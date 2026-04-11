@@ -122,12 +122,22 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
         auto it = loopIterEndBound_.find(idxIdent->name);
         if (it != loopIterEndBound_.end()) {
             llvm::Value* endBound = it->second;
-            std::string lenName = std::string(prefix) + ".len.elim";
-            auto* lenLoadElim = builder->CreateAlignedLoad(
-                getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
-            lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-            lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-            llvm::Value* lenVal = lenLoadElim;
+            // Use loop-scope array length cache when available to avoid
+            // redundant loads within the same loop iteration.
+            llvm::Value* lenVal;
+            auto cacheIt = loopArrayLenCache_.find(basePtr);
+            if (cacheIt != loopArrayLenCache_.end()) {
+                lenVal = cacheIt->second;
+            } else {
+                std::string lenName = std::string(prefix) + ".len.elim";
+                auto* lenLoadElim = builder->CreateAlignedLoad(
+                    getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
+                lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                lenVal = lenLoadElim;
+                if (!loopStack.empty())
+                    loopArrayLenCache_[basePtr] = lenVal;
+            }
 
             // Case D: same SSA value
             if (endBound == lenVal)
@@ -170,15 +180,24 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
 
                     // ── Positive offset: arr[i + C] ─────────────────
                     if (effectiveOffset >= 0) {
-                        std::string arithLenName = std::string(prefix) + ".len.arith";
-                        auto* arithLenLoad = builder->CreateAlignedLoad(
-                            getDefaultType(), basePtr, llvm::MaybeAlign(8), arithLenName.c_str());
-                        arithLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-                        arithLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                        llvm::Value* arithLenVal;
+                        auto arithCacheIt = loopArrayLenCache_.find(basePtr);
+                        if (arithCacheIt != loopArrayLenCache_.end()) {
+                            arithLenVal = arithCacheIt->second;
+                        } else {
+                            std::string arithLenName = std::string(prefix) + ".len.arith";
+                            auto* arithLenLoad = builder->CreateAlignedLoad(
+                                getDefaultType(), basePtr, llvm::MaybeAlign(8), arithLenName.c_str());
+                            arithLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                            arithLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                            arithLenVal = arithLenLoad;
+                            if (!loopStack.empty())
+                                loopArrayLenCache_[basePtr] = arithLenVal;
+                        }
 
                         auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
                         if (endCI) {
-                            if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(arithLenLoad)) {
+                            if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(arithLenVal)) {
                                 if (endCI->getSExtValue() + effectiveOffset <= lenCI->getSExtValue())
                                     return true;
                             }
@@ -190,7 +209,7 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                                 llvm::ConstantInt::get(getDefaultType(), effectiveOffset),
                                 std::string(prefix) + ".adjend");
                             llvm::Value* cmp = builder->CreateICmpSLE(
-                                adjustedEnd, arithLenLoad,
+                                adjustedEnd, arithLenVal,
                                 std::string(prefix) + ".arith.safe");
                             llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
                                 module.get(), llvm::Intrinsic::assume, {});
@@ -209,11 +228,20 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
 
                             // Fallback: emit assume hints
                             if (optimizationLevel >= OptimizationLevel::O2) {
-                                std::string negLenName = std::string(prefix) + ".len.arith.neg";
-                                auto* negLenLoad = builder->CreateAlignedLoad(
-                                    getDefaultType(), basePtr, llvm::MaybeAlign(8), negLenName.c_str());
-                                negLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-                                negLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                                llvm::Value* negLenVal;
+                                auto negCacheIt = loopArrayLenCache_.find(basePtr);
+                                if (negCacheIt != loopArrayLenCache_.end()) {
+                                    negLenVal = negCacheIt->second;
+                                } else {
+                                    std::string negLenName = std::string(prefix) + ".len.arith.neg";
+                                    auto* negLenLoad = builder->CreateAlignedLoad(
+                                        getDefaultType(), basePtr, llvm::MaybeAlign(8), negLenName.c_str());
+                                    negLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                                    negLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                                    negLenVal = negLenLoad;
+                                    if (!loopStack.empty())
+                                        loopArrayLenCache_[basePtr] = negLenVal;
+                                }
                                 llvm::Value* adjustedStart = builder->CreateSub(
                                     startIt->second,
                                     llvm::ConstantInt::get(getDefaultType(), absOffset),
@@ -227,7 +255,7 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                                     llvm::ConstantInt::get(getDefaultType(), absOffset),
                                     std::string(prefix) + ".adjend.neg");
                                 llvm::Value* leLen = builder->CreateICmpSLE(
-                                    adjustedEnd, negLenLoad,
+                                    adjustedEnd, negLenVal,
                                     std::string(prefix) + ".negoff.safe");
                                 llvm::Value* bothSafe = builder->CreateAnd(
                                     geZero, leLen,
@@ -262,16 +290,36 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
         std::string strlenName = std::string(prefix) + ".strlen";
         lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, strlenName.c_str());
     } else {
-        std::string lenName = std::string(prefix) + ".len";
-        auto* lenLoad = builder->CreateAlignedLoad(
-            getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
-        lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        if (isBorrowed) {
-            lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                                 llvm::MDNode::get(*context, {}));
+        // Loop-scope array length cache: when we're inside a loop and have
+        // already loaded the length of this array, reuse the SSA value
+        // instead of emitting a redundant load.  LLVM's GVN can sometimes
+        // merge these loads, but when bounds checks create separate control-
+        // flow paths (ok/fail branches), the loads end up in different
+        // dominance subtrees and GVN cannot always merge them.  By caching
+        // at the codegen level, we guarantee a single load per array per
+        // loop iteration, which is critical for tight inner loops with
+        // multiple array accesses (e.g., arr[i] + arr[i+1]).
+        auto cacheIt = loopArrayLenCache_.find(basePtr);
+        if (cacheIt != loopArrayLenCache_.end()) {
+            lenVal = cacheIt->second;
+        } else {
+            std::string lenName = std::string(prefix) + ".len";
+            auto* lenLoad = builder->CreateAlignedLoad(
+                getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
+            lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            if (isBorrowed) {
+                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                     llvm::MDNode::get(*context, {}));
+            }
+            lenVal = lenLoad;
+            // Cache for subsequent bounds checks within the same loop body.
+            // Only cache when inside a loop (loopStack non-empty) to avoid
+            // stale values across unrelated code.
+            if (!loopStack.empty()) {
+                loopArrayLenCache_[basePtr] = lenVal;
+            }
         }
-        lenVal = lenLoad;
     }
 
     // Single unsigned compare: (unsigned)idx < len checks both non-negativity
@@ -304,9 +352,18 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
     } else if (expr->literalType == LiteralExpr::LiteralType::FLOAT) {
         return llvm::ConstantFP::get(getFloatType(), expr->floatValue);
     } else {
-        // String literal - return as a pointer to the global string data.
-        // When passed directly to print(), the pointer form is used with %s.
-        return builder->CreateGlobalString(expr->stringValue, "str");
+        // String literal — use the interning pool to deduplicate identical
+        // string constants across the module.  This returns a GEP to the
+        // interned global's first byte, equivalent to CreateGlobalString but
+        // sharing the underlying global for identical content.
+        llvm::GlobalVariable* gv = internString(expr->stringValue);
+        return llvm::ConstantExpr::getInBoundsGetElementPtr(
+            gv->getValueType(),
+            gv,
+            llvm::ArrayRef<llvm::Constant*>{
+                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+            });
     }
 }
 
@@ -356,6 +413,18 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         }
     }
 
+    // Constant folding for `const` float variables: return the ConstantFP
+    // directly.  Enables compile-time evaluation of float arithmetic chains
+    // (e.g. `const PI = 3.14159; var r = PI * 2.0;` → 6.28318 at compile
+    // time) by making the constant visible to the float constant-folding
+    // path in generateBinary.
+    {
+        auto foldIt = constFloatFolds_.find(expr->name);
+        if (foldIt != constFloatFolds_.end()) {
+            return llvm::ConstantFP::get(getFloatType(), foldIt->second);
+        }
+    }
+
     // Register-promotion strategy: prefetched variables go straight to
     // registers (promoted by SROA/mem2reg) and stay there until invalidated.
     // No use-site llvm.prefetch is emitted on the alloca — that would anchor
@@ -381,6 +450,16 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     if (isInvariant) {
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                  llvm::MDNode::get(*context, {}));
+        }
+    }
+    // OmScript variables are always initialized before use (the ownership
+    // system prevents use of uninitialized variables).  The !noundef metadata
+    // tells LLVM that the loaded value is never poison or undef, enabling
+    // more aggressive speculation, freeze elimination, and branch folding.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
+            loadInst->setMetadata(llvm::LLVMContext::MD_noundef,
                                   llvm::MDNode::get(*context, {}));
         }
     }
@@ -418,19 +497,52 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     return load;
 }
 
+// ---------------------------------------------------------------------------
+// Recursive string literal constant folding
+// ---------------------------------------------------------------------------
+// Walk a tree of BinaryExpr(+) nodes.  If every leaf is a string literal,
+// append all of them (left-to-right) into `out` and return true.
+// This turns  "a" + "b" + "c"  into a single compile-time constant "abc",
+// eliminating all runtime malloc + strlen + memcpy work.
+bool CodeGenerator::tryFoldStringConcat(Expression* expr, std::string& out) const {
+    if (expr->type == ASTNodeType::LITERAL_EXPR) {
+        auto* lit = static_cast<LiteralExpr*>(expr);
+        if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+            out += lit->stringValue;
+            return true;
+        }
+        return false;
+    }
+    if (expr->type == ASTNodeType::BINARY_EXPR) {
+        auto* bin = static_cast<BinaryExpr*>(expr);
+        if (bin->op == "+") {
+            return tryFoldStringConcat(bin->left.get(), out) &&
+                   tryFoldStringConcat(bin->right.get(), out);
+        }
+    }
+    return false;
+}
+
 llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
-    // --- Compile-time string constant folding ---
-    // When both operands of '+' are string literals, concatenate at compile time
-    // to avoid runtime malloc+strcpy overhead.
+    // --- Compile-time string constant folding (recursive) ---
+    // Fold arbitrarily chained string literal concatenations at compile time:
+    //   "a" + "b" + "c"  →  single global "abc"
+    // This eliminates runtime malloc+strlen+memcpy chains entirely.  The
+    // recursive helper walks through nested BinaryExpr(+) trees, collecting
+    // all leaf string literals.  If every leaf is a string literal the whole
+    // expression is folded into a single compile-time constant.
     if (expr->op == "+") {
-        if (expr->left->type == ASTNodeType::LITERAL_EXPR && expr->right->type == ASTNodeType::LITERAL_EXPR) {
-            auto* leftLit = static_cast<LiteralExpr*>(expr->left.get());
-            auto* rightLit = static_cast<LiteralExpr*>(expr->right.get());
-            if (leftLit->literalType == LiteralExpr::LiteralType::STRING &&
-                rightLit->literalType == LiteralExpr::LiteralType::STRING) {
-                const std::string folded = leftLit->stringValue + rightLit->stringValue;
-                return builder->CreateGlobalString(folded, "strfold");
-            }
+        std::string folded;
+        if (tryFoldStringConcat(expr, folded)) {
+            // Use interned string for folded concatenation result too.
+            llvm::GlobalVariable* gv = internString(folded);
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(),
+                gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                });
         }
     }
     // --- End string constant folding ---
@@ -580,7 +692,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::BasicBlock* nonZeroBB = llvm::BasicBlock::Create(*context, "coalesce.nonzero", function);
         llvm::BasicBlock* zeroBB = llvm::BasicBlock::Create(*context, "coalesce.zero", function);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "coalesce.merge", function);
-        builder->CreateCondBr(isNonZero, nonZeroBB, zeroBB);
+        // The left operand of ?? is usually non-zero — that's the point
+        // of the null-coalescing operator.  Weight the hot path accordingly.
+        llvm::MDNode* coalW = llvm::MDBuilder(*context).createBranchWeights(99, 1);
+        builder->CreateCondBr(isNonZero, nonZeroBB, zeroBB, coalW);
         builder->SetInsertPoint(nonZeroBB);
         builder->CreateBr(mergeBB);
         builder->SetInsertPoint(zeroBB);
@@ -986,7 +1101,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Function* curFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* ovfBB = llvm::BasicBlock::Create(*context, "strmul.overflow", curFn);
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "strmul.ok", curFn);
-        builder->CreateCondBr(overflowed, ovfBB, okBB);
+        // Overflow is extremely unlikely — mark the error path cold.
+        llvm::MDNode* ovfW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(overflowed, ovfBB, okBB, ovfW);
 
         builder->SetInsertPoint(ovfBB);
         llvm::Value* ovfMsg = builder->CreateGlobalString(
@@ -998,7 +1115,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* allocSz =
-            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc");
+            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
         // Null-terminate first byte so strcat works from empty buffer
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
@@ -1015,7 +1132,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->CreateCondBr(builder->CreateICmpSLT(idx, countVal, "strmul.cond"), bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         builder->CreateCall(getOrDeclareStrcat(), {buf, strPtr});
-        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next");
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(doneBB);
@@ -1033,6 +1150,46 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         };
         llvm::Value* lPtr = toStrPtr(left);
         llvm::Value* rPtr = toStrPtr(right);
+
+        // Fast path for == and !=: if pointers are identical, strings are
+        // trivially equal (skip the O(n) strcmp).  This fires when the same
+        // string variable appears on both sides, or when two references
+        // point to the same interned literal.
+        if (expr->op == "==" || expr->op == "!=") {
+            llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+            auto* ptrEqBB = llvm::BasicBlock::Create(*context, "streq.ptreq", parentFn);
+            auto* slowBB  = llvm::BasicBlock::Create(*context, "streq.slow", parentFn);
+            auto* mergeBB = llvm::BasicBlock::Create(*context, "streq.merge", parentFn);
+
+            llvm::Value* samePtr = builder->CreateICmpEQ(lPtr, rPtr, "streq.sameptr");
+            // With string interning, pointer equality is common for string
+            // literals — weight both paths more evenly than before.
+            llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1, 4);
+            builder->CreateCondBr(samePtr, ptrEqBB, slowBB, brW);
+
+            // Fast path: pointers match → strings are equal
+            builder->SetInsertPoint(ptrEqBB);
+            llvm::Value* fastResult = (expr->op == "==")
+                ? llvm::ConstantInt::get(getDefaultType(), 1)
+                : llvm::ConstantInt::get(getDefaultType(), 0);
+            builder->CreateBr(mergeBB);
+
+            // Slow path: call strcmp
+            builder->SetInsertPoint(slowBB);
+            llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lPtr, rPtr}, "strcmp.res");
+            llvm::Value* slowBool = (expr->op == "==")
+                ? builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "scmp.eq")
+                : builder->CreateICmpNE(cmpResult, builder->getInt32(0), "scmp.ne");
+            llvm::Value* slowResult = builder->CreateZExt(slowBool, getDefaultType(), "scmp.zext");
+            builder->CreateBr(mergeBB);
+
+            builder->SetInsertPoint(mergeBB);
+            llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "streq.phi");
+            phi->addIncoming(fastResult, ptrEqBB);
+            phi->addIncoming(slowResult, slowBB);
+            return phi;
+        }
+
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lPtr, rPtr}, "strcmp.res");
         llvm::Value* zero32 = builder->getInt32(0);
         llvm::Value* cmpBool;
@@ -1322,6 +1479,31 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return result;
     }
 
+    // Chained inverse operation elimination: (x + C) - C → x, (x - C) + C → x
+    // These patterns arise frequently in index arithmetic (e.g., computing an
+    // offset and then undoing it) and are not always caught by LLVM's InstCombine
+    // when the operations span different basic blocks or when NSW/NUW flags are
+    // absent.  By detecting them at IR generation time we produce shorter IR
+    // and avoid the round-trip through the optimizer.
+    if (expr->op == "+" || expr->op == "-") {
+        if (auto* ciRight = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            if (auto* binLeft = llvm::dyn_cast<llvm::BinaryOperator>(left)) {
+                bool isAddSub = (binLeft->getOpcode() == llvm::Instruction::Add &&
+                                 expr->op == "-") ||
+                                (binLeft->getOpcode() == llvm::Instruction::Sub &&
+                                 expr->op == "+");
+                if (isAddSub) {
+                    if (auto* ciInner = llvm::dyn_cast<llvm::ConstantInt>(
+                            binLeft->getOperand(1))) {
+                        if (ciInner->getValue() == ciRight->getValue()) {
+                            return binLeft->getOperand(0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Regular code generation for non-constant expressions.
     // Integer arithmetic generally uses wrapping (no NSW/NUW flags) because
     // NSW/NUW tell LLVM that overflow is undefined behavior, which can cause
@@ -1364,7 +1546,21 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         //   neither → no flags (conservative, no UB assumptions)
         const bool canNSWNUW = bothOperandsNonNeg || constNonNeg;
         const bool canNSW = canNSWNUW || inOptMaxFunction;
-        auto* result = canNSWNUW
+        // KnownBits fallback: when nonNegValues_ doesn't track both operands
+        // (e.g., values flowing through PHI nodes from loop back-edges),
+        // use LLVM's KnownBits analysis to detect non-negativity.  This
+        // catches patterns like `phi_val + 1` where phi_val is non-negative
+        // via range metadata or nuw flags but not in our tracking set.
+        bool kbNSWNUW = false;
+        if (!canNSWNUW && !canNSW) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(
+                left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(
+                right, module->getDataLayout());
+            if (lhsKB.isNonNegative() && rhsKB.isNonNegative())
+                kbNSWNUW = true;
+        }
+        auto* result = (canNSWNUW || kbNSWNUW)
             ? builder->CreateAdd(left, right, "addtmp", /*HasNUW=*/true, /*HasNSW=*/true)
             : canNSW
                 ? builder->CreateNSWAdd(left, right, "addtmp")
@@ -1374,7 +1570,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // (assuming no overflow, which is true for typical loop counter
         // arithmetic).  canNSW-only (@optmax) does NOT prove non-negativity
         // of the result — the operands might be negative.
-        if (canNSWNUW)
+        if (canNSWNUW || kbNSWNUW)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "-") {
@@ -1397,7 +1593,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 constNSW = rightNonNeg && !ci->isNegative();
         }
-        const bool canNSW = bothNonNeg || constNSW || inOptMaxFunction;
+        // KnownBits fallback: detect non-negativity through PHI/value-range.
+        bool kbNSW = false;
+        if (!bothNonNeg && !constNSW && !inOptMaxFunction) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(
+                left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(
+                right, module->getDataLayout());
+            kbNSW = lhsKB.isNonNegative() && rhsKB.isNonNegative();
+        }
+        const bool canNSW = bothNonNeg || constNSW || kbNSW || inOptMaxFunction;
         return canNSW ? builder->CreateNSWSub(left, right, "subtmp")
                       : builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
@@ -3013,9 +3218,45 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         // @optmax: the user's guarantee of well-behaved arithmetic means
         // signed overflow cannot occur, enabling nsw for better SCEV analysis.
-        return inOptMaxFunction
-            ? builder->CreateNSWMul(left, right, "multmp")
-            : builder->CreateMul(left, right, "multmp");
+        if (inOptMaxFunction)
+            return builder->CreateNSWMul(left, right, "multmp");
+
+        // KnownBits analysis: use leading-zero counts to prove the product
+        // cannot overflow signed i64.  If a has L_a leading zeros and b has
+        // L_b leading zeros, then a < 2^(64-L_a) and b < 2^(64-L_b), so
+        // a*b < 2^(128-L_a-L_b).  The product fits in 64 bits (no unsigned
+        // overflow) when L_a + L_b >= 64, and in 63 bits (no signed overflow)
+        // when L_a + L_b >= 65.  This is the common case for loop-counter ×
+        // small-stride patterns like arr[i*4], arr[i*8], etc.
+        {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(
+                left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(
+                right, module->getDataLayout());
+            unsigned lhsLZ = lhsKB.countMinLeadingZeros();
+            unsigned rhsLZ = rhsKB.countMinLeadingZeros();
+            unsigned totalLZ = lhsLZ + rhsLZ;
+            if (totalLZ >= 65) {
+                // Product provably < 2^63 → fits in signed i64 → nsw+nuw safe.
+                auto* result = builder->CreateMul(left, right, "multmp",
+                                                   /*HasNUW=*/true, /*HasNSW=*/true);
+                nonNegValues_.insert(result);
+                return result;
+            }
+            if (totalLZ >= 64) {
+                // Product provably < 2^64 → fits in unsigned i64 → nuw safe.
+                // nsw requires the result < 2^63 (totalLZ >= 65), so we
+                // conservatively omit it here: e.g. (2^32)*(2^32) = 2^64
+                // fits unsigned but NOT signed i64.
+                auto* result = builder->CreateMul(left, right, "multmp",
+                                                   /*HasNUW=*/true, /*HasNSW=*/false);
+                if (lhsKB.isNonNegative() && rhsKB.isNonNegative())
+                    nonNegValues_.insert(result);
+                return result;
+            }
+        }
+
+        return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";
 
@@ -3225,6 +3466,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
         }
+        // KnownBits fallback for values not in nonNegValues_ (e.g., PHI nodes).
+        if (!bothNonNeg) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
+        }
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpULT(left, right, "cmptmp")
             : builder->CreateICmpSLT(left, right, "cmptmp");
@@ -3238,6 +3485,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
+        }
+        if (!bothNonNeg) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpULE(left, right, "cmptmp")
@@ -3253,6 +3505,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
         }
+        if (!bothNonNeg) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
+        }
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpUGT(left, right, "cmptmp")
             : builder->CreateICmpSGT(left, right, "cmptmp");
@@ -3266,6 +3523,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
+        }
+        if (!bothNonNeg) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpUGE(left, right, "cmptmp")
@@ -3290,22 +3552,76 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == "|") {
         auto* result = builder->CreateOr(left, right, "ortmp");
-        // OR of two non-negative values is non-negative
-        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+        // OR of two non-negative values is non-negative (sign bit stays 0).
+        // Also: OR with a non-negative constant preserves non-negativity
+        // of the other operand (ORing in low bits cannot set the sign bit
+        // when the constant's sign bit is 0).
+        bool resultNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!resultNonNeg) {
+            // One tracked non-neg + constant with sign bit 0 → result non-neg
+            if (nonNegValues_.count(left)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                    resultNonNeg = !ci->isNegative();
+            }
+            if (!resultNonNeg && nonNegValues_.count(right)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                    resultNonNeg = !ci->isNegative();
+            }
+            // Both constants non-negative → result non-negative
+            if (!resultNonNeg) {
+                auto* lci = llvm::dyn_cast<llvm::ConstantInt>(left);
+                auto* rci = llvm::dyn_cast<llvm::ConstantInt>(right);
+                if (lci && rci && !lci->isNegative() && !rci->isNegative())
+                    resultNonNeg = true;
+            }
+        }
+        if (resultNonNeg)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "^") {
         auto* result = builder->CreateXor(left, right, "xortmp");
-        // XOR of two non-negative values is non-negative (sign bit stays 0)
-        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+        // XOR of two non-negative values is non-negative (sign bit stays 0).
+        // Also: XOR with a non-negative constant preserves the sign bit of
+        // the other operand when that operand is non-negative (both have
+        // sign bit 0, XOR(0,0)=0).
+        bool resultNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!resultNonNeg) {
+            if (nonNegValues_.count(left)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                    resultNonNeg = !ci->isNegative();
+            }
+            if (!resultNonNeg && nonNegValues_.count(right)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                    resultNonNeg = !ci->isNegative();
+            }
+        }
+        if (resultNonNeg)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "<<") {
         // For constant shift amounts already in [0, 63], skip the mask.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const int64_t sv = ci->getSExtValue();
-            if (sv >= 0 && sv < 64)
+            if (sv >= 0 && sv < 64) {
+                // KnownBits analysis: when the base has enough leading zeros
+                // to absorb the shift without overflow, set nuw (and nsw if
+                // also non-negative).  E.g., loop counter i with 33 leading
+                // zeros shifted left by 3 → 30 leading zeros, still fits.
+                llvm::KnownBits lhsKB = llvm::computeKnownBits(
+                    left, module->getDataLayout());
+                unsigned lz = lhsKB.countMinLeadingZeros();
+                if (lz > static_cast<unsigned>(sv)) {
+                    // (lz - sv) leading zeros remain → no unsigned overflow.
+                    // If the base is also non-negative, no signed overflow.
+                    bool baseNonNeg = lhsKB.isNonNegative();
+                    auto* result = builder->CreateShl(left, right, "shltmp",
+                                                       /*HasNUW=*/true, /*HasNSW=*/baseNonNeg);
+                    if (baseNonNeg)
+                        nonNegValues_.insert(result);
+                    return result;
+                }
                 return builder->CreateShl(left, right, "shltmp");
+            }
         }
         // Mask shift amount to [0, 63] to prevent undefined behavior
         llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
@@ -3964,12 +4280,21 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
-        llvm::Value* current = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
+        auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
+        // TBAA: array element slots (index 1+) never alias the length header
+        // (index 0), so tagging the load enables LICM to hoist length loads
+        // past element increments/decrements.
+        elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
+        llvm::Value* current = elemLoad;
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
         llvm::Value* updated =
-            (op == "++") ? builder->CreateAdd(current, delta, "inc") : builder->CreateSub(current, delta, "dec");
-        builder->CreateAlignedStore(updated, elemPtr, llvm::MaybeAlign(8));
+            (op == "++") ? builder->CreateAdd(current, delta, "inc", /*HasNUW=*/false, /*HasNSW=*/true)
+                         : builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
+        auto* elemStore = builder->CreateAlignedStore(updated, elemPtr, llvm::MaybeAlign(8));
+        elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         return isPostfix ? current : updated;
     }
 
@@ -3995,7 +4320,8 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         updated = (op == "++") ? builder->CreateFAdd(current, one, "finc") : builder->CreateFSub(current, one, "fdec");
     } else {
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        updated = (op == "++") ? builder->CreateAdd(current, delta, "inc") : builder->CreateSub(current, delta, "dec");
+        updated = (op == "++") ? builder->CreateAdd(current, delta, "inc", /*HasNUW=*/false, /*HasNSW=*/true)
+                               : builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
     }
 
     builder->CreateStore(updated, it->second);
@@ -4299,6 +4625,10 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     return phi;
 }
 
+bool CodeGenerator::canStackAllocateArray(const std::string& varName) const {
+    return stackAllocatedArrays_.count(varName) != 0;
+}
+
 llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     // Check if any elements are spread expressions
     bool hasSpread = false;
@@ -4315,8 +4645,25 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         const size_t totalSlots = 1 + numElements;
         const size_t totalBytes = totalSlots * 8;
 
-        llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalBytes);
-        llvm::Value* arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
+        llvm::Value* arrPtr;
+        if (pendingArrayStackAlloc_ &&
+            numElements <= kMaxStackArrayElements &&
+            optimizationLevel >= OptimizationLevel::O1) {
+            // Stack-allocate: use alloca in the entry block for small non-escaping arrays.
+            llvm::Function* function = builder->GetInsertBlock()->getParent();
+            auto* arrTy = llvm::ArrayType::get(getDefaultType(), totalSlots);
+            llvm::AllocaInst* alloca = createEntryBlockAlloca(function, "arr.stack", arrTy);
+            alloca->setAlignment(llvm::Align(16));
+            // Bitcast the array alloca to an i64* for element access.
+            arrPtr = builder->CreateInBoundsGEP(
+                arrTy, alloca,
+                {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0),
+                 llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)},
+                "arr.stack.ptr");
+        } else {
+            llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalBytes);
+            arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
+        }
 
         // Fast path: if ALL elements are compile-time integer constants, build
         // a global constant array and initialize with a single memcpy.  This
@@ -4509,6 +4856,72 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
+    // --- Compile-time dict literal constant propagation ---
+    // When the base is a dict literal and the key is a literal, resolve the
+    // lookup at compile time.  This eliminates hash table allocation,
+    // insertion, and lookup entirely — the matched value expression is
+    // generated directly.  Must run BEFORE generateExpression(array) to
+    // avoid emitting the dead dict construction IR.
+    if (expr->array->type == ASTNodeType::DICT_EXPR &&
+        expr->index->type == ASTNodeType::LITERAL_EXPR) {
+        auto* dict = static_cast<DictExpr*>(expr->array.get());
+        auto* keyLit = static_cast<LiteralExpr*>(expr->index.get());
+        bool canFold = false;
+        Expression* matchedValue = nullptr;
+
+        if (keyLit->literalType == LiteralExpr::LiteralType::STRING) {
+            canFold = true;
+            // Last matching key wins (matches runtime SET-overwrites semantics).
+            for (auto& [k, v] : dict->pairs) {
+                if (k->type == ASTNodeType::LITERAL_EXPR) {
+                    auto* kl = static_cast<LiteralExpr*>(k.get());
+                    if (kl->literalType == LiteralExpr::LiteralType::STRING &&
+                        kl->stringValue == keyLit->stringValue) {
+                        matchedValue = v.get();
+                    }
+                } else {
+                    // Non-literal key → can't fold (side effects possible)
+                    canFold = false;
+                    break;
+                }
+            }
+        } else if (keyLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+            canFold = true;
+            for (auto& [k, v] : dict->pairs) {
+                if (k->type == ASTNodeType::LITERAL_EXPR) {
+                    auto* kl = static_cast<LiteralExpr*>(k.get());
+                    if (kl->literalType == LiteralExpr::LiteralType::INTEGER &&
+                        kl->intValue == keyLit->intValue) {
+                        matchedValue = v.get();
+                    }
+                } else {
+                    canFold = false;
+                    break;
+                }
+            }
+        }
+
+        if (canFold) {
+            // Also need to check that all VALUE expressions in the dict are
+            // side-effect-free literals, or we'd lose their side effects.
+            // For now, only fold when every value is a literal (int/float/string).
+            bool allValuesAreLiterals = true;
+            for (auto& [k, v] : dict->pairs) {
+                if (v->type != ASTNodeType::LITERAL_EXPR) {
+                    allValuesAreLiterals = false;
+                    break;
+                }
+            }
+            if (allValuesAreLiterals) {
+                if (matchedValue) {
+                    return generateExpression(matchedValue);
+                }
+                // Key not found → return 0 (matches runtime map_get default)
+                return llvm::ConstantInt::get(getDefaultType(), 0);
+            }
+        }
+    }
+
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
 
@@ -4637,6 +5050,12 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
     auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
     elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    // OmScript arrays are always initialized: array literals set every element,
+    // array_fill zero-initializes via calloc.  The !noundef metadata tells LLVM
+    // the loaded value is never poison/undef, enabling more aggressive
+    // speculation and freeze elimination in downstream loop transforms.
+    if (optimizationLevel >= OptimizationLevel::O1)
+        elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
     // When inside a parallel loop, attach the access group metadata so
     // LLVM's vectorizer and Polly know this load is iteration-independent.
     if (currentLoopAccessGroup_)
@@ -4876,8 +5295,12 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
         load = builder->CreateLoad(getDefaultType(), elemPtr, "struct.field.val");
     }
 
-    // TBAA: struct fields are distinct from array elements/lengths/map slots.
-    load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStructField_);
+    // TBAA: use a per-field type node so different fields of the same struct
+    // do not alias each other.  Each (structType, fieldIdx) pair gets a unique
+    // child of tbaaStructTypeNode_, allowing LLVM to prove that, e.g.,
+    // p.x and p.y are independent loads even when their base pointer is shared.
+    load->setMetadata(llvm::LLVMContext::MD_tbaa,
+                      getOrCreateFieldTBAA(structType, fieldIdx));
 
     // Apply LLVM metadata from struct field attributes.
     if (attrs) {
@@ -4960,8 +5383,10 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
         store = builder->CreateStore(newVal, elemPtr);
     }
 
-    // TBAA: struct fields are distinct from array elements/lengths/map slots.
-    store->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStructField_);
+    // TBAA: per-field type node so writes to different fields don't alias reads
+    // from other fields.  Matches the per-field TBAA used in generateFieldAccess.
+    store->setMetadata(llvm::LLVMContext::MD_tbaa,
+                       getOrCreateFieldTBAA(structType, fieldIdx));
 
     // !nontemporal hint for cold fields — bypass cache on write
     if (attrs && attrs->cold) {

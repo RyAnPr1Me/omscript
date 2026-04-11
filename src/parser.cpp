@@ -177,6 +177,7 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintVectorize = false, hintNoVectorize = false;
             bool hintParallelize = false, hintNoParallelize = false;
             bool hintMinSize = false, hintOptNone = false, hintNoUnwind = false;
+            bool hintConstEval = false;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -218,9 +219,11 @@ std::unique_ptr<Program> Parser::parse() {
                     hintOptNone = true;
                 } else if (ann.lexeme == "nounwind") {
                     hintNoUnwind = true;
+                } else if (ann.lexeme == "const_eval") {
+                    hintConstEval = true;
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive);
@@ -242,6 +245,7 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintMinSize = hintMinSize;
             func->hintOptNone = hintOptNone;
             func->hintNoUnwind = hintNoUnwind;
+            func->hintConstEval = hintConstEval;
             // Warn about conflicting annotations at parse time.
             if (hintOptNone && hintInline) {
                 std::cerr << "warning: '@optnone' and '@inline' are mutually exclusive on function '"
@@ -469,7 +473,22 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
         returnType = parseTypeAnnotation();
     }
 
-    auto body = parseBlock();
+    std::unique_ptr<BlockStmt> body;
+
+    // Shorthand: fn name(params) = expr;
+    // Desugars to: fn name(params) { return expr; }
+    if (match(TokenType::ASSIGN)) {
+        auto expr = parseExpression();
+        consume(TokenType::SEMICOLON, "Expected ';' after expression-body function");
+        auto retStmt = std::make_unique<ReturnStmt>(std::move(expr));
+        retStmt->line = name.line;
+        retStmt->column = name.column;
+        std::vector<std::unique_ptr<Statement>> stmts;
+        stmts.push_back(std::move(retStmt));
+        body = std::make_unique<BlockStmt>(std::move(stmts));
+    } else {
+        body = parseBlock();
+    }
 
     inOptMaxFunction = savedOptMaxState;
 
@@ -555,6 +574,98 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    if (match(TokenType::UNLESS)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseUnlessStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::UNTIL)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseUntilStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::LOOP)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseLoopStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::REPEAT)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseRepeatStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::DEFER)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseDeferStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::GUARD)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseGuardStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::WHEN)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseWhenStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::FOREVER)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseForeverStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::FOREACH)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseForEachStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::ELIF)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseElifStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (check(TokenType::SWAP) && !(current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LPAREN)) {
+        advance(); // consume SWAP
+        const Token kw = tokens[current - 1];
+        auto stmt = parseSwapStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::TIMES)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseTimesStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::WITH)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseWithStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
     if (match(TokenType::VAR)) {
         auto decl = parseVarDecl(false);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
@@ -621,6 +732,20 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     }
     if (match(TokenType::PREFETCH)) {
         const Token kw = tokens[current - 1];
+
+        // Parse optional byte offset: prefetch+128 or prefetch+64 etc.
+        // The '+' immediately after 'prefetch' indicates cache-line-ahead
+        // speculative prefetching.  E.g. prefetch+128 fetches 2 cache lines
+        // ahead (128 bytes = 2 × 64-byte cache lines on most CPUs).
+        int64_t offsetBytes = 0;
+        if (match(TokenType::PLUS)) {
+            if (!check(TokenType::INTEGER)) {
+                error("Expected integer offset after '+' in prefetch");
+            }
+            const Token offsetTok = advance();
+            offsetBytes = std::stoll(offsetTok.lexeme);
+        }
+
         // Parse optional attributes: hot, immut
         bool hintHot = false;
         bool hintImmut = false;
@@ -675,7 +800,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             auto varDecl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
             varDecl->line = kw.line;
             varDecl->column = kw.column;
-            auto stmt = std::make_unique<PrefetchStmt>(std::move(varDecl), hintHot, hintImmut);
+            auto stmt = std::make_unique<PrefetchStmt>(std::move(varDecl), hintHot, hintImmut, offsetBytes);
             stmt->line = kw.line;
             stmt->column = kw.column;
             return stmt;
@@ -688,7 +813,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
                 parseTypeAnnotation(); // consume and discard
             }
             consume(TokenType::SEMICOLON, "Expected ';' after prefetch statement");
-            auto stmt = std::make_unique<PrefetchStmt>(varName.lexeme);
+            auto stmt = std::make_unique<PrefetchStmt>(varName.lexeme, offsetBytes);
             stmt->line = kw.line;
             stmt->column = kw.column;
             return stmt;
@@ -763,11 +888,20 @@ std::unique_ptr<BlockStmt> Parser::parseBlock() {
         if (check(TokenType::VAR) || check(TokenType::CONST)) {
             const bool isConst = check(TokenType::CONST);
             advance(); // consume var/const
-            statements.push_back(parseVarDecl(isConst));
-            while (match(TokenType::COMMA)) {
+            // Check for array destructuring: var [a, b, c] = expr;
+            if (check(TokenType::LBRACKET)) {
+                auto decls = parseDestructuringDecl(isConst);
+                for (auto& d : decls) {
+                    statements.push_back(std::move(d));
+                }
+                consume(TokenType::SEMICOLON, "Expected ';' after destructuring declaration");
+            } else {
                 statements.push_back(parseVarDecl(isConst));
+                while (match(TokenType::COMMA)) {
+                    statements.push_back(parseVarDecl(isConst));
+                }
+                consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
             }
-            consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
         } else {
             statements.push_back(parseStatement());
         }
@@ -808,6 +942,12 @@ std::unique_ptr<Statement> Parser::parseIfStmt() {
 
     if (match(TokenType::ELSE)) {
         elseBranch = parseStatement();
+    } else if (match(TokenType::ELIF)) {
+        // elif (cond) { ... } => else if (cond) { ... }
+        auto elifStmt = parseElifStmt();
+        elifStmt->line = tokens[current - 1].line;
+        elifStmt->column = tokens[current - 1].column;
+        elseBranch = std::move(elifStmt);
     }
 
     return std::make_unique<IfStmt>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
@@ -825,12 +965,24 @@ std::unique_ptr<Statement> Parser::parseWhileStmt() {
 
 std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
     auto body = parseStatement();
-    consume(TokenType::WHILE, "Expected 'while' after do-while body");
-    consume(TokenType::LPAREN, "Expected '(' after 'while'");
+
+    // Support both: do { ... } while (cond); and do { ... } until (cond);
+    bool isUntil = false;
+    if (match(TokenType::UNTIL)) {
+        isUntil = true;
+    } else {
+        consume(TokenType::WHILE, "Expected 'while' or 'until' after do block");
+    }
+    consume(TokenType::LPAREN, isUntil ? "Expected '(' after 'until'" : "Expected '(' after 'while'");
     auto condition = parseExpression();
     consume(TokenType::RPAREN, "Expected ')' after condition");
-    consume(TokenType::SEMICOLON, "Expected ';' after do-while statement");
+    consume(TokenType::SEMICOLON, "Expected ';' after do-while/until statement");
 
+    if (isUntil) {
+        // Negate: do { ... } until (c) => do { ... } while (!c)
+        auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
+        return std::make_unique<DoWhileStmt>(std::move(body), std::move(negated));
+    }
     return std::make_unique<DoWhileStmt>(std::move(body), std::move(condition));
 }
 
@@ -839,7 +991,56 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
     // Parse: for (var in start...end) or for (var in start...end...step)
     //    or: for (var in collection)  -- for-each over array
+    //    or: for (idx, item in collection)  -- indexed for-each
     const Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable");
+
+    // Check for indexed for-each: for (idx, item in collection)
+    if (match(TokenType::COMMA)) {
+        const Token itemName = consume(TokenType::IDENTIFIER, "Expected item variable after ',' in for");
+        consume(TokenType::IN, "Expected 'in' after for variables");
+        auto collection = parseExpression();
+        consume(TokenType::RPAREN, "Expected ')' after for-each collection");
+        auto body = parseStatement();
+
+        // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
+        static int forIdxCounter = 0;
+        int id = forIdxCounter++;
+        std::string arrTmp = "__for_arr_" + std::to_string(id);
+
+        std::vector<std::unique_ptr<Statement>> outerStmts;
+
+        // var __for_arr_N = collection;
+        auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
+        arrDecl->line = varName.line;
+        arrDecl->column = varName.column;
+        outerStmts.push_back(std::move(arrDecl));
+
+        // Build inner body: { var item = __for_arr_N[idx]; original_body }
+        std::vector<std::unique_ptr<Statement>> innerStmts;
+        auto arrRef = std::make_unique<IdentifierExpr>(arrTmp);
+        auto idxRef = std::make_unique<IdentifierExpr>(varName.lexeme);
+        auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
+        auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
+        itemDecl->line = itemName.line;
+        itemDecl->column = itemName.column;
+        innerStmts.push_back(std::move(itemDecl));
+        innerStmts.push_back(std::move(body));
+        auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
+
+        // for (idx in 0...len(__for_arr_N))
+        auto zero = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+        std::vector<std::unique_ptr<Expression>> lenArgs;
+        lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
+        auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
+        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(zero), std::move(lenCall),
+                                                  nullptr, std::move(innerBlock));
+        forStmt->line = varName.line;
+        forStmt->column = varName.column;
+        outerStmts.push_back(std::move(forStmt));
+
+        return std::make_unique<BlockStmt>(std::move(outerStmts));
+    }
+
     std::string iteratorType;
     if (match(TokenType::COLON)) {
         iteratorType = parseTypeAnnotation();
@@ -855,7 +1056,11 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         auto end = parseExpression();
 
         std::unique_ptr<Expression> step = nullptr;
+        // Support both: for (i in 0...10...2) and for (i in 0...10 step 2)
         if (match(TokenType::RANGE)) {
+            step = parseExpression();
+        } else if (check(TokenType::IDENTIFIER) && peek().lexeme == "step") {
+            advance(); // consume 'step'
             step = parseExpression();
         }
 
@@ -864,6 +1069,31 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
         return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step),
                                          std::move(body), iteratorType);
+    }
+
+    // for (i in 10 downto 0) => for (i in 10...0...-1)
+    // for (i in 10 downto 0 step 2) => for (i in 10...0...-2)
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "downto") {
+        advance(); // consume 'downto'
+        auto end = parseExpression();
+
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "step") {
+            advance(); // consume 'step'
+            auto stepExpr = parseExpression();
+            // The step is positive in user syntax, we negate it for downto
+            // Desugar to: for (i in start...end...-step)
+            consume(TokenType::RPAREN, "Expected ')' after for downto range");
+            auto body = parseStatement();
+            auto negStep = std::make_unique<UnaryExpr>("-", std::move(stepExpr));
+            return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
+                                             std::move(negStep), std::move(body), iteratorType);
+        }
+
+        consume(TokenType::RPAREN, "Expected ')' after for downto range");
+        auto body = parseStatement();
+        auto negOne = std::make_unique<LiteralExpr>(static_cast<long long>(-1));
+        return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
+                                         std::move(negOne), std::move(body), iteratorType);
     }
 
     // Otherwise this is a for-each loop: for (var in collection)
@@ -953,6 +1183,437 @@ std::unique_ptr<Statement> Parser::parseThrowStmt() {
     auto value = parseExpression();
     consume(TokenType::SEMICOLON, "Expected ';' after throw expression");
     return std::make_unique<ThrowStmt>(std::move(value));
+}
+
+// unless (condition) { ... } else { ... }
+// Desugars to: if (!condition) { ... } else { ... }
+std::unique_ptr<Statement> Parser::parseUnlessStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'unless'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after condition");
+
+    auto thenBranch = parseStatement();
+    std::unique_ptr<Statement> elseBranch = nullptr;
+
+    if (match(TokenType::ELSE)) {
+        elseBranch = parseStatement();
+    }
+
+    // Negate the condition: unless (c) => if (!c)
+    auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
+    return std::make_unique<IfStmt>(std::move(negated), std::move(thenBranch), std::move(elseBranch));
+}
+
+// until (condition) { ... }
+// Desugars to: while (!condition) { ... }
+std::unique_ptr<Statement> Parser::parseUntilStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'until'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after condition");
+
+    auto body = parseStatement();
+
+    // Negate the condition: until (c) => while (!c)
+    auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
+    return std::make_unique<WhileStmt>(std::move(negated), std::move(body));
+}
+
+// loop { ... }
+// Desugars to: while (true) { ... }
+std::unique_ptr<Statement> Parser::parseLoopStmt() {
+    // Two forms:
+    // 1. loop { ... } — infinite loop (while true)
+    // 2. loop N { ... } or loop (N) { ... } — counted loop (for __i in 0...N)
+    if (check(TokenType::LBRACE)) {
+        auto body = parseStatement();
+        // Infinite loop: loop { ... } => while (true) { ... }
+        auto trueVal = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+        return std::make_unique<WhileStmt>(std::move(trueVal), std::move(body));
+    }
+
+    // Counted form: loop N { ... } or loop (N) { ... }
+    bool hasParen = match(TokenType::LPAREN);
+    auto count = parseExpression();
+    if (hasParen) {
+        consume(TokenType::RPAREN, "Expected ')' after loop count");
+    }
+    auto body = parseStatement();
+
+    // Desugar to: for (__loop_N in 0...count) { body }
+    static int loopCounter = 0;
+    std::string iterVar = "__loop_" + std::to_string(loopCounter++);
+    auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+    return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
+}
+
+// repeat N { ... }  or  repeat (expr) { ... }
+// Desugars to: for (__repeat_i in 0...N) { ... }
+std::unique_ptr<Statement> Parser::parseRepeatStmt() {
+    // Two forms:
+    // 1. repeat N { ... }  or  repeat (N) { ... }  — counted loop
+    // 2. repeat { ... } until (cond);               — post-test loop
+
+    // If next token is '{', this is the repeat...until form
+    if (check(TokenType::LBRACE)) {
+        auto body = parseStatement();
+        consume(TokenType::UNTIL, "Expected 'until' after repeat block");
+        consume(TokenType::LPAREN, "Expected '(' after 'until'");
+        auto condition = parseExpression();
+        consume(TokenType::RPAREN, "Expected ')' after until condition");
+        consume(TokenType::SEMICOLON, "Expected ';' after repeat...until");
+
+        // Negate: repeat { ... } until (c) => do { ... } while (!c)
+        auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
+        return std::make_unique<DoWhileStmt>(std::move(body), std::move(negated));
+    }
+
+    // Counted form: repeat N { ... } or repeat (N) { ... }
+    bool hasParen = match(TokenType::LPAREN);
+    auto count = parseExpression();
+    if (hasParen) {
+        consume(TokenType::RPAREN, "Expected ')' after repeat count");
+    }
+
+    auto body = parseStatement();
+
+    // Desugar to: for (__repeat_N in 0...count) { body }
+    static int repeatCounter = 0;
+    std::string iterVar = "__repeat_" + std::to_string(repeatCounter++);
+    auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+    return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
+}
+
+// defer statement;  or  defer { ... }
+// Stores the statement to be executed at the end of the enclosing block
+std::unique_ptr<Statement> Parser::parseDeferStmt() {
+    auto body = parseStatement();
+    return std::make_unique<DeferStmt>(std::move(body));
+}
+
+// guard (condition) else { ... }
+// Desugars to: if (!condition) { body }
+// Used for early-exit / precondition patterns:
+//   guard (x > 0) else { return -1; }
+std::unique_ptr<Statement> Parser::parseGuardStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'guard'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after guard condition");
+    consume(TokenType::ELSE, "Expected 'else' after guard condition");
+
+    auto elseBody = parseStatement();
+
+    // Negate the condition: guard (c) else { ... } => if (!c) { ... }
+    auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
+    return std::make_unique<IfStmt>(std::move(negated), std::move(elseBody));
+}
+
+// when (expr) { val1 => { stmts }, val2, val3 => { stmts }, _ => { stmts } }
+// Desugars to a switch statement with fat-arrow syntax
+std::unique_ptr<Statement> Parser::parseWhenStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'when'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after when expression");
+    consume(TokenType::LBRACE, "Expected '{' after when expression");
+
+    std::vector<SwitchCase> cases;
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        // Check for default case: _ => { ... }
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
+            advance(); // consume '_'
+            consume(TokenType::FAT_ARROW, "Expected '=>' after '_' in when clause");
+            std::vector<std::unique_ptr<Statement>> body;
+            body.push_back(parseStatement());
+            cases.emplace_back(std::vector<std::unique_ptr<Expression>>{}, std::move(body), true);
+        } else {
+            // Parse one or more case values: val1, val2, val3 => { ... }
+            std::vector<std::unique_ptr<Expression>> values;
+            values.push_back(parseExpression());
+            while (match(TokenType::COMMA)) {
+                // Check if next is '=>' (end of value list)
+                if (check(TokenType::FAT_ARROW)) break;
+                values.push_back(parseExpression());
+            }
+            consume(TokenType::FAT_ARROW, "Expected '=>' after value(s) in when clause");
+            std::vector<std::unique_ptr<Statement>> body;
+            body.push_back(parseStatement());
+            cases.emplace_back(std::move(values), std::move(body), false);
+        }
+
+        // Allow optional comma between arms
+        match(TokenType::COMMA);
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' to close when block");
+    return std::make_unique<SwitchStmt>(std::move(condition), std::move(cases));
+}
+
+// forever { ... }
+// Desugars to: while (true) { ... }
+std::unique_ptr<Statement> Parser::parseForeverStmt() {
+    auto body = parseStatement();
+
+    // Infinite loop: forever { ... } => while (true) { ... }
+    auto trueVal = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+    return std::make_unique<WhileStmt>(std::move(trueVal), std::move(body));
+}
+
+// foreach item in collection { ... }
+// foreach (i, item in collection) { ... } — indexed variant
+// Desugars to: for (item in collection) { ... } (ForEachStmt)
+// Indexed variant desugars to:
+//   { var __foreach_arr_N = collection;
+//     for (__foreach_idx_N in 0...len(__foreach_arr_N)) {
+//       var i = __foreach_idx_N;
+//       var item = __foreach_arr_N[__foreach_idx_N];
+//       body } }
+std::unique_ptr<Statement> Parser::parseForEachStmt() {
+    // Allow optional parens: foreach item in arr or foreach (item in arr)
+    bool hasParen = match(TokenType::LPAREN);
+    const Token firstName = consume(TokenType::IDENTIFIER, "Expected iterator variable after 'foreach'");
+
+    // Check for indexed variant: foreach (idx, item in collection)
+    if (match(TokenType::COMMA)) {
+        // This is the indexed form: foreach (idx, item in collection)
+        const Token itemName = consume(TokenType::IDENTIFIER, "Expected item variable after ',' in foreach");
+        consume(TokenType::IN, "Expected 'in' after foreach variables");
+        auto collection = parseExpression();
+        if (hasParen) {
+            consume(TokenType::RPAREN, "Expected ')' after foreach collection");
+        }
+        auto body = parseStatement();
+
+        // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
+        static int foreachIdxCounter = 0;
+        int id = foreachIdxCounter++;
+        std::string arrTmp = "__foreach_arr_" + std::to_string(id);
+
+        std::vector<std::unique_ptr<Statement>> outerStmts;
+
+        // var __foreach_arr_N = collection;
+        auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
+        arrDecl->line = firstName.line;
+        arrDecl->column = firstName.column;
+        outerStmts.push_back(std::move(arrDecl));
+
+        // Build inner body: { var item = __foreach_arr_N[idx]; original_body }
+        std::vector<std::unique_ptr<Statement>> innerStmts;
+
+        // var item = __foreach_arr_N[idx];
+        auto arrRef = std::make_unique<IdentifierExpr>(arrTmp);
+        auto idxRef = std::make_unique<IdentifierExpr>(firstName.lexeme);
+        auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
+        auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
+        itemDecl->line = itemName.line;
+        itemDecl->column = itemName.column;
+        innerStmts.push_back(std::move(itemDecl));
+        innerStmts.push_back(std::move(body));
+        auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
+
+        // for (idx in 0...len(__foreach_arr_N))
+        auto zero = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+        std::vector<std::unique_ptr<Expression>> lenArgs;
+        lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
+        auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
+        auto forStmt = std::make_unique<ForStmt>(firstName.lexeme, std::move(zero), std::move(lenCall),
+                                                  nullptr, std::move(innerBlock));
+        forStmt->line = firstName.line;
+        forStmt->column = firstName.column;
+        outerStmts.push_back(std::move(forStmt));
+
+        return std::make_unique<BlockStmt>(std::move(outerStmts));
+    }
+
+    consume(TokenType::IN, "Expected 'in' after foreach variable");
+    auto collection = parseExpression();
+    if (hasParen) {
+        consume(TokenType::RPAREN, "Expected ')' after foreach collection");
+    }
+    auto body = parseStatement();
+    return std::make_unique<ForEachStmt>(firstName.lexeme, std::move(collection), std::move(body));
+}
+
+// elif (condition) { ... } [elif (...) { ... }] [else { ... }]
+// Desugars to: if (condition) { ... } [else if (...) { ... }] [else { ... }]
+std::unique_ptr<Statement> Parser::parseElifStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'elif'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after elif condition");
+
+    auto thenBranch = parseStatement();
+    std::unique_ptr<Statement> elseBranch = nullptr;
+
+    if (match(TokenType::ELIF)) {
+        elseBranch = parseElifStmt();
+    } else if (match(TokenType::ELSE)) {
+        elseBranch = parseStatement();
+    }
+
+    return std::make_unique<IfStmt>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
+}
+
+// swap a, b;  or  swap a, b, c;  (circular rotation: a←b, b←c, c←old_a)
+// Desugars to: { var __swap_tmp = a; a = b; b = c; ... last = __swap_tmp; }
+std::unique_ptr<Statement> Parser::parseSwapStmt() {
+    // Collect all operands
+    std::vector<std::string> names;
+    auto first = parseExpression();
+    auto* firstIdent = dynamic_cast<IdentifierExpr*>(first.get());
+    if (!firstIdent) {
+        error("swap operands must be variable names");
+    }
+    names.push_back(firstIdent->name);
+
+    while (match(TokenType::COMMA)) {
+        auto operand = parseExpression();
+        auto* ident = dynamic_cast<IdentifierExpr*>(operand.get());
+        if (!ident) {
+            error("swap operands must be variable names");
+        }
+        names.push_back(ident->name);
+    }
+    consume(TokenType::SEMICOLON, "Expected ';' after swap statement");
+
+    if (names.size() < 2) {
+        error("swap requires at least two variables");
+    }
+
+    static int swapCounter = 0;
+    std::string tmpName = "__swap_" + std::to_string(swapCounter++);
+
+    std::vector<std::unique_ptr<Statement>> stmts;
+
+    // var __swap_tmp = first;
+    auto tmpInit = std::make_unique<IdentifierExpr>(names[0]);
+    stmts.push_back(std::make_unique<VarDecl>(tmpName, std::move(tmpInit)));
+
+    // Circular rotation: names[0] = names[1]; names[1] = names[2]; ...
+    for (size_t i = 0; i + 1 < names.size(); ++i) {
+        auto assign = std::make_unique<AssignExpr>(names[i], std::make_unique<IdentifierExpr>(names[i + 1]));
+        stmts.push_back(std::make_unique<ExprStmt>(std::move(assign)));
+    }
+
+    // last = __swap_tmp;
+    auto assignLast = std::make_unique<AssignExpr>(names.back(), std::make_unique<IdentifierExpr>(tmpName));
+    stmts.push_back(std::make_unique<ExprStmt>(std::move(assignLast)));
+
+    return std::make_unique<BlockStmt>(std::move(stmts));
+}
+
+// times (N) { ... }  or  times N { ... }
+// Desugars to: for (__times_i in 0...N) { ... }
+std::unique_ptr<Statement> Parser::parseTimesStmt() {
+    // Allow optional parens: times N { ... } or times (N) { ... }
+    bool hasParen = match(TokenType::LPAREN);
+    auto count = parseExpression();
+    if (hasParen) {
+        consume(TokenType::RPAREN, "Expected ')' after times count");
+    }
+
+    auto body = parseStatement();
+
+    // Desugar to: for (__times_N in 0...count) { body }
+    static int timesCounter = 0;
+    std::string iterVar = "__times_" + std::to_string(timesCounter++);
+    auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+    return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
+}
+
+// with (var x = expr) { body }  or  with (var x = expr, var y = expr2) { body }
+// Desugars to: { var x = expr; [var y = expr2;] body }
+// Scoped bindings that are cleaned up at block end
+std::unique_ptr<Statement> Parser::parseWithStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'with'");
+
+    std::vector<std::unique_ptr<Statement>> stmts;
+
+    // Parse one or more variable declarations
+    do {
+        bool isConst = false;
+        if (match(TokenType::CONST)) {
+            isConst = true;
+        } else {
+            consume(TokenType::VAR, "Expected 'var' or 'const' in with binding");
+        }
+        auto decl = parseVarDecl(isConst);
+        stmts.push_back(std::move(decl));
+    } while (match(TokenType::COMMA));
+
+    consume(TokenType::RPAREN, "Expected ')' after with bindings");
+
+    auto body = parseStatement();
+    stmts.push_back(std::move(body));
+
+    return std::make_unique<BlockStmt>(std::move(stmts));
+}
+
+// var [a, b, c] = expr;  or  const [a, b, c] = expr;
+// Desugars to:
+//   { var __destructure_N = expr;
+//     var a = __destructure_N[0];
+//     var b = __destructure_N[1];
+//     var c = __destructure_N[2]; }
+// Use '_' to skip an element: var [a, _, c] = expr;
+std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isConst) {
+    const Token lbracket = consume(TokenType::LBRACKET, "Expected '[' for array destructuring");
+
+    std::vector<std::string> names;
+    if (!check(TokenType::RBRACKET)) {
+        // First name or '_'
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
+            advance();
+            names.push_back("_");
+        } else {
+            const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in destructuring");
+            names.push_back(name.lexeme);
+        }
+        while (match(TokenType::COMMA)) {
+            if (check(TokenType::RBRACKET)) break; // trailing comma
+            if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
+                advance();
+                names.push_back("_");
+            } else {
+                const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in destructuring");
+                names.push_back(name.lexeme);
+            }
+        }
+    }
+    consume(TokenType::RBRACKET, "Expected ']' after destructuring names");
+
+    if (names.empty()) {
+        error("Destructuring must have at least one variable name");
+    }
+
+    consume(TokenType::ASSIGN, "Expected '=' after destructuring pattern");
+    auto initializer = parseExpression();
+
+    // Desugar to a block of individual assignments
+    static int destructureCounter = 0;
+    std::string tmpName = "__destructure_" + std::to_string(destructureCounter++);
+
+    std::vector<std::unique_ptr<Statement>> stmts;
+
+    // var __destructure_N = expr;
+    auto tmpDecl = std::make_unique<VarDecl>(tmpName, std::move(initializer), false);
+    tmpDecl->line = lbracket.line;
+    tmpDecl->column = lbracket.column;
+    stmts.push_back(std::move(tmpDecl));
+
+    // var a = __destructure_N[0]; var b = __destructure_N[1]; ...
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == "_") continue; // skip placeholder
+
+        auto tmpRef = std::make_unique<IdentifierExpr>(tmpName);
+        auto idx = std::make_unique<LiteralExpr>(static_cast<long long>(i));
+        auto indexExpr = std::make_unique<IndexExpr>(std::move(tmpRef), std::move(idx));
+
+        auto varDecl = std::make_unique<VarDecl>(names[i], std::move(indexExpr), isConst);
+        varDecl->line = lbracket.line;
+        varDecl->column = lbracket.column;
+        stmts.push_back(std::move(varDecl));
+    }
+
+    return stmts;
 }
 
 std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
@@ -1583,14 +2244,31 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
             indexExpr->column = bracketToken.column;
             expr = std::move(indexExpr);
         }
-        // Handle field access (dot notation)
+        // Handle field access (dot notation) or method call (obj.method(args))
         else if (match(TokenType::DOT)) {
             const Token dotToken = tokens[current - 1];
             const Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name after '.'");
-            auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(expr), fieldToken.lexeme);
-            fieldExpr->line = dotToken.line;
-            fieldExpr->column = dotToken.column;
-            expr = std::move(fieldExpr);
+            // Method call: obj.method(args...) desugars to method(obj, args...)
+            if (check(TokenType::LPAREN)) {
+                advance(); // consume '('
+                std::vector<std::unique_ptr<Expression>> arguments;
+                arguments.push_back(std::move(expr)); // receiver becomes first argument
+                if (!check(TokenType::RPAREN)) {
+                    do {
+                        arguments.push_back(parseExpression());
+                    } while (match(TokenType::COMMA));
+                }
+                consume(TokenType::RPAREN, "Expected ')' after method call arguments");
+                auto callExpr = std::make_unique<CallExpr>(fieldToken.lexeme, std::move(arguments));
+                callExpr->line = dotToken.line;
+                callExpr->column = dotToken.column;
+                expr = std::move(callExpr);
+            } else {
+                auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(expr), fieldToken.lexeme);
+                fieldExpr->line = dotToken.line;
+                fieldExpr->column = dotToken.column;
+                expr = std::move(fieldExpr);
+            }
         } else {
             break;
         }
@@ -1689,6 +2367,16 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             advance(); // consume ':'
             advance(); // consume type name
         }
+        return expr;
+    }
+
+    // Allow keyword tokens that double as builtin function names to be used
+    // in expression context (e.g. swap(arr, i, j) as a function call).
+    if (match(TokenType::SWAP)) {
+        const Token token = tokens[current - 1];
+        auto expr = std::make_unique<IdentifierExpr>(token.lexeme);
+        expr->line = token.line;
+        expr->column = token.column;
         return expr;
     }
 

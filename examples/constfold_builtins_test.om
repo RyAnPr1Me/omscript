@@ -1,0 +1,55 @@
+// constfold_builtins_test.om
+// Tests compile-time constant folding for various builtins.
+// All inputs are literals so everything folds at compile time.
+
+fn main() {
+    var total = 0;
+
+    // popcount: popcount(255) = 8 (eight 1-bits)
+    total = total + (popcount(255) == 8);              // +1
+
+    // clz: clz(1) = 63 (63 leading zeros in 64-bit)
+    total = total + (clz(1) == 63);                    // +1
+
+    // ctz: ctz(8) = 3 (three trailing zeros)
+    total = total + (ctz(8) == 3);                     // +1
+
+    // is_power_of_2: 64 is a power of 2
+    total = total + (is_power_of_2(64) == 1);          // +1
+
+    // is_power_of_2: 63 is NOT a power of 2
+    total = total + (is_power_of_2(63) == 0);          // +1
+
+    // gcd: gcd(12, 8) = 4
+    total = total + (gcd(12, 8) == 4);                 // +1
+
+    // lcm: lcm(4, 6) = 12
+    total = total + (lcm(4, 6) == 12);                 // +1
+
+    // to_int: to_int("42") = 42
+    total = total + (to_int("42") == 42);              // +1
+
+    // to_float: to_float("3") -> 3.0, cast to int = 3
+    total = total + (to_int(to_float("3")) == 3);      // +1
+
+    // rotate_left: rotate_left(1, 3) = 8
+    total = total + (rotate_left(1, 3) == 8);          // +1
+
+    // rotate_right: rotate_right(8, 3) = 1
+    total = total + (rotate_right(8, 3) == 1);         // +1
+
+    // saturating_add: 100 + 200 = 300 (no overflow)
+    total = total + (saturating_add(100, 200) == 300);  // +1
+
+    // saturating_sub: 100 - 200 = -100 (no overflow)
+    total = total + (saturating_sub(100, 200) == -100); // +1
+
+    // str_count: str_count("abcabc", "abc") = 2
+    total = total + (str_count("abcabc", "abc") == 2);  // +1
+
+    // bswap: bswap(0x0100000000000000) = 1
+    total = total + (bswap(72057594037927936) == 1);     // +1
+
+    // Expected: 15
+    return total;
+}

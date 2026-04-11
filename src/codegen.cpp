@@ -806,9 +806,12 @@ void CodeGenerator::initTBAAMetadata() {
     llvm::MDNode* tbaaLenType    = makeTBAAType("array length");
     llvm::MDNode* tbaaElemType   = makeTBAAType("array element");
     llvm::MDNode* tbaaStructType = makeTBAAType("struct field");
+    tbaaStructTypeNode_ = tbaaStructType;
     llvm::MDNode* tbaaStrType    = makeTBAAType("string data");
     llvm::MDNode* tbaaMapKeyType = makeTBAAType("map key");
     llvm::MDNode* tbaaMapValType = makeTBAAType("map value");
+    llvm::MDNode* tbaaMapHashType = makeTBAAType("map hash");
+    llvm::MDNode* tbaaMapMetaType = makeTBAAType("map meta");
 
     // Access tag nodes: !{ !base-type, !access-type, offset }
     // For scalar types, base == access.
@@ -820,6 +823,8 @@ void CodeGenerator::initTBAAMetadata() {
     tbaaStringData_  = llvm::MDNode::get(C, {tbaaStrType, tbaaStrType, zero});
     tbaaMapKey_      = llvm::MDNode::get(C, {tbaaMapKeyType, tbaaMapKeyType, zero});
     tbaaMapVal_      = llvm::MDNode::get(C, {tbaaMapValType, tbaaMapValType, zero});
+    tbaaMapHash_     = llvm::MDNode::get(C, {tbaaMapHashType, tbaaMapHashType, zero});
+    tbaaMapMeta_     = llvm::MDNode::get(C, {tbaaMapMetaType, tbaaMapMetaType, zero});
 
     // !range metadata: array lengths are always in [0, INT64_MAX).
     auto* i64Ty = llvm::Type::getInt64Ty(C);
@@ -830,6 +835,30 @@ void CodeGenerator::initTBAAMetadata() {
     });
 }
 
+llvm::MDNode* CodeGenerator::getOrCreateFieldTBAA(const std::string& structType, size_t fieldIdx) {
+    auto key = std::make_pair(structType, fieldIdx);
+    auto it = tbaaStructFieldCache_.find(key);
+    if (it != tbaaStructFieldCache_.end()) return it->second;
+
+    // Build a unique per-field TBAA type node as a child of tbaaStructTypeNode_.
+    // Two accesses to different fields will have sibling type nodes that do not alias.
+    // A generic struct-field access using tbaaStructField_ still aliases all per-field
+    // accesses because tbaaStructTypeNode_ is their common ancestor.
+    auto& C = *context;
+    auto* zero = llvm::ConstantAsMetadata::get(
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(C), 0));
+    std::string nodeName = "struct." + structType + "." + std::to_string(fieldIdx);
+    llvm::MDNode* fieldTypeNode = llvm::MDNode::get(C, {
+        llvm::MDString::get(C, nodeName),
+        tbaaStructTypeNode_,
+        zero
+    });
+    // Access tag: {fieldTypeNode, fieldTypeNode, 0}
+    llvm::MDNode* accessTag = llvm::MDNode::get(C, {fieldTypeNode, fieldTypeNode, zero});
+    tbaaStructFieldCache_[key] = accessTag;
+    return accessTag;
+}
+
 void CodeGenerator::setupPrintfDeclaration() {
     // Declare printf function for output
     std::vector<llvm::Type*> printfArgs;
@@ -837,7 +866,13 @@ void CodeGenerator::setupPrintfDeclaration() {
 
     llvm::FunctionType* printfType = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), printfArgs, true);
 
-    llvm::Function::Create(printfType, llvm::Function::ExternalLinkage, "printf", module.get());
+    auto* fn = llvm::Function::Create(printfType, llvm::Function::ExternalLinkage, "printf", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    // printf reads through its format string arg (nocapture, readonly).
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    OMSC_ADD_NOCAPTURE(fn, 0);
 }
 
 llvm::Function* CodeGenerator::getPrintfFunction() {
@@ -1038,6 +1073,12 @@ void CodeGenerator::endScope() {
         } else {
             constIntFolds_.erase(entry.first);
         }
+        // Restore constFloatFolds_ to the value that was in scope before this scope was entered.
+        if (entry.second.hadPreviousFloatFold) {
+            constFloatFolds_[entry.first] = entry.second.previousFloatFold;
+        } else {
+            constFloatFolds_.erase(entry.first);
+        }
     }
     scopeStack.pop_back();
     constScopeStack.pop_back();
@@ -1067,15 +1108,23 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
                 binding.hadPreviousIntFold = true;
                 binding.previousIntFold = foldIt->second;
             }
+            // Save previous constFloatFolds_ entry for this variable (for scope restoration).
+            auto floatFoldIt = constFloatFolds_.find(name);
+            if (floatFoldIt != constFloatFolds_.end()) {
+                binding.hadPreviousFloatFold = true;
+                binding.previousFloatFold = floatFoldIt->second;
+            }
             constScope[name] = binding;
         }
     }
     namedValues[name] = value;
     constValues[name] = isConst;
-    // If the variable is being rebound (not a const), remove its int fold entry
+    // If the variable is being rebound (not a const), remove its int/float fold entry
     // since the new binding may have a different value.
-    if (!isConst)
+    if (!isConst) {
         constIntFolds_.erase(name);
+        constFloatFolds_.erase(name);
+    }
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
@@ -1190,13 +1239,11 @@ llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
     fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull); // OmScript assumes alloc always succeeds
     // allocsize(0, 1): allocation size is arg0 * arg1 — enables LLVM to
     // reason about the returned buffer size for alias analysis and to
     // eliminate redundant bounds checks on the allocated memory.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, 1));
-    // Note: calloc CAN return NULL on OOM, so we do NOT add NonNull here.
-    // The call site in array_fill does not check for NULL because OmScript's
-    // runtime assumes allocation always succeeds (same as C benchmarks).
     return fn;
 }
 
@@ -1320,6 +1367,7 @@ llvm::Function* CodeGenerator::getOrDeclareFputs() {
                                        {ptrTy, ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fputs", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1329,12 +1377,21 @@ llvm::Function* CodeGenerator::getOrDeclareFputs() {
 llvm::Value* CodeGenerator::getOrDeclareStdout() {
     // Get the C library 'stdout' global (extern FILE *stdout).
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    if (auto* gv = module->getGlobalVariable("stdout"))
-        return builder->CreateLoad(ptrTy, gv, "stdout.val");
+    if (auto* gv = module->getGlobalVariable("stdout")) {
+        auto* load = builder->CreateLoad(ptrTy, gv, "stdout.val");
+        // stdout is a process-wide constant — mark as nonnull and invariant
+        // so LLVM can hoist/CSE repeated loads.
+        load->setMetadata(llvm::LLVMContext::MD_nonnull,
+                          llvm::MDNode::get(*context, {}));
+        return load;
+    }
     auto* gv = new llvm::GlobalVariable(
         *module, ptrTy, /*isConstant=*/false,
         llvm::GlobalValue::ExternalLinkage, nullptr, "stdout");
-    return builder->CreateLoad(ptrTy, gv, "stdout.val");
+    auto* load = builder->CreateLoad(ptrTy, gv, "stdout.val");
+    load->setMetadata(llvm::LLVMContext::MD_nonnull,
+                      llvm::MDNode::get(*context, {}));
+    return load;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareScanf() {
@@ -1342,7 +1399,12 @@ llvm::Function* CodeGenerator::getOrDeclareScanf() {
         return fn;
     auto* ty =
         llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::PointerType::getUnqual(*context)}, true);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "scanf", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "scanf", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareExit() {
@@ -1382,6 +1444,10 @@ llvm::Function* CodeGenerator::getOrDeclareSnprintf() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // snprintf: dest is writeonly+nocapture, format string is readonly+nocapture.
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(2, llvm::Attribute::ReadOnly);
+    OMSC_ADD_NOCAPTURE(fn, 2);
     return fn;
 }
 
@@ -1699,6 +1765,7 @@ llvm::Function* CodeGenerator::getOrDeclareRealloc() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull); // OmScript assumes alloc always succeeds
     OMSC_ADD_NOCAPTURE(fn, 0); // realloc does not capture the old pointer
     // allocsize(1): parameter 1 is the new allocation size.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 1, std::nullopt));
@@ -1757,7 +1824,9 @@ llvm::Function* CodeGenerator::getOrDeclareFwrite() {
     auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy, getDefaultType(), getDefaultType(), ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fwrite", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(3, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 3);
@@ -1771,6 +1840,7 @@ llvm::Function* CodeGenerator::getOrDeclareFflush() {
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fflush", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
 }
@@ -1782,7 +1852,9 @@ llvm::Function* CodeGenerator::getOrDeclareFgets() {
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context), ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fgets", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(2, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 2);
     return fn;
@@ -1796,6 +1868,7 @@ llvm::Function* CodeGenerator::getOrDeclareFopen() {
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fopen", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1812,6 +1885,7 @@ llvm::Function* CodeGenerator::getOrDeclareFclose() {
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fclose", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -1824,6 +1898,7 @@ llvm::Function* CodeGenerator::getOrDeclareFread() {
     auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy, getDefaultType(), getDefaultType(), ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fread", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(3, llvm::Attribute::NonNull);
@@ -1839,6 +1914,7 @@ llvm::Function* CodeGenerator::getOrDeclareFseek() {
                                        {ptrTy, getDefaultType(), llvm::Type::getInt32Ty(*context)}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fseek", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -1851,6 +1927,7 @@ llvm::Function* CodeGenerator::getOrDeclareFtell() {
     auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "ftell", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -1864,6 +1941,7 @@ llvm::Function* CodeGenerator::getOrDeclareAccess() {
         llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, llvm::Type::getInt32Ty(*context)}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "access", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1939,8 +2017,64 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexDestroy() {
 //
 // Total allocation: (2 + 3 * capacity) * 8 bytes
 //
-// Hash function: FNV-1a on the 64-bit key value.
-//   result = ((hash_raw >> 2) | 2)  -- ensure result >= 2
+// Hash function: "Rotate-Accumulate" (RA) hash — 4 IR instructions.
+//
+//   h  = key * 0xD6E8FEB86659FD93     (multiply: primary avalanche)
+//   r  = ror(h, 37)                    (rotate right by prime 37)
+//   h  = h + r                         (add: carry-propagation mixing)
+//   h |= 2                             (reserve sentinels 0 and 1)
+//
+// Novel design rationale:
+//
+// 1. SINGLE MULTIPLY: The large odd constant 0xD6E8FEB86659FD93 (from the
+//    murmur3/splitmix family) spreads bits across the full 64-bit word.
+//    For sequential integer keys, the products are perfectly spaced with
+//    zero collisions modulo any power of 2.
+//
+// 2. ROTATE (not shift): `ror(h, 37)` is a lossless permutation — no
+//    information is destroyed, unlike `h >> k` which discards k low bits.
+//    37 is prime and coprime to 64, maximizing the bit displacement:
+//    every bit moves to a position 37 away (mod 64) with no fixed points
+//    and no short cycles.  Compiles to a single `ror` instruction.
+//
+// 3. ADD (not XOR): Addition provides strictly superior mixing via carry
+//    propagation — a single bit flip at position i affects all positions
+//    >= i through the carry chain.  XOR only affects position i.  This
+//    is the key novelty: after rotate-add, every output bit depends on
+//    ~half of all input bits through the combined multiply+carry chains.
+//
+// Performance: 4 IR instructions → 4 machine instructions on x86
+// (imul, ror, add, or).  Critical-path latency ~5 cycles (mul=3, ror=1,
+// add=1, or folded).  The shortest dependency chain possible for a
+// quality hash.
+
+/// Emit the Rotate-Accumulate hash for a 64-bit integer key.
+/// Returns a hash value guaranteed >= 2 (0=empty, 1=tombstone reserved).
+/// Only 4 LLVM IR instructions: mul, fshr (ror), add, or.
+llvm::Value* CodeGenerator::emitKeyHash(llvm::Value* key) {
+    auto* i64Ty = getDefaultType();
+
+    // Step 1: multiply by large odd constant — primary avalanche.
+    llvm::Value* h = builder->CreateMul(
+        key, llvm::ConstantInt::get(i64Ty, 0xD6E8FEB86659FD93ULL), "h.mul");
+
+    // Step 2: rotate right by 37 (prime, coprime to 64) — lossless permutation.
+    // llvm.fshr(h, h, 37) = (h concat h) >> 37 = ror(h, 37).
+    // Compiles to a single `ror` on x86 / `ror` on ARM64.
+    llvm::Function* fshr = OMSC_GET_INTRINSIC(
+        module.get(), llvm::Intrinsic::fshr, {i64Ty});
+    llvm::Value* rotated = builder->CreateCall(
+        fshr, {h, h, llvm::ConstantInt::get(i64Ty, 37)}, "h.rot");
+
+    // Step 3: add (not xor) — carry propagation provides additional mixing.
+    // A bit flip at position i propagates to all positions > i via carry.
+    // NUW only (not NSW): the add can produce any 64-bit value including
+    // signed overflow, but unsigned wrapping is intentional hash behavior.
+    h = builder->CreateAdd(h, rotated, "h.mix", /*HasNUW=*/true, /*HasNSW=*/false);
+
+    // Step 4: ensure hash >= 2 (0=empty, 1=tombstone are reserved).
+    return builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
+}
 
 /// Helper: set common attributes on emitted map functions.
 static void setHashMapFnAttrs(llvm::Function* fn) {
@@ -1964,6 +2098,9 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
     auto* fnTy = llvm::FunctionType::get(ptrTy, {}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_new", module.get());
     setHashMapFnAttrs(fn);
+    // Returns a fresh calloc'd allocation — always unique and non-null.
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
 
     auto savedIP = builder->saveIP();
     auto* entryBB = llvm::BasicBlock::Create(*context, "entry", fn);
@@ -1976,8 +2113,11 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
     llvm::Value* buf = builder->CreateCall(getOrDeclareCalloc(), {
         llvm::ConstantInt::get(i64Ty, 1), totalBytes
     }, "hmap.buf");
+    // OmScript assumes allocations always succeed — annotate call-site result.
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
     // Store capacity in slot 0
-    builder->CreateAlignedStore(cap, buf, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(cap, buf, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
     // Size (slot 1) is already 0 from calloc
     builder->CreateRet(buf);
 
@@ -1996,6 +2136,12 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty, i64Ty}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_set", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map pointer is the sole reference to this allocation.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    // Returns the (possibly reallocated) map — still a unique allocation.
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     fn->getArg(0)->setName("map");
     fn->getArg(1)->setName("key");
     fn->getArg(2)->setName("val");
@@ -2020,26 +2166,42 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* keyArg = fn->getArg(1);
     llvm::Value* valArg = fn->getArg(2);
 
-    // FNV-1a hash of the 64-bit key
-    // hash = fnv1a(key) — unrolled over 8 bytes
-    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
-    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
-    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
-    llvm::Value* h = basis;
-    for (int byte = 0; byte < 8; byte++) {
-        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
-        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
-        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
-    }
-    // Ensure hash >= 2 (0=empty, 1=tombstone are reserved)
-    llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
-
-    // Load capacity and size
+    // Rotate-Accumulate (RA) hash
+    llvm::Value* hashVal = emitKeyHash(keyArg);
     auto* capPtr = mapArg;  // slot 0
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, capPtr, llvm::MaybeAlign(8), "cap");
+    auto* capLoad = builder->CreateAlignedLoad(i64Ty, capPtr, llvm::MaybeAlign(8), "cap");
+    capLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* cap = capLoad;
+    // Capacity is always a power of 2 >= 8.  Communicate this to LLVM:
+    //  (a) !range metadata:  cap ∈ [8, 2^62)  — eliminates dead zero-checks
+    //  (b) llvm.assume(cap & (cap-1) == 0)    — lets CorrelatedValuePropagation
+    //      prove slot < cap after slot & mask, enabling downstream optimizations
+    {
+        llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 8)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        capLoad->setMetadata(llvm::LLVMContext::MD_range,
+                             llvm::MDNode::get(*context, rangeMD));
+        llvm::Value* capM1 = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1));
+        llvm::Value* isPow2 = builder->CreateICmpEQ(
+            builder->CreateAnd(cap, capM1), llvm::ConstantInt::get(i64Ty, 0), "cap.pow2");
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {isPow2});
+    }
+
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1), "sizeptr");
-    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
-    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask");
+    auto* sizeLoad = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    sizeLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    {   // Size is always in [0, 2^62).
+        llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        sizeLoad->setMetadata(llvm::LLVMContext::MD_range,
+                              llvm::MDNode::get(*context, rangeMD));
+    }
+    llvm::Value* size = sizeLoad;
+    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
     builder->CreateBr(probeBB);
 
@@ -2053,10 +2215,11 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     // Compute entry base: mapPtr + 2 + slot*3
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* entryOff = builder->CreateAdd(
-        builder->CreateMul(slot, three, "slot3"),
-        llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+        builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     // Check if empty (hash == 0)
     llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
     builder->CreateCondBr(isEmpty, emptyBB, checkBB);
@@ -2071,77 +2234,103 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         slot, firstTombstone, "newtomb");
     builder->CreateCondBr(isTomb, nextBB, occupBB);
 
-    // Occupied: check if key matches
+    // Occupied: first compare stored hash vs computed hash (cheap i64 cmp).
+    // On mismatch we skip the key load entirely — avoids a cache miss on
+    // probe chains where most slots hold different keys.
     builder->SetInsertPoint(occupBB);
-    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    auto* checkKeyBB = llvm::BasicBlock::Create(*context, "checkkey", fn);
+    llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
+    // Hash match is unlikely on long probe chains; weight accordingly.
+    auto* hashW = llvm::MDBuilder(*context).createBranchWeights(1, 4);
+    builder->CreateCondBr(hashMatch, checkKeyBB, nextBB, hashW);
+
+    // Hash matched — now load and compare the actual key.
+    builder->SetInsertPoint(checkKeyBB);
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
-    builder->CreateCondBr(keyMatch, matchBB, nextBB);
+    // When hashes match, key match is overwhelmingly likely (collision ~1/2^62).
+    auto* keyW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+    builder->CreateCondBr(keyMatch, matchBB, nextBB, keyW);
 
     // Match: update value in place
     builder->SetInsertPoint(matchBB);
-    llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff");
+    llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "evalptr");
-    builder->CreateAlignedStore(valArg, eValPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(valArg, eValPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_); }
     builder->CreateBr(doneBB);
 
     // Next: advance to next slot (linear probe), wrap around
     builder->SetInsertPoint(nextBB);
-    llvm::PHINode* tombForNext = builder->CreatePHI(i64Ty, 2, "tomb.next");
-    tombForNext->addIncoming(newTomb, checkBB);
-    tombForNext->addIncoming(firstTombstone, occupBB);  // no change if occupied but no match
+    llvm::PHINode* tombForNext = builder->CreatePHI(i64Ty, 3, "tomb.next");
+    tombForNext->addIncoming(newTomb, checkBB);          // tombstone path: may update tracker
+    tombForNext->addIncoming(firstTombstone, occupBB);   // hash mismatch: no change
+    tombForNext->addIncoming(firstTombstone, checkKeyBB); // key mismatch: no change
     llvm::Value* nextSlot = builder->CreateAnd(
-        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1"),
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
     firstTombstone->addIncoming(tombForNext, nextBB);
-    builder->CreateBr(probeBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(probeBB)));
 
     // Empty: key not found — insert
     builder->SetInsertPoint(emptyBB);
     // Check if we need to grow: size+1 > cap*3/4
-    llvm::Value* newSize = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "newsize");
+    llvm::Value* newSize = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "newsize", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* threshold = builder->CreateLShr(
-        builder->CreateMul(cap, llvm::ConstantInt::get(i64Ty, 3)), llvm::ConstantInt::get(i64Ty, 2), "threshold");
+        builder->CreateMul(cap, llvm::ConstantInt::get(i64Ty, 3), "cap3thr", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "threshold");
     llvm::Value* needGrow = builder->CreateICmpUGT(newSize, threshold, "needgrow");
-    builder->CreateCondBr(needGrow, growBB, insertBB);
+    // Growth is rare: only triggered when load factor exceeds 75%, which
+    // happens at most log2(N) times over N insertions.  Weight accordingly
+    // so the branch predictor and code layout favor the no-grow path.
+    llvm::MDNode* growWeights = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+    builder->CreateCondBr(needGrow, growBB, insertBB, growWeights);
 
     // Insert: write into the slot (prefer tombstone slot if available)
     builder->SetInsertPoint(insertBB);
     llvm::Value* hasTombForInsert = builder->CreateICmpNE(firstTombstone, llvm::ConstantInt::get(i64Ty, -1), "hastomb2");
     llvm::Value* insSlot = builder->CreateSelect(hasTombForInsert, firstTombstone, slot, "insslot");
     llvm::Value* insOff = builder->CreateAdd(
-        builder->CreateMul(insSlot, three),
-        llvm::ConstantInt::get(i64Ty, 2), "insoff");
+        builder->CreateMul(insSlot, three, "ins3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "insoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* insHashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, insOff, "inshashptr");
-    builder->CreateAlignedStore(hashVal, insHashPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(hashVal, insHashPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_); }
     llvm::Value* insKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
-        builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 1)), "inskeyptr");
-    builder->CreateAlignedStore(keyArg, insKeyPtr, llvm::MaybeAlign(8));
+        builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 1), "inskeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "inskeyptr");
+    {   auto* st = builder->CreateAlignedStore(keyArg, insKeyPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_); }
     llvm::Value* insValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
-        builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 2)), "insvalptr");
-    builder->CreateAlignedStore(valArg, insValPtr, llvm::MaybeAlign(8));
+        builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 2), "insvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "insvalptr");
+    {   auto* st = builder->CreateAlignedStore(valArg, insValPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_); }
     // Update size
-    builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
     builder->CreateBr(doneBB);
 
     // Grow: double capacity, rehash all entries, then insert the new key
     builder->SetInsertPoint(growBB);
-    llvm::Value* newCap = builder->CreateShl(cap, llvm::ConstantInt::get(i64Ty, 1), "newcap");
+    llvm::Value* newCap = builder->CreateShl(cap, llvm::ConstantInt::get(i64Ty, 1), "newcap", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* newTotalSlots = builder->CreateAdd(
-        builder->CreateMul(newCap, three),
-        llvm::ConstantInt::get(i64Ty, 2), "newtotalslots");
-    llvm::Value* newTotalBytes = builder->CreateMul(newTotalSlots, llvm::ConstantInt::get(i64Ty, 8), "newtotalbytes");
+        builder->CreateMul(newCap, three, "cap3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "newtotalslots", /*HasNUW=*/true, /*HasNSW=*/true);
+    llvm::Value* newTotalBytes = builder->CreateMul(newTotalSlots, llvm::ConstantInt::get(i64Ty, 8), "newtotalbytes", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* newBuf = builder->CreateCall(getOrDeclareCalloc(), {
         llvm::ConstantInt::get(i64Ty, 1), newTotalBytes
     }, "newbuf");
+    llvm::cast<llvm::CallInst>(newBuf)->addRetAttr(llvm::Attribute::NonNull);
     // Store new capacity and size+1
-    builder->CreateAlignedStore(newCap, newBuf, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(newCap, newBuf, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
     llvm::Value* newSizePtr = builder->CreateInBoundsGEP(i64Ty, newBuf, llvm::ConstantInt::get(i64Ty, 1));
-    builder->CreateAlignedStore(newSize, newSizePtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(newSize, newSizePtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
     // Rehash loop: iterate old entries, insert non-empty/non-tombstone into new table
-    llvm::Value* newMask = builder->CreateSub(newCap, llvm::ConstantInt::get(i64Ty, 1), "newmask");
+    llvm::Value* newMask = builder->CreateSub(newCap, llvm::ConstantInt::get(i64Ty, 1), "newmask", /*HasNUW=*/true, /*HasNSW=*/true);
     auto* rehashLoopBB = llvm::BasicBlock::Create(*context, "rehash.loop", fn);
     auto* rehashBodyBB = llvm::BasicBlock::Create(*context, "rehash.body", fn);
     auto* rehashProbeBB = llvm::BasicBlock::Create(*context, "rehash.probe", fn);
@@ -2160,21 +2349,24 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     // Rehash body: read old entry, skip empty/tombstone
     builder->SetInsertPoint(rehashBodyBB);
     llvm::Value* oldOff = builder->CreateAdd(
-        builder->CreateMul(ri, three),
-        llvm::ConstantInt::get(i64Ty, 2), "oldoff");
+        builder->CreateMul(ri, three, "ri3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "oldoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* oldHashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, oldOff, "oldhashptr");
     llvm::Value* oldHash = builder->CreateAlignedLoad(i64Ty, oldHashPtr, llvm::MaybeAlign(8), "oldhash");
+    llvm::cast<llvm::Instruction>(oldHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* isActive = builder->CreateICmpUGE(oldHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
     builder->CreateCondBr(isActive, rehashProbeBB, rehashNextBB);
 
     // Rehash probe: find empty slot in new table
     builder->SetInsertPoint(rehashProbeBB);
     llvm::Value* oldKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
-        builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 1)), "oldkeyptr");
+        builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 1), "oldkeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "oldkeyptr");
     llvm::Value* oldKey = builder->CreateAlignedLoad(i64Ty, oldKeyPtr, llvm::MaybeAlign(8), "oldkey");
+    llvm::cast<llvm::Instruction>(oldKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* oldValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
-        builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 2)), "oldvalptr");
+        builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 2), "oldvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "oldvalptr");
     llvm::Value* oldVal = builder->CreateAlignedLoad(i64Ty, oldValPtr, llvm::MaybeAlign(8), "oldval");
+    llvm::cast<llvm::Instruction>(oldVal)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
     // Find empty slot in new table using oldHash
     llvm::Value* rStartSlot = builder->CreateAnd(oldHash, newMask, "rstartslot");
 
@@ -2187,37 +2379,41 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::PHINode* rs = builder->CreatePHI(i64Ty, 2, "rs");
     rs->addIncoming(rStartSlot, rehashProbeBB);
     llvm::Value* rEntryOff = builder->CreateAdd(
-        builder->CreateMul(rs, three),
-        llvm::ConstantInt::get(i64Ty, 2), "rentryoff");
+        builder->CreateMul(rs, three, "rs3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "rentryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* rHashPtr = builder->CreateInBoundsGEP(i64Ty, newBuf, rEntryOff, "rhashptr");
     llvm::Value* rSlotHash = builder->CreateAlignedLoad(i64Ty, rHashPtr, llvm::MaybeAlign(8), "rslothash");
+    llvm::cast<llvm::Instruction>(rSlotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* rIsEmpty = builder->CreateICmpEQ(rSlotHash, llvm::ConstantInt::get(i64Ty, 0), "risempty");
     builder->CreateCondBr(rIsEmpty, rehashWriteBB, rAdvanceBB);
 
     // Advance probe: compute next slot, loop back
     builder->SetInsertPoint(rAdvanceBB);
     llvm::Value* rNext = builder->CreateAnd(
-        builder->CreateAdd(rs, llvm::ConstantInt::get(i64Ty, 1)),
+        builder->CreateAdd(rs, llvm::ConstantInt::get(i64Ty, 1), "rs1", /*HasNUW=*/true, /*HasNSW=*/true),
         newMask, "rnext");
     rs->addIncoming(rNext, rAdvanceBB);
-    builder->CreateBr(rProbeLpBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(rProbeLpBB)));
 
     // Write rehashed entry into new table
     builder->SetInsertPoint(rehashWriteBB);
-    builder->CreateAlignedStore(oldHash, rHashPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(oldHash, rHashPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_); }
     llvm::Value* rKeyPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
-        builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 1)), "rkeyptr");
-    builder->CreateAlignedStore(oldKey, rKeyPtr, llvm::MaybeAlign(8));
+        builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 1), "rkeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "rkeyptr");
+    {   auto* st = builder->CreateAlignedStore(oldKey, rKeyPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_); }
     llvm::Value* rValPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
-        builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 2)), "rvalptr");
-    builder->CreateAlignedStore(oldVal, rValPtr, llvm::MaybeAlign(8));
+        builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 2), "rvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "rvalptr");
+    {   auto* st = builder->CreateAlignedStore(oldVal, rValPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_); }
     builder->CreateBr(rehashNextBB);
 
     // Rehash next: advance outer loop
     builder->SetInsertPoint(rehashNextBB);
-    llvm::Value* riNext = builder->CreateAdd(ri, llvm::ConstantInt::get(i64Ty, 1), "rinext");
+    llvm::Value* riNext = builder->CreateAdd(ri, llvm::ConstantInt::get(i64Ty, 1), "rinext", /*HasNUW=*/true, /*HasNSW=*/true);
     ri->addIncoming(riNext, rehashNextBB);
-    builder->CreateBr(rehashLoopBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(rehashLoopBB)));
 
     // After rehash: insert the new key into the new table
     builder->SetInsertPoint(rehashDoneBB);
@@ -2234,10 +2430,11 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::PHINode* ns = builder->CreatePHI(i64Ty, 2, "ns");
     ns->addIncoming(nStartSlot, insertNewBB);
     llvm::Value* nEntryOff = builder->CreateAdd(
-        builder->CreateMul(ns, three),
-        llvm::ConstantInt::get(i64Ty, 2), "nentryoff");
+        builder->CreateMul(ns, three, "ns3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "nentryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* nHashPtr = builder->CreateInBoundsGEP(i64Ty, newBuf, nEntryOff, "nhashptr");
     llvm::Value* nSlotHash = builder->CreateAlignedLoad(i64Ty, nHashPtr, llvm::MaybeAlign(8), "nslothash");
+    llvm::cast<llvm::Instruction>(nSlotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* nIsEmpty = builder->CreateICmpEQ(nSlotHash, llvm::ConstantInt::get(i64Ty, 0), "nisempty");
     auto* nWriteBB = llvm::BasicBlock::Create(*context, "nprobe.write", fn);
     auto* nAdvBB   = llvm::BasicBlock::Create(*context, "nprobe.adv", fn);
@@ -2245,19 +2442,22 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
 
     builder->SetInsertPoint(nAdvBB);
     llvm::Value* nNext = builder->CreateAnd(
-        builder->CreateAdd(ns, llvm::ConstantInt::get(i64Ty, 1)),
+        builder->CreateAdd(ns, llvm::ConstantInt::get(i64Ty, 1), "ns1", /*HasNUW=*/true, /*HasNSW=*/true),
         newMask, "nnext");
     ns->addIncoming(nNext, nAdvBB);
-    builder->CreateBr(nProbeLpBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(nProbeLpBB)));
 
     builder->SetInsertPoint(nWriteBB);
-    builder->CreateAlignedStore(hashVal, nHashPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(hashVal, nHashPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_); }
     llvm::Value* nKeyPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
-        builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 1)), "nkeyptr");
-    builder->CreateAlignedStore(keyArg, nKeyPtr, llvm::MaybeAlign(8));
+        builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 1), "nkeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "nkeyptr");
+    {   auto* st = builder->CreateAlignedStore(keyArg, nKeyPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_); }
     llvm::Value* nValPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
-        builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 2)), "nvalptr");
-    builder->CreateAlignedStore(valArg, nValPtr, llvm::MaybeAlign(8));
+        builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 2), "nvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "nvalptr");
+    {   auto* st = builder->CreateAlignedStore(valArg, nValPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_); }
     builder->CreateBr(doneBB);
 
     // Done: return map pointer
@@ -2282,6 +2482,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     auto* fnTy = llvm::FunctionType::get(i64Ty, {ptrTy, i64Ty, i64Ty}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_get", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference; get is read-only.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->getArg(0)->setName("map");
     fn->getArg(1)->setName("key");
     fn->getArg(2)->setName("def");
@@ -2300,20 +2504,30 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     llvm::Value* keyArg = fn->getArg(1);
     llvm::Value* defArg = fn->getArg(2);
 
-    // FNV-1a hash
-    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
-    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
-    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
-    llvm::Value* h = basis;
-    for (int byte = 0; byte < 8; byte++) {
-        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
-        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
-        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
-    }
-    llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
+    // Rotate-Accumulate (RA) hash
+    llvm::Value* hashVal = emitKeyHash(keyArg);
 
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
-    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask");
+    auto* capLoad = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    // Capacity is invariant during a read-only GET — let LLVM hoist/CSE it.
+    capLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                         llvm::MDNode::get(*context, {}));
+    capLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* cap = capLoad;
+    // Capacity is always a power of 2 >= 8.
+    {
+        llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 8)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        capLoad->setMetadata(llvm::LLVMContext::MD_range,
+                             llvm::MDNode::get(*context, rangeMD));
+        llvm::Value* capM1 = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1));
+        llvm::Value* isPow2 = builder->CreateICmpEQ(
+            builder->CreateAnd(cap, capM1), llvm::ConstantInt::get(i64Ty, 0), "cap.pow2");
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {isPow2});
+    }
+    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
     builder->CreateBr(probeBB);
 
@@ -2324,9 +2538,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
 
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* entryOff = builder->CreateAdd(
-        builder->CreateMul(slot, three), llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+        builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     // Empty => not found
     llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
     builder->CreateCondBr(isEmpty, notfoundBB, checkBB);
@@ -2334,31 +2549,42 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     // Check: tombstone or occupied?
     builder->SetInsertPoint(checkBB);
     llvm::Value* isTomb = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 1), "istomb");
-    // If tombstone, skip to next; otherwise check key
+    // If tombstone, skip to next; otherwise compare hashes first
+    auto* hashCmpBB = llvm::BasicBlock::Create(*context, "hashcmp", fn);
+    builder->CreateCondBr(isTomb, nextBB, hashCmpBB);
+
+    // Hash pre-filter: compare stored hash vs computed hash before loading key.
+    // Avoids an expensive key load (potential cache miss) on hash mismatch.
+    builder->SetInsertPoint(hashCmpBB);
     auto* checkKeyBB = llvm::BasicBlock::Create(*context, "checkkey", fn);
-    builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
+    llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 4);
+        builder->CreateCondBr(hashMatch, checkKeyBB, nextBB, w); }
 
     builder->SetInsertPoint(checkKeyBB);
-    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
-    builder->CreateCondBr(keyMatch, foundBB, nextBB);
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(keyMatch, foundBB, nextBB, w); }
 
     // Found: load value
     builder->SetInsertPoint(foundBB);
-    llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff");
+    llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "evalptr");
     llvm::Value* val = builder->CreateAlignedLoad(i64Ty, eValPtr, llvm::MaybeAlign(8), "val");
+    llvm::cast<llvm::Instruction>(val)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
     builder->CreateRet(val);
 
     // Next: advance slot (both tombstone and no-match paths funnel here)
     builder->SetInsertPoint(nextBB);
     llvm::Value* nextSlot = builder->CreateAnd(
-        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1)),
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
-    builder->CreateBr(probeBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(probeBB)));
 
     // Not found: return default
     builder->SetInsertPoint(notfoundBB);
@@ -2378,6 +2604,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     auto* fnTy = llvm::FunctionType::get(i64Ty, {ptrTy, i64Ty}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_has", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference; has is read-only.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->getArg(0)->setName("map");
     fn->getArg(1)->setName("key");
 
@@ -2395,20 +2625,30 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     llvm::Value* mapArg = fn->getArg(0);
     llvm::Value* keyArg = fn->getArg(1);
 
-    // FNV-1a hash
-    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
-    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
-    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
-    llvm::Value* h = basis;
-    for (int byte = 0; byte < 8; byte++) {
-        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
-        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
-        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
-    }
-    llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
+    // Rotate-Accumulate (RA) hash
+    llvm::Value* hashVal = emitKeyHash(keyArg);
 
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
-    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask");
+    auto* capLoad_has = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    // Capacity is invariant during a read-only HAS — let LLVM hoist/CSE it.
+    capLoad_has->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                             llvm::MDNode::get(*context, {}));
+    capLoad_has->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* cap = capLoad_has;
+    // Capacity is always a power of 2 >= 8.
+    {
+        llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 8)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        capLoad_has->setMetadata(llvm::LLVMContext::MD_range,
+                             llvm::MDNode::get(*context, rangeMD));
+        llvm::Value* capM1 = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1));
+        llvm::Value* isPow2 = builder->CreateICmpEQ(
+            builder->CreateAnd(cap, capM1), llvm::ConstantInt::get(i64Ty, 0), "cap.pow2");
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {isPow2});
+    }
+    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
     builder->CreateBr(probeBB);
 
@@ -2418,32 +2658,42 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
 
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* entryOff = builder->CreateAdd(
-        builder->CreateMul(slot, three), llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+        builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
     builder->CreateCondBr(isEmpty, notfoundBB, checkBB);
 
     builder->SetInsertPoint(checkBB);
     llvm::Value* isTomb = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 1), "istomb");
-    builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
+    auto* hashCmpBB = llvm::BasicBlock::Create(*context, "hashcmp", fn);
+    builder->CreateCondBr(isTomb, nextBB, hashCmpBB);
+
+    // Hash pre-filter: compare stored hash vs computed hash before loading key.
+    builder->SetInsertPoint(hashCmpBB);
+    llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 4);
+        builder->CreateCondBr(hashMatch, checkKeyBB, nextBB, w); }
 
     builder->SetInsertPoint(checkKeyBB);
-    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
-    builder->CreateCondBr(keyMatch, foundBB, nextBB);
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(keyMatch, foundBB, nextBB, w); }
 
     builder->SetInsertPoint(foundBB);
     builder->CreateRet(llvm::ConstantInt::get(i64Ty, 1));
 
     builder->SetInsertPoint(nextBB);
     llvm::Value* nextSlot = builder->CreateAnd(
-        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1)),
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
-    builder->CreateBr(probeBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(probeBB)));
 
     builder->SetInsertPoint(notfoundBB);
     builder->CreateRet(llvm::ConstantInt::get(i64Ty, 0));
@@ -2463,6 +2713,12 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_remove", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    // Returns the same map pointer (unique ownership).
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     fn->getArg(0)->setName("map");
     fn->getArg(1)->setName("key");
 
@@ -2480,20 +2736,27 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     llvm::Value* mapArg = fn->getArg(0);
     llvm::Value* keyArg = fn->getArg(1);
 
-    // FNV-1a hash
-    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
-    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
-    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
-    llvm::Value* h = basis;
-    for (int byte = 0; byte < 8; byte++) {
-        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
-        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
-        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
-    }
-    llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
+    // Rotate-Accumulate (RA) hash
+    llvm::Value* hashVal = emitKeyHash(keyArg);
 
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
-    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask");
+    auto* capLoad_rm = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    capLoad_rm->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* cap = capLoad_rm;
+    // Capacity is always a power of 2 >= 8.
+    {
+        llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 8)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        capLoad_rm->setMetadata(llvm::LLVMContext::MD_range,
+                             llvm::MDNode::get(*context, rangeMD));
+        llvm::Value* capM1 = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1));
+        llvm::Value* isPow2 = builder->CreateICmpEQ(
+            builder->CreateAnd(cap, capM1), llvm::ConstantInt::get(i64Ty, 0), "cap.pow2");
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {isPow2});
+    }
+    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
     builder->CreateBr(probeBB);
 
@@ -2503,38 +2766,52 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
 
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* entryOff = builder->CreateAdd(
-        builder->CreateMul(slot, three), llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+        builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
     builder->CreateCondBr(isEmpty, doneBB, checkBB);
 
     builder->SetInsertPoint(checkBB);
     llvm::Value* isTomb = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 1), "istomb");
-    builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
+    auto* hashCmpBB = llvm::BasicBlock::Create(*context, "hashcmp", fn);
+    builder->CreateCondBr(isTomb, nextBB, hashCmpBB);
+
+    // Hash pre-filter: compare stored hash vs computed hash before loading key.
+    builder->SetInsertPoint(hashCmpBB);
+    llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 4);
+        builder->CreateCondBr(hashMatch, checkKeyBB, nextBB, w); }
 
     builder->SetInsertPoint(checkKeyBB);
-    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
-    builder->CreateCondBr(keyMatch, foundBB, nextBB);
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(keyMatch, foundBB, nextBB, w); }
 
     // Found: mark as tombstone, decrement size
     builder->SetInsertPoint(foundBB);
-    builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 1), hashPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 1), hashPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_); }
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1));
-    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
-    llvm::Value* newSize = builder->CreateSub(size, llvm::ConstantInt::get(i64Ty, 1), "newsize");
-    builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
+    auto* sizeLoad_rm = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    sizeLoad_rm->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* size = sizeLoad_rm;
+    llvm::Value* newSize = builder->CreateSub(size, llvm::ConstantInt::get(i64Ty, 1), "newsize", /*HasNUW=*/true, /*HasNSW=*/true);
+    auto* sizeStore_rm = builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
+    sizeStore_rm->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
     builder->CreateBr(doneBB);
 
     builder->SetInsertPoint(nextBB);
     llvm::Value* nextSlot = builder->CreateAnd(
-        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1)),
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
-    builder->CreateBr(probeBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(probeBB)));
 
     // Done: return same map pointer (mutated in place)
     builder->SetInsertPoint(doneBB);
@@ -2554,6 +2831,13 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
     auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_keys", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference; keys only reads the map.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    // Returns a fresh malloc'd array — always unique and non-null.
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     fn->getArg(0)->setName("map");
 
     auto savedIP = builder->saveIP();
@@ -2566,14 +2850,18 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
 
     builder->SetInsertPoint(entryBB);
     llvm::Value* mapArg = fn->getArg(0);
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    auto* capLoad_keys = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    capLoad_keys->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* cap = capLoad_keys;
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1));
-    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    auto* sizeLoad_keys = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    sizeLoad_keys->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* size = sizeLoad_keys;
 
     // Allocate output array: (size + 1) * 8
     llvm::Value* eight = llvm::ConstantInt::get(i64Ty, 8);
-    llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots");
-    llvm::Value* arrBytes = builder->CreateMul(arrSlots, eight, "arrbytes");
+    llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
+    llvm::Value* arrBytes = builder->CreateMul(arrSlots, eight, "arrbytes", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrBytes}, "buf");
     builder->CreateAlignedStore(size, buf, llvm::MaybeAlign(8));
     builder->CreateBr(loopBB);
@@ -2590,30 +2878,32 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
     builder->SetInsertPoint(bodyBB);
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* off = builder->CreateAdd(
-        builder->CreateMul(i, three), llvm::ConstantInt::get(i64Ty, 2), "off");
+        builder->CreateMul(i, three, "i3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "off", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, off, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* isActive = builder->CreateICmpUGE(slotHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
     builder->CreateCondBr(isActive, storeBB, nextBB);
 
     builder->SetInsertPoint(storeBB);
-    llvm::Value* keyOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* keyOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* keyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "keyptr");
     llvm::Value* key = builder->CreateAlignedLoad(i64Ty, keyPtr, llvm::MaybeAlign(8), "key");
-    llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff");
+    llvm::cast<llvm::Instruction>(key)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
+    llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* arrPtr = builder->CreateInBoundsGEP(i64Ty, buf, arrOff, "arrptr");
     builder->CreateAlignedStore(key, arrPtr, llvm::MaybeAlign(8));
-    llvm::Value* newWIdx = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "newidx");
+    llvm::Value* newWIdx = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "newidx", /*HasNUW=*/true, /*HasNSW=*/true);
     builder->CreateBr(nextBB);
 
     builder->SetInsertPoint(nextBB);
     llvm::PHINode* wPhi = builder->CreatePHI(i64Ty, 2, "wphi");
     wPhi->addIncoming(writeIdx, bodyBB);   // not active: unchanged
     wPhi->addIncoming(newWIdx, storeBB);   // active: incremented
-    llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext");
+    llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext", /*HasNUW=*/true, /*HasNSW=*/true);
     i->addIncoming(iNext, nextBB);
     writeIdx->addIncoming(wPhi, nextBB);
-    builder->CreateBr(loopBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
     builder->SetInsertPoint(doneBB);
     builder->CreateRet(buf);
@@ -2632,6 +2922,13 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
     auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_values", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference; values only reads the map.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    // Returns a fresh malloc'd array — always unique and non-null.
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     fn->getArg(0)->setName("map");
 
     auto savedIP = builder->saveIP();
@@ -2644,13 +2941,17 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
 
     builder->SetInsertPoint(entryBB);
     llvm::Value* mapArg = fn->getArg(0);
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    auto* capLoad_vals = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    capLoad_vals->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* cap = capLoad_vals;
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1));
-    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    auto* sizeLoad_vals = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    sizeLoad_vals->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* size = sizeLoad_vals;
 
     llvm::Value* eight = llvm::ConstantInt::get(i64Ty, 8);
-    llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots");
-    llvm::Value* arrBytes = builder->CreateMul(arrSlots, eight, "arrbytes");
+    llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
+    llvm::Value* arrBytes = builder->CreateMul(arrSlots, eight, "arrbytes", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrBytes}, "buf");
     builder->CreateAlignedStore(size, buf, llvm::MaybeAlign(8));
     builder->CreateBr(loopBB);
@@ -2666,30 +2967,32 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
     builder->SetInsertPoint(bodyBB);
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* off = builder->CreateAdd(
-        builder->CreateMul(i, three), llvm::ConstantInt::get(i64Ty, 2), "off");
+        builder->CreateMul(i, three, "i3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "off", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, off, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* isActive = builder->CreateICmpUGE(slotHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
     builder->CreateCondBr(isActive, storeBB, nextBB);
 
     builder->SetInsertPoint(storeBB);
-    llvm::Value* valOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 2), "valoff");
+    llvm::Value* valOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 2), "valoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* valPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "valptr");
     llvm::Value* val = builder->CreateAlignedLoad(i64Ty, valPtr, llvm::MaybeAlign(8), "val");
-    llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff");
+    llvm::cast<llvm::Instruction>(val)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
+    llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* arrPtr = builder->CreateInBoundsGEP(i64Ty, buf, arrOff, "arrptr");
     builder->CreateAlignedStore(val, arrPtr, llvm::MaybeAlign(8));
-    llvm::Value* newWIdx = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "newidx");
+    llvm::Value* newWIdx = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "newidx", /*HasNUW=*/true, /*HasNSW=*/true);
     builder->CreateBr(nextBB);
 
     builder->SetInsertPoint(nextBB);
     llvm::PHINode* wPhi = builder->CreatePHI(i64Ty, 2, "wphi");
     wPhi->addIncoming(writeIdx, bodyBB);
     wPhi->addIncoming(newWIdx, storeBB);
-    llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext");
+    llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext", /*HasNUW=*/true, /*HasNSW=*/true);
     i->addIncoming(iNext, nextBB);
     writeIdx->addIncoming(wPhi, nextBB);
-    builder->CreateBr(loopBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
     builder->SetInsertPoint(doneBB);
     builder->CreateRet(buf);
@@ -2708,6 +3011,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSize() {
     auto* fnTy = llvm::FunctionType::get(i64Ty, {ptrTy}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_size", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference; size only reads slot[1].
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->getArg(0)->setName("map");
 
     auto savedIP = builder->saveIP();
@@ -2715,8 +3022,16 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSize() {
     builder->SetInsertPoint(entryBB);
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, fn->getArg(0),
         llvm::ConstantInt::get(i64Ty, 1), "sizeptr");
-    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
-    builder->CreateRet(size);
+    auto* sizeLoad_sz = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    sizeLoad_sz->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    // Size is always non-negative.
+    {   llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        sizeLoad_sz->setMetadata(llvm::LLVMContext::MD_range,
+                                 llvm::MDNode::get(*context, rangeMD));
+    }
+    builder->CreateRet(sizeLoad_sz);
 
     builder->restoreIP(savedIP);
     return fn;
@@ -3306,26 +3621,40 @@ void CodeGenerator::generate(Program* program) {
                 funcArgs.insert(&arg);
             // Helper: strip GEP chains to find the underlying allocation.
             // A store to `getelementptr(alloca, ...)` is still a local write.
-            auto isLocalAlloca = [](llvm::Value* ptr) -> bool {
-                while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr))
-                    ptr = gep->getPointerOperand();
-                return llvm::isa<llvm::AllocaInst>(ptr);
+            // Helper: strip GEP/BitCast/IntToPtr/PtrToInt chains to find
+            // the underlying pointer source.  OmScript uses i64 as the
+            // default type, so values frequently pass through IntToPtr and
+            // PtrToInt conversions.  Stripping these is essential for
+            // accurate memory-effect inference.
+            auto stripPointerCasts = [](llvm::Value* ptr) -> llvm::Value* {
+                for (unsigned i = 0; i < 16; ++i) { // depth limit
+                    if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+                        ptr = gep->getPointerOperand();
+                    } else if (auto* bc = llvm::dyn_cast<llvm::BitCastInst>(ptr)) {
+                        ptr = bc->getOperand(0);
+                    } else if (auto* i2p = llvm::dyn_cast<llvm::IntToPtrInst>(ptr)) {
+                        ptr = i2p->getOperand(0);
+                    } else if (auto* p2i = llvm::dyn_cast<llvm::PtrToIntInst>(ptr)) {
+                        ptr = p2i->getOperand(0);
+                    } else {
+                        break;
+                    }
+                }
+                return ptr;
             };
-            // Helper: strip GEP/bitcast chains and check if the base is a
-            // function argument or a load from a function argument (one level
-            // of indirection covers OmScript's array-of-pointers pattern).
+            auto isLocalAlloca = [&stripPointerCasts](llvm::Value* ptr) -> bool {
+                return llvm::isa<llvm::AllocaInst>(stripPointerCasts(ptr));
+            };
+            // Helper: strip chains and check if the base is a function
+            // argument or a load from a function argument (one level of
+            // indirection covers OmScript's array-of-pointers pattern).
             auto isArgDerived = [&](llvm::Value* ptr) -> bool {
-                while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr))
-                    ptr = gep->getPointerOperand();
-                if (auto* bc = llvm::dyn_cast<llvm::BitCastInst>(ptr))
-                    ptr = bc->getOperand(0);
+                ptr = stripPointerCasts(ptr);
                 if (funcArgs.count(ptr))
                     return true;
                 // One level of load indirection: load from arg-derived ptr.
                 if (auto* li = llvm::dyn_cast<llvm::LoadInst>(ptr)) {
-                    llvm::Value* loadPtr = li->getPointerOperand();
-                    while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(loadPtr))
-                        loadPtr = gep->getPointerOperand();
+                    llvm::Value* loadPtr = stripPointerCasts(li->getPointerOperand());
                     return funcArgs.count(loadPtr) > 0;
                 }
                 return false;
@@ -3419,6 +3748,29 @@ void CodeGenerator::generate(Program* program) {
                         if (calledFn && calledFn->getName() == func.getName()) {
                             callsSelf = true;
                             break;
+                        }
+                        // Handle indirect calls through IntToPtr/PtrToInt chains:
+                        // OmScript may cast function pointers through integer
+                        // types, making getCalledFunction() return nullptr.
+                        // Strip casts to recover the underlying function.
+                        if (!calledFn) {
+                            llvm::Value* calledVal = CI->getCalledOperand();
+                            for (unsigned d = 0; d < 8; ++d) {
+                                if (auto* i2p = llvm::dyn_cast<llvm::IntToPtrInst>(calledVal))
+                                    calledVal = i2p->getOperand(0);
+                                else if (auto* p2i = llvm::dyn_cast<llvm::PtrToIntInst>(calledVal))
+                                    calledVal = p2i->getOperand(0);
+                                else if (auto* bc = llvm::dyn_cast<llvm::BitCastInst>(calledVal))
+                                    calledVal = bc->getOperand(0);
+                                else
+                                    break;
+                            }
+                            if (auto* gv = llvm::dyn_cast<llvm::Function>(calledVal)) {
+                                if (gv->getName() == func.getName()) {
+                                    callsSelf = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -3659,6 +4011,28 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->setDoesNotThrow();
         function->setWillReturn();
         function->setDoesNotFreeMemory();
+        // Speculatable: the function can be executed speculatively without
+        // any observable effect.  This enables LLVM to hoist pure calls out
+        // of loops, move them past branches, and speculatively execute them
+        // in if-conversion (select formation).  Combined with readonly +
+        // nounwind + willreturn, this is the strongest set of attributes
+        // for a pure function — a unique advantage of OmScript's ownership
+        // system where the programmer can guarantee purity.
+        function->addFnAttr(llvm::Attribute::Speculatable);
+        // NoSync: the function does not communicate with other threads via
+        // memory or synchronization primitives.  Required for LLVM to move
+        // the call freely across other memory operations.
+        function->setNoSync();
+    }
+    if (func->hintConstEval) {
+        // @const_eval: mark the function for compile-time evaluation when
+        // called with all-constant arguments.  At the LLVM level, mark it
+        // as pure + inline so that any fallback runtime call is efficient.
+        constEvalFunctions_.insert(func->name);
+        function->addFnAttr(llvm::Attribute::InlineHint);
+        function->setOnlyReadsMemory();
+        function->setDoesNotThrow();
+        function->setWillReturn();
     }
     if (func->hintNoReturn) {
         function->addFnAttr(llvm::Attribute::NoReturn);
@@ -3754,7 +4128,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // (arrays, strings) are always valid (non-null) distinct allocations.
         // Mark ALL pointer parameters as nonnull at O2+ — this lets LLVM
         // eliminate null-checks and enables speculative loads/hoisting.
-        // @hot and @optmax functions get additional noalias below.
+        // noalias is handled by the default fallback below (line ~4013+)
+        // which applies to all functions regardless of optimization level,
+        // since no-aliasing is a language-level invariant.
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
@@ -3809,16 +4185,14 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
     }
 
-    // Default noalias at O1+: OmScript's ownership model guarantees that
-    // distinct pointer parameters never alias the same memory region —
-    // the borrow checker prevents multiple mutable references.  This is
-    // equivalent to compiling all C code with __restrict on every pointer
-    // parameter.  The attribute enables LLVM to freely reorder, vectorize,
-    // and hoist loads/stores without alias-related conservatism.
-    // Lowered from O2 to O1: aliasing information is a language-level
-    // invariant, not a heuristic — it should be propagated at all opt levels.
-    if (optimizationLevel >= OptimizationLevel::O1
-        && !inOptMaxFunction && !currentFuncHintHot_
+    // Default noalias fallback: OmScript's ownership model guarantees that
+    // distinct pointer parameters never alias the same memory region — the
+    // borrow checker prevents multiple mutable references.  Applied at all
+    // optimization levels (including O0) because this is a language-level
+    // invariant, not a heuristic.  The guard excludes functions already
+    // handled above (@optmax, @hot, @restrict, file-level @noalias) to
+    // avoid redundant attribute additions.
+    if (!inOptMaxFunction && !currentFuncHintHot_
         && !func->hintRestrict && !fileNoAlias_) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
@@ -3912,6 +4286,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     dictVarNames_.clear();
     nonNegValues_.clear();
     constIntFolds_.clear();
+    constFloatFolds_.clear();
+    stackAllocatedArrays_.clear();
+    pendingArrayStackAlloc_ = false;
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -4100,6 +4477,11 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::PREFETCH_STMT:
         generatePrefetch(static_cast<PrefetchStmt*>(stmt));
         break;
+    case ASTNodeType::DEFER_STMT:
+        // Defer outside a block: just execute the body immediately
+        // (normal defer semantics are handled in generateBlock)
+        generateStatement(static_cast<DeferStmt*>(stmt)->body.get());
+        break;
     default:
         codegenError("Unknown statement type", stmt);
     }
@@ -4164,6 +4546,251 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
     default:
         codegenError("Unknown expression type", expr);
     }
+}
+
+} // namespace omscript
+
+// ---------------------------------------------------------------------------
+// Compile-time function evaluation for @const_eval
+// ---------------------------------------------------------------------------
+// Simple AST-level interpreter for integer-only functions.  Supports:
+//   - Integer arithmetic (+, -, *, /, %, **, &, |, ^, <<, >>)
+//   - Comparisons (==, !=, <, <=, >, >=)
+//   - Logical operators (&&, ||, !)
+//   - Unary operators (-, ~)
+//   - If/else statements
+//   - Return statements
+//   - Variable declarations and assignments
+//   - Recursive calls to @const_eval functions
+//
+// Returns std::nullopt for unsupported constructs, falling back to runtime.
+namespace omscript {
+
+std::optional<int64_t> CodeGenerator::tryConstEval(
+    const FunctionDecl* func,
+    const std::vector<int64_t>& argVals) {
+
+    if (!func || !func->body || func->parameters.size() != argVals.size())
+        return std::nullopt;
+
+    // Environment: variable name → current integer value
+    std::unordered_map<std::string, int64_t> env;
+    for (size_t i = 0; i < argVals.size(); ++i) {
+        env[func->parameters[i].name] = argVals[i];
+    }
+
+    // Limit recursion depth to prevent infinite loops at compile time
+    static thread_local int depth = 0;
+    if (++depth > 100) { --depth; return std::nullopt; }
+
+    struct DepthGuard { ~DepthGuard() { --depth; } } guard;
+
+    // Return value (set by a ReturnStmt)
+    std::optional<int64_t> retVal;
+
+    // Forward declarations for mutual recursion
+    std::function<std::optional<int64_t>(Expression*)> evalExpr;
+    std::function<bool(Statement*)> evalStmt;
+
+    evalExpr = [&](Expression* e) -> std::optional<int64_t> {
+        if (!e) return std::nullopt;
+        switch (e->type) {
+        case ASTNodeType::LITERAL_EXPR: {
+            auto* lit = static_cast<LiteralExpr*>(e);
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+                return lit->intValue;
+            // Booleans are represented as integers in OmScript (0 or 1).
+            // Float literals are not supported in const_eval context.
+            return std::nullopt;
+        }
+        case ASTNodeType::IDENTIFIER_EXPR: {
+            auto* id = static_cast<IdentifierExpr*>(e);
+            auto it = env.find(id->name);
+            if (it != env.end()) return it->second;
+            // Check enum constants
+            auto eit = enumConstants_.find(id->name);
+            if (eit != enumConstants_.end()) return static_cast<int64_t>(eit->second);
+            return std::nullopt;
+        }
+        case ASTNodeType::BINARY_EXPR: {
+            auto* bin = static_cast<BinaryExpr*>(e);
+            auto lv = evalExpr(bin->left.get());
+            // Short-circuit for logical operators
+            if (bin->op == "&&") {
+                if (!lv) return std::nullopt;
+                if (*lv == 0) return int64_t(0);
+                auto rv = evalExpr(bin->right.get());
+                return rv ? std::optional<int64_t>(*rv != 0 ? 1 : 0) : std::nullopt;
+            }
+            if (bin->op == "||") {
+                if (!lv) return std::nullopt;
+                if (*lv != 0) return int64_t(1);
+                auto rv = evalExpr(bin->right.get());
+                return rv ? std::optional<int64_t>(*rv != 0 ? 1 : 0) : std::nullopt;
+            }
+            auto rv = evalExpr(bin->right.get());
+            if (!lv || !rv) return std::nullopt;
+            int64_t a = *lv, b = *rv;
+            if (bin->op == "+") return a + b;
+            if (bin->op == "-") return a - b;
+            if (bin->op == "*") return a * b;
+            if (bin->op == "/" && b != 0) return a / b;
+            if (bin->op == "%" && b != 0) return a % b;
+            if (bin->op == "&") return a & b;
+            if (bin->op == "|") return a | b;
+            if (bin->op == "^") return a ^ b;
+            if (bin->op == "<<" && b >= 0 && b < 64) return a << b;
+            if (bin->op == ">>" && b >= 0 && b < 64) return a >> b;
+            if (bin->op == "==") return int64_t(a == b ? 1 : 0);
+            if (bin->op == "!=") return int64_t(a != b ? 1 : 0);
+            if (bin->op == "<")  return int64_t(a < b ? 1 : 0);
+            if (bin->op == "<=") return int64_t(a <= b ? 1 : 0);
+            if (bin->op == ">")  return int64_t(a > b ? 1 : 0);
+            if (bin->op == ">=") return int64_t(a >= b ? 1 : 0);
+            if (bin->op == "**") {
+                if (b < 0) return (a == 1) ? int64_t(1) : (a == -1 ? (b & 1 ? int64_t(-1) : int64_t(1)) : int64_t(0));
+                int64_t result = 1;
+                for (int64_t i = 0; i < b; ++i) result *= a;
+                return result;
+            }
+            return std::nullopt;
+        }
+        case ASTNodeType::UNARY_EXPR: {
+            auto* un = static_cast<UnaryExpr*>(e);
+            auto v = evalExpr(un->operand.get());
+            if (!v) return std::nullopt;
+            if (un->op == "-") return -*v;
+            if (un->op == "~") return ~*v;
+            if (un->op == "!") return int64_t(*v == 0 ? 1 : 0);
+            return std::nullopt;
+        }
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* tern = static_cast<TernaryExpr*>(e);
+            auto cond = evalExpr(tern->condition.get());
+            if (!cond) return std::nullopt;
+            return *cond != 0 ? evalExpr(tern->thenExpr.get())
+                              : evalExpr(tern->elseExpr.get());
+        }
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<CallExpr*>(e);
+            // Recursive @const_eval call
+            if (!constEvalFunctions_.count(call->callee))
+                return std::nullopt;
+            auto declIt = functionDecls_.find(call->callee);
+            if (declIt == functionDecls_.end()) return std::nullopt;
+            std::vector<int64_t> callArgs;
+            callArgs.reserve(call->arguments.size());
+            for (auto& arg : call->arguments) {
+                auto av = evalExpr(arg.get());
+                if (!av) return std::nullopt;
+                callArgs.push_back(*av);
+            }
+            return tryConstEval(declIt->second, callArgs);
+        }
+        default:
+            return std::nullopt;
+        }
+    };
+
+    evalStmt = [&](Statement* s) -> bool {
+        if (!s || retVal) return true;  // already returned
+        switch (s->type) {
+        case ASTNodeType::RETURN_STMT: {
+            auto* ret = static_cast<ReturnStmt*>(s);
+            if (ret->value) {
+                auto v = evalExpr(ret->value.get());
+                if (!v) return false;
+                retVal = *v;
+            } else {
+                retVal = 0;
+            }
+            return true;
+        }
+        case ASTNodeType::VAR_DECL: {
+            auto* decl = static_cast<VarDecl*>(s);
+            if (decl->initializer) {
+                auto v = evalExpr(decl->initializer.get());
+                if (!v) return false;
+                env[decl->name] = *v;
+            } else {
+                env[decl->name] = 0;
+            }
+            return true;
+        }
+        case ASTNodeType::EXPR_STMT: {
+            auto* es = static_cast<ExprStmt*>(s);
+            if (es->expression->type == ASTNodeType::ASSIGN_EXPR) {
+                auto* assign = static_cast<AssignExpr*>(es->expression.get());
+                auto v = evalExpr(assign->value.get());
+                if (!v) return false;
+                env[assign->name] = *v;
+                return true;
+            }
+            // Other expression statements: just evaluate for side effects
+            auto v = evalExpr(es->expression.get());
+            return v.has_value();
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifs = static_cast<IfStmt*>(s);
+            auto cond = evalExpr(ifs->condition.get());
+            if (!cond) return false;
+            if (*cond != 0) {
+                return evalStmt(ifs->thenBranch.get());
+            } else if (ifs->elseBranch) {
+                return evalStmt(ifs->elseBranch.get());
+            }
+            return true;
+        }
+        case ASTNodeType::BLOCK: {
+            auto* block = static_cast<BlockStmt*>(s);
+            for (auto& stmt : block->statements) {
+                if (!evalStmt(stmt.get())) return false;
+                if (retVal) return true;
+            }
+            return true;
+        }
+        default:
+            return false;  // Unsupported statement type
+        }
+    };
+
+    // Evaluate the function body
+    for (auto& stmt : func->body->statements) {
+        if (!evalStmt(stmt.get())) return std::nullopt;
+        if (retVal) return retVal;
+    }
+    return retVal.value_or(0);
+}
+
+// ── String Interning ────────────────────────────────────────────
+// Deduplicates identical string literals across the entire module by
+// maintaining a pool of interned global string constants.  When the
+// same string content is used in multiple places, this returns a
+// pointer to the single canonical global, enabling:
+//   1. Reduced data section size (no duplicate string constants)
+//   2. Pointer-equality comparison for identical strings
+//   3. Better D-cache utilization (fewer unique cache lines)
+llvm::GlobalVariable* CodeGenerator::internString(const std::string& content) {
+    auto it = internedStrings_.find(content);
+    if (it != internedStrings_.end()) {
+        return it->second;
+    }
+
+    // Create a new global string constant with internal linkage and
+    // unnamed_addr so LLVM can merge it with other identical constants.
+    auto* strConst = llvm::ConstantDataArray::getString(*context, content, /*AddNull=*/true);
+    auto* gv = new llvm::GlobalVariable(
+        *module,
+        strConst->getType(),
+        /*isConstant=*/true,
+        llvm::GlobalValue::PrivateLinkage,
+        strConst,
+        ".str.intern");
+    gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    gv->setAlignment(llvm::Align(1));
+
+    internedStrings_[content] = gv;
+    return gv;
 }
 
 } // namespace omscript

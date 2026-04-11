@@ -1,0 +1,73 @@
+// Tests for array_product, array_last, array_insert, str_pad_left, str_pad_right
+
+fn test_array_product() {
+    var a = [2, 3, 4];
+    var p = array_product(a);        // 24
+    var empty = [];
+    var pe = array_product(empty);   // 1 (identity)
+    var single = [7];
+    var ps = array_product(single);  // 7
+    return p + pe + ps;              // 24 + 1 + 7 = 32
+}
+
+fn test_array_last() {
+    var a = [10, 20, 30, 99];
+    var l = array_last(a);           // 99
+    var b = [42];
+    var l2 = array_last(b);          // 42
+    return l + l2 - 41;              // 99 + 42 - 41 = 100
+}
+
+fn test_array_insert() {
+    var a = [1, 2, 4, 5];
+    var b = array_insert(a, 2, 3);   // [1, 2, 3, 4, 5]
+    var s = 0;
+    for (x in b) { s = s + x; }     // 1+2+3+4+5 = 15
+    // Insert at front
+    var c = array_insert([10, 20], 0, 5);  // [5, 10, 20]
+    var t = 0;
+    for (x in c) { t = t + x; }     // 5+10+20 = 35
+    // Insert at end
+    var d = array_insert([1, 2], 2, 3);    // [1, 2, 3]
+    return s + t - 35;               // 15 + 35 - 35 = 15
+}
+
+fn test_str_pad_left() {
+    var s = str_pad_left("hi", 5, " ");   // "   hi"
+    var l = str_len(s);                    // 5
+    // Already wide enough - unchanged
+    var s2 = str_pad_left("hello", 3, " ");
+    var l2 = str_len(s2);                  // 5
+    // Zero padding
+    var n = str_pad_left("42", 6, "0");   // "000042"
+    var l3 = str_len(n);                   // 6
+    // Verify content: first char of "   hi" is space (32), last is 'i' (105)
+    var first = char_at(s, 0);            // 32 (space)
+    var last = char_at(s, 4);             // 105 ('i')
+    var content = (first == 32) + (last == 105);  // 2
+    return l + l2 + l3 + content;         // 5 + 5 + 6 + 2 = 18
+}
+
+fn test_str_pad_right() {
+    var s = str_pad_right("hi", 5, " ");  // "hi   "
+    var l = str_len(s);                    // 5
+    // Verify content: first char 'h' (104), third char is space (32)
+    var c0 = char_at(s, 0);              // 104 ('h')
+    var c1 = char_at(s, 1);             // 105 ('i')
+    var c2 = char_at(s, 2);             // 32  (' ')
+    var match = (c0 == 104) + (c1 == 105) + (c2 == 32);  // 3
+    // Already wide enough
+    var s2 = str_pad_right("hello", 3, "-");
+    var l2 = str_len(s2);                  // 5
+    return l + match + l2;                 // 5 + 3 + 5 = 13
+}
+
+fn main() {
+    var r1 = test_array_product();   // 32
+    var r2 = test_array_last();      // 100
+    var r3 = test_array_insert();    // 15
+    var r4 = test_str_pad_left();    // 18
+    var r5 = test_str_pad_right();   // 13
+    return r1 + r2 + r3 + r4 + r5;  // 32+100+15+18+13 = 178
+}
+

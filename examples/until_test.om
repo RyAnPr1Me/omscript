@@ -1,0 +1,38 @@
+// Test the 'until' keyword (syntactic sugar for 'while (!condition)')
+fn main() {
+    var result = 0;
+
+    // Basic until: loop until condition becomes true
+    var i = 0;
+    until (i == 5) {
+        result = result + 1;
+        i = i + 1;
+    }
+    // result = 5 (looped 5 times: i=0,1,2,3,4)
+
+    // Until with equality condition
+    var j = 10;
+    until (j == 0) {
+        result = result + 1;
+        j = j - 2;
+    }
+    // j goes: 10, 8, 6, 4, 2, 0 (5 iterations)
+    // result = 5 + 5 = 10
+
+    // Nested until
+    var a = 0;
+    var count = 0;
+    until (a == 3) {
+        var b = 0;
+        until (b == 2) {
+            count = count + 1;
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+    result = result + count;
+    // 3 * 2 = 6 iterations
+    // result = 10 + 6 = 16
+
+    return result;  // Expected: 16
+}

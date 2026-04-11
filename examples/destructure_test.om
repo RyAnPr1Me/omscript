@@ -1,0 +1,84 @@
+// Test: array destructuring
+// var [a, b, c] = expr; — desugars to individual indexed assignments
+
+fn basic_destructure() {
+    var arr = [10, 20, 30];
+    var [a, b, c] = arr;
+    return a + b + c;
+}
+
+fn skip_element() {
+    var arr = [100, 200, 300];
+    var [x, _, z] = arr;
+    return x + z;
+}
+
+fn const_destructure() {
+    var arr = [5, 15, 25];
+    const [a, b, c] = arr;
+    return a + b + c;
+}
+
+fn destructure_from_literal() {
+    var [a, b] = [42, 58];
+    return a + b;
+}
+
+fn nested_use() {
+    var data = [1, 2, 3, 4, 5];
+    var [first, second, third, fourth, fifth] = data;
+    return first * 10000 + second * 1000 + third * 100 + fourth * 10 + fifth;
+}
+
+fn skip_multiple() {
+    var arr = [10, 20, 30, 40, 50];
+    var [a, _, _, _, e] = arr;
+    return a + e;
+}
+
+fn destructure_in_loop() {
+    var pairs = [[1, 2], [3, 4], [5, 6]];
+    var total = 0;
+    for (i in 0...3) {
+        var [x, y] = pairs[i];
+        total = total + x + y;
+    }
+    return total;
+}
+
+fn single_element() {
+    var arr = [99];
+    var [x] = arr;
+    return x;
+}
+
+fn main() {
+    var total = 0;
+
+    // basic: 10 + 20 + 30 = 60
+    total = total + basic_destructure();
+
+    // skip: 100 + 300 = 400
+    total = total + skip_element();
+
+    // const: 5 + 15 + 25 = 45
+    total = total + const_destructure();
+
+    // from literal: 42 + 58 = 100
+    total = total + destructure_from_literal();
+
+    // nested: 1*10000 + 2*1000 + 3*100 + 4*10 + 5 = 12345
+    total = total + nested_use();
+
+    // skip multiple: 10 + 50 = 60
+    total = total + skip_multiple();
+
+    // in loop: (1+2) + (3+4) + (5+6) = 21
+    total = total + destructure_in_loop();
+
+    // single: 99
+    total = total + single_element();
+
+    // Expected: 60 + 400 + 45 + 100 + 12345 + 60 + 21 + 99 = 13130
+    return total;
+}

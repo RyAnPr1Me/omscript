@@ -68,7 +68,13 @@ enum class BuiltinId : uint8_t {
     LCM,
     // New intrinsic builtins
     ROTATE_LEFT, ROTATE_RIGHT, BSWAP, SATURATING_ADD, SATURATING_SUB,
-    FMA_BUILTIN, COPYSIGN, MIN_FLOAT, MAX_FLOAT
+    FMA_BUILTIN, COPYSIGN, MIN_FLOAT, MAX_FLOAT,
+    // Optimizer hint builtins
+    ASSUME, UNREACHABLE, EXPECT,
+    // Array utility builtins
+    ARRAY_PRODUCT, ARRAY_LAST, ARRAY_INSERT,
+    // String padding builtins
+    STR_PAD_LEFT, STR_PAD_RIGHT
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -209,11 +215,31 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"copysign", BuiltinId::COPYSIGN},
     {"min_float", BuiltinId::MIN_FLOAT},
     {"max_float", BuiltinId::MAX_FLOAT},
+    {"assume", BuiltinId::ASSUME},
+    {"unreachable", BuiltinId::UNREACHABLE},
+    {"expect", BuiltinId::EXPECT},
+    {"array_product", BuiltinId::ARRAY_PRODUCT},
+    {"array_last", BuiltinId::ARRAY_LAST},
+    {"array_insert", BuiltinId::ARRAY_INSERT},
+    {"str_pad_left", BuiltinId::STR_PAD_LEFT},
+    {"str_pad_right", BuiltinId::STR_PAD_RIGHT},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
     auto it = builtinLookup.find(std::string_view(name));
     return it != builtinLookup.end() ? it->second : BuiltinId::NONE;
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time constant folding helper
+// ---------------------------------------------------------------------------
+// Extract a compile-time integer constant from an AST expression node.
+// Returns std::nullopt if the expression isn't a plain integer literal.
+static std::optional<int64_t> getConstantInt(Expression* expr) {
+    if (!expr || expr->type != ASTNodeType::LITERAL_EXPR) return std::nullopt;
+    auto* lit = static_cast<LiteralExpr*>(expr);
+    if (lit->literalType != LiteralExpr::LiteralType::INTEGER) return std::nullopt;
+    return static_cast<int64_t>(lit->intValue);
 }
 
 void CodeGenerator::validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected) {
@@ -276,6 +302,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::ABS) {
         validateArgCount(expr, "abs", 1);
+        // Constant-fold abs(literal): eliminates the intrinsic call entirely.
+        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+            int64_t v = *cv;
+            int64_t result = (v < 0) ? -v : v;
+            auto* c = llvm::ConstantInt::get(getDefaultType(), result);
+            nonNegValues_.insert(c);
+            return c;
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
             // Use llvm.fabs intrinsic for native hardware abs on floats
@@ -292,6 +326,47 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::LEN) {
         validateArgCount(expr, "len", 1);
+
+        // Constant-fold len() on string literals: the length is known at
+        // compile time, so emit a constant instead of a runtime strlen call.
+        // This eliminates O(n) work per literal and enables further constant
+        // propagation / dead code elimination in the optimizer.
+        if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                int64_t len = static_cast<int64_t>(lit->stringValue.size());
+                auto* result = llvm::ConstantInt::get(getDefaultType(), len);
+                nonNegValues_.insert(result);
+                return result;
+            }
+        }
+
+        // Constant-fold len() on const string variables: when a variable
+        // was declared as `const s = "hello"`, len(s) folds to 5.
+        if (auto* ident = dynamic_cast<IdentifierExpr*>(expr->arguments[0].get())) {
+            auto it = constStringFolds_.find(ident->name);
+            if (it != constStringFolds_.end()) {
+                int64_t len = static_cast<int64_t>(it->second.size());
+                auto* result = llvm::ConstantInt::get(getDefaultType(), len);
+                nonNegValues_.insert(result);
+                return result;
+            }
+        }
+
+        // Constant-fold len(array_fill(N, val)): when N is a constant the
+        // array length is known at compile time.  Avoids a runtime load from
+        // the array header and enables further constant propagation.
+        if (auto* call = dynamic_cast<CallExpr*>(expr->arguments[0].get())) {
+            if (call->callee == "array_fill" && call->arguments.size() == 2) {
+                if (auto* sizelit = dynamic_cast<LiteralExpr*>(call->arguments[0].get())) {
+                    if (sizelit->literalType == LiteralExpr::LiteralType::INTEGER && sizelit->intValue >= 0) {
+                        auto* result = llvm::ConstantInt::get(getDefaultType(), sizelit->intValue);
+                        nonNegValues_.insert(result);
+                        return result;
+                    }
+                }
+            }
+        }
+
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         Expression* argExpr = expr->arguments[0].get();
 
@@ -331,6 +406,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::MIN) {
         validateArgCount(expr, "min", 2);
+        // Constant-fold min(a, b) when both are integer literals.
+        if (auto ca = getConstantInt(expr->arguments[0].get())) {
+            if (auto cb = getConstantInt(expr->arguments[1].get())) {
+                int64_t result = std::min(*ca, *cb);
+                auto* c = llvm::ConstantInt::get(getDefaultType(), result);
+                if (result >= 0) nonNegValues_.insert(c);
+                return c;
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
@@ -354,6 +438,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::MAX) {
         validateArgCount(expr, "max", 2);
+        // Constant-fold max(a, b) when both are integer literals.
+        if (auto ca = getConstantInt(expr->arguments[0].get())) {
+            if (auto cb = getConstantInt(expr->arguments[1].get())) {
+                int64_t result = std::max(*ca, *cb);
+                auto* c = llvm::ConstantInt::get(getDefaultType(), result);
+                if (result >= 0) nonNegValues_.insert(c);
+                return c;
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
@@ -377,6 +470,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SIGN) {
         validateArgCount(expr, "sign", 1);
+        // Constant-fold sign(literal).
+        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+            int64_t result = (*cv > 0) ? 1 : ((*cv < 0) ? -1 : 0);
+            return llvm::ConstantInt::get(getDefaultType(), result, true);
+        }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         if (x->getType()->isDoubleTy()) {
             llvm::Value* fzero = llvm::ConstantFP::get(getFloatType(), 0.0);
@@ -399,6 +497,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CLAMP) {
         validateArgCount(expr, "clamp", 3);
+        // Constant-fold clamp(val, lo, hi) when all three are integer literals.
+        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+            if (auto cl = getConstantInt(expr->arguments[1].get())) {
+                if (auto ch = getConstantInt(expr->arguments[2].get())) {
+                    int64_t result = std::max(*cl, std::min(*cv, *ch));
+                    auto* c = llvm::ConstantInt::get(getDefaultType(), result, true);
+                    if (result >= 0) nonNegValues_.insert(c);
+                    return c;
+                }
+            }
+        }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         llvm::Value* lo = generateExpression(expr->arguments[1].get());
         llvm::Value* hi = generateExpression(expr->arguments[2].get());
@@ -428,6 +537,29 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::POW) {
         validateArgCount(expr, "pow", 2);
+        // Constant-fold pow(base, exp) when both are integer literals and exp >= 0.
+        // Eliminates the entire exponentiation loop at compile time.
+        if (auto cb = getConstantInt(expr->arguments[0].get())) {
+            if (auto ce = getConstantInt(expr->arguments[1].get())) {
+                int64_t b = *cb, e = *ce;
+                if (e >= 0) {
+                    int64_t result = 1;
+                    int64_t cur = b;
+                    int64_t rem = e;
+                    while (rem > 0) {
+                        if (rem & 1) result *= cur;
+                        cur *= cur;
+                        rem >>= 1;
+                    }
+                    auto* c = llvm::ConstantInt::get(getDefaultType(), result, true);
+                    if (result >= 0) nonNegValues_.insert(c);
+                    return c;
+                } else {
+                    // Negative exponent in integer pow → 0 (matches runtime)
+                    return llvm::ConstantInt::get(getDefaultType(), 0);
+                }
+            }
+        }
         llvm::Value* base = generateExpression(expr->arguments[0].get());
         llvm::Value* exp  = generateExpression(expr->arguments[1].get());
 
@@ -458,7 +590,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1, true);
         llvm::Value* isNegExp = builder->CreateICmpSLT(exp, zero, "pow.isneg");
-        builder->CreateCondBr(isNegExp, negExpBB, posExpBB);
+        // Negative exponent is uncommon for integer pow(); favour the positive path.
+        auto* negExpW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(isNegExp, negExpBB, posExpBB, negExpW);
 
         // Negative exponent: return 0 (integer approximation of base^(-n))
         builder->SetInsertPoint(negExpBB);
@@ -560,7 +694,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "inputln.ok", function);
         llvm::BasicBlock* stripBB = llvm::BasicBlock::Create(*context, "inputln.strip", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "inputln.done", function);
-        builder->CreateCondBr(fgetsNull, eofBB, okBB);
+        // EOF/error on fgets is rare — favour the success path.
+        auto* fgetsW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(fgetsNull, eofBB, okBB, fgetsW);
         // EOF path: store '\0' at start of buffer
         builder->SetInsertPoint(eofBB);
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
@@ -570,7 +706,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nlChar = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 10);
         llvm::Value* nlPtr = builder->CreateCall(getOrDeclareStrchr(), {buf, nlChar}, "inputln.nl");
         llvm::Value* isNull = builder->CreateICmpEQ(nlPtr, llvm::ConstantPointerNull::get(ptrTy), "inputln.isnull");
-        builder->CreateCondBr(isNull, doneBB, stripBB);
+        // Well-formed input lines almost always have a trailing newline.
+        auto* nlW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(isNull, doneBB, stripBB, nlW);
         builder->SetInsertPoint(stripBB);
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nlPtr);
         builder->CreateBr(doneBB);
@@ -659,6 +797,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::IS_EVEN) {
         validateArgCount(expr, "is_even", 1);
+        // Constant-fold is_even(literal).
+        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+            int64_t result = ((*cv & 1) == 0) ? 1 : 0;
+            auto* c = llvm::ConstantInt::get(getDefaultType(), result);
+            nonNegValues_.insert(c);
+            return c;
+        }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_even() is an integer operation
         x = toDefaultType(x);
@@ -673,6 +818,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::IS_ODD) {
         validateArgCount(expr, "is_odd", 1);
+        // Constant-fold is_odd(literal).
+        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+            int64_t result = (*cv & 1) ? 1 : 0;
+            auto* c = llvm::ConstantInt::get(getDefaultType(), result);
+            nonNegValues_.insert(c);
+            return c;
+        }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_odd() is an integer operation
         x = toDefaultType(x);
@@ -782,7 +934,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "swap.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "swap.fail", function);
-        builder->CreateCondBr(bothValid, okBB, failBB);
+        // Swap OOB is extremely unlikely.
+        llvm::MDNode* swapW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(bothValid, okBB, failBB, swapW);
 
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: swap index out of bounds\n", "swap_oob_msg");
@@ -957,7 +1111,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "assert.fail", function);
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "assert.ok", function);
 
-        builder->CreateCondBr(condVal, okBB, failBB);
+        // Assertions are expected to pass.
+        llvm::MDNode* assertW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(condVal, okBB, failBB, assertW);
 
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: assertion failed\n", "assert_fail_msg");
@@ -983,6 +1139,29 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CHAR_AT) {
         validateArgCount(expr, "char_at", 2);
+
+        // ── Compile-time char_at folding ────────────────────────────
+        // When both the string and index are compile-time constants,
+        // fold char_at("hello", 1) → 'e' (ASCII 101) at compile time.
+        // This eliminates the runtime strlen + bounds check + load entirely.
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* idxLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (idxLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                        int64_t idx = idxLit->intValue;
+                        int64_t len = static_cast<int64_t>(strLit->stringValue.size());
+                        if (idx >= 0 && idx < len) {
+                            // Valid index — fold to the character value.
+                            char ch = strLit->stringValue[static_cast<size_t>(idx)];
+                            return llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                        }
+                        // Out-of-bounds index with literals → still emit runtime
+                        // error path (don't silently UB).
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
         idxArg = toDefaultType(idxArg);
@@ -1002,7 +1181,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "charat.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "charat.fail", function);
-        builder->CreateCondBr(valid, okBB, failBB);
+        // char_at OOB is extremely unlikely.
+        llvm::MDNode* charAtW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(valid, okBB, failBB, charAtW);
 
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg =
@@ -1088,7 +1269,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::BasicBlock* cachedBB = builder->GetInsertBlock();
             llvm::BasicBlock* strlenBB = llvm::BasicBlock::Create(*context, "concat.strlen", fn);
             llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "concat.merge", fn);
-            builder->CreateCondBr(isSentinel, strlenBB, mergeBB);
+            // Cache hit is the common case after first concat — favour merge.
+            auto* sentW = llvm::MDBuilder(*context).createBranchWeights(1, 9);
+            builder->CreateCondBr(isSentinel, strlenBB, mergeBB, sentW);
 
             builder->SetInsertPoint(strlenBB);
             llvm::Value* realLen = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1.real");
@@ -1150,7 +1333,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::BasicBlock* growBB = llvm::BasicBlock::Create(*context, "concat.grow", fn);
             llvm::BasicBlock* appendBB = llvm::BasicBlock::Create(*context, "concat.append", fn);
             llvm::BasicBlock* curBB = builder->GetInsertBlock();
-            builder->CreateCondBr(needGrow, growBB, appendBB);
+            // Growth is rare in append loops — weight accordingly for branch
+            // predictor and code layout (grow path moved out of line).
+            llvm::MDNode* concatGrowWeights = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+            builder->CreateCondBr(needGrow, growBB, appendBB, concatGrowWeights);
 
             // Grow path: double capacity until sufficient, then realloc.
             builder->SetInsertPoint(growBB);
@@ -1239,6 +1425,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::GCD) {
         validateArgCount(expr, "gcd", 2);
+        // Constant-fold gcd(a, b) when both are integer literals.
+        if (auto va = getConstantInt(expr->arguments[0].get())) {
+            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+                uint64_t a = static_cast<uint64_t>(std::abs(*va));
+                uint64_t b = static_cast<uint64_t>(std::abs(*vb));
+                while (b) { uint64_t t = b; b = a % b; a = t; }
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(a));
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
@@ -1288,7 +1483,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* edgeCase = builder->CreateOr(
             builder->CreateICmpEQ(a, zero, "gcd.a0"),
             builder->CreateICmpEQ(b, zero, "gcd.b0"), "gcd.edge");
-        builder->CreateCondBr(edgeCase, doneBB, mainBB);
+        // a==0 or b==0 is a degenerate edge case; favour the main loop.
+        auto* gcdEdgeW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(edgeCase, doneBB, mainBB, gcdEdgeW);
 
         // Main: make a odd
         builder->SetInsertPoint(mainBB);
@@ -1550,6 +1747,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::TO_INT) {
         validateArgCount(expr, "to_int", 1);
+
+        // ── Compile-time to_int folding ─────────────────────────────
+        // to_int("42") → 42, to_int(3.14) → 3 at compile time.
+        if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                try {
+                    int64_t parsed = std::stoll(lit->stringValue);
+                    return llvm::ConstantInt::get(getDefaultType(), parsed);
+                } catch (...) {
+                    // Fall through to runtime parsing if conversion fails.
+                }
+            } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(lit->floatValue));
+            } else if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                return llvm::ConstantInt::get(getDefaultType(), lit->intValue);
+            }
+        }
+
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
             return builder->CreateFPToSI(arg, getDefaultType(), "toint.ftoi");
@@ -1569,6 +1784,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::TO_FLOAT) {
         validateArgCount(expr, "to_float", 1);
+
+        // ── Compile-time to_float folding ───────────────────────────
+        // to_float("3.14") → 3.14, to_float(42) → 42.0 at compile time.
+        if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                try {
+                    double parsed = std::stod(lit->stringValue);
+                    return llvm::ConstantFP::get(getFloatType(), parsed);
+                } catch (...) {
+                    // Fall through to runtime parsing if conversion fails.
+                }
+            } else if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                return llvm::ConstantFP::get(getFloatType(), static_cast<double>(lit->intValue));
+            } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+                return llvm::ConstantFP::get(getFloatType(), lit->floatValue);
+            }
+        }
+
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // If the argument is a string, parse it with strtod.
         if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
@@ -1590,6 +1823,41 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_SUBSTR) {
         validateArgCount(expr, "str_substr", 3);
+
+        // ── Compile-time str_substr folding ─────────────────────────
+        // When all three arguments are compile-time constants, fold the
+        // substr to a string literal.  This eliminates malloc + memcpy.
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* startLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (startLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                        if (auto* lenLit = dynamic_cast<LiteralExpr*>(expr->arguments[2].get())) {
+                            if (lenLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                                const auto& s = strLit->stringValue;
+                                int64_t slen = static_cast<int64_t>(s.size());
+                                int64_t startVal = static_cast<int64_t>(startLit->intValue);
+                                int64_t lenVal = static_cast<int64_t>(lenLit->intValue);
+                                if (startVal < 0) startVal = 0;
+                                if (startVal > slen) startVal = slen;
+                                int64_t maxLen = slen - startVal;
+                                if (lenVal < 0) lenVal = 0;
+                                if (lenVal > maxLen) lenVal = maxLen;
+                                std::string result = s.substr(static_cast<size_t>(startVal), static_cast<size_t>(lenVal));
+                                llvm::GlobalVariable* gv = internString(result);
+                                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                                    gv->getValueType(),
+                                    gv,
+                                    llvm::ArrayRef<llvm::Constant*>{
+                                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                                    });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* startArg = generateExpression(expr->arguments[1].get());
         llvm::Value* lenArg = generateExpression(expr->arguments[2].get());
@@ -1631,6 +1899,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_UPPER) {
         validateArgCount(expr, "str_upper", 1);
+        // NOTE: Cannot constant-fold str_upper — callers may mutate the returned
+        // heap-allocated string via s[i]=v, and a read-only global would segfault.
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -1674,6 +1944,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_LOWER) {
         validateArgCount(expr, "str_lower", 1);
+        // NOTE: Cannot constant-fold str_lower — callers may mutate the returned
+        // heap-allocated string via s[i]=v, and a read-only global would segfault.
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -1715,6 +1987,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_CONTAINS) {
         validateArgCount(expr, "str_contains", 2);
+
+        // ── Compile-time str_contains folding ───────────────────────
+        // When both arguments are string literals, fold at compile time.
+        if (auto* hayLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (hayLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* needleLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (needleLit->literalType == LiteralExpr::LiteralType::STRING) {
+                        bool found = hayLit->stringValue.find(needleLit->stringValue) != std::string::npos;
+                        return llvm::ConstantInt::get(getDefaultType(), found ? 1 : 0);
+                    }
+                }
+            }
+        }
+
         // Detect single-character literal needle → use memchr (SIMD-optimized)
         // instead of strstr (byte-by-byte scan).
         Expression* needleExpr = expr->arguments[1].get();
@@ -1758,6 +2044,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_INDEX_OF) {
         validateArgCount(expr, "str_index_of", 2);
+
+        // ── Compile-time str_index_of folding ───────────────────────
+        if (auto* hayLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (hayLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* needleLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (needleLit->literalType == LiteralExpr::LiteralType::STRING) {
+                        auto pos = hayLit->stringValue.find(needleLit->stringValue);
+                        int64_t result = (pos == std::string::npos) ? -1 : static_cast<int64_t>(pos);
+                        return llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(result));
+                    }
+                }
+            }
+        }
+
         // Detect single-character literal needle → use memchr (SIMD-optimized)
         // instead of strstr (byte-by-byte scan).
         Expression* needleExpr = expr->arguments[1].get();
@@ -1801,6 +2101,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_REPLACE) {
         validateArgCount(expr, "str_replace", 3);
+        // NOTE: Cannot constant-fold str_replace — callers may mutate the returned
+        // heap-allocated string via s[i]=v, and a read-only global would segfault.
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* oldArg = generateExpression(expr->arguments[1].get());
         llvm::Value* newArg = generateExpression(expr->arguments[2].get());
@@ -1833,7 +2135,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* emptyOldBB = llvm::BasicBlock::Create(*context, "replace.emptyold", function);
         llvm::BasicBlock* replaceMainBB = llvm::BasicBlock::Create(*context, "replace.main", function);
         llvm::Value* oldIsEmpty = builder->CreateICmpEQ(oldLen, zero, "replace.oldempty");
-        builder->CreateCondBr(oldIsEmpty, emptyOldBB, replaceMainBB);
+        // Empty-old is a degenerate edge case — heavily favour normal path.
+        auto* eoW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(oldIsEmpty, emptyOldBB, replaceMainBB, eoW);
 
         // Empty old: return strdup(str)
         builder->SetInsertPoint(emptyOldBB);
@@ -1947,6 +2251,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_TRIM) {
         validateArgCount(expr, "str_trim", 1);
+        // NOTE: Cannot constant-fold str_trim — callers may mutate the returned
+        // heap-allocated string via s[i]=v, and a read-only global would segfault.
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
                                   ? strArg
@@ -2041,6 +2347,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_STARTS_WITH) {
         validateArgCount(expr, "str_starts_with", 2);
+
+        // ── Compile-time str_starts_with folding ────────────────────
+        // When both arguments are string literals, fold at compile time.
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* prefixLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (prefixLit->literalType == LiteralExpr::LiteralType::STRING) {
+                        bool result = strLit->stringValue.substr(0, prefixLit->stringValue.size())
+                                      == prefixLit->stringValue;
+                        return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* prefixArg = generateExpression(expr->arguments[1].get());
         llvm::Value* strPtr =
@@ -2063,6 +2384,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_ENDS_WITH) {
         validateArgCount(expr, "str_ends_with", 2);
+
+        // ── Compile-time str_ends_with folding ──────────────────────
+        // When both arguments are string literals, fold at compile time.
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* suffixLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (suffixLit->literalType == LiteralExpr::LiteralType::STRING) {
+                        const auto& s = strLit->stringValue;
+                        const auto& suffix = suffixLit->stringValue;
+                        bool result = s.size() >= suffix.size() &&
+                                      s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+                        return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* suffixArg = generateExpression(expr->arguments[1].get());
         llvm::Value* strPtr =
@@ -2081,7 +2419,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "endswith.check", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "endswith.fail", function);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "endswith.merge", function);
-        builder->CreateCondBr(tooLong, failBB, checkBB);
+        // Suffix longer than string is unlikely in typical use.
+        llvm::MDNode* ewW = llvm::MDBuilder(*context).createBranchWeights(1, 99);
+        builder->CreateCondBr(tooLong, failBB, checkBB, ewW);
         builder->SetInsertPoint(failBB);
         builder->CreateBr(mergeBB);
         builder->SetInsertPoint(checkBB);
@@ -2103,6 +2443,37 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_REPEAT) {
         validateArgCount(expr, "str_repeat", 2);
+
+        // ── Compile-time str_repeat folding ─────────────────────────
+        // When both arguments are compile-time constants and the result
+        // is reasonably small, fold at compile time.
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* countLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (countLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                        int64_t count = countLit->intValue;
+                        // Only fold for small results (≤ 256 bytes) to avoid
+                        // bloating the data section.
+                        if (count >= 0 && count * static_cast<int64_t>(strLit->stringValue.size()) <= 256) {
+                            std::string result;
+                            result.reserve(static_cast<size_t>(count) * strLit->stringValue.size());
+                            for (int64_t i = 0; i < count; ++i) {
+                                result += strLit->stringValue;
+                            }
+                            llvm::GlobalVariable* gv = internString(result);
+                            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                                gv->getValueType(),
+                                gv,
+                                llvm::ArrayRef<llvm::Constant*>{
+                                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                                });
+                        }
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* countArg = generateExpression(expr->arguments[1].get());
         countArg = toDefaultType(countArg);
@@ -2155,6 +2526,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_REVERSE) {
         validateArgCount(expr, "str_reverse", 1);
+
+        // ── Compile-time str_reverse folding ────────────────────────
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                std::string reversed = strLit->stringValue;
+                std::reverse(reversed.begin(), reversed.end());
+                llvm::GlobalVariable* gv = internString(reversed);
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(),
+                    gv,
+                    llvm::ArrayRef<llvm::Constant*>{
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                    });
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -2241,20 +2629,28 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* nogrowBB = llvm::BasicBlock::Create(*context, "push.nogrow", function);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "push.merge", function);
 
-        builder->CreateCondBr(needsGrow, growBB, nogrowBB);
+        // Growth is rare (only at power-of-2 boundaries + first push to min 16).
+        // Weight the no-grow path heavily for branch prediction and code layout.
+        llvm::MDNode* pushGrowW = llvm::MDBuilder(*context).createBranchWeights(1, 99);
+        builder->CreateCondBr(needsGrow, growBB, nogrowBB, pushGrowW);
 
         // Grow path: compute new capacity and realloc
         builder->SetInsertPoint(growBB);
         llvm::Value* slots = builder->CreateAdd(newLen, one64, "push.slots", /*HasNUW=*/true, /*HasNSW=*/true);
-        // nextPow2 via OR-cascade (covers 64-bit values)
-        llvm::Value* v = builder->CreateSub(slots, one64, "push.pm1", /*HasNUW=*/true, /*HasNSW=*/true);
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)), "push.p2a");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)), "push.p2b");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 4)), "push.p2c");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 8)), "push.p2d");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)), "push.p2e");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)), "push.p2f");
-        llvm::Value* cap = builder->CreateAdd(v, one64, "push.cap", /*HasNUW=*/true, /*HasNSW=*/true);
+        // nextPow2 via ctlz intrinsic: 1 << (64 - ctlz(slots - 1))
+        // This replaces a 6-shift OR-cascade (~14 instructions) with 4
+        // instructions (sub, ctlz, sub, shl), which maps to a single
+        // BSR/LZCNT + shift on x86-64.
+        llvm::Value* slotsM1 = builder->CreateSub(slots, one64, "push.pm1", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(),
+            llvm::Intrinsic::ctlz, {getDefaultType()});
+        // is_zero_poison=true: slots is always >= 2 here (newLen >= 1), so
+        // slotsM1 is always >= 1, never zero.
+        llvm::Value* lz = builder->CreateCall(ctlzFn,
+            {slotsM1, llvm::ConstantInt::getTrue(*context)}, "push.lz");
+        llvm::Value* shift = builder->CreateSub(
+            llvm::ConstantInt::get(getDefaultType(), 64), lz, "push.shift");
+        llvm::Value* cap = builder->CreateShl(one64, shift, "push.cap", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* useMin = builder->CreateICmpSLT(cap, minSlots, "push.usemin");
         cap = builder->CreateSelect(useMin, minSlots, cap, "push.finalcap");
         llvm::Value* newSize = builder->CreateMul(cap,
@@ -2302,7 +2698,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "pop.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pop.fail", function);
-        builder->CreateCondBr(isEmpty, failBB, okBB);
+        // Popping from an empty array is extremely unlikely.
+        llvm::MDNode* popW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(isEmpty, failBB, okBB, popW);
 
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: pop from empty array\n", "pop_empty_msg");
@@ -2557,13 +2955,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // (length = 0) and all element slots are zero.  We only need to
             // fix up the header with the correct length.
             buf = builder->CreateCall(getOrDeclareCalloc(), {slots, eight}, "fill.buf");
+            llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
             // Store length in header (calloc zeroed it; overwrite with actual size)
-            builder->CreateStore(sizeArg, buf);
+            auto* fillLenSt = builder->CreateStore(sizeArg, buf);
+            fillLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         } else {
             llvm::Value* bytes = builder->CreateMul(slots, eight, "fill.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
             buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "fill.buf");
             // Store length
-            builder->CreateStore(sizeArg, buf);
+            auto* fillLenSt2 = builder->CreateStore(sizeArg, buf);
+            fillLenSt2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             // Fill loop
             llvm::Function* function = builder->GetInsertBlock()->getParent();
             llvm::BasicBlock* preheader = builder->GetInsertBlock();
@@ -2576,12 +2977,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->SetInsertPoint(loopBB);
             llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "fill.idx");
             idx->addIncoming(zero, preheader);
-            llvm::Value* cond = builder->CreateICmpSLT(idx, sizeArg, "fill.cond");
+            llvm::Value* cond = builder->CreateICmpULT(idx, sizeArg, "fill.cond");
             builder->CreateCondBr(cond, bodyBB, doneBB);
             builder->SetInsertPoint(bodyBB);
             llvm::Value* elemIdx = builder->CreateAdd(idx, one, "fill.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, elemIdx, "fill.elemptr");
-            builder->CreateStore(valArg, elemPtr);
+            auto* fillElemSt = builder->CreateStore(valArg, elemPtr);
+            fillElemSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
             llvm::Value* nextIdx = builder->CreateAdd(idx, one, "fill.next", /*HasNUW=*/true, /*HasNSW=*/true);
             idx->addIncoming(nextIdx, bodyBB);
             auto* backBr_2379 = builder->CreateBr(loopBB);
@@ -2629,7 +3031,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* bytes = builder->CreateMul(slots, llvm::ConstantInt::get(getDefaultType(), 8), "aconcat.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "aconcat.buf");
         // Store length
-        builder->CreateStore(totalLen, buf);
+        auto* aconcatLenSt = builder->CreateStore(totalLen, buf);
+        aconcatLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         // Copy arr1 elements (len1 * 8 bytes starting at arr1[1])
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
@@ -2679,7 +3082,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(sliceLen, one, "slice.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "slice.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "slice.buf");
-        builder->CreateStore(sliceLen, buf);
+        auto* sliceLenSt = builder->CreateStore(sliceLen, buf);
+        sliceLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         // Copy elements: arr[start+1..end+1) to buf[1..)
         llvm::Value* srcIdx = builder->CreateAdd(startArg, one, "slice.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* src = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, srcIdx, "slice.src");
@@ -2732,7 +3136,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "aremove.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "aremove.fail", function);
-        builder->CreateCondBr(valid, okBB, failBB);
+        // OOB is extremely unlikely.
+        llvm::MDNode* removeW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(valid, okBB, failBB, removeW);
         // Out-of-bounds: print error and abort
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg =
@@ -2745,6 +3151,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elemOffset = builder->CreateAdd(idxArg, one, "aremove.elemoff", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemOffset, "aremove.elemptr");
         llvm::Value* removedVal = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "aremove.removed");
+        // TBAA: removed value is an array element, never aliases the length header.
+        llvm::cast<llvm::LoadInst>(removedVal)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         // memmove(&arr[idx+1], &arr[idx+2], (length - idx - 1) * 8)
         llvm::Value* srcOffset =
             builder->CreateAdd(idxArg, llvm::ConstantInt::get(getDefaultType(), 2), "aremove.srcoff", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2755,7 +3163,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclareMemmove(), {elemPtr, srcPtr, shiftBytes});
         // Decrement length
         llvm::Value* newLen = builder->CreateSub(arrLen, one, "aremove.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
-        builder->CreateStore(newLen, arrPtr);
+        auto* newLenSt = builder->CreateStore(newLen, arrPtr);
+        newLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         return removedVal;
     }
 
@@ -2797,7 +3206,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(arrLen, one, "amap.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "amap.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "amap.buf");
-        builder->CreateStore(arrLen, buf);
+        auto* amapLenSt = builder->CreateStore(arrLen, buf);
+        amapLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
         // Loop: for each element, call mapFn and store result
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2869,7 +3279,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* bytes = builder->CreateMul(slots, eight, "afilt.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "afilt.buf");
         // Initialize length to 0 (will be updated as we add elements)
-        builder->CreateStore(zero, buf);
+        auto* afiltInitSt = builder->CreateStore(zero, buf);
+        afiltInitSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
         // Loop: for each element, call filterFn; if non-zero, add to result
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2923,7 +3334,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Done: store final length
         builder->SetInsertPoint(doneBB);
-        builder->CreateStore(outIdx, buf);
+        auto* afiltLenSt = builder->CreateStore(outIdx, buf);
+        afiltLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         return builder->CreatePtrToInt(buf, getDefaultType(), "afilt.result");
     }
 
@@ -3945,6 +4357,27 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::STR_COUNT) {
         validateArgCount(expr, "str_count", 2);
+
+        // ── Compile-time str_count folding ──────────────────────────
+        if (auto* sLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (sLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* subLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (subLit->literalType == LiteralExpr::LiteralType::STRING &&
+                        !subLit->stringValue.empty()) {
+                        const std::string& haystack = sLit->stringValue;
+                        const std::string& needle = subLit->stringValue;
+                        int64_t count = 0;
+                        size_t pos = 0;
+                        while ((pos = haystack.find(needle, pos)) != std::string::npos) {
+                            ++count;
+                            pos += needle.size();
+                        }
+                        return llvm::ConstantInt::get(getDefaultType(), count);
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* subArg = generateExpression(expr->arguments[1].get());
 
@@ -4040,7 +4473,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* nullBB = llvm::BasicBlock::Create(*context, "fread.null", parentFn);
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "fread.ok", parentFn);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "fread.merge", parentFn);
-        builder->CreateCondBr(isNull, nullBB, okBB);
+        // File open normally succeeds — mark null path cold.
+        auto* freadW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(isNull, nullBB, okBB, freadW);
 
         // Null path: return empty string
         builder->SetInsertPoint(nullBB);
@@ -4110,7 +4545,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* nullBB = llvm::BasicBlock::Create(*context, "fwrite.null", parentFn);
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "fwrite.ok", parentFn);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "fwrite.merge", parentFn);
-        builder->CreateCondBr(isNull, nullBB, okBB);
+        // File open normally succeeds — mark null path cold.
+        auto* fwriteW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(isNull, nullBB, okBB, fwriteW);
 
         builder->SetInsertPoint(nullBB);
         builder->CreateBr(mergeBB);
@@ -4151,7 +4588,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* nullBB = llvm::BasicBlock::Create(*context, "fappend.null", parentFn);
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "fappend.ok", parentFn);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "fappend.merge", parentFn);
-        builder->CreateCondBr(isNull, nullBB, okBB);
+        // File open normally succeeds — mark null path cold.
+        auto* fappW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(isNull, nullBB, okBB, fappW);
 
         builder->SetInsertPoint(nullBB);
         builder->CreateBr(mergeBB);
@@ -4386,7 +4825,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "rstep.i");
         i->addIncoming(zero, entryBB);
-        llvm::Value* cond = builder->CreateICmpSLT(i, count, "rstep.cond");
+        llvm::Value* cond = builder->CreateICmpULT(i, count, "rstep.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
 
         builder->SetInsertPoint(bodyBB);
@@ -4395,7 +4834,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slot = builder->CreateAdd(i, one, "rstep.slot");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, slot, "rstep.elemptr");
         builder->CreateStore(val, elemPtr);
-        llvm::Value* nextI = builder->CreateAdd(i, one, "rstep.next");
+        llvm::Value* nextI = builder->CreateAdd(i, one, "rstep.next", /*HasNUW=*/true, /*HasNSW=*/true);
         i->addIncoming(nextI, bodyBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
@@ -4566,6 +5005,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // ── Bitwise intrinsic builtins ─────────────────────────────────────
     if (bid == BuiltinId::POPCOUNT) {
         validateArgCount(expr, "popcount", 1);
+        // Constant-fold popcount(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            uint64_t bits = static_cast<uint64_t>(*val);
+            return llvm::ConstantInt::get(getDefaultType(), __builtin_popcountll(bits));
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* ctpopFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctpop, {getDefaultType()});
@@ -4576,6 +5020,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CLZ) {
         validateArgCount(expr, "clz", 1);
+        // Constant-fold clz(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            uint64_t bits = static_cast<uint64_t>(*val);
+            int64_t result = bits == 0 ? 64 : __builtin_clzll(bits);
+            return llvm::ConstantInt::get(getDefaultType(), result);
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
@@ -4586,6 +5036,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CTZ) {
         validateArgCount(expr, "ctz", 1);
+        // Constant-fold ctz(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            uint64_t bits = static_cast<uint64_t>(*val);
+            int64_t result = bits == 0 ? 64 : __builtin_ctzll(bits);
+            return llvm::ConstantInt::get(getDefaultType(), result);
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* cttzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::cttz, {getDefaultType()});
@@ -4596,6 +5052,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::BITREVERSE) {
         validateArgCount(expr, "bitreverse", 1);
+        // Constant-fold bitreverse(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            uint64_t bits = static_cast<uint64_t>(*val);
+            uint64_t reversed = 0;
+            for (int i = 0; i < 64; ++i)
+                reversed |= ((bits >> i) & 1ULL) << (63 - i);
+            return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(reversed));
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* brevFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::bitreverse, {getDefaultType()});
@@ -4612,6 +5076,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::IS_POWER_OF_2) {
         validateArgCount(expr, "is_power_of_2", 1);
+        // Constant-fold is_power_of_2(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            int64_t v = *val;
+            bool result = v > 0 && (v & (v - 1)) == 0;
+            return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -4631,6 +5101,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::LCM) {
         validateArgCount(expr, "lcm", 2);
+        // Constant-fold lcm(a, b) when both are integer literals.
+        if (auto va = getConstantInt(expr->arguments[0].get())) {
+            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+                uint64_t a = static_cast<uint64_t>(std::abs(*va));
+                uint64_t b = static_cast<uint64_t>(std::abs(*vb));
+                if (a == 0 || b == 0)
+                    return llvm::ConstantInt::get(getDefaultType(), 0);
+                uint64_t ga = a, gb = b;
+                while (gb) { uint64_t t = gb; gb = ga % gb; ga = t; }
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(a / ga * b));
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
@@ -4683,6 +5165,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // ── New intrinsic builtins ─────────────────────────────────────────
     if (bid == BuiltinId::ROTATE_LEFT) {
         validateArgCount(expr, "rotate_left", 2);
+        // Constant-fold rotate_left(val, amt).
+        if (auto vv = getConstantInt(expr->arguments[0].get())) {
+            if (auto va = getConstantInt(expr->arguments[1].get())) {
+                uint64_t v = static_cast<uint64_t>(*vv);
+                unsigned amt = static_cast<unsigned>(*va) & 63;
+                uint64_t result = (v << amt) | (v >> (64 - amt));
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(result));
+            }
+        }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         llvm::Value* amt = generateExpression(expr->arguments[1].get());
         val = toDefaultType(val);
@@ -4694,6 +5185,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::ROTATE_RIGHT) {
         validateArgCount(expr, "rotate_right", 2);
+        // Constant-fold rotate_right(val, amt).
+        if (auto vv = getConstantInt(expr->arguments[0].get())) {
+            if (auto va = getConstantInt(expr->arguments[1].get())) {
+                uint64_t v = static_cast<uint64_t>(*vv);
+                unsigned amt = static_cast<unsigned>(*va) & 63;
+                uint64_t result = (v >> amt) | (v << (64 - amt));
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(result));
+            }
+        }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         llvm::Value* amt = generateExpression(expr->arguments[1].get());
         val = toDefaultType(val);
@@ -4705,6 +5205,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::BSWAP) {
         validateArgCount(expr, "bswap", 1);
+        // Constant-fold bswap(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            uint64_t bits = static_cast<uint64_t>(*val);
+            uint64_t swapped = __builtin_bswap64(bits);
+            return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(swapped));
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* bswapFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::bswap, {getDefaultType()});
@@ -4713,6 +5219,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SATURATING_ADD) {
         validateArgCount(expr, "saturating_add", 2);
+        // Constant-fold saturating_add(a, b) when both are integer literals.
+        if (auto va = getConstantInt(expr->arguments[0].get())) {
+            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+                int64_t a = *va, b = *vb;
+                // Signed saturating add: clamp to INT64_MIN/INT64_MAX on overflow.
+                __int128 sum = static_cast<__int128>(a) + static_cast<__int128>(b);
+                if (sum > INT64_MAX) sum = INT64_MAX;
+                if (sum < INT64_MIN) sum = INT64_MIN;
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(sum));
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
@@ -4723,6 +5240,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SATURATING_SUB) {
         validateArgCount(expr, "saturating_sub", 2);
+        // Constant-fold saturating_sub(a, b) when both are integer literals.
+        if (auto va = getConstantInt(expr->arguments[0].get())) {
+            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+                int64_t a = *va, b = *vb;
+                // Signed saturating sub: clamp to INT64_MIN/INT64_MAX on overflow.
+                __int128 diff = static_cast<__int128>(a) - static_cast<__int128>(b);
+                if (diff > INT64_MAX) diff = INT64_MAX;
+                if (diff < INT64_MIN) diff = INT64_MIN;
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(diff));
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
@@ -4771,6 +5299,297 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         b = ensureFloat(b);
         llvm::Function* maxnumFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::maxnum, {getFloatType()});
         return builder->CreateCall(maxnumFn, {a, b}, "maxnum.result");
+    }
+
+    if (bid == BuiltinId::ASSUME) {
+        validateArgCount(expr, "assume", 1);
+        llvm::Value* condVal = generateExpression(expr->arguments[0].get());
+        condVal = toBool(condVal);
+        // llvm.assume(i1) — zero-cost hint to the optimizer that condVal is true.
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {condVal});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::UNREACHABLE) {
+        validateArgCount(expr, "unreachable", 0);
+        // Emit LLVM unreachable — tells the optimizer this code path is never taken.
+        builder->CreateUnreachable();
+        // Subsequent code in the same block is dead; open a new (dead) block so
+        // codegen can continue without emitting into a terminated block.
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* deadBB =
+            llvm::BasicBlock::Create(*context, "unreachable.dead", function);
+        builder->SetInsertPoint(deadBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::EXPECT) {
+        validateArgCount(expr, "expect", 2);
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        llvm::Value* likelyVal = generateExpression(expr->arguments[1].get());
+        val = toDefaultType(val);
+        likelyVal = toDefaultType(likelyVal);
+        // llvm.expect.i64(val, expected_val) — branch-prediction hint; returns val unchanged.
+        llvm::Function* expectFn =
+            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::expect, {getDefaultType()});
+        return builder->CreateCall(expectFn, {val, likelyVal}, "expect.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // array_product(arr) — multiply all elements together; returns 1 for empty array
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_PRODUCT) {
+        validateArgCount(expr, "array_product", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* arrPtr =
+            arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "aprod.arrptr");
+        auto* aprodLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "aprod.len");
+        aprodLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        aprodLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* length = aprodLenLoad;
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "aprod.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "aprod.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "aprod.done", function);
+
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(loopBB);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "aprod.acc");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "aprod.idx");
+        acc->addIncoming(one, entryBB);  // product identity is 1
+        idx->addIncoming(zero, entryBB);
+
+        llvm::Value* done = builder->CreateICmpUGE(idx, length, "aprod.done");
+        auto* aprodCondBr = builder->CreateCondBr(done, doneBB, bodyBB);
+        if (optimizationLevel >= OptimizationLevel::O2) {
+            aprodCondBr->setMetadata(llvm::LLVMContext::MD_prof,
+                llvm::MDBuilder(*context).createBranchWeights(1, 2000));
+        }
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "aprod.offset", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "aprod.elemptr");
+        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "aprod.elem");
+        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* newAcc = builder->CreateMul(acc, elem, "aprod.newacc");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aprod.newidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        acc->addIncoming(newAcc, bodyBB);
+        idx->addIncoming(newIdx, bodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(doneBB);
+        return acc;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_last(arr) — return the last element; aborts on empty array
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_LAST) {
+        validateArgCount(expr, "array_last", 1);
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "alast.arrptr");
+        auto* alastLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "alast.len");
+        alastLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        alastLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* arrLen = alastLenLoad;
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* notEmpty = builder->CreateICmpSGT(arrLen, zero, "alast.notempty");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "alast.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "alast.fail", function);
+        llvm::MDNode* alastW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(notEmpty, okBB, failBB, alastW);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array_last called on empty array\n", "alast_empty_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
+        // Last element is at offset arrLen (1-based: header is at [0], elements at [1..arrLen])
+        llvm::Value* lastPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, arrLen, "alast.ptr");
+        auto* lastLoad = builder->CreateAlignedLoad(getDefaultType(), lastPtr, llvm::MaybeAlign(8), "alast.val");
+        lastLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (optimizationLevel >= OptimizationLevel::O1) {
+            lastLoad->setMetadata(llvm::LLVMContext::MD_noundef,
+                llvm::MDNode::get(*context, {}));
+        }
+        return lastLoad;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_insert(arr, idx, val) — insert val at position idx, shifting elements right
+    //   Returns a new array (original is unchanged).
+    //   idx must be in [0, length] — inserting at length appends.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_INSERT) {
+        validateArgCount(expr, "array_insert", 3);
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
+        llvm::Value* valArg = generateExpression(expr->arguments[2].get());
+        arrArg = toDefaultType(arrArg);
+        idxArg = toDefaultType(idxArg);
+        valArg = toDefaultType(valArg);
+
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "ains.arrptr");
+        auto* ainsLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "ains.len");
+        ainsLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        ainsLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* arrLen = ainsLenLoad;
+
+        // Bounds check: 0 <= idx <= length (insert at end is allowed)
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "ains.notneg");
+        llvm::Value* notOver = builder->CreateICmpSLE(idxArg, arrLen, "ains.notover");
+        llvm::Value* valid = builder->CreateAnd(notNeg, notOver, "ains.valid");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "ains.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "ains.fail", function);
+        llvm::MDNode* ainsW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(valid, okBB, failBB, ainsW);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array_insert index out of bounds\n", "ains_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
+        llvm::Value* newLen = builder->CreateAdd(arrLen, one, "ains.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Allocate: (newLen + 1) * 8 bytes
+        llvm::Value* slots = builder->CreateAdd(newLen, one, "ains.slots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "ains.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "ains.buf");
+
+        // Store new length header
+        auto* ainsLenSt = builder->CreateStore(newLen, buf);
+        ainsLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+
+        // Copy elements before insertion point: arr[1..idx+1) → buf[1..idx+1)
+        llvm::Value* preSrc = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "ains.presrc");
+        llvm::Value* preDst = builder->CreateInBoundsGEP(getDefaultType(), buf, one, "ains.predst");
+        llvm::Value* preCount = builder->CreateMul(idxArg, eight, "ains.precnt", /*HasNUW=*/true, /*HasNSW=*/true);
+        builder->CreateCall(getOrDeclareMemcpy(), {preDst, preSrc, preCount});
+
+        // Store the inserted value at buf[idx+1]
+        llvm::Value* insertSlot = builder->CreateAdd(idxArg, one, "ains.slot", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* insertPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, insertSlot, "ains.insertptr");
+        auto* ainsValSt = builder->CreateStore(valArg, insertPtr);
+        ainsValSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+
+        // Copy elements from insertion point onward: arr[idx+1..arrLen+1) → buf[idx+2..newLen+1)
+        llvm::Value* postSrcIdx = builder->CreateAdd(idxArg, one, "ains.postsrcidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* postSrc = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, postSrcIdx, "ains.postsrc");
+        llvm::Value* postDstIdx = builder->CreateAdd(idxArg, llvm::ConstantInt::get(getDefaultType(), 2), "ains.postdstidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* postDst = builder->CreateInBoundsGEP(getDefaultType(), buf, postDstIdx, "ains.postdst");
+        llvm::Value* postCount = builder->CreateSub(arrLen, idxArg, "ains.postcnt", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* postBytes = builder->CreateMul(postCount, eight, "ains.postbytes", /*HasNUW=*/true, /*HasNSW=*/true);
+        builder->CreateCall(getOrDeclareMemcpy(), {postDst, postSrc, postBytes});
+
+        return builder->CreatePtrToInt(buf, getDefaultType(), "ains.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // str_pad_left(str, width, fill) — left-pad str with fill[0] until length == width
+    // str_pad_right(str, width, fill) — right-pad str with fill[0] until length == width
+    //   If str is already >= width chars, returns str unchanged.
+    //   fill must be a non-empty string; its first character is used as the pad byte.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::STR_PAD_LEFT || bid == BuiltinId::STR_PAD_RIGHT) {
+        const char* fnName = (bid == BuiltinId::STR_PAD_LEFT) ? "str_pad_left" : "str_pad_right";
+        validateArgCount(expr, fnName, 3);
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* widthArg = generateExpression(expr->arguments[1].get());
+        llvm::Value* fillArg = generateExpression(expr->arguments[2].get());
+        widthArg = toDefaultType(widthArg);
+        fillArg = toDefaultType(fillArg);
+
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy() ? strArg
+                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "strpad.strptr");
+        llvm::Value* fillPtr =
+            fillArg->getType()->isPointerTy() ? fillArg
+                : builder->CreateIntToPtr(fillArg, llvm::PointerType::getUnqual(*context), "strpad.fillptr");
+
+        // slen = strlen(str)
+        llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strpad.slen");
+
+        // Clamp width to [0, i64_max] — negative width means no padding
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* negWidth = builder->CreateICmpSLT(widthArg, zero, "strpad.negw");
+        llvm::Value* effectiveWidth = builder->CreateSelect(negWidth, zero, widthArg, "strpad.width");
+
+        // If slen >= width, return str unchanged
+        llvm::Value* needsPad = builder->CreateICmpULT(slen, effectiveWidth, "strpad.needs");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* padBB = llvm::BasicBlock::Create(*context, "strpad.pad", function);
+        llvm::BasicBlock* noPadBB = llvm::BasicBlock::Create(*context, "strpad.nopad", function);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "strpad.merge", function);
+
+        // Padding is the common case for typical use of pad functions (e.g. formatting);
+        // use equal weights.
+        builder->CreateCondBr(needsPad, padBB, noPadBB);
+
+        // --- No-pad path: return original string pointer as i64 ---
+        builder->SetInsertPoint(noPadBB);
+        llvm::Value* origI64 = builder->CreatePtrToInt(strPtr, getDefaultType(), "strpad.origval");
+        builder->CreateBr(mergeBB);
+
+        // --- Pad path ---
+        builder->SetInsertPoint(padBB);
+        // Load fill character: first byte of fill string
+        llvm::Value* fillByte = builder->CreateAlignedLoad(builder->getInt8Ty(), fillPtr, llvm::MaybeAlign(1), "strpad.fillbyte");
+
+        llvm::Value* padLen = builder->CreateSub(effectiveWidth, slen, "strpad.padlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Allocate (effectiveWidth + 1) bytes for result
+        llvm::Value* allocSize = builder->CreateAdd(effectiveWidth,
+            llvm::ConstantInt::get(getDefaultType(), 1), "strpad.allocsz", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strpad.buf");
+
+        if (bid == BuiltinId::STR_PAD_LEFT) {
+            // Fill first padLen bytes with fill char
+            builder->CreateMemSet(buf, fillByte, padLen, llvm::MaybeAlign(1));
+            // Copy str (including null terminator) into buf + padLen
+            llvm::Value* copyDst = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, padLen, "strpad.copydst");
+            llvm::Value* copySize = builder->CreateAdd(slen,
+                llvm::ConstantInt::get(getDefaultType(), 1), "strpad.copysz", /*HasNUW=*/true, /*HasNSW=*/true);
+            builder->CreateCall(getOrDeclareMemcpy(), {copyDst, strPtr, copySize});
+        } else {
+            // STR_PAD_RIGHT: copy str into buf, then fill remaining bytes with fill char
+            builder->CreateCall(getOrDeclareMemcpy(), {buf, strPtr, slen});
+            llvm::Value* fillDst = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, slen, "strpad.filldst");
+            builder->CreateMemSet(fillDst, fillByte, padLen, llvm::MaybeAlign(1));
+            // Null-terminate
+            llvm::Value* nullPtr = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, effectiveWidth, "strpad.nullptr");
+            builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullPtr);
+        }
+
+        llvm::Value* padI64 = builder->CreatePtrToInt(buf, getDefaultType(), "strpad.padval");
+        builder->CreateBr(mergeBB);
+
+        // --- Merge ---
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "strpad.result");
+        result->addIncoming(origI64, noPadBB);
+        result->addIncoming(padI64, padBB);
+        stringReturningFunctions_.insert(fnName);
+        return result;
     }
 
     if (inOptMaxFunction) {
@@ -4843,6 +5662,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (callee->doesNotThrow()) {
         callResult->setDoesNotThrow();
     }
+    // When the callee is @pure (speculatable + willreturn + readonly), mark the
+    // call site as well.  This enables GVN to deduplicate identical pure calls
+    // and LICM to hoist pure calls out of loops.
+    if (callee->hasFnAttribute(llvm::Attribute::Speculatable)) {
+        callResult->addFnAttr(llvm::Attribute::Speculatable);
+    }
+    // Propagate non-negativity from the callee: if the callee's return value
+    // has !range [0, INT64_MAX) metadata, mark the result as non-negative.
+    if (callee->hasRetAttribute(llvm::Attribute::ZExt))
+        nonNegValues_.insert(callResult);
     return callResult;
 }
 

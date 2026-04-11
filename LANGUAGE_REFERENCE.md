@@ -1,8 +1,8 @@
 # OmScript Language Reference
 
-> **Version:** 3.7.0  
-> **Compiler:** `omsc` — OmScript Compiler v3.7.0  
-> **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
+> **Version:** 3.7.0
+> **Compiler:** `omsc` — OmScript Compiler
+> **Backend:** LLVM 18+ · Ahead-of-Time Compilation
 > **License:** See repository root
 
 ---
@@ -11,3962 +11,1430 @@
 
 1. [Overview](#1-overview)
 2. [Compilation Pipeline](#2-compilation-pipeline)
-3. [Type System](#3-type-system)
-4. [Lexical Structure](#4-lexical-structure)
-5. [Variables and Constants](#5-variables-and-constants)
-6. [Functions](#6-functions)
-7. [Operators](#7-operators)
+3. [Lexical Structure](#3-lexical-structure)
+4. [Preprocessor](#4-preprocessor)
+5. [Types and Values](#5-types-and-values)
+6. [Variables and Constants](#6-variables-and-constants)
+7. [Functions](#7-functions)
 8. [Control Flow](#8-control-flow)
-9. [Arrays](#9-arrays)
-10. [Strings](#10-strings)
-11. [Structs](#11-structs)
-12. [Enums](#12-enums)
-13. [Maps](#13-maps)
-14. [Ownership System](#14-ownership-system)
-15. [Module Imports](#15-module-imports)
-16. [File I/O](#16-file-io)
-17. [Concurrency](#17-concurrency)
-18. [Standard Library](#18-standard-library)
-19. [Optimization Levels](#19-optimization-levels)
-20. [OPTMAX Directive](#20-optmax-directive)
-21. [E-Graph & Superoptimizer](#21-e-graph--superoptimizer)
-22. [Adaptive JIT Runtime](#22-adaptive-jit-runtime)
-23. [Memory Management](#23-memory-management)
-24. [CLI Reference](#24-cli-reference)
-25. [Building from Source](#25-building-from-source)
-26. [Error Handling and Diagnostics](#26-error-handling-and-diagnostics)
-27. [Complete Code Examples](#27-complete-code-examples)
-28. [Grammar Summary](#28-grammar-summary)
+9. [Loops](#9-loops)
+10. [Expressions and Operators](#10-expressions-and-operators)
+11. [Arrays](#11-arrays)
+12. [Strings](#12-strings)
+13. [Dictionaries / Maps](#13-dictionaries--maps)
+14. [Structs](#14-structs)
+15. [Enums](#15-enums)
+16. [Error Handling](#16-error-handling)
+17. [Memory Semantics and Ownership System](#17-memory-semantics-and-ownership-system)
+18. [OPTMAX Blocks](#18-optmax-blocks)
+19. [Built-in Functions](#19-built-in-functions)
+20. [Concurrency](#20-concurrency)
+21. [File I/O](#21-file-io)
+22. [Lambda Expressions](#22-lambda-expressions)
+23. [Import System](#23-import-system)
+24. [Compiler CLI Reference](#24-compiler-cli-reference)
+25. [Advanced Optimization Features](#25-advanced-optimization-features)
 
 ---
 
 ## 1. Overview
 
-OmScript is a **low-level, C-like programming language** featuring:
+OmScript is a statically-compiled, dynamically-typed language with optional type annotations. It compiles through LLVM to native machine code. Key features:
 
-- **Dynamic typing** — Variables do not require explicit type annotations (though optional type hints are supported for documentation and OPTMAX optimization).
-- **Ahead-of-Time (AOT) compilation** — All code compiles to native machine code through LLVM.
-- **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
-- **Adaptive JIT runtime** — A lightweight JIT runtime monitors function call counts and recompiles hot functions at higher optimization levels with profile-guided hints, producing even faster native code for performance-critical paths.
-- **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **Ownership system** — Optional `move`, `invalidate`, and `borrow` keywords enable compiler optimizations and catch use-after-move/invalidate bugs at compile time — without requiring ownership annotations on normal code.
-- **121 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
-- **Structs** — Named record types with field access, mutation, and optional field-level optimization attributes.
-- **Module system** — `import` statements with circular-import detection.
-- **Generic function syntax** — Type-annotated generic parameters (type-erased at runtime).
-- **Concurrency primitives** — POSIX thread creation/join and mutex operations.
-
-### Design Philosophy
-
-OmScript prioritizes **performance** and **simplicity**. The language provides the essential building blocks (functions, variables, loops, conditionals, arrays, structs, maps, modules, and I/O) without a garbage collector. Every stdlib function compiles directly to LLVM IR, producing native machine instructions with zero runtime dispatch overhead.
+- **Dynamic typing with optional annotations** — variables are untyped by default; annotations enable advanced optimizations and SIMD types
+- **LLVM backend** — ahead-of-time compilation to native binaries
+- **Three-stage optimizer** — e-graph equality saturation, superoptimizer, and hardware graph optimization engine (HGOE)
+- **C-compatible performance** — designed to match C performance with high-level syntax
 
 ---
 
 ## 2. Compilation Pipeline
 
-### 2.1 Pipeline Stages
-
-The OmScript compiler (`omsc`) transforms source code to a native executable through eight stages:
-
 ```
-Source Code (.om)
-       │
-       ▼
-   ┌──────────┐
-   │  LEXER   │  Tokenizes source into a stream of tokens
-   └────┬─────┘
-        │
-        ▼
-   ┌──────────┐
-   │  PARSER  │  Builds an Abstract Syntax Tree (AST)
-   └────┬─────┘
-        │
-        ▼
-   ┌──────────┐
-   │  E-GRAPH │  Equality-saturation rewrites on AST (O2+)
-   └────┬─────┘
-        │
-        ▼
-   ┌──────────┐
-   │ CODEGEN  │  Translates AST → LLVM IR
-   └────┬─────┘
-        │
-        ▼
-   ┌──────────┐
-   │ LLVM OPT │  Standard LLVM optimization pipeline
-   └────┬─────┘
-        │
-        ▼
-   ┌──────────┐
-   │SUPEROPT  │  Post-pipeline superoptimizer (O2+)
-   └────┬─────┘
-        │
-        ▼
-   ┌──────────┐
-   │   HGOE   │  Hardware-graph target-aware opts (O2+, -march/-mtune)
-   └────┬─────┘
-        │
-        ▼
-   ┌──────────┐
-   │ LLVM BE  │  LLVM compiles IR → native object file (.o)
-   └────┬─────┘
-        │
-        ▼
-   ┌──────────┐
-   │  LINKER  │  GCC links object file → executable
-   └──────────┘
-```
-
-### 2.2 Stage Details
-
-| Stage | Input | Output | Tool |
-|-------|-------|--------|------|
-| **Lexing** | Source text (`.om` file) | Token stream | `Lexer::tokenize()` |
-| **Parsing** | Token stream | Abstract Syntax Tree | `Parser::parse()` |
-| **E-Graph Optimization** | AST | Optimized AST | `egraph::optimizeProgram()` |
-| **Code Generation** | AST | LLVM IR Module | `CodeGenerator::generate()` |
-| **LLVM Optimization** | LLVM IR Module | Optimized LLVM IR | `runOptimizationPasses()` |
-| **Superoptimizer** | Optimized LLVM IR | Further-optimized IR | `superopt::superoptimizeModule()` |
-| **HGOE** | Optimized LLVM IR | Target-tuned IR | `hgoe::optimizeModule()` |
-| **Object Emission** | Optimized LLVM IR | Native object file (`.o`) | `CodeGenerator::writeObjectFile()` |
-| **Linking** | Object file | Executable binary | System `gcc` |
-
-### 2.3 Intermediate Representations
-
-You can inspect each stage's output:
-
-```bash
-# View tokens
-omsc lex program.om
-
-# View AST
-omsc parse program.om
-
-# View LLVM IR
-omsc emit-ir program.om
-
-# Full compilation (default)
-omsc program.om -o myprogram
-```
-
-### 2.4 Target Architecture
-
-OmScript auto-detects the host architecture and emits native code for it. Supported backends:
-
-- **x86-64** (primary target)
-- **AArch64** (ARM64)
-- **ARM** (32-bit)
-
-The target triple is determined at compile time from the host system (e.g., `x86_64-pc-linux-gnu`).
-
----
-
-## 3. Type System
-
-### 3.1 Runtime Value Types
-
-OmScript is **dynamically typed**. At runtime, values are represented by a tagged union:
-
-| Type | Internal Representation | Description |
-|------|------------------------|-------------|
-| `INTEGER` | `int64_t` (64-bit signed) | Whole numbers, booleans (0 = false, nonzero = true) |
-| `FLOAT` | `double` (64-bit IEEE 754) | Floating-point numbers |
-| `STRING` | `RefCountedString` | Reference-counted heap-allocated string |
-| `NONE` | — | Absence of a value |
-
-### 3.2 Compile-Time Representation
-
-All values are represented as `i64` (64-bit integer) in the LLVM IR. This is the "default type" used throughout code generation:
-
-- **Integers** are stored directly as `i64`.
-- **Booleans** are `i64` where `0` = false, nonzero = true.
-- **Pointers** (arrays, strings) are cast to `i64` via `PtrToInt` and back via `IntToPtr`.
-- **Floats** use `double` for arithmetic and are bitcast to/from `i64` for uniform storage.
-
-### 3.3 Truthiness
-
-The following values are **falsy**:
-
-- Integer `0`
-- Float `0.0`
-- `NONE`
-
-Everything else is **truthy**, including negative numbers and non-empty strings.
-
-### 3.4 Type Annotations
-
-Variable, parameter, and function return type declarations may include type annotations. When present, annotations control the LLVM IR type used for the value, enabling the optimizer to generate more efficient code (e.g. native `double` operations instead of integer bit-casting). Supported type annotations:
-
-| Annotation | LLVM Type | Description |
-|------------|-----------|-------------|
-| `int`, `i64` | `i64` | 64-bit signed integer (default) |
-| `i32` | `i32` | 32-bit signed integer |
-| `i16` | `i16` | 16-bit signed integer |
-| `i8` | `i8` | 8-bit signed integer |
-| `u64` | `i64` | 64-bit unsigned integer (uses `zeroext`) |
-| `u32` | `i32` | 32-bit unsigned integer (uses `zeroext`) |
-| `u16` | `i16` | 16-bit unsigned integer (uses `zeroext`) |
-| `u8` | `i8` | 8-bit unsigned integer (uses `zeroext`) |
-| `bool` | `i1` | Boolean (1-bit integer) |
-| `float`, `double` | `double` | 64-bit IEEE 754 floating-point |
-| `string` | `i64` | String pointer (stored as i64) |
-| *struct name* | `i64` | Struct pointer (stored as i64) |
-| *type*`[]` | `i64` | Array pointer (stored as i64) |
-| `f32x4` | `<4 x float>` | 4-element f32 SIMD vector |
-| `f32x8` | `<8 x float>` | 8-element f32 SIMD vector |
-| `f64x2` | `<2 x double>` | 2-element f64 SIMD vector |
-| `f64x4` | `<4 x double>` | 4-element f64 SIMD vector |
-| `i32x4` | `<4 x i32>` | 4-element i32 SIMD vector |
-| `i32x8` | `<8 x i32>` | 8-element i32 SIMD vector |
-| `i64x2` | `<2 x i64>` | 2-element i64 SIMD vector |
-| `i64x4` | `<4 x i64>` | 4-element i64 SIMD vector |
-
-Unsigned type annotations (`u8`, `u16`, `u32`, `u64`) use the same LLVM integer types as their signed counterparts but apply `zeroext` instead of `signext` at function boundaries. This enables the optimizer to prove non-negativity, unlocking more aggressive strength reduction (e.g., `srem` → `urem`, `sdiv` → `udiv`).
-
-```javascript
-var x: int = 42;              // i64 alloca
-var f: float = 3.14;          // double alloca (native FP ops)
-var arr: int[] = [1, 2, 3];   // array type hint
-var n: u64 = 100;             // unsigned i64 (zeroext at boundaries)
-fn add(a: float, b: float) -> float { return a + b; }    // double params & return
-fn process(pts: Point[]) -> Point { return pts[0]; }     // struct types
-fn count(x: u64) -> u64 { return x + 1; }               // unsigned params & return
-```
-
-#### 3.4.1 SIMD Vector Types
-
-SIMD (Single Instruction, Multiple Data) vector types enable handwritten SIMD programming. Variables declared with a SIMD type annotation map directly to LLVM fixed-vector types, generating native vector instructions (SSE, AVX, NEON, etc.) on supported hardware.
-
-**Vector initialization** uses array literal syntax:
-
-```javascript
-var a: f32x4 = [1.0, 2.0, 3.0, 4.0];   // 4 floats
-var b: i32x4 = [10, 20, 30, 40];        // 4 integers
-var c: f64x2 = [1.5, 2.5];              // 2 doubles
-```
-
-**Vector arithmetic** uses the standard operators. All operations are element-wise:
-
-```javascript
-var sum: f32x4 = a + b;    // element-wise add
-var diff: f32x4 = a - b;   // element-wise subtract
-var prod: f32x4 = a * b;   // element-wise multiply
-var quot: f32x4 = a / b;   // element-wise divide
-```
-
-**Scalar-to-vector broadcast** (splat): when a scalar operand is mixed with a vector operand, the scalar is automatically broadcast to all lanes:
-
-```javascript
-var scaled: f32x4 = a * 2.0;   // multiply all elements by 2.0
-```
-
-**Element access** via indexing:
-
-```javascript
-var first = v[0];    // extract element (returns standard float/int)
-v[2] = 99;           // insert element at index 2
-```
-
-**Bitwise operations** work on integer vectors (`i32x4`, `i32x8`, `i64x2`, `i64x4`):
-
-```javascript
-var x: i32x4 = [0xFF, 0x0F, 0xF0, 0x00];
-var y: i32x4 = [0x0F, 0x0F, 0x0F, 0x0F];
-var masked: i32x4 = x & y;   // bitwise AND
-var shifted: i32x4 = x << 4; // left shift all lanes
+Source (.om)
+  → Preprocessor     (macro expansion, conditional compilation)
+  → Lexer            (tokenization)
+  → Parser           (AST construction)
+  → Code Generator   (LLVM IR generation)
+  → E-Graph          (equality saturation, algebraic identities)
+  → Superoptimizer   (idiom recognition, branch-to-select)
+  → HGOE             (hardware-aware scheduling, FMA fusion)
+  → LLVM             (standard optimization passes)
+  → Native Binary
 ```
 
 ---
 
-## 4. Lexical Structure
+## 3. Lexical Structure
 
-### 4.1 Character Set
-
-OmScript source files are UTF-8 text. Identifiers and keywords use ASCII characters only.
-
-### 4.2 Comments
-
-```javascript
-// Single-line comment (extends to end of line)
-
-/* Multi-line comment
-   can span multiple lines */
-```
-
-Block comments (`/* */`) are **not nestable**. The lexer tracks line and column numbers inside comments for error reporting.
-
-### 4.3 Identifiers
-
-Identifiers start with a letter or underscore, followed by letters, digits, or underscores:
+### 3.1 Comments
 
 ```
-identifier := [a-zA-Z_][a-zA-Z0-9_]*
+// Single-line comment
+/* Block comment */
 ```
 
-### 4.4 Keywords
+Block comments do not nest. The first `*/` encountered closes the comment, regardless of any nested `/*` inside it. An unterminated block comment is a compile error.
 
-The following words are reserved:
+### 3.2 Keywords
 
-| Keyword | Purpose |
-|---------|---------|
-| `fn` | Function declaration |
-| `return` | Return from function |
-| `if` | Conditional branch |
-| `else` | Alternative branch |
-| `while` | While loop |
-| `do` | Do-while loop |
-| `for` | For loop (range-based and for-each) |
-| `var` | Variable declaration |
-| `const` | Constant declaration |
-| `break` | Break out of loop or switch case |
-| `continue` | Skip to next iteration |
-| `in` | Range/array iteration keyword |
-| `switch` | Multi-way branch |
-| `case` | Switch case label |
-| `default` | Switch default label |
-| `try` | Error handling block |
-| `catch` | Error handler |
-| `throw` | Throw an error value |
-| `enum` | Enum declaration |
-| `struct` | Struct/record type declaration |
-| `import` | Module import statement |
-| `true` | Boolean true (1) |
-| `false` | Boolean false (0) |
-| `null` | Null literal |
-| `move` | Transfer ownership of a variable |
-| `invalidate` | Explicitly invalidate a variable (end its lifetime) |
-| `borrow` | Borrow a reference to a variable |
-| `prefetch` | Declare a register-pinned variable with optional cache prefetch |
-| `register` | Force variable into a CPU register via immediate mem2reg promotion |
-| `likely` | Branch prediction hint: then-branch is expected |
-| `unlikely` | Branch prediction hint: then-branch is rare |
-| `OPTMAX` | Begin exhaustive optimization block |
-
-### 4.5 Literals
-
-#### Integer Literals
-
-Decimal integer literals:
-
-```javascript
-0
-42
-1000000
--7          // Unary minus applied to 7
+```
+fn        return    if        else      elif      unless
+while     do        for       foreach   forever   loop
+repeat    until     times     with      var       const
+register  break     continue  in        true      false
+null      switch    case      default   try       catch
+throw     enum      struct    import    move      invalidate
+borrow    prefetch  likely    unlikely  when      guard
+defer     swap
 ```
 
-Hexadecimal, octal, and binary literals are also supported:
+### 3.3 Literals
 
-```javascript
-0xFF        // Hex: 255
-0x1A        // Hex: 26
-0o77        // Octal: 63
-0o10        // Octal: 8
-0b1010      // Binary: 10
-0b11111111  // Binary: 255
+**Integer literals:**
+```
+42          // decimal
+0xFF        // hexadecimal (0x or 0X prefix)
+0o77        // octal (0o or 0O prefix)
+0b1010      // binary (0b or 0B prefix)
+1_000_000   // underscores as separators
 ```
 
-The prefix is case-insensitive (`0x` and `0X` are equivalent, likewise for `0o`/`0O` and `0b`/`0B`). At least one digit must follow the prefix.
-
-All numeric literals (decimal, hex, octal, binary, and float) support **underscore separators** for readability. Underscores are stripped during lexing and do not affect the value:
-
-```javascript
-1_000_000     // Decimal: 1000000
-0xFF_FF       // Hex: 65535
-0b1010_0101   // Binary: 165
-0o7_7         // Octal: 63
-3.14_159      // Float: 3.14159
+**Float literals:**
 ```
-
-#### Float Literals
-
-Floating-point literals with a decimal point:
-
-```javascript
 3.14
-0.5
-100.0
+2.0
+1_000.5
 ```
 
-#### String Literals
-
-Double-quoted strings with escape sequence support:
-
-```javascript
-"hello world"
-"line one\nline two"
-"tab\there"
-"quote: \"escaped\""
-"backslash: \\"
+**String literals:**
+```
+"hello"
+"line\nnewline"    // \n, \t, \r, \\, \", \0, \xHH supported
 ```
 
-**Escape Sequences:**
-
-| Escape | Character |
-|--------|-----------|
-| `\n` | Newline (0x0A) |
-| `\t` | Tab (0x09) |
-| `\r` | Carriage return (0x0D) |
-| `\0` | Null (0x00) |
-| `\b` | Backspace (0x08) |
-| `\f` | Form feed (0x0C) |
-| `\v` | Vertical tab (0x0B) |
-| `\\` | Backslash |
-| `\"` | Double quote |
-| `\xHH` | Hex escape (exactly two hex digits, e.g. `\x41` → `A`) |
-
-Unterminated strings and unterminated escape sequences (backslash at end of string) produce compile errors.
-
-#### Multi-line String Literals
-
-Triple-quoted strings (`"""..."""`) support embedded newlines without escape sequences:
-
-```javascript
-var poem = """Roses are red,
-Violets are blue,
-OmScript is fast,
-And so are you.""";
+**String interpolation:** `$"..."` with `{expr}` placeholders — desugars into a concatenation chain at parse time:
+```
+var name = "world"
+var s = $"hello {name}!"    // equivalent to "hello " + name + "!"
 ```
 
-Multi-line strings preserve all characters between the opening and closing `"""` exactly as written, including newlines and spaces. They do **not** process escape sequences.
-
-#### String Interpolation
-
-Prefixing a string with `$` enables string interpolation. Expressions inside `{...}` are evaluated and automatically converted to strings:
-
-```javascript
-var name = "world";
-var greeting = $"hello {name}!";           // "hello world!"
-var x = 10;
-var msg = $"value is {x + 5}";             // "value is 15"
-var a = 3;
-var b = 4;
-var result = $"{a} + {b} = {a + b}";       // "3 + 4 = 7"
+**Multi-line string literals:** triple-quoted `"""..."""` — spans multiple lines; all characters between the delimiters are included verbatim:
+```
+var text = """
+line one
+line two
+"""
 ```
 
-Interpolated strings support all escape sequences from regular strings, plus `\{` and `\}` for literal braces:
+**Boolean literals:** `true`, `false`
 
-```javascript
-$"use \{curly\} braces"   // "use {curly} braces"
-```
+**Null literal:** `null`
 
-Expressions inside `{...}` can include function calls, ternary operators, and nested strings:
+### 3.4 Identifiers
 
-```javascript
-$"length is {len(arr)}"
-$"flag is {flag ? "on" : "off"}"
-```
-
-String interpolation desugars into `+` concatenation at compile time, so there is no runtime overhead beyond normal string operations.
-
-### 4.6 Special Tokens
-
-| Token | Meaning |
-|-------|---------|
-| `OPTMAX=:` | Begin OPTMAX optimization block |
-| `OPTMAX!:` | End OPTMAX optimization block |
-| `...` | Range operator (in for-loop ranges) |
+Identifiers begin with a letter or underscore and may contain letters, digits, and underscores.
 
 ---
 
-## 5. Variables and Constants
+## 4. Preprocessor
 
-### 5.1 Variable Declaration
+The preprocessor runs before lexing. All directives begin with `#`.
 
-Variables are declared with `var` and optionally initialized:
+### 4.1 Macro Definition
 
-```javascript
-var x = 10;          // Initialized
-var y;               // Default-initialized to 0
-var z: int = 42;     // With optional type annotation
+```
+#define NAME value
+#define NAME(param1, param2) body_with_params
+#undef NAME
 ```
 
-Uninitialized variables default to `0`.
+**Predefined macros:**
 
-### 5.2 Constant Declaration
+| Macro | Value |
+|---|---|
+| `__VERSION__` | Compiler version string (e.g., `"3.7.0"`) |
+| `__OS__` | `"linux"`, `"macos"`, or `"windows"` |
+| `__ARCH__` | `"x86_64"`, `"aarch64"`, `"arm"`, or `"unknown"` |
+| `__FILE__` | Current filename |
+| `__LINE__` | Current line number |
+| `__COUNTER__` | Auto-incrementing integer (unique per use) |
 
-Constants are declared with `const` and **must** be initialized:
+### 4.2 Conditional Compilation
 
-```javascript
-const MAX_SIZE = 100;
+```
+#ifdef NAME
+#ifndef NAME
+#if expr
+#elif expr
+#else
+#endif
 ```
 
-Attempting to reassign a constant produces a compile error:
+The `#if`/`#elif` expressions support integer arithmetic, comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`), and `defined(NAME)`.
 
-```javascript
-const x = 5;
-x = 10;    // ERROR: Cannot modify constant 'x'
+### 4.3 Diagnostics
+
+```
+#error message           // Compile-time error
+#warning message         // Compile-time warning (continues)
+#info message            // Compile-time info message (continues)
+#assert expr             // Abort with default message if expr == 0
+#assert expr "message"   // Abort with custom message if expr == 0
+#require "version"       // Error if compiler version is older than required
 ```
 
-### 5.3 Register Variables
+### 4.4 Counter Macros
 
-The `register` keyword forces the compiler to promote a variable into a CPU register. A mem2reg pass is run immediately after code generation for any function containing register variables, guaranteeing that the annotated allocas are promoted to SSA registers regardless of the global optimization level.  Register variables are **mutable** — the keyword forces register allocation, not immutability.
-
-```javascript
-register var counter = 0;         // Forced into a CPU register
-register var acc: float = 0.0;    // Typed register variable
-counter = counter + 1;            // Reassignment is allowed
+```
+#counter MY_COUNTER      // Creates MY_COUNTER as an auto-incrementing macro
+// First use of MY_COUNTER expands to "0", then "1", etc.
 ```
 
-### 5.4 Assignment
+### 4.5 Line Continuation
 
-```javascript
-x = 42;             // Simple assignment
-x += 5;             // Compound: x = x + 5
-x -= 3;             // Compound: x = x - 3
-x *= 2;             // Compound: x = x * 2
-x /= 4;             // Compound: x = x / 4
-x %= 3;             // Compound: x = x % 3
-x **= 2;            // Compound: x = x ** 2 (power-assign)
-x ??= 10;           // Null-coalesce-assign: x = x ?? 10 (assign if x is falsy)
+A backslash `\` immediately before a newline joins the line with the next:
+
 ```
-
-Compound assignment operators (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `??=`) are desugared by the parser into their equivalent binary + assignment form.  Compound assignment works on variables, array elements (`arr[i] += 1`), and struct fields (`s.x += 1`).
-
-### 5.5 Scoping
-
-OmScript uses **block scoping**. Variables declared inside a block `{ }` are not visible outside it:
-
-```javascript
-fn main() {
-    var x = 1;
-    {
-        var x = 2;      // Shadows outer x
-        var y = x + 3;  // y = 5
-    }
-    // x is 1 here; y is not accessible
-    var y = x + 4;      // y = 5
-    return y;            // Returns 5
-}
+#define LONG_MACRO \
+    some_value
 ```
-
-Variables in inner scopes **shadow** identically-named variables in outer scopes.
 
 ---
 
-## 6. Functions
+## 5. Types and Values
 
-### 6.1 Function Declaration
+OmScript is dynamically typed. Type annotations are optional except inside `OPTMAX` blocks (where they are required). Annotated variables enable stronger code generation.
 
-Functions are declared with the `fn` keyword:
+### 5.1 Type Annotations
 
-```javascript
-fn functionName(param1, param2) {
-    // body
-    return value;
-}
+Type annotations are written with `:` after a name:
+
+```
+var x:int = 42
+var y:float = 3.14
+var s:string = "hello"
 ```
 
-With optional type annotations:
+### 5.2 Scalar Types
 
-```javascript
-fn add(a: int, b: int) {
-    return a + b;
-}
+| Annotation | Description | LLVM Type |
+|---|---|---|
+| `int` | 64-bit signed integer (default integer) | `i64` |
+| `i64` | 64-bit signed integer | `i64` |
+| `u64` | 64-bit unsigned integer | `i64` |
+| `i32` | 32-bit signed integer | `i32` |
+| `u32` | 32-bit unsigned integer | `i32` |
+| `i16` | 16-bit signed integer | `i16` |
+| `u16` | 16-bit unsigned integer | `i16` |
+| `i8` | 8-bit signed integer | `i8` |
+| `u8` | 8-bit unsigned integer | `i8` |
+| `float` | 64-bit IEEE 754 double | `f64` |
+| `double` | 64-bit IEEE 754 double | `f64` |
+| `bool` | Boolean (1-bit) | `i1` |
+| `string` | String (heap-allocated, NUL-terminated) | `ptr` |
+
+### 5.3 Array Types
+
+```
+var arr:int[]     // array of int
+var mat:float[][] // 2D array of float
 ```
 
-With an optional return-type annotation:
+### 5.4 Dictionary Type
 
-```javascript
-fn square(n: int) -> int {
-    return n * n;
-}
+```
+var d:dict
+var d:dict[string, int]   // generic annotation (informational)
 ```
 
-### 6.2 Generic Functions
+### 5.5 SIMD Vector Types
 
-Functions may declare one or more **type parameters** enclosed in angle brackets. Type parameters are used for documentation and tooling only; all values are represented as `i64` at runtime (type-erased), so no code is specialised per type.
-
-```javascript
-fn identity<T>(x: T) -> T {
-    return x;
-}
-
-fn first<T>(arr) -> T {
-    return arr[0];
-}
-
-fn pair<A, B>(a: A, b: B) {
-    return a;
-}
-
-fn main() {
-    println(identity(42));        // 42
-    println(first([10, 20, 30])); // 10
-    return 0;
-}
-```
-
-### 6.3 The `main` Function
-
-Every OmScript program must have a `main` function. This is the entry point. The return value of `main` becomes the process exit code (modulo 256):
-
-```javascript
-fn main() {
-    return 0;    // Exit code 0
-}
-```
-
-### 6.4 Function Calls
-
-```javascript
-var result = factorial(5);
-print(result);
-```
-
-Functions support forward references — a function may call another function defined later in the file. Recursive and mutually recursive calls are supported.
-
-### 6.5 Default Parameters
-
-Parameters can have default values. When a function is called with fewer arguments than parameters, the missing arguments use their default values. Default values must be literal expressions (integer, float, or string). Non-default parameters must come before default parameters.
-
-```javascript
-fn greet(name, greeting = "Hello") {
-    println(greeting);
-    println(name);
-    return 0;
-}
-
-fn main() {
-    greet("Alice");           // Uses default: greeting = "Hello"
-    greet("Bob", "Hi");      // Overrides: greeting = "Hi"
-    return 0;
-}
-```
-
-Multiple default parameters are supported:
-
-```javascript
-fn create(x, y = 0, z = 0) {
-    return x + y + z;
-}
-
-fn main() {
-    print(create(1));         // 1  (y=0, z=0)
-    print(create(1, 2));      // 3  (z=0)
-    print(create(1, 2, 3));   // 6
-    return 0;
-}
-```
-
-### 6.6 Return Values
-
-All functions return an `i64` value. If no `return` statement is reached, the function returns `0` by default.
-
-```javascript
-fn nothing() {
-    // No return statement
-}
-// nothing() returns 0
-```
-
-### 6.7 Recursion
-
-OmScript supports recursion:
-
-```javascript
-fn factorial(n) {
-    if (n <= 1) {
-        return 1;
-    }
-    return n * factorial(n - 1);
-}
-```
-
-### 6.8 Function Annotations (Compiler Hints)
-
-Functions can be annotated with `@` directives placed before the `fn` keyword. These annotations provide compiler hints that control optimization behavior. Multiple annotations can be combined on a single function.
-
-| Annotation | LLVM Attribute | Description |
-|------------|---------------|-------------|
-| `@inline` | `alwaysinline` | Force-inline this function at all call sites |
-| `@noinline` | `noinline` | Never inline this function (useful for debugging, code size) |
-| `@cold` | `cold` | Mark as rarely executed — optimize for size, place away from hot code |
-| `@hot` | `hot` | Mark as frequently executed — optimize aggressively, keep in I-cache |
-| `@pure` | `memory(read)` | Function has no side effects — enables CSE, LICM, dead call elimination |
-| `@noreturn` | `noreturn` | Function never returns (e.g., `exit_program`) — enables dead code after call |
-| `@static` | internal linkage | Not visible outside the module — enables constant propagation, dead arg elimination |
-| `@flatten` | `flatten` | Inline all callees within this function — maximizes optimization scope |
-| `@unroll` | `llvm.loop.unroll.full` | Aggressively unroll all loops in this function — eliminates loop overhead |
-| `@nounroll` | `llvm.loop.unroll.disable` | Disable loop unrolling in this function — reduces code size, I-cache pressure |
-| `@vectorize` | `llvm.loop.vectorize.enable` | Enable loop vectorization for all loops in this function |
-| `@novectorize` | `llvm.loop.vectorize.enable=false` | Disable loop vectorization for all loops in this function |
-| `@minsize` | `optsize` + `minsize` | Optimize for minimum code size — prefer smaller sequences over faster ones |
-| `@optnone` | `optnone` + `noinline` | Disable all optimizations — useful for debugging, keeps variables observable |
-| `@nounwind` | `nounwind` | Function never throws exceptions — omits unwind tables, improves inlining |
-
-```javascript
-@inline
-fn add(a: int, b: int) -> int {
-    return a + b;
-}
-
-@cold
-fn handle_error(code: int) {
-    print(code);
-    exit_program(1);
-}
-
-@hot
-fn compute(n: int) -> int {
-    var total: int = 0;
-    for (i: int in 0...n) {
-        total = total + i;
-    }
-    return total;
-}
-
-@pure
-fn square(x: int) -> int {
-    return x * x;
-}
-
-@static @noinline
-fn internal_helper(x: int) -> int {
-    return x + 1;
-}
-
-@noreturn
-fn die(msg) {
-    println(msg);
-    exit_program(1);
-}
-
-@unroll
-fn fast_sum(n: int) -> int {
-    var total: int = 0;
-    for (i: int in 0...16) {
-        total = total + i;
-    }
-    return total;
-}
-
-@vectorize
-fn vec_add(n: int) -> int {
-    var total: int = 0;
-    for (i: int in 0...n) {
-        total = total + i * 2;
-    }
-    return total;
-}
-
-@novectorize @unroll
-fn scalar_work(n: int) -> int {
-    var total: int = 0;
-    for (i: int in 0...n) {
-        total = total + i;
-    }
-    return total;
-}
-
-@minsize
-fn rarely_called_helper(x: int) -> int {
-    // Optimize for binary size — useful for cold paths in size-sensitive builds
-    return x * 7 + x * 3;
-}
-
-@optnone
-fn debug_me(x: int) -> int {
-    // All optimizations disabled — variables remain visible in a debugger
-    var y: int = x + 1;
-    var z: int = y * 2;
-    return z;
-}
-
-@nounwind @pure
-fn safe_hash(x: int) -> int {
-    // Never throws, no side effects — enables aggressive inlining and hoisting
-    return x * 2654435761;
-}
-```
-
-**Notes:**
-- `@inline` and `@noinline` override the compiler's automatic inlining heuristics.
-- `@cold` functions are preserved through the post-pipeline attribute stripping (unlike LLVM's auto-detected cold functions which are stripped to prevent false positives).
-- `@pure` implies the function only reads memory and has no observable side effects. Do not use on functions that call `print`, modify arrays, or write to files.
-- `@static` changes the function's linkage to internal, which is only meaningful for AOT compilation — it has no effect in JIT mode.
-- `@unroll` and `@nounroll` apply to **all** loops within the annotated function. `@unroll` is most effective on small constant-trip-count loops; on large or variable-trip-count loops, the optimizer may ignore the hint if full unrolling would exceed code-size thresholds.
-- `@vectorize` and `@novectorize` apply to **all** loops within the annotated function. `@vectorize` hints the LLVM vectorizer to attempt vectorization even when the cost model is uncertain. `@novectorize` prevents vectorization when it hurts performance (e.g., small iteration counts, complex control flow, or high register pressure).
-- `@minsize` combines LLVM's `OptimizeForSize` and `MinSize` attributes. The backend selects smaller code sequences (e.g., shorter immediate encodings, fewer instructions) at the cost of some speed. Useful for rarely-called utility functions or memory-constrained targets.
-- `@optnone` completely bypasses the optimizer for the annotated function. The LLVM verifier requires `noinline` alongside `optnone`, so `@inline` is silently ignored and a compile-time warning is emitted when both are specified. Similarly, `@hot` has no effect when combined with `@optnone` (a warning is also issued). Use for isolating performance regressions or keeping variables visible during debugging.
-- `@nounwind` marks the function as never propagating C++ exceptions. This lets the compiler omit DWARF unwind tables for the function, reducing binary size and allowing the inliner to skip exception-routing overhead at call sites.
-
-### 6.9 Parameter Annotations
-
-Parameters can be annotated with `@prefetch` to hint the CPU to load the parameter's memory into cache before it is accessed:
-
-```javascript
-fn process(@prefetch data: int, size: int) -> int {
-    var total: int = 0;
-    for (i: int in 0...size) {
-        total = total + data;
-    }
-    return total;
-}
-```
+Used with type annotations for explicit SIMD programming:
 
 | Annotation | Description |
-|------------|-------------|
-| `@prefetch` | Emit a software prefetch intrinsic at function entry for this parameter |
+|---|---|
+| `f32x4` | 4 × f32 vector (128-bit SSE) |
+| `f32x8` | 8 × f32 vector (256-bit AVX) |
+| `f64x2` | 2 × f64 vector (128-bit SSE) |
+| `f64x4` | 4 × f64 vector (256-bit AVX) |
+| `i32x4` | 4 × i32 vector (128-bit SSE) |
+| `i32x8` | 8 × i32 vector (256-bit AVX) |
+| `i64x2` | 2 × i64 vector (128-bit SSE) |
+| `i64x4` | 4 × i64 vector (256-bit AVX) |
 
-**Prefetch Lifecycle:**
-1. At function **entry**, the compiler emits `llvm.prefetch` with high locality (keep in all cache levels) for the parameter value interpreted as a memory address.
-2. At function **exit**, if the prefetched parameter is **not** being returned (transferred out), the compiler emits a cache eviction hint (`llvm.prefetch` with locality=0) to free the cache line.
-3. If the prefetched parameter **is** the return value, the cache line is preserved — ownership of the cached data transfers to the caller.
+### 5.6 Reference Types
 
-This provides a deterministic cache management model: prefetched data is automatically invalidated at scope exit unless explicitly transferred out via `return`.
-
-### 6.10 Prefetch Variable Statements
-
-The `prefetch` keyword can also be used as a statement to declare or mark a variable for register pinning. Prefetch-tagged variables are promoted directly to CPU registers by SROA/mem2reg and remain live until explicitly invalidated. The prefetch hint is only meaningful if the containing function or loop survives past codegen (is not optimized away).
-
-**Declaration form:**
-
-```javascript
-prefetch [hot] [immut] var name[:type] = expr;
+```
+var x:&i32     // reference to i32 (same underlying storage)
 ```
 
-**Standalone form (existing variable):**
-
-```javascript
-prefetch name;
-```
-
-**Examples:**
-
-```javascript
-fn compute(x: int) -> int {
-    prefetch var val:i32 = x;        // register-pinned, promoted by mem2reg
-    var result = val + 10;
-    var doubled = val * 2;
-    invalidate val;                  // required before return
-    return result + doubled;
-}
-
-fn compute_hot(x: int) -> int {
-    prefetch hot var v:i64 = x;      // high-locality prefetch on pointed-to memory
-    var a = v + 1;
-    invalidate v;
-    return a;
-}
-
-fn compute_immut(x: int) -> int {
-    prefetch immut var c:i32 = x;    // invariant — LLVM can hoist/CSE loads
-    var r = c + c;
-    invalidate c;
-    return r;
-}
-```
-
-**Attributes:**
-
-| Attribute | Effect |
-|-----------|--------|
-| `hot` | For i64/ptr variables, the pointed-to memory is prefetched with locality=3 (keep in all cache levels). Default is locality=2. |
-| `immut` | Loads of this variable are marked with `!invariant.load` metadata, allowing LLVM to hoist and CSE them aggressively. |
-
-**Register Promotion Semantics:**
-- The `prefetch` statement does **not** emit `llvm.prefetch` on the variable's alloca — this would prevent SROA/mem2reg from promoting it to an SSA register.
-- For variables that hold pointer-sized values (i64 or ptr types), a value-based prefetch is emitted: the variable's value is treated as a memory address and `llvm.prefetch` is called on the pointed-to memory.
-- All prefetched variables must be explicitly invalidated (`invalidate name;`) before the function returns. The compiler emits a compile-time error if any prefetched variable is still live at a return statement.
-- Variables being returned (directly or via `move`) are exempt from the invalidation requirement.
+Reference types share the same LLVM representation as their base type; the annotation affects alias analysis.
 
 ---
 
-## 7. Operators
+## 6. Variables and Constants
 
-### 7.1 Operator Precedence Table
-
-Operators are listed from **highest** to **lowest** precedence:
-
-| Precedence | Operators | Associativity | Description |
-|:----------:|-----------|:-------------:|-------------|
-| 1 | `()` `[]` | Left | Grouping, array indexing |
-| 2 | `x++` `x--` | Left | Postfix increment/decrement |
-| 3 | `++x` `--x` `-x` `!` `~` | Right | Prefix increment/decrement, unary minus, logical NOT, bitwise NOT |
-| 4 | `**` | Right | Exponentiation |
-| 5 | `*` `/` `%` | Left | Multiplication, division, modulo |
-| 6 | `+` `-` | Left | Addition, subtraction |
-| 7 | `<<` `>>` | Left | Bitwise left shift, logical right shift |
-| 8 | `<` `<=` `>` `>=` | Left | Relational comparison |
-| 9 | `==` `!=` | Left | Equality comparison |
-| 10 | `&` | Left | Bitwise AND |
-| 11 | `^` | Left | Bitwise XOR |
-| 12 | `\|` | Left | Bitwise OR |
-| 13 | `&&` | Left | Logical AND (short-circuit) |
-| 14 | `\|\|` | Left | Logical OR (short-circuit) |
-| 14.5 | `??` | Left | Null coalescing |
-| 15 | `? :` | Right | Ternary conditional |
-| 15.5 | `\|>` | Left | Pipe forward |
-| 16 | `=` `+=` `-=` `*=` `/=` `%=` | Right | Assignment |
-
-### 7.2 Arithmetic Operators
-
-| Operator | Example | Description |
-|----------|---------|-------------|
-| `+` | `a + b` | Addition |
-| `-` | `a - b` | Subtraction |
-| `*` | `a * b` | Multiplication |
-| `/` | `a / b` | Integer division (truncates toward zero) |
-| `%` | `a % b` | Modulo (remainder) |
-| `**` | `a ** b` | Exponentiation (right-associative) |
-| `-` (unary) | `-a` | Negation |
-
-```javascript
-2 ** 8        // 256
-3 ** 3        // 27
-2 ** 3 ** 2   // 512 (right-associative: 2 ** (3 ** 2) = 2 ** 9)
-2 ** -1       // 0 (negative exponent → 0 for integer power)
-```
-
-**Division and modulo by zero** are detected in the generated machine code at runtime. They print an error and terminate the program with exit code 1:
+### 6.1 Variable Declaration
 
 ```
-Runtime error: division by zero
-Runtime error: modulo by zero
+var x = 42                // mutable, no annotation
+var x:int = 42            // mutable, annotated
+var arr = [1, 2, 3]       // array
+var d = map_new()         // dictionary
 ```
 
-### 7.3 Comparison Operators
+**Array destructuring** — assigns elements of an array to individual variables in one declaration:
 
-All comparison operators return `1` (true) or `0` (false):
-
-| Operator | Example | Description |
-|----------|---------|-------------|
-| `==` | `a == b` | Equal to |
-| `!=` | `a != b` | Not equal to |
-| `<` | `a < b` | Less than |
-| `<=` | `a <= b` | Less than or equal |
-| `>` | `a > b` | Greater than |
-| `>=` | `a >= b` | Greater than or equal |
-
-### 7.4 Logical Operators
-
-| Operator | Example | Description |
-|----------|---------|-------------|
-| `&&` | `a && b` | Logical AND (short-circuit) |
-| `\|\|` | `a \|\| b` | Logical OR (short-circuit) |
-| `!` | `!a` | Logical NOT |
-
-**Short-circuit evaluation**: `&&` does not evaluate the right operand if the left is falsy. `||` does not evaluate the right operand if the left is truthy.
-
-```javascript
-// y is never set to 1 because 0 is falsy
-if (0 && (y = 1)) { }
-
-// y is never set to 2 because 1 is truthy
-if (1 || (y = 2)) { }
+```
+var [a, b, c] = arr       // a = arr[0], b = arr[1], c = arr[2]
+var [x, _, z] = arr       // use '_' to skip an element
+const [first, second] = arr
 ```
 
-### 7.5 Bitwise Operators
+Desugars to a temporary variable plus individual element reads.
 
-| Operator | Example | Description |
-|----------|---------|-------------|
-| `&` | `a & b` | Bitwise AND |
-| `\|` | `a \| b` | Bitwise OR |
-| `^` | `a ^ b` | Bitwise XOR |
-| `~` | `~a` | Bitwise NOT (complement) |
-| `<<` | `a << n` | Left shift |
-| `>>` | `a >> n` | Logical right shift (zero-filling) |
+### 6.2 Constants
 
-```javascript
-var a = 12 & 10;     // 1100 & 1010 = 1000 = 8
-var b = 12 | 10;     // 1100 | 1010 = 1110 = 14
-var c = 12 ^ 10;     // 1100 ^ 1010 = 0110 = 6
-var d = ~0;           // All bits set = -1
-var e = 1 << 4;       // 16
-var f = 32 >> 2;      // 8
+```
+const PI = 3.14159
+const MAX:int = 100
 ```
 
-### 7.6 Increment and Decrement
+Constants must be initialized at declaration and cannot be reassigned. The compiler performs constant folding at compile time.
 
-| Operator | Example | Description |
-|----------|---------|-------------|
-| `++x` | `var b = ++a;` | Prefix: increments `a`, returns **new** value |
-| `x++` | `var b = a++;` | Postfix: increments `a`, returns **old** value |
-| `--x` | `var b = --a;` | Prefix: decrements `a`, returns **new** value |
-| `x--` | `var b = a--;` | Postfix: decrements `a`, returns **old** value |
+### 6.3 Register Variables
 
-```javascript
-var a = 5;
-var b = ++a;    // a = 6, b = 6  (prefix: new value)
-var c = 10;
-var d = c++;    // c = 11, d = 10 (postfix: old value)
+```
+register var x:int = 0    // hint to force variable into CPU register
 ```
 
-Increment and decrement operators also work on **array elements**:
+Instructs the compiler to promote the variable to an SSA register via LLVM's `mem2reg` pass. Only works for types that fit in a register (integers, floats, bools).
 
-```javascript
-var arr = [10, 20, 30];
-arr[0]++;           // arr[0] = 11
-var old = arr[1]--; // old = 20, arr[1] = 19
-var val = ++arr[2]; // val = 31, arr[2] = 31
+### 6.4 Assignment
+
+```
+x = 10
+arr[i] = value
+obj.field = value
 ```
 
-### 7.7 Ternary Operator
+### 6.5 Compound Assignment
 
-```javascript
-var result = condition ? valueIfTrue : valueIfFalse;
+```
+x += 1     x -= 1     x *= 2     x /= 2     x %= 3
+x &= mask  x |= flag  x ^= bits  x <<= 2    x >>= 2
+x **= 2    x ??= default_val
 ```
 
-Ternary expressions can be nested:
+---
 
-```javascript
-var sign = (x > 0) ? 1 : ((x < 0) ? -1 : 0);
+## 7. Functions
+
+### 7.1 Basic Syntax
+
+```
+fn name(param1, param2) {
+    // body
+}
 ```
 
-### 7.8 Null Coalescing Operator
+### 7.2 Type-Annotated Parameters and Return Type
 
-The `??` operator returns the left operand if it is non-zero (truthy), otherwise the right operand:
-
-```javascript
-var result = value ?? defaultValue;
-// Equivalent to: value != 0 ? value : defaultValue
+```
+fn add(a:int, b:int) -> int {
+    return a + b;
+}
 ```
 
-The right operand is only evaluated if the left operand is zero (short-circuit evaluation). `??` is left-associative and can be chained:
+### 7.3 Expression-Body Functions
 
-```javascript
-var x = a ?? b ?? c;  // First non-zero value, or c
+A function with a single-expression body can use `=` syntax:
+
+```
+fn square(x:int) -> int = x * x;
 ```
 
-### 7.9 Compound Assignment
+### 7.4 Default Parameter Values
 
-| Operator | Equivalent |
-|----------|------------|
-| `x += y` | `x = x + y` |
-| `x -= y` | `x = x - y` |
-| `x *= y` | `x = x * y` |
-| `x /= y` | `x = x / y` |
-| `x %= y` | `x = x % y` |
-| `x &= y` | `x = x & y` |
-| `x \|= y` | `x = x \| y` |
-| `x ^= y` | `x = x ^ y` |
-| `x <<= y` | `x = x << y` |
-| `x >>= y` | `x = x >> y` |
+Parameter defaults must be literal values:
 
-### 7.10 Pipe Operator
-
-The pipe operator `|>` passes the left operand as the argument to the function on the right. It is syntactic sugar for a function call and supports both user-defined and standard library functions.
-
-```javascript
-// expr |> fn  is equivalent to  fn(expr)
-var result = [1, 2, 3] |> len;           // len([1, 2, 3]) → 3
-
-fn double(x) { return x * 2; }
-var y = 5 |> double;                      // double(5) → 10
-
-// Chaining: left-associative, evaluated left to right
-var n = [1, 2, 3, 4, 5, 6] |> len;       // 6
+```
+fn greet(name, times = 1) {
+    repeat times { println(name); }
+}
 ```
 
-### 7.11 Lambda Expressions
+### 7.5 Generic (Type-Parameterized) Functions
 
-Lambda expressions create anonymous functions inline. They are desugared at parse time into named helper functions, so they can be used wherever a function name string literal is expected (such as `array_map`, `array_filter`, `array_reduce`).
-
-**Syntax:** `|params| body_expression`
-
-```javascript
-// Single parameter
-var doubled = array_map([1, 2, 3], |x| x * 2);    // [2, 4, 6]
-
-// Multiple parameters
-var sum = array_reduce([1, 2, 3], |acc, x| acc + x, 0);  // 6
-
-// Filter with lambda predicate
-var evens = array_filter([1, 2, 3, 4], |x| x % 2 == 0);  // [2, 4]
-
-// Zero parameters
-var always42 = || 42;
+```
+fn identity<T>(x:T) -> T {
+    return x;
+}
 ```
 
-> **Note:** Lambdas are compile-time constructs. They do not capture variables from the enclosing scope — they are pure functions of their parameters.
+Type parameters are declared in `<...>` after the function name and are mainly informational.
 
-### 7.12 Spread Operator
+### 7.6 Function Annotations
 
-The spread operator `...` unpacks array elements into a new array literal. It can appear anywhere inside `[...]` brackets alongside regular elements.
+Annotations appear before `fn` and are prefixed with `@`:
 
-```javascript
-var a = [1, 2, 3];
-var b = [4, 5, 6];
+```
+@hot
+fn compute(x:int) -> int { ... }
 
-var combined = [...a, ...b];           // [1, 2, 3, 4, 5, 6]
-var prepended = [0, ...a];             // [0, 1, 2, 3]
-var sandwiched = [0, ...a, 99, ...b];  // [0, 1, 2, 3, 99, 4, 5, 6]
+@inline @pure
+fn add(a:int, b:int) -> int = a + b;
 ```
 
-The spread operator computes the total length at runtime and allocates a single result array.
+| Annotation | Effect |
+|---|---|
+| `@inline` | Force function inlining |
+| `@noinline` | Prevent inlining |
+| `@cold` | Mark as cold (infrequently called) |
+| `@hot` | Mark as hot (optimize aggressively; elides bounds checks at O2+) |
+| `@pure` | Mark as pure (no side effects) |
+| `@noreturn` | Function never returns |
+| `@static` | Internal linkage |
+| `@flatten` | Inline all call sites within this function |
+| `@unroll` | Unroll loops within this function |
+| `@nounroll` | Prevent loop unrolling |
+| `@restrict` | All pointer params are non-aliasing (`noalias`) |
+| `@noalias` | Alias for `@restrict` |
+| `@vectorize` | Enable loop auto-vectorization |
+| `@novectorize` | Disable loop auto-vectorization |
+| `@parallel` | Enable loop parallelization hints |
+| `@noparallel` | Disable loop parallelization hints |
+| `@minsize` | Optimize for code size |
+| `@optnone` | Disable all optimizations (overrides `@inline`, `@hot`) |
+| `@nounwind` | Function never throws (no unwind tables) |
+| `@const_eval` | Evaluate at compile time when possible |
+
+**File-level annotation:**
+```
+@noalias   // applied before any fn/struct/enum — sets noalias on all functions in file
+```
+
+### 7.7 Parameter Annotation: @prefetch
+
+```
+fn process(@prefetch data, size:int) {
+    // 'data' will be prefetched into cache before first use
+}
+```
+
+At function return the compiler automatically emits cache-eviction prefetch hints for any `@prefetch`-annotated parameters that are not being returned. No explicit `invalidate` is required for `@prefetch` parameters.
+
+### 7.8 Tail Calls
+
+Self-recursive calls in tail position are automatically converted to jumps (guaranteed tail call elimination).
 
 ---
 
 ## 8. Control Flow
 
-### 8.1 If / Else
+### 8.1 if / else / elif
 
-```javascript
-if (condition) {
-    // then branch
-}
-
-if (condition) {
-    // then branch
-} else {
-    // else branch
-}
-
-// Single-statement (no braces)
-if (x > 0) return x;
-else return -x;
 ```
-
-#### Branch Prediction Hints: `likely` / `unlikely`
-
-The `likely` and `unlikely` keywords can precede an `if` statement to provide branch prediction hints. The compiler emits LLVM branch weight metadata (2000:1 ratio) that guides the CPU's branch predictor and the code layout optimizer.
-
-```javascript
-// Hint: the condition is usually true — optimize for the then-branch
-likely if (n > 0) {
-    return compute(n);
+if (condition) {
+    // ...
+} elif (other) {
+    // ...
 } else {
-    return 0;
-}
-
-// Hint: the condition is usually false — optimize for the else-branch
-unlikely if (error_code != 0) {
-    handle_error(error_code);
+    // ...
 }
 ```
 
-| Keyword | Branch Weight | Effect |
-|---------|--------------|--------|
-| `likely` | then=2000, else=1 | Then-branch is the hot path; code layout favors fall-through to then |
-| `unlikely` | then=1, else=2000 | Then-branch is the cold path; else-branch (or fall-through) is hot |
+`elif` is a first-class keyword (not `else if`).
 
-**Notes:**
-- `likely`/`unlikely` are pure hints — they do not change program semantics.
-- At O2+, the LLVM backend uses these weights for block placement, reducing branch mispredictions.
-- The HGOE (Hardware Graph Optimizer) also uses exit-block heuristics for branch layout when no explicit hints are provided.
+### 8.2 unless
 
-### 8.2 While Loop
+Inverted `if` — executes the body when the condition is **false**:
 
-```javascript
+```
+unless (x == 0) {
+    // runs when x != 0
+}
+```
+
+Desugars to `if (!condition)`.
+
+### 8.3 Branch Prediction Hints
+
+```
+likely if (condition) { ... }
+unlikely if (condition) { ... }
+```
+
+Attaches branch-weight metadata to the conditional branch.
+
+### 8.4 guard
+
+Early-exit pattern — executes the body when the condition is **false**:
+
+```
+guard (x > 0) else {
+    return -1;
+}
+```
+
+Desugars to `if (!condition) { body }`.
+
+### 8.5 switch
+
+```
+switch (value) {
+    case 1: { ... }
+    case 2, 3: { ... }    // multi-value case: matches 2 or 3
+    default: { ... }
+}
+```
+
+Multiple comma-separated values in one `case` arm map to the same body. OmScript has **no C-style fallthrough** — an empty case body simply exits the switch without executing the next case's body. To match multiple values, use comma syntax (`case 2, 3:`).
+
+`break` inside any case arm exits the switch (same as a loop `break`).
+
+### 8.6 when
+
+Pattern-matching style switch with `=>` syntax:
+
+```
+when (value) {
+    1 => { println("one"); },
+    2, 3 => { println("two or three"); },
+    _ => { println("other"); }
+}
+```
+
+Desugars to a switch statement.
+
+### 8.7 defer
+
+Defers execution of a statement to the end of the enclosing block. Multiple `defer`s in the same block execute in **LIFO order** (last `defer` runs first):
+
+```
+fn open_file() {
+    defer println("second");  // runs second
+    defer println("first");   // runs first (LIFO)
+    // ... work ...
+    // deferred statements execute here, at block exit
+}
+```
+
+### 8.8 with
+
+Scoped variable bindings lexically scoped to a block. Supports `var` and `const` bindings, and multiple comma-separated bindings in one `with`:
+
+```
+with (var f = open_file()) {
+    // f is available here
+}
+
+with (var a = 5, var b = 10) {
+    // both a and b are in scope
+}
+
+with (const factor = 7) {
+    // factor is a read-only binding
+}
+```
+
+Desugars to a block with the variable declarations prepended to the body.
+
+---
+
+## 9. Loops
+
+### 9.1 while
+
+```
 while (condition) {
-    // body
+    // ...
 }
 ```
 
-Example:
+### 9.2 do...while
 
-```javascript
-var i = 0;
-var sum = 0;
-while (i < 10) {
-    sum = sum + i;
-    i = i + 1;
-}
 ```
-
-### 8.3 Do-While Loop
-
-Executes the body **at least once**, then checks the condition:
-
-```javascript
 do {
-    // body
+    // ...
 } while (condition);
 ```
 
-Example:
+### 9.3 until
 
-```javascript
-var sum = 0;
-var i = 1;
-do {
-    sum += i;
-    i++;
-} while (i <= 5);
-// sum = 15
+Loop while condition is **false** — desugars to `while (!condition)`:
+
+```
+until (x == 0) {
+    x -= 1;
+}
 ```
 
-### 8.4 For Loop (Range-Based)
+### 9.4 for — Range-Based
 
-OmScript's for loop iterates over a range of integers:
+```
+for (i in 0...10) { ... }          // 0, 1, ..., 9
+for (i in 0...10...2) { ... }      // 0, 2, 4, 6, 8 (step 2)
+for (i in 0...10 step 2) { ... }   // same as above
+```
 
-```javascript
-// Ascending: 0, 1, 2, 3, 4
-for (i in 0...5) {
-    print(i);
+`...` is the range operator (exclusive end). `..` is also accepted.
+
+### 9.5 for — Downto
+
+```
+for (i in 10 downto 0) { ... }         // 10, 9, ..., 1 (step -1)
+for (i in 10 downto 0 step 2) { ... }  // 10, 8, 6, 4, 2
+```
+
+### 9.6 for — Collection Iteration (for-each)
+
+```
+for (item in collection) { ... }
+for (i, item in collection) { ... }   // indexed: i = index, item = element
+```
+
+When the collection is a **string**, the iterator variable holds the **integer character code** (byte value) of each character, not a single-character string:
+
+```
+for (c in "abc") {
+    // c = 97, then 98, then 99  (ASCII codes)
 }
+```
 
-// With optional type annotation
-for (i: int in 0...10) {
+Use `to_char(c)` to convert a character code back to a single-character string.
+
+### 9.7 foreach
+
+```
+foreach item in collection { ... }
+foreach (i, item in collection) { ... }   // indexed variant
+```
+
+Desugars to a `for` loop.
+
+### 9.8 loop
+
+Infinite loop (desugars to `while (true)`):
+
+```
+loop {
+    // infinite
+}
+```
+
+Counted loop:
+
+```
+loop 5 { ... }      // run body 5 times
+loop (n) { ... }    // run body n times
+```
+
+### 9.9 repeat
+
+Counted loop:
+
+```
+repeat 5 { ... }      // run body 5 times
+repeat (n) { ... }    // run body n times
+```
+
+Post-test loop (desugars to `do...while`):
+
+```
+repeat {
     // ...
-}
+} until (condition);
+```
 
-// With explicit step
-for (i in 0...20...2) {
-    // i = 0, 2, 4, 6, ..., 18
-}
+### 9.10 forever
 
-// Descending range with negative step
-for (i in 5...0...-1) {
-    // i = 5, 4, 3, 2, 1
+Infinite loop:
+
+```
+forever {
+    // infinite, same as loop { }
 }
 ```
 
-**Syntax:** `for (iterator in start...end[...step]) body`
+### 9.11 times
 
-- `start` is **inclusive**
-- `end` is **exclusive**
-- `step` defaults to `1` (or `-1` if `start > end`)
-- The iterator variable is loop-scoped
+Counted loop:
 
-#### For-Each Loop (Array Iteration)
-
-The `for...in` syntax also supports iterating over arrays:
-
-```javascript
-var arr = [10, 20, 30, 40, 50];
-var total = 0;
-for (x in arr) {
-    total = total + x;
-}
-// total = 150
+```
+times 3 { ... }     // run body 3 times
+times (n) { ... }   // run body n times
 ```
 
-When the right-hand side of `in` is an array (rather than a range with `...`), the loop iterates over each element.
+### 9.12 OPTMAX Loop Variables
 
-### 8.5 Break and Continue
+Inside `OPTMAX` blocks, loop variables require type annotations:
 
-```javascript
-while (i < 100) {
-    if (i == 50) break;       // Exit the loop
-    if (i % 2 == 0) {
-        i++;
-        continue;             // Skip to next iteration
+```
+for (i:int in 0...n) { ... }
+```
+
+### 9.13 break / continue
+
+```
+break;
+continue;
+```
+
+### 9.14 swap
+
+Rotates values among two or more variables atomically:
+
+```
+swap a, b;         // exchange a and b
+swap a, b, c;      // a←b, b←c, c←a (rotation)
+```
+
+---
+
+## 10. Expressions and Operators
+
+### 10.1 Arithmetic
+
+```
+a + b    a - b    a * b    a / b    a % b
+a ** b             // exponentiation (a to the power of b)
+-a                 // unary negation
+```
+
+### 10.2 Comparison
+
+```
+a == b    a != b    a < b    a <= b    a > b    a >= b
+```
+
+### 10.3 Logical
+
+```
+a && b    a || b    !a
+```
+
+### 10.4 Bitwise
+
+```
+a & b     // AND
+a | b     // OR
+a ^ b     // XOR
+~a        // NOT (bitwise complement)
+a << n    // left shift
+a >> n    // right shift
+```
+
+### 10.5 Null Coalescing
+
+```
+a ?? b    // if a != null/0, yields a; otherwise yields b
+x ??= default_val  // compound null-coalescing assignment
+```
+
+### 10.6 Ternary
+
+```
+condition ? then_value : else_value
+```
+
+### 10.7 Pipe Forward
+
+```
+value |> function_name    // equivalent to function_name(value)
+[1,2,3] |> sort |> reverse
+```
+
+### 10.8 Range
+
+```
+0...10      // exclusive range from 0 to 9
+0..10       // also supported
+```
+
+### 10.9 Spread
+
+```
+...array    // spread array elements into a call or array literal
+```
+
+### 10.10 Increment / Decrement
+
+```
+x++    x--    ++x    --x
+```
+
+### 10.11 Address / Reference
+
+```
+&variable   // take address / borrow reference
+```
+
+### 10.12 Operator Precedence (high to low)
+
+1. Postfix `++`, `--`, `[]`, `.`, function call
+2. Prefix `++`, `--`, `-`, `!`, `~`, `&`
+3. `**` (right-associative)
+4. `*`, `/`, `%`
+5. `+`, `-`
+6. `<<`, `>>`
+7. `&`
+8. `^`
+9. `|`
+10. `==`, `!=`, `<`, `<=`, `>`, `>=`
+11. `&&`
+12. `||`
+13. `??`
+14. `? :` (ternary)
+15. Assignment (`=`, `+=`, etc.)
+16. `|>` (pipe forward)
+
+---
+
+## 11. Arrays
+
+### 11.1 Array Literals
+
+```
+var arr = [1, 2, 3]
+var empty = []
+var typed:int[] = [10, 20, 30]
+```
+
+### 11.2 Indexing
+
+```
+arr[0]          // read (bounds-checked at O0/O1)
+arr[i] = val    // write
+s[i]            // string subscript: returns the integer character code at index i
+```
+
+Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and when the compiler can statically prove safety.
+
+### 11.3 Array Built-ins
+
+| Function | Description |
+|---|---|
+| `len(arr)` | Number of elements |
+| `push(arr, val)` | Append element |
+| `pop(arr)` | Remove and return last element |
+| `sort(arr)` | Sort in place |
+| `reverse(arr)` | Reverse in place |
+| `index_of(arr, val)` | First index of value (-1 if not found) |
+| `array_contains(arr, val)` | Returns 1 if found, 0 otherwise |
+| `array_fill(size, val)` | Create array of `size` copies of `val` |
+| `array_concat(a, b)` | Concatenate two arrays |
+| `array_slice(arr, start, end)` | Sub-array `[start, end)` |
+| `array_copy(arr)` | Shallow copy |
+| `array_remove(arr, i)` | Remove element at index `i` |
+| `array_map(arr, fn)` | Apply function to each element, return new array |
+| `array_filter(arr, fn)` | Keep elements for which `fn` returns true |
+| `array_reduce(arr, fn, init)` | Reduce array to single value |
+| `array_min(arr)` | Minimum value |
+| `array_max(arr)` | Maximum value |
+| `array_any(arr, fn)` | True if any element satisfies `fn` |
+| `array_every(arr, fn)` | True if all elements satisfy `fn` |
+| `array_find(arr, fn)` | First element satisfying `fn` |
+| `array_count(arr, fn)` | Count elements satisfying `fn` |
+| `array_product(arr)` | Product of all elements |
+| `array_last(arr)` | Last element |
+| `array_insert(arr, i, val)` | Insert `val` at index `i` |
+| `swap(arr, i, j)` | Swap elements at indices `i` and `j` in place (bounds-checked) |
+| `sum(arr)` | Sum of all elements |
+| `range(start, end)` | Create array `[start, start+1, ..., end-1]` |
+| `range_step(start, end, step)` | Create array with step |
+
+---
+
+## 12. Strings
+
+Strings are heap-allocated and NUL-terminated. String indexing and concatenation are built-in.
+
+### 12.1 String Built-ins
+
+| Function | Description |
+|---|---|
+| `len(s)` / `str_len(s)` | Length in characters |
+| `char_at(s, i)` | Character code at index `i` (returns an **integer**, the byte value; use `to_char()` to get a string) |
+| `str_eq(s1, s2)` | String equality (returns 1/0) |
+| `str_concat(s1, s2)` | Concatenate two strings |
+| `str_substr(s, start, len)` | Substring of length `len` starting at `start` |
+| `str_upper(s)` | Uppercase |
+| `str_lower(s)` | Lowercase |
+| `str_find(s, c)` | Find first occurrence of character code `c` (integer) in `s`; returns index or -1 |
+| `str_contains(s, sub)` | Contains substring (1/0) |
+| `str_index_of(s, sub)` | First index of substring `sub` (-1 if not found) |
+| `str_replace(s, old, new)` | Replace all occurrences of `old` with `new` |
+| `str_trim(s)` | Strip leading/trailing whitespace |
+| `str_starts_with(s, prefix)` | Starts with prefix (1/0) |
+| `str_ends_with(s, suffix)` | Ends with suffix (1/0) |
+| `str_repeat(s, n)` | Repeat string `n` times |
+| `str_reverse(s)` | Reverse string |
+| `str_split(s, delim)` | Split by delimiter, returns array |
+| `str_chars(s)` | Split into array of single-character strings |
+| `str_join(arr, delim)` | Join array with delimiter |
+| `str_count(s, sub)` | Count non-overlapping occurrences of `sub` |
+| `str_pad_left(s, n, ch)` | Pad string on left to width `n` with character `ch` |
+| `str_pad_right(s, n, ch)` | Pad string on right to width `n` with character `ch` |
+| `to_string(x)` | Convert number to string |
+| `number_to_string(x)` | Convert number to string |
+| `string_to_number(s)` | Parse string as number |
+| `str_to_int(s)` | Parse string as integer |
+| `str_to_float(s)` | Parse string as float |
+| `to_int(x)` | Convert to integer |
+| `to_float(x)` | Convert to float |
+| `to_char(code)` | Integer code point to single-character string |
+| `char_code(c)` | Character to integer code point |
+| `is_alpha(c)` | Is alphabetic (1/0) |
+| `is_digit(c)` | Is decimal digit (1/0) |
+
+---
+
+## 13. Dictionaries / Maps
+
+Dictionaries (maps) are hash maps mapping string keys to integer/pointer values.
+
+### 13.1 Map Built-ins
+
+| Function | Description |
+|---|---|
+| `map_new()` | Create new empty map |
+| `map_set(m, key, val)` | Set key to value |
+| `map_get(m, key, default)` | Get value for key; returns `default` if key is absent |
+| `map_has(m, key)` | Check if key exists (1/0) |
+| `map_remove(m, key)` | Remove key |
+| `map_keys(m)` | Array of all keys |
+| `map_values(m)` | Array of all values |
+| `map_size(m)` | Number of entries |
+
+---
+
+## 14. Structs
+
+### 14.1 Definition
+
+```
+struct Point {
+    x: int,
+    y: int
+}
+```
+
+### 14.2 Field Attributes
+
+Fields can carry optional attributes:
+
+```
+struct Buffer {
+    hot data: int,           // frequently accessed field
+    cold metadata: int,      // infrequently accessed
+    noalias ptr: int,        // pointer does not alias other fields
+    immut size: int,         // immutable after construction
+    align(16) data: float,   // alignment requirement
+    range(0, 100) percent: int  // value range hint
+}
+```
+
+### 14.3 Struct Literals
+
+```
+var p = Point { x: 10, y: 20 }
+```
+
+### 14.4 Field Access and Assignment
+
+```
+var v = p.x
+p.y = 30
+p.x += 5    // compound assignment on struct fields supported
+```
+
+### 14.5 Operator Overloading
+
+```
+struct Vec2 {
+    x: float,
+    y: float,
+    fn operator+(other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y };
     }
-    sum += i;
-    i++;
-}
-```
-
-`break` and `continue` work in `while`, `do-while`, and `for` loops. Using them outside a loop produces a compile error.
-
-### 8.6 Blocks
-
-Braces `{ }` introduce a new scope:
-
-```javascript
-{
-    var x = 10;    // x is only visible inside this block
-}
-// x is not accessible here
-```
-
-### 8.7 Try / Catch / Throw
-
-OmScript supports structured error handling via `try`, `catch`, and `throw`:
-
-```javascript
-try {
-    // Code that may throw an error
-    if (x < 0) {
-        throw 42;  // throw an integer error code
+    fn operator==(other: Vec2) -> bool {
+        return self.x == other.x && self.y == other.y;
     }
-    var result = risky_operation();
-} catch (err) {
-    // err contains the thrown value (42 in this case)
-    println(err);
 }
 ```
 
-**Key points:**
-- `throw` accepts any integer expression as an error value.
-- The `catch` block binds the thrown value to the named variable.
-- If no `throw` occurs in the `try` block, the `catch` block is skipped.
-- Try/catch blocks can be nested.
+Supported operators: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`.
 
-```javascript
-try {
-    try {
-        throw 1;
-    } catch (inner) {
-        // inner == 1
-    }
-    // Execution continues here after inner catch
-    throw 2;
-} catch (outer) {
-    // outer == 2
-}
+Operator overload functions are automatically inlined.
+
+---
+
+## 15. Enums
+
 ```
-
-### 8.8 Enums
-
-Enums declare named integer constants at the top level of a program:
-
-```javascript
 enum Color {
-    RED,        // 0 (auto-incremented from 0)
-    GREEN = 10, // explicit value
-    BLUE        // 11 (auto-incremented from previous)
+    Red,
+    Green,
+    Blue,
+    Custom = 42
 }
 
-fn main() {
-    var c = Color_GREEN;  // accessed as EnumName_MemberName
-    if (c == Color_GREEN) {
-        println("green!");
-    }
-    return 0;
-}
+var c = Color.Red
 ```
 
-**Key points:**
-- Members default to 0 for the first value and auto-increment by 1.
-- Explicit values can be assigned with `= value`.
-- Enum members are accessed as `EnumName_MemberName` (e.g., `Color_RED`).
-- Enums are compile-time constants — they produce no runtime overhead.
-
-### 8.9 Switch / Case / Default
-
-The `switch` statement provides multi-way branching on integer values:
-
-```javascript
-fn classify(x) {
-    switch (x) {
-        case 1:
-            return 10;
-        case 2:
-            return 20;
-        case 3:
-            return 30;
-        default:
-            return 0;
-    }
-}
-```
-
-#### Multi-Value Case
-
-A single `case` arm can match multiple values using comma-separated constants:
-
-```javascript
-fn category(x) {
-    switch (x) {
-        case 1, 2, 3:
-            return "small";
-        case 4, 5:
-            return "medium";
-        default:
-            return "large";
-    }
-}
-```
-
-All values in a multi-value case must be unique across the entire switch statement. Duplicate values (even across different case arms) produce a compile error.
-
-**Key points:**
-- Case values must be integer constants (float literals produce a compile error).
-- Use `break` to exit a case (fall-through occurs without it).
-- The `default` case handles any value not matched by an explicit `case`.
-- `continue` inside a `switch` nested within a loop jumps to the enclosing loop's continue target.
-- When the switch condition is a compile-time constant, the compiler eliminates dead branches and generates only the matched case body.
+Enum members without explicit values are auto-numbered from 0 (or from the previous explicit value + 1).
 
 ---
 
-## 9. Arrays
+## 16. Error Handling
 
-### 9.1 Array Literals
-
-Arrays are created with square bracket syntax:
-
-```javascript
-var arr = [10, 20, 30, 40, 50];
-var empty = [];
-var mixed = [1, 2 + 3, factorial(5)];
-```
-
-### 9.2 Internal Representation
-
-Arrays are stack-allocated as contiguous `i64` slots:
+### 16.1 try / catch / throw
 
 ```
-Slot 0: length (number of elements)
-Slot 1: element 0
-Slot 2: element 1
-...
-Slot N: element N-1
-```
-
-The array value is stored as a pointer cast to `i64`. The `len()` builtin reads slot 0; indexing reads slot `index + 1`.
-
-### 9.3 Array Indexing
-
-```javascript
-var arr = [10, 20, 30];
-var first = arr[0];     // 10
-var last = arr[2];      // 30
-```
-
-**Bounds checking** is performed at runtime. Accessing an out-of-bounds index prints an error and terminates the program:
-
-```
-Runtime error: array index out of bounds
-```
-
-### 9.4 Array Iteration
-
-```javascript
-var arr = [10, 20, 30, 40, 50];
-var sum = 0;
-for (i in 0...len(arr)) {
-    sum = sum + arr[i];
-}
-// sum = 150
-```
-
-### 9.5 Array Mutation
-
-Arrays can be mutated in-place using stdlib functions:
-
-```javascript
-var arr = [1, 2, 3, 4, 5];
-swap(arr, 0, 4);       // arr = [5, 2, 3, 4, 1]
-reverse(arr);           // arr = [1, 4, 3, 2, 5]
-```
-
----
-
-## 10. Strings
-
-### 10.1 String Literals
-
-Strings are enclosed in double quotes:
-
-```javascript
-print("hello world");
-print("line 1\nline 2");
-```
-
-### 10.2 String Support
-
-Strings are supported as:
-
-- **Global string constants** — String literals are emitted as LLVM `CreateGlobalString` constants.
-- **Print argument** — `print("message")` detects string literal arguments and uses `%s\n` format.
-- **Return type** — String values are stored as pointer-to-i64 in the uniform value representation.
-
-### 10.3 Runtime String Type
-
-At runtime, strings are fully dynamic:
-
-- Reference-counted with `RefCountedString` (malloc-based).
-- Support concatenation (`+`), comparison (`==`, `<`), and conversion (`toString()`).
-- Automatic deallocation when the reference count reaches zero.
-
----
-
-## 11. Structs
-
-### 11.1 Declaration
-
-Structs declare named record types at the top level. Fields are separated by commas:
-
-```javascript
-struct Point { x, y }
-struct Color { r, g, b }
-struct Person { name, age, score }
-```
-
-### 11.2 Creating Struct Instances
-
-Use a **struct literal** with field names and values:
-
-```javascript
-struct Point { x, y }
-
-fn main() {
-    var p = Point { x: 10, y: 20 };
-    return 0;
-}
-```
-
-### 11.3 Field Access
-
-Use dot notation to read a field:
-
-```javascript
-struct Point { x, y }
-
-fn main() {
-    var p = Point { x: 10, y: 20 };
-    println(p.x);   // 10
-    println(p.y);   // 20
-    return 0;
-}
-```
-
-### 11.4 Field Assignment
-
-Use dot notation on the left-hand side to update a field:
-
-```javascript
-struct Point { x, y }
-
-fn main() {
-    var p = Point { x: 10, y: 20 };
-    p.x = 30;
-    println(p.x);   // 30
-    return 0;
-}
-```
-
-### 11.5 Structs as Function Arguments and Return Values
-
-Structs are passed and returned like any other value:
-
-```javascript
-struct Point { x, y }
-
-fn make_point(a, b) {
-    return Point { x: a, y: b };
-}
-
-fn sum(p) {
-    return p.x + p.y;
-}
-
-fn main() {
-    var p = make_point(3, 4);
-    println(sum(p));   // 7
-    return 0;
-}
-```
-
-**Key points:**
-- All field names in a struct literal must match the declared fields (order is flexible).
-- Field values may be any expression.
-- Structs are value types passed by reference internally — mutation via dot-assign affects the original variable.
-
-### 11.6 Field-Level Optimization Attributes
-
-Struct fields support optional attributes that enable compiler optimizations. These are **hints only** — they do not change runtime semantics:
-
-```javascript
-struct Particle {
-    hot immut int id,
-    cold int last_used,
-    align(64) int buffer,
-    noalias int ptr,
-    range(0,100) int score,
-    move int inner
-}
-```
-
-| Attribute | Meaning |
-|-----------|---------|
-| `hot` | Hint: field is frequently accessed — guide cache layout |
-| `cold` | Hint: field is rarely accessed |
-| `immut` | Hint: field never modified after initialization |
-| `noalias` | Hint: pointer field does not alias any other pointer |
-| `align(N)` | Hint: field should be aligned to N bytes |
-| `range(min,max)` | Hint: field value is always in [min, max] — enables range propagation |
-| `move` | Hint: field participates in ownership transfer |
-
-Multiple attributes may be combined on a single field. All attributes are optional and have no effect on correctness — they only enable LLVM to produce better code.
-
----
-
-## 12. Enums
-
-Enums declare named integer constants at the top level. See [section 8.8](#88-enums) for full details.
-
-```javascript
-enum Direction { NORTH, SOUTH = 10, EAST, WEST }
-
-fn main() {
-    var d = Direction_EAST;   // 11
-    return d;
-}
-```
-
----
-
-## 13. Maps
-
-Maps (dictionaries) store key-value pairs where keys are strings and values are `i64`.
-
-### 13.1 Creating a Map
-
-```javascript
-var m = map_new();
-```
-
-### 13.2 Setting and Getting Values
-
-```javascript
-m = map_set(m, "x", 42);
-var v = map_get(m, "x", 0);   // 0 is the default if key absent
-println(v);                    // 42
-```
-
-### 13.3 Checking for Keys
-
-```javascript
-var exists = map_has(m, "x");   // 1 if present, 0 otherwise
-```
-
-### 13.4 Removing Keys
-
-```javascript
-m = map_remove(m, "x");
-```
-
-### 13.5 Querying Size and Iterating
-
-```javascript
-var sz = map_size(m);
-var keys   = map_keys(m);    // returns an array of key strings
-var values = map_values(m);  // returns an array of values
-```
-
-### 13.6 Full Example
-
-```javascript
-fn main() {
-    var m = map_new();
-    m = map_set(m, "a", 1);
-    m = map_set(m, "b", 2);
-    m = map_set(m, "c", 3);
-
-    println(map_get(m, "b", 0));   // 2
-    println(map_has(m, "d"));      // 0
-    println(map_size(m));          // 3
-
-    m = map_remove(m, "a");
-    println(map_size(m));          // 2
-    return 0;
-}
-```
-
-### 13.7 Dict Literal Syntax
-
-OmScript supports a concise **dict literal** syntax for constructing maps inline:
-
-```omscript
-var d = {"a": 1, "b": 2, "c": 3};
-var typed: dict = {"x": 10};
-var empty = {};
-```
-
-Dict literals are zero-cost — the compiler allocates a single block and writes all key-value pairs at compile-time-known offsets, with no search loop. They are fully compatible with all `map_*` built-ins:
-
-```omscript
-var d = {"key": 42};
-d = map_set(d, "key2", 99);
-println(map_get(d, "key", 0));   // 42
-println(map_size(d));             // 2
-```
-
-The type annotation `dict` (and `dict[K, V]` for documentation purposes) is supported but does not affect code generation.
-
----
-
-## 13b. Preprocessor
-
-OmScript includes a source-level preprocessor that runs **before** the lexer. It supports standard C-style directives plus several OmScript-specific extensions.
-
-### Macro Definition
-
-```omscript
-#define ANSWER 42
-#define DOUBLE(x) x * 2
-#undef ANSWER
-```
-
-### Conditional Compilation
-
-```omscript
-#ifdef FEATURE_X
-    // compiled if FEATURE_X is defined
-#endif
-
-#ifndef DEBUG
-    // compiled if DEBUG is not defined
-#endif
-
-#if VERSION >= 2
-    // compiled if expression is true
-#elif VERSION == 1
+try {
     // ...
-#else
-    // ...
-#endif
+    throw "something went wrong";
+} catch (e) {
+    println(e);
+}
 ```
 
-### Predefined Macros
+`throw` accepts any expression. `catch (e)` binds the thrown value to `e`.
 
-| Macro | Description |
-|-------|-------------|
-| `__FILE__` | Current source file name (string) |
-| `__LINE__` | Current line number (integer) |
-| `__VERSION__` | Compiler version string (e.g. `"3.7.0"`) |
-| `__OS__` | Target OS: `"linux"`, `"macos"`, or `"windows"` |
-| `__ARCH__` | Target architecture: `"x86_64"`, `"aarch64"`, `"arm"`, or `"unknown"` |
-| `__COUNTER__` | Auto-incrementing integer counter |
+### 16.2 assert
 
-### OmScript-Specific Directives
-
-```omscript
-#info This message is printed as a compiler info note
-#warning This message is printed as a compiler warning
-
-// Compile-time assertion (throws error if condition is false)
-#assert VERSION >= 1 "Version must be at least 1"
-
-// Require minimum compiler version
-#require "3.7.0"
-
-// Named auto-incrementing counter (each use increments by 1)
-#counter MY_ID
-var a = MY_ID;   // 0
-var b = MY_ID;   // 1
+```
+assert(x > 0);             // runtime assertion; aborts on failure
 ```
 
 ---
 
-## 14. Ownership System
+## 17. Memory Semantics and Ownership System
 
-OmScript provides an **optional, lightweight ownership system** that enables compiler optimizations and catches use-after-move/invalidate bugs at compile time. These features are **entirely optional** — normal code without ownership annotations is never affected.
+OmScript has a **compile-time ownership system** that statically tracks how every variable's value is used. The ownership system serves two purposes:
 
-### 14.1 Move Semantics
+1. **Safety** — detecting use-after-move and use-after-invalidate at compile time.
+2. **Aliasing guarantee** — the compiler proves that no two live references can point to the same memory, enabling `noalias`, `nonnull`, `dereferenceable`, and `nocapture` LLVM attributes on all pointer parameters automatically.
 
-The `move` keyword transfers ownership of a value from source to destination. After a move, the source variable is logically dead — any use of it is a **compile-time error**.
+### 17.0 Ownership States
 
-**Move declaration:**
-
-```javascript
-fn main() {
-    var a = 42;
-    move var b = a;  // b takes ownership; a is now dead
-    println(b);      // 42
-    // println(a);   // ERROR: Use of moved variable 'a'
-    return 0;
-}
-```
-
-**Move expression** (in assignment or return):
-
-```javascript
-fn make_value() {
-    var x = 42;
-    return move x;   // transfer ownership to caller; x is dead
-}
-
-fn main() {
-    var a = 100;
-    var b = move a;   // b = 100; a is now dead
-    println(b);       // 100
-    return 0;
-}
-```
-
-**What the compiler may do with `move`:**
-- Elide copies (construct directly in destination)
-- Reuse the source's stack slot / register
-- Enable RVO/NRVO for return values
-- Promote fields to registers (scalar replacement)
-
-### 14.2 Invalidate
-
-The `invalidate` statement explicitly marks a variable as dead without transferring its value. This lets the compiler reuse the variable's memory immediately.
-
-```javascript
-fn main() {
-    var x = 42;
-    println(x);      // 42
-    invalidate x;    // x is now dead
-    // println(x);   // ERROR: Use of invalidated variable 'x'
-
-    // Compiler can reuse x's stack slot for new variables
-    var y = 99;
-    println(y);      // 99
-    return 0;
-}
-```
-
-**What the compiler may do with `invalidate`:**
-- Emit `llvm.lifetime.end` to free the stack slot early
-- Eliminate dead stores to the variable
-- Reuse registers immediately
-
-### 14.3 Borrow
-
-The `borrow` keyword creates a non-owning reference hint for alias analysis. The compiler treats borrowed values as non-escaping, enabling better load/store optimization.
-
-```javascript
-fn main() {
-    var x = 42;
-    borrow var ref = x;   // ref holds x's value with noalias hint
-    println(ref);         // 42
-    return 0;
-}
-```
-
-Borrow declarations also support reference type annotations with `&` and the address-of operator:
-
-```javascript
-fn main() {
-    var x :i32 = 5;
-    borrow var j:&i32 = &x;   // reference type &i32, address-of &x
-    println(j);               // 5
-    return 0;
-}
-```
-
-The `&type` annotation (e.g., `&i32`, `&i64`) denotes a borrowed reference type. The `&expr` operator in this context is syntactic sugar indicating the value is borrowed from the source variable. Under the hood, borrowed references share the same underlying type as the referent.
-
-The compiler attaches `!noalias` scope metadata to loads from borrowed variables, enabling LLVM's alias analysis to produce more aggressive optimizations.
-
-### 14.4 Variable State Model
-
-Each variable has a conceptual state:
+Every variable that participates in ownership annotations transitions through an ownership lattice:
 
 | State | Meaning |
-|-------|---------|
-| **Owned** | Valid, can be read and written |
-| **Moved** | Dead — moved to another variable. Use is a compile error |
-| **Invalidated** | Dead — explicitly destroyed. Use is a compile error |
+|---|---|
+| **Owned** | Full control — may read, write, move, borrow, or invalidate |
+| **Borrowed** | Read-only alias — may NOT mutate, move, or invalidate the source |
+| **Moved** | Ownership transferred out — any further use is a compile error |
+| **Invalidated** | Explicitly killed — any further use is a compile error |
 
-**Transitions:**
+Variables that never use `move`, `borrow`, or `invalidate` remain in the Owned state and behave like ordinary variables.
+
+### 17.1 move
 
 ```
-Owned ──move──→ Moved (dead)
-Owned ──invalidate──→ Invalidated (dead)
-Moved ──assign──→ Owned (revived)
-Invalidated ──assign──→ Owned (revived)
+var a = [1, 2, 3]
+var b = move a     // b owns the array; a transitions to Moved state
 ```
 
-Re-assigning to a dead variable **revives** it:
+After `move`, the source variable (`a`) is **dead** — any subsequent read or write to it is a **compile-time error**. The compiler emits `llvm.lifetime.end` on the source alloca so the register allocator and optimizer can freely reuse its storage.
 
-```javascript
-fn main() {
-    var x = 42;
-    var y = move x;   // x is dead
-    x = 99;           // x is revived
-    println(x);       // 99
-    return 0;
+`move` can also appear in expression position:
+
+```
+fn transfer(data) {
+    store(move data)   // data is moved into the call; data is dead afterwards
 }
 ```
 
-### 14.5 Compile-Time Enforcement
-
-The compiler detects use-after-move and use-after-invalidate as **compile-time errors**:
+### 17.2 borrow
 
 ```
-error at line 4, column 13: Use of moved variable 'x'
-error at line 4, column 13: Use of invalidated variable 'x'
-```
-
-This detection is **automatic** — it does not require any special flags or annotations. It only triggers when the user explicitly writes `move` or `invalidate`. Normal code is never affected.
-
-### 14.6 LLVM IR Effects
-
-| Feature | IR Effect |
-|---------|-----------|
-| `move` | Source gets `llvm.lifetime.end` + `store undef` |
-| `invalidate` | Variable gets `llvm.lifetime.end` + `store undef` |
-| `borrow` | Load gets `!noalias` scope metadata |
-
-These IR annotations enable LLVM's optimization passes (SROA, mem2reg, GVN, alias analysis) to produce significantly better machine code.
-
----
-
-## 15. Module Imports
-
-### 15.1 Import Syntax
-
-The `import` statement includes another `.om` source file before compilation:
-
-```javascript
-import "path/to/module";
-```
-
-- The `.om` extension is added automatically if omitted.
-- Paths are relative to the importing file's directory.
-- Circular imports are detected and silently skipped.
-
-### 15.2 Module Files
-
-A module is an ordinary `.om` file that exports functions:
-
-```javascript
-// modules/math_utils.om
-fn square(n) { return n * n; }
-fn cube(n)   { return n * n * n; }
-fn add(a, b) { return a + b; }
-```
-
-### 15.3 Using Imported Functions
-
-After importing, all functions from the module are available in the current file:
-
-```javascript
-import "modules/math_utils";
-
-fn main() {
-    println(square(5));   // 25
-    println(cube(3));     // 27
-    println(add(10, 20)); // 30
-    return 0;
+fn process(data) {
+    var view = borrow data
+    // view shares data's storage; data cannot be mutated or moved
+    // while view is live
 }
 ```
 
-### 15.4 Multiple Imports
+`borrow` creates a read-only alias. The source variable transitions to the Borrowed state: it may still be read but cannot be mutated, moved, or invalidated while the borrow is active. The borrow ends at the end of the enclosing scope.
 
-```javascript
-import "modules/math_utils";
-import "modules/string_utils";
+The compiler attaches `!alias.scope` and `!noalias` LLVM scoped-noalias metadata to loads through borrowed pointers, enabling alias-analysis-dependent optimizations (vectorization, LICM, load/store reordering) across borrow boundaries.
 
-fn main() {
-    println(square(4));        // 16
-    println(greet("World"));   // Hello, World!
-    return 0;
-}
+### 17.3 invalidate
+
+```
+invalidate a;      // explicitly marks variable 'a' as Invalidated
 ```
 
-### 15.5 Circular Import Detection
+After `invalidate`, any use of `a` is a **compile-time error**.
 
-If file A imports file B which imports file A, the second import of A is silently ignored. This prevents infinite recursion during compilation.
+Required before returning from a function in which a variable was declared with the `prefetch` statement — the compiler enforces that every prefetch-declared variable is either invalidated or returned before the function exits. This does **not** apply to `@prefetch`-annotated function parameters (those are handled automatically).
 
----
+### 17.4 prefetch
 
-## 16. File I/O
+The `prefetch` statement issues software prefetch instructions and optionally declares a variable:
 
-### 16.1 Reading Files
-
-```javascript
-var content = file_read("data.txt");   // returns string, or "" on error
+```
+prefetch arr;              // prefetch 'arr' into L1 cache
+prefetch+128 arr;          // prefetch 'arr' and 128 bytes ahead
+prefetch data:int = compute();    // declare 'data' and prefetch it
 ```
 
-### 16.2 Writing Files
+Variables declared with the `prefetch` statement must be `invalidate`d before the function returns (unless they are returned via `move`).
 
-```javascript
-file_write("output.txt", "Hello, World!\n");   // overwrites the file
+### 17.5 No-Aliasing Guarantee
+
+OmScript's ownership system provides a **language-level no-aliasing guarantee**: at any point in a function, no two live pointer-typed variables can refer to the same memory region. This guarantee is enforced by the borrow checker — the Borrowed state prevents the source from being concurrently mutated, and the Moved/Invalidated states prevent any use of the old reference after transfer.
+
+As a result of this invariant, the compiler **automatically** adds the following LLVM attributes to every pointer parameter of every user function (at all optimization levels, including O0):
+
+| LLVM Attribute | Meaning |
+|---|---|
+| `noalias` | This pointer does not alias any other pointer parameter |
+| `nonnull` | This pointer is never null |
+| `dereferenceable(8)` | At least 8 bytes are valid at this address |
+| `nocapture` | This pointer is never stored into global state or returned as a pointer |
+
+These attributes are applied universally — not just in `@restrict` or `@optmax` functions — because they follow from the language semantics, not from programmer hints. This enables LLVM's alias analysis, CSE, LICM, vectorization, and dead-store elimination passes to apply their most aggressive optimizations throughout the entire program.
+
+For the strongest possible alias annotations, use:
+
+```
+@restrict         // synonym: @noalias
+fn compute(a:int[], b:int[], n:int) -> int { ... }
 ```
 
-### 16.3 Appending to Files
+or apply `@noalias` at the file level to cover all functions in the file:
 
-```javascript
-file_append("log.txt", "New entry\n");   // appends to existing file
 ```
-
-### 16.4 Checking File Existence
-
-```javascript
-var exists = file_exists("data.txt");   // 1 if exists, 0 otherwise
-```
-
-### 16.5 Full Example
-
-```javascript
-fn main() {
-    if (!file_exists("out.txt")) {
-        file_write("out.txt", "first line\n");
-    }
-    file_append("out.txt", "second line\n");
-    var text = file_read("out.txt");
-    println(text);
-    return 0;
-}
+@noalias
+// ... all functions below get explicit restrict on all params
 ```
 
 ---
 
-## 17. Concurrency
+## 18. OPTMAX Blocks
 
-OmScript provides POSIX thread and mutex primitives.
+`OPTMAX` blocks mark regions for maximum optimization. Inside these blocks:
+- All function parameters **must** have type annotations
+- All `var` declarations **must** have type annotations
+- All `for` loop variables **must** have type annotations
+- Bounds checks on array/string accesses are **elided**
+- The compiler applies the most aggressive optimization strategy
 
-### 17.1 Threads
-
-#### Creating a Thread
-
-```javascript
-var handle = thread_create("function_name");
-```
-
-- The argument is the **name** of a zero-argument function defined in the current program.
-- The function runs concurrently in a new POSIX thread.
-- Returns an opaque thread handle.
-
-#### Joining a Thread
-
-```javascript
-thread_join(handle);
-```
-
-Blocks until the thread completes.
-
-### 17.2 Mutexes
-
-```javascript
-var m = mutex_new();     // create a mutex
-mutex_lock(m);           // acquire the lock
-// ... critical section ...
-mutex_unlock(m);         // release the lock
-mutex_destroy(m);        // free the mutex
-```
-
-### 17.3 Example
-
-```javascript
-fn worker() {
-    println(42);
-    return 0;
-}
-
-fn main() {
-    var m = mutex_new();
-    mutex_lock(m);
-    mutex_unlock(m);
-    mutex_destroy(m);
-
-    var t = thread_create("worker");
-    thread_join(t);
-
-    return 0;
-}
-```
-
-**Key points:**
-- Thread functions must be zero-parameter functions defined in the same program.
-- Mutex operations must be balanced (each lock must have a matching unlock).
-- Functions that use concurrency primitives do not receive the `NoSync`/`NoFree` LLVM attributes.
-
----
-
-## 18. Standard Library
-
-OmScript provides **121 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
-
-### 18.1 I/O Functions
-
-#### `print(value)`
-
-Prints a value followed by a newline.
-
-- **Integer argument:** Prints using `%lld\n` format via `printf`.
-- **String literal argument:** Prints using `%s\n` format via `printf`.
-- **Returns:** `0` for all argument types.
-
-```javascript
-print(42);              // Output: 42
-print("hello world");   // Output: hello world
-```
-
-#### `print_char(code)`
-
-Prints a single ASCII character (no newline) using `putchar`.
-
-- **Parameter:** `code` — ASCII character code (integer).
-- **Returns:** The character code.
-
-```javascript
-print_char(72);     // Output: H
-print_char(105);    // Output: i
-print_char(10);     // Output: (newline)
-```
-
-#### `input()`
-
-Reads an integer from standard input using `scanf("%lld")`.
-
-- **Parameters:** None.
-- **Returns:** The integer read from stdin.
-
-```javascript
-var n = input();
-print(n);
-```
-
-#### `input_line()`
-
-Reads a full line from standard input as a string. Strips the trailing newline character. Returns an empty string on EOF.
-
-- **Parameters:** None.
-- **Returns:** A heap-allocated string containing the line read from stdin.
-
-```javascript
-var line = input_line();
-println(line);
-```
-
-#### `println(value)`
-
-Prints a value followed by a newline. Functionally identical to `print()` — provided as an explicit alias for clarity.
-
-- **Returns:** `0`.
-
-```javascript
-println(42);           // Output: 42
-println("hello");      // Output: hello
-```
-
-#### `write(value)`
-
-Prints a value **without** a trailing newline. Useful for building output incrementally.
-
-- **Returns:** `0`.
-
-```javascript
-write("hello ");
-write("world");    // Output: hello world (on same line)
-```
-
-#### `exit_program(code)`
-
-Terminates the program immediately with the given exit code.
-
-- **Parameter:** `code` — integer exit code.
-- **Returns:** Never returns (process terminates).
-
-```javascript
-if (error) {
-    exit_program(1);
-}
-```
-
-### 18.2 Math Functions
-
-#### `abs(x)`
-
-Returns the absolute value of `x`.
-
-- **Implementation:** `x >= 0 ? x : -x` (branchless via LLVM `select`).
-
-```javascript
-abs(-10)    // 10
-abs(5)      // 5
-abs(0)      // 0
-```
-
-#### `min(a, b)`
-
-Returns the smaller of two signed integers.
-
-```javascript
-min(3, 7)     // 3
-min(-5, -1)   // -5
-```
-
-#### `max(a, b)`
-
-Returns the larger of two signed integers.
-
-```javascript
-max(3, 7)     // 7
-max(-5, -1)   // -1
-```
-
-#### `sign(x)`
-
-Returns the sign of `x` as -1, 0, or 1.
-
-```javascript
-sign(42)    // 1
-sign(-7)    // -1
-sign(0)     // 0
-```
-
-#### `clamp(value, lo, hi)`
-
-Clamps `value` to the range `[lo, hi]`.
-
-- **Implementation:** `max(lo, min(value, hi))`
-
-```javascript
-clamp(5, 0, 10)     // 5
-clamp(-3, 0, 10)    // 0
-clamp(15, 0, 10)    // 10
-```
-
-#### `pow(base, exponent)`
-
-Computes integer exponentiation (`base^exponent`).
-
-- **Implementation:** Loop multiplying `base` × `base` for `exponent` iterations using LLVM PHI nodes.
-- **Returns** `1` for `exponent <= 0`.
-
-```javascript
-pow(2, 0)     // 1
-pow(2, 3)     // 8
-pow(3, 2)     // 9
-```
-
-#### `sqrt(x)`
-
-Computes the integer square root (floor) using Newton's method.
-
-- **Returns** `0` for `x <= 0`.
-- Includes a convergence guarantee to prevent infinite loops.
-
-```javascript
-sqrt(0)      // 0
-sqrt(1)      // 1
-sqrt(9)      // 3
-sqrt(10)     // 3  (floor)
-sqrt(99)     // 9  (floor)
-```
-
-#### `is_even(x)`
-
-Returns `1` if `x` is even, `0` otherwise.
-
-- **Implementation:** `(x & 1) == 0` (bitwise check, no branching).
-
-```javascript
-is_even(4)    // 1
-is_even(7)    // 0
-is_even(0)    // 1
-```
-
-#### `is_odd(x)`
-
-Returns `1` if `x` is odd, `0` otherwise.
-
-- **Implementation:** `x & 1` (single bitwise AND).
-
-```javascript
-is_odd(3)     // 1
-is_odd(8)     // 0
-```
-
-#### `log2(n)`
-
-Returns the integer base-2 logarithm (floor) of `n`. Returns `-1` for `n <= 0`.
-
-- **Implementation:** Loop counting right-shifts until zero.
-
-```javascript
-log2(1)       // 0
-log2(2)       // 1
-log2(8)       // 3
-log2(1024)    // 10
-log2(7)       // 2  (floor)
-log2(0)       // -1
-log2(-5)      // -1
-```
-
-#### `gcd(a, b)`
-
-Returns the greatest common divisor of `a` and `b` using the Euclidean algorithm. Works with negative numbers (uses absolute values internally).
-
-- **Implementation:** Iterative Euclidean algorithm with `abs()` preprocessing.
-
-```javascript
-gcd(12, 8)    // 4
-gcd(100, 75)  // 25
-gcd(7, 13)    // 1
-gcd(0, 5)     // 5
-gcd(-12, 8)   // 4
-```
-
-#### `floor(x)`
-
-Returns the largest integer less than or equal to `x`. Converts float to integer.
-
-```javascript
-floor(3.7)    // 3
-floor(3.2)    // 3
-floor(-1.5)   // -2
-```
-
-#### `ceil(x)`
-
-Returns the smallest integer greater than or equal to `x`. Converts float to integer.
-
-```javascript
-ceil(3.2)     // 4
-ceil(3.7)     // 4
-ceil(-1.5)    // -1
-```
-
-#### `round(x)`
-
-Returns the nearest integer to `x`, rounding half away from zero.
-
-```javascript
-round(3.4)    // 3
-round(3.5)    // 4
-round(3.7)    // 4
-```
-
-#### `sin(x)`
-
-Returns the sine of `x` (in radians). Returns a floating-point value.
-
-```javascript
-sin(0.0)          // 0.0
-sin(1.5707963)    // 1.0 (π/2)
-```
-
-#### `cos(x)`
-
-Returns the cosine of `x` (in radians). Returns a floating-point value.
-
-```javascript
-cos(0.0)          // 1.0
-cos(3.14159265)   // -1.0 (π)
-```
-
-#### `tan(x)`
-
-Returns the tangent of `x` (in radians). Returns a floating-point value.
-
-```javascript
-tan(0.0)          // 0.0
-tan(0.7853981)    // 1.0 (π/4)
-```
-
-#### `asin(x)`
-
-Returns the arc sine of `x` in radians. Input must be in range [-1, 1]. Returns a floating-point value.
-
-```javascript
-asin(0.0)    // 0.0
-asin(1.0)    // 1.5707963 (π/2)
-```
-
-#### `acos(x)`
-
-Returns the arc cosine of `x` in radians. Input must be in range [-1, 1]. Returns a floating-point value.
-
-```javascript
-acos(1.0)    // 0.0
-acos(0.0)    // 1.5707963 (π/2)
-```
-
-#### `atan(x)`
-
-Returns the arc tangent of `x` in radians. Returns a floating-point value.
-
-```javascript
-atan(0.0)    // 0.0
-atan(1.0)    // 0.7853981 (π/4)
-```
-
-#### `atan2(y, x)`
-
-Returns the arc tangent of `y/x` in radians, using the signs of both arguments to determine the correct quadrant. Returns a floating-point value.
-
-```javascript
-atan2(1.0, 1.0)    // 0.7853981 (π/4)
-atan2(0.0, 1.0)    // 0.0
-atan2(1.0, 0.0)    // 1.5707963 (π/2)
-```
-
-#### `exp(x)`
-
-Returns e raised to the power `x`. Returns a floating-point value.
-
-```javascript
-exp(0.0)    // 1.0
-exp(1.0)    // 2.71828...
-```
-
-#### `log(x)`
-
-Returns the natural logarithm (base e) of `x`. Returns a floating-point value.
-
-```javascript
-log(1.0)        // 0.0
-log(2.71828)    // 1.0
-```
-
-#### `log10(x)`
-
-Returns the base-10 logarithm of `x`. Returns a floating-point value.
-
-```javascript
-log10(1.0)      // 0.0
-log10(100.0)    // 2.0
-log10(1000.0)   // 3.0
-```
-
-#### `cbrt(x)`
-
-Returns the cube root of `x`. Returns a floating-point value.
-
-```javascript
-cbrt(27.0)    // 3.0
-cbrt(8.0)     // 2.0
-cbrt(1000.0)  // 10.0
-```
-
-#### `hypot(x, y)`
-
-Returns the hypotenuse — `sqrt(x² + y²)` — without undue overflow or underflow. Returns a floating-point value.
-
-```javascript
-hypot(3.0, 4.0)     // 5.0
-hypot(5.0, 12.0)    // 13.0
-```
-
-#### `to_int(x)`
-
-Converts a float to an integer by truncation (towards zero).
-
-```javascript
-to_int(7.9)   // 7
-to_int(-3.7)  // -3
-to_int(42)    // 42  (identity for integers)
-```
-
-#### `to_float(x)`
-
-Converts an integer to a floating-point value.
-
-```javascript
-to_float(10)  // 10.0
-to_float(-3)  // -3.0
-```
-
-#### `fast_add(a, b)`, `fast_sub(a, b)`, `fast_mul(a, b)`, `fast_div(a, b)`
-
-Perform floating-point arithmetic with full fast-math flags enabled (reassociation, reciprocal transforms, NaN/Inf assumptions, fused operations). Use in hot loops where numerical accuracy is less important than speed.
-
-```javascript
-fast_add(3, 4)   // 7 (with fast-math FP semantics)
-fast_mul(5, 6)   // 30
-```
-
-#### `precise_add(a, b)`, `precise_sub(a, b)`, `precise_mul(a, b)`, `precise_div(a, b)`
-
-Perform floating-point arithmetic with strict IEEE-754 semantics — no reassociation, no NaN/Inf assumptions, no implicit fusing. Use when numerical stability is critical.
-
-```javascript
-precise_add(3, 4)   // 7 (strict IEEE-754 semantics)
-precise_mul(5, 6)   // 30
-```
-
-Both families accept two arguments, convert them to `double`, perform the operation, and return the result as an integer (consistent with OmScript's convention of `i64`-encoded floats for interop).
-
-### 18.3 Array Functions
-
-#### `len(array)`
-
-Returns the number of elements in an array.
-
-- **Implementation:** Loads the length from slot 0 of the array's internal representation.
-
-```javascript
-var arr = [10, 20, 30];
-len(arr)    // 3
-```
-
-#### `sum(array)`
-
-Returns the sum of all elements in an array.
-
-- **Implementation:** LLVM IR loop with PHI node accumulator.
-
-```javascript
-var arr = [10, 20, 30, 40];
-sum(arr)    // 100
-```
-
-#### `swap(array, i, j)`
-
-Swaps elements at indices `i` and `j` in-place.
-
-- **Returns:** `0`.
-
-```javascript
-var arr = [10, 20, 30, 40];
-swap(arr, 0, 3);
-// arr is now [40, 20, 30, 10]
-```
-
-#### `reverse(array)`
-
-Reverses the array in-place using a two-pointer approach.
-
-- **Returns:** The array value (pointer-as-i64).
-
-```javascript
-var arr = [1, 2, 3, 4, 5];
-reverse(arr);
-// arr is now [5, 4, 3, 2, 1]
-```
-
-#### `push(array, value)`
-
-Returns a new array with `value` appended to the end. The original array is not modified; the variable must be reassigned.
-
-```javascript
-var arr = [1, 2, 3];
-arr = push(arr, 4);
-// arr is now [1, 2, 3, 4], len(arr) == 4
-```
-
-#### `pop(array)`
-
-Removes and returns the last element of the array. The array length is decreased in-place.
-
-```javascript
-var arr = [10, 20, 30];
-var last = pop(arr);
-// last == 30, len(arr) == 2
-```
-
-#### `index_of(array, value)`
-
-Returns the zero-based index of the first occurrence of `value` in the array, or `-1` if not found.
-
-```javascript
-index_of([10, 20, 30], 20)   // 1
-index_of([10, 20, 30], 99)   // -1
-```
-
-#### `array_contains(array, value)`
-
-Returns `1` if `value` exists in the array, `0` otherwise.
-
-```javascript
-array_contains([10, 20, 30], 20)  // 1
-array_contains([10, 20, 30], 99)  // 0
 ```
-
-#### `sort(array)`
-
-Sorts the array in-place in ascending order using bubble sort.
-
-```javascript
-var arr = [50, 10, 30, 20, 40];
-sort(arr);
-// arr is now [10, 20, 30, 40, 50]
-```
-
-#### `array_fill(size, value)`
-
-Creates a new array of `size` elements, all initialized to `value`.
-
-```javascript
-var arr = array_fill(5, 42);
-// arr == [42, 42, 42, 42, 42]
-```
-
-#### `array_concat(array1, array2)`
-
-Returns a new array containing all elements of `array1` followed by all elements of `array2`.
-
-```javascript
-var merged = array_concat([1, 2, 3], [4, 5, 6]);
-// merged == [1, 2, 3, 4, 5, 6]
-```
-
-#### `array_slice(array, start, end)`
-
-Returns a new array containing elements from index `start` (inclusive) to `end` (exclusive).
-
-```javascript
-var sliced = array_slice([10, 20, 30, 40, 50], 1, 4);
-// sliced == [20, 30, 40]
-```
-
-#### `array_copy(array)`
-
-Returns a new heap-allocated copy of an array. Modifications to the copy do not affect the original.
-
-```javascript
-var original = [1, 2, 3];
-var copy = array_copy(original);
-copy[0] = 99;
-print(original[0]);  // 1 (unaffected)
-print(copy[0]);      // 99
-```
-
-#### `array_remove(array, index)`
-
-Removes the element at the given index, shifts remaining elements left, decrements the array length, and returns the removed value. Aborts with an error if the index is out of bounds.
-
-```javascript
-var arr = [10, 20, 30, 40, 50];
-var removed = array_remove(arr, 2);  // removed == 30
-// arr == [10, 20, 40, 50], len(arr) == 4
-```
-
-#### `array_map(array, "function_name")`
-
-Applies a named function to each element of the array and returns a new array with the results. The function name must be a string literal (resolved at compile time) and the function must accept at least one argument. Lambda expressions can also be used.
-
-```javascript
-fn double(x) { return x * 2; }
-fn main() {
-    var arr = [1, 2, 3, 4, 5];
-    var doubled = array_map(arr, "double");
-    // doubled == [2, 4, 6, 8, 10]
-
-    // With lambda:
-    var tripled = array_map(arr, |x| x * 3);
-    // tripled == [3, 6, 9, 12, 15]
-    return 0;
-}
-```
-
-#### `array_filter(array, "function_name")`
-
-Returns a new array containing only the elements for which the named predicate function returns a non-zero value. The function name must be a string literal and the function must accept at least one argument. Lambda expressions can also be used.
-
-```javascript
-fn is_even(x) { return x % 2 == 0; }
-fn main() {
-    var arr = [1, 2, 3, 4, 5, 6];
-    var evens = array_filter(arr, "is_even");
-    // evens == [2, 4, 6]
-
-    // With lambda:
-    var odds = array_filter(arr, |x| x % 2 != 0);
-    // odds == [1, 3, 5]
-    return 0;
-}
-```
-
-#### `array_reduce(array, "function_name", initial)`
-
-Reduces an array to a single value by applying a named two-argument function `(accumulator, element)` across all elements, starting with the given initial value. The function name must be a string literal and the function must accept at least two arguments. Lambda expressions can also be used.
-
-```javascript
-fn add(acc, x) { return acc + x; }
-fn multiply(acc, x) { return acc * x; }
-fn main() {
-    var arr = [1, 2, 3, 4, 5];
-    var total = array_reduce(arr, "add", 0);      // 15
-    var product = array_reduce(arr, "multiply", 1); // 120
-
-    // With lambda:
-    var sum = array_reduce(arr, |a, b| a + b, 0);  // 15
-    return 0;
-}
-```
-
-#### `array_min(array)`
-
-Returns the minimum element in the array. Returns 0 for empty arrays.
-
-```javascript
-var arr = [5, 3, 8, 1, 9];
-array_min(arr)    // 1
-array_min([])     // 0
-```
-
-#### `array_max(array)`
-
-Returns the maximum element in the array. Returns 0 for empty arrays.
-
-```javascript
-var arr = [5, 3, 8, 1, 9];
-array_max(arr)    // 9
-array_max([])     // 0
-```
-
-#### `array_find(array, value)`
-
-Returns the index of the first element equal to `value`, or -1 if not found.
-
-```javascript
-var arr = [10, 20, 30, 40];
-array_find(arr, 30)    // 2
-array_find(arr, 99)    // -1
-```
-
-#### `array_any(array, "function_name")`
-
-Returns 1 if the predicate function returns non-zero for **any** element in the array, 0 otherwise. The function name must be a string literal. Lambda expressions can also be used. Returns 0 for empty arrays.
-
-```javascript
-fn is_negative(x) { return x < 0; }
-fn main() {
-    var arr = [1, -2, 3];
-    array_any(arr, "is_negative")     // 1
-
-    var pos = [1, 2, 3];
-    array_any(pos, "is_negative")     // 0
-
-    // With lambda:
-    array_any(arr, |x| x < 0)        // 1
-    return 0;
-}
-```
-
-#### `array_every(array, "function_name")`
-
-Returns 1 if the predicate function returns non-zero for **all** elements in the array, 0 otherwise. The function name must be a string literal. Lambda expressions can also be used. Returns 1 for empty arrays (vacuous truth).
-
-```javascript
-fn is_even(x) { return x % 2 == 0; }
-fn main() {
-    var evens = [2, 4, 6];
-    array_every(evens, "is_even")     // 1
-
-    var mixed = [2, 3, 6];
-    array_every(mixed, "is_even")     // 0
-
-    // With lambda:
-    array_every(evens, |x| x % 2 == 0)  // 1
-    return 0;
-}
-```
-
-#### `array_count(array, "function_name")`
-
-Returns the count of elements for which the predicate function returns non-zero. The function name must be a string literal. Lambda expressions can also be used.
-
-```javascript
-fn is_even(x) { return x % 2 == 0; }
-fn main() {
-    var arr = [1, 2, 3, 4, 5, 6];
-    array_count(arr, "is_even")       // 3
-
-    // With lambda:
-    array_count(arr, |x| x > 3)      // 3
-    return 0;
-}
-```
-
-### 18.4 Character Functions
-
-#### `to_char(code)`
-
-Identity function — returns the integer value. Provided for semantic clarity when working with character codes.
-
-```javascript
-to_char(65)    // 65 (represents 'A')
-```
-
-#### `is_alpha(code)`
-
-Returns `1` if the character code is an ASCII letter (A–Z or a–z), `0` otherwise.
-
-```javascript
-is_alpha(65)    // 1  ('A')
-is_alpha(97)    // 1  ('a')
-is_alpha(48)    // 0  ('0')
-is_alpha(32)    // 0  (' ')
-```
-
-#### `is_digit(code)`
-
-Returns `1` if the character code is an ASCII digit (0–9), `0` otherwise.
-
-```javascript
-is_digit(48)    // 1  ('0')
-is_digit(57)    // 1  ('9')
-is_digit(65)    // 0  ('A')
-```
-
-### 18.5 String Functions
-
-#### `str_len(s)`
-
-Returns the number of characters in string `s` (equivalent to C `strlen`).
-
-```javascript
-var s = "hello";
-str_len(s)    // 5
-str_len("")   // 0
-```
-
-#### `char_at(s, index)`
-
-Returns the ASCII character code of the character at position `index` in string `s`. Aborts with a runtime error if `index` is negative or out of range.
-
-```javascript
-var s = "hello";
-char_at(s, 0)    // 104  ('h')
-char_at(s, 4)    // 111  ('o')
-```
-
-#### `str_eq(a, b)`
-
-Returns `1` if strings `a` and `b` have identical contents, `0` otherwise. Uses `strcmp` internally. Use this instead of `==` when comparing string variables, since `==` compares pointer values.
-
-```javascript
-str_eq("hello", "hello")    // 1
-str_eq("hello", "world")    // 0
-```
-
-#### `str_concat(a, b)`
-
-Returns a new string that is the concatenation of strings `a` and `b`. This is equivalent to `a + b` for strings but provides an explicit function interface.
-
-```javascript
-str_concat("hello", " world")   // "hello world"
-str_concat("foo", "bar")        // "foobar"
-str_concat("test", "")          // "test"
-```
-
-#### `to_string(n)`
-
-Converts an integer to its string representation. Returns a heap-allocated string.
-
-- **Implementation:** Uses `snprintf` with a 21-byte buffer (enough for any 64-bit signed integer).
-
-```javascript
-to_string(42)       // "42"
-to_string(-100)     // "-100"
-to_string(0)        // "0"
-print(to_string(12345));  // Output: 12345
-```
-
-#### `str_find(s, ch)`
-
-Finds the first occurrence of a character code `ch` in string `s`. Returns the zero-based index, or `-1` if not found.
-
-- **Implementation:** Uses `memchr` for efficient single-character search.
-
-```javascript
-str_find("hello", 104)    // 0  ('h' at index 0)
-str_find("hello", 111)    // 4  ('o' at index 4)
-str_find("hello", 122)    // -1 ('z' not found)
-```
-
-#### `str_substr(s, start, length)`
-
-Returns a new string that is a substring of `s` starting at index `start` with the given `length`.
-
-```javascript
-str_substr("hello world", 6, 5)  // "world"
-str_substr("abcdef", 0, 3)       // "abc"
-```
-
-#### `str_upper(s)`
-
-Returns a new string with all characters converted to uppercase.
-
-```javascript
-str_upper("hello")    // "HELLO"
-str_upper("Hello!")   // "HELLO!"
-```
-
-#### `str_lower(s)`
-
-Returns a new string with all characters converted to lowercase.
-
-```javascript
-str_lower("WORLD")    // "world"
-str_lower("Hello!")   // "hello!"
-```
-
-#### `str_contains(s, substring)`
-
-Returns `1` if `substring` is found within `s`, `0` otherwise.
-
-```javascript
-str_contains("hello world", "world")  // 1
-str_contains("hello world", "xyz")    // 0
-```
-
-#### `str_index_of(s, substring)`
-
-Returns the zero-based index of the first occurrence of `substring` in `s`, or `-1` if not found.
-
-```javascript
-str_index_of("hello world", "world")  // 6
-str_index_of("hello world", "xyz")    // -1
-```
-
-#### `str_replace(s, old, new)`
-
-Returns a new string with all occurrences of `old` replaced by `new`. If `old` is not found, returns a copy of the original string. If `old` is empty, returns a copy of the original string.
-
-```javascript
-str_replace("hello world", "world", "there")  // "hello there"
-str_replace("abcabc", "b", "x")               // "axcaxc"
-```
-
-#### `str_trim(s)`
-
-Returns a new string with leading and trailing whitespace removed.
-
-```javascript
-str_trim("  hello  ")     // "hello"
-str_trim("\t text \n")    // "text"
-```
-
-#### `str_starts_with(s, prefix)`
-
-Returns `1` if `s` starts with `prefix`, `0` otherwise.
-
-```javascript
-str_starts_with("hello world", "hello")  // 1
-str_starts_with("hello world", "world")  // 0
-```
-
-#### `str_ends_with(s, suffix)`
-
-Returns `1` if `s` ends with `suffix`, `0` otherwise.
-
-```javascript
-str_ends_with("hello world", "world")  // 1
-str_ends_with("hello world", "hello")  // 0
-```
-
-#### `str_repeat(s, count)`
-
-Returns a new string that is `s` repeated `count` times.
-
-```javascript
-str_repeat("ab", 3)   // "ababab"
-str_repeat("x", 5)    // "xxxxx"
-```
-
-#### `str_reverse(s)`
-
-Returns a new string with the characters of `s` in reverse order.
-
-```javascript
-str_reverse("hello")  // "olleh"
-str_reverse("abc")    // "cba"
-```
-
-#### `str_split(s, delimiter)`
-
-Splits a string by a single-character delimiter, returning an array of substring values.
-
-```javascript
-var parts = str_split("a,b,c", ",");
-// parts == ["a", "b", "c"], len(parts) == 3
-```
-
-#### `str_join(arr, delimiter)`
-
-Joins an array of strings into a single string, inserting `delimiter` between each element. This is the inverse of `str_split`.
-
-```javascript
-var parts = str_split("a,b,c", ",");
-str_join(parts, "-")     // "a-b-c"
-str_join(parts, "")      // "abc"
-str_join(parts, " :: ")  // "a :: b :: c"
-```
-
-#### `str_count(s, substring)`
-
-Counts the number of non-overlapping occurrences of `substring` in `s`. Returns `0` if `substring` is empty or not found.
-
-```javascript
-str_count("abcabcabc", "abc")  // 3
-str_count("hello", "l")        // 2
-str_count("aaa", "aa")         // 1 (non-overlapping)
-str_count("hello", "xyz")      // 0
-str_count("hello", "")         // 0
-```
-
-#### `str_to_int(s)`
-
-Parses a string as a base-10 integer. Returns the parsed value.
-
-```javascript
-str_to_int("42")     // 42
-str_to_int("-10")    // -10
-```
-
-#### `str_to_float(s)`
-
-Parses a string as a floating-point number.
-
-```javascript
-str_to_float("3.14")   // 3.14
-str_to_float("-2.5")   // -2.5
-```
-
-#### `str_chars(s)`
-
-Converts a string into an array of integer character codes (ASCII values).
-
-```javascript
-var chars = str_chars("ABC");
-// chars == [65, 66, 67]
-```
-
-### 18.5.1 System Functions
-
-#### `random()`
-
-Returns a pseudo-random non-negative integer. Automatically seeds the random number generator on first call using `time()`.
-
-```javascript
-var r = random();  // e.g. 1804289383
-```
-
-#### `time()`
-
-Returns the current Unix timestamp (seconds since January 1, 1970).
-
-```javascript
-var t = time();  // e.g. 1709258765
-```
-
-#### `sleep(ms)`
-
-Pauses execution for the specified number of milliseconds.
-
-```javascript
-sleep(1000);  // sleep for 1 second
-```
-
-### 18.6 Utility Functions
-
-#### `typeof(x)`
-
-Returns a type tag for `x` based on the static LLVM IR type of the expression:
-
-| Tag | Meaning |
-|-----|---------|
-| `1` | Integer (default for `i64` values, including arrays) |
-| `2` | Float (double-precision) |
-| `3` | String (pointer type or tracked string variable) |
-
-```javascript
-typeof(42)         // 1  (integer)
-typeof(3.14)       // 2  (float)
-typeof("hello")    // 3  (string)
-var f = 2.71828;
-typeof(f)          // 2  (float variable)
-var s = "world";
-typeof(s)          // 3  (string variable)
-```
-
-> **Note:** The type tag reflects the *static* type known at compile time.  A variable holding the result of a function call that could return either an integer or a string will have tag `1` unless the compiler can prove it is a string.
-
-#### `assert(condition)`
-
-Aborts the program with a runtime error message if `condition` is falsy (zero). Returns `1` if the assertion passes.
-
-```javascript
-assert(1);          // passes, returns 1
-assert(x > 0);      // passes if x > 0, otherwise aborts
-assert(0);          // always aborts: "Runtime error: assertion failed"
-```
-
-### 18.7 Stdlib Summary Table
-
-| Function | Args | Returns | Description |
-|----------|:----:|---------|-------------|
-| `print(x)` | 1 | 0 | Print integer or string |
-| `print_char(c)` | 1 | c | Print single ASCII character |
-| `input()` | 0 | integer | Read integer from stdin |
-| `input_line()` | 0 | string | Read a line from stdin as string |
-| `abs(x)` | 1 | \|x\| | Absolute value |
-| `min(a, b)` | 2 | min | Minimum of two values |
-| `max(a, b)` | 2 | max | Maximum of two values |
-| `sign(x)` | 1 | -1/0/1 | Sign of value |
-| `clamp(v, lo, hi)` | 3 | clamped | Clamp to range |
-| `pow(base, exp)` | 2 | base^exp | Integer exponentiation |
-| `sqrt(x)` | 1 | floor(√x) | Integer square root |
-| `is_even(x)` | 1 | 0/1 | Even check |
-| `is_odd(x)` | 1 | 0/1 | Odd check |
-| `log2(n)` | 1 | floor(log₂n) | Integer base-2 logarithm (-1 if n ≤ 0) |
-| `gcd(a, b)` | 2 | gcd | Greatest common divisor |
-| `len(arr)` | 1 | length | Array length |
-| `sum(arr)` | 1 | total | Sum of array elements |
-| `swap(arr, i, j)` | 3 | 0 | Swap array elements |
-| `reverse(arr)` | 1 | arr | Reverse array in-place |
-| `to_char(code)` | 1 | code | Identity (semantic alias) |
-| `is_alpha(code)` | 1 | 0/1 | Alphabetic check |
-| `is_digit(code)` | 1 | 0/1 | Digit check |
-| `str_len(s)` | 1 | length | Length of a string |
-| `char_at(s, i)` | 2 | code | ASCII code of character at index `i` |
-| `str_eq(a, b)` | 2 | 0/1 | String equality (1 if equal, 0 otherwise) |
-| `str_concat(a, b)` | 2 | string | Concatenation of strings `a` and `b` |
-| `to_string(n)` | 1 | string | Convert integer to string representation |
-| `str_find(s, ch)` | 2 | index | Index of first occurrence of char (-1 if not found) |
-| `floor(x)` | 1 | int | Floor of float value |
-| `ceil(x)` | 1 | int | Ceiling of float value |
-| `round(x)` | 1 | int | Round float to nearest integer |
-| `to_int(x)` | 1 | int | Convert float to integer (truncation) |
-| `to_float(x)` | 1 | float | Convert integer to float |
-| `str_substr(s, i, n)` | 3 | string | Substring from index `i` of length `n` |
-| `str_upper(s)` | 1 | string | Uppercase version of string |
-| `str_lower(s)` | 1 | string | Lowercase version of string |
-| `str_contains(s, sub)` | 2 | 0/1 | Whether string contains substring |
-| `str_index_of(s, sub)` | 2 | index | Index of substring (-1 if not found) |
-| `str_replace(s, old, new)` | 3 | string | Replace all occurrences of `old` with `new` |
-| `str_trim(s)` | 1 | string | Remove leading/trailing whitespace |
-| `str_starts_with(s, p)` | 2 | 0/1 | Whether string starts with prefix |
-| `str_ends_with(s, p)` | 2 | 0/1 | Whether string ends with suffix |
-| `str_repeat(s, n)` | 2 | string | Repeat string `n` times |
-| `str_reverse(s)` | 1 | string | Reverse string characters |
-| `push(arr, val)` | 2 | array | Append value to array (returns new array) |
-| `pop(arr)` | 1 | value | Remove and return last element |
-| `index_of(arr, val)` | 2 | index | Index of value in array (-1 if not found) |
-| `array_contains(arr, v)` | 2 | 0/1 | Whether array contains value |
-| `sort(arr)` | 1 | arr | Sort array in-place (ascending) |
-| `array_fill(n, val)` | 2 | array | Create array of `n` elements all set to `val` |
-| `array_concat(a, b)` | 2 | array | Concatenate two arrays |
-| `array_slice(arr, s, e)` | 3 | array | Slice array from index `s` to `e` (exclusive) |
-| `array_copy(arr)` | 1 | array | Create a deep copy of an array |
-| `array_remove(arr, i)` | 2 | value | Remove element at index `i` and return it |
-| `array_map(arr, "fn")` | 2 | array | Apply named function to each element |
-| `array_filter(arr, "fn")` | 2 | array | Keep elements where named function returns non-zero |
-| `array_reduce(arr, "fn", init)` | 3 | value | Reduce array using named 2-arg function |
-| `typeof(x)` | 1 | 1/2/3 | Type tag: 1=int, 2=float, 3=string |
-| `assert(cond)` | 1 | 1 | Abort with error if `cond` is falsy |
-| `println(x)` | 1 | 0 | Print value with newline (alias for print) |
-| `write(x)` | 1 | 0 | Print value without trailing newline |
-| `exit_program(code)` | 1 | — | Terminate process with exit code |
-| `random()` | 0 | int | Pseudo-random integer (auto-seeded) |
-| `time()` | 0 | int | Current Unix timestamp (seconds) |
-| `sleep(ms)` | 1 | 0 | Sleep for given milliseconds |
-| `str_to_int(s)` | 1 | int | Parse string as base-10 integer |
-| `str_to_float(s)` | 1 | float | Parse string as float |
-| `str_split(s, delim)` | 2 | array | Split string by delimiter into array |
-| `str_join(arr, delim)` | 2 | string | Join array of strings with delimiter |
-| `str_count(s, sub)` | 2 | int | Count non-overlapping occurrences of substring |
-| `str_chars(s)` | 1 | array | Convert string to array of char codes |
-| `char_code(s, i)` | 2 | int | ASCII code of character at index `i` in string `s` |
-| `number_to_string(n)` | 1 | string | Convert integer or float to string |
-| `string_to_number(s)` | 1 | int/float | Parse string as integer or float |
-| `file_read(path)` | 1 | string | Read entire file contents as string |
-| `file_write(path, s)` | 2 | 0 | Write string to file (overwrite) |
-| `file_append(path, s)` | 2 | 0 | Append string to file |
-| `file_exists(path)` | 1 | 0/1 | Check whether file exists |
-| `map_new()` | 0 | map | Create an empty map |
-| `map_set(m, k, v)` | 3 | map | Set key `k` to value `v`; returns updated map |
-| `map_get(m, k, d)` | 3 | value | Get value for key `k`, or default `d` |
-| `map_has(m, k)` | 2 | 0/1 | Check whether key `k` exists |
-| `map_remove(m, k)` | 2 | map | Remove key `k`; returns updated map |
-| `map_size(m)` | 1 | int | Number of keys in map |
-| `map_keys(m)` | 1 | array | Array of all keys |
-| `map_values(m)` | 1 | array | Array of all values |
-| `range(start, end)` | 2 | array | Array of integers from `start` to `end-1` |
-| `range_step(s, e, step)` | 3 | array | Array of integers from `s` to `e` with given step |
-| `thread_create(fn)` | 1 | handle | Start named function in new thread |
-| `thread_join(h)` | 1 | 0 | Wait for thread `h` to finish |
-| `mutex_new()` | 0 | mutex | Create a new mutex |
-| `mutex_lock(m)` | 1 | 0 | Acquire mutex `m` |
-| `mutex_unlock(m)` | 1 | 0 | Release mutex `m` |
-| `mutex_destroy(m)` | 1 | 0 | Destroy mutex `m` |
-| `fast_add(a, b)` | 2 | result | Fast-math FP addition (reassociable, fused) |
-| `fast_sub(a, b)` | 2 | result | Fast-math FP subtraction |
-| `fast_mul(a, b)` | 2 | result | Fast-math FP multiplication |
-| `fast_div(a, b)` | 2 | result | Fast-math FP division |
-| `precise_add(a, b)` | 2 | result | Strict IEEE-754 FP addition |
-| `precise_sub(a, b)` | 2 | result | Strict IEEE-754 FP subtraction |
-| `precise_mul(a, b)` | 2 | result | Strict IEEE-754 FP multiplication |
-| `precise_div(a, b)` | 2 | result | Strict IEEE-754 FP division |
-
----
-
-## 19. Optimization Levels
-
-### 19.1 O0 — No Optimization
-
-- Fastest compilation, largest and slowest output.
-- LLVM IR is emitted directly without any transformation passes.
-- Useful for debugging.
-
-### 19.2 O1 — Basic Optimization
-
-- Instruction combining and reassociation.
-- CFG simplification.
-- Dead code elimination.
-- Minor peephole optimizations.
-
-### 19.3 O2 — Moderate Optimization (Default)
-
-All O1 passes plus:
-
-- **mem2reg** — Promotes stack allocas to SSA registers.
-- **SROA** — Scalar Replacement of Aggregates.
-- **GVN** — Global Value Numbering (eliminates redundant computations).
-- **Early CSE** — Common Subexpression Elimination.
-- Additional dead code elimination passes.
-
-### 19.4 O3 — Aggressive Optimization
-
-All O2 passes plus:
-
-| Pass | Description |
-|------|-------------|
-| **LICM** | Loop Invariant Code Motion — moves constant expressions out of loops |
-| **Loop Rotation** | Transforms loops into a more optimizable form |
-| **Loop Simplification** | Canonicalizes loop structure |
-| **Loop Inst Simplify** | Simplifies instructions within loops |
-| **Loop Unrolling** | Unrolls loops for reduced branch overhead |
-| **Code Sinking** | Moves instructions closer to their use |
-| **Merged Load/Store Motion** | Combines memory operations |
-| **Straightline Strength Reduce** | Replaces expensive ops with cheaper ones |
-| **N-Ary Reassociate** | Advanced algebraic reassociation |
-| **Tail Call Elimination** | Converts tail calls to jumps |
-| Second cleanup round | Instruction combining + CFG simplification + DCE |
-
-### 19.5 Constant Folding (AST-Level)
-
-Before LLVM optimization, the code generator performs AST-level constant folding:
-
-- **Arithmetic:** `3 + 4` → `7`, `10 * 2` → `20`, `10 % 3` → `1`
-- **Comparison:** `5 > 3` → `1`
-- **Bitwise:** `0xFF & 0x0F` → `15`
-- **Float:** `1.5 + 2.5` → `4.0`, `7.0 % 3.0` → `1.0`, `2.0 ** 3.0` → `8.0`
-- **Unary:** `-(-5)` → `5`, `!0` → `1`, `~0` → `-1`
-- **Identity:** `x + 0` → `x`, `x * 1` → `x`, `x * 0` → `0`, `x % 1` → `0`
-- **Negation:** `0 - x` → `-x`, `x * (-1)` → `-x`, `x / (-1)` → `-x`
-- **Self-identity:** `x == x` → `1`, `x != x` → `0`, `x - x` → `0`, `x / x` → `1`, `x % x` → `0`
-- **Logical:** `3 && 5` → `1`, `0 && 5` → `0`, `0 || 7` → `1`, `0 || 0` → `0`
-- **Float negation:** `x * (-1.0)` → `-x`, `x / (-1.0)` → `-x`
-- **Null coalescing:** `42 ?? y` → `42`, `0 ?? y` → `y`
-- **Ternary:** `1 ? a : b` → `a`, `0 ? a : b` → `b`
-
----
-
-## 20. OPTMAX Directive
-
-### 20.1 Overview
-
-`OPTMAX` is a compiler directive that marks functions for **maximum optimization**. Functions between `OPTMAX=:` and `OPTMAX!:` receive:
-
-1. **AST-level algebraic optimization** before code generation.
-2. **A 3-iteration fixed-point optimization pipeline** after code generation.
-3. **OPTMAX isolation** — non-OPTMAX user functions cannot be called from OPTMAX functions (stdlib functions are allowed).
-
-### 20.2 Syntax
-
-```javascript
 OPTMAX=:
-fn highly_optimized(n: int) {
-    var total: int = 0;
-    for (i: int in 0...n) {
-        total = total + i;
+fn fast_sum(arr:int[], n:int) -> int {
+    var total:int = 0;
+    for (i:int in 0...n) {
+        total += arr[i];
     }
     return total;
 }
 OPTMAX!:
-
-fn main() {
-    return highly_optimized(100);
-}
 ```
 
-### 20.3 OPTMAX Optimization Pipeline
-
-The OPTMAX pipeline runs **3 iterations**, each consisting of 4 phases:
-
-**Phase 1 — Early Canonicalization:**
-SROA, Early CSE, mem2reg, instruction combining, reassociation, GVN, CFG simplification, dead code elimination.
-
-**Phase 2 — Loop Optimization:**
-LICM, loop rotation, loop simplification, loop instruction simplification, straightline strength reduction, loop unrolling.
-
-**Phase 3 — Post-Loop:**
-Code sinking, merged load/store motion, straightline strength reduction, n-ary reassociation, tail call elimination, constant hoisting, CFG flattening.
-
-**Phase 4 — Final Cleanup:**
-Instruction combining, CFG simplification, dead code elimination.
-
-Each pass may expose new optimization opportunities that the next iteration can exploit.
-
-### 20.4 Restrictions
-
-- OPTMAX functions **can** call other OPTMAX functions.
-- OPTMAX functions **can** call any stdlib built-in function (they compile to native code).
-- OPTMAX functions **cannot** call non-OPTMAX user-defined functions (produces a compile error).
+`OPTMAX=:` opens the block; `OPTMAX!:` closes it. Nesting is not allowed.
 
 ---
 
-## 21. E-Graph & Superoptimizer
+## 19. Built-in Functions
 
-OmScript's compiler includes two advanced optimization systems that run alongside the standard LLVM pipeline at O2+.
+### 19.1 I/O
 
-### 21.1 E-Graph Equality Saturation
+| Function | Description |
+|---|---|
+| `print(...)` | Print values without newline |
+| `println(...)` | Print values with newline |
+| `write(s)` | Write string to stdout |
+| `print_char(c)` | Print a single character code |
+| `input()` | Read a word from stdin |
+| `input_line()` | Read a full line from stdin |
+| `exit(code)` / `exit_program(code)` | Exit with given code |
 
-An **e-graph** (equivalence graph) compactly represents many equivalent programs simultaneously. Instead of applying rewrites destructively, it adds new expressions alongside old ones, then extracts the cheapest equivalent using a cost model.
+### 19.2 Math
 
-The e-graph operates on the **AST** before LLVM code generation and includes **640+ rewrite rules** in three categories:
+| Function | Description |
+|---|---|
+| `abs(x)` | Absolute value |
+| `pow(x, y)` | x to the power y |
+| `sqrt(x)` | Square root |
+| `cbrt(x)` | Cube root |
+| `exp(x)` | e^x |
+| `exp2(x)` | 2^x |
+| `log(x)` | Natural logarithm |
+| `log2(x)` | Base-2 logarithm |
+| `log10(x)` | Base-10 logarithm |
+| `floor(x)` | Floor |
+| `ceil(x)` | Ceiling |
+| `round(x)` | Round to nearest integer |
+| `sin(x)` | Sine |
+| `cos(x)` | Cosine |
+| `tan(x)` | Tangent |
+| `asin(x)` | Arc sine |
+| `acos(x)` | Arc cosine |
+| `atan(x)` | Arc tangent |
+| `atan2(y, x)` | Two-argument arc tangent |
+| `hypot(x, y)` | sqrt(x² + y²) |
+| `min(a, b)` | Minimum of two values |
+| `max(a, b)` | Maximum of two values |
+| `min_float(a, b)` | Floating-point minimum (NaN-aware) |
+| `max_float(a, b)` | Floating-point maximum (NaN-aware) |
+| `sign(x)` | Sign: -1, 0, or 1 |
+| `clamp(x, lo, hi)` | Clamp x to [lo, hi] |
+| `gcd(a, b)` | Greatest common divisor |
+| `lcm(a, b)` | Least common multiple |
+| `is_even(x)` | 1 if even, 0 otherwise |
+| `is_odd(x)` | 1 if odd, 0 otherwise |
+| `is_power_of_2(x)` | 1 if x is a power of 2 |
+| `fma(a, b, c)` | Fused multiply-add: a*b+c |
+| `copysign(x, y)` | Magnitude of x with sign of y |
+| `random()` | Random float in [0.0, 1.0) |
 
-| Category | Examples |
-|----------|---------|
-| **Algebraic** | `x + 0 → x`, `x * 1 → x`, `x - x → 0`, `x * 2 → x << 1`, `x * 3 → (x << 1) + x` |
-| **Comparison** | `x == x → 1`, `x != x → 0`, `!(a == b) → a != b`, `!!x → x`, `x && 1 → bool(x)`, `0 \|\| x → bool(x)` |
-| **Bitwise** | `x ^ x → 0`, `x & x → x`, `~(~x) → x`, De Morgan's laws, shift combination |
+### 19.3 Arithmetic with Explicit Overflow/Precision Mode
 
-Controlled via: `-fegraph` (default on at O2+) / `-fno-egraph`
+| Function | Description |
+|---|---|
+| `fast_add(a, b)` | Addition with `nsw` (no signed wrap) flag |
+| `fast_sub(a, b)` | Subtraction with `nsw` flag |
+| `fast_mul(a, b)` | Multiplication with `nsw` flag |
+| `fast_div(a, b)` | Division (exact, no remainder) |
+| `precise_add(a, b)` | Addition without unsafe flags |
+| `precise_sub(a, b)` | Subtraction without unsafe flags |
+| `precise_mul(a, b)` | Multiplication without unsafe flags |
+| `precise_div(a, b)` | Division without unsafe flags |
+| `saturating_add(a, b)` | LLVM saturating addition |
+| `saturating_sub(a, b)` | LLVM saturating subtraction |
 
-### 21.2 Superoptimizer
+### 19.4 Bit Manipulation
 
-The superoptimizer operates on **LLVM IR** after the standard pipeline and finds optimal instruction sequences through four phases:
+| Function | Description |
+|---|---|
+| `popcount(x)` | Count set bits |
+| `clz(x)` | Count leading zeros |
+| `ctz(x)` | Count trailing zeros |
+| `bitreverse(x)` | Reverse bit order |
+| `bswap(x)` | Byte-swap (endianness swap) |
+| `rotate_left(x, n)` | Rotate bits left by n |
+| `rotate_right(x, n)` | Rotate bits right by n |
 
-1. **Idiom Recognition** — Detects patterns like rotate, abs, min/max, popcount, and replaces them with optimal LLVM intrinsics.
-2. **Algebraic Simplification** — Applies identity simplifications that instcombine may miss across basic blocks.
-3. **Branch Simplification** — Converts simple diamond-shaped branches to branchless `select`.
-4. **Enumerative Synthesis** — For expensive instructions (multiply, divide), searches for cheaper equivalent sequences (e.g., `x * 7 → (x << 3) - x`).
+### 19.5 Type Utilities
 
-Controlled via: `-fsuperopt` (default on at O2+) / `-fno-superopt`
+| Function | Description |
+|---|---|
+| `typeof(x)` | Returns an integer type tag: 1 = integer, 2 = float, 3 = string |
+| `len(x)` | Length of array or string |
+| `to_int(x)` | Convert to integer |
+| `to_float(x)` | Convert to float |
+| `to_string(x)` | Convert number to string |
+| `assert(cond)` | Runtime assertion (aborts on failure) |
 
-### 21.3 Hardware Graph Optimizer (HGOE)
+### 19.6 Time / System
 
-At O2+ with `-march`/`-mtune`, the HGOE performs target-aware optimizations:
+| Function | Description |
+|---|---|
+| `time()` | Current Unix timestamp in seconds (integer) |
+| `sleep(ms)` | Sleep for `ms` milliseconds |
 
-- **FMA generation** — Fused multiply-add for supported architectures
-- **Prefetch insertion** — Software prefetching for memory access patterns
-- **Branch layout** — Reorders basic blocks for better branch prediction
-- **Integer strength reduction** — Target-specific multiply-to-shift transforms
-- **Instruction scheduling** — Microarchitecture-aware instruction ordering
+### 19.7 Optimizer Hints
 
----
-
-## 22. Adaptive JIT Runtime
-
-### 22.1 Overview
-
-OmScript is an **AOT-compiled language** — all code compiles to native machine code through LLVM. When using `omsc run`, the program executes through a lightweight **adaptive JIT runtime** that automatically recompiles hot functions with even more aggressive optimizations.
-
-### 22.2 Two-Tier Execution Model
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Tier 1 — Initial JIT (fast startup)                │
-│  • Module compiled at O2 via LLVM MCJIT             │
-│  • Call-counting dispatch prologs injected           │
-│  • Execution begins immediately                     │
-└────────────────────┬────────────────────────────────┘
-                     │  function call count reaches threshold
-                     ▼
-┌─────────────────────────────────────────────────────┐
-│  Tier 2 — Adaptive Recompile (hot path)             │
-│  • Clean IR parsed into fresh context               │
-│  • Function annotated with real call count (PGO)    │
-│  • Full O3 pipeline re-run with profile hints       │
-│  • JIT-compiled via MCJIT                           │
-│  • New native pointer stored for future calls       │
-└─────────────────────────────────────────────────────┘
-```
-
-### 22.3 How It Works
-
-1. **Initial compilation**: When `omsc run` is invoked, the module's LLVM IR is JIT-compiled at O2. Every non-`main` function receives a lightweight dispatch prolog that atomically increments a per-function call counter.
-
-2. **Hot function detection**: When a function's call count first reaches the recompile threshold, the runtime triggers adaptive recompilation.
-
-3. **Profile-guided recompilation**: The runtime:
-   - Loads a clean (counter-free) copy of the module's bitcode
-   - Annotates the hot function with its real call count as a PGO entry count
-   - Re-runs the full LLVM O3 pipeline — the inliner, branch layout, loop vectorizer, and unroller all see the function as hot and optimize accordingly
-   - JIT-compiles the result and stores the new native function pointer
-
-4. **Fast path**: After recompilation, future calls to the function take a fast path — one volatile load and a well-predicted branch, then a direct call to the O3-PGO-optimized native code with zero counter overhead.
-
-### 22.4 AOT Compilation Path
-
-When compiling to an executable (the default `omsc build` path), all code is AOT-compiled through the standard LLVM pipeline:
-
-```
-Source → Lexer → Parser → AST → E-Graph (O2+) → CodeGen (LLVM IR) → LLVM Optimizer → Superoptimizer (O2+) → HGOE (O2+) → Native Object → Linker → Executable
-```
-
-The adaptive JIT runtime is only used during `omsc run` for interactive/development workflows.
-
----
-
-## 23. Memory Management
-
-### 23.1 Overview
-
-OmScript uses **reference counting** for automatic memory management of heap-allocated data (strings).
-
-### 23.2 Stack Allocation
-
-Most values (integers, array slots) are **stack-allocated** via LLVM `alloca` in the function's entry block. This means:
-
-- Arrays are stack-allocated (not heap-allocated).
-- Local variables are stack-allocated.
-- No heap allocation for numeric types.
-
-### 23.3 Reference-Counted Strings
-
-Strings use a `RefCountedString` type with the following layout:
-
-```
-┌──────────────────────────────────┐
-│  StringData (heap-allocated)     │
-├──────────┬───────────┬───────────┤
-│ refCount │  length   │  chars[]  │
-│ (size_t) │ (size_t)  │ (flex)    │
-└──────────┴───────────┴───────────┘
-```
-
-**Operations:**
-
-| Operation | Effect |
-|-----------|--------|
-| `allocate(str)` | `malloc` with refCount = 1 |
-| Copy constructor | `retain()` → increment refCount |
-| Assignment | `release()` old, `retain()` new |
-| Destructor | `release()` → decrement refCount, `free` when 0 |
-
-### 23.4 Characteristics
-
-- **Deterministic:** Objects are freed immediately when the last reference is released.
-- **No GC pauses:** No stop-the-world garbage collection.
-- **Minimal overhead:** 16 bytes (two `size_t`) per unique string, plus the string data.
-- **Zero-copy sharing:** Multiple references to the same string share memory.
+| Function | Description |
+|---|---|
+| `assume(cond)` | Assert to optimizer that `cond` is always true (LLVM `llvm.assume`) |
+| `unreachable()` | Mark code as unreachable (UB if reached) |
+| `expect(val, expected)` | Branch prediction hint: `val` is likely `expected` |
 
 ---
 
-## 24. CLI Reference
+## 20. Concurrency
 
-### 24.1 Basic Usage
+OmScript provides low-level threading and mutex primitives.
 
-```bash
-omsc [command] <source.om> [options]
-```
+### 20.1 Thread Functions
 
-### 24.2 Commands
+| Function | Description |
+|---|---|
+| `thread_create("func_name")` | Create a new thread running the named zero-argument function; returns a thread handle |
+| `thread_join(t)` | Wait for thread `t` to finish |
 
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| *(default)* | `compile`, `build`, `-c`, `-b`, `--compile`, `--build` | Compile source to executable |
-| `run` | `-r`, `--run` | Compile and immediately run |
-| `check` | `--check` | Validate syntax without compiling |
-| `lex` | `tokens`, `-l`, `--lex`, `--tokens`, `--dump-tokens` | Print lexer token stream |
-| `parse` | `emit-ast`, `-p`, `-a`, `--parse`, `--ast`, `--emit-ast` | Print parsed AST |
-| `emit-ir` | `-e`, `-i`, `--emit-ir`, `--ir` | Print LLVM IR |
-| `clean` | `-C`, `--clean` | Remove compiled outputs |
-| `pkg` | `--pkg`, `package` | Package manager (install, remove, list, search, info) |
-| `install` | `--install` | Install omsc to your PATH |
-| `update` | `--update` | Update to latest version |
-| `uninstall` | `--uninstall` | Uninstall omsc from PATH |
-| `help` | `-h`, `--help` | Show help message |
-| `version` | `-v`, `--version` | Show compiler version |
+### 20.2 Mutex Functions
 
-### 24.3 Options
-
-| Option | Description |
-|--------|-------------|
-| `-o <file>`, `--output <file>` | Set output filename (default: `a.out`) |
-| `-O0`, `-O1`, `-O2`, `-O3` | Optimization level (default: `-O2`) |
-| `-k`, `--keep-temps` | Keep temporary files when using `run` |
-| `-V`, `--verbose` | Verbose output |
-| `-q`, `--quiet` | Suppress non-error output |
-| `--time` | Show timing breakdown |
-| `--emit-obj` | Emit object file only |
-| `--dry-run` | Validate without writing files |
-| `--dump-ast` | Dump AST during compilation |
-| `-s`, `--strip` | Strip symbols from output |
-| `-static` | Static linking |
-| `--` | Separator between compiler args and runtime args |
-
-### 24.3.1 Codegen Options
-
-| Option | Description |
-|--------|-------------|
-| `-march=<cpu>` | Target CPU architecture (default: `native`) |
-| `-mtune=<cpu>` | Tuning CPU (default: same as `-march`) |
-| `-flto` | Full link-time optimization |
-| `-ffast-math` | Unsafe floating-point optimizations |
-| `-fvectorize` | SIMD vectorization hints (default: on) |
-| `-funroll-loops` | Loop unrolling (default: on) |
-| `-floop-optimize` | Polyhedral loop optimizations (default: on) |
-| `-fpic` | Position-independent code (default: on) |
-| `-foptmax` | OPTMAX block optimization (default: on) |
-| `-fjit` | Adaptive JIT runtime (default: on) |
-| `-fstack-protector` | Stack protection |
-| `-fegraph` | E-graph equality saturation (default: on at O2+) |
-| `-fsuperopt` | Superoptimizer pass (default: on at O2+) |
-| `-fhgoe` | Hardware graph optimization engine (default: on) |
-| `-g`, `--debug` | Emit DWARF debug info (line tables, variable locations) |
-
-Use `-fno-<flag>` to disable any `-f` flag (e.g., `-fno-lto`, `-fno-vectorize`).
-
-### 24.3.2 Profile-Guided Optimization (PGO)
-
-OmScript supports two-phase PGO via LLVM's IR-level instrumentation:
-
-| Option | Description |
-|--------|-------------|
-| `--pgo-gen=<path>` | Insert instrumentation counters; write raw profile to `<path>` on program exit |
-| `--pgo-use=<path>` | Read merged `.profdata` and use branch/call counts for optimization |
-
-**Workflow:**
-
-```bash
-# Phase 1: Instrument and collect profile data
-omsc build program.om --pgo-gen=prog.profraw -O2
-./a.out                                    # run with representative workload
-llvm-profdata merge -output=prog.profdata prog.profraw
-
-# Phase 2: Optimize with collected profile
-omsc build program.om --pgo-use=prog.profdata -O3
-```
-
-PGO data guides inlining decisions (hot callees get larger budgets), branch layout (hot side in fall-through), loop trip-count estimation (better vectorization/unrolling), and cold-code sinking.
-
-### 24.4 Examples
-
-```bash
-# Compile to executable
-omsc program.om -o myapp
-
-# Compile and run
-omsc run program.om
-
-# Validate syntax only
-omsc check program.om
-
-# View lexer output
-omsc lex program.om
-
-# View AST
-omsc parse program.om
-
-# View LLVM IR
-omsc emit-ir program.om
-
-# Compile and run, keep temp files
-omsc run program.om --keep-temps
-
-# Compile with aggressive optimization
-omsc program.om -O3 -march=native -flto
-
-# Show timing breakdown
-omsc run program.om --time
-
-# Package management
-omsc pkg install <package>
-omsc pkg list
-
-# Clean up generated files
-omsc clean program.om
-```
-
-### 24.5 Exit Codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | Compilation error or runtime error (div-by-zero, OOB) |
-| *N* | `main()` return value modulo 256 |
+| Function | Description |
+|---|---|
+| `mutex_new()` | Create a new mutex |
+| `mutex_lock(m)` | Lock mutex `m` |
+| `mutex_unlock(m)` | Unlock mutex `m` |
+| `mutex_destroy(m)` | Destroy mutex `m` |
 
 ---
 
-## 25. Building from Source
+## 21. File I/O
 
-### 25.1 Prerequisites
-
-- **CMake** 3.13 or later
-- **C++17** compatible compiler (GCC, Clang)
-- **LLVM** development libraries (headers + shared libraries)
-- **GCC** (used as the linker for final executable output)
-
-### 25.2 Build Steps
-
-```bash
-# Clone the repository
-git clone https://github.com/RyAnPr1Me/omscript.git
-cd omscript
-
-# Create build directory
-mkdir build && cd build
-
-# Configure
-cmake ..
-
-# Build
-make -j$(nproc)
-
-# The compiler is now at ./build/omsc
-```
-
-### 25.3 CMake Configuration
-
-| Setting | Value |
-|---------|-------|
-| C++ Standard | C++17 |
-| Target | `omsc` executable |
-| LLVM Components | core, executionengine, mcjit, interpreter, native, support, passes, target, transformutils, analysis, asmparser, codegen, mc, mcparser, bitreader |
-
-### 25.4 Running Tests
-
-```bash
-# From repository root
-bash run_tests.sh
-```
-
-The test suite verifies:
-- CLI commands (help, version, lex, parse, emit-ir, build, run)
-- 30+ example programs with expected return values
-- Compile-failure cases (const reassignment, break outside loop, etc.)
-- Optimization levels (O3 compilation)
+| Function | Description |
+|---|---|
+| `file_read(path)` | Read entire file as string |
+| `file_write(path, content)` | Write string to file (overwrite) |
+| `file_append(path, content)` | Append string to file |
+| `file_exists(path)` | Returns 1 if file exists, 0 otherwise |
 
 ---
 
-## 26. Error Handling and Diagnostics
+## 22. Lambda Expressions
 
-### 26.1 Compile-Time Errors
-
-The compiler reports errors with **file, line, and column** information:
+Lambdas create anonymous functions. They are desugared to named functions at parse time.
 
 ```
-Error at line 4, column 12: Undefined variable 'z'
-Error: Cannot modify constant variable 'PI'
-Error: 'break' statement outside of loop
-Error: 'continue' statement outside of loop
+|x| x * 2                     // single parameter
+|x, y| x + y                  // two parameters
+|| 42                          // no parameters
+|x:int| x * 2                 // annotated parameter
 ```
 
-### 26.2 Runtime Errors
-
-Runtime errors print a message to stderr and terminate with exit code 1:
+Lambdas are first-class values and can be passed to higher-order functions:
 
 ```
-Runtime error: division by zero
-Runtime error: modulo by zero
-Runtime error: array index out of bounds
-```
-
-Division by zero and modulo by zero are detected in generated code and call `exit(1)`. Array out-of-bounds triggers `llvm.trap` after printing the error.
-
-### 26.3 Lexer Errors
-
-```
-Unterminated string literal
-Unterminated block comment
-Unterminated escape sequence at end of string
-```
-
-### 26.4 Code Generator Errors
-
-```
-Unknown function: nonexistent_func
-Function 'add' expects 2 argument(s), but 3 provided
-Built-in function 'abs' expects 1 argument, but 2 provided
-OPTMAX function "optimized_fn" cannot invoke non-OPTMAX function "regular_fn"
+var doubled = array_map([1, 2, 3], |x| x * 2)
+var evens = array_filter([1, 2, 3, 4], |x| x % 2 == 0)
+var total = array_reduce([1, 2, 3, 4], |acc, x| acc + x, 0)
 ```
 
 ---
 
-## 27. Complete Code Examples
+## 23. Import System
 
-### 27.1 Hello World
-
-```javascript
-fn main() {
-    print("hello world");
-    return 0;
-}
+```
+import "filename";
+import "path/to/module";   // .om extension added automatically
 ```
 
-### 27.2 Factorial (Recursion)
+- Circular imports are detected and silently skipped
+- Paths are resolved relative to the importing file's directory
+- Imports merge all functions, structs, and enums from the imported file
 
-```javascript
-fn factorial(n) {
-    if (n <= 1) {
-        return 1;
-    }
-    return n * factorial(n - 1);
-}
+---
 
-fn main() {
-    var result = factorial(5);
-    print(result);     // Output: 120
-    return result;     // Exit code: 120
-}
+## 24. Compiler CLI Reference
+
+### 24.1 Commands
+
+```
+omsc <file.om>                  # compile to executable (default: a.out)
+omsc compile <file.om>          # same as above
+omsc build <file.om>            # same as above
+omsc run <file.om>              # compile and run
+omsc check <file.om>            # validate syntax only
+omsc emit-ir <file.om>          # print LLVM IR
+omsc --emit-obj <file.om>       # emit object file only
+omsc clean                      # remove build artifacts
+omsc pkg <subcommand>           # package manager
 ```
 
-### 27.3 Fibonacci (Iteration)
+### 24.2 Output
 
-```javascript
-fn fibonacci(n) {
-    if (n <= 1) {
-        return n;
-    }
-    var a = 0;
-    var b = 1;
-    var i = 2;
-    while (i <= n) {
-        var temp = a + b;
-        a = b;
-        b = temp;
-        i = i + 1;
-    }
-    return b;
-}
-
-fn main() {
-    return fibonacci(10);   // 55
-}
+```
+-o <file>      Output file path (default: a.out)
 ```
 
-### 27.4 GCD (Euclidean Algorithm)
+### 24.3 Optimization Levels
 
-```javascript
-fn gcd(a, b) {
-    while (b != 0) {
-        var temp = b;
-        b = a % b;
-        a = temp;
-    }
-    return a;
-}
-
-fn main() {
-    return gcd(48, 18);   // 6
-}
+```
+-O0            No optimization
+-O1            Basic optimizations
+-O2            Standard optimizations (default)
+-O3            Aggressive optimizations
+-Ofast         -O3 + fast-math
 ```
 
-### 27.5 Array Operations
+### 24.4 Target
 
-```javascript
-fn main() {
-    var arr = [10, 20, 30, 40, 50];
-    var total = 0;
-
-    // Iterate with len()
-    for (i in 0...len(arr)) {
-        total = total + arr[i];
-    }
-    print(total);          // Output: 150
-
-    // Use stdlib functions
-    print(sum(arr));       // Output: 150
-    swap(arr, 0, 4);       // arr = [50, 20, 30, 40, 10]
-    reverse(arr);          // arr = [10, 40, 30, 20, 50]
-
-    return sum(arr);       // 150
-}
+```
+-march=<cpu>   Target CPU (default: native)
+-mtune=<cpu>   Tuning CPU (default: same as -march)
 ```
 
-### 27.6 Math Stdlib Demo
+Examples: `-march=native`, `-march=znver3`, `-march=skylake`
 
-```javascript
-fn main() {
-    var total = 0;
-    total = total + abs(-10);              // 10
-    total = total + min(3, 7);             // 3
-    total = total + max(3, 7);             // 7
-    total = total + sign(-42);             // -1
-    total = total + clamp(15, 0, 10);      // 10
-    total = total + pow(2, 8);             // 256
-    total = total + sqrt(144);             // 12
-    total = total + is_even(42);           // 1
-    total = total + is_odd(7);             // 1
-    return total;                          // 299
-}
+### 24.5 Feature Flags
+
+All `-f` flags have a `-fno-` counterpart to disable:
+
+| Flag | Default | Description |
+|---|---|---|
+| `-flto` | off | Link-time optimization |
+| `-fpic` | on | Position-independent code |
+| `-ffast-math` | off | Fast floating-point (imprecise) |
+| `-foptmax` | on | Enable OPTMAX block processing |
+| `-fstack-protector` | off | Stack smashing protection |
+| `-fvectorize` | on | Auto-vectorization |
+| `-funroll-loops` | on | Loop unrolling |
+| `-floop-optimize` | on | Loop optimization passes |
+| `-fparallelize` | on | Parallelization hints |
+| `-fegraph` | on | E-graph equality saturation (active at O2+) |
+| `-fsuperopt` | on | Superoptimizer pass (active at O2+) |
+| `-fhgoe` | on | Hardware Graph Optimization Engine (active at O2+ with -march/-mtune) |
+
+### 24.6 Superoptimizer Level
+
+```
+-fsuperopt-level=0   Disabled
+-fsuperopt-level=1   Basic idiom recognition
+-fsuperopt-level=2   Default (idiom + algebraic simplification)
+-fsuperopt-level=3   Full (+ enumerative synthesis)
 ```
 
-### 27.7 Character Classification
+### 24.7 Debugging and Info
 
-```javascript
-fn main() {
-    // Print "Hello" using print_char
-    print_char(72);     // H
-    print_char(101);    // e
-    print_char(108);    // l
-    print_char(108);    // l
-    print_char(111);    // o
-    print_char(10);     // newline
-
-    // Check character types
-    var result = 0;
-    result = result + is_alpha(65);    // 1 ('A')
-    result = result + is_digit(48);    // 1 ('0')
-    result = result + is_alpha(48);    // 0 ('0' is not alpha)
-    return result;                     // 2
-}
+```
+-g / --debug   Emit debug information
+-V / --verbose Verbose compiler output
+-static        Link statically
+-s / --strip   Strip debug symbols from output
 ```
 
-### 27.8 OPTMAX Optimization
+### 24.8 Package Manager
 
-```javascript
-OPTMAX=:
-fn compute_sum(n: int) {
-    var total: int = 0;
-    for (i: int in 0...n) {
-        total = total + i;
-    }
-    return total;
-}
-OPTMAX!:
-
-fn main() {
-    return compute_sum(100);    // 4950
-}
 ```
-
-### 27.9 All Control Flow
-
-```javascript
-fn main() {
-    var result = 0;
-
-    // If/else
-    if (1) { result = result + 1; }
-    else { result = result + 100; }
-
-    // While loop
-    var i = 0;
-    while (i < 5) {
-        result = result + 1;
-        i++;
-    }
-
-    // Do-while loop
-    var j = 0;
-    do {
-        result = result + 1;
-        j++;
-    } while (j < 3);
-
-    // For loop with range
-    for (k in 0...4) {
-        result = result + 1;
-    }
-
-    // Break and continue
-    for (m in 0...10) {
-        if (m == 3) continue;
-        if (m == 7) break;
-        result = result + 1;
-    }
-
-    // Ternary
-    result = result + ((result > 10) ? 1 : 0);
-
-    return result;
-    // 1 + 5 + 3 + 4 + 6 + 1 = 20
-}
-```
-
-### 27.10 Descending Range with Step
-
-```javascript
-fn sum_down(start, end, step) {
-    var total = 0;
-    for (i in start...end...step) {
-        total = total + i;
-    }
-    return total;
-}
-
-fn main() {
-    return sum_down(5, 0, -1);   // 5+4+3+2+1 = 15
-}
+omsc pkg install <package>   # Install a package
+omsc pkg remove <package>    # Remove a package
+omsc pkg list                # List installed packages
+omsc pkg search <query>      # Search the registry
+omsc pkg info <package>      # Show package details
 ```
 
 ---
 
-## 28. Grammar Summary
+## 25. Advanced Optimization Features
 
-### 28.1 EBNF Grammar
+### 25.1 E-Graph Equality Saturation
 
-```ebnf
-program        = { import_stmt | enum_decl | struct_decl | function_decl } ;
+The e-graph pass applies algebraic identities and constant folding to LLVM IR before the standard optimization pipeline. It uses union-find with path compression and cost-based extraction to find the lowest-cost equivalent expression.
 
-import_stmt    = "import" STRING ";" ;
-enum_decl      = "enum" IDENTIFIER "{" enum_member { "," enum_member } "}" ;
-enum_member    = IDENTIFIER [ "=" INTEGER ] ;
-struct_decl    = "struct" IDENTIFIER "{" struct_field { "," struct_field } "}" ;
-struct_field   = { field_attr } [ IDENTIFIER ] IDENTIFIER ;
-field_attr     = "hot" | "cold" | "noalias" | "immut" | "move"
-               | "align" "(" INTEGER ")"
-               | "range" "(" INTEGER "," INTEGER ")" ;
-function_decl  = "fn" IDENTIFIER [ "<" type_param_list ">" ]
-                 "(" [ param_list ] ")" [ "->" type_annotation ] block ;
-type_param_list = IDENTIFIER { "," IDENTIFIER } ;
-param_list     = parameter { "," parameter } ;
-parameter      = IDENTIFIER [ ":" type_annotation ] [ "=" literal ] ;
-type_annotation = [ "&" ] IDENTIFIER { "[]" } ;
+Enabled by default at O2+; disable with `-fno-egraph`.
 
-block          = "{" { statement } "}" ;
+### 25.2 Superoptimizer
 
-statement      = var_decl
-               | const_decl
-               | move_decl
-               | invalidate_stmt
-               | borrow_decl
-               | return_stmt
-               | if_stmt
-               | while_stmt
-               | do_while_stmt
-               | for_stmt
-               | switch_stmt
-               | try_stmt
-               | break_stmt
-               | continue_stmt
-               | throw_stmt
-               | expr_stmt
-               | block ;
+A post-LLVM optimization pass that applies:
+- **Idiom recognition**: popcount, bswap, rotate, min/max, abs, etc.
+- **Algebraic simplification**: algebraic identities on LLVM IR instructions
+- **Branch-to-select**: converts simple diamond CFGs to `select` instructions
+- **Enumerative synthesis** (level 3 only): enumerates short instruction sequences
 
-var_decl       = "var" IDENTIFIER [ ":" type_annotation ] [ "=" expression ] ";" ;
-const_decl     = "const" IDENTIFIER [ ":" type_annotation ] "=" expression ";" ;
-move_decl      = "move" ( "var" | IDENTIFIER ) IDENTIFIER "=" expression ";" ;
-invalidate_stmt = "invalidate" IDENTIFIER ";" ;
-borrow_decl    = "borrow" ( "var" | IDENTIFIER ) IDENTIFIER [ ":" type_annotation ] "=" expression ";" ;
-return_stmt    = "return" [ expression ] ";" ;
-if_stmt        = "if" "(" expression ")" statement [ "else" statement ] ;
-while_stmt     = "while" "(" expression ")" statement ;
-do_while_stmt  = "do" statement "while" "(" expression ")" ";" ;
-for_stmt       = "for" "(" IDENTIFIER [ ":" type_annotation ] "in"
-                   expression [ "..." expression [ "..." expression ] ] ")" statement ;
-switch_stmt    = "switch" "(" expression ")" "{" { case_clause } [ default_clause ] "}" ;
-case_clause    = "case" expression { "," expression } ":" { statement } ;
-default_clause = "default" ":" { statement } ;
-try_stmt       = "try" block "catch" "(" IDENTIFIER ")" block ;
-throw_stmt     = "throw" expression ";" ;
-break_stmt     = "break" ";" ;
-continue_stmt  = "continue" ";" ;
-expr_stmt      = expression ";" ;
+Enabled by default at O2+; configure with `-fsuperopt-level=<level>`.
 
-expression     = assignment ;
-assignment     = pipe [ ( "=" | "+=" | "-=" | "*=" | "/=" | "%="
-                        | "&=" | "|=" | "^=" | "<<=" | ">>=" ) assignment ]
-               | field_assign ;
-field_assign   = postfix "." IDENTIFIER "=" expression ;
-pipe           = ternary { "|>" IDENTIFIER } ;
-ternary        = null_coalesce [ "?" expression ":" ternary ] ;
-null_coalesce  = logical_or { "??" logical_or } ;
-logical_or     = logical_and { "||" logical_and } ;
-logical_and    = bitwise_or { "&&" bitwise_or } ;
-bitwise_or     = bitwise_xor { "|" bitwise_xor } ;
-bitwise_xor    = bitwise_and { "^" bitwise_and } ;
-bitwise_and    = equality { "&" equality } ;
-equality       = comparison { ( "==" | "!=" ) comparison } ;
-comparison     = shift { ( "<" | "<=" | ">" | ">=" ) shift } ;
-shift          = additive { ( "<<" | ">>" ) additive } ;
-additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
-multiplicative = power { ( "*" | "/" | "%" ) power } ;
-power          = unary [ "**" power ] ;
-unary          = ( "-" | "!" | "~" | "++" | "--" | "move" ) unary | postfix ;
-postfix        = primary { "++" | "--" | "[" expression "]"
-                         | "(" [ arg_list ] ")"
-                         | "." IDENTIFIER } ;
-primary        = INTEGER | FLOAT | STRING
-               | "true" | "false" | "null"
-               | IDENTIFIER
-               | IDENTIFIER "{" field_init { "," field_init } "}"
-               | "(" expression ")"
-               | "[" [ spread_or_expr { "," spread_or_expr } ] "]"
-               | lambda ;
-field_init     = IDENTIFIER ":" expression ;
-spread_or_expr = [ "..." ] expression ;
-lambda         = "|" [ param_list ] "|" expression ;
-arg_list       = expression { "," expression } ;
-```
+### 25.3 Hardware Graph Optimization Engine (HGOE)
 
-### 28.2 Token Reference
+Activated at O2+ when `-march` or `-mtune` is provided (including `native`). When neither flag is set the pass is a complete no-op. Builds a structural model of the target CPU microarchitecture and:
+- Maps operations to hardware execution units
+- Inserts FMA (fused multiply-add) instructions where profitable
+- Applies hardware-specific strength reductions
+- Uses hardware-aware cost models for scheduling decisions
 
-| Category | Tokens |
-|----------|--------|
-| **Literals** | `INTEGER`, `FLOAT`, `STRING`, `IDENTIFIER` |
-| **Keywords** | `fn`, `return`, `if`, `else`, `while`, `do`, `for`, `var`, `const`, `break`, `continue`, `in`, `switch`, `case`, `default`, `try`, `catch`, `throw`, `enum`, `struct`, `import`, `move`, `invalidate`, `borrow`, `true`, `false`, `null` |
-| **Arithmetic** | `+`, `-`, `*`, `/`, `%`, `**` |
-| **Comparison** | `==`, `!=`, `<`, `<=`, `>`, `>=` |
-| **Logical** | `&&`, `\|\|`, `!` |
-| **Bitwise** | `&`, `\|`, `^`, `~`, `<<`, `>>` |
-| **Assignment** | `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `\|=`, `^=`, `<<=`, `>>=` |
-| **Inc/Dec** | `++`, `--` |
-| **Special** | `...` (range/spread), `?` (ternary), `??` (null coalesce), `\|>` (pipe), `=>` (fat arrow) |
-| **Delimiters** | `(`, `)`, `{`, `}`, `[`, `]`, `;`, `,`, `:`, `.` |
-| **Pragmas** | `OPTMAX=:`, `OPTMAX!:` |
-| **Meta** | `END_OF_FILE`, `INVALID` |
+### 25.4 OPTMAX Blocks
 
----
+See [Section 18](#18-optmax-blocks).
 
-*This document describes OmScript Compiler v2.7.9. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*
+### 25.5 Profile Guidance (PGO)
+
+The build system includes `benchmark_pgo.sh` for profile-guided optimization runs. PGO is coordinated externally via the build scripts — there is no language-level PGO syntax.

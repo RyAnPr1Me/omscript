@@ -1,0 +1,52 @@
+// Test: do...until statement
+// do { ... } until (condition); — loop body runs at least once, stops when condition is true
+
+fn count_up_to(limit) {
+    var i = 0;
+    do {
+        i = i + 1;
+    } until (i >= limit);
+    return i;
+}
+
+fn sum_digits(n) {
+    var sum = 0;
+    do {
+        sum = sum + n % 10;
+        n = n / 10;
+    } until (n == 0);
+    return sum;
+}
+
+fn find_power_of_two(target) {
+    var val = 1;
+    do {
+        val = val * 2;
+    } until (val >= target);
+    return val;
+}
+
+fn main() {
+    var total = 0;
+
+    // count up to 5
+    total = total + count_up_to(5);          // 5
+
+    // count up to 10
+    total = total + count_up_to(10);         // 10
+
+    // sum digits of 123 => 1+2+3 = 6
+    total = total + sum_digits(123);         // 6
+
+    // sum digits of 9999 => 9+9+9+9 = 36
+    total = total + sum_digits(9999);        // 36
+
+    // find power of 2 >= 30 => 32
+    total = total + find_power_of_two(30);   // 32
+
+    // find power of 2 >= 100 => 128
+    total = total + find_power_of_two(100);  // 128
+
+    // Expected: 5 + 10 + 6 + 36 + 32 + 128 = 217
+    return total;
+}

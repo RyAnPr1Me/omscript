@@ -1,0 +1,19 @@
+// Test chained inverse operation elimination.
+// (x + C) - C → x, (x - C) + C → x
+fn test_add_sub(x) {
+    var y = x + 10;
+    var z = y - 10;   // (x + 10) - 10 → x
+    return z;
+}
+
+fn test_sub_add(x) {
+    var y = x - 5;
+    var z = y + 5;    // (x - 5) + 5 → x
+    return z;
+}
+
+fn main() {
+    var a = test_add_sub(42);   // should be 42
+    var b = test_sub_add(17);   // should be 17
+    return a + b;  // 42 + 17 = 59
+}

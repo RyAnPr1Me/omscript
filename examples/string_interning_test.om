@@ -1,0 +1,52 @@
+// Test string interning: identical string literals share the same pointer
+// and compile-time string builtin folding.
+fn main() {
+    var total = 0;
+
+    // Test 1: Basic string equality (interned literals should match)
+    var a = "hello";
+    var b = "hello";
+    total = total + (a == b);  // 1 — same interned pointer → fast path
+
+    // Test 2: Different strings are not equal
+    var c = "world";
+    total = total + (a != c);  // 1
+
+    // Test 3: String concatenation folding
+    var d = "hel" + "lo";
+    total = total + (d == "hello");  // 1 — folded to interned "hello"
+
+    // Test 4: Compile-time char_at folding
+    var ch = char_at("ABCDE", 2);
+    total = total + (ch == 67);  // 1 — 'C' = 67
+
+    // Test 5: Compile-time str_starts_with folding
+    total = total + str_starts_with("hello world", "hello");  // 1
+    total = total + (1 - str_starts_with("hello", "world"));  // 1
+
+    // Test 6: Compile-time str_ends_with folding
+    total = total + str_ends_with("hello world", "world");  // 1
+    total = total + (1 - str_ends_with("world", "hello world"));  // 1
+
+    // Test 7: Compile-time str_contains folding
+    total = total + str_contains("hello world", "lo wo");  // 1
+    total = total + (1 - str_contains("hello", "xyz"));  // 1
+
+    // Test 8: Compile-time str_index_of folding
+    total = total + (str_index_of("hello", "ell") == 1);  // 1
+    total = total + (str_index_of("hello", "xyz") == -1);  // 1
+
+    // Test 9: Compile-time str_reverse folding
+    var rev = str_reverse("abc");
+    total = total + (rev == "cba");  // 1
+
+    // Test 10: Compile-time str_repeat folding
+    var rep = str_repeat("ab", 3);
+    total = total + (rep == "ababab");  // 1
+
+    // Test 11: Compile-time str_substr folding
+    var sub = str_substr("hello world", 6, 5);
+    total = total + (sub == "world");  // 1
+
+    return total;  // Should be 15
+}

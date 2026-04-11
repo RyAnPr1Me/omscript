@@ -1,0 +1,24 @@
+// Test the 'defer' keyword (execute at end of block, LIFO order)
+fn main() {
+    var result = 0;
+
+    // Basic defer: should execute after other statements in the block
+    {
+        result = result + 1;      // runs first
+        defer result = result * 2; // deferred: runs last
+        result = result + 3;      // runs second
+    }
+    // Inside block: result = 0 + 1 = 1, then + 3 = 4, then * 2 = 8
+    // result = 8
+
+    // LIFO order: last defer runs first
+    {
+        defer result = result + 1;   // runs second (after the other defer)
+        defer result = result * 3;   // runs first (LIFO)
+        result = result + 2;
+    }
+    // result = 8 + 2 = 10, then * 3 = 30, then + 1 = 31
+    // result = 31
+
+    return result;  // Expected: 31
+}

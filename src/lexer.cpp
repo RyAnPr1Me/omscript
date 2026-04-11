@@ -42,7 +42,20 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"prefetch", TokenType::PREFETCH},
     {"likely", TokenType::LIKELY},
     {"unlikely", TokenType::UNLIKELY},
-    {"register", TokenType::REGISTER}};
+    {"register", TokenType::REGISTER},
+    {"unless", TokenType::UNLESS},
+    {"until", TokenType::UNTIL},
+    {"loop", TokenType::LOOP},
+    {"repeat", TokenType::REPEAT},
+    {"defer", TokenType::DEFER},
+    {"guard", TokenType::GUARD},
+    {"when", TokenType::WHEN},
+    {"forever", TokenType::FOREVER},
+    {"foreach", TokenType::FOREACH},
+    {"elif", TokenType::ELIF},
+    {"swap", TokenType::SWAP},
+    {"times", TokenType::TIMES},
+    {"with", TokenType::WITH}};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] [[gnu::cold]] static void lexError(const std::string& msg, int ln, int col) {

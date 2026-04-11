@@ -5,6 +5,38 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.0] - 2026-04-11
+
+### Added
+- **Method-call syntax: `obj.method(args)` desugars to `method(obj, args)`** (syntactic improvement).
+  Any dot-followed-by-call expression is transparently rewritten in the parser so that the receiver becomes the first argument of the named function. This enables an idiomatic, object-oriented style without introducing a new runtime model:
+  - `arr.push(42)` → `push(arr, 42)` — array methods
+  - `str.len()` → `len(str)` — string/any builtin that takes a single value
+  - `str.str_upper()` → `str_upper(str)` — prefixed builtins
+  - `point.translate(dx, dy)` → `translate(point, dx, dy)` — user-defined struct methods
+  - Chains (`c = c.increment(1)`) work naturally since each call returns the result.
+  - Zero runtime overhead — generates identical code to the direct function-call form.
+- **New example/test program** `examples/method_call_test.om` covering struct methods, array methods, string methods, and sequential chaining (expected exit 129).
+- **Integration test** for `method_call_test.om` added to `run_tests.sh`.
+
+### Changed (codegen improvement)
+- **Per-field TBAA for struct field accesses.** Each `(struct_type, field_index)` pair now gets its own unique TBAA type node that is a child of the shared `struct field` root type. Previously all struct field loads and stores shared a single `tbaaStructField_` TBAA access tag, so LLVM had to assume that reading one field might alias writing any other. With per-field nodes:
+  - Stores to `p.x` and loads from `p.y` are proven non-aliasing → LLVM can reorder/CSE them.
+  - Generic (unknown-field) accesses that retain the old `tbaaStructField_` tag still correctly alias all per-field accesses because the shared type is their common ancestor.
+  - Per-field nodes are created lazily and cached in `tbaaStructFieldCache_`.
+
+## [3.8.0] - 2026-04-11
+
+### Added
+- **5 new built-in functions** for array and string manipulation:
+  - `array_product(arr)` — multiplies all elements together; returns `1` for an empty array (the multiplicative identity). Mirrors `sum()`. Uses a vectorization-friendly loop with `mustprogress` metadata.
+  - `array_last(arr)` — returns the last element of an array; aborts with a runtime error on an empty array. Branch weights favour the non-empty path (1000:1).
+  - `array_insert(arr, idx, val)` — inserts `val` at index `idx`, shifting subsequent elements right. Returns a **new array** (the original is unchanged). `idx` must be in `[0, length]`; inserting at `length` is equivalent to appending. Bounds-checked with a 1000:1 hot/cold branch weight.
+  - `str_pad_left(str, width, fill)` — left-pads `str` with the first character of `fill` until the string is at least `width` characters long. Returns `str` unchanged if it already meets or exceeds `width`.
+  - `str_pad_right(str, width, fill)` — right-pads `str` with the first character of `fill`. Returns `str` unchanged if it already meets or exceeds `width`.
+- **New example/test program** `examples/array_string_builtins_test.om` covering all five new builtins with 5 independent sub-tests.
+- **Integration test** for `array_string_builtins_test.om` (expected exit 178) added to `run_tests.sh`.
+
 ## [3.7.0] - 2026-03-23
 
 ### Added

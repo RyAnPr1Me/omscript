@@ -59,7 +59,8 @@ enum class ASTNodeType {
     DICT_EXPR,
     INVALIDATE_STMT,
     MOVE_DECL,
-    PREFETCH_STMT
+    PREFETCH_STMT,
+    DEFER_STMT
 };
 
 class ASTNode {
@@ -383,6 +384,13 @@ class ThrowStmt : public Statement {
     explicit ThrowStmt(std::unique_ptr<Expression> val) : Statement(ASTNodeType::THROW_STMT), value(std::move(val)) {}
 };
 
+class DeferStmt : public Statement {
+  public:
+    std::unique_ptr<Statement> body;
+
+    explicit DeferStmt(std::unique_ptr<Statement> b) : Statement(ASTNodeType::DEFER_STMT), body(std::move(b)) {}
+};
+
 class EnumDecl : public Statement {
   public:
     std::string name;
@@ -512,6 +520,7 @@ class FunctionDecl : public ASTNode {
     bool hintMinSize = false;     ///< @minsize — optimize for minimum code size
     bool hintOptNone = false;     ///< @optnone — disable all optimizations (useful for debugging)
     bool hintNoUnwind = false;    ///< @nounwind — function never throws C++ exceptions
+    bool hintConstEval = false;   ///< @const_eval — evaluate at compile time when all args are constants
 
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {
@@ -620,14 +629,19 @@ class PrefetchStmt : public Statement {
     bool hintHot = false;
     bool hintImmut = false;
 
+    /// Byte offset for speculative prefetch (e.g. prefetch+128 to prefetch
+    /// 2 cache lines ahead).  Default 0 means prefetch at the variable's
+    /// base address only.
+    int64_t offsetBytes = 0;
+
     /// Constructor for standalone prefetch of an existing variable.
-    explicit PrefetchStmt(const std::string& name)
-        : Statement(ASTNodeType::PREFETCH_STMT), varName(name) {}
+    explicit PrefetchStmt(const std::string& name, int64_t offset = 0)
+        : Statement(ASTNodeType::PREFETCH_STMT), varName(name), offsetBytes(offset) {}
 
     /// Constructor for prefetch with variable declaration.
-    PrefetchStmt(std::unique_ptr<VarDecl> decl, bool hot, bool immut)
+    PrefetchStmt(std::unique_ptr<VarDecl> decl, bool hot, bool immut, int64_t offset = 0)
         : Statement(ASTNodeType::PREFETCH_STMT), varDecl(std::move(decl)),
-          hintHot(hot), hintImmut(immut) {}
+          hintHot(hot), hintImmut(immut), offsetBytes(offset) {}
 };
 
 } // namespace omscript

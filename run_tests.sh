@@ -675,6 +675,37 @@ test_program "examples/loop_ucmp_test.om" 5
 test_program "examples/dict_literal_test.om" 18
 test_program "examples/preprocessor_test.om" 12
 test_program "examples/dict_chaining_test.om" 16
+test_program "examples/ifelse_select_test.om" 37
+test_program "examples/const_float_fold_test.om" 7
+test_program "examples/inverse_op_test.om" 59
+test_program "examples/musttail_test.om" 175
+test_program "examples/string_interning_test.om" 15
+test_program "examples/constfold_builtins_test.om" 15
+
+# Syntactic features tests
+test_program "examples/unless_test.om" 31
+test_program "examples/until_test.om" 16
+test_program "examples/loop_keyword_test.om" 25
+test_program "examples/repeat_test.om" 65
+test_program "examples/defer_test.om" 31
+test_program "examples/guard_test.om" 170
+test_program "examples/when_test.om" 65
+test_program "examples/forever_test.om" 103
+test_program "examples/foreach_keyword_test.om" 33
+test_program "examples/do_until_test.om" 217
+test_program "examples/elif_test.om" 165
+test_program "examples/swap_test.om" 108
+test_program "examples/times_test.om" 162
+test_program "examples/destructure_test.om" 13130
+test_program "examples/indexed_foreach_test.om" 1652
+test_program "examples/repeat_until_test.om" 297
+test_program "examples/step_downto_test.om" 112
+test_program "examples/with_test.om" 188
+test_program "examples/loop_counted_test.om" 63
+test_program "examples/expr_fn_swap_test.om" 529
+test_program "examples/assume_unreachable_expect_test.om" 125
+test_program "examples/array_string_builtins_test.om" 178
+test_program "examples/method_call_test.om" 129
 
 echo ""
 echo "============================================"

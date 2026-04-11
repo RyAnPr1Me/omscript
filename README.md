@@ -13,6 +13,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Lambda Expressions**: Anonymous functions with `|x| x * 2` syntax for use with higher-order builtins
 - **Pipe Operator**: Left-to-right function chaining with `expr |> fn`
 - **Spread Operator**: Array unpacking in literals with `[1, ...arr, 2]`
+- **Method-Call Syntax**: `obj.method(args)` desugars to `method(obj, args)` — enables OOP-style code with zero runtime overhead
 - **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end)` and `for (i in start...end...step)`
 - **For-Each Loops**: Iterate over arrays with `for (x in array)`
 - **Switch/Case**: Multi-way branching with `switch`/`case`/`default`, multi-value `case 1, 2, 3:`
@@ -24,7 +25,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
 - **String Interpolation**: `$"hello {name}, count = {n + 1}"` with auto type conversion
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
-- **121 Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
+- **140+ Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
 - **Adaptive JIT Runtime**: Hot functions are automatically recompiled at higher optimization levels using runtime profiling data
 
 ## Optimization Pipeline

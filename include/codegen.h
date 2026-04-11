@@ -20,6 +20,7 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -212,6 +213,9 @@ class CodeGenerator {
     llvm::StringMap<llvm::Value*> namedValues;
     std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
 
+    // Defer stack: each scope level has its own list of deferred statements (LIFO)
+    std::vector<std::vector<Statement*>> deferStack;
+
     struct LoopContext {
         llvm::BasicBlock* breakTarget;
         llvm::BasicBlock* continueTarget;
@@ -263,6 +267,9 @@ class CodeGenerator {
         // Previous constIntFolds_ value for this variable (if any).
         bool hadPreviousIntFold = false;
         int64_t previousIntFold = 0;
+        // Previous constFloatFolds_ value for this variable (if any).
+        bool hadPreviousFloatFold = false;
+        double previousFloatFold = 0.0;
     };
     llvm::StringMap<bool> constValues;
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
@@ -309,6 +316,23 @@ class CodeGenerator {
     // allocated buffer capacity.  Used by str_concat to skip realloc calls
     // when the existing buffer has enough space (amortized O(1) appends).
     llvm::StringMap<llvm::AllocaInst*> stringCapCache_;
+
+    // ── String Interning Pool ──────────────────────────────────────
+    /// Maps string literal content → LLVM global constant pointer.
+    /// Enables pointer-equality comparison for interned strings and
+    /// deduplicates identical string literals across the entire module.
+    llvm::StringMap<llvm::GlobalVariable*> internedStrings_;
+
+    /// Intern a string literal: return the unique global pointer for the
+    /// given string content.  Creates a new global if this content has
+    /// not been seen before; otherwise returns the existing one.
+    llvm::GlobalVariable* internString(const std::string& content);
+
+    /// Maximum string length for Small String Optimization (SSO).
+    /// Strings ≤ this length are stack-allocated via alloca+memcpy
+    /// instead of heap-allocated via strdup.  23 bytes matches the
+    /// common SSO threshold (24-byte struct with 1 byte for NUL/flags).
+    static constexpr size_t kSSOMaxLen = 23;
 
     /// Ownership lattice: tracks the ownership state of each variable.
     ///
@@ -362,6 +386,19 @@ class CodeGenerator {
     /// constants, which the vectorizer then preserves as vector urem/udiv.
     llvm::DenseSet<llvm::Value*> nonNegValues_;
 
+    /// Loop-scope array length cache: maps array base pointer → loaded length
+    /// value within the current loop body.  When multiple array accesses in the
+    /// same loop body use the same array, the length load is shared instead of
+    /// re-loaded from memory on every bounds check.  TBAA already tells LLVM
+    /// that length and element slots don't alias, but LLVM's GVN/LICM may not
+    /// always succeed when the loads are in different control-flow paths (each
+    /// behind a bounds-check branch).  This cache short-circuits that by
+    /// re-using the SSA value directly.
+    /// Cleared on loop entry/exit to avoid stale values.
+    llvm::DenseMap<llvm::Value*, llvm::Value*> loopArrayLenCache_;
+    /// Nesting depth of loopArrayLenCache_ — pushed/popped on loop entry/exit.
+    unsigned loopLenCacheDepth_ = 0;
+
     /// File-level @noalias: all pointer parameters are marked noalias.
     bool fileNoAlias_ = false;
 
@@ -372,10 +409,19 @@ class CodeGenerator {
     llvm::MDNode* tbaaRoot_ = nullptr;       ///< Root of TBAA type hierarchy
     llvm::MDNode* tbaaArrayLen_ = nullptr;   ///< TBAA access tag for array length (slot 0)
     llvm::MDNode* tbaaArrayElem_ = nullptr;  ///< TBAA access tag for array elements (slots 1+)
-    llvm::MDNode* tbaaStructField_ = nullptr; ///< TBAA access tag for struct field loads/stores
+    llvm::MDNode* tbaaStructField_ = nullptr; ///< TBAA access tag for struct field loads/stores (generic)
+    llvm::MDNode* tbaaStructTypeNode_ = nullptr; ///< TBAA type node for "struct field" (parent of per-field types)
     llvm::MDNode* tbaaStringData_ = nullptr;  ///< TBAA access tag for string character data
     llvm::MDNode* tbaaMapKey_ = nullptr;      ///< TBAA access tag for map key slots
     llvm::MDNode* tbaaMapVal_ = nullptr;      ///< TBAA access tag for map value slots
+    llvm::MDNode* tbaaMapHash_ = nullptr;     ///< TBAA access tag for map hash slots
+    llvm::MDNode* tbaaMapMeta_ = nullptr;     ///< TBAA access tag for map header (capacity/size)
+    /// Per-field TBAA access tag cache: maps (structTypeName, fieldIndex) → access tag.
+    /// Each struct field gets a unique TBAA type node that is a child of tbaaStructTypeNode_,
+    /// so accesses to different fields of the same (or different) struct types do not alias.
+    std::map<std::pair<std::string, size_t>, llvm::MDNode*> tbaaStructFieldCache_;
+    /// Returns (creating if needed) a per-field TBAA access tag for the given struct type and field index.
+    llvm::MDNode* getOrCreateFieldTBAA(const std::string& structType, size_t fieldIdx);
 
     /// !range metadata for array length loads: [0, INT64_MAX).
     /// Array lengths are always non-negative (they're sizes).
@@ -402,6 +448,31 @@ class CodeGenerator {
     /// variable with value 10000), enabling the urem/udiv fast path and
     /// avoiding the slow dynamic-divisor branch with zero-check overhead.
     llvm::StringMap<int64_t> constIntFolds_;
+
+    /// Constant float values for `const` float variables initialized with
+    /// a compile-time constant.  Enables compile-time evaluation of float
+    /// arithmetic chains: `const PI = 3.14159; var x = PI * 2.0;` folds
+    /// to 6.28318 at compile time, eliminating runtime fmul.
+    llvm::StringMap<double> constFloatFolds_;
+
+    /// Constant string values for `const` string variables initialized with
+    /// a compile-time string literal.  Enables compile-time evaluation of
+    /// string builtins: `const s = "hello"; var n = len(s);` folds to 5.
+    llvm::StringMap<std::string> constStringFolds_;
+
+    /// Set of function names marked with @const_eval.
+    /// When called with all-constant integer arguments, the compiler evaluates
+    /// the function body at compile time using AST-level interpretation,
+    /// returning a compile-time constant.  This is similar to C++20's consteval
+    /// but automatically falls back to runtime codegen when arguments are not
+    /// constant.
+    llvm::StringSet<> constEvalFunctions_;
+
+    /// Evaluate a @const_eval function at compile time.
+    /// Returns std::nullopt if the function body is too complex for the
+    /// compile-time interpreter (falls back to runtime codegen).
+    std::optional<int64_t> tryConstEval(const FunctionDecl* func,
+                                        const std::vector<int64_t>& argVals);
 
     /// Variables with SIMD vector types for operator dispatch.
     llvm::StringSet<> simdVars_;
@@ -447,6 +518,12 @@ class CodeGenerator {
     [[gnu::hot]] llvm::Value* generateLiteral(LiteralExpr* expr);
     [[gnu::hot]] llvm::Value* generateIdentifier(IdentifierExpr* expr);
     [[gnu::hot]] llvm::Value* generateBinary(BinaryExpr* expr);
+    /// Recursively check if an expression tree is a chain of string literal
+    /// concatenations (e.g. "a" + "b" + "c").  If so, append the folded result
+    /// to @p out and return true.  Otherwise return false and leave @p out
+    /// unchanged.  This enables compile-time folding of arbitrarily deep
+    /// chained string concatenations.
+    bool tryFoldStringConcat(Expression* expr, std::string& out) const;
     llvm::Value* generateUnary(UnaryExpr* expr);
     [[gnu::hot]] llvm::Value* generateCall(CallExpr* expr);
     llvm::Value* generateAssign(AssignExpr* expr);
@@ -456,6 +533,24 @@ class CodeGenerator {
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateDict(DictExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
+
+    // ── Array Escape Analysis ──────────────────────────────────────
+    /// Check whether an array literal assigned to @p varName can be
+    /// stack-allocated (does not escape the current function scope).
+    /// Returns true if the array is safe for alloca (no escape).
+    bool canStackAllocateArray(const std::string& varName) const;
+
+    /// Maximum number of array elements for stack allocation (prevents
+    /// stack overflow from large arrays — 64 elements × 8 bytes = 512 B).
+    static constexpr size_t kMaxStackArrayElements = 64;
+
+    /// Track which variables hold stack-allocated arrays so that free()
+    /// is not called on them and bounds-check code uses the correct base.
+    llvm::StringSet<> stackAllocatedArrays_;
+
+    /// Hint flag set by generateVarDecl to tell generateArray to use alloca
+    /// instead of malloc for the next array allocation.
+    bool pendingArrayStackAlloc_ = false;
 
     /// Returns true if @p expr statically resolves to a dict/map value.
     /// Used to route dict["key"] through map_get IR rather than array element IR.
@@ -738,6 +833,12 @@ class CodeGenerator {
     llvm::Function* getOrEmitHashMapKeys();
     llvm::Function* getOrEmitHashMapValues();
     llvm::Function* getOrEmitHashMapSize();
+
+    /// Emit the Rotate-Accumulate (RA) hash for a 64-bit integer key.
+    /// Returns a hash value with the low two bits guaranteed >= 2
+    /// (0=empty, 1=tombstone are reserved).  Only 4 IR instructions:
+    /// mul, fshr (ror), add, or.
+    llvm::Value* emitKeyHash(llvm::Value* key);
 
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*

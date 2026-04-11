@@ -1,0 +1,70 @@
+// Test: loop N — counted loop variant
+// loop N { ... } — runs body N times (zero-cost sugar for for __i in 0...N)
+
+fn accumulate() {
+    var total = 0;
+    loop 5 {
+        total = total + 1;
+    }
+    return total;
+}
+
+fn with_parens() {
+    var total = 0;
+    loop (10) {
+        total = total + 2;
+    }
+    return total;
+}
+
+fn nested_loops() {
+    var total = 0;
+    loop 3 {
+        loop 4 {
+            total = total + 1;
+        }
+    }
+    return total;
+}
+
+fn loop_with_var() {
+    var total = 0;
+    var n = 7;
+    loop n {
+        total = total + 3;
+    }
+    return total;
+}
+
+fn infinite_with_break() {
+    var i = 0;
+    loop {
+        i = i + 1;
+        if (i >= 5) {
+            break;
+        }
+    }
+    return i;
+}
+
+fn main() {
+    var total = 0;
+
+    // accumulate: 5
+    total = total + accumulate();
+
+    // with parens: 20
+    total = total + with_parens();
+
+    // nested: 3*4 = 12
+    total = total + nested_loops();
+
+    // with var: 7*3 = 21
+    total = total + loop_with_var();
+
+    // infinite with break: 5
+    total = total + infinite_with_break();
+
+    // Expected: 5 + 20 + 12 + 21 + 5 = 63
+    return total;
+}

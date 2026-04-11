@@ -1603,6 +1603,32 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "UNLIKELY";
     case omscript::TokenType::REGISTER:
         return "REGISTER";
+    case omscript::TokenType::UNLESS:
+        return "UNLESS";
+    case omscript::TokenType::UNTIL:
+        return "UNTIL";
+    case omscript::TokenType::LOOP:
+        return "LOOP";
+    case omscript::TokenType::REPEAT:
+        return "REPEAT";
+    case omscript::TokenType::DEFER:
+        return "DEFER";
+    case omscript::TokenType::GUARD:
+        return "GUARD";
+    case omscript::TokenType::WHEN:
+        return "WHEN";
+    case omscript::TokenType::FOREVER:
+        return "FOREVER";
+    case omscript::TokenType::FOREACH:
+        return "FOREACH";
+    case omscript::TokenType::ELIF:
+        return "ELIF";
+    case omscript::TokenType::SWAP:
+        return "SWAP";
+    case omscript::TokenType::TIMES:
+        return "TIMES";
+    case omscript::TokenType::WITH:
+        return "WITH";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:

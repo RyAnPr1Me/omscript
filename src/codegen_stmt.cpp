@@ -1,10 +1,12 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include <iostream>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>
+#include <llvm/Support/KnownBits.h>
 #include <set>
 #include <stdexcept>
 
@@ -58,7 +60,31 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
             initValue = vec;
         } else {
+            // Check if this is a const array literal eligible for stack allocation.
+            // Const arrays cannot escape via reassignment; if the array is small
+            // and has no spread elements, we hint generateArray to use alloca.
+            bool useStackAlloc = false;
+            if (stmt->isConst &&
+                stmt->initializer->type == ASTNodeType::ARRAY_EXPR &&
+                optimizationLevel >= OptimizationLevel::O1) {
+                auto* arrExpr = static_cast<ArrayExpr*>(stmt->initializer.get());
+                bool hasSpreadElem = false;
+                for (const auto& elem : arrExpr->elements) {
+                    if (elem->type == ASTNodeType::SPREAD_EXPR) {
+                        hasSpreadElem = true;
+                        break;
+                    }
+                }
+                if (!hasSpreadElem && arrExpr->elements.size() <= kMaxStackArrayElements) {
+                    useStackAlloc = true;
+                    pendingArrayStackAlloc_ = true;
+                }
+            }
             initValue = generateExpression(stmt->initializer.get());
+            if (useStackAlloc) {
+                pendingArrayStackAlloc_ = false;
+                stackAllocatedArrays_.insert(stmt->name);
+            }
         }
 
         // When no annotation is present, infer the type from the initializer.
@@ -164,6 +190,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
                     initNonNeg = !ci->isNegative();
             }
+            // KnownBits fallback: detect non-negativity through LLVM's
+            // value-tracking analysis for values not in nonNegValues_ (e.g.,
+            // function call results with !range metadata, shift results, etc.)
+            if (!initNonNeg && optimizationLevel >= OptimizationLevel::O1) {
+                llvm::KnownBits kb = llvm::computeKnownBits(
+                    initValue, module->getDataLayout());
+                initNonNeg = kb.isNonNegative();
+            }
             if (initNonNeg)
                 nonNegValues_.insert(alloca);
             // Propagate tight upper bound for modular arithmetic.
@@ -188,6 +222,21 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             if (stmt->isConst) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
                     constIntFolds_[stmt->name] = ci->getSExtValue();
+            }
+        }
+        // Track const float values for compile-time float expression folding.
+        if (stmt->isConst && initValue->getType()->isDoubleTy()) {
+            if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(initValue))
+                constFloatFolds_[stmt->name] = cf->getValueAPF().convertToDouble();
+        }
+        // Track const string values for compile-time string builtin folding.
+        // When a const variable is initialized with a string literal, record
+        // the literal content so that len(var), str_starts_with(var, ...) etc.
+        // can be folded at compile time without a runtime strlen/strcmp.
+        if (stmt->isConst && stmt->initializer) {
+            if (auto* lit = dynamic_cast<LiteralExpr*>(stmt->initializer.get())) {
+                if (lit->literalType == LiteralExpr::LiteralType::STRING)
+                    constStringFolds_[stmt->name] = lit->stringValue;
             }
         }
         // Track whether this variable holds a string value so that print(),
@@ -306,7 +355,33 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
         // benefit from TCO marking.
         if (optimizationLevel >= OptimizationLevel::O1) {
             if (auto* callInst = llvm::dyn_cast<llvm::CallInst>(retValue)) {
-                callInst->setTailCallKind(llvm::CallInst::TCK_Tail);
+                // Self-recursive tail calls get musttail: this GUARANTEES the
+                // call is lowered to a jump, providing O(1) stack usage for
+                // any depth of recursion.  This is a unique OmScript advantage
+                // — most languages only get "best effort" tail call elimination.
+                // musttail requires the callee signature matches the caller's,
+                // which is always true for self-recursive calls.
+                llvm::Function* calledFn = callInst->getCalledFunction();
+                if (calledFn && calledFn == currentFn &&
+                    calledFn->getReturnType() == currentFn->getReturnType() &&
+                    calledFn->arg_size() == callInst->arg_size()) {
+                    // Verify all parameter types match (required by musttail).
+                    bool typesMatch = true;
+                    for (unsigned i = 0; i < calledFn->arg_size(); ++i) {
+                        if (callInst->getArgOperand(i)->getType() !=
+                            calledFn->getFunctionType()->getParamType(i)) {
+                            typesMatch = false;
+                            break;
+                        }
+                    }
+                    if (typesMatch) {
+                        callInst->setTailCallKind(llvm::CallInst::TCK_MustTail);
+                    } else {
+                        callInst->setTailCallKind(llvm::CallInst::TCK_Tail);
+                    }
+                } else {
+                    callInst->setTailCallKind(llvm::CallInst::TCK_Tail);
+                }
             }
         }
 
@@ -392,6 +467,105 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     }
 
     llvm::Value* condBool = toBool(condition);
+
+    // ── If-else to select conversion ─────────────────────────────────
+    // Pattern: if (c) { x = a; } else { x = b; }  →  x = select(c, a, b)
+    // Eliminates branch misprediction entirely for simple conditional
+    // assignments.  Only fires at O2+ when both arms are single assignments
+    // to the same variable with side-effect-free values.
+    if (optimizationLevel >= OptimizationLevel::O2 && stmt->elseBranch) {
+        // Extract the single assignment from each branch.
+        auto extractSingleAssign = [](Statement* branch) -> AssignExpr* {
+            // Direct expression statement
+            if (branch->type == ASTNodeType::EXPR_STMT) {
+                auto* exprStmt = static_cast<ExprStmt*>(branch);
+                if (exprStmt->expression->type == ASTNodeType::ASSIGN_EXPR)
+                    return static_cast<AssignExpr*>(exprStmt->expression.get());
+            }
+            // Block with a single statement
+            if (branch->type == ASTNodeType::BLOCK) {
+                auto* block = static_cast<BlockStmt*>(branch);
+                if (block->statements.size() == 1 &&
+                    block->statements[0]->type == ASTNodeType::EXPR_STMT) {
+                    auto* exprStmt = static_cast<ExprStmt*>(block->statements[0].get());
+                    if (exprStmt->expression->type == ASTNodeType::ASSIGN_EXPR)
+                        return static_cast<AssignExpr*>(exprStmt->expression.get());
+                }
+            }
+            return nullptr;
+        };
+
+        auto* thenAssign = extractSingleAssign(stmt->thenBranch.get());
+        auto* elseAssign = extractSingleAssign(stmt->elseBranch.get());
+
+        if (thenAssign && elseAssign && thenAssign->name == elseAssign->name) {
+            // Check that both RHS values are simple side-effect-free expressions.
+            auto isSimpleValue = [](Expression* e) -> bool {
+                if (e->type == ASTNodeType::LITERAL_EXPR) return true;
+                if (e->type == ASTNodeType::IDENTIFIER_EXPR) return true;
+                if (e->type == ASTNodeType::UNARY_EXPR) {
+                    auto* u = static_cast<UnaryExpr*>(e);
+                    return (u->op == "-" || u->op == "~" || u->op == "!") &&
+                           (u->operand->type == ASTNodeType::LITERAL_EXPR ||
+                            u->operand->type == ASTNodeType::IDENTIFIER_EXPR);
+                }
+                if (e->type == ASTNodeType::BINARY_EXPR) {
+                    auto* b = static_cast<BinaryExpr*>(e);
+                    const bool lhsSimple = b->left->type == ASTNodeType::IDENTIFIER_EXPR ||
+                                           b->left->type == ASTNodeType::LITERAL_EXPR;
+                    const bool rhsSimple = b->right->type == ASTNodeType::IDENTIFIER_EXPR ||
+                                           b->right->type == ASTNodeType::LITERAL_EXPR;
+                    const std::string& op = b->op;
+                    const bool safeOp = (op == "+" || op == "-" || op == "*" ||
+                                         op == "&" || op == "|" || op == "^" ||
+                                         op == "<<" || op == ">>");
+                    return lhsSimple && rhsSimple && safeOp;
+                }
+                return false;
+            };
+
+            if (isSimpleValue(thenAssign->value.get()) &&
+                isSimpleValue(elseAssign->value.get())) {
+                // Emit both values eagerly and use select.
+                llvm::Value* thenVal = generateExpression(thenAssign->value.get());
+                llvm::Value* elseVal = generateExpression(elseAssign->value.get());
+                // Type-match for select.
+                if (thenVal->getType() != elseVal->getType()) {
+                    if (thenVal->getType()->isDoubleTy() || elseVal->getType()->isDoubleTy()) {
+                        if (!thenVal->getType()->isDoubleTy())
+                            thenVal = ensureFloat(thenVal);
+                        if (!elseVal->getType()->isDoubleTy())
+                            elseVal = ensureFloat(elseVal);
+                    } else {
+                        thenVal = toDefaultType(thenVal);
+                        elseVal = toDefaultType(elseVal);
+                    }
+                }
+                llvm::Value* sel = builder->CreateSelect(condBool, thenVal, elseVal, "ifsel");
+                // Store to the target variable.
+                auto it = namedValues.find(thenAssign->name);
+                if (it != namedValues.end()) {
+                    builder->CreateStore(sel, it->second);
+                    // Track non-negativity of the result.
+                    bool tNonNeg = nonNegValues_.count(thenVal) > 0;
+                    bool eNonNeg = nonNegValues_.count(elseVal) > 0;
+                    if (!tNonNeg) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(thenVal))
+                            tNonNeg = !ci->isNegative();
+                    }
+                    if (!eNonNeg) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(elseVal))
+                            eNonNeg = !ci->isNegative();
+                    }
+                    if (tNonNeg && eNonNeg)
+                        nonNegValues_.insert(it->second);
+                    else
+                        nonNegValues_.erase(it->second);
+                    return;
+                }
+            }
+        }
+    }
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
 
@@ -554,7 +728,10 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         builder->CreateBr(bodyBB);
         builder->SetInsertPoint(bodyBB);
         loopStack.push_back({endBB, bodyBB});
+        auto savedLenCacheWI = std::move(loopArrayLenCache_);
+        loopArrayLenCache_.clear();
         generateStatement(stmt->body.get());
+        loopArrayLenCache_ = std::move(savedLenCacheWI);
         loopStack.pop_back();
         if (!builder->GetInsertBlock()->getTerminator()) {
             builder->CreateBr(bodyBB);
@@ -621,7 +798,10 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         }
     }
 
+    auto savedLenCacheW = std::move(loopArrayLenCache_);
+    loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
+    loopArrayLenCache_ = std::move(savedLenCacheW);
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         auto* backBrWhile = builder->CreateBr(condBB);
@@ -665,12 +845,12 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
         } else if (!whileBodyHasNonPow2ModVal
                    && (currentFuncHintVectorize_
-                       || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+                       || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2
                            && loopNestDepth_ <= 1))) {
-            // @hot at O3: auto-enable vectorization for top-level while-loops.
-            // While-loops are less amenable to vectorization than for-loops
-            // (no known trip count), so we require @hot as a signal that the
-            // loop is performance-critical before applying this hint.
+            // @hot at O2+: auto-enable vectorization for top-level while-loops.
+            // Promoted from O3-only to O2+: the vectorizer's cost model already
+            // rejects unprofitable vectorizations, so the hint only nudges it to
+            // try.  @hot signals the loop is performance-critical.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -678,7 +858,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         }
         if (currentFuncHintHot_ && currentFuncHintVectorize_
             && !whileBodyHasNonPow2ModVal
-            && optimizationLevel >= OptimizationLevel::O3
+            && optimizationLevel >= OptimizationLevel::O2
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
@@ -739,7 +919,10 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
+    auto savedLenCacheDW = std::move(loopArrayLenCache_);
+    loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
+    loopArrayLenCache_ = std::move(savedLenCacheDW);
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(condBB);
@@ -786,16 +969,16 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
         } else if (currentFuncHintVectorize_
-                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2
                        && loopNestDepth_ <= 1)) {
-            // Mirror while-loop: @hot+O3 for top-level do-while loops.
+            // Mirror while-loop: @hot+O2+ for top-level do-while loops.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         if (currentFuncHintHot_ && currentFuncHintVectorize_
-            && optimizationLevel >= OptimizationLevel::O3
+            && optimizationLevel >= OptimizationLevel::O2
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
@@ -845,6 +1028,21 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Value* startVal = generateExpression(stmt->start.get());
     startVal = convertTo(startVal, iterType);
     builder->CreateStore(startVal, iterAlloca);
+
+    // Early non-negativity tracking: mark the iterator alloca as non-negative
+    // BEFORE the condition block so that the loop condition can use unsigned
+    // comparison (ULT instead of SLT).  For ascending loops starting at a
+    // non-negative value, the iterator remains non-negative throughout because
+    // the loop body cannot modify it below the start value.
+    {
+        bool startNonNeg = false;
+        if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal))
+            startNonNeg = startCI->getSExtValue() >= 0;
+        if (!startNonNeg)
+            startNonNeg = nonNegValues_.count(startVal) > 0;
+        if (startNonNeg)
+            nonNegValues_.insert(iterAlloca);
+    }
 
     // Get end value
     llvm::Value* endVal = generateExpression(stmt->end.get());
@@ -925,7 +1123,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         builder->CreateBr(stepCheckBB);
         builder->SetInsertPoint(stepCheckBB);
         llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
-        builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
+        // Zero step is a programming error — heavily favour the non-zero path.
+        auto* stepW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(stepNonZero, condBB, stepFailBB, stepW);
 
         builder->SetInsertPoint(stepFailBB);
         const std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
@@ -951,8 +1151,16 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // induction variables, which unlocks more aggressive loop transforms.
         const bool iterNonNeg = nonNegValues_.count(iterAlloca) > 0;
         const auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal);
-        const bool endNonNeg  = nonNegValues_.count(endVal) > 0
+        bool endNonNeg  = nonNegValues_.count(endVal) > 0
             || (endCI && !endCI->isNegative());
+        // KnownBits fallback: detect non-negativity of end value through
+        // LLVM's value-tracking analysis.  This catches cases like
+        // `len(arr)` whose result has !range [0, INT64_MAX) metadata.
+        if (iterNonNeg && !endNonNeg) {
+            llvm::KnownBits endKB = llvm::computeKnownBits(
+                endVal, module->getDataLayout());
+            endNonNeg = endKB.isNonNegative();
+        }
         if (iterNonNeg && endNonNeg) {
             continueCond = builder->CreateICmpULT(curVal, endVal, "forcond_ult");
         } else {
@@ -966,8 +1174,24 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
     auto* forCondBr = builder->CreateCondBr(continueCond, bodyBB, endBB);
     // Hint loop back-edge as likely-taken for branch prediction.
+    // When the trip count is known at compile time (constant start and end),
+    // emit exact weights (tripCount : 1) instead of the generic (2000 : 1).
+    // Exact weights enable LLVM's block placement to optimize the branch layout
+    // precisely and improve the vectorizer's cost model for small trip counts.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        uint32_t bodyWeight = 2000;
+        if (stepKnownPositive) {
+            if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+                if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+                    int64_t sv = startCI->getSExtValue();
+                    int64_t ev = endCI->getSExtValue();
+                    if (ev > sv && (ev - sv) < 100000) {
+                        bodyWeight = static_cast<uint32_t>(ev - sv);
+                    }
+                }
+            }
+        }
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(bodyWeight, 1);
         forCondBr->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
     }
 
@@ -1073,7 +1297,12 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
 
     loopStack.push_back({endBB, incBB});
+    // Clear per-iteration array length cache so inner-body bounds checks
+    // get fresh values.  Save outer cache for nested loop restore.
+    auto savedLenCache = std::move(loopArrayLenCache_);
+    loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
+    loopArrayLenCache_ = std::move(savedLenCache);
     loopStack.pop_back();
 
     // Clean up: iterator no longer has guaranteed bounds outside the loop.
@@ -1709,12 +1938,18 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // to hoist the length load out of the loop body.
         if (auto* elemLoad = llvm::dyn_cast<llvm::LoadInst>(elemVal)) {
             elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            // OmScript arrays are always initialized, so element loads are !noundef.
+            if (optimizationLevel >= OptimizationLevel::O1)
+                elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
         }
     }
     builder->CreateStore(elemVal, iterAlloca);
 
     loopStack.push_back({endBB, incBB});
+    auto savedLenCacheFE = std::move(loopArrayLenCache_);
+    loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
+    loopArrayLenCache_ = std::move(savedLenCacheFE);
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);
@@ -1814,12 +2049,30 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
 void CodeGenerator::generateBlock(BlockStmt* stmt) {
     const ScopeGuard scope(*this);
+    deferStack.emplace_back(); // Push new defer scope
+
     for (auto& statement : stmt->statements) {
         if (builder->GetInsertBlock()->getTerminator()) {
             break; // Don't generate unreachable code
         }
-        generateStatement(statement.get());
+        if (statement->type == ASTNodeType::DEFER_STMT) {
+            // Collect deferred statements for later execution
+            auto* deferStmt = static_cast<DeferStmt*>(statement.get());
+            deferStack.back().push_back(deferStmt->body.get());
+        } else {
+            generateStatement(statement.get());
+        }
     }
+
+    // Execute deferred statements in LIFO order (reverse of defer order)
+    auto& defers = deferStack.back();
+    for (auto it = defers.rbegin(); it != defers.rend(); ++it) {
+        if (builder->GetInsertBlock()->getTerminator()) {
+            break; // Don't generate after a terminator
+        }
+        generateStatement(*it);
+    }
+    deferStack.pop_back(); // Pop defer scope
 }
 
 void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
@@ -2103,7 +2356,9 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
                 llvm::Value* flagSet =
                     builder->CreateICmpNE(flagNow, llvm::ConstantInt::get(getDefaultType(), 0), "try.flagset");
                 llvm::BasicBlock* contBB = llvm::BasicBlock::Create(*context, "try.cont", function);
-                builder->CreateCondBr(flagSet, catchBB, contBB);
+                // Error flag is rarely set — favour the non-error continuation.
+                auto* tryW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+                builder->CreateCondBr(flagSet, catchBB, contBB, tryW);
                 builder->SetInsertPoint(contBB);
             }
         }
@@ -2406,6 +2661,25 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
                 pfCall->setMetadata("omscript.memory_prefetch",
                     llvm::MDNode::get(*context, {}));
 
+                // Offset prefetch for large types: if the user specified
+                // prefetch+N, emit an additional prefetch at base+N bytes.
+                // This is useful when the variable points to a buffer whose
+                // upcoming region should be warmed into cache.
+                if (stmt->offsetBytes > 0) {
+                    llvm::Value* aheadPtr = builder->CreateInBoundsGEP(
+                        builder->getInt8Ty(), alloca,
+                        llvm::ConstantInt::get(getDefaultType(), stmt->offsetBytes),
+                        varName + ".pf.ahead");
+                    auto* pfAhead = builder->CreateCall(prefetchFn, {
+                        aheadPtr,
+                        builder->getInt32(0),
+                        builder->getInt32(locality),
+                        builder->getInt32(1)
+                    });
+                    pfAhead->setMetadata("omscript.memory_prefetch",
+                        llvm::MDNode::get(*context, {}));
+                }
+
                 // For multi-slot arrays (structs), also prefetch subsequent
                 // cache lines to cover the full object.  Each cache line is
                 // typically 64 bytes = 8 × i64 slots.
@@ -2459,6 +2733,27 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
                         builder->getInt32(locality),   // temporal locality
                         builder->getInt32(1)           // data cache
                     });
+
+                    // Offset prefetch: prefetch+N brings the cache line at
+                    // ptr+N into L1.  Typical use: prefetch+128 to speculatively
+                    // warm 2 cache lines ahead (128 = 2 × 64-byte cache lines
+                    // on most CPUs).  This is useful in loops that walk through
+                    // arrays or linked structures — each iteration prefetches
+                    // data for a future iteration, hiding memory latency.
+                    if (stmt->offsetBytes > 0) {
+                        llvm::Value* offsetPtr = builder->CreateInBoundsGEP(
+                            builder->getInt8Ty(), ptr,
+                            llvm::ConstantInt::get(getDefaultType(), stmt->offsetBytes),
+                            varName + ".pf.ahead");
+                        auto* pfAhead = builder->CreateCall(prefetchFn, {
+                            offsetPtr,
+                            builder->getInt32(0),
+                            builder->getInt32(locality),
+                            builder->getInt32(1)
+                        });
+                        pfAhead->setMetadata("omscript.memory_prefetch",
+                            llvm::MDNode::get(*context, {}));
+                    }
                 }
             }
         }

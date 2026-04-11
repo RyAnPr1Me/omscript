@@ -994,6 +994,48 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // ── Loop Re-Optimization Pass ──────────────────────────────────
+    // After the main pipeline (inlining, fusion, distribution, partial
+    // inlining), many new optimization opportunities are exposed:
+    //   - Inlined code may contain loops with invariant computations
+    //   - Fused loops may have new redundancies
+    //   - Constant propagation may have simplified loop bounds
+    //
+    // Re-running LICM + InstCombine + loop simplification catches
+    // these late opportunities that the first pass couldn't see.
+    // This is an architectural pattern used by production compilers (GCC's
+    // -ftree-loop-optimize-2, LLVM's LTO pipeline) but not typically
+    // available in language-level compilers.
+    //
+    // Only enabled at O3 to avoid any stability risk at lower opt levels.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
+            llvm::FunctionPassManager ReOptFPM;
+            // EarlyCSE with MemorySSA catches common redundancies.
+            ReOptFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+            // Re-run LICM to hoist newly-invariant code out of loops.
+            llvm::LoopPassManager ReOptLPM;
+            ReOptLPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
+            ReOptLPM.addPass(llvm::LoopInstSimplifyPass());
+            ReOptLPM.addPass(llvm::IndVarSimplifyPass());
+            ReOptFPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+                std::move(ReOptLPM), /*UseMemorySSA=*/true));
+            // Clean up with InstCombine after loop re-optimization.
+            ReOptFPM.addPass(llvm::InstCombinePass());
+            // Re-run DSE to catch stores made dead by loop transformations.
+            ReOptFPM.addPass(llvm::DSEPass());
+            // Re-run SLP vectorizer to catch new vectorization
+            // opportunities in inlined code.
+            ReOptFPM.addPass(llvm::SLPVectorizerPass());
+            // Full GVN catches deep redundancies.
+            ReOptFPM.addPass(llvm::GVNPass());
+            // Final CFG cleanup.
+            ReOptFPM.addPass(llvm::SimplifyCFGPass());
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(ReOptFPM)));
+        });
+    }
+
     // At O3, add a post-vectorizer superblock formation phase.  After the
     // loop vectorizer has transformed loops, the CFG often contains new
     // scalar-epilogue paths, predicated blocks, and vector-select patterns
