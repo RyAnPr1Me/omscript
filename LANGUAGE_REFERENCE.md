@@ -25,7 +25,7 @@
 14. [Structs](#14-structs)
 15. [Enums](#15-enums)
 16. [Error Handling](#16-error-handling)
-17. [Memory Semantics](#17-memory-semantics)
+17. [Memory Semantics and Ownership System](#17-memory-semantics-and-ownership-system)
 18. [OPTMAX Blocks](#18-optmax-blocks)
 19. [Built-in Functions](#19-built-in-functions)
 20. [Concurrency](#20-concurrency)
@@ -284,6 +284,16 @@ var arr = [1, 2, 3]       // array
 var d = map_new()         // dictionary
 ```
 
+**Array destructuring** — assigns elements of an array to individual variables in one declaration:
+
+```
+var [a, b, c] = arr       // a = arr[0], b = arr[1], c = arr[2]
+var [x, _, z] = arr       // use '_' to skip an element
+const [first, second] = arr
+```
+
+Desugars to a temporary variable plus individual element reads.
+
 ### 6.2 Constants
 
 ```
@@ -475,11 +485,14 @@ Desugars to `if (!condition) { body }`.
 ```
 switch (value) {
     case 1: { ... }
-    case 2:
-    case 3: { ... }    // fallthrough: matches 2 or 3
+    case 2, 3: { ... }    // multi-value case: matches 2 or 3
     default: { ... }
 }
 ```
+
+Multiple comma-separated values in one `case` arm map to the same body. OmScript has **no C-style fallthrough** — an empty case body simply exits the switch without executing the next case's body. To match multiple values, use comma syntax (`case 2, 3:`).
+
+`break` inside any case arm exits the switch (same as a loop `break`).
 
 ### 8.6 when
 
@@ -497,27 +510,36 @@ Desugars to a switch statement.
 
 ### 8.7 defer
 
-Defers execution of a statement to the end of the enclosing block:
+Defers execution of a statement to the end of the enclosing block. Multiple `defer`s in the same block execute in **LIFO order** (last `defer` runs first):
 
 ```
 fn open_file() {
-    defer println("done");
+    defer println("second");  // runs second
+    defer println("first");   // runs first (LIFO)
     // ... work ...
-    // "done" prints here, at block exit
+    // deferred statements execute here, at block exit
 }
 ```
 
 ### 8.8 with
 
-Scoped variable bindings that are lexically scoped to a block:
+Scoped variable bindings lexically scoped to a block. Supports `var` and `const` bindings, and multiple comma-separated bindings in one `with`:
 
 ```
 with (var f = open_file()) {
     // f is available here
 }
+
+with (var a = 5, var b = 10) {
+    // both a and b are in scope
+}
+
+with (const factor = 7) {
+    // factor is a read-only binding
+}
 ```
 
-Desugars to a block with variable declarations.
+Desugars to a block with the variable declarations prepended to the body.
 
 ---
 
@@ -572,6 +594,16 @@ for (i in 10 downto 0 step 2) { ... }  // 10, 8, 6, 4, 2
 for (item in collection) { ... }
 for (i, item in collection) { ... }   // indexed: i = index, item = element
 ```
+
+When the collection is a **string**, the iterator variable holds the **integer character code** (byte value) of each character, not a single-character string:
+
+```
+for (c in "abc") {
+    // c = 97, then 98, then 99  (ASCII codes)
+}
+```
+
+Use `to_char(c)` to convert a character code back to a single-character string.
 
 ### 9.7 foreach
 
@@ -775,6 +807,7 @@ var typed:int[] = [10, 20, 30]
 ```
 arr[0]          // read (bounds-checked at O0/O1)
 arr[i] = val    // write
+s[i]            // string subscript: returns the integer character code at index i
 ```
 
 Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and when the compiler can statically prove safety.
@@ -807,6 +840,7 @@ Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and whe
 | `array_product(arr)` | Product of all elements |
 | `array_last(arr)` | Last element |
 | `array_insert(arr, i, val)` | Insert `val` at index `i` |
+| `swap(arr, i, j)` | Swap elements at indices `i` and `j` in place (bounds-checked) |
 | `sum(arr)` | Sum of all elements |
 | `range(start, end)` | Create array `[start, start+1, ..., end-1]` |
 | `range_step(start, end, step)` | Create array with step |
@@ -822,15 +856,15 @@ Strings are heap-allocated and NUL-terminated. String indexing and concatenation
 | Function | Description |
 |---|---|
 | `len(s)` / `str_len(s)` | Length in characters |
-| `char_at(s, i)` | Character at index `i` (as string) |
+| `char_at(s, i)` | Character code at index `i` (returns an **integer**, the byte value; use `to_char()` to get a string) |
 | `str_eq(s1, s2)` | String equality (returns 1/0) |
 | `str_concat(s1, s2)` | Concatenate two strings |
 | `str_substr(s, start, len)` | Substring of length `len` starting at `start` |
 | `str_upper(s)` | Uppercase |
 | `str_lower(s)` | Lowercase |
-| `str_find(s, sub)` | Find substring (returns index or -1) |
+| `str_find(s, c)` | Find first occurrence of character code `c` (integer) in `s`; returns index or -1 |
 | `str_contains(s, sub)` | Contains substring (1/0) |
-| `str_index_of(s, sub)` | First index of substring (-1 if not found) |
+| `str_index_of(s, sub)` | First index of substring `sub` (-1 if not found) |
 | `str_replace(s, old, new)` | Replace all occurrences of `old` with `new` |
 | `str_trim(s)` | Strip leading/trailing whitespace |
 | `str_starts_with(s, prefix)` | Starts with prefix (1/0) |
@@ -977,33 +1011,64 @@ assert(x > 0);             // runtime assertion; aborts on failure
 
 ---
 
-## 17. Memory Semantics
+## 17. Memory Semantics and Ownership System
 
-OmScript provides explicit move/borrow/invalidate semantics for performance-critical code.
+OmScript has a **compile-time ownership system** that statically tracks how every variable's value is used. The ownership system serves two purposes:
+
+1. **Safety** — detecting use-after-move and use-after-invalidate at compile time.
+2. **Aliasing guarantee** — the compiler proves that no two live references can point to the same memory, enabling `noalias`, `nonnull`, `dereferenceable`, and `nocapture` LLVM attributes on all pointer parameters automatically.
+
+### 17.0 Ownership States
+
+Every variable that participates in ownership annotations transitions through an ownership lattice:
+
+| State | Meaning |
+|---|---|
+| **Owned** | Full control — may read, write, move, borrow, or invalidate |
+| **Borrowed** | Read-only alias — may NOT mutate, move, or invalidate the source |
+| **Moved** | Ownership transferred out — any further use is a compile error |
+| **Invalidated** | Explicitly killed — any further use is a compile error |
+
+Variables that never use `move`, `borrow`, or `invalidate` remain in the Owned state and behave like ordinary variables.
 
 ### 17.1 move
 
 ```
 var a = [1, 2, 3]
-var b = move a     // b owns the array; a is invalidated
+var b = move a     // b owns the array; a transitions to Moved state
 ```
 
-After `move`, accessing the source variable is undefined behavior.
+After `move`, the source variable (`a`) is **dead** — any subsequent read or write to it is a **compile-time error**. The compiler emits `llvm.lifetime.end` on the source alloca so the register allocator and optimizer can freely reuse its storage.
+
+`move` can also appear in expression position:
+
+```
+fn transfer(data) {
+    store(move data)   // data is moved into the call; data is dead afterwards
+}
+```
 
 ### 17.2 borrow
 
 ```
 fn process(data) {
     var view = borrow data
-    // view shares data's storage; data is not moved
+    // view shares data's storage; data cannot be mutated or moved
+    // while view is live
 }
 ```
+
+`borrow` creates a read-only alias. The source variable transitions to the Borrowed state: it may still be read but cannot be mutated, moved, or invalidated while the borrow is active. The borrow ends at the end of the enclosing scope.
+
+The compiler attaches `!alias.scope` and `!noalias` LLVM scoped-noalias metadata to loads through borrowed pointers, enabling alias-analysis-dependent optimizations (vectorization, LICM, load/store reordering) across borrow boundaries.
 
 ### 17.3 invalidate
 
 ```
-invalidate a;      // explicitly marks variable 'a' as invalid
+invalidate a;      // explicitly marks variable 'a' as Invalidated
 ```
+
+After `invalidate`, any use of `a` is a **compile-time error**.
 
 Required before returning from a function in which a variable was declared with the `prefetch` statement — the compiler enforces that every prefetch-declared variable is either invalidated or returned before the function exits. This does **not** apply to `@prefetch`-annotated function parameters (those are handled automatically).
 
@@ -1018,6 +1083,35 @@ prefetch data:int = compute();    // declare 'data' and prefetch it
 ```
 
 Variables declared with the `prefetch` statement must be `invalidate`d before the function returns (unless they are returned via `move`).
+
+### 17.5 No-Aliasing Guarantee
+
+OmScript's ownership system provides a **language-level no-aliasing guarantee**: at any point in a function, no two live pointer-typed variables can refer to the same memory region. This guarantee is enforced by the borrow checker — the Borrowed state prevents the source from being concurrently mutated, and the Moved/Invalidated states prevent any use of the old reference after transfer.
+
+As a result of this invariant, the compiler **automatically** adds the following LLVM attributes to every pointer parameter of every user function (at all optimization levels, including O0):
+
+| LLVM Attribute | Meaning |
+|---|---|
+| `noalias` | This pointer does not alias any other pointer parameter |
+| `nonnull` | This pointer is never null |
+| `dereferenceable(8)` | At least 8 bytes are valid at this address |
+| `nocapture` | This pointer is never stored into global state or returned as a pointer |
+
+These attributes are applied universally — not just in `@restrict` or `@optmax` functions — because they follow from the language semantics, not from programmer hints. This enables LLVM's alias analysis, CSE, LICM, vectorization, and dead-store elimination passes to apply their most aggressive optimizations throughout the entire program.
+
+For the strongest possible alias annotations, use:
+
+```
+@restrict         // synonym: @noalias
+fn compute(a:int[], b:int[], n:int) -> int { ... }
+```
+
+or apply `@noalias` at the file level to cover all functions in the file:
+
+```
+@noalias
+// ... all functions below get explicit restrict on all params
+```
 
 ---
 
