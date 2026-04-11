@@ -68,7 +68,9 @@ enum class BuiltinId : uint8_t {
     LCM,
     // New intrinsic builtins
     ROTATE_LEFT, ROTATE_RIGHT, BSWAP, SATURATING_ADD, SATURATING_SUB,
-    FMA_BUILTIN, COPYSIGN, MIN_FLOAT, MAX_FLOAT
+    FMA_BUILTIN, COPYSIGN, MIN_FLOAT, MAX_FLOAT,
+    // Optimizer hint builtins
+    ASSUME, UNREACHABLE, EXPECT
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -209,6 +211,9 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"copysign", BuiltinId::COPYSIGN},
     {"min_float", BuiltinId::MIN_FLOAT},
     {"max_float", BuiltinId::MAX_FLOAT},
+    {"assume", BuiltinId::ASSUME},
+    {"unreachable", BuiltinId::UNREACHABLE},
+    {"expect", BuiltinId::EXPECT},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -5285,6 +5290,41 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         b = ensureFloat(b);
         llvm::Function* maxnumFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::maxnum, {getFloatType()});
         return builder->CreateCall(maxnumFn, {a, b}, "maxnum.result");
+    }
+
+    if (bid == BuiltinId::ASSUME) {
+        validateArgCount(expr, "assume", 1);
+        llvm::Value* condVal = generateExpression(expr->arguments[0].get());
+        condVal = toBool(condVal);
+        // llvm.assume(i1) — zero-cost hint to the optimizer that condVal is true.
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {condVal});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::UNREACHABLE) {
+        validateArgCount(expr, "unreachable", 0);
+        // Emit LLVM unreachable — tells the optimizer this code path is never taken.
+        builder->CreateUnreachable();
+        // Subsequent code in the same block is dead; open a new (dead) block so
+        // codegen can continue without emitting into a terminated block.
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* deadBB =
+            llvm::BasicBlock::Create(*context, "unreachable.dead", function);
+        builder->SetInsertPoint(deadBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::EXPECT) {
+        validateArgCount(expr, "expect", 2);
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        llvm::Value* likelyVal = generateExpression(expr->arguments[1].get());
+        val = toDefaultType(val);
+        likelyVal = toDefaultType(likelyVal);
+        // llvm.expect.i64(val, expected_val) — branch-prediction hint; returns val unchanged.
+        llvm::Function* expectFn =
+            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::expect, {getDefaultType()});
+        return builder->CreateCall(expectFn, {val, likelyVal}, "expect.result");
     }
 
     if (inOptMaxFunction) {

@@ -1,0 +1,82 @@
+// Test: assume, unreachable, expect — optimizer-hint builtins
+//
+//   assume(cond)          → llvm.assume: zero-cost hint that cond is always true
+//   unreachable()         → llvm unreachable: marks a code path as never reached
+//   expect(val, likely)   → llvm.expect: branch-prediction hint, returns val unchanged
+
+fn test_assume_basic() {
+    var x = 5;
+    assume(x > 0);    // hint: x is positive — may eliminate sign checks on x
+    return x + 1;     // 6
+}
+
+fn test_assume_loop_bounds() {
+    var n = 10;
+    assume(n > 0);
+    assume(n < 100);
+    var total = 0;
+    for (i in 0...n) {
+        total = total + i;
+    }
+    return total;     // 0+1+...+9 = 45
+}
+
+fn test_expect_returns_val() {
+    var x = 42;
+    var result = expect(x, 42);   // likely value is 42; result == x regardless
+    return result;                 // 42
+}
+
+fn test_expect_any_value() {
+    var v = 7;
+    var r = expect(v, 1);   // likely 1 but actual is 7 — expect never changes the value
+    return r;                // 7
+}
+
+fn test_unreachable_dead_branch() {
+    var x = 10;
+    var result = 0;
+    if (x > 0) {
+        result = 1;
+    } else {
+        // This branch is never taken at runtime; mark it unreachable.
+        unreachable();
+        result = 999;   // dead code — never executed
+    }
+    return result;      // 1
+}
+
+fn test_unreachable_after_exhaustive_switch() {
+    var v = 2;
+    var result = 0;
+    switch (v) {
+        case 1: result = 10;
+        case 2: result = 20;
+        case 3: result = 30;
+        default: unreachable();   // all real values handled above
+    }
+    return result;   // 20
+}
+
+fn test_assume_enables_strength_reduction() {
+    // After assume(n % 2 == 0) the optimizer knows n is even.
+    // This test verifies the program still produces the right answer.
+    var n = 8;
+    assume(n % 2 == 0);
+    return n / 2;    // 4
+}
+
+fn main() {
+    var total = 0;
+
+    total = total + test_assume_basic();                     // 6
+    total = total + test_assume_loop_bounds();               // 45
+    total = total + test_expect_returns_val();               // 42
+    total = total + test_expect_any_value();                 // 7
+    total = total + test_unreachable_dead_branch();          // 1
+    total = total + test_unreachable_after_exhaustive_switch(); // 20
+    total = total + test_assume_enables_strength_reduction(); // 4
+
+    // Expected: 6 + 45 + 42 + 7 + 1 + 20 + 4 = 125
+    return total;
+}
