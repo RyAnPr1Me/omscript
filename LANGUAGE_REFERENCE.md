@@ -2,7 +2,7 @@
 
 > **Version:** 3.7.0
 > **Compiler:** `omsc` — OmScript Compiler
-> **Backend:** LLVM 18 · Ahead-of-Time Compilation
+> **Backend:** LLVM 18+ · Ahead-of-Time Compilation
 > **License:** See repository root
 
 ---
@@ -16,40 +16,35 @@
 5. [Types and Values](#5-types-and-values)
 6. [Variables and Constants](#6-variables-and-constants)
 7. [Functions](#7-functions)
-8. [Operators](#8-operators)
-9. [Control Flow](#9-control-flow)
-10. [Arrays](#10-arrays)
-11. [Strings](#11-strings)
-12. [Structs](#12-structs)
-13. [Enums](#13-enums)
-14. [Maps (Dictionaries)](#14-maps-dictionaries)
-15. [Ownership System](#15-ownership-system)
-16. [Module Imports](#16-module-imports)
-17. [File I/O](#17-file-io)
-18. [Concurrency](#18-concurrency)
+8. [Control Flow](#8-control-flow)
+9. [Loops](#9-loops)
+10. [Expressions and Operators](#10-expressions-and-operators)
+11. [Arrays](#11-arrays)
+12. [Strings](#12-strings)
+13. [Dictionaries / Maps](#13-dictionaries--maps)
+14. [Structs](#14-structs)
+15. [Enums](#15-enums)
+16. [Error Handling](#16-error-handling)
+17. [Memory Semantics](#17-memory-semantics)
+18. [OPTMAX Blocks](#18-optmax-blocks)
 19. [Built-in Functions](#19-built-in-functions)
-20. [Optimization Directives](#20-optimization-directives)
-21. [OPTMAX Directive](#21-optmax-directive)
-22. [E-Graph and Superoptimizer](#22-e-graph-and-superoptimizer)
-23. [Hardware Graph Optimization Engine](#23-hardware-graph-optimization-engine)
-24. [CLI Reference](#24-cli-reference)
-25. [Grammar Summary](#25-grammar-summary)
+20. [Concurrency](#20-concurrency)
+21. [File I/O](#21-file-io)
+22. [Lambda Expressions](#22-lambda-expressions)
+23. [Import System](#23-import-system)
+24. [Compiler CLI Reference](#24-compiler-cli-reference)
+25. [Advanced Optimization Features](#25-advanced-optimization-features)
+
 ---
 
 ## 1. Overview
 
-OmScript is a **statically compiled, C-like programming language** with dynamic typing and an LLVM-based AOT compiler. Key verified properties:
+OmScript is a statically-compiled, dynamically-typed language with optional type annotations. It compiles through LLVM to native machine code. Key features:
 
-- **Dynamic typing** -- Variables do not require type annotations. Optional type annotations (`var x:int = 0`) are supported for documentation and are **required** inside `OPTMAX` blocks.
-- **Ahead-of-Time (AOT) compilation** -- Source compiles to native machine code via LLVM. There is no runtime JIT.
-- **Memory management** -- Heap memory is managed with `malloc`/`free`. There is no garbage collector and no runtime reference counting.
-- **Aggressive optimization** -- Four optimization levels (O0-O3) plus an OPTMAX directive, an E-graph equality saturation pass, a superoptimizer pass, and a hardware graph optimization engine.
-- **Ownership hints** -- Optional `move`, `invalidate`, and `borrow` keywords provide compile-time use-after-move/use-after-invalidate detection and improve LLVM alias analysis.
-- **Comprehensive standard library** -- Math, arrays, strings, maps, file I/O, threading, and character classification, all compiled directly to LLVM IR.
-- **Structs** -- Named record types with field access, mutation, field-level optimization hints, and operator overloading.
-- **Enums** -- Named integer constant groups with auto-increment.
-- **Module system** -- `import` statements with circular-import detection.
-- **Preprocessor** -- `#define`, conditional compilation, `#error`, `#warning`, `#assert`, `#require`, `#counter`, and predefined macros.
+- **Dynamic typing with optional annotations** — variables are untyped by default; annotations enable advanced optimizations and SIMD types
+- **LLVM backend** — ahead-of-time compilation to native binaries
+- **Three-stage optimizer** — e-graph equality saturation, superoptimizer, and hardware graph optimization engine (HGOE)
+- **C-compatible performance** — designed to match C performance with high-level syntax
 
 ---
 
@@ -57,36 +52,15 @@ OmScript is a **statically compiled, C-like programming language** with dynamic 
 
 ```
 Source (.om)
-     |
-     v
- Preprocessor      Macro expansion, conditional compilation
-     |
-     v
- Lexer             Tokenization
-     |
-     v
- Parser            AST construction
-     |
-     v
- E-Graph (O2+)     Equality-saturation rewrites on AST (600+ rules)
-     |
-     v
- Codegen           AST to LLVM IR
-     |
-     v
- LLVM Optimizer    Standard LLVM pass manager (level dependent)
-     |
-     v
- Superoptimizer    Custom IR peephole + idiom passes (O2+)
-     |
-     v
- HGOE              Hardware-graph instruction scheduling (-march/-mtune)
-     |
-     v
- LLVM Backend      Instruction selection, register allocation
-     |
-     v
- Native binary / object file
+  → Preprocessor     (macro expansion, conditional compilation)
+  → Lexer            (tokenization)
+  → Parser           (AST construction)
+  → Code Generator   (LLVM IR generation)
+  → E-Graph          (equality saturation, algebraic identities)
+  → Superoptimizer   (idiom recognition, branch-to-select)
+  → HGOE             (hardware-aware scheduling, FMA fusion)
+  → LLVM             (standard optimization passes)
+  → Native Binary
 ```
 
 ---
@@ -95,1274 +69,1264 @@ Source (.om)
 
 ### 3.1 Comments
 
-```omscript
+```
 // Single-line comment
-
-/* Block comment
-   spanning multiple lines */
+/* Block comment */
 ```
 
-### 3.2 Integer Literals
+Block comments nest correctly and must be terminated.
 
-```omscript
+### 3.2 Keywords
+
+```
+fn        return    if        else      elif      unless
+while     do        for       foreach   forever   loop
+repeat    until     times     with      var       const
+register  break     continue  in        true      false
+null      switch    case      default   try       catch
+throw     enum      struct    import    move      invalidate
+borrow    prefetch  likely    unlikely  when      guard
+defer     swap
+```
+
+### 3.3 Literals
+
+**Integer literals:**
+```
 42          // decimal
-0xFF        // hexadecimal (case-insensitive)
-0o17        // octal
-0b1010      // binary
-1_000_000   // underscores are ignored
+0xFF        // hexadecimal (0x or 0X prefix)
+0o77        // octal (0o or 0O prefix)
+0b1010      // binary (0b or 0B prefix)
+1_000_000   // underscores as separators
 ```
 
-All integer literals must fit in a 64-bit signed integer. Out-of-range values are a lex error.
-
-### 3.3 Float Literals
-
-```omscript
+**Float literals:**
+```
 3.14
 2.0
 1_000.5
 ```
 
-IEEE 754 double precision. A `.` followed by another `.` (range operator `..` or `...`) is not
-treated as a decimal point.
-
-### 3.4 String Literals
-
-**Regular string** — escape sequences are processed:
-
-```omscript
-"hello\nworld"
+**String literals:**
+```
+"hello"
+"line\nnewline"    // \n, \t, \r, \\, \", \0, \xHH supported
 ```
 
-Supported escapes: `\n` `\t` `\r` `\b` `\f` `\v` `\\` `\"` `\xHH`
+**Boolean literals:** `true`, `false`
 
-Embedded null bytes (`\0`, `\x00`) are rejected at lex time with an error.
+**Null literal:** `null`
 
-**Multi-line string** — no escape processing; whitespace and newlines are preserved exactly:
+### 3.4 Identifiers
 
-```
-"""line one
-line two"""
-```
-
-**Interpolated string** — expressions inside `{}` are evaluated at runtime and converted to strings:
-
-```omscript
-var s = $"hello {name}, value = {n + 1}";
-```
-
-Literal braces inside an interpolated string are written as `\{` and `\}`.
-
-### 3.5 Identifiers
-
-Start with a letter or `_`, followed by letters, digits, or `_`.
-
-### 3.6 Keywords
-
-```
-fn       return   if       else     elif     unless
-while    do       until    for      foreach  forever
-loop     repeat   times    with     break    continue
-var      const    switch   case     default
-try      catch    throw    enum     struct   import
-move     invalidate borrow  prefetch
-likely   unlikely register  defer    guard    when
-swap     in       true     false    null
-```
-
-The tokens `OPTMAX=:` and `OPTMAX!:` are scanned as single units (not regular keywords).
+Identifiers begin with a letter or underscore and may contain letters, digits, and underscores.
 
 ---
 
 ## 4. Preprocessor
 
-Runs before lexing. Directives start with `#` on a line (leading whitespace is allowed).
+The preprocessor runs before lexing. All directives begin with `#`.
 
 ### 4.1 Macro Definition
 
-```omscript
+```
 #define NAME value
-#define DOUBLE(x) x * 2     // function-like: no space between name and '('
+#define NAME(param1, param2) body_with_params
 #undef NAME
 ```
 
+**Predefined macros:**
+
+| Macro | Value |
+|---|---|
+| `__VERSION__` | Compiler version string (e.g., `"3.7.0"`) |
+| `__OS__` | `"linux"`, `"macos"`, or `"windows"` |
+| `__ARCH__` | `"x86_64"`, `"aarch64"`, `"arm"`, or `"unknown"` |
+| `__FILE__` | Current filename |
+| `__LINE__` | Current line number |
+| `__COUNTER__` | Auto-incrementing integer (unique per use) |
+
 ### 4.2 Conditional Compilation
 
-```omscript
-#ifdef  NAME
+```
+#ifdef NAME
 #ifndef NAME
-#if     expr
-#elif   expr
+#if expr
+#elif expr
 #else
 #endif
 ```
 
-Expressions support: integers, macro names, `defined(NAME)`, arithmetic `+ - * / %`,
-comparisons `== != < <= > >=`, logical `&& || !`, and parentheses.
+The `#if`/`#elif` expressions support integer arithmetic, comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`), and `defined(NAME)`.
 
 ### 4.3 Diagnostics
 
-```omscript
-#error   "message"          // compile-time error -- aborts compilation
-#warning "message"          // warning -- compilation continues
-#info    "message"          // informational
-#assert  expr "message"     // abort if expr evaluates to 0
+```
+#error message           // Compile-time error
+#warning message         // Compile-time warning (continues)
+#info message            // Compile-time info message (continues)
+#assert expr             // Abort with default message if expr == 0
+#assert expr "message"   // Abort with custom message if expr == 0
+#require "version"       // Error if compiler version is older than required
 ```
 
-### 4.4 Version Requirement
+### 4.4 Counter Macros
 
-```omscript
-#require "3.7.0"    // error if compiler version is older than 3.7.0
+```
+#counter MY_COUNTER      // Creates MY_COUNTER as an auto-incrementing macro
+// First use of MY_COUNTER expands to "0", then "1", etc.
 ```
 
-### 4.5 Counter Macro
+### 4.5 Line Continuation
 
-```omscript
-#counter MY_ID     // MY_ID expands to 0, 1, 2, ... on successive uses
+A backslash `\` immediately before a newline joins the line with the next:
+
 ```
-
-### 4.6 Predefined Macros
-
-| Macro | Value |
-|-------|-------|
-| `__VERSION__` | Compiler version string (e.g. `"3.7.0"`) |
-| `__OS__`      | `"linux"`, `"macos"`, or `"windows"` |
-| `__ARCH__`    | `"x86_64"`, `"aarch64"`, `"arm"`, or `"unknown"` |
+#define LONG_MACRO \
+    some_value
+```
 
 ---
 
 ## 5. Types and Values
 
-OmScript is dynamically typed at the source level. IR representation:
+OmScript is dynamically typed. Type annotations are optional except inside `OPTMAX` blocks (where they are required). Annotated variables enable stronger code generation.
 
-| Source concept | IR representation |
-|----------------|-------------------|
-| Integer | `i64` |
-| Float | `double` |
-| Boolean | `i64` (1 = true, 0 = false) |
-| `null` / `false` | `i64` value 0 |
-| `true` | `i64` value 1 |
-| String | `i8*` pointer to null-terminated bytes |
-| Array | `i64*` pointer: `[length, elem0, elem1, ...]` |
-| Struct | `i64*` pointer to heap block of fields |
-| Map | `i64*` pointer to internal hash-map structure |
+### 5.1 Type Annotations
 
-### 5.1 Optional Type Annotations
+Type annotations are written with `:` after a name:
 
-Advisory only -- no effect on code generation outside OPTMAX blocks.
-
-```omscript
-var x: int = 0
-var s: string = "hi"
-var arr: int[] = [1, 2, 3]
-fn f(a: i64, b: i64) -> i64 { return a + b; }
+```
+var x:int = 42
+var y:float = 3.14
+var s:string = "hello"
 ```
 
-Valid annotation names: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `int`, `float`,
-`double`, `bool`, `string`, `dict`, any struct name, array forms (`type[]`, `type[][]`), and
-reference form (`&type`).
+### 5.2 Scalar Types
+
+| Annotation | Description | LLVM Type |
+|---|---|---|
+| `int` | 64-bit signed integer (default integer) | `i64` |
+| `i64` | 64-bit signed integer | `i64` |
+| `u64` | 64-bit unsigned integer | `i64` |
+| `i32` | 32-bit signed integer | `i32` |
+| `u32` | 32-bit unsigned integer | `i32` |
+| `i16` | 16-bit signed integer | `i16` |
+| `u16` | 16-bit unsigned integer | `i16` |
+| `i8` | 8-bit signed integer | `i8` |
+| `u8` | 8-bit unsigned integer | `i8` |
+| `float` | 64-bit IEEE 754 double | `f64` |
+| `double` | 64-bit IEEE 754 double | `f64` |
+| `bool` | Boolean (1-bit) | `i1` |
+| `string` | String (heap-allocated, NUL-terminated) | `ptr` |
+
+### 5.3 Array Types
+
+```
+var arr:int[]     // array of int
+var mat:float[][] // 2D array of float
+```
+
+### 5.4 Dictionary Type
+
+```
+var d:dict
+var d:dict[string, int]   // generic annotation (informational)
+```
+
+### 5.5 SIMD Vector Types
+
+Used with type annotations for explicit SIMD programming:
+
+| Annotation | Description |
+|---|---|
+| `f32x4` | 4 × f32 vector (128-bit SSE) |
+| `f32x8` | 8 × f32 vector (256-bit AVX) |
+| `f64x2` | 2 × f64 vector (128-bit SSE) |
+| `f64x4` | 4 × f64 vector (256-bit AVX) |
+| `i32x4` | 4 × i32 vector (128-bit SSE) |
+| `i32x8` | 8 × i32 vector (256-bit AVX) |
+| `i64x2` | 2 × i64 vector (128-bit SSE) |
+| `i64x4` | 4 × i64 vector (256-bit AVX) |
+
+### 5.6 Reference Types
+
+```
+var x:&i32     // reference to i32 (same underlying storage)
+```
+
+Reference types share the same LLVM representation as their base type; the annotation affects alias analysis.
 
 ---
 
 ## 6. Variables and Constants
 
-```omscript
-var x = 10;
-const y = 20;
-var z: int = 30;
+### 6.1 Variable Declaration
 
-// Multi-variable in one statement
-var a = 1, b = 2, c = 3;
-
-// Array destructuring
-var [first, second] = arr;
-var [a, _, c] = arr;     // '_' skips an element
-
-// Register hint: keep variable in a CPU register (mem2reg hint)
-register var k = 0;
-register const k = 0;
+```
+var x = 42                // mutable, no annotation
+var x:int = 42            // mutable, annotated
+var arr = [1, 2, 3]       // array
+var d = map_new()         // dictionary
 ```
 
-Variables declared without an initializer have the value 0.
+### 6.2 Constants
 
-**Destructuring** desugars to a hidden temp plus indexed reads:
+```
+const PI = 3.14159
+const MAX:int = 100
+```
 
-```omscript
-var [a, b] = get_pair();
-// equivalent to:
-//   var __tmp = get_pair();
-//   var a = __tmp[0];
-//   var b = __tmp[1];
+Constants must be initialized at declaration and cannot be reassigned. The compiler performs constant folding at compile time.
+
+### 6.3 Register Variables
+
+```
+register var x:int = 0    // hint to force variable into CPU register
+```
+
+Instructs the compiler to promote the variable to an SSA register via LLVM's `mem2reg` pass. Only works for types that fit in a register (integers, floats, bools).
+
+### 6.4 Assignment
+
+```
+x = 10
+arr[i] = value
+obj.field = value
+```
+
+### 6.5 Compound Assignment
+
+```
+x += 1     x -= 1     x *= 2     x /= 2     x %= 3
+x &= mask  x |= flag  x ^= bits  x <<= 2    x >>= 2
+x **= 2    x ??= default_val
 ```
 
 ---
 
 ## 7. Functions
 
-### 7.1 Basic Declaration
+### 7.1 Basic Syntax
 
-```omscript
-fn add(a, b) {
+```
+fn name(param1, param2) {
+    // body
+}
+```
+
+### 7.2 Type-Annotated Parameters and Return Type
+
+```
+fn add(a:int, b:int) -> int {
     return a + b;
 }
 ```
 
-All functions are top-level. Forward references work across the file and imported files.
+### 7.3 Expression-Body Functions
 
-### 7.2 Expression-Body Shorthand
+A function with a single-expression body can use `=` syntax:
 
-```omscript
-fn square(x) = x * x;
-// same as: fn square(x) { return x * x; }
+```
+fn square(x:int) -> int = x * x;
 ```
 
-### 7.3 Type Annotations and Return Type
+### 7.4 Default Parameter Values
 
-```omscript
-fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
-    return max(lo, min(x, hi));
+Parameter defaults must be literal values:
+
+```
+fn greet(name, times = 1) {
+    repeat times { println(name); }
 }
 ```
 
-### 7.4 Generic Type Parameters
+### 7.5 Generic (Type-Parameterized) Functions
 
-```omscript
-fn identity<T>(x: T) -> T { return x; }
 ```
-
-Type parameters are annotation-only -- erased at the IR level.
-
-### 7.5 Default Parameters
-
-```omscript
-fn greet(name, greeting = "Hello") {
-    println(greeting + " " + name);
-    return 0;
+fn identity<T>(x:T) -> T {
+    return x;
 }
 ```
 
-Default values must be integer, float, or string literals. Parameters with defaults must follow
-parameters without defaults.
+Type parameters are declared in `<...>` after the function name and are mainly informational.
 
 ### 7.6 Function Annotations
 
-One or more annotations may appear directly before `fn`:
+Annotations appear before `fn` and are prefixed with `@`:
 
-```omscript
-@inline fn fast(x) { ... }
-@noinline @cold fn error_handler(code) { ... }
+```
+@hot
+fn compute(x:int) -> int { ... }
+
+@inline @pure
+fn add(a:int, b:int) -> int = a + b;
 ```
 
 | Annotation | Effect |
-|------------|--------|
-| `@inline` | Suggest inlining (`alwaysinline` at O2+) |
+|---|---|
+| `@inline` | Force function inlining |
 | `@noinline` | Prevent inlining |
-| `@cold` | Rarely executed |
-| `@hot` | Frequently executed |
-| `@pure` | No side effects (`readonly` + `willreturn`) |
+| `@cold` | Mark as cold (infrequently called) |
+| `@hot` | Mark as hot (optimize aggressively; elides bounds checks at O2+) |
+| `@pure` | Mark as pure (no side effects) |
 | `@noreturn` | Function never returns |
 | `@static` | Internal linkage |
-| `@flatten` | Inline all callees |
-| `@unroll` | Aggressively unroll loops |
-| `@nounroll` | Disable loop unrolling |
-| `@restrict` | All pointer params are `noalias` |
-| `@noalias` | Same as `@restrict` on functions |
-| `@vectorize` | Enable SIMD vectorization for all loops |
-| `@novectorize` | Disable SIMD vectorization |
-| `@parallel` | Enable auto-parallelization |
-| `@noparallel` | Disable auto-parallelization |
+| `@flatten` | Inline all call sites within this function |
+| `@unroll` | Unroll loops within this function |
+| `@nounroll` | Prevent loop unrolling |
+| `@restrict` | All pointer params are non-aliasing (`noalias`) |
+| `@noalias` | Alias for `@restrict` |
+| `@vectorize` | Enable loop auto-vectorization |
+| `@novectorize` | Disable loop auto-vectorization |
+| `@parallel` | Enable loop parallelization hints |
+| `@noparallel` | Disable loop parallelization hints |
 | `@minsize` | Optimize for code size |
-| `@optnone` | Disable all optimizations |
-| `@nounwind` | No C++ exceptions |
-| `@const_eval` | Evaluate at compile time when all args are constants |
+| `@optnone` | Disable all optimizations (overrides `@inline`, `@hot`) |
+| `@nounwind` | Function never throws (no unwind tables) |
+| `@const_eval` | Evaluate at compile time when possible |
 
-`@optnone` and `@inline` are mutually exclusive; a warning is emitted and `@inline` is ignored.
-
-### 7.7 Parameter Annotation
-
-```omscript
-fn process(@prefetch data, count) { ... }
+**File-level annotation:**
+```
+@noalias   // applied before any fn/struct/enum — sets noalias on all functions in file
 ```
 
-`@prefetch` emits `llvm.prefetch` at function entry for that parameter's value.
+### 7.7 Parameter Annotation: @prefetch
 
-### 7.8 Method-Call Syntax
-
-```omscript
-obj.method(a, b)
-// desugars to: method(obj, a, b)
 ```
-
-No object system. Purely syntactic sugar with zero runtime overhead.
-
-### 7.9 Lambda Expressions
-
-```omscript
-var double = |x| x * 2;
-var add    = |a, b| a + b;
-var noop   = || 0;            // zero-parameter lambda
-```
-
-Lambdas desugar to named top-level functions (`__lambda_N`) at parse time and are returned as
-string literals (function names). They can be passed to `array_map`, `array_filter`,
-`array_reduce`, `array_any`, `array_every`, and `array_find`.
-
-Optional type annotations on parameters are accepted: `|x:int| x * 2`.
-
-### 7.10 Pipe Operator
-
-```omscript
-arr |> sort |> reverse
-// equivalent to: reverse(sort(arr))
-```
-
-Passes the left-hand value as the first argument to the named function on the right.
-
----
-
-## 8. Operators
-
-### 8.1 Arithmetic
-
-| Operator | Description |
-|----------|-------------|
-| `+` | Addition; string concatenation if either operand is a string |
-| `-` | Subtraction |
-| `*` | Multiplication; string repetition if left is string and right is integer |
-| `/` | Division |
-| `%` | Modulo |
-| `**` | Exponentiation (right-associative) |
-| `-x` | Unary negation |
-
-### 8.2 Comparison
-
-`==`, `!=`, `<`, `<=`, `>`, `>=`
-
-Strings: `==`/`!=` compare contents via `strcmp`; `<`/`<=`/`>`/`>=` compare lexicographically.
-
-### 8.3 Logical (Short-Circuit)
-
-`&&`, `||`, `!`
-
-### 8.4 Bitwise
-
-`&`, `|`, `^`, `~`, `<<`, `>>`
-
-### 8.5 Null Coalescing
-
-```omscript
-x ?? fallback    // x if x != 0, else fallback
-x ??= fallback   // x = x ?? fallback
-```
-
-### 8.6 Compound Assignment
-
-`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `??=`
-
-Work on variables, array elements (`arr[i] += 1`), and struct fields (`s.x += 1`).
-
-### 8.7 Increment / Decrement
-
-`x++`, `x--` (postfix), `++x`, `--x` (prefix). Work on variables and array elements.
-
-### 8.8 Ternary
-
-```omscript
-cond ? then_expr : else_expr    // right-associative
-```
-
-### 8.9 Spread
-
-```omscript
-[1, ...arr, 2]    // expand arr inline in an array literal
-```
-
-### 8.10 Operator Precedence (high to low)
-
-| Level | Operators |
-|-------|-----------|
-| Postfix | `()` `[]` `.` `++` `--` |
-| Unary | `-` `!` `~` `&` `++` `--` `move` |
-| Exponent | `**` (right-associative) |
-| Multiply | `*` `/` `%` |
-| Add | `+` `-` |
-| Shift | `<<` `>>` |
-| Compare | `<` `<=` `>` `>=` |
-| Equality | `==` `!=` |
-| Bitwise AND | `&` |
-| Bitwise XOR | `^` |
-| Bitwise OR | `\|` |
-| Logical AND | `&&` |
-| Logical OR | `\|\|` |
-| Null coalesce | `??` |
-| Ternary | `? :` |
-| Pipe | `\|>` |
-| Assignment | `=` `+=` `-=` `*=` `/=` `%=` `**=` `&=` `\|=` `^=` `<<=` `>>=` `??=` |
-
----
-
-## 9. Control Flow
-
-### 9.1 if / elif / else / unless
-
-```omscript
-if (cond) {
-    ...
-} elif (cond2) {
-    ...
-} else {
-    ...
+fn process(@prefetch data, size:int) {
+    // 'data' will be prefetched into cache before first use
 }
-
-unless (cond) { ... }    // desugars to: if (!cond) { ... }
 ```
 
-`elif` is a first-class keyword. Branch prediction hints:
+Prefetched parameters must be explicitly `invalidate`d before the function returns.
 
-```omscript
-likely   if (common_path)  { ... }
-unlikely if (rare_path)    { ... }
+### 7.8 Tail Calls
+
+Self-recursive calls in tail position are automatically converted to jumps (guaranteed tail call elimination).
+
+---
+
+## 8. Control Flow
+
+### 8.1 if / else / elif
+
+```
+if (condition) {
+    // ...
+} elif (other) {
+    // ...
+} else {
+    // ...
+}
 ```
 
-These set LLVM branch-weight metadata on the conditional branch.
+`elif` is a first-class keyword (not `else if`).
 
-### 9.2 while / until
+### 8.2 unless
 
-```omscript
-while (cond)  { ... }
-until (cond)  { ... }    // while (!cond) { ... }
+Inverted `if` — executes the body when the condition is **false**:
+
+```
+unless (x == 0) {
+    // runs when x != 0
+}
 ```
 
-### 9.3 do-while / do-until
+Desugars to `if (!condition)`.
 
-```omscript
-do { ... } while (cond);
-do { ... } until (cond);    // do { ... } while (!cond)
+### 8.3 Branch Prediction Hints
+
+```
+likely if (condition) { ... }
+unlikely if (condition) { ... }
 ```
 
-### 9.4 for (range-based)
+Attaches branch-weight metadata to the conditional branch.
 
-```omscript
-for (i in 0...10)              { ... }    // 0 <= i < 10, step +1
-for (i in 0..10)               { ... }    // same (..)
-for (i in 0...10...2)          { ... }    // step 2
-for (i in 0...10 step 2)       { ... }    // step keyword
-for (i in 10 downto 1)         { ... }    // 10 >= i > 1, step -1
-for (i in 10 downto 1 step 2)  { ... }    // step -2
-for (i:u32 in 0...n)           { ... }    // typed iterator
+### 8.4 guard
+
+Early-exit pattern — executes the body when the condition is **false**:
+
+```
+guard (x > 0) else {
+    return -1;
+}
 ```
 
-The loop continues while `i < upper` (ascending) or `i > lower` (descending with negative step).
+Desugars to `if (!condition) { body }`.
 
-### 9.5 for-each / foreach
+### 8.5 switch
 
-```omscript
-for (x in arr)            { ... }
-foreach item in arr       { ... }
-foreach (item in arr)     { ... }
-
-// Indexed variants:
-for (i, x in arr)         { ... }    // i = index, x = element
-foreach (i, item in arr)  { ... }
 ```
-
-Both desugar to a range for-loop over indices.
-
-### 9.6 loop
-
-```omscript
-loop          { ... }    // infinite
-loop N        { ... }    // N times
-loop (N)      { ... }    // same
-```
-
-### 9.7 repeat
-
-```omscript
-repeat N       { ... }
-repeat (N)     { ... }
-repeat { ... } until (cond);    // post-test loop (do-while !cond)
-```
-
-### 9.8 times
-
-```omscript
-times N        { ... }
-times (N)      { ... }
-```
-
-### 9.9 forever
-
-```omscript
-forever { ... }    // infinite loop
-```
-
-### 9.10 switch
-
-```omscript
-switch (expr) {
-    case 1: { ... break; }
-    case 2, 3: { ... break; }    // multi-value case
+switch (value) {
+    case 1: { ... }
+    case 2:
+    case 3: { ... }    // fallthrough: matches 2 or 3
     default: { ... }
 }
 ```
 
-### 9.11 when
+### 8.6 when
 
-```omscript
-when (expr) {
-    1, 2, 3 => { ... }
-    4       => { ... }
-    _       => { ... }    // default arm
+Pattern-matching style switch with `=>` syntax:
+
+```
+when (value) {
+    1 => { println("one"); },
+    2, 3 => { println("two or three"); },
+    _ => { println("other"); }
 }
 ```
 
-Desugars to `switch`. Each arm body is one statement. Optional trailing commas between arms.
+Desugars to a switch statement.
 
-### 9.12 break / continue
+### 8.7 defer
 
-`break` exits the innermost loop. `continue` jumps to the next iteration of the innermost loop.
+Defers execution of a statement to the end of the enclosing block:
 
-### 9.13 return
-
-```omscript
-return expr;
-return;    // returns 0
 ```
-
-### 9.14 guard
-
-```omscript
-guard (cond) else { return -1; }
-// desugars to: if (!cond) { return -1; }
-```
-
-### 9.15 defer
-
-```omscript
-defer stmt;
-defer { ... }
-```
-
-Executes at block exit. Multiple defers in the same block execute LIFO.
-
-### 9.16 with
-
-```omscript
-with (var x = expr) { ... }
-with (var a = e1, var b = e2) { ... }
-with (const k = 5) { ... }
-```
-
-Desugars to a block containing the declarations followed by the body.
-
-### 9.17 swap
-
-```omscript
-swap a, b;            // exchange a and b
-swap a, b, c;         // circular: a<-b, b<-c, c<-old_a
-```
-
-Operands must be simple variable names.
-
-### 9.18 try / catch / throw
-
-```omscript
-try {
-    if (bad) throw 42;
-    risky_fn();
-} catch (err) {
-    // err holds the thrown integer value
+fn open_file() {
+    defer println("done");
+    // ... work ...
+    // "done" prints here, at block exit
 }
 ```
 
-Implemented via an error-flag variable and conditional branches -- not C++ exceptions. Nested
-try/catch blocks work correctly.
+### 8.8 with
+
+Scoped variable bindings that are lexically scoped to a block:
+
+```
+with (var f = open_file()) {
+    // f is available here
+}
+```
+
+Desugars to a block with variable declarations.
 
 ---
 
-## 10. Arrays
+## 9. Loops
 
-### 10.1 Literals
+### 9.1 while
 
-```omscript
-var arr = [1, 2, 3];
-var copy = [...arr];
-var extended = [0, ...arr, 4];
+```
+while (condition) {
+    // ...
+}
 ```
 
-Heap-allocated. Memory layout: `[length_i64, elem0_i64, elem1_i64, ...]`.
+### 9.2 do...while
 
-### 10.2 Indexing
-
-```omscript
-var v = arr[i];      // bounds-checked read
-arr[i] = value;      // bounds-checked write
-arr[i] += 1;         // compound assignment
+```
+do {
+    // ...
+} while (condition);
 ```
 
-Out-of-bounds access prints an error message and exits the program.
+### 9.3 until
 
-### 10.3 Array Built-ins
+Loop while condition is **false** — desugars to `while (!condition)`:
+
+```
+until (x == 0) {
+    x -= 1;
+}
+```
+
+### 9.4 for — Range-Based
+
+```
+for (i in 0...10) { ... }          // 0, 1, ..., 9
+for (i in 0...10...2) { ... }      // 0, 2, 4, 6, 8 (step 2)
+for (i in 0...10 step 2) { ... }   // same as above
+```
+
+`...` is the range operator (exclusive end). `..` is also accepted.
+
+### 9.5 for — Downto
+
+```
+for (i in 10 downto 0) { ... }         // 10, 9, ..., 1 (step -1)
+for (i in 10 downto 0 step 2) { ... }  // 10, 8, 6, 4, 2
+```
+
+### 9.6 for — Collection Iteration (for-each)
+
+```
+for (item in collection) { ... }
+for (i, item in collection) { ... }   // indexed: i = index, item = element
+```
+
+### 9.7 foreach
+
+```
+foreach item in collection { ... }
+foreach (i, item in collection) { ... }   // indexed variant
+```
+
+Desugars to a `for` loop.
+
+### 9.8 loop
+
+Infinite loop (desugars to `while (true)`):
+
+```
+loop {
+    // infinite
+}
+```
+
+Counted loop:
+
+```
+loop 5 { ... }      // run body 5 times
+loop (n) { ... }    // run body n times
+```
+
+### 9.9 repeat
+
+Counted loop:
+
+```
+repeat 5 { ... }      // run body 5 times
+repeat (n) { ... }    // run body n times
+```
+
+Post-test loop (desugars to `do...while`):
+
+```
+repeat {
+    // ...
+} until (condition);
+```
+
+### 9.10 forever
+
+Infinite loop:
+
+```
+forever {
+    // infinite, same as loop { }
+}
+```
+
+### 9.11 times
+
+Counted loop:
+
+```
+times 3 { ... }     // run body 3 times
+times (n) { ... }   // run body n times
+```
+
+### 9.12 OPTMAX Loop Variables
+
+Inside `OPTMAX` blocks, loop variables require type annotations:
+
+```
+for (i:int in 0...n) { ... }
+```
+
+### 9.13 break / continue
+
+```
+break;
+continue;
+```
+
+### 9.14 swap
+
+Rotates values among two or more variables atomically:
+
+```
+swap a, b;         // exchange a and b
+swap a, b, c;      // a←b, b←c, c←a (rotation)
+```
+
+---
+
+## 10. Expressions and Operators
+
+### 10.1 Arithmetic
+
+```
+a + b    a - b    a * b    a / b    a % b
+a ** b             // exponentiation (a to the power of b)
+-a                 // unary negation
+```
+
+### 10.2 Comparison
+
+```
+a == b    a != b    a < b    a <= b    a > b    a >= b
+```
+
+### 10.3 Logical
+
+```
+a && b    a || b    !a
+```
+
+### 10.4 Bitwise
+
+```
+a & b     // AND
+a | b     // OR
+a ^ b     // XOR
+~a        // NOT (bitwise complement)
+a << n    // left shift
+a >> n    // right shift
+```
+
+### 10.5 Null Coalescing
+
+```
+a ?? b    // if a != null/0, yields a; otherwise yields b
+x ??= default_val  // compound null-coalescing assignment
+```
+
+### 10.6 Ternary
+
+```
+condition ? then_value : else_value
+```
+
+### 10.7 Pipe Forward
+
+```
+value |> function_name    // equivalent to function_name(value)
+[1,2,3] |> sort |> reverse
+```
+
+### 10.8 Range
+
+```
+0...10      // exclusive range from 0 to 9
+0..10       // also supported
+```
+
+### 10.9 Spread
+
+```
+...array    // spread array elements into a call or array literal
+```
+
+### 10.10 Increment / Decrement
+
+```
+x++    x--    ++x    --x
+```
+
+### 10.11 Address / Reference
+
+```
+&variable   // take address / borrow reference
+```
+
+### 10.12 Operator Precedence (high to low)
+
+1. Postfix `++`, `--`, `[]`, `.`, function call
+2. Prefix `++`, `--`, `-`, `!`, `~`, `&`
+3. `**` (right-associative)
+4. `*`, `/`, `%`
+5. `+`, `-`
+6. `<<`, `>>`
+7. `&`
+8. `^`
+9. `|`
+10. `==`, `!=`, `<`, `<=`, `>`, `>=`
+11. `&&`
+12. `||`
+13. `??`
+14. `? :` (ternary)
+15. Assignment (`=`, `+=`, etc.)
+16. `|>` (pipe forward)
+
+---
+
+## 11. Arrays
+
+### 11.1 Array Literals
+
+```
+var arr = [1, 2, 3]
+var empty = []
+var typed:int[] = [10, 20, 30]
+```
+
+### 11.2 Indexing
+
+```
+arr[0]          // read (bounds-checked at O0/O1)
+arr[i] = val    // write
+```
+
+Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and when the compiler can statically prove safety.
+
+### 11.3 Array Built-ins
 
 | Function | Description |
-|----------|-------------|
+|---|---|
 | `len(arr)` | Number of elements |
-| `push(arr, val)` | New array with val appended |
-| `pop(arr)` | New array with last element removed |
-| `sort(arr)` | Sorted copy |
-| `reverse(arr)` | Reversed copy |
-| `sum(arr)` | Sum of all elements |
-| `array_product(arr)` | Product of all elements |
-| `array_fill(n, val)` | Array of n copies of val |
-| `array_copy(arr)` | Shallow copy |
+| `push(arr, val)` | Append element |
+| `pop(arr)` | Remove and return last element |
+| `sort(arr)` | Sort in place |
+| `reverse(arr)` | Reverse in place |
+| `index_of(arr, val)` | First index of value (-1 if not found) |
+| `array_contains(arr, val)` | Returns 1 if found, 0 otherwise |
+| `array_fill(size, val)` | Create array of `size` copies of `val` |
 | `array_concat(a, b)` | Concatenate two arrays |
-| `array_slice(arr, start, end)` | Sub-array [start, end) |
-| `array_remove(arr, i)` | Remove element at index i |
-| `array_insert(arr, i, val)` | Insert val at index i |
-| `array_last(arr)` | Last element (error if empty) |
-| `array_map(arr, fn)` | Apply fn to each element |
-| `array_filter(arr, fn)` | Keep elements where fn(elem) != 0 |
-| `array_reduce(arr, fn, init)` | Fold left: fn(acc, elem) |
-| `array_contains(arr, val)` | 1 if val is present |
-| `index_of(arr, val)` | First index of val, or -1 |
-| `array_min(arr)` | Minimum element |
-| `array_max(arr)` | Maximum element |
-| `array_any(arr, fn)` | 1 if any element satisfies fn |
-| `array_every(arr, fn)` | 1 if all elements satisfy fn |
-| `array_find(arr, fn)` | First element satisfying fn, or 0 |
-| `array_count(arr, fn)` | Count elements satisfying fn |
+| `array_slice(arr, start, end)` | Sub-array `[start, end)` |
+| `array_copy(arr)` | Shallow copy |
+| `array_remove(arr, i)` | Remove element at index `i` |
+| `array_map(arr, fn)` | Apply function to each element, return new array |
+| `array_filter(arr, fn)` | Keep elements for which `fn` returns true |
+| `array_reduce(arr, fn, init)` | Reduce array to single value |
+| `array_min(arr)` | Minimum value |
+| `array_max(arr)` | Maximum value |
+| `array_any(arr, fn)` | True if any element satisfies `fn` |
+| `array_every(arr, fn)` | True if all elements satisfy `fn` |
+| `array_find(arr, fn)` | First element satisfying `fn` |
+| `array_count(arr, fn)` | Count elements satisfying `fn` |
+| `array_product(arr)` | Product of all elements |
+| `array_last(arr)` | Last element |
+| `array_insert(arr, i, val)` | Insert `val` at index `i` |
+| `sum(arr)` | Sum of all elements |
+| `range(start, end)` | Create array `[start, start+1, ..., end-1]` |
+| `range_step(start, end, step)` | Create array with step |
 
 ---
 
-## 11. Strings
+## 12. Strings
 
-Heap-allocated null-terminated byte arrays. String literals are global constants. Most string
-operations allocate new strings.
+Strings are heap-allocated and NUL-terminated. String indexing and concatenation are built-in.
 
-### 11.1 Operations
-
-```omscript
-var t = s + " world";    // concatenation
-var r = s * 3;           // repetition -> "sss"
-var c = s[2];            // character code at index 2 (integer)
-s[2] = 108;              // write character in place
-```
-
-`==`/`!=` compare contents. `<`/`<=`/`>`/`>=` compare lexicographically.
-
-### 11.2 String Built-ins
+### 12.1 String Built-ins
 
 | Function | Description |
-|----------|-------------|
-| `len(s)` / `str_len(s)` | Byte length |
-| `char_at(s, i)` | Character code at index i |
-| `str_eq(a, b)` | 1 if equal |
-| `str_concat(a, b)` | Concatenate |
-| `str_substr(s, start, len)` | Substring |
-| `str_find(s, sub)` / `str_index_of(s, sub)` | First occurrence index, or -1 |
-| `str_contains(s, sub)` | 1 if found |
-| `str_starts_with(s, prefix)` | 1 if starts with prefix |
-| `str_ends_with(s, suffix)` | 1 if ends with suffix |
+|---|---|
+| `len(s)` / `str_len(s)` | Length in characters |
+| `char_at(s, i)` | Character at index `i` (as string) |
+| `str_eq(s1, s2)` | String equality (returns 1/0) |
+| `str_concat(s1, s2)` | Concatenate two strings |
+| `str_substr(s, start, len)` | Substring of length `len` starting at `start` |
+| `str_upper(s)` | Uppercase |
+| `str_lower(s)` | Lowercase |
+| `str_find(s, sub)` | Find substring (returns index or -1) |
+| `str_contains(s, sub)` | Contains substring (1/0) |
+| `str_index_of(s, sub)` | First index of substring (-1 if not found) |
 | `str_replace(s, old, new)` | Replace first occurrence |
-| `str_upper(s)` | Uppercase copy |
-| `str_lower(s)` | Lowercase copy |
 | `str_trim(s)` | Strip leading/trailing whitespace |
-| `str_repeat(s, n)` | Repeat n times |
-| `str_reverse(s)` | Reverse characters |
-| `str_split(s, delim)` | Split on delimiter, return array |
-| `str_chars(s)` | Array of character codes |
-| `str_join(arr, sep)` | Join string array with separator |
-| `str_count(s, sub)` | Count non-overlapping occurrences |
-| `str_pad_left(s, width, ch)` | Left-pad to width |
-| `str_pad_right(s, width, ch)` | Right-pad to width |
-| `to_char(n)` | Integer to single-character string |
-| `char_code(s)` | ASCII code of first character |
-| `is_alpha(n)` | 1 if code is a letter |
-| `is_digit(n)` | 1 if code is a decimal digit |
-| `to_string(n)` / `number_to_string(n)` | Integer or float to string |
-| `to_int(s)` / `str_to_int(s)` | Parse as integer |
-| `to_float(s)` / `str_to_float(s)` | Parse as double |
-| `string_to_number(s)` | Parse as integer |
+| `str_starts_with(s, prefix)` | Starts with prefix (1/0) |
+| `str_ends_with(s, suffix)` | Ends with suffix (1/0) |
+| `str_repeat(s, n)` | Repeat string `n` times |
+| `str_reverse(s)` | Reverse string |
+| `str_split(s, delim)` | Split by delimiter, returns array |
+| `str_chars(s)` | Split into array of single-character strings |
+| `str_join(arr, delim)` | Join array with delimiter |
+| `str_count(s, sub)` | Count non-overlapping occurrences of `sub` |
+| `str_pad_left(s, n, ch)` | Pad string on left to width `n` with character `ch` |
+| `str_pad_right(s, n, ch)` | Pad string on right to width `n` with character `ch` |
+| `to_string(x)` | Convert number to string |
+| `number_to_string(x)` | Convert number to string |
+| `string_to_number(s)` | Parse string as number |
+| `str_to_int(s)` | Parse string as integer |
+| `str_to_float(s)` | Parse string as float |
+| `to_int(x)` | Convert to integer |
+| `to_float(x)` | Convert to float |
+| `to_char(code)` | Integer code point to single-character string |
+| `char_code(c)` | Character to integer code point |
+| `is_alpha(c)` | Is alphabetic (1/0) |
+| `is_digit(c)` | Is decimal digit (1/0) |
 
 ---
 
-## 12. Structs
+## 13. Dictionaries / Maps
 
-### 12.1 Declaration
+Dictionaries (maps) are hash maps mapping string keys to integer/pointer values.
 
-```omscript
+### 13.1 Map Built-ins
+
+| Function | Description |
+|---|---|
+| `map_new()` | Create new empty map |
+| `map_set(m, key, val)` | Set key to value |
+| `map_get(m, key)` | Get value for key |
+| `map_has(m, key)` | Check if key exists (1/0) |
+| `map_remove(m, key)` | Remove key |
+| `map_keys(m)` | Array of all keys |
+| `map_values(m)` | Array of all values |
+| `map_size(m)` | Number of entries |
+
+---
+
+## 14. Structs
+
+### 14.1 Definition
+
+```
 struct Point {
-    x,
-    y
+    x: int,
+    y: int
 }
 ```
 
-Trailing comma is allowed.
+### 14.2 Field Attributes
 
-### 12.2 Literal Construction
+Fields can carry optional attributes:
 
-```omscript
-var p = Point { x: 10, y: 20 };
 ```
-
-Fields may be given in any order.
-
-### 12.3 Access and Mutation
-
-```omscript
-var v = p.x;
-p.y = 30;
-p.x += 5;
-```
-
-### 12.4 Typed Fields
-
-```omscript
-struct Vec3 { float x, float y, float z }
-// or equivalently:
-struct Vec3 { x: float, y: float, z: float }
-```
-
-### 12.5 Field Attributes
-
-Optimization hints preceding the field name:
-
-```omscript
-struct Particle {
-    hot float x,
-    cold int debug_id,
-    noalias data,
-    immut mass,
-    move owner,
-    align(64) buffer,
-    range(0, 255) level
+struct Buffer {
+    hot data: int,           // frequently accessed field
+    cold metadata: int,      // infrequently accessed
+    noalias ptr: int,        // pointer does not alias other fields
+    immut size: int,         // immutable after construction
+    align(16) data: float,   // alignment requirement
+    range(0, 100) percent: int  // value range hint
 }
 ```
 
-| Attribute | Description |
-|-----------|-------------|
-| `hot` | Frequently accessed |
-| `cold` | Rarely accessed |
-| `noalias` | Pointer does not alias other fields |
-| `immut` | Never modified after construction |
-| `move` | Participates in ownership transfer |
-| `align(N)` | Align to N bytes |
-| `range(min, max)` | Value in [min, max] -- enables range_metadata on loads |
+### 14.3 Struct Literals
 
-### 12.6 Operator Overloading
+```
+var p = Point { x: 10, y: 20 }
+```
 
-```omscript
+### 14.4 Field Access and Assignment
+
+```
+var v = p.x
+p.y = 30
+p.x += 5    // compound assignment on struct fields supported
+```
+
+### 14.5 Operator Overloading
+
+```
 struct Vec2 {
-    x, y,
+    x: float,
+    y: float,
     fn operator+(other: Vec2) -> Vec2 {
         return Vec2 { x: self.x + other.x, y: self.y + other.y };
+    }
+    fn operator==(other: Vec2) -> bool {
+        return self.x == other.x && self.y == other.y;
     }
 }
 ```
 
-Supported: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`.
+Supported operators: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`.
 
-`self` is the left-hand operand. Operator implementations are automatically `@inline`.
+Operator overload functions are automatically inlined.
 
 ---
 
-## 13. Enums
+## 15. Enums
 
-```omscript
+```
 enum Color {
-    RED,           // 0
-    GREEN = 10,    // 10
-    BLUE           // 11
+    Red,
+    Green,
+    Blue,
+    Custom = 42
+}
+
+var c = Color.Red
+```
+
+Enum members without explicit values are auto-numbered from 0 (or from the previous explicit value + 1).
+
+---
+
+## 16. Error Handling
+
+### 16.1 try / catch / throw
+
+```
+try {
+    // ...
+    throw "something went wrong";
+} catch (e) {
+    println(e);
 }
 ```
 
-Members auto-increment from the previous value. Access as `EnumName_MEMBER`:
+`throw` accepts any expression. `catch (e)` binds the thrown value to `e`.
 
-```omscript
-var c = Color_GREEN;   // 10
-if (c == Color_BLUE) { ... }
+### 16.2 assert
+
 ```
-
-Enum values are plain integers at runtime.
-
----
-
-## 14. Maps (Dictionaries)
-
-Open-addressing integer-to-integer hash tables.
-
-### 14.1 Dict Literal Syntax
-
-```omscript
-var m = {"key": 42, "other": 99};
-```
-
-Compiles to direct stores (no search loops). A literal key lookup on a literal dict is
-constant-folded at compile time.
-
-### 14.2 Map Operations
-
-```omscript
-var m = map_new();
-m = map_set(m, key, value);
-var v = map_get(m, key, default_value);
-var found = map_has(m, key);         // 1 or 0
-m = map_remove(m, key);
-var sz = map_size(m);
-var keys = map_keys(m);              // integer array of keys
-var vals = map_values(m);            // integer array of values
-```
-
-Keys and values are 64-bit integers. String keys are stored as their pointer value cast to integer.
-
----
-
-## 15. Ownership System
-
-Optional. Normal code does not need it.
-
-### 15.1 move
-
-```omscript
-move var dst = src;
-var x = move src;
-return move src;
-```
-
-Using the source variable after `move` is a compile-time error.
-
-### 15.2 invalidate
-
-```omscript
-invalidate x;    // mark x as dead; subsequent use is a compile-time error
-```
-
-### 15.3 borrow
-
-```omscript
-borrow var ref = &source;
-borrow j:u32 = &source;
-```
-
-Non-owning reference hint for alias analysis. `&` here is advisory, not an actual pointer
-operation.
-
-### 15.4 prefetch Statement
-
-```omscript
-prefetch name;
-prefetch+64 name;
-prefetch hot name;
-prefetch immut name;
-prefetch var name = expr;
-prefetch+128 hot var buf = data;
-```
-
-Emits `llvm.prefetch`. `+N` prefetches N bytes ahead of the variable's value.
-
----
-
-## 16. Module Imports
-
-```omscript
-import "utils.om";
-import "path/to/module";    // .om appended automatically if missing
-```
-
-Top-level only. All declarations from the imported file are merged. Circular and duplicate
-imports are silently skipped.
-
----
-
-## 17. File I/O
-
-```omscript
-var content = file_read("path.txt");     // "" on error
-file_write("out.txt", "data");           // overwrite
-file_append("log.txt", "line\n");        // append
-var ok = file_exists("path.txt");        // 1 or 0
+assert(x > 0);             // runtime assertion; aborts on failure
 ```
 
 ---
 
-## 18. Concurrency
+## 17. Memory Semantics
 
-```omscript
-var tid = thread_create("function_name");    // zero-argument function, name as string literal
-thread_join(tid);
+OmScript provides explicit move/borrow/invalidate semantics for performance-critical code.
 
-var mu = mutex_new();
-mutex_lock(mu);
-// ... critical section ...
-mutex_unlock(mu);
-mutex_destroy(mu);
+### 17.1 move
+
+```
+var a = [1, 2, 3]
+var b = move a     // b owns the array; a is invalidated
 ```
 
-`thread_create` accepts the name of a zero-argument OmScript function as a string literal. The
-wrapper is synthesized at compile time.
+After `move`, accessing the source variable is undefined behavior.
+
+### 17.2 borrow
+
+```
+fn process(data) {
+    var view = borrow data
+    // view shares data's storage; data is not moved
+}
+```
+
+### 17.3 invalidate
+
+```
+invalidate a;      // explicitly marks variable 'a' as invalid
+```
+
+Required before returning from a function that received a `@prefetch` parameter — the parameter must be invalidated before return.
+
+### 17.4 prefetch
+
+The `prefetch` statement issues software prefetch instructions and optionally declares a variable:
+
+```
+prefetch arr;              // prefetch 'arr' into L1 cache
+prefetch+128 arr;          // prefetch 'arr' and 128 bytes ahead
+prefetch data:int = compute();    // declare 'data' and prefetch it
+```
+
+Prefetched variables must be `invalidate`d before the function returns.
+
+---
+
+## 18. OPTMAX Blocks
+
+`OPTMAX` blocks mark regions for maximum optimization. Inside these blocks:
+- All function parameters **must** have type annotations
+- All `var` declarations **must** have type annotations
+- All `for` loop variables **must** have type annotations
+- Bounds checks on array/string accesses are **elided**
+- The compiler applies the most aggressive optimization strategy
+
+```
+OPTMAX=:
+fn fast_sum(arr:int[], n:int) -> int {
+    var total:int = 0;
+    for (i:int in 0...n) {
+        total += arr[i];
+    }
+    return total;
+}
+OPTMAX!:
+```
+
+`OPTMAX=:` opens the block; `OPTMAX!:` closes it. Nesting is not allowed.
 
 ---
 
 ## 19. Built-in Functions
 
-All compile directly to LLVM IR with no dispatch overhead.
-
 ### 19.1 I/O
 
 | Function | Description |
-|----------|-------------|
-| `print(val)` | Print integer, float, or string without newline |
-| `println(val)` | Print with newline |
-| `print_char(n)` | Print character by ASCII code |
+|---|---|
+| `print(...)` | Print values without newline |
+| `println(...)` | Print values with newline |
 | `write(s)` | Write string to stdout |
-| `input()` | Read integer from stdin |
-| `input_line()` | Read line from stdin as string (newline stripped) |
+| `print_char(c)` | Print a single character code |
+| `input()` | Read a word from stdin |
+| `input_line()` | Read a full line from stdin |
+| `exit(code)` / `exit_program(code)` | Exit with given code |
 
 ### 19.2 Math
 
 | Function | Description |
-|----------|-------------|
+|---|---|
 | `abs(x)` | Absolute value |
-| `min(a, b)` | Minimum |
-| `max(a, b)` | Maximum |
-| `sign(x)` | -1, 0, or 1 |
-| `clamp(x, lo, hi)` | Clamp to [lo, hi] |
-| `pow(base, exp)` | Exponentiation |
+| `pow(x, y)` | x to the power y |
 | `sqrt(x)` | Square root |
-| `floor(x)` | Floor |
-| `ceil(x)` | Ceiling |
-| `round(x)` | Round to nearest |
-| `is_even(n)` | 1 if even |
-| `is_odd(n)` | 1 if odd |
-| `gcd(a, b)` | Greatest common divisor |
-| `lcm(a, b)` | Least common multiple |
-| `is_power_of_2(n)` | 1 if power of two |
-
-### 19.3 Trigonometry and Transcendental
-
-| Function | Description |
-|----------|-------------|
-| `sin(x)` | Sine (radians) |
-| `cos(x)` | Cosine |
-| `tan(x)` | Tangent |
-| `asin(x)` | Arcsine |
-| `acos(x)` | Arccosine |
-| `atan(x)` | Arctangent |
-| `atan2(y, x)` | Two-argument arctangent |
+| `cbrt(x)` | Cube root |
 | `exp(x)` | e^x |
 | `exp2(x)` | 2^x |
 | `log(x)` | Natural logarithm |
+| `log2(x)` | Base-2 logarithm |
 | `log10(x)` | Base-10 logarithm |
-| `cbrt(x)` | Cube root |
-| `hypot(a, b)` | sqrt(a^2 + b^2) |
+| `floor(x)` | Floor |
+| `ceil(x)` | Ceiling |
+| `round(x)` | Round to nearest integer |
+| `sin(x)` | Sine |
+| `cos(x)` | Cosine |
+| `tan(x)` | Tangent |
+| `asin(x)` | Arc sine |
+| `acos(x)` | Arc cosine |
+| `atan(x)` | Arc tangent |
+| `atan2(y, x)` | Two-argument arc tangent |
+| `hypot(x, y)` | sqrt(x² + y²) |
+| `min(a, b)` | Minimum of two values |
+| `max(a, b)` | Maximum of two values |
+| `min_float(a, b)` | Floating-point minimum (NaN-aware) |
+| `max_float(a, b)` | Floating-point maximum (NaN-aware) |
+| `sign(x)` | Sign: -1, 0, or 1 |
+| `clamp(x, lo, hi)` | Clamp x to [lo, hi] |
+| `gcd(a, b)` | Greatest common divisor |
+| `lcm(a, b)` | Least common multiple |
+| `is_even(x)` | 1 if even, 0 otherwise |
+| `is_odd(x)` | 1 if odd, 0 otherwise |
+| `is_power_of_2(x)` | 1 if x is a power of 2 |
 | `fma(a, b, c)` | Fused multiply-add: a*b+c |
-| `copysign(x, y)` | x with sign of y |
-| `min_float(a, b)` | Minimum of two floats |
-| `max_float(a, b)` | Maximum of two floats |
+| `copysign(x, y)` | Magnitude of x with sign of y |
+| `random()` | Random float in [0.0, 1.0) |
 
-### 19.4 Precision Floating-Point
-
-| Function | Description |
-|----------|-------------|
-| `fast_add(a, b)` | Add with fast-math (allows reassociation) |
-| `fast_sub(a, b)` | Subtract with fast-math |
-| `fast_mul(a, b)` | Multiply with fast-math |
-| `fast_div(a, b)` | Divide with fast-math |
-| `precise_add(a, b)` | Add without fast-math |
-| `precise_sub(a, b)` | Subtract without fast-math |
-| `precise_mul(a, b)` | Multiply without fast-math |
-| `precise_div(a, b)` | Divide without fast-math |
-
-### 19.5 Bitwise / Integer Intrinsics
+### 19.3 Arithmetic with Explicit Overflow/Precision Mode
 
 | Function | Description |
-|----------|-------------|
-| `popcount(n)` | Count set bits |
-| `clz(n)` | Count leading zeros |
-| `ctz(n)` | Count trailing zeros |
-| `bitreverse(n)` | Reverse bit order |
-| `bswap(n)` | Byte-swap (endian flip) |
-| `rotate_left(n, k)` | Rotate left by k bits |
-| `rotate_right(n, k)` | Rotate right by k bits |
-| `saturating_add(a, b)` | Signed saturating add |
-| `saturating_sub(a, b)` | Signed saturating subtract |
+|---|---|
+| `fast_add(a, b)` | Addition with `nsw` (no signed wrap) flag |
+| `fast_sub(a, b)` | Subtraction with `nsw` flag |
+| `fast_mul(a, b)` | Multiplication with `nsw` flag |
+| `fast_div(a, b)` | Division (exact, no remainder) |
+| `precise_add(a, b)` | Addition without unsafe flags |
+| `precise_sub(a, b)` | Subtraction without unsafe flags |
+| `precise_mul(a, b)` | Multiplication without unsafe flags |
+| `precise_div(a, b)` | Division without unsafe flags |
+| `saturating_add(a, b)` | LLVM saturating addition |
+| `saturating_sub(a, b)` | LLVM saturating subtraction |
 
-### 19.6 Type Utilities
-
-| Function | Description |
-|----------|-------------|
-| `typeof(x)` | Returns `"int"`, `"float"`, `"string"`, `"array"`, `"map"`, or `"null"` |
-
-### 19.7 Assertions and Hints
+### 19.4 Bit Manipulation
 
 | Function | Description |
-|----------|-------------|
-| `assert(cond)` | Print error and exit if cond is 0 |
-| `assume(cond)` | Tell LLVM the condition is always true (UB if false) |
-| `unreachable()` | Mark unreachable (UB if executed) |
-| `expect(val, likely_val)` | Branch prediction hint |
+|---|---|
+| `popcount(x)` | Count set bits |
+| `clz(x)` | Count leading zeros |
+| `ctz(x)` | Count trailing zeros |
+| `bitreverse(x)` | Reverse bit order |
+| `bswap(x)` | Byte-swap (endianness swap) |
+| `rotate_left(x, n)` | Rotate bits left by n |
+| `rotate_right(x, n)` | Rotate bits right by n |
 
-### 19.8 System
-
-| Function | Description |
-|----------|-------------|
-| `exit(code)` / `exit_program(code)` | Exit with code |
-| `random()` | Random integer (wraps C rand()) |
-| `time()` | Seconds since Unix epoch |
-| `sleep(ms)` | Sleep ms milliseconds |
-
-### 19.9 Range Generation
+### 19.5 Type Utilities
 
 | Function | Description |
-|----------|-------------|
-| `range(start, end)` | Array [start, ..., end-1] |
-| `range_step(start, end, step)` | Array with custom step (step != 0) |
+|---|---|
+| `typeof(x)` | Returns string name of type |
+| `len(x)` | Length of array or string |
+| `to_int(x)` | Convert to integer |
+| `to_float(x)` | Convert to float |
+| `to_string(x)` | Convert number to string |
+| `assert(cond)` | Runtime assertion (aborts on failure) |
+
+### 19.6 Time / System
+
+| Function | Description |
+|---|---|
+| `time()` | Current time in milliseconds |
+| `sleep(ms)` | Sleep for `ms` milliseconds |
+
+### 19.7 Optimizer Hints
+
+| Function | Description |
+|---|---|
+| `assume(cond)` | Assert to optimizer that `cond` is always true (LLVM `llvm.assume`) |
+| `unreachable()` | Mark code as unreachable (UB if reached) |
+| `expect(val, expected)` | Branch prediction hint: `val` is likely `expected` |
 
 ---
 
-## 20. Optimization Directives
+## 20. Concurrency
 
-### 20.1 Optimization Levels
+OmScript provides low-level threading and mutex primitives.
 
-| Level | Description |
-|-------|-------------|
-| `-O0` | No optimization. |
-| `-O1` | Basic: instruction combining, CFG simplification, mem2reg. |
-| `-O2` | Standard -- **default**. Full LLVM pass manager; E-graph and Superoptimizer enabled. |
-| `-O3` | Aggressive. All O2 plus additional loop and peephole passes. |
-| `-Ofast` | Treated as -O3. |
+### 20.1 Thread Functions
 
-### 20.2 @noalias File Directive
+| Function | Description |
+|---|---|
+| `thread_create(fn, arg)` | Create a new thread running `fn(arg)` |
+| `thread_join(t)` | Wait for thread `t` to finish |
 
-```omscript
-@noalias
+### 20.2 Mutex Functions
+
+| Function | Description |
+|---|---|
+| `mutex_new()` | Create a new mutex |
+| `mutex_lock(m)` | Lock mutex `m` |
+| `mutex_unlock(m)` | Unlock mutex `m` |
+| `mutex_destroy(m)` | Destroy mutex `m` |
+
+---
+
+## 21. File I/O
+
+| Function | Description |
+|---|---|
+| `file_read(path)` | Read entire file as string |
+| `file_write(path, content)` | Write string to file (overwrite) |
+| `file_append(path, content)` | Append string to file |
+| `file_exists(path)` | Returns 1 if file exists, 0 otherwise |
+
+---
+
+## 22. Lambda Expressions
+
+Lambdas create anonymous functions. They are desugared to named functions at parse time.
+
+```
+|x| x * 2                     // single parameter
+|x, y| x + y                  // two parameters
+|| 42                          // no parameters
+|x:int| x * 2                 // annotated parameter
 ```
 
-Placed at the top level before any function: marks all pointer parameters in every function
-in the file as `noalias`.
+Lambdas are first-class values and can be passed to higher-order functions:
 
----
-
-## 21. OPTMAX Directive
-
-```omscript
-OPTMAX=:
-fn compute(x: i64, y: i64) -> i64 {
-    var result: i64 = x * y;
-    return result;
-}
-OPTMAX!:
+```
+var doubled = array_map([1, 2, 3], |x| x * 2)
+var evens = array_filter([1, 2, 3, 4], |x| x % 2 == 0)
+var total = array_reduce([1, 2, 3, 4], |acc, x| acc + x, 0)
 ```
 
-Functions between `OPTMAX=:` and `OPTMAX!:` require explicit type annotations on all parameters
-and local variables, and receive the most aggressive LLVM optimization configuration. Nesting is
-a parse error.
+---
+
+## 23. Import System
+
+```
+import "filename";
+import "path/to/module";   // .om extension added automatically
+```
+
+- Circular imports are detected and silently skipped
+- Paths are resolved relative to the importing file's directory
+- Imports merge all functions, structs, and enums from the imported file
 
 ---
 
-## 22. E-Graph and Superoptimizer
-
-### 22.1 E-Graph Equality Saturation (O2+)
-
-Applied to the AST before codegen. 600+ algebraic rewrite rules:
-
-- Constant folding
-- Strength reduction: `x*3 -> (x<<1)+x`, `x*15 -> (x<<4)-x`
-- Algebraic identities: commutativity, associativity, distributivity
-- Bitwise absorption and shift combination
-- Comparison simplification
-
-### 22.2 Superoptimizer (O2+)
-
-Applied to LLVM IR after the standard optimization pipeline. Four passes:
-
-1. **Idiom recognition** -- `sdiv x, pow2 -> ashr`, `x % pow2 -> and`
-2. **Algebraic simplification** -- 300+ peephole rewrites
-3. **Branch-to-select** -- conditional branches to `select`
-4. **Synthesis** -- optimal shift+add sequences for constant multiplications
-
----
-
-## 23. Hardware Graph Optimization Engine
-
-Activated by `-march=<cpu>` or `-mtune=<cpu>`. Builds a hardware execution model and performs:
-
-- **Instruction scheduling** -- per-basic-block list scheduler with cycle-accurate port model
-- **Port-diversity** -- fills different execution units each cycle to maximize IPC
-- **Register-pressure tiebreaker** -- prefers instructions that free registers
-- **FMA generation** -- `fadd(fmul(a,b), c) -> fma(a,b,c)`
-- **Integer strength reduction** -- `imul -> shift+add` for constant multipliers
-- **Software pipelining** -- loop headers get `llvm.loop.unroll.count`, `interleave.count`, and
-  `vectorize.width` metadata from the hardware resource model
-- **Target attributes** -- sets `target-cpu` and `target-features` on every function
-
-Supported targets: Skylake, Haswell, Alder Lake, Zen 3/4/5, Apple M1-M4, Neoverse N2/V2,
-RISC-V, and others.
-
----
-
-## 24. CLI Reference
+## 24. Compiler CLI Reference
 
 ### 24.1 Commands
 
 ```
-omsc <file.om>          Compile to native executable (default)
-omsc compile <file.om>  Same
-omsc run <file.om>      Compile and execute
-omsc check <file.om>    Parse and validate only
-omsc lex <file.om>      Print token stream
-omsc parse <file.om>    Print AST
-omsc emit-ir <file.om>  Emit LLVM IR
-omsc clean              Remove build artifacts
-omsc install            Install to PATH
-omsc uninstall          Remove from PATH
-omsc update             Update to latest version
-omsc pkg <subcommand>   Package manager (install, remove, list, search, info)
-omsc version            Print version
-omsc help               Print usage
+omsc <file.om>                  # compile to executable (default: a.out)
+omsc compile <file.om>          # same as above
+omsc build <file.om>            # same as above
+omsc run <file.om>              # compile and run
+omsc check <file.om>            # validate syntax only
+omsc emit-ir <file.om>          # print LLVM IR
+omsc --emit-obj <file.om>       # emit object file only
+omsc clean                      # remove build artifacts
+omsc pkg <subcommand>           # package manager
 ```
 
-### 24.2 Compiler Options
+### 24.2 Output
 
 ```
--o <file>             Output file (default: a.out)
--O0 / -O1 / -O2 / -O3 / -Ofast   Optimization level (default: -O2)
--V, --verbose         Verbose output
--q, --quiet           Suppress non-error output
---emit-obj            Emit object file only
---dry-run             Validate without writing output
---time                Show timing breakdown
+-o <file>      Output file path (default: a.out)
 ```
 
-### 24.3 Codegen Options
+### 24.3 Optimization Levels
 
 ```
--march=<cpu>           Target CPU (default: native)
--mtune=<cpu>           Tuning CPU (default: -march value)
--flto                  Full link-time optimization
--ffast-math            Unsafe floating-point optimizations
--fvectorize            SIMD vectorization (default: on)
--funroll-loops         Loop unrolling (default: on)
--floop-optimize        Polyhedral loop optimization (default: on)
--fparallelize          Auto-parallelize loops (default: on)
--fpic                  Position-independent code (default: on)
--foptmax               OPTMAX optimization (default: on)
--fstack-protector      Stack canary protection
--fegraph               E-graph saturation (default: on at O2+)
--fsuperopt             Superoptimizer (default: on at O2+)
--fsuperopt-level=N     Superoptimizer aggressiveness 0-3 (default: 2)
--fhgoe                 Hardware graph optimization (default: on)
+-O0            No optimization
+-O1            Basic optimizations
+-O2            Standard optimizations (default)
+-O3            Aggressive optimizations
+-Ofast         -O3 + fast-math
 ```
 
-Use `-fno-<flag>` to disable any flag: e.g., `-fno-lto`, `-fno-vectorize`.
-
-### 24.4 Linker Options
+### 24.4 Target
 
 ```
--static        Static linking
--s, --strip    Strip debug symbols
+-march=<cpu>   Target CPU (default: native)
+-mtune=<cpu>   Tuning CPU (default: same as -march)
+```
+
+Examples: `-march=native`, `-march=znver3`, `-march=skylake`
+
+### 24.5 Feature Flags
+
+All `-f` flags have a `-fno-` counterpart to disable:
+
+| Flag | Default | Description |
+|---|---|---|
+| `-flto` | off | Link-time optimization |
+| `-fpic` | on | Position-independent code |
+| `-ffast-math` | off | Fast floating-point (imprecise) |
+| `-foptmax` | on | Enable OPTMAX block processing |
+| `-fstack-protector` | off | Stack smashing protection |
+| `-fvectorize` | on | Auto-vectorization |
+| `-funroll-loops` | on | Loop unrolling |
+| `-floop-optimize` | on | Loop optimization passes |
+| `-fparallelize` | on | Parallelization hints |
+| `-fegraph` | on | E-graph equality saturation |
+| `-fsuperopt` | on | Superoptimizer pass |
+| `-fhgoe` | on | Hardware Graph Optimization Engine |
+
+### 24.6 Superoptimizer Level
+
+```
+-fsuperopt=0   Disabled
+-fsuperopt=1   Basic idiom recognition
+-fsuperopt=2   Default (idiom + algebraic simplification)
+-fsuperopt=3   Full (+ enumerative synthesis)
+```
+
+### 24.7 Debugging and Info
+
+```
+-g / --debug   Emit debug information
+-V / --verbose Verbose compiler output
+-static        Link statically
+-s / --strip   Strip debug symbols from output
+```
+
+### 24.8 Package Manager
+
+```
+omsc pkg install <package>   # Install a package
+omsc pkg remove <package>    # Remove a package
+omsc pkg list                # List installed packages
+omsc pkg search <query>      # Search the registry
+omsc pkg info <package>      # Show package details
 ```
 
 ---
 
-## 25. Grammar Summary
+## 25. Advanced Optimization Features
 
-```
-program        = top_level*
+### 25.1 E-Graph Equality Saturation
 
-top_level      = import_stmt
-               | enum_decl
-               | struct_decl
-               | annotation* fn_decl
-               | '@noalias'
+The e-graph pass applies algebraic identities and constant folding to LLVM IR before the standard optimization pipeline. It uses union-find with path compression and cost-based extraction to find the lowest-cost equivalent expression.
 
-import_stmt    = 'import' STRING ';'
+Enabled by default at O1+; disable with `-fno-egraph`.
 
-enum_decl      = 'enum' IDENT '{' (IDENT ('=' INTEGER)? ','?)* '}'
+### 25.2 Superoptimizer
 
-struct_decl    = 'struct' IDENT '{' struct_member* '}'
-struct_member  = operator_overload | field_decl
-operator_overload = 'fn' 'operator' op '(' IDENT (':' type_ann)? ')' ('->' type_ann)? block
-field_decl     = field_attr* type_name? IDENT (':' type_ann)? ','?
-field_attr     = 'hot' | 'cold' | 'noalias' | 'immut' | 'move'
-               | 'align' '(' INTEGER ')' | 'range' '(' INTEGER ',' INTEGER ')'
-op             = '+' | '-' | '*' | '/' | '%' | '==' | '!=' | '<' | '>' | '<=' | '>='
+A post-LLVM optimization pass that applies:
+- **Idiom recognition**: popcount, bswap, rotate, min/max, abs, etc.
+- **Algebraic simplification**: algebraic identities on LLVM IR instructions
+- **Branch-to-select**: converts simple diamond CFGs to `select` instructions
+- **Enumerative synthesis** (level 3 only): enumerates short instruction sequences
 
-annotation     = '@' IDENT
-fn_decl        = 'fn' IDENT ('<' IDENT (',' IDENT)* '>')?
-                 '(' param_list ')' ('->' type_ann)?
-                 (block | '=' expr ';')
-param_list     = (param (',' param)*)?
-param          = ('@prefetch')? IDENT (':' type_ann)? ('=' literal)?
-type_ann       = ('&')? IDENT ('[]')*
-literal        = INTEGER | FLOAT | STRING
+Enabled by default at O1+; configure with `-fsuperopt=<level>`.
 
-block          = '{' stmt* '}'
+### 25.3 Hardware Graph Optimization Engine (HGOE)
 
-stmt           = ('var' | 'const') var_decl (',' var_decl)* ';'
-               | ('var' | 'const') '[' (IDENT|'_') (',' (IDENT|'_'))* ']' '=' expr ';'
-               | 'register' ('var' | 'const') IDENT (':' type_ann)? ('=' expr)? ';'
-               | 'move' ('var' | IDENT) IDENT '=' expr ';'
-               | 'borrow' ('var' | IDENT)? IDENT (':' type_ann)? '=' expr ';'
-               | 'invalidate' IDENT ';'
-               | 'prefetch' ('+' INTEGER)? ('hot'|'immut')* (IDENT | 'var' IDENT (':' type_ann)? ('=' expr)?) ';'
-               | ('likely'|'unlikely')? 'if' '(' expr ')' stmt ('elif' '(' expr ')' stmt)* ('else' stmt)?
-               | 'unless' '(' expr ')' stmt ('else' stmt)?
-               | 'while' '(' expr ')' stmt
-               | 'until' '(' expr ')' stmt
-               | 'do' stmt ('while'|'until') '(' expr ')' ';'
-               | 'for' '(' IDENT (',' IDENT)? (':' type_ann)? 'in' expr
-                     (('..'|'...') expr (('..'|'...'|'step') expr)?)? ')' stmt
-               | 'for' '(' IDENT (':' type_ann)? 'in' expr 'downto' expr ('step' expr)? ')' stmt
-               | 'foreach' '('? IDENT (',' IDENT)? 'in' expr ')'? stmt
-               | 'loop' expr? stmt
-               | 'repeat' expr? stmt | 'repeat' stmt 'until' '(' expr ')' ';'
-               | 'times' '('? expr ')'? stmt
-               | 'forever' stmt
-               | 'switch' '(' expr ')' '{' switch_case* '}'
-               | 'when' '(' expr ')' '{' when_arm* '}'
-               | 'guard' '(' expr ')' 'else' stmt
-               | 'defer' stmt
-               | 'with' '(' with_binding (',' with_binding)* ')' stmt
-               | 'swap' IDENT (',' IDENT)+ ';'
-               | 'return' expr? ';'
-               | 'break' ';' | 'continue' ';'
-               | 'try' block 'catch' '(' IDENT ')' block
-               | 'throw' expr ';'
-               | block | expr ';'
+Activated when `-march` or `-mtune` is provided (including `native`). Builds a structural model of the target CPU microarchitecture and:
+- Maps operations to hardware execution units
+- Inserts FMA (fused multiply-add) instructions where profitable
+- Applies hardware-specific strength reductions
+- Uses hardware-aware cost models for scheduling decisions
 
-var_decl       = IDENT (':' type_ann)? ('=' expr)?
-with_binding   = ('var' | 'const') IDENT (':' type_ann)? ('=' expr)?
-switch_case    = ('case' expr (',' expr)* | 'default') ':' stmt*
-when_arm       = (expr (',' expr)* | '_') '=>' stmt ','?
+### 25.4 OPTMAX Blocks
 
-expr           = assignment
-assignment     = pipe (assign_op assignment)?
-assign_op      = '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '**='
-               | '&=' | '|=' | '^=' | '<<=' | '>>=' | '??='
-pipe           = ternary ('|>' IDENT)*
-ternary        = null_coal ('?' expr ':' ternary)?
-null_coal      = logical_or ('??' logical_or)*
-logical_or     = logical_and ('||' logical_and)*
-logical_and    = bitwise_or ('&&' bitwise_or)*
-bitwise_or     = bitwise_xor ('|' bitwise_xor)*
-bitwise_xor    = bitwise_and ('^' bitwise_and)*
-bitwise_and    = equality ('&' equality)*
-equality       = comparison (('==' | '!=') comparison)*
-comparison     = shift (('<' | '<=' | '>' | '>=') shift)*
-shift          = addition (('<<' | '>>') addition)*
-addition       = multiply (('+' | '-') multiply)*
-multiply       = power (('*' | '/' | '%') power)*
-power          = unary ('**' power)?
-unary          = ('-' | '!' | '~' | '&' | '++' | '--' | 'move') unary | postfix
-postfix        = call ('++' | '--' | '[' expr ']' | '.' IDENT ('(' args ')')?)*
-call           = primary ('(' args ')')?
-primary        = INTEGER | FLOAT | STRING | 'true' | 'false' | 'null'
-               | IDENT | '(' expr ')' | '[' array_elems ']' | '{' dict_pairs '}'
-               | '|' params '|' expr | '||' expr
-               | IDENT '{' field_inits '}'
-array_elems    = ('...' expr | expr) (',' ('...' expr | expr))* ','?
-dict_pairs     = (expr ':' expr) (',' (expr ':' expr))* ','?
-field_inits    = (IDENT ':' expr ','?)*
-args           = (expr (',' expr)*)?
-```
+See [Section 18](#18-optmax-blocks).
+
+### 25.5 Profile Guidance (PGO)
+
+The build system includes `benchmark_pgo.sh` for profile-guided optimization runs. PGO is coordinated externally via the build scripts — there is no language-level PGO syntax.
