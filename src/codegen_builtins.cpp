@@ -70,7 +70,11 @@ enum class BuiltinId : uint8_t {
     ROTATE_LEFT, ROTATE_RIGHT, BSWAP, SATURATING_ADD, SATURATING_SUB,
     FMA_BUILTIN, COPYSIGN, MIN_FLOAT, MAX_FLOAT,
     // Optimizer hint builtins
-    ASSUME, UNREACHABLE, EXPECT
+    ASSUME, UNREACHABLE, EXPECT,
+    // Array utility builtins
+    ARRAY_PRODUCT, ARRAY_LAST, ARRAY_INSERT,
+    // String padding builtins
+    STR_PAD_LEFT, STR_PAD_RIGHT
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -214,6 +218,11 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"assume", BuiltinId::ASSUME},
     {"unreachable", BuiltinId::UNREACHABLE},
     {"expect", BuiltinId::EXPECT},
+    {"array_product", BuiltinId::ARRAY_PRODUCT},
+    {"array_last", BuiltinId::ARRAY_LAST},
+    {"array_insert", BuiltinId::ARRAY_INSERT},
+    {"str_pad_left", BuiltinId::STR_PAD_LEFT},
+    {"str_pad_right", BuiltinId::STR_PAD_RIGHT},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -5325,6 +5334,262 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* expectFn =
             OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::expect, {getDefaultType()});
         return builder->CreateCall(expectFn, {val, likelyVal}, "expect.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // array_product(arr) — multiply all elements together; returns 1 for empty array
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_PRODUCT) {
+        validateArgCount(expr, "array_product", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* arrPtr =
+            arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "aprod.arrptr");
+        auto* aprodLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "aprod.len");
+        aprodLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        aprodLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* length = aprodLenLoad;
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "aprod.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "aprod.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "aprod.done", function);
+
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(loopBB);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "aprod.acc");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "aprod.idx");
+        acc->addIncoming(one, entryBB);  // product identity is 1
+        idx->addIncoming(zero, entryBB);
+
+        llvm::Value* done = builder->CreateICmpUGE(idx, length, "aprod.done");
+        auto* aprodCondBr = builder->CreateCondBr(done, doneBB, bodyBB);
+        if (optimizationLevel >= OptimizationLevel::O2) {
+            aprodCondBr->setMetadata(llvm::LLVMContext::MD_prof,
+                llvm::MDBuilder(*context).createBranchWeights(1, 2000));
+        }
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "aprod.offset", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "aprod.elemptr");
+        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "aprod.elem");
+        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* newAcc = builder->CreateMul(acc, elem, "aprod.newacc");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aprod.newidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        acc->addIncoming(newAcc, bodyBB);
+        idx->addIncoming(newIdx, bodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(doneBB);
+        return acc;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_last(arr) — return the last element; aborts on empty array
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_LAST) {
+        validateArgCount(expr, "array_last", 1);
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "alast.arrptr");
+        auto* alastLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "alast.len");
+        alastLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        alastLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* arrLen = alastLenLoad;
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* notEmpty = builder->CreateICmpSGT(arrLen, zero, "alast.notempty");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "alast.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "alast.fail", function);
+        llvm::MDNode* alastW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(notEmpty, okBB, failBB, alastW);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array_last called on empty array\n", "alast_empty_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
+        // Last element is at offset arrLen (1-based: header is at [0], elements at [1..arrLen])
+        llvm::Value* lastPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, arrLen, "alast.ptr");
+        auto* lastLoad = builder->CreateAlignedLoad(getDefaultType(), lastPtr, llvm::MaybeAlign(8), "alast.val");
+        lastLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (optimizationLevel >= OptimizationLevel::O1) {
+            lastLoad->setMetadata(llvm::LLVMContext::MD_noundef,
+                llvm::MDNode::get(*context, {}));
+        }
+        return lastLoad;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_insert(arr, idx, val) — insert val at position idx, shifting elements right
+    //   Returns a new array (original is unchanged).
+    //   idx must be in [0, length] — inserting at length appends.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_INSERT) {
+        validateArgCount(expr, "array_insert", 3);
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
+        llvm::Value* valArg = generateExpression(expr->arguments[2].get());
+        arrArg = toDefaultType(arrArg);
+        idxArg = toDefaultType(idxArg);
+        valArg = toDefaultType(valArg);
+
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "ains.arrptr");
+        auto* ainsLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "ains.len");
+        ainsLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        ainsLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* arrLen = ainsLenLoad;
+
+        // Bounds check: 0 <= idx <= length (insert at end is allowed)
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "ains.notneg");
+        llvm::Value* notOver = builder->CreateICmpSLE(idxArg, arrLen, "ains.notover");
+        llvm::Value* valid = builder->CreateAnd(notNeg, notOver, "ains.valid");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "ains.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "ains.fail", function);
+        llvm::MDNode* ainsW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(valid, okBB, failBB, ainsW);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array_insert index out of bounds\n", "ains_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
+        llvm::Value* newLen = builder->CreateAdd(arrLen, one, "ains.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Allocate: (newLen + 1) * 8 bytes
+        llvm::Value* slots = builder->CreateAdd(newLen, one, "ains.slots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "ains.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "ains.buf");
+
+        // Store new length header
+        auto* ainsLenSt = builder->CreateStore(newLen, buf);
+        ainsLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+
+        // Copy elements before insertion point: arr[1..idx+1) → buf[1..idx+1)
+        llvm::Value* preSrc = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "ains.presrc");
+        llvm::Value* preDst = builder->CreateInBoundsGEP(getDefaultType(), buf, one, "ains.predst");
+        llvm::Value* preCount = builder->CreateMul(idxArg, eight, "ains.precnt", /*HasNUW=*/true, /*HasNSW=*/true);
+        builder->CreateCall(getOrDeclareMemcpy(), {preDst, preSrc, preCount});
+
+        // Store the inserted value at buf[idx+1]
+        llvm::Value* insertSlot = builder->CreateAdd(idxArg, one, "ains.slot", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* insertPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, insertSlot, "ains.insertptr");
+        auto* ainsValSt = builder->CreateStore(valArg, insertPtr);
+        ainsValSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+
+        // Copy elements from insertion point onward: arr[idx+1..arrLen+1) → buf[idx+2..newLen+1)
+        llvm::Value* postSrcIdx = builder->CreateAdd(idxArg, one, "ains.postsrcidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* postSrc = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, postSrcIdx, "ains.postsrc");
+        llvm::Value* postDstIdx = builder->CreateAdd(idxArg, llvm::ConstantInt::get(getDefaultType(), 2), "ains.postdstidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* postDst = builder->CreateInBoundsGEP(getDefaultType(), buf, postDstIdx, "ains.postdst");
+        llvm::Value* postCount = builder->CreateSub(arrLen, idxArg, "ains.postcnt", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* postBytes = builder->CreateMul(postCount, eight, "ains.postbytes", /*HasNUW=*/true, /*HasNSW=*/true);
+        builder->CreateCall(getOrDeclareMemcpy(), {postDst, postSrc, postBytes});
+
+        return builder->CreatePtrToInt(buf, getDefaultType(), "ains.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // str_pad_left(str, width, fill) — left-pad str with fill[0] until length == width
+    // str_pad_right(str, width, fill) — right-pad str with fill[0] until length == width
+    //   If str is already >= width chars, returns str unchanged.
+    //   fill must be a non-empty string; its first character is used as the pad byte.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::STR_PAD_LEFT || bid == BuiltinId::STR_PAD_RIGHT) {
+        const char* fnName = (bid == BuiltinId::STR_PAD_LEFT) ? "str_pad_left" : "str_pad_right";
+        validateArgCount(expr, fnName, 3);
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* widthArg = generateExpression(expr->arguments[1].get());
+        llvm::Value* fillArg = generateExpression(expr->arguments[2].get());
+        widthArg = toDefaultType(widthArg);
+        fillArg = toDefaultType(fillArg);
+
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy() ? strArg
+                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "strpad.strptr");
+        llvm::Value* fillPtr =
+            fillArg->getType()->isPointerTy() ? fillArg
+                : builder->CreateIntToPtr(fillArg, llvm::PointerType::getUnqual(*context), "strpad.fillptr");
+
+        // slen = strlen(str)
+        llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strpad.slen");
+
+        // Clamp width to [0, i64_max] — negative width means no padding
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* negWidth = builder->CreateICmpSLT(widthArg, zero, "strpad.negw");
+        llvm::Value* effectiveWidth = builder->CreateSelect(negWidth, zero, widthArg, "strpad.width");
+
+        // If slen >= width, return str unchanged
+        llvm::Value* needsPad = builder->CreateICmpULT(slen, effectiveWidth, "strpad.needs");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* padBB = llvm::BasicBlock::Create(*context, "strpad.pad", function);
+        llvm::BasicBlock* noPadBB = llvm::BasicBlock::Create(*context, "strpad.nopad", function);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "strpad.merge", function);
+
+        // Padding is the common case for typical use of pad functions (e.g. formatting);
+        // use equal weights.
+        builder->CreateCondBr(needsPad, padBB, noPadBB);
+
+        // --- No-pad path: return original string pointer as i64 ---
+        builder->SetInsertPoint(noPadBB);
+        llvm::Value* origI64 = builder->CreatePtrToInt(strPtr, getDefaultType(), "strpad.origval");
+        builder->CreateBr(mergeBB);
+
+        // --- Pad path ---
+        builder->SetInsertPoint(padBB);
+        // Load fill character: first byte of fill string
+        llvm::Value* fillByte = builder->CreateAlignedLoad(builder->getInt8Ty(), fillPtr, llvm::MaybeAlign(1), "strpad.fillbyte");
+
+        llvm::Value* padLen = builder->CreateSub(effectiveWidth, slen, "strpad.padlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Allocate (effectiveWidth + 1) bytes for result
+        llvm::Value* allocSize = builder->CreateAdd(effectiveWidth,
+            llvm::ConstantInt::get(getDefaultType(), 1), "strpad.allocsz", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strpad.buf");
+
+        if (bid == BuiltinId::STR_PAD_LEFT) {
+            // Fill first padLen bytes with fill char
+            builder->CreateMemSet(buf, fillByte, padLen, llvm::MaybeAlign(1));
+            // Copy str (including null terminator) into buf + padLen
+            llvm::Value* copyDst = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, padLen, "strpad.copydst");
+            llvm::Value* copySize = builder->CreateAdd(slen,
+                llvm::ConstantInt::get(getDefaultType(), 1), "strpad.copysz", /*HasNUW=*/true, /*HasNSW=*/true);
+            builder->CreateCall(getOrDeclareMemcpy(), {copyDst, strPtr, copySize});
+        } else {
+            // STR_PAD_RIGHT: copy str into buf, then fill remaining bytes with fill char
+            builder->CreateCall(getOrDeclareMemcpy(), {buf, strPtr, slen});
+            llvm::Value* fillDst = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, slen, "strpad.filldst");
+            builder->CreateMemSet(fillDst, fillByte, padLen, llvm::MaybeAlign(1));
+            // Null-terminate
+            llvm::Value* nullPtr = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, effectiveWidth, "strpad.nullptr");
+            builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullPtr);
+        }
+
+        llvm::Value* padI64 = builder->CreatePtrToInt(buf, getDefaultType(), "strpad.padval");
+        builder->CreateBr(mergeBB);
+
+        // --- Merge ---
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "strpad.result");
+        result->addIncoming(origI64, noPadBB);
+        result->addIncoming(padI64, padBB);
+        stringReturningFunctions_.insert(fnName);
+        return result;
     }
 
     if (inOptMaxFunction) {

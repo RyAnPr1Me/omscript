@@ -24,7 +24,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
 - **String Interpolation**: `$"hello {name}, count = {n + 1}"` with auto type conversion
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
-- **121 Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
+- **140+ Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
 - **Adaptive JIT Runtime**: Hot functions are automatically recompiled at higher optimization levels using runtime profiling data
 
 ## Optimization Pipeline

@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 3.7.0  
-> **Compiler:** `omsc` — OmScript Compiler v3.7.0  
+> **Version:** 3.8.0  
+> **Compiler:** `omsc` — OmScript Compiler v3.8.0  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
@@ -2732,6 +2732,52 @@ fn main() {
 }
 ```
 
+#### `array_product(array)`
+
+Multiplies all elements together and returns the result. Returns `1` for an empty array (the multiplicative identity).
+
+```javascript
+fn main() {
+    var a = [2, 3, 4];
+    array_product(a)          // 24
+
+    var empty = [];
+    array_product(empty)      // 1
+
+    return 0;
+}
+```
+
+#### `array_last(array)`
+
+Returns the last element of the array. Aborts with a runtime error if the array is empty.
+
+```javascript
+fn main() {
+    var a = [10, 20, 30, 99];
+    array_last(a)             // 99
+
+    var b = [42];
+    array_last(b)             // 42
+    return 0;
+}
+```
+
+#### `array_insert(array, index, value)`
+
+Returns a **new array** with `value` inserted at `index`, shifting all elements at or after `index` one position to the right. The original array is unchanged. `index` must be in `[0, length]`; inserting at `length` is equivalent to appending.
+
+```javascript
+fn main() {
+    var a = [1, 2, 4, 5];
+    var b = array_insert(a, 2, 3);   // [1, 2, 3, 4, 5]
+
+    var c = array_insert([10, 20], 0, 5);  // [5, 10, 20]  (insert at front)
+    var d = array_insert([1, 2], 2, 3);    // [1, 2, 3]    (insert at end)
+    return 0;
+}
+```
+
 ### 18.4 Character Functions
 
 #### `to_char(code)`
@@ -2958,6 +3004,26 @@ str_count("hello", "l")        // 2
 str_count("aaa", "aa")         // 1 (non-overlapping)
 str_count("hello", "xyz")      // 0
 str_count("hello", "")         // 0
+```
+
+#### `str_pad_left(str, width, fill)`
+
+Left-pads `str` with the first character of `fill` until the result is at least `width` characters long. Returns `str` unchanged if it is already `width` or more characters.
+
+```javascript
+str_pad_left("42", 6, "0")     // "000042"
+str_pad_left("hi", 5, " ")     // "   hi"
+str_pad_left("hello", 3, " ")  // "hello"  (already wider than 5)
+```
+
+#### `str_pad_right(str, width, fill)`
+
+Right-pads `str` with the first character of `fill` until the result is at least `width` characters long. Returns `str` unchanged if it is already `width` or more characters.
+
+```javascript
+str_pad_right("hi", 5, " ")    // "hi   "
+str_pad_right("ok", 4, "-")    // "ok--"
+str_pad_right("hello", 3, "-") // "hello"  (already wider)
 ```
 
 #### `str_to_int(s)`
