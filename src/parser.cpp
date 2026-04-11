@@ -866,11 +866,20 @@ std::unique_ptr<BlockStmt> Parser::parseBlock() {
         if (check(TokenType::VAR) || check(TokenType::CONST)) {
             const bool isConst = check(TokenType::CONST);
             advance(); // consume var/const
-            statements.push_back(parseVarDecl(isConst));
-            while (match(TokenType::COMMA)) {
+            // Check for array destructuring: var [a, b, c] = expr;
+            if (check(TokenType::LBRACKET)) {
+                auto decls = parseDestructuringDecl(isConst);
+                for (auto& d : decls) {
+                    statements.push_back(std::move(d));
+                }
+                consume(TokenType::SEMICOLON, "Expected ';' after destructuring declaration");
+            } else {
                 statements.push_back(parseVarDecl(isConst));
+                while (match(TokenType::COMMA)) {
+                    statements.push_back(parseVarDecl(isConst));
+                }
+                consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
             }
-            consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
         } else {
             statements.push_back(parseStatement());
         }
@@ -1300,6 +1309,75 @@ std::unique_ptr<Statement> Parser::parseTimesStmt() {
     std::string iterVar = "__times_" + std::to_string(timesCounter++);
     auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
     return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
+}
+
+// var [a, b, c] = expr;  or  const [a, b, c] = expr;
+// Desugars to:
+//   { var __destructure_N = expr;
+//     var a = __destructure_N[0];
+//     var b = __destructure_N[1];
+//     var c = __destructure_N[2]; }
+// Use '_' to skip an element: var [a, _, c] = expr;
+std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isConst) {
+    const Token lbracket = consume(TokenType::LBRACKET, "Expected '[' for array destructuring");
+
+    std::vector<std::string> names;
+    if (!check(TokenType::RBRACKET)) {
+        // First name or '_'
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
+            advance();
+            names.push_back("_");
+        } else {
+            const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in destructuring");
+            names.push_back(name.lexeme);
+        }
+        while (match(TokenType::COMMA)) {
+            if (check(TokenType::RBRACKET)) break; // trailing comma
+            if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
+                advance();
+                names.push_back("_");
+            } else {
+                const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in destructuring");
+                names.push_back(name.lexeme);
+            }
+        }
+    }
+    consume(TokenType::RBRACKET, "Expected ']' after destructuring names");
+
+    if (names.empty()) {
+        error("Destructuring must have at least one variable name");
+    }
+
+    consume(TokenType::ASSIGN, "Expected '=' after destructuring pattern");
+    auto initializer = parseExpression();
+
+    // Desugar to a block of individual assignments
+    static int destructureCounter = 0;
+    std::string tmpName = "__destructure_" + std::to_string(destructureCounter++);
+
+    std::vector<std::unique_ptr<Statement>> stmts;
+
+    // var __destructure_N = expr;
+    auto tmpDecl = std::make_unique<VarDecl>(tmpName, std::move(initializer), false);
+    tmpDecl->line = lbracket.line;
+    tmpDecl->column = lbracket.column;
+    stmts.push_back(std::move(tmpDecl));
+
+    // var a = __destructure_N[0]; var b = __destructure_N[1]; ...
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == "_") continue; // skip placeholder
+
+        auto tmpRef = std::make_unique<IdentifierExpr>(tmpName);
+        auto idx = std::make_unique<LiteralExpr>(static_cast<long long>(i));
+        auto indexExpr = std::make_unique<IndexExpr>(std::move(tmpRef), std::move(idx));
+
+        auto varDecl = std::make_unique<VarDecl>(names[i], std::move(indexExpr), isConst);
+        varDecl->line = lbracket.line;
+        varDecl->column = lbracket.column;
+        stmts.push_back(std::move(varDecl));
+    }
+
+    return stmts;
 }
 
 std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
