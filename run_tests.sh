@@ -701,6 +701,7 @@ test_program "examples/indexed_foreach_test.om" 1652
 test_program "examples/repeat_until_test.om" 297
 test_program "examples/step_downto_test.om" 112
 test_program "examples/with_test.om" 188
+test_program "examples/loop_counted_test.om" 63
 
 echo ""
 echo "============================================"

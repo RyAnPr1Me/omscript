@@ -1206,11 +1206,29 @@ std::unique_ptr<Statement> Parser::parseUntilStmt() {
 // loop { ... }
 // Desugars to: while (true) { ... }
 std::unique_ptr<Statement> Parser::parseLoopStmt() {
+    // Two forms:
+    // 1. loop { ... } — infinite loop (while true)
+    // 2. loop N { ... } or loop (N) { ... } — counted loop (for __i in 0...N)
+    if (check(TokenType::LBRACE)) {
+        auto body = parseStatement();
+        // Infinite loop: loop { ... } => while (true) { ... }
+        auto trueVal = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+        return std::make_unique<WhileStmt>(std::move(trueVal), std::move(body));
+    }
+
+    // Counted form: loop N { ... } or loop (N) { ... }
+    bool hasParen = match(TokenType::LPAREN);
+    auto count = parseExpression();
+    if (hasParen) {
+        consume(TokenType::RPAREN, "Expected ')' after loop count");
+    }
     auto body = parseStatement();
 
-    // Infinite loop: loop { ... } => while (true) { ... }
-    auto trueVal = std::make_unique<LiteralExpr>(static_cast<long long>(1));
-    return std::make_unique<WhileStmt>(std::move(trueVal), std::move(body));
+    // Desugar to: for (__loop_N in 0...count) { body }
+    static int loopCounter = 0;
+    std::string iterVar = "__loop_" + std::to_string(loopCounter++);
+    auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+    return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
 }
 
 // repeat N { ... }  or  repeat (expr) { ... }
