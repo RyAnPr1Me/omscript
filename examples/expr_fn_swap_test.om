@@ -1,0 +1,64 @@
+// Test: expression-body functions and multi-variable swap
+// fn name(params) = expr; — shorthand for fn name(params) { return expr; }
+// swap a, b, c; — circular rotation
+
+fn double(x) = x * 2;
+
+fn add(a, b) = a + b;
+
+fn square(x) = x * x;
+
+fn cube(x) = x * x * x;
+
+fn max2(a, b) = a > b ? a : b;
+
+fn clamp_val(x, lo, hi) = max2(lo, max2(x, lo) > hi ? hi : max2(x, lo));
+
+fn three_way_swap() {
+    var a = 1;
+    var b = 2;
+    var c = 3;
+    swap a, b, c;
+    // After: a=2, b=3, c=1
+    return a * 100 + b * 10 + c;
+}
+
+fn four_way_swap() {
+    var a = 10;
+    var b = 20;
+    var c = 30;
+    var d = 40;
+    swap a, b, c, d;
+    // After: a=20, b=30, c=40, d=10
+    return a + b + c + d;
+}
+
+fn two_way_swap_still_works() {
+    var x = 5;
+    var y = 10;
+    swap x, y;
+    return x * 10 + y;
+}
+
+fn main() {
+    var total = 0;
+
+    // expression-body functions
+    total = total + double(7);      // 14
+    total = total + add(3, 4);      // 7
+    total = total + square(5);      // 25
+    total = total + cube(3);        // 27
+    total = total + max2(10, 20);   // 20
+
+    // three-way swap: 2*100 + 3*10 + 1 = 231
+    total = total + three_way_swap();
+
+    // four-way swap: 20+30+40+10 = 100
+    total = total + four_way_swap();
+
+    // two-way swap: 10*10 + 5 = 105
+    total = total + two_way_swap_still_works();
+
+    // Expected: 14 + 7 + 25 + 27 + 20 + 231 + 100 + 105 = 529
+    return total;
+}

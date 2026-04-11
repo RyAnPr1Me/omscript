@@ -702,6 +702,7 @@ test_program "examples/repeat_until_test.om" 297
 test_program "examples/step_downto_test.om" 112
 test_program "examples/with_test.om" 188
 test_program "examples/loop_counted_test.om" 63
+test_program "examples/expr_fn_swap_test.om" 529
 
 echo ""
 echo "============================================"

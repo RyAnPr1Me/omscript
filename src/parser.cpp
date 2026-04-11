@@ -473,7 +473,22 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
         returnType = parseTypeAnnotation();
     }
 
-    auto body = parseBlock();
+    std::unique_ptr<BlockStmt> body;
+
+    // Shorthand: fn name(params) = expr;
+    // Desugars to: fn name(params) { return expr; }
+    if (match(TokenType::ASSIGN)) {
+        auto expr = parseExpression();
+        consume(TokenType::SEMICOLON, "Expected ';' after expression-body function");
+        auto retStmt = std::make_unique<ReturnStmt>(std::move(expr));
+        retStmt->line = name.line;
+        retStmt->column = name.column;
+        std::vector<std::unique_ptr<Statement>> stmts;
+        stmts.push_back(std::move(retStmt));
+        body = std::make_unique<BlockStmt>(std::move(stmts));
+    } else {
+        body = parseBlock();
+    }
 
     inOptMaxFunction = savedOptMaxState;
 
@@ -1437,38 +1452,50 @@ std::unique_ptr<Statement> Parser::parseElifStmt() {
     return std::make_unique<IfStmt>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
 }
 
-// swap a, b;
-// Desugars to: { var __swap_tmp = a; a = b; b = __swap_tmp; }
+// swap a, b;  or  swap a, b, c;  (circular rotation: a←b, b←c, c←old_a)
+// Desugars to: { var __swap_tmp = a; a = b; b = c; ... last = __swap_tmp; }
 std::unique_ptr<Statement> Parser::parseSwapStmt() {
-    auto lhs = parseExpression();
-    consume(TokenType::COMMA, "Expected ',' between swap operands");
-    auto rhs = parseExpression();
-    consume(TokenType::SEMICOLON, "Expected ';' after swap statement");
-
-    // We need the names of the variables being swapped
-    auto* lhsIdent = dynamic_cast<IdentifierExpr*>(lhs.get());
-    auto* rhsIdent = dynamic_cast<IdentifierExpr*>(rhs.get());
-    if (!lhsIdent || !rhsIdent) {
+    // Collect all operands
+    std::vector<std::string> names;
+    auto first = parseExpression();
+    auto* firstIdent = dynamic_cast<IdentifierExpr*>(first.get());
+    if (!firstIdent) {
         error("swap operands must be variable names");
     }
+    names.push_back(firstIdent->name);
 
-    // Desugar to: { var __swap_tmp = a; a = b; b = __swap_tmp; }
+    while (match(TokenType::COMMA)) {
+        auto operand = parseExpression();
+        auto* ident = dynamic_cast<IdentifierExpr*>(operand.get());
+        if (!ident) {
+            error("swap operands must be variable names");
+        }
+        names.push_back(ident->name);
+    }
+    consume(TokenType::SEMICOLON, "Expected ';' after swap statement");
+
+    if (names.size() < 2) {
+        error("swap requires at least two variables");
+    }
+
     static int swapCounter = 0;
     std::string tmpName = "__swap_" + std::to_string(swapCounter++);
 
     std::vector<std::unique_ptr<Statement>> stmts;
 
-    // var __swap_tmp = a;
-    auto tmpInit = std::make_unique<IdentifierExpr>(lhsIdent->name);
+    // var __swap_tmp = first;
+    auto tmpInit = std::make_unique<IdentifierExpr>(names[0]);
     stmts.push_back(std::make_unique<VarDecl>(tmpName, std::move(tmpInit)));
 
-    // a = b;
-    auto assignLhs = std::make_unique<AssignExpr>(lhsIdent->name, std::make_unique<IdentifierExpr>(rhsIdent->name));
-    stmts.push_back(std::make_unique<ExprStmt>(std::move(assignLhs)));
+    // Circular rotation: names[0] = names[1]; names[1] = names[2]; ...
+    for (size_t i = 0; i + 1 < names.size(); ++i) {
+        auto assign = std::make_unique<AssignExpr>(names[i], std::make_unique<IdentifierExpr>(names[i + 1]));
+        stmts.push_back(std::make_unique<ExprStmt>(std::move(assign)));
+    }
 
-    // b = __swap_tmp;
-    auto assignRhs = std::make_unique<AssignExpr>(rhsIdent->name, std::make_unique<IdentifierExpr>(tmpName));
-    stmts.push_back(std::make_unique<ExprStmt>(std::move(assignRhs)));
+    // last = __swap_tmp;
+    auto assignLast = std::make_unique<AssignExpr>(names.back(), std::make_unique<IdentifierExpr>(tmpName));
+    stmts.push_back(std::make_unique<ExprStmt>(std::move(assignLast)));
 
     return std::make_unique<BlockStmt>(std::move(stmts));
 }
