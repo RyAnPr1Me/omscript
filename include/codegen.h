@@ -263,6 +263,9 @@ class CodeGenerator {
         // Previous constIntFolds_ value for this variable (if any).
         bool hadPreviousIntFold = false;
         int64_t previousIntFold = 0;
+        // Previous constFloatFolds_ value for this variable (if any).
+        bool hadPreviousFloatFold = false;
+        double previousFloatFold = 0.0;
     };
     llvm::StringMap<bool> constValues;
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
@@ -423,6 +426,20 @@ class CodeGenerator {
     /// arithmetic chains: `const PI = 3.14159; var x = PI * 2.0;` folds
     /// to 6.28318 at compile time, eliminating runtime fmul.
     llvm::StringMap<double> constFloatFolds_;
+
+    /// Set of function names marked with @const_eval.
+    /// When called with all-constant integer arguments, the compiler evaluates
+    /// the function body at compile time using AST-level interpretation,
+    /// returning a compile-time constant.  This is similar to C++20's consteval
+    /// but automatically falls back to runtime codegen when arguments are not
+    /// constant.
+    llvm::StringSet<> constEvalFunctions_;
+
+    /// Evaluate a @const_eval function at compile time.
+    /// Returns std::nullopt if the function body is too complex for the
+    /// compile-time interpreter (falls back to runtime codegen).
+    std::optional<int64_t> tryConstEval(const FunctionDecl* func,
+                                        const std::vector<int64_t>& argVals);
 
     /// Variables with SIMD vector types for operator dispatch.
     llvm::StringSet<> simdVars_;

@@ -1,0 +1,18 @@
+// Test const float variable propagation optimization.
+// Const float variables are folded at compile time, enabling
+// chain evaluation: const PI = 3.14; var x = PI * 2.0 → 6.28.
+fn main() {
+    const PI = 3.0;
+    const SCALE = 2.0;
+    
+    // These should be folded at compile time: PI * SCALE = 6.0
+    var area = PI * SCALE;
+    
+    // Chain: const folding through multiple operations
+    const HALF = 0.5;
+    var result = PI * HALF;  // Should fold to 1.5 at compile time
+    
+    // Return as integer for test validation
+    // area (6.0) + result (1.5) as int = 7
+    return to_int(area) + to_int(result);  // 6 + 1 = 7
+}

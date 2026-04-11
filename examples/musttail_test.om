@@ -1,0 +1,21 @@
+// Test guaranteed tail call optimization (musttail).
+// Self-recursive functions get musttail, ensuring O(1) stack usage.
+fn factorial(n, acc) {
+    if (n <= 1) {
+        return acc;
+    }
+    return factorial(n - 1, n * acc);  // Self-recursive tail call → musttail
+}
+
+fn sum_to(n, acc) {
+    if (n <= 0) {
+        return acc;
+    }
+    return sum_to(n - 1, acc + n);  // Self-recursive tail call → musttail
+}
+
+fn main() {
+    var f = factorial(5, 1);    // 5! = 120
+    var s = sum_to(10, 0);      // 1+2+...+10 = 55
+    return f + s;  // 120 + 55 = 175
+}

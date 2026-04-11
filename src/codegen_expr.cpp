@@ -1461,6 +1461,31 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return result;
     }
 
+    // Chained inverse operation elimination: (x + C) - C → x, (x - C) + C → x
+    // These patterns arise frequently in index arithmetic (e.g., computing an
+    // offset and then undoing it) and are not always caught by LLVM's InstCombine
+    // when the operations span different basic blocks or when NSW/NUW flags are
+    // absent.  By detecting them at IR generation time we produce shorter IR
+    // and avoid the round-trip through the optimizer.
+    if (expr->op == "+" || expr->op == "-") {
+        if (auto* ciRight = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            if (auto* binLeft = llvm::dyn_cast<llvm::BinaryOperator>(left)) {
+                bool isAddSub = (binLeft->getOpcode() == llvm::Instruction::Add &&
+                                 expr->op == "-") ||
+                                (binLeft->getOpcode() == llvm::Instruction::Sub &&
+                                 expr->op == "+");
+                if (isAddSub) {
+                    if (auto* ciInner = llvm::dyn_cast<llvm::ConstantInt>(
+                            binLeft->getOperand(1))) {
+                        if (ciInner->getValue() == ciRight->getValue()) {
+                            return binLeft->getOperand(0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Regular code generation for non-constant expressions.
     // Integer arithmetic generally uses wrapping (no NSW/NUW flags) because
     // NSW/NUW tell LLVM that overflow is undefined behavior, which can cause

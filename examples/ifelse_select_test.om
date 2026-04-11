@@ -1,0 +1,29 @@
+// Test if-else to select conversion optimization.
+// When both branches are simple assignments to the same variable,
+// the compiler converts them to a branchless select instruction.
+fn test_select(x) {
+    var result = 0;
+    if (x > 5) {
+        result = 10;
+    } else {
+        result = 20;
+    }
+    return result;
+}
+
+fn test_select_expr(a, b) {
+    var max = 0;
+    if (a > b) {
+        max = a;
+    } else {
+        max = b;
+    }
+    return max;
+}
+
+fn main() {
+    var r1 = test_select(10);   // x=10 > 5, so result=10
+    var r2 = test_select(3);    // x=3 <= 5, so result=20
+    var r3 = test_select_expr(7, 3);  // max(7,3) = 7
+    return r1 + r2 + r3;  // 10 + 20 + 7 = 37
+}

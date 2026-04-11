@@ -321,7 +321,33 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
         // benefit from TCO marking.
         if (optimizationLevel >= OptimizationLevel::O1) {
             if (auto* callInst = llvm::dyn_cast<llvm::CallInst>(retValue)) {
-                callInst->setTailCallKind(llvm::CallInst::TCK_Tail);
+                // Self-recursive tail calls get musttail: this GUARANTEES the
+                // call is lowered to a jump, providing O(1) stack usage for
+                // any depth of recursion.  This is a unique OmScript advantage
+                // — most languages only get "best effort" tail call elimination.
+                // musttail requires the callee signature matches the caller's,
+                // which is always true for self-recursive calls.
+                llvm::Function* calledFn = callInst->getCalledFunction();
+                if (calledFn && calledFn == currentFn &&
+                    calledFn->getReturnType() == currentFn->getReturnType() &&
+                    calledFn->arg_size() == callInst->arg_size()) {
+                    // Verify all parameter types match (required by musttail).
+                    bool typesMatch = true;
+                    for (unsigned i = 0; i < calledFn->arg_size(); ++i) {
+                        if (callInst->getArgOperand(i)->getType() !=
+                            calledFn->getFunctionType()->getParamType(i)) {
+                            typesMatch = false;
+                            break;
+                        }
+                    }
+                    if (typesMatch) {
+                        callInst->setTailCallKind(llvm::CallInst::TCK_MustTail);
+                    } else {
+                        callInst->setTailCallKind(llvm::CallInst::TCK_Tail);
+                    }
+                } else {
+                    callInst->setTailCallKind(llvm::CallInst::TCK_Tail);
+                }
             }
         }
 

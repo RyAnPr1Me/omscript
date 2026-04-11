@@ -1048,6 +1048,12 @@ void CodeGenerator::endScope() {
         } else {
             constIntFolds_.erase(entry.first);
         }
+        // Restore constFloatFolds_ to the value that was in scope before this scope was entered.
+        if (entry.second.hadPreviousFloatFold) {
+            constFloatFolds_[entry.first] = entry.second.previousFloatFold;
+        } else {
+            constFloatFolds_.erase(entry.first);
+        }
     }
     scopeStack.pop_back();
     constScopeStack.pop_back();
@@ -1077,15 +1083,23 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
                 binding.hadPreviousIntFold = true;
                 binding.previousIntFold = foldIt->second;
             }
+            // Save previous constFloatFolds_ entry for this variable (for scope restoration).
+            auto floatFoldIt = constFloatFolds_.find(name);
+            if (floatFoldIt != constFloatFolds_.end()) {
+                binding.hadPreviousFloatFold = true;
+                binding.previousFloatFold = floatFoldIt->second;
+            }
             constScope[name] = binding;
         }
     }
     namedValues[name] = value;
     constValues[name] = isConst;
-    // If the variable is being rebound (not a const), remove its int fold entry
+    // If the variable is being rebound (not a const), remove its int/float fold entry
     // since the new binding may have a different value.
-    if (!isConst)
+    if (!isConst) {
         constIntFolds_.erase(name);
+        constFloatFolds_.erase(name);
+    }
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
@@ -3985,6 +3999,16 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // the call freely across other memory operations.
         function->setNoSync();
     }
+    if (func->hintConstEval) {
+        // @const_eval: mark the function for compile-time evaluation when
+        // called with all-constant arguments.  At the LLVM level, mark it
+        // as pure + inline so that any fallback runtime call is efficient.
+        constEvalFunctions_.insert(func->name);
+        function->addFnAttr(llvm::Attribute::InlineHint);
+        function->setOnlyReadsMemory();
+        function->setDoesNotThrow();
+        function->setWillReturn();
+    }
     if (func->hintNoReturn) {
         function->addFnAttr(llvm::Attribute::NoReturn);
     }
@@ -4237,6 +4261,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     dictVarNames_.clear();
     nonNegValues_.clear();
     constIntFolds_.clear();
+    constFloatFolds_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -4489,6 +4514,220 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
     default:
         codegenError("Unknown expression type", expr);
     }
+}
+
+} // namespace omscript
+
+// ---------------------------------------------------------------------------
+// Compile-time function evaluation for @const_eval
+// ---------------------------------------------------------------------------
+// Simple AST-level interpreter for integer-only functions.  Supports:
+//   - Integer arithmetic (+, -, *, /, %, **, &, |, ^, <<, >>)
+//   - Comparisons (==, !=, <, <=, >, >=)
+//   - Logical operators (&&, ||, !)
+//   - Unary operators (-, ~)
+//   - If/else statements
+//   - Return statements
+//   - Variable declarations and assignments
+//   - Recursive calls to @const_eval functions
+//
+// Returns std::nullopt for unsupported constructs, falling back to runtime.
+namespace omscript {
+
+std::optional<int64_t> CodeGenerator::tryConstEval(
+    const FunctionDecl* func,
+    const std::vector<int64_t>& argVals) {
+
+    if (!func || !func->body || func->parameters.size() != argVals.size())
+        return std::nullopt;
+
+    // Environment: variable name → current integer value
+    std::unordered_map<std::string, int64_t> env;
+    for (size_t i = 0; i < argVals.size(); ++i) {
+        env[func->parameters[i].name] = argVals[i];
+    }
+
+    // Limit recursion depth to prevent infinite loops at compile time
+    static thread_local int depth = 0;
+    if (++depth > 100) { --depth; return std::nullopt; }
+
+    struct DepthGuard { ~DepthGuard() { --depth; } } guard;
+
+    // Return value (set by a ReturnStmt)
+    std::optional<int64_t> retVal;
+
+    // Forward declarations for mutual recursion
+    std::function<std::optional<int64_t>(Expression*)> evalExpr;
+    std::function<bool(Statement*)> evalStmt;
+
+    evalExpr = [&](Expression* e) -> std::optional<int64_t> {
+        if (!e) return std::nullopt;
+        switch (e->type) {
+        case ASTNodeType::LITERAL_EXPR: {
+            auto* lit = static_cast<LiteralExpr*>(e);
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+                return lit->intValue;
+            // Booleans are represented as integers in OmScript (0 or 1).
+            // Float literals are not supported in const_eval context.
+            return std::nullopt;
+        }
+        case ASTNodeType::IDENTIFIER_EXPR: {
+            auto* id = static_cast<IdentifierExpr*>(e);
+            auto it = env.find(id->name);
+            if (it != env.end()) return it->second;
+            // Check enum constants
+            auto eit = enumConstants_.find(id->name);
+            if (eit != enumConstants_.end()) return static_cast<int64_t>(eit->second);
+            return std::nullopt;
+        }
+        case ASTNodeType::BINARY_EXPR: {
+            auto* bin = static_cast<BinaryExpr*>(e);
+            auto lv = evalExpr(bin->left.get());
+            // Short-circuit for logical operators
+            if (bin->op == "&&") {
+                if (!lv) return std::nullopt;
+                if (*lv == 0) return int64_t(0);
+                auto rv = evalExpr(bin->right.get());
+                return rv ? std::optional<int64_t>(*rv != 0 ? 1 : 0) : std::nullopt;
+            }
+            if (bin->op == "||") {
+                if (!lv) return std::nullopt;
+                if (*lv != 0) return int64_t(1);
+                auto rv = evalExpr(bin->right.get());
+                return rv ? std::optional<int64_t>(*rv != 0 ? 1 : 0) : std::nullopt;
+            }
+            auto rv = evalExpr(bin->right.get());
+            if (!lv || !rv) return std::nullopt;
+            int64_t a = *lv, b = *rv;
+            if (bin->op == "+") return a + b;
+            if (bin->op == "-") return a - b;
+            if (bin->op == "*") return a * b;
+            if (bin->op == "/" && b != 0) return a / b;
+            if (bin->op == "%" && b != 0) return a % b;
+            if (bin->op == "&") return a & b;
+            if (bin->op == "|") return a | b;
+            if (bin->op == "^") return a ^ b;
+            if (bin->op == "<<" && b >= 0 && b < 64) return a << b;
+            if (bin->op == ">>" && b >= 0 && b < 64) return a >> b;
+            if (bin->op == "==") return int64_t(a == b ? 1 : 0);
+            if (bin->op == "!=") return int64_t(a != b ? 1 : 0);
+            if (bin->op == "<")  return int64_t(a < b ? 1 : 0);
+            if (bin->op == "<=") return int64_t(a <= b ? 1 : 0);
+            if (bin->op == ">")  return int64_t(a > b ? 1 : 0);
+            if (bin->op == ">=") return int64_t(a >= b ? 1 : 0);
+            if (bin->op == "**") {
+                if (b < 0) return (a == 1) ? int64_t(1) : (a == -1 ? (b & 1 ? int64_t(-1) : int64_t(1)) : int64_t(0));
+                int64_t result = 1;
+                for (int64_t i = 0; i < b; ++i) result *= a;
+                return result;
+            }
+            return std::nullopt;
+        }
+        case ASTNodeType::UNARY_EXPR: {
+            auto* un = static_cast<UnaryExpr*>(e);
+            auto v = evalExpr(un->operand.get());
+            if (!v) return std::nullopt;
+            if (un->op == "-") return -*v;
+            if (un->op == "~") return ~*v;
+            if (un->op == "!") return int64_t(*v == 0 ? 1 : 0);
+            return std::nullopt;
+        }
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* tern = static_cast<TernaryExpr*>(e);
+            auto cond = evalExpr(tern->condition.get());
+            if (!cond) return std::nullopt;
+            return *cond != 0 ? evalExpr(tern->thenExpr.get())
+                              : evalExpr(tern->elseExpr.get());
+        }
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<CallExpr*>(e);
+            // Recursive @const_eval call
+            if (!constEvalFunctions_.count(call->callee))
+                return std::nullopt;
+            auto declIt = functionDecls_.find(call->callee);
+            if (declIt == functionDecls_.end()) return std::nullopt;
+            std::vector<int64_t> callArgs;
+            callArgs.reserve(call->arguments.size());
+            for (auto& arg : call->arguments) {
+                auto av = evalExpr(arg.get());
+                if (!av) return std::nullopt;
+                callArgs.push_back(*av);
+            }
+            return tryConstEval(declIt->second, callArgs);
+        }
+        default:
+            return std::nullopt;
+        }
+    };
+
+    evalStmt = [&](Statement* s) -> bool {
+        if (!s || retVal) return true;  // already returned
+        switch (s->type) {
+        case ASTNodeType::RETURN_STMT: {
+            auto* ret = static_cast<ReturnStmt*>(s);
+            if (ret->value) {
+                auto v = evalExpr(ret->value.get());
+                if (!v) return false;
+                retVal = *v;
+            } else {
+                retVal = 0;
+            }
+            return true;
+        }
+        case ASTNodeType::VAR_DECL: {
+            auto* decl = static_cast<VarDecl*>(s);
+            if (decl->initializer) {
+                auto v = evalExpr(decl->initializer.get());
+                if (!v) return false;
+                env[decl->name] = *v;
+            } else {
+                env[decl->name] = 0;
+            }
+            return true;
+        }
+        case ASTNodeType::EXPR_STMT: {
+            auto* es = static_cast<ExprStmt*>(s);
+            if (es->expression->type == ASTNodeType::ASSIGN_EXPR) {
+                auto* assign = static_cast<AssignExpr*>(es->expression.get());
+                auto v = evalExpr(assign->value.get());
+                if (!v) return false;
+                env[assign->name] = *v;
+                return true;
+            }
+            // Other expression statements: just evaluate for side effects
+            auto v = evalExpr(es->expression.get());
+            return v.has_value();
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifs = static_cast<IfStmt*>(s);
+            auto cond = evalExpr(ifs->condition.get());
+            if (!cond) return false;
+            if (*cond != 0) {
+                return evalStmt(ifs->thenBranch.get());
+            } else if (ifs->elseBranch) {
+                return evalStmt(ifs->elseBranch.get());
+            }
+            return true;
+        }
+        case ASTNodeType::BLOCK: {
+            auto* block = static_cast<BlockStmt*>(s);
+            for (auto& stmt : block->statements) {
+                if (!evalStmt(stmt.get())) return false;
+                if (retVal) return true;
+            }
+            return true;
+        }
+        default:
+            return false;  // Unsupported statement type
+        }
+    };
+
+    // Evaluate the function body
+    for (auto& stmt : func->body->statements) {
+        if (!evalStmt(stmt.get())) return std::nullopt;
+        if (retVal) return retVal;
+    }
+    return retVal.value_or(0);
 }
 
 } // namespace omscript

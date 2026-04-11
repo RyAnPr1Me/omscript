@@ -675,6 +675,10 @@ test_program "examples/loop_ucmp_test.om" 5
 test_program "examples/dict_literal_test.om" 18
 test_program "examples/preprocessor_test.om" 12
 test_program "examples/dict_chaining_test.om" 16
+test_program "examples/ifelse_select_test.om" 37
+test_program "examples/const_float_fold_test.om" 7
+test_program "examples/inverse_op_test.om" 59
+test_program "examples/musttail_test.om" 175
 
 echo ""
 echo "============================================"

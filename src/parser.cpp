@@ -177,6 +177,7 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintVectorize = false, hintNoVectorize = false;
             bool hintParallelize = false, hintNoParallelize = false;
             bool hintMinSize = false, hintOptNone = false, hintNoUnwind = false;
+            bool hintConstEval = false;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -218,9 +219,11 @@ std::unique_ptr<Program> Parser::parse() {
                     hintOptNone = true;
                 } else if (ann.lexeme == "nounwind") {
                     hintNoUnwind = true;
+                } else if (ann.lexeme == "const_eval") {
+                    hintConstEval = true;
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive);
@@ -242,6 +245,7 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintMinSize = hintMinSize;
             func->hintOptNone = hintOptNone;
             func->hintNoUnwind = hintNoUnwind;
+            func->hintConstEval = hintConstEval;
             // Warn about conflicting annotations at parse time.
             if (hintOptNone && hintInline) {
                 std::cerr << "warning: '@optnone' and '@inline' are mutually exclusive on function '"
