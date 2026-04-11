@@ -404,6 +404,18 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         }
     }
 
+    // Constant folding for `const` float variables: return the ConstantFP
+    // directly.  Enables compile-time evaluation of float arithmetic chains
+    // (e.g. `const PI = 3.14159; var r = PI * 2.0;` → 6.28318 at compile
+    // time) by making the constant visible to the float constant-folding
+    // path in generateBinary.
+    {
+        auto foldIt = constFloatFolds_.find(expr->name);
+        if (foldIt != constFloatFolds_.end()) {
+            return llvm::ConstantFP::get(getFloatType(), foldIt->second);
+        }
+    }
+
     // Register-promotion strategy: prefetched variables go straight to
     // registers (promoted by SROA/mem2reg) and stay there until invalidated.
     // No use-site llvm.prefetch is emitted on the alloca — that would anchor

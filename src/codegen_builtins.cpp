@@ -5016,6 +5016,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (callee->doesNotThrow()) {
         callResult->setDoesNotThrow();
     }
+    // When the callee is @pure (speculatable + willreturn + readonly), mark the
+    // call site as well.  This enables GVN to deduplicate identical pure calls
+    // and LICM to hoist pure calls out of loops.
+    if (callee->hasFnAttribute(llvm::Attribute::Speculatable)) {
+        callResult->addFnAttr(llvm::Attribute::Speculatable);
+    }
+    // Propagate non-negativity from the callee: if the callee's return value
+    // has !range [0, INT64_MAX) metadata, mark the result as non-negative.
+    if (callee->hasRetAttribute(llvm::Attribute::ZExt))
+        nonNegValues_.insert(callResult);
     return callResult;
 }
 

@@ -418,6 +418,12 @@ class CodeGenerator {
     /// avoiding the slow dynamic-divisor branch with zero-check overhead.
     llvm::StringMap<int64_t> constIntFolds_;
 
+    /// Constant float values for `const` float variables initialized with
+    /// a compile-time constant.  Enables compile-time evaluation of float
+    /// arithmetic chains: `const PI = 3.14159; var x = PI * 2.0;` folds
+    /// to 6.28318 at compile time, eliminating runtime fmul.
+    llvm::StringMap<double> constFloatFolds_;
+
     /// Variables with SIMD vector types for operator dispatch.
     llvm::StringSet<> simdVars_;
 

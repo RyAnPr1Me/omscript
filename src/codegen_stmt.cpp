@@ -200,6 +200,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     constIntFolds_[stmt->name] = ci->getSExtValue();
             }
         }
+        // Track const float values for compile-time float expression folding.
+        if (stmt->isConst && initValue->getType()->isDoubleTy()) {
+            if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(initValue))
+                constFloatFolds_[stmt->name] = cf->getValueAPF().convertToDouble();
+        }
         // Track whether this variable holds a string value so that print(),
         // concatenation, and comparison operators handle it correctly when
         // the variable's alloca type is i64 (e.g. assigned from a function
@@ -402,6 +407,105 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     }
 
     llvm::Value* condBool = toBool(condition);
+
+    // ── If-else to select conversion ─────────────────────────────────
+    // Pattern: if (c) { x = a; } else { x = b; }  →  x = select(c, a, b)
+    // Eliminates branch misprediction entirely for simple conditional
+    // assignments.  Only fires at O2+ when both arms are single assignments
+    // to the same variable with side-effect-free values.
+    if (optimizationLevel >= OptimizationLevel::O2 && stmt->elseBranch) {
+        // Extract the single assignment from each branch.
+        auto extractSingleAssign = [](Statement* branch) -> AssignExpr* {
+            // Direct expression statement
+            if (branch->type == ASTNodeType::EXPR_STMT) {
+                auto* exprStmt = static_cast<ExprStmt*>(branch);
+                if (exprStmt->expression->type == ASTNodeType::ASSIGN_EXPR)
+                    return static_cast<AssignExpr*>(exprStmt->expression.get());
+            }
+            // Block with a single statement
+            if (branch->type == ASTNodeType::BLOCK) {
+                auto* block = static_cast<BlockStmt*>(branch);
+                if (block->statements.size() == 1 &&
+                    block->statements[0]->type == ASTNodeType::EXPR_STMT) {
+                    auto* exprStmt = static_cast<ExprStmt*>(block->statements[0].get());
+                    if (exprStmt->expression->type == ASTNodeType::ASSIGN_EXPR)
+                        return static_cast<AssignExpr*>(exprStmt->expression.get());
+                }
+            }
+            return nullptr;
+        };
+
+        auto* thenAssign = extractSingleAssign(stmt->thenBranch.get());
+        auto* elseAssign = extractSingleAssign(stmt->elseBranch.get());
+
+        if (thenAssign && elseAssign && thenAssign->name == elseAssign->name) {
+            // Check that both RHS values are simple side-effect-free expressions.
+            auto isSimpleValue = [](Expression* e) -> bool {
+                if (e->type == ASTNodeType::LITERAL_EXPR) return true;
+                if (e->type == ASTNodeType::IDENTIFIER_EXPR) return true;
+                if (e->type == ASTNodeType::UNARY_EXPR) {
+                    auto* u = static_cast<UnaryExpr*>(e);
+                    return (u->op == "-" || u->op == "~" || u->op == "!") &&
+                           (u->operand->type == ASTNodeType::LITERAL_EXPR ||
+                            u->operand->type == ASTNodeType::IDENTIFIER_EXPR);
+                }
+                if (e->type == ASTNodeType::BINARY_EXPR) {
+                    auto* b = static_cast<BinaryExpr*>(e);
+                    const bool lhsSimple = b->left->type == ASTNodeType::IDENTIFIER_EXPR ||
+                                           b->left->type == ASTNodeType::LITERAL_EXPR;
+                    const bool rhsSimple = b->right->type == ASTNodeType::IDENTIFIER_EXPR ||
+                                           b->right->type == ASTNodeType::LITERAL_EXPR;
+                    const std::string& op = b->op;
+                    const bool safeOp = (op == "+" || op == "-" || op == "*" ||
+                                         op == "&" || op == "|" || op == "^" ||
+                                         op == "<<" || op == ">>");
+                    return lhsSimple && rhsSimple && safeOp;
+                }
+                return false;
+            };
+
+            if (isSimpleValue(thenAssign->value.get()) &&
+                isSimpleValue(elseAssign->value.get())) {
+                // Emit both values eagerly and use select.
+                llvm::Value* thenVal = generateExpression(thenAssign->value.get());
+                llvm::Value* elseVal = generateExpression(elseAssign->value.get());
+                // Type-match for select.
+                if (thenVal->getType() != elseVal->getType()) {
+                    if (thenVal->getType()->isDoubleTy() || elseVal->getType()->isDoubleTy()) {
+                        if (!thenVal->getType()->isDoubleTy())
+                            thenVal = ensureFloat(thenVal);
+                        if (!elseVal->getType()->isDoubleTy())
+                            elseVal = ensureFloat(elseVal);
+                    } else {
+                        thenVal = toDefaultType(thenVal);
+                        elseVal = toDefaultType(elseVal);
+                    }
+                }
+                llvm::Value* sel = builder->CreateSelect(condBool, thenVal, elseVal, "ifsel");
+                // Store to the target variable.
+                auto it = namedValues.find(thenAssign->name);
+                if (it != namedValues.end()) {
+                    builder->CreateStore(sel, it->second);
+                    // Track non-negativity of the result.
+                    bool tNonNeg = nonNegValues_.count(thenVal) > 0;
+                    bool eNonNeg = nonNegValues_.count(elseVal) > 0;
+                    if (!tNonNeg) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(thenVal))
+                            tNonNeg = !ci->isNegative();
+                    }
+                    if (!eNonNeg) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(elseVal))
+                            eNonNeg = !ci->isNegative();
+                    }
+                    if (tNonNeg && eNonNeg)
+                        nonNegValues_.insert(it->second);
+                    else
+                        nonNegValues_.erase(it->second);
+                    return;
+                }
+            }
+        }
+    }
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
 
@@ -1010,8 +1114,24 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
     auto* forCondBr = builder->CreateCondBr(continueCond, bodyBB, endBB);
     // Hint loop back-edge as likely-taken for branch prediction.
+    // When the trip count is known at compile time (constant start and end),
+    // emit exact weights (tripCount : 1) instead of the generic (2000 : 1).
+    // Exact weights enable LLVM's block placement to optimize the branch layout
+    // precisely and improve the vectorizer's cost model for small trip counts.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        uint32_t bodyWeight = 2000;
+        if (stepKnownPositive) {
+            if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+                if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+                    int64_t sv = startCI->getSExtValue();
+                    int64_t ev = endCI->getSExtValue();
+                    if (ev > sv && (ev - sv) < 100000) {
+                        bodyWeight = static_cast<uint32_t>(ev - sv);
+                    }
+                }
+            }
+        }
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(bodyWeight, 1);
         forCondBr->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
     }
 

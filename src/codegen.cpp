@@ -3972,6 +3972,18 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->setDoesNotThrow();
         function->setWillReturn();
         function->setDoesNotFreeMemory();
+        // Speculatable: the function can be executed speculatively without
+        // any observable effect.  This enables LLVM to hoist pure calls out
+        // of loops, move them past branches, and speculatively execute them
+        // in if-conversion (select formation).  Combined with readonly +
+        // nounwind + willreturn, this is the strongest set of attributes
+        // for a pure function — a unique advantage of OmScript's ownership
+        // system where the programmer can guarantee purity.
+        function->addFnAttr(llvm::Attribute::Speculatable);
+        // NoSync: the function does not communicate with other threads via
+        // memory or synchronization primitives.  Required for LLVM to move
+        // the call freely across other memory operations.
+        function->setNoSync();
     }
     if (func->hintNoReturn) {
         function->addFnAttr(llvm::Attribute::NoReturn);
