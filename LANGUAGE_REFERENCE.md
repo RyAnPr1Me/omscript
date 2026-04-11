@@ -74,7 +74,7 @@ Source (.om)
 /* Block comment */
 ```
 
-Block comments nest correctly and must be terminated.
+Block comments do not nest. The first `*/` encountered closes the comment, regardless of any nested `/*` inside it. An unterminated block comment is a compile error.
 
 ### 3.2 Keywords
 
@@ -111,6 +111,20 @@ defer     swap
 ```
 "hello"
 "line\nnewline"    // \n, \t, \r, \\, \", \0, \xHH supported
+```
+
+**String interpolation:** `$"..."` with `{expr}` placeholders — desugars into a concatenation chain at parse time:
+```
+var name = "world"
+var s = $"hello {name}!"    // equivalent to "hello " + name + "!"
+```
+
+**Multi-line string literals:** triple-quoted `"""..."""` — spans multiple lines; all characters between the delimiters are included verbatim:
+```
+var text = """
+line one
+line two
+"""
 ```
 
 **Boolean literals:** `true`, `false`
@@ -399,7 +413,7 @@ fn process(@prefetch data, size:int) {
 }
 ```
 
-Prefetched parameters must be explicitly `invalidate`d before the function returns.
+At function return the compiler automatically emits cache-eviction prefetch hints for any `@prefetch`-annotated parameters that are not being returned. No explicit `invalidate` is required for `@prefetch` parameters.
 
 ### 7.8 Tail Calls
 
@@ -817,7 +831,7 @@ Strings are heap-allocated and NUL-terminated. String indexing and concatenation
 | `str_find(s, sub)` | Find substring (returns index or -1) |
 | `str_contains(s, sub)` | Contains substring (1/0) |
 | `str_index_of(s, sub)` | First index of substring (-1 if not found) |
-| `str_replace(s, old, new)` | Replace first occurrence |
+| `str_replace(s, old, new)` | Replace all occurrences of `old` with `new` |
 | `str_trim(s)` | Strip leading/trailing whitespace |
 | `str_starts_with(s, prefix)` | Starts with prefix (1/0) |
 | `str_ends_with(s, suffix)` | Ends with suffix (1/0) |
@@ -853,7 +867,7 @@ Dictionaries (maps) are hash maps mapping string keys to integer/pointer values.
 |---|---|
 | `map_new()` | Create new empty map |
 | `map_set(m, key, val)` | Set key to value |
-| `map_get(m, key)` | Get value for key |
+| `map_get(m, key, default)` | Get value for key; returns `default` if key is absent |
 | `map_has(m, key)` | Check if key exists (1/0) |
 | `map_remove(m, key)` | Remove key |
 | `map_keys(m)` | Array of all keys |
@@ -991,7 +1005,7 @@ fn process(data) {
 invalidate a;      // explicitly marks variable 'a' as invalid
 ```
 
-Required before returning from a function that received a `@prefetch` parameter — the parameter must be invalidated before return.
+Required before returning from a function in which a variable was declared with the `prefetch` statement — the compiler enforces that every prefetch-declared variable is either invalidated or returned before the function exits. This does **not** apply to `@prefetch`-annotated function parameters (those are handled automatically).
 
 ### 17.4 prefetch
 
@@ -1003,7 +1017,7 @@ prefetch+128 arr;          // prefetch 'arr' and 128 bytes ahead
 prefetch data:int = compute();    // declare 'data' and prefetch it
 ```
 
-Prefetched variables must be `invalidate`d before the function returns.
+Variables declared with the `prefetch` statement must be `invalidate`d before the function returns (unless they are returned via `move`).
 
 ---
 
@@ -1116,7 +1130,7 @@ OPTMAX!:
 
 | Function | Description |
 |---|---|
-| `typeof(x)` | Returns string name of type |
+| `typeof(x)` | Returns an integer type tag: 1 = integer, 2 = float, 3 = string |
 | `len(x)` | Length of array or string |
 | `to_int(x)` | Convert to integer |
 | `to_float(x)` | Convert to float |
@@ -1127,7 +1141,7 @@ OPTMAX!:
 
 | Function | Description |
 |---|---|
-| `time()` | Current time in milliseconds |
+| `time()` | Current Unix timestamp in seconds (integer) |
 | `sleep(ms)` | Sleep for `ms` milliseconds |
 
 ### 19.7 Optimizer Hints
@@ -1148,7 +1162,7 @@ OmScript provides low-level threading and mutex primitives.
 
 | Function | Description |
 |---|---|
-| `thread_create(fn, arg)` | Create a new thread running `fn(arg)` |
+| `thread_create("func_name")` | Create a new thread running the named zero-argument function; returns a thread handle |
 | `thread_join(t)` | Wait for thread `t` to finish |
 
 ### 20.2 Mutex Functions
@@ -1263,17 +1277,17 @@ All `-f` flags have a `-fno-` counterpart to disable:
 | `-funroll-loops` | on | Loop unrolling |
 | `-floop-optimize` | on | Loop optimization passes |
 | `-fparallelize` | on | Parallelization hints |
-| `-fegraph` | on | E-graph equality saturation |
-| `-fsuperopt` | on | Superoptimizer pass |
-| `-fhgoe` | on | Hardware Graph Optimization Engine |
+| `-fegraph` | on | E-graph equality saturation (active at O2+) |
+| `-fsuperopt` | on | Superoptimizer pass (active at O2+) |
+| `-fhgoe` | on | Hardware Graph Optimization Engine (active at O2+ with -march/-mtune) |
 
 ### 24.6 Superoptimizer Level
 
 ```
--fsuperopt=0   Disabled
--fsuperopt=1   Basic idiom recognition
--fsuperopt=2   Default (idiom + algebraic simplification)
--fsuperopt=3   Full (+ enumerative synthesis)
+-fsuperopt-level=0   Disabled
+-fsuperopt-level=1   Basic idiom recognition
+-fsuperopt-level=2   Default (idiom + algebraic simplification)
+-fsuperopt-level=3   Full (+ enumerative synthesis)
 ```
 
 ### 24.7 Debugging and Info
@@ -1303,7 +1317,7 @@ omsc pkg info <package>      # Show package details
 
 The e-graph pass applies algebraic identities and constant folding to LLVM IR before the standard optimization pipeline. It uses union-find with path compression and cost-based extraction to find the lowest-cost equivalent expression.
 
-Enabled by default at O1+; disable with `-fno-egraph`.
+Enabled by default at O2+; disable with `-fno-egraph`.
 
 ### 25.2 Superoptimizer
 
@@ -1313,11 +1327,11 @@ A post-LLVM optimization pass that applies:
 - **Branch-to-select**: converts simple diamond CFGs to `select` instructions
 - **Enumerative synthesis** (level 3 only): enumerates short instruction sequences
 
-Enabled by default at O1+; configure with `-fsuperopt=<level>`.
+Enabled by default at O2+; configure with `-fsuperopt-level=<level>`.
 
 ### 25.3 Hardware Graph Optimization Engine (HGOE)
 
-Activated when `-march` or `-mtune` is provided (including `native`). Builds a structural model of the target CPU microarchitecture and:
+Activated at O2+ when `-march` or `-mtune` is provided (including `native`). When neither flag is set the pass is a complete no-op. Builds a structural model of the target CPU microarchitecture and:
 - Maps operations to hardware execution units
 - Inserts FMA (fused multiply-add) instructions where profitable
 - Applies hardware-specific strength reductions
