@@ -1411,6 +1411,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::GCD) {
         validateArgCount(expr, "gcd", 2);
+        // Constant-fold gcd(a, b) when both are integer literals.
+        if (auto va = getConstantInt(expr->arguments[0].get())) {
+            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+                uint64_t a = static_cast<uint64_t>(std::abs(*va));
+                uint64_t b = static_cast<uint64_t>(std::abs(*vb));
+                while (b) { uint64_t t = b; b = a % b; a = t; }
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(a));
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
@@ -1724,6 +1733,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::TO_INT) {
         validateArgCount(expr, "to_int", 1);
+
+        // ── Compile-time to_int folding ─────────────────────────────
+        // to_int("42") → 42, to_int(3.14) → 3 at compile time.
+        if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                try {
+                    int64_t parsed = std::stoll(lit->stringValue);
+                    return llvm::ConstantInt::get(getDefaultType(), parsed);
+                } catch (...) {
+                    // Fall through to runtime parsing if conversion fails.
+                }
+            } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(lit->floatValue));
+            } else if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                return llvm::ConstantInt::get(getDefaultType(), lit->intValue);
+            }
+        }
+
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
             return builder->CreateFPToSI(arg, getDefaultType(), "toint.ftoi");
@@ -1743,6 +1770,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::TO_FLOAT) {
         validateArgCount(expr, "to_float", 1);
+
+        // ── Compile-time to_float folding ───────────────────────────
+        // to_float("3.14") → 3.14, to_float(42) → 42.0 at compile time.
+        if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                try {
+                    double parsed = std::stod(lit->stringValue);
+                    return llvm::ConstantFP::get(getFloatType(), parsed);
+                } catch (...) {
+                    // Fall through to runtime parsing if conversion fails.
+                }
+            } else if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                return llvm::ConstantFP::get(getFloatType(), static_cast<double>(lit->intValue));
+            } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+                return llvm::ConstantFP::get(getFloatType(), lit->floatValue);
+            }
+        }
+
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // If the argument is a string, parse it with strtod.
         if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
@@ -1840,6 +1885,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_UPPER) {
         validateArgCount(expr, "str_upper", 1);
+
+        // ── Compile-time str_upper folding ──────────────────────────
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                std::string upper = strLit->stringValue;
+                for (auto& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                llvm::GlobalVariable* gv = internString(upper);
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(), gv,
+                    llvm::ArrayRef<llvm::Constant*>{
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -1883,6 +1943,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_LOWER) {
         validateArgCount(expr, "str_lower", 1);
+
+        // ── Compile-time str_lower folding ──────────────────────────
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                std::string lower = strLit->stringValue;
+                for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                llvm::GlobalVariable* gv = internString(lower);
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(), gv,
+                    llvm::ArrayRef<llvm::Constant*>{
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -2038,6 +2113,39 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_REPLACE) {
         validateArgCount(expr, "str_replace", 3);
+
+        // ── Compile-time str_replace folding ────────────────────────
+        // When all three arguments are string literals, fold at compile time.
+        if (auto* sLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (sLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* oLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (oLit->literalType == LiteralExpr::LiteralType::STRING) {
+                        if (auto* nLit = dynamic_cast<LiteralExpr*>(expr->arguments[2].get())) {
+                            if (nLit->literalType == LiteralExpr::LiteralType::STRING &&
+                                !oLit->stringValue.empty()) {
+                                std::string result = sLit->stringValue;
+                                const std::string& oldS = oLit->stringValue;
+                                const std::string& newS = nLit->stringValue;
+                                size_t pos = 0;
+                                while ((pos = result.find(oldS, pos)) != std::string::npos) {
+                                    result.replace(pos, oldS.size(), newS);
+                                    pos += newS.size();
+                                }
+                                if (result.size() <= 256) {
+                                    llvm::GlobalVariable* gv = internString(result);
+                                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                                        gv->getValueType(), gv,
+                                        llvm::ArrayRef<llvm::Constant*>{
+                                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* oldArg = generateExpression(expr->arguments[1].get());
         llvm::Value* newArg = generateExpression(expr->arguments[2].get());
@@ -2186,6 +2294,25 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_TRIM) {
         validateArgCount(expr, "str_trim", 1);
+
+        // ── Compile-time str_trim folding ───────────────────────────
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                const std::string& s = strLit->stringValue;
+                size_t start = 0;
+                while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) ++start;
+                size_t end = s.size();
+                while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) --end;
+                std::string trimmed = s.substr(start, end - start);
+                llvm::GlobalVariable* gv = internString(trimmed);
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(), gv,
+                    llvm::ArrayRef<llvm::Constant*>{
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
                                   ? strArg
@@ -4290,6 +4417,27 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::STR_COUNT) {
         validateArgCount(expr, "str_count", 2);
+
+        // ── Compile-time str_count folding ──────────────────────────
+        if (auto* sLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (sLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* subLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (subLit->literalType == LiteralExpr::LiteralType::STRING &&
+                        !subLit->stringValue.empty()) {
+                        const std::string& haystack = sLit->stringValue;
+                        const std::string& needle = subLit->stringValue;
+                        int64_t count = 0;
+                        size_t pos = 0;
+                        while ((pos = haystack.find(needle, pos)) != std::string::npos) {
+                            ++count;
+                            pos += needle.size();
+                        }
+                        return llvm::ConstantInt::get(getDefaultType(), count);
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* subArg = generateExpression(expr->arguments[1].get());
 
@@ -4917,6 +5065,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // ── Bitwise intrinsic builtins ─────────────────────────────────────
     if (bid == BuiltinId::POPCOUNT) {
         validateArgCount(expr, "popcount", 1);
+        // Constant-fold popcount(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            uint64_t bits = static_cast<uint64_t>(*val);
+            return llvm::ConstantInt::get(getDefaultType(), __builtin_popcountll(bits));
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* ctpopFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctpop, {getDefaultType()});
@@ -4927,6 +5080,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CLZ) {
         validateArgCount(expr, "clz", 1);
+        // Constant-fold clz(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            uint64_t bits = static_cast<uint64_t>(*val);
+            int64_t result = bits == 0 ? 64 : __builtin_clzll(bits);
+            return llvm::ConstantInt::get(getDefaultType(), result);
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
@@ -4937,6 +5096,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CTZ) {
         validateArgCount(expr, "ctz", 1);
+        // Constant-fold ctz(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            uint64_t bits = static_cast<uint64_t>(*val);
+            int64_t result = bits == 0 ? 64 : __builtin_ctzll(bits);
+            return llvm::ConstantInt::get(getDefaultType(), result);
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* cttzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::cttz, {getDefaultType()});
@@ -4947,6 +5112,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::BITREVERSE) {
         validateArgCount(expr, "bitreverse", 1);
+        // Constant-fold bitreverse(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            uint64_t bits = static_cast<uint64_t>(*val);
+            uint64_t reversed = 0;
+            for (int i = 0; i < 64; ++i)
+                reversed |= ((bits >> i) & 1ULL) << (63 - i);
+            return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(reversed));
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* brevFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::bitreverse, {getDefaultType()});
@@ -4963,6 +5136,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::IS_POWER_OF_2) {
         validateArgCount(expr, "is_power_of_2", 1);
+        // Constant-fold is_power_of_2(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            int64_t v = *val;
+            bool result = v > 0 && (v & (v - 1)) == 0;
+            return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -4982,6 +5161,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::LCM) {
         validateArgCount(expr, "lcm", 2);
+        // Constant-fold lcm(a, b) when both are integer literals.
+        if (auto va = getConstantInt(expr->arguments[0].get())) {
+            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+                uint64_t a = static_cast<uint64_t>(std::abs(*va));
+                uint64_t b = static_cast<uint64_t>(std::abs(*vb));
+                if (a == 0 || b == 0)
+                    return llvm::ConstantInt::get(getDefaultType(), 0);
+                uint64_t ga = a, gb = b;
+                while (gb) { uint64_t t = gb; gb = ga % gb; ga = t; }
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(a / ga * b));
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
@@ -5034,6 +5225,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // ── New intrinsic builtins ─────────────────────────────────────────
     if (bid == BuiltinId::ROTATE_LEFT) {
         validateArgCount(expr, "rotate_left", 2);
+        // Constant-fold rotate_left(val, amt).
+        if (auto vv = getConstantInt(expr->arguments[0].get())) {
+            if (auto va = getConstantInt(expr->arguments[1].get())) {
+                uint64_t v = static_cast<uint64_t>(*vv);
+                unsigned amt = static_cast<unsigned>(*va) & 63;
+                uint64_t result = (v << amt) | (v >> (64 - amt));
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(result));
+            }
+        }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         llvm::Value* amt = generateExpression(expr->arguments[1].get());
         val = toDefaultType(val);
@@ -5045,6 +5245,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::ROTATE_RIGHT) {
         validateArgCount(expr, "rotate_right", 2);
+        // Constant-fold rotate_right(val, amt).
+        if (auto vv = getConstantInt(expr->arguments[0].get())) {
+            if (auto va = getConstantInt(expr->arguments[1].get())) {
+                uint64_t v = static_cast<uint64_t>(*vv);
+                unsigned amt = static_cast<unsigned>(*va) & 63;
+                uint64_t result = (v >> amt) | (v << (64 - amt));
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(result));
+            }
+        }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         llvm::Value* amt = generateExpression(expr->arguments[1].get());
         val = toDefaultType(val);
@@ -5056,6 +5265,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::BSWAP) {
         validateArgCount(expr, "bswap", 1);
+        // Constant-fold bswap(literal).
+        if (auto val = getConstantInt(expr->arguments[0].get())) {
+            uint64_t bits = static_cast<uint64_t>(*val);
+            uint64_t swapped = __builtin_bswap64(bits);
+            return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(swapped));
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* bswapFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::bswap, {getDefaultType()});
