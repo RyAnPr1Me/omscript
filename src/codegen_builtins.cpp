@@ -1113,6 +1113,29 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CHAR_AT) {
         validateArgCount(expr, "char_at", 2);
+
+        // ── Compile-time char_at folding ────────────────────────────
+        // When both the string and index are compile-time constants,
+        // fold char_at("hello", 1) → 'e' (ASCII 101) at compile time.
+        // This eliminates the runtime strlen + bounds check + load entirely.
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* idxLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (idxLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                        int64_t idx = idxLit->intValue;
+                        int64_t len = static_cast<int64_t>(strLit->stringValue.size());
+                        if (idx >= 0 && idx < len) {
+                            // Valid index — fold to the character value.
+                            char ch = strLit->stringValue[static_cast<size_t>(idx)];
+                            return llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                        }
+                        // Out-of-bounds index with literals → still emit runtime
+                        // error path (don't silently UB).
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
         idxArg = toDefaultType(idxArg);
@@ -1729,6 +1752,41 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_SUBSTR) {
         validateArgCount(expr, "str_substr", 3);
+
+        // ── Compile-time str_substr folding ─────────────────────────
+        // When all three arguments are compile-time constants, fold the
+        // substr to a string literal.  This eliminates malloc + memcpy.
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* startLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (startLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                        if (auto* lenLit = dynamic_cast<LiteralExpr*>(expr->arguments[2].get())) {
+                            if (lenLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                                const auto& s = strLit->stringValue;
+                                int64_t slen = static_cast<int64_t>(s.size());
+                                int64_t startVal = static_cast<int64_t>(startLit->intValue);
+                                int64_t lenVal = static_cast<int64_t>(lenLit->intValue);
+                                if (startVal < 0) startVal = 0;
+                                if (startVal > slen) startVal = slen;
+                                int64_t maxLen = slen - startVal;
+                                if (lenVal < 0) lenVal = 0;
+                                if (lenVal > maxLen) lenVal = maxLen;
+                                std::string result = s.substr(static_cast<size_t>(startVal), static_cast<size_t>(lenVal));
+                                llvm::GlobalVariable* gv = internString(result);
+                                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                                    gv->getValueType(),
+                                    gv,
+                                    llvm::ArrayRef<llvm::Constant*>{
+                                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                                    });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* startArg = generateExpression(expr->arguments[1].get());
         llvm::Value* lenArg = generateExpression(expr->arguments[2].get());
@@ -1854,6 +1912,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_CONTAINS) {
         validateArgCount(expr, "str_contains", 2);
+
+        // ── Compile-time str_contains folding ───────────────────────
+        // When both arguments are string literals, fold at compile time.
+        if (auto* hayLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (hayLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* needleLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (needleLit->literalType == LiteralExpr::LiteralType::STRING) {
+                        bool found = hayLit->stringValue.find(needleLit->stringValue) != std::string::npos;
+                        return llvm::ConstantInt::get(getDefaultType(), found ? 1 : 0);
+                    }
+                }
+            }
+        }
+
         // Detect single-character literal needle → use memchr (SIMD-optimized)
         // instead of strstr (byte-by-byte scan).
         Expression* needleExpr = expr->arguments[1].get();
@@ -1897,6 +1969,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_INDEX_OF) {
         validateArgCount(expr, "str_index_of", 2);
+
+        // ── Compile-time str_index_of folding ───────────────────────
+        if (auto* hayLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (hayLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* needleLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (needleLit->literalType == LiteralExpr::LiteralType::STRING) {
+                        auto pos = hayLit->stringValue.find(needleLit->stringValue);
+                        int64_t result = (pos == std::string::npos) ? -1 : static_cast<int64_t>(pos);
+                        return llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(result));
+                    }
+                }
+            }
+        }
+
         // Detect single-character literal needle → use memchr (SIMD-optimized)
         // instead of strstr (byte-by-byte scan).
         Expression* needleExpr = expr->arguments[1].get();
@@ -2182,6 +2268,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_STARTS_WITH) {
         validateArgCount(expr, "str_starts_with", 2);
+
+        // ── Compile-time str_starts_with folding ────────────────────
+        // When both arguments are string literals, fold at compile time.
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* prefixLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (prefixLit->literalType == LiteralExpr::LiteralType::STRING) {
+                        bool result = strLit->stringValue.substr(0, prefixLit->stringValue.size())
+                                      == prefixLit->stringValue;
+                        return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* prefixArg = generateExpression(expr->arguments[1].get());
         llvm::Value* strPtr =
@@ -2204,6 +2305,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_ENDS_WITH) {
         validateArgCount(expr, "str_ends_with", 2);
+
+        // ── Compile-time str_ends_with folding ──────────────────────
+        // When both arguments are string literals, fold at compile time.
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* suffixLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (suffixLit->literalType == LiteralExpr::LiteralType::STRING) {
+                        const auto& s = strLit->stringValue;
+                        const auto& suffix = suffixLit->stringValue;
+                        bool result = s.size() >= suffix.size() &&
+                                      s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+                        return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* suffixArg = generateExpression(expr->arguments[1].get());
         llvm::Value* strPtr =
@@ -2246,6 +2364,37 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_REPEAT) {
         validateArgCount(expr, "str_repeat", 2);
+
+        // ── Compile-time str_repeat folding ─────────────────────────
+        // When both arguments are compile-time constants and the result
+        // is reasonably small, fold at compile time.
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                if (auto* countLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
+                    if (countLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                        int64_t count = countLit->intValue;
+                        // Only fold for small results (≤ 256 bytes) to avoid
+                        // bloating the data section.
+                        if (count >= 0 && count * static_cast<int64_t>(strLit->stringValue.size()) <= 256) {
+                            std::string result;
+                            result.reserve(static_cast<size_t>(count) * strLit->stringValue.size());
+                            for (int64_t i = 0; i < count; ++i) {
+                                result += strLit->stringValue;
+                            }
+                            llvm::GlobalVariable* gv = internString(result);
+                            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                                gv->getValueType(),
+                                gv,
+                                llvm::ArrayRef<llvm::Constant*>{
+                                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                                });
+                        }
+                    }
+                }
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* countArg = generateExpression(expr->arguments[1].get());
         countArg = toDefaultType(countArg);
@@ -2298,6 +2447,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_REVERSE) {
         validateArgCount(expr, "str_reverse", 1);
+
+        // ── Compile-time str_reverse folding ────────────────────────
+        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
+                std::string reversed = strLit->stringValue;
+                std::reverse(reversed.begin(), reversed.end());
+                llvm::GlobalVariable* gv = internString(reversed);
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(),
+                    gv,
+                    llvm::ArrayRef<llvm::Constant*>{
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                    });
+            }
+        }
+
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()

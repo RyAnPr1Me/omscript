@@ -1162,8 +1162,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             auto* mergeBB = llvm::BasicBlock::Create(*context, "streq.merge", parentFn);
 
             llvm::Value* samePtr = builder->CreateICmpEQ(lPtr, rPtr, "streq.sameptr");
-            // Pointer equality is rare in general — weight slow path heavier.
-            llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+            // With string interning, pointer equality is common for string
+            // literals — weight both paths more evenly than before.
+            llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1, 4);
             builder->CreateCondBr(samePtr, ptrEqBB, slowBB, brW);
 
             // Fast path: pointers match → strings are equal

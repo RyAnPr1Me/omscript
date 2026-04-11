@@ -679,6 +679,7 @@ test_program "examples/ifelse_select_test.om" 37
 test_program "examples/const_float_fold_test.om" 7
 test_program "examples/inverse_op_test.om" 59
 test_program "examples/musttail_test.om" 175
+test_program "examples/string_interning_test.om" 15
 
 echo ""
 echo "============================================"
