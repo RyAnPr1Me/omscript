@@ -969,7 +969,56 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
     // Parse: for (var in start...end) or for (var in start...end...step)
     //    or: for (var in collection)  -- for-each over array
+    //    or: for (idx, item in collection)  -- indexed for-each
     const Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable");
+
+    // Check for indexed for-each: for (idx, item in collection)
+    if (match(TokenType::COMMA)) {
+        const Token itemName = consume(TokenType::IDENTIFIER, "Expected item variable after ',' in for");
+        consume(TokenType::IN, "Expected 'in' after for variables");
+        auto collection = parseExpression();
+        consume(TokenType::RPAREN, "Expected ')' after for-each collection");
+        auto body = parseStatement();
+
+        // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
+        static int forIdxCounter = 0;
+        int id = forIdxCounter++;
+        std::string arrTmp = "__for_arr_" + std::to_string(id);
+
+        std::vector<std::unique_ptr<Statement>> outerStmts;
+
+        // var __for_arr_N = collection;
+        auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
+        arrDecl->line = varName.line;
+        arrDecl->column = varName.column;
+        outerStmts.push_back(std::move(arrDecl));
+
+        // Build inner body: { var item = __for_arr_N[idx]; original_body }
+        std::vector<std::unique_ptr<Statement>> innerStmts;
+        auto arrRef = std::make_unique<IdentifierExpr>(arrTmp);
+        auto idxRef = std::make_unique<IdentifierExpr>(varName.lexeme);
+        auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
+        auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
+        itemDecl->line = itemName.line;
+        itemDecl->column = itemName.column;
+        innerStmts.push_back(std::move(itemDecl));
+        innerStmts.push_back(std::move(body));
+        auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
+
+        // for (idx in 0...len(__for_arr_N))
+        auto zero = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+        std::vector<std::unique_ptr<Expression>> lenArgs;
+        lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
+        auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
+        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(zero), std::move(lenCall),
+                                                  nullptr, std::move(innerBlock));
+        forStmt->line = varName.line;
+        forStmt->column = varName.column;
+        outerStmts.push_back(std::move(forStmt));
+
+        return std::make_unique<BlockStmt>(std::move(outerStmts));
+    }
+
     std::string iteratorType;
     if (match(TokenType::COLON)) {
         iteratorType = parseTypeAnnotation();
@@ -1131,7 +1180,25 @@ std::unique_ptr<Statement> Parser::parseLoopStmt() {
 // repeat N { ... }  or  repeat (expr) { ... }
 // Desugars to: for (__repeat_i in 0...N) { ... }
 std::unique_ptr<Statement> Parser::parseRepeatStmt() {
-    // Allow optional parens: repeat N { ... } or repeat (N) { ... }
+    // Two forms:
+    // 1. repeat N { ... }  or  repeat (N) { ... }  — counted loop
+    // 2. repeat { ... } until (cond);               — post-test loop
+
+    // If next token is '{', this is the repeat...until form
+    if (check(TokenType::LBRACE)) {
+        auto body = parseStatement();
+        consume(TokenType::UNTIL, "Expected 'until' after repeat block");
+        consume(TokenType::LPAREN, "Expected '(' after 'until'");
+        auto condition = parseExpression();
+        consume(TokenType::RPAREN, "Expected ')' after until condition");
+        consume(TokenType::SEMICOLON, "Expected ';' after repeat...until");
+
+        // Negate: repeat { ... } until (c) => do { ... } while (!c)
+        auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
+        return std::make_unique<DoWhileStmt>(std::move(body), std::move(negated));
+    }
+
+    // Counted form: repeat N { ... } or repeat (N) { ... }
     bool hasParen = match(TokenType::LPAREN);
     auto count = parseExpression();
     if (hasParen) {
@@ -1223,18 +1290,78 @@ std::unique_ptr<Statement> Parser::parseForeverStmt() {
 }
 
 // foreach item in collection { ... }
+// foreach (i, item in collection) { ... } — indexed variant
 // Desugars to: for (item in collection) { ... } (ForEachStmt)
+// Indexed variant desugars to:
+//   { var __foreach_arr_N = collection;
+//     for (__foreach_idx_N in 0...len(__foreach_arr_N)) {
+//       var i = __foreach_idx_N;
+//       var item = __foreach_arr_N[__foreach_idx_N];
+//       body } }
 std::unique_ptr<Statement> Parser::parseForEachStmt() {
     // Allow optional parens: foreach item in arr or foreach (item in arr)
     bool hasParen = match(TokenType::LPAREN);
-    const Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable after 'foreach'");
+    const Token firstName = consume(TokenType::IDENTIFIER, "Expected iterator variable after 'foreach'");
+
+    // Check for indexed variant: foreach (idx, item in collection)
+    if (match(TokenType::COMMA)) {
+        // This is the indexed form: foreach (idx, item in collection)
+        const Token itemName = consume(TokenType::IDENTIFIER, "Expected item variable after ',' in foreach");
+        consume(TokenType::IN, "Expected 'in' after foreach variables");
+        auto collection = parseExpression();
+        if (hasParen) {
+            consume(TokenType::RPAREN, "Expected ')' after foreach collection");
+        }
+        auto body = parseStatement();
+
+        // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
+        static int foreachIdxCounter = 0;
+        int id = foreachIdxCounter++;
+        std::string arrTmp = "__foreach_arr_" + std::to_string(id);
+
+        std::vector<std::unique_ptr<Statement>> outerStmts;
+
+        // var __foreach_arr_N = collection;
+        auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
+        arrDecl->line = firstName.line;
+        arrDecl->column = firstName.column;
+        outerStmts.push_back(std::move(arrDecl));
+
+        // Build inner body: { var item = __foreach_arr_N[idx]; original_body }
+        std::vector<std::unique_ptr<Statement>> innerStmts;
+
+        // var item = __foreach_arr_N[idx];
+        auto arrRef = std::make_unique<IdentifierExpr>(arrTmp);
+        auto idxRef = std::make_unique<IdentifierExpr>(firstName.lexeme);
+        auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
+        auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
+        itemDecl->line = itemName.line;
+        itemDecl->column = itemName.column;
+        innerStmts.push_back(std::move(itemDecl));
+        innerStmts.push_back(std::move(body));
+        auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
+
+        // for (idx in 0...len(__foreach_arr_N))
+        auto zero = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+        std::vector<std::unique_ptr<Expression>> lenArgs;
+        lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
+        auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
+        auto forStmt = std::make_unique<ForStmt>(firstName.lexeme, std::move(zero), std::move(lenCall),
+                                                  nullptr, std::move(innerBlock));
+        forStmt->line = firstName.line;
+        forStmt->column = firstName.column;
+        outerStmts.push_back(std::move(forStmt));
+
+        return std::make_unique<BlockStmt>(std::move(outerStmts));
+    }
+
     consume(TokenType::IN, "Expected 'in' after foreach variable");
     auto collection = parseExpression();
     if (hasParen) {
         consume(TokenType::RPAREN, "Expected ')' after foreach collection");
     }
     auto body = parseStatement();
-    return std::make_unique<ForEachStmt>(varName.lexeme, std::move(collection), std::move(body));
+    return std::make_unique<ForEachStmt>(firstName.lexeme, std::move(collection), std::move(body));
 }
 
 // elif (condition) { ... } [elif (...) { ... }] [else { ... }]

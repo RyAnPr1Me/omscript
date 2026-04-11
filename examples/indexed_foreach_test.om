@@ -1,0 +1,66 @@
+// Test: indexed foreach
+// foreach (i, item in arr) — gives both index and value
+
+fn sum_indexed(arr) {
+    var total = 0;
+    foreach (i, val in arr) {
+        total = total + i * val;
+    }
+    return total;
+}
+
+fn weighted_sum() {
+    var data = [10, 20, 30, 40];
+    // 0*10 + 1*20 + 2*30 + 3*40 = 0 + 20 + 60 + 120 = 200
+    return sum_indexed(data);
+}
+
+fn index_tracking() {
+    var arr = [5, 5, 5, 5, 5];
+    var index_sum = 0;
+    foreach (i, item in arr) {
+        index_sum = index_sum + i;
+    }
+    // 0 + 1 + 2 + 3 + 4 = 10
+    return index_sum;
+}
+
+fn for_indexed() {
+    var arr = [100, 200, 300];
+    var total = 0;
+    // Also works with for (i, item in arr)
+    for (i, val in arr) {
+        total = total + (i + 1) * val;
+    }
+    // 1*100 + 2*200 + 3*300 = 100 + 400 + 900 = 1400
+    return total;
+}
+
+fn single_element_indexed() {
+    var arr = [42];
+    var result = 0;
+    foreach (i, v in arr) {
+        result = i * 1000 + v;
+    }
+    // 0 * 1000 + 42 = 42
+    return result;
+}
+
+fn main() {
+    var total = 0;
+
+    // weighted_sum: 200
+    total = total + weighted_sum();
+
+    // index_tracking: 10
+    total = total + index_tracking();
+
+    // for_indexed: 1400
+    total = total + for_indexed();
+
+    // single_element: 42
+    total = total + single_element_indexed();
+
+    // Expected: 200 + 10 + 1400 + 42 = 1652
+    return total;
+}

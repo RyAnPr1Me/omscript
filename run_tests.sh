@@ -697,6 +697,8 @@ test_program "examples/elif_test.om" 165
 test_program "examples/swap_test.om" 108
 test_program "examples/times_test.om" 162
 test_program "examples/destructure_test.om" 13130
+test_program "examples/indexed_foreach_test.om" 1652
+test_program "examples/repeat_until_test.om" 297
 
 echo ""
 echo "============================================"

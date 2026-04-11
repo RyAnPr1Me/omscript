@@ -1,0 +1,61 @@
+// Test: repeat...until statement
+// repeat { ... } until (condition); — post-test loop, body runs at least once
+
+fn count_to(limit) {
+    var i = 0;
+    repeat {
+        i = i + 1;
+    } until (i >= limit);
+    return i;
+}
+
+fn sum_until_threshold(arr) {
+    var sum = 0;
+    var i = 0;
+    repeat {
+        sum = sum + arr[i];
+        i = i + 1;
+    } until (sum >= 100);
+    return sum;
+}
+
+fn factorial(n) {
+    var result = 1;
+    var i = 1;
+    repeat {
+        result = result * i;
+        i = i + 1;
+    } until (i > n);
+    return result;
+}
+
+fn single_iteration() {
+    var x = 0;
+    repeat {
+        x = 42;
+    } until (true);
+    return x;
+}
+
+fn main() {
+    var total = 0;
+
+    // count to 5: 5
+    total = total + count_to(5);
+
+    // count to 10: 10
+    total = total + count_to(10);
+
+    // sum [30, 40, 50, 60] until >= 100: 30+40+50 = 120
+    var arr = [30, 40, 50, 60];
+    total = total + sum_until_threshold(arr);
+
+    // factorial(5) = 120
+    total = total + factorial(5);
+
+    // single iteration: 42
+    total = total + single_iteration();
+
+    // Expected: 5 + 10 + 120 + 120 + 42 = 297
+    return total;
+}
