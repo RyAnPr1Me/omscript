@@ -13,6 +13,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Lambda Expressions**: Anonymous functions with `|x| x * 2` syntax for use with higher-order builtins
 - **Pipe Operator**: Left-to-right function chaining with `expr |> fn`
 - **Spread Operator**: Array unpacking in literals with `[1, ...arr, 2]`
+- **Method-Call Syntax**: `obj.method(args)` desugars to `method(obj, args)` — enables OOP-style code with zero runtime overhead
 - **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end)` and `for (i in start...end...step)`
 - **For-Each Loops**: Iterate over arrays with `for (x in array)`
 - **Switch/Case**: Multi-way branching with `switch`/`case`/`default`, multi-value `case 1, 2, 3:`

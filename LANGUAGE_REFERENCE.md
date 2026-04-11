@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 3.8.0  
-> **Compiler:** `omsc` — OmScript Compiler v3.8.0  
+> **Version:** 3.9.0  
+> **Compiler:** `omsc` — OmScript Compiler v3.9.0  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
@@ -1572,6 +1572,47 @@ struct Particle {
 | `move` | Hint: field participates in ownership transfer |
 
 Multiple attributes may be combined on a single field. All attributes are optional and have no effect on correctness — they only enable LLVM to produce better code.
+
+### 11.7 Method-Call Syntax
+
+OmScript supports a convenient method-call syntax: `obj.method(args...)` is transparently desugared by the parser into `method(obj, args...)`. The receiver becomes the first argument of the named function. This works with any function — built-in or user-defined.
+
+**User-defined struct methods:**
+
+```javascript
+struct Counter { val }
+
+fn increment(self, amount) {
+    self.val = self.val + amount;
+    return self;
+}
+
+fn main() {
+    var c = Counter { val: 0 };
+    c = c.increment(10);   // equivalent to: c = increment(c, 10)
+    c = c.increment(5);    // equivalent to: c = increment(c, 5)
+    return c.val;           // 15
+}
+```
+
+**Array and string built-ins:**
+
+```javascript
+fn main() {
+    var arr = [3, 1, 4, 1, 5];
+    arr = arr.push(9);           // push(arr, 9)
+    arr.sort();                  // sort(arr)
+    var s = arr.sum();           // sum(arr)
+    var n = arr.len();           // len(arr)
+
+    var str = "hello";
+    var l = str.len();           // len(str)
+    var up = str.str_upper();    // str_upper(str)
+    return s + n + l;
+}
+```
+
+The method name must exactly match an existing function. No name mangling is applied — `arr.push(x)` looks up `push`, not `arr_push`. This generates identical IR to the direct call form: there is zero runtime overhead.
 
 ---
 

@@ -5295,8 +5295,12 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
         load = builder->CreateLoad(getDefaultType(), elemPtr, "struct.field.val");
     }
 
-    // TBAA: struct fields are distinct from array elements/lengths/map slots.
-    load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStructField_);
+    // TBAA: use a per-field type node so different fields of the same struct
+    // do not alias each other.  Each (structType, fieldIdx) pair gets a unique
+    // child of tbaaStructTypeNode_, allowing LLVM to prove that, e.g.,
+    // p.x and p.y are independent loads even when their base pointer is shared.
+    load->setMetadata(llvm::LLVMContext::MD_tbaa,
+                      getOrCreateFieldTBAA(structType, fieldIdx));
 
     // Apply LLVM metadata from struct field attributes.
     if (attrs) {
@@ -5379,8 +5383,10 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
         store = builder->CreateStore(newVal, elemPtr);
     }
 
-    // TBAA: struct fields are distinct from array elements/lengths/map slots.
-    store->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStructField_);
+    // TBAA: per-field type node so writes to different fields don't alias reads
+    // from other fields.  Matches the per-field TBAA used in generateFieldAccess.
+    store->setMetadata(llvm::LLVMContext::MD_tbaa,
+                       getOrCreateFieldTBAA(structType, fieldIdx));
 
     // !nontemporal hint for cold fields — bypass cache on write
     if (attrs && attrs->cold) {

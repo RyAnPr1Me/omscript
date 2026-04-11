@@ -806,6 +806,7 @@ void CodeGenerator::initTBAAMetadata() {
     llvm::MDNode* tbaaLenType    = makeTBAAType("array length");
     llvm::MDNode* tbaaElemType   = makeTBAAType("array element");
     llvm::MDNode* tbaaStructType = makeTBAAType("struct field");
+    tbaaStructTypeNode_ = tbaaStructType;
     llvm::MDNode* tbaaStrType    = makeTBAAType("string data");
     llvm::MDNode* tbaaMapKeyType = makeTBAAType("map key");
     llvm::MDNode* tbaaMapValType = makeTBAAType("map value");
@@ -832,6 +833,30 @@ void CodeGenerator::initTBAAMetadata() {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
             i64Ty, static_cast<uint64_t>(INT64_MAX)))
     });
+}
+
+llvm::MDNode* CodeGenerator::getOrCreateFieldTBAA(const std::string& structType, size_t fieldIdx) {
+    auto key = std::make_pair(structType, fieldIdx);
+    auto it = tbaaStructFieldCache_.find(key);
+    if (it != tbaaStructFieldCache_.end()) return it->second;
+
+    // Build a unique per-field TBAA type node as a child of tbaaStructTypeNode_.
+    // Two accesses to different fields will have sibling type nodes that do not alias.
+    // A generic struct-field access using tbaaStructField_ still aliases all per-field
+    // accesses because tbaaStructTypeNode_ is their common ancestor.
+    auto& C = *context;
+    auto* zero = llvm::ConstantAsMetadata::get(
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(C), 0));
+    std::string nodeName = "struct." + structType + "." + std::to_string(fieldIdx);
+    llvm::MDNode* fieldTypeNode = llvm::MDNode::get(C, {
+        llvm::MDString::get(C, nodeName),
+        tbaaStructTypeNode_,
+        zero
+    });
+    // Access tag: {fieldTypeNode, fieldTypeNode, 0}
+    llvm::MDNode* accessTag = llvm::MDNode::get(C, {fieldTypeNode, fieldTypeNode, zero});
+    tbaaStructFieldCache_[key] = accessTag;
+    return accessTag;
 }
 
 void CodeGenerator::setupPrintfDeclaration() {

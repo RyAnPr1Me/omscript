@@ -20,6 +20,7 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -408,12 +409,19 @@ class CodeGenerator {
     llvm::MDNode* tbaaRoot_ = nullptr;       ///< Root of TBAA type hierarchy
     llvm::MDNode* tbaaArrayLen_ = nullptr;   ///< TBAA access tag for array length (slot 0)
     llvm::MDNode* tbaaArrayElem_ = nullptr;  ///< TBAA access tag for array elements (slots 1+)
-    llvm::MDNode* tbaaStructField_ = nullptr; ///< TBAA access tag for struct field loads/stores
+    llvm::MDNode* tbaaStructField_ = nullptr; ///< TBAA access tag for struct field loads/stores (generic)
+    llvm::MDNode* tbaaStructTypeNode_ = nullptr; ///< TBAA type node for "struct field" (parent of per-field types)
     llvm::MDNode* tbaaStringData_ = nullptr;  ///< TBAA access tag for string character data
     llvm::MDNode* tbaaMapKey_ = nullptr;      ///< TBAA access tag for map key slots
     llvm::MDNode* tbaaMapVal_ = nullptr;      ///< TBAA access tag for map value slots
     llvm::MDNode* tbaaMapHash_ = nullptr;     ///< TBAA access tag for map hash slots
     llvm::MDNode* tbaaMapMeta_ = nullptr;     ///< TBAA access tag for map header (capacity/size)
+    /// Per-field TBAA access tag cache: maps (structTypeName, fieldIndex) → access tag.
+    /// Each struct field gets a unique TBAA type node that is a child of tbaaStructTypeNode_,
+    /// so accesses to different fields of the same (or different) struct types do not alias.
+    std::map<std::pair<std::string, size_t>, llvm::MDNode*> tbaaStructFieldCache_;
+    /// Returns (creating if needed) a per-field TBAA access tag for the given struct type and field index.
+    llvm::MDNode* getOrCreateFieldTBAA(const std::string& structType, size_t fieldIdx);
 
     /// !range metadata for array length loads: [0, INT64_MAX).
     /// Array lengths are always non-negative (they're sizes).

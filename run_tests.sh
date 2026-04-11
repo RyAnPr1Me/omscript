@@ -705,6 +705,7 @@ test_program "examples/loop_counted_test.om" 63
 test_program "examples/expr_fn_swap_test.om" 529
 test_program "examples/assume_unreachable_expect_test.om" 125
 test_program "examples/array_string_builtins_test.om" 178
+test_program "examples/method_call_test.om" 129
 
 echo ""
 echo "============================================"

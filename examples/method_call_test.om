@@ -1,0 +1,76 @@
+// Test: method-call syntax: obj.method(args) desugars to method(obj, args)
+// Covers user-defined "methods", array methods, and string methods.
+
+struct Vec2 { x, y }
+struct Counter { val }
+
+fn dot(u, v) {
+    return u.x * v.x + u.y * v.y;
+}
+
+fn distance_sq(p, q) {
+    var dx = p.x - q.x;
+    var dy = p.y - q.y;
+    return dx * dx + dy * dy;
+}
+
+fn increment(c, by) {
+    c.val = c.val + by;
+    return c;
+}
+
+fn negate_x(v) {
+    v.x = 0 - v.x;
+    return v;
+}
+
+fn test_struct_methods() {
+    var a = Vec2 { x: 3, y: 4 };
+    var b = Vec2 { x: 1, y: 2 };
+    var d = a.dot(b);                  // dot(a, b) = 3 + 8 = 11
+
+    var origin = Vec2 { x: 0, y: 0 };
+    var pt = Vec2 { x: 3, y: 4 };
+    var dsq = origin.distance_sq(pt);  // 9 + 16 = 25
+
+    var c = Counter { val: 0 };
+    c = c.increment(7);                // val = 7
+    c = c.increment(3);                // val = 10
+
+    return d + dsq + c.val;            // 11 + 25 + 10 = 46
+}
+
+fn test_array_methods() {
+    var arr = [1, 2, 3, 4, 5];
+    var s = arr.sum();                 // 15
+    var l = arr.len();                 // 5
+    var mx = arr.array_max();          // 5
+    var mn = arr.array_min();          // 1
+    return s + l + mx + mn;            // 15 + 5 + 5 + 1 = 26
+}
+
+fn test_string_methods() {
+    var s = "Hello World";
+    var l = s.len();                   // 11
+    var upper = s.str_upper();         // "HELLO WORLD"
+    var ul = upper.len();              // 11
+    return l + ul;                     // 22
+}
+
+fn test_chained_methods() {
+    // Chained: c.increment(5).increment(10) not directly supported
+    // but sequential chaining works:
+    var c = Counter { val: 0 };
+    c = c.increment(5);
+    c = c.increment(10);
+    c = c.increment(20);               // val = 35
+    return c.val;                      // 35
+}
+
+fn main() {
+    var r1 = test_struct_methods();    // 46
+    var r2 = test_array_methods();     // 26
+    var r3 = test_string_methods();    // 22
+    var r4 = test_chained_methods();   // 35
+    return r1 + r2 + r3 + r4;         // 46 + 26 + 22 + 35 = 129
+}

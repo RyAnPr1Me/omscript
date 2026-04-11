@@ -2244,14 +2244,31 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
             indexExpr->column = bracketToken.column;
             expr = std::move(indexExpr);
         }
-        // Handle field access (dot notation)
+        // Handle field access (dot notation) or method call (obj.method(args))
         else if (match(TokenType::DOT)) {
             const Token dotToken = tokens[current - 1];
             const Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name after '.'");
-            auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(expr), fieldToken.lexeme);
-            fieldExpr->line = dotToken.line;
-            fieldExpr->column = dotToken.column;
-            expr = std::move(fieldExpr);
+            // Method call: obj.method(args...) desugars to method(obj, args...)
+            if (check(TokenType::LPAREN)) {
+                advance(); // consume '('
+                std::vector<std::unique_ptr<Expression>> arguments;
+                arguments.push_back(std::move(expr)); // receiver becomes first argument
+                if (!check(TokenType::RPAREN)) {
+                    do {
+                        arguments.push_back(parseExpression());
+                    } while (match(TokenType::COMMA));
+                }
+                consume(TokenType::RPAREN, "Expected ')' after method call arguments");
+                auto callExpr = std::make_unique<CallExpr>(fieldToken.lexeme, std::move(arguments));
+                callExpr->line = dotToken.line;
+                callExpr->column = dotToken.column;
+                expr = std::move(callExpr);
+            } else {
+                auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(expr), fieldToken.lexeme);
+                fieldExpr->line = dotToken.line;
+                fieldExpr->column = dotToken.column;
+                expr = std::move(fieldExpr);
+            }
         } else {
             break;
         }
