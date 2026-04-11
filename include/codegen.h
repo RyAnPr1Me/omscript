@@ -444,6 +444,11 @@ class CodeGenerator {
     /// to 6.28318 at compile time, eliminating runtime fmul.
     llvm::StringMap<double> constFloatFolds_;
 
+    /// Constant string values for `const` string variables initialized with
+    /// a compile-time string literal.  Enables compile-time evaluation of
+    /// string builtins: `const s = "hello"; var n = len(s);` folds to 5.
+    llvm::StringMap<std::string> constStringFolds_;
+
     /// Set of function names marked with @const_eval.
     /// When called with all-constant integer arguments, the compiler evaluates
     /// the function body at compile time using AST-level interpretation,

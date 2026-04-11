@@ -326,6 +326,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             }
         }
 
+        // Constant-fold len() on const string variables: when a variable
+        // was declared as `const s = "hello"`, len(s) folds to 5.
+        if (auto* ident = dynamic_cast<IdentifierExpr*>(expr->arguments[0].get())) {
+            auto it = constStringFolds_.find(ident->name);
+            if (it != constStringFolds_.end()) {
+                int64_t len = static_cast<int64_t>(it->second.size());
+                auto* result = llvm::ConstantInt::get(getDefaultType(), len);
+                nonNegValues_.insert(result);
+                return result;
+            }
+        }
+
         // Constant-fold len(array_fill(N, val)): when N is a constant the
         // array length is known at compile time.  Avoids a runtime load from
         // the array header and enables further constant propagation.

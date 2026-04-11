@@ -229,6 +229,16 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(initValue))
                 constFloatFolds_[stmt->name] = cf->getValueAPF().convertToDouble();
         }
+        // Track const string values for compile-time string builtin folding.
+        // When a const variable is initialized with a string literal, record
+        // the literal content so that len(var), str_starts_with(var, ...) etc.
+        // can be folded at compile time without a runtime strlen/strcmp.
+        if (stmt->isConst && stmt->initializer) {
+            if (auto* lit = dynamic_cast<LiteralExpr*>(stmt->initializer.get())) {
+                if (lit->literalType == LiteralExpr::LiteralType::STRING)
+                    constStringFolds_[stmt->name] = lit->stringValue;
+            }
+        }
         // Track whether this variable holds a string value so that print(),
         // concatenation, and comparison operators handle it correctly when
         // the variable's alloca type is i64 (e.g. assigned from a function
