@@ -5222,7 +5222,9 @@ static UDivMagic computeUDivMagic64(uint64_t d) {
     // The formula floor(x/d) = mulhu(x, magic) >> s is valid when:
     //   magic * d - 2^(64+s) < 2^s   (no-add case, magic < 2^64)
     //   OR use add-fixup form         (when magic >= 2^64)
-    for (unsigned s = 0; s <= 64; ++s) {
+    // Upper bound: s=63 gives pow2 = 2^127 which fits in __uint128_t;
+    // s=64 would require 2^128 which overflows __uint128_t.
+    for (unsigned s = 0; s <= 63; ++s) {
         __uint128_t pow2 = (__uint128_t)1 << (64 + s);
         __uint128_t m = (pow2 + d - 1) / d;  // ceil(2^(64+s) / d)
 
@@ -5384,8 +5386,11 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
         bool anySideEffects = false;
         for (auto& caseIt : sw->cases()) {
             llvm::BasicBlock* caseBB = caseIt.getCaseSuccessor();
-            // Skip if case destination IS the merge block (no intermediate block)
-            if (caseBB == mergeBB) continue;
+            // Reject if a case branches directly to the merge block.  In that
+            // situation the PHI in mergeBB has an incoming value from switchBB
+            // (not from an intermediate caseBB), so getIncomingValueForBlock
+            // would return null and we'd incorrectly use defaultVal.
+            if (caseBB == mergeBB) { allConverge = false; break; }
             auto* caseTerm = llvm::dyn_cast<llvm::BranchInst>(caseBB->getTerminator());
             if (!caseTerm || !caseTerm->isUnconditional() ||
                 caseTerm->getSuccessor(0) != mergeBB) {
@@ -5594,6 +5599,10 @@ static unsigned eliminateRedundantBoundsChecks(llvm::Function& func) {
 
     for (auto& [inst, replacement] : replacements) {
         inst->replaceAllUsesWith(replacement);
+        // The icmp is now dead (no uses, no side effects) — remove it to keep
+        // the IR clean.  The Phase 5 dead-code-elimination pass would catch
+        // this too, but erasing here avoids a second scan.
+        inst->eraseFromParent();
         ++count;
     }
     return count;
