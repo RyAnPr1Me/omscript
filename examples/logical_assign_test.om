@@ -1,0 +1,49 @@
+// Test compound logical assignment operators &&= and ||=
+fn main() {
+    var total = 0;
+
+    // &&= with true values
+    var a = 1;
+    a &&= 1;
+    total = total + a;  // 1
+
+    // &&= with false left (short-circuits to 0)
+    var b = 0;
+    b &&= 1;
+    total = total + (b == 0);  // 1
+
+    // &&= with false right
+    var c = 1;
+    c &&= 0;
+    total = total + (c == 0);  // 1
+
+    // ||= with false left
+    var d = 0;
+    d ||= 1;
+    total = total + d;  // 1
+
+    // ||= with true left (keeps true)
+    var e = 1;
+    e ||= 0;
+    total = total + e;  // 1
+
+    // ||= both false
+    var f = 0;
+    f ||= 0;
+    total = total + (f == 0);  // 1
+
+    // Chained usage
+    var g = 1;
+    g &&= 1;
+    g &&= 1;
+    total = total + g;  // 1
+
+    var h = 0;
+    h ||= 0;
+    h ||= 1;
+    total = total + h;  // 1
+
+    // total = 8
+    println(total);
+    return total;
+}

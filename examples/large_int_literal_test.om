@@ -1,0 +1,38 @@
+// Test that large hex/octal/binary integer literals (> INT64_MAX as unsigned)
+// are accepted and their bit patterns are preserved.
+fn main() {
+    var total = 0;
+
+    // Fibonacci hashing constant (the originally reported constant)
+    var fib = 0x9e3779b185ebca87;
+    // Check it's non-zero (can't compare exact value since it's negative as signed)
+    total = total + (fib != 0);         // 1
+
+    // Max unsigned 64-bit value (all bits set) = -1 as signed int64
+    var allbits = 0xffffffffffffffff;
+    total = total + (allbits == -1);    // 1
+
+    // High bit set: 0x8000000000000000 = INT64_MIN = -9223372036854775808
+    var minval = 0x8000000000000000;
+    total = total + (minval < 0);       // 1
+
+    // 63rd bit set in binary: same as 0x8000000000000000
+    var binval = 0b1000000000000000000000000000000000000000000000000000000000000000;
+    total = total + (binval == minval); // 1
+
+    // Round-trip: large hex constant survives arithmetic
+    var v = 0xdeadbeefcafebabe;
+    total = total + (v != 0);           // 1
+
+    // Octal: 0o1777777777777777777777 = 0xffffffffffffffff = -1
+    var octmax = 0o1777777777777777777777;
+    total = total + (octmax == -1);     // 1
+
+    // Underscore separators still work in large values
+    var sep = 0x9e37_79b1_85eb_ca87;
+    total = total + (sep == fib);       // 1
+
+    // total = 7
+    println(total);
+    return total;
+}

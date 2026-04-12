@@ -3476,10 +3476,13 @@ void CodeGenerator::generate(Program* program) {
 
     // Process enum declarations: store constant values for identifier resolution.
     for (auto& enumDecl : program->enums) {
+        std::vector<std::string> memberNames;
         for (auto& [memberName, memberValue] : enumDecl->members) {
             const std::string fullName = enumDecl->name + "_" + memberName;
             enumConstants_[fullName] = memberValue;
+            memberNames.push_back(memberName);
         }
+        enumMembers_[enumDecl->name] = std::move(memberNames);
     }
 
     // Process struct declarations: store field layouts for struct operations.
@@ -4543,6 +4546,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateBorrowExpr(static_cast<BorrowExpr*>(expr));
     case ASTNodeType::DICT_EXPR:
         return generateDict(static_cast<DictExpr*>(expr));
+    case ASTNodeType::SCOPE_RESOLUTION_EXPR:
+        return generateScopeResolution(static_cast<ScopeResolutionExpr*>(expr));
     default:
         codegenError("Unknown expression type", expr);
     }
@@ -4686,6 +4691,13 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
                 callArgs.push_back(*av);
             }
             return tryConstEval(declIt->second, callArgs);
+        }
+        case ASTNodeType::SCOPE_RESOLUTION_EXPR: {
+            auto* sr = static_cast<ScopeResolutionExpr*>(e);
+            const std::string fullName = sr->scopeName + "_" + sr->memberName;
+            auto eit = enumConstants_.find(fullName);
+            if (eit != enumConstants_.end()) return static_cast<int64_t>(eit->second);
+            return std::nullopt;
         }
         default:
             return std::nullopt;

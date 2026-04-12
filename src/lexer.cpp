@@ -191,7 +191,7 @@ Token Lexer::scanNumber() {
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
-                token.intValue = std::stoll(num, nullptr, 16);
+                token.intValue = static_cast<int64_t>(std::stoull(num, nullptr, 16));
             } catch (const std::out_of_range&) {
                 lexError("Integer literal out of range: " + num, token.line, token.column);
             }
@@ -210,7 +210,7 @@ Token Lexer::scanNumber() {
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
-                token.intValue = std::stoll(num.substr(2), nullptr, 8);
+                token.intValue = static_cast<int64_t>(std::stoull(num.substr(2), nullptr, 8));
             } catch (const std::out_of_range&) {
                 lexError("Integer literal out of range: " + num, token.line, token.column);
             }
@@ -229,7 +229,7 @@ Token Lexer::scanNumber() {
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
-                token.intValue = std::stoll(num.substr(2), nullptr, 2);
+                token.intValue = static_cast<int64_t>(std::stoull(num.substr(2), nullptr, 2));
             } catch (const std::out_of_range&) {
                 lexError("Integer literal out of range: " + num, token.line, token.column);
             }
@@ -270,6 +270,29 @@ Token Lexer::scanNumber() {
         for (size_t i = numStart; i < pos; i++) {
             if (source[i] != '_')
                 num += source[i];
+        }
+    }
+
+    // Scientific notation: e.g. 1e5, 1.5e-3, 2E10, 3e+2
+    // Consume 'e' or 'E' followed by optional '+'/'-' and digits.
+    if (!isAtEnd() && (peek() == 'e' || peek() == 'E')) {
+        // Only treat as exponent if followed by a digit or +/- then digit.
+        const char next1 = peek(1);
+        bool hasExp = false;
+        if (isDigit(next1)) {
+            hasExp = true;
+        } else if ((next1 == '+' || next1 == '-') && isDigit(peek(2))) {
+            hasExp = true;
+        }
+        if (hasExp) {
+            isFloat = true;
+            num += advance(); // consume 'e'/'E'
+            if (peek() == '+' || peek() == '-') {
+                num += advance(); // consume sign
+            }
+            while (!isAtEnd() && isDigit(peek())) {
+                num += advance();
+            }
         }
     }
 
@@ -577,7 +600,12 @@ Token Lexer::scanMultiLineString() {
             tokens.push_back(makeToken(TokenType::COMMA, ","));
             break;
         case ':':
-            tokens.push_back(makeToken(TokenType::COLON, ":"));
+            if (peek() == ':') {
+                advance();
+                tokens.push_back(makeToken(TokenType::SCOPE, "::"));
+            } else {
+                tokens.push_back(makeToken(TokenType::COLON, ":"));
+            }
             break;
         case '?':
             if (peek() == '?') {
@@ -654,7 +682,12 @@ Token Lexer::scanMultiLineString() {
         case '&':
             if (peek() == '&') {
                 advance();
-                tokens.push_back(makeToken(TokenType::AND, "&&"));
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::AND_ASSIGN, "&&="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::AND, "&&"));
+                }
             } else if (peek() == '=') {
                 advance();
                 tokens.push_back(makeToken(TokenType::AMPERSAND_ASSIGN, "&="));
@@ -666,7 +699,12 @@ Token Lexer::scanMultiLineString() {
         case '|':
             if (peek() == '|') {
                 advance();
-                tokens.push_back(makeToken(TokenType::OR, "||"));
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::OR_ASSIGN, "||="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::OR, "||"));
+                }
             } else if (peek() == '>') {
                 advance();
                 tokens.push_back(makeToken(TokenType::PIPE_FORWARD, "|>"));

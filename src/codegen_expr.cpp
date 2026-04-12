@@ -367,6 +367,66 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
     }
 }
 
+llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
+    const std::string& scope = expr->scopeName;
+    const std::string& member = expr->memberName;
+
+    // Check if the scope is a known enum
+    auto enumIt = enumMembers_.find(scope);
+    if (enumIt != enumMembers_.end()) {
+        // Validate the member exists in this enum
+        const auto& members = enumIt->second;
+        bool found = false;
+        for (const auto& m : members) {
+            if (m == member) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            // Build helpful error: list valid members
+            std::string msg = "Enum '" + scope + "' has no member '" + member + "'. Valid members: ";
+            for (size_t i = 0; i < members.size(); i++) {
+                if (i > 0) msg += ", ";
+                msg += members[i];
+            }
+            codegenError(msg, expr);
+        }
+
+        // Resolve to the enum constant value
+        const std::string fullName = scope + "_" + member;
+        auto constIt = enumConstants_.find(fullName);
+        if (constIt != enumConstants_.end()) {
+            auto* ci = llvm::ConstantInt::get(getDefaultType(), constIt->second);
+            if (constIt->second >= 0)
+                nonNegValues_.insert(ci);
+            return ci;
+        }
+        codegenError("Internal error: enum constant '" + fullName + "' not found", expr);
+    }
+
+    // Check if the scope is a known struct (for future extensibility)
+    auto structIt = structDefs_.find(scope);
+    if (structIt != structDefs_.end()) {
+        codegenError("Scope resolution on struct '" + scope + "' is not yet supported. "
+                     "Use field access with '.' instead", expr);
+    }
+
+    // Unknown scope: provide a helpful error message
+    std::string msg = "'" + scope + "' is not a valid scope for '::' operator. "
+                      "Expected an enum name";
+    // Suggest similar enum names
+    std::vector<std::string> candidates;
+    for (const auto& [name, _] : enumMembers_) {
+        candidates.push_back(name);
+    }
+    const std::string suggestion = suggestSimilar(scope, candidates);
+    if (!suggestion.empty()) {
+        msg += " (did you mean '" + suggestion + "'?)";
+    }
+    codegenError(msg, expr);
+}
+
 llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     // Check for use-after-move or use-after-invalidate.
     auto deadIt = deadVars_.find(expr->name);

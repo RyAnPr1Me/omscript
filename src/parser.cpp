@@ -361,6 +361,10 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     for (const auto& name : importParser.structNames_) {
         structNames_.insert(name);
     }
+    // Import enum names for scope resolution
+    for (const auto& name : importParser.enumNames_) {
+        enumNames_.insert(name);
+    }
 }
 
 std::string Parser::parseTypeAnnotation() {
@@ -1637,6 +1641,7 @@ std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
     }
 
     consume(TokenType::RBRACE, "Expected '}' after enum body");
+    enumNames_.insert(nameToken.lexeme);
     return std::make_unique<EnumDecl>(nameToken.lexeme, std::move(members));
 }
 
@@ -1840,12 +1845,12 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
         }
     }
 
-    // Compound assignment operators: +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=
+    // Compound assignment operators: +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=, &&=, ||=
     if (match(TokenType::PLUS_ASSIGN) || match(TokenType::MINUS_ASSIGN) || match(TokenType::STAR_ASSIGN) ||
         match(TokenType::SLASH_ASSIGN) || match(TokenType::PERCENT_ASSIGN) || match(TokenType::AMPERSAND_ASSIGN) ||
         match(TokenType::PIPE_ASSIGN) || match(TokenType::CARET_ASSIGN) || match(TokenType::LSHIFT_ASSIGN) ||
         match(TokenType::RSHIFT_ASSIGN) || match(TokenType::STAR_STAR_ASSIGN) ||
-        match(TokenType::NULL_COALESCE_ASSIGN)) {
+        match(TokenType::NULL_COALESCE_ASSIGN) || match(TokenType::AND_ASSIGN) || match(TokenType::OR_ASSIGN)) {
         const TokenType opType = tokens[current - 1].type;
         const std::string opLexeme = tokens[current - 1].lexeme;
 
@@ -1887,6 +1892,12 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             break;
         case TokenType::NULL_COALESCE_ASSIGN:
             binOp = "??";
+            break;
+        case TokenType::AND_ASSIGN:
+            binOp = "&&";
+            break;
+        case TokenType::OR_ASSIGN:
+            binOp = "||";
             break;
         default:
             error("Unknown compound assignment operator: " + opLexeme);
@@ -2017,6 +2028,45 @@ std::unique_ptr<Expression> Parser::parseTernary() {
 
     if (match(TokenType::QUESTION)) {
         const Token questionToken = tokens[current - 1];
+        // Elvis operator: x ?: default → x ? x : default
+        if (match(TokenType::COLON)) {
+            auto elseExpr = parseTernary();
+            // Duplicate the condition as the then-branch.
+            // For simple identifiers this is safe; for complex expressions
+            // the condition is evaluated once by the ternary codegen (it emits
+            // a branch on the condition and selects the value).  We clone by
+            // wrapping in a fresh IdentifierExpr when the condition is an
+            // identifier, otherwise fall back to a TernaryExpr where condition
+            // and thenExpr share the same AST node structure.
+            std::unique_ptr<Expression> thenClone;
+            if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* id = static_cast<IdentifierExpr*>(expr.get());
+                thenClone = std::make_unique<IdentifierExpr>(id->name);
+                thenClone->line = id->line;
+                thenClone->column = id->column;
+            } else if (expr->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<LiteralExpr*>(expr.get());
+                if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+                    thenClone = std::make_unique<LiteralExpr>(lit->intValue);
+                else if (lit->literalType == LiteralExpr::LiteralType::FLOAT)
+                    thenClone = std::make_unique<LiteralExpr>(lit->floatValue);
+                else
+                    thenClone = std::make_unique<LiteralExpr>(lit->stringValue);
+                thenClone->line = lit->line;
+                thenClone->column = lit->column;
+            } else {
+                // For other expression types, use null coalescing semantics
+                // (x ?? default), which has equivalent behavior for non-null values.
+                auto node = std::make_unique<BinaryExpr>("??", std::move(expr), std::move(elseExpr));
+                node->line = questionToken.line;
+                node->column = questionToken.column;
+                return node;
+            }
+            auto node = std::make_unique<TernaryExpr>(std::move(expr), std::move(thenClone), std::move(elseExpr));
+            node->line = questionToken.line;
+            node->column = questionToken.column;
+            return node;
+        }
         auto thenExpr = parseExpression();
         consume(TokenType::COLON, "Expected ':' in ternary expression");
         auto elseExpr = parseTernary();
@@ -2118,10 +2168,107 @@ std::unique_ptr<Expression> Parser::parseEquality() {
 std::unique_ptr<Expression> Parser::parseComparison() {
     auto left = parseShift();
 
-    while (match(TokenType::LT) || match(TokenType::LE) || match(TokenType::GT) || match(TokenType::GE)) {
-        const std::string op = tokens[current - 1].lexeme;
-        auto right = parseShift();
-        left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    // Chained comparisons: a < b < c desugars to (a < b) && (b < c)
+    // Supports arbitrary chains like a < b <= c > d.
+    if (check(TokenType::LT) || check(TokenType::LE) || check(TokenType::GT) || check(TokenType::GE)) {
+        const Token firstOp = peek();
+        advance();
+        const std::string op1 = firstOp.lexeme;
+        auto mid = parseShift();
+
+        // Check for chained comparison: if another comparison op follows
+        if (check(TokenType::LT) || check(TokenType::LE) || check(TokenType::GT) || check(TokenType::GE)) {
+            // We need to duplicate `mid` for the second comparison.
+            // Clone mid by creating a fresh reference if it's an identifier or literal.
+            std::unique_ptr<Expression> midClone;
+            if (mid->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* id = static_cast<IdentifierExpr*>(mid.get());
+                midClone = std::make_unique<IdentifierExpr>(id->name);
+                midClone->line = id->line;
+                midClone->column = id->column;
+            } else if (mid->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<LiteralExpr*>(mid.get());
+                if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+                    midClone = std::make_unique<LiteralExpr>(lit->intValue);
+                else if (lit->literalType == LiteralExpr::LiteralType::FLOAT)
+                    midClone = std::make_unique<LiteralExpr>(lit->floatValue);
+                else
+                    midClone = std::make_unique<LiteralExpr>(lit->stringValue);
+                midClone->line = lit->line;
+                midClone->column = lit->column;
+            } else {
+                // For complex expressions, fall back to non-chained behavior
+                left = std::make_unique<BinaryExpr>(op1, std::move(left), std::move(mid));
+                while (match(TokenType::LT) || match(TokenType::LE) || match(TokenType::GT) || match(TokenType::GE)) {
+                    const std::string op = tokens[current - 1].lexeme;
+                    auto right = parseShift();
+                    left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+                }
+                goto check_in;
+            }
+
+            // First comparison: left op1 mid
+            auto cmp1 = std::make_unique<BinaryExpr>(op1, std::move(left), std::move(mid));
+            cmp1->line = firstOp.line;
+            cmp1->column = firstOp.column;
+
+            std::unique_ptr<Expression> result = std::move(cmp1);
+
+            // Continue chaining: midClone op2 right ...
+            left = std::move(midClone);
+            while (match(TokenType::LT) || match(TokenType::LE) || match(TokenType::GT) || match(TokenType::GE)) {
+                const std::string opN = tokens[current - 1].lexeme;
+                auto right = parseShift();
+
+                // Clone right for potential further chaining
+                std::unique_ptr<Expression> rightClone;
+                if (check(TokenType::LT) || check(TokenType::LE) || check(TokenType::GT) || check(TokenType::GE)) {
+                    if (right->type == ASTNodeType::IDENTIFIER_EXPR) {
+                        auto* id = static_cast<IdentifierExpr*>(right.get());
+                        rightClone = std::make_unique<IdentifierExpr>(id->name);
+                        rightClone->line = id->line;
+                        rightClone->column = id->column;
+                    } else if (right->type == ASTNodeType::LITERAL_EXPR) {
+                        auto* lit = static_cast<LiteralExpr*>(right.get());
+                        if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+                            rightClone = std::make_unique<LiteralExpr>(lit->intValue);
+                        else if (lit->literalType == LiteralExpr::LiteralType::FLOAT)
+                            rightClone = std::make_unique<LiteralExpr>(lit->floatValue);
+                        else
+                            rightClone = std::make_unique<LiteralExpr>(lit->stringValue);
+                        rightClone->line = lit->line;
+                        rightClone->column = lit->column;
+                    }
+                }
+
+                auto cmpN = std::make_unique<BinaryExpr>(opN, std::move(left), std::move(right));
+                result = std::make_unique<BinaryExpr>("&&", std::move(result), std::move(cmpN));
+
+                if (rightClone) {
+                    left = std::move(rightClone);
+                } else {
+                    break;
+                }
+            }
+            left = std::move(result);
+        } else {
+            left = std::make_unique<BinaryExpr>(op1, std::move(left), std::move(mid));
+        }
+    }
+
+check_in:
+    // 'in' operator: x in arr → array_contains(arr, x)
+    // Placed at comparison precedence so it binds like other relational ops.
+    if (match(TokenType::IN)) {
+        const Token inToken = tokens[current - 1];
+        auto container = parseShift();
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(std::move(container)); // array is first arg
+        args.push_back(std::move(left));      // value is second arg
+        auto callExpr = std::make_unique<CallExpr>("array_contains", std::move(args));
+        callExpr->line = inToken.line;
+        callExpr->column = inToken.column;
+        return callExpr;
     }
 
     return left;
@@ -2234,15 +2381,48 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
             expr->line = opToken.line;
             expr->column = opToken.column;
         }
-        // Handle array indexing
+        // Handle array indexing or slice syntax arr[start:end]
         else if (match(TokenType::LBRACKET)) {
             const Token bracketToken = tokens[current - 1];
-            auto index = parseExpression();
-            consume(TokenType::RBRACKET, "Expected ']' after array index");
-            auto indexExpr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
-            indexExpr->line = bracketToken.line;
-            indexExpr->column = bracketToken.column;
-            expr = std::move(indexExpr);
+            // Check for slice syntax: arr[start:end]
+            // If first token after '[' is ':', it's arr[:end] (start defaults to 0)
+            if (match(TokenType::COLON)) {
+                // arr[:end] → array_slice(arr, 0, end)
+                auto endIdx = parseExpression();
+                consume(TokenType::RBRACKET, "Expected ']' after slice");
+                std::vector<std::unique_ptr<Expression>> args;
+                args.push_back(std::move(expr));
+                auto zeroLit = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+                zeroLit->line = bracketToken.line;
+                zeroLit->column = bracketToken.column;
+                args.push_back(std::move(zeroLit));
+                args.push_back(std::move(endIdx));
+                auto callExpr = std::make_unique<CallExpr>("array_slice", std::move(args));
+                callExpr->line = bracketToken.line;
+                callExpr->column = bracketToken.column;
+                expr = std::move(callExpr);
+            } else {
+                auto index = parseExpression();
+                if (match(TokenType::COLON)) {
+                    // arr[start:end] → array_slice(arr, start, end)
+                    auto endIdx = parseExpression();
+                    consume(TokenType::RBRACKET, "Expected ']' after slice");
+                    std::vector<std::unique_ptr<Expression>> args;
+                    args.push_back(std::move(expr));
+                    args.push_back(std::move(index));
+                    args.push_back(std::move(endIdx));
+                    auto callExpr = std::make_unique<CallExpr>("array_slice", std::move(args));
+                    callExpr->line = bracketToken.line;
+                    callExpr->column = bracketToken.column;
+                    expr = std::move(callExpr);
+                } else {
+                    consume(TokenType::RBRACKET, "Expected ']' after array index");
+                    auto indexExpr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+                    indexExpr->line = bracketToken.line;
+                    indexExpr->column = bracketToken.column;
+                    expr = std::move(indexExpr);
+                }
+            }
         }
         // Handle field access (dot notation) or method call (obj.method(args))
         else if (match(TokenType::DOT)) {
@@ -2371,6 +2551,15 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
 
     if (match(TokenType::IDENTIFIER)) {
         const Token token = tokens[current - 1];
+        // Scope resolution: Enum::Member creates a ScopeResolutionExpr
+        // that is resolved in codegen with proper scope validation.
+        if (match(TokenType::SCOPE)) {
+            const Token memberToken = consume(TokenType::IDENTIFIER, "Expected member name after '::'");
+            auto expr = std::make_unique<ScopeResolutionExpr>(token.lexeme, memberToken.lexeme);
+            expr->line = token.line;
+            expr->column = token.column;
+            return expr;
+        }
         // Check if this is a struct literal: StructName { field: value, ... }
         if (structNames_.count(token.lexeme) && check(TokenType::LBRACE)) {
             advance(); // consume '{'

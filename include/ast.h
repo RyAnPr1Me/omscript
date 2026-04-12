@@ -60,7 +60,8 @@ enum class ASTNodeType {
     INVALIDATE_STMT,
     MOVE_DECL,
     PREFETCH_STMT,
-    DEFER_STMT
+    DEFER_STMT,
+    SCOPE_RESOLUTION_EXPR
 };
 
 class ASTNode {
@@ -228,6 +229,16 @@ class PipeExpr : public Expression {
 
     PipeExpr(std::unique_ptr<Expression> l, const std::string& fn)
         : Expression(ASTNodeType::PIPE_EXPR), left(std::move(l)), functionName(fn) {}
+};
+
+/// Scope resolution expression: Scope::Member (e.g. Color::RED, Status::OK)
+class ScopeResolutionExpr : public Expression {
+  public:
+    std::string scopeName;   ///< The scope/namespace name (e.g. "Color")
+    std::string memberName;  ///< The member name (e.g. "RED")
+
+    ScopeResolutionExpr(const std::string& scope, const std::string& member)
+        : Expression(ASTNodeType::SCOPE_RESOLUTION_EXPR), scopeName(scope), memberName(member) {}
 };
 
 // Statements

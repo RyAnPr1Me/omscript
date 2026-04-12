@@ -1719,6 +1719,12 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "PIPE_FORWARD";
     case omscript::TokenType::SPREAD:
         return "SPREAD";
+    case omscript::TokenType::SCOPE:
+        return "SCOPE";
+    case omscript::TokenType::AND_ASSIGN:
+        return "AND_ASSIGN";
+    case omscript::TokenType::OR_ASSIGN:
+        return "OR_ASSIGN";
     case omscript::TokenType::LPAREN:
         return "LPAREN";
     case omscript::TokenType::RPAREN:

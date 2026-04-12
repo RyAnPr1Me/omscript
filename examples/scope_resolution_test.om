@@ -1,0 +1,54 @@
+// Test :: scope resolution operator for enums
+enum Color {
+    RED,
+    GREEN = 10,
+    BLUE
+}
+
+enum Status {
+    OK = 0,
+    ERROR = 1,
+    PENDING = 2
+}
+
+fn main() {
+    var total = 0;
+
+    // Scope resolution: Color::RED is equivalent to Color_RED
+    total = total + (Color::RED == 0);      // 1
+    total = total + (Color::GREEN == 10);   // 1
+    total = total + (Color::BLUE == 11);    // 1
+
+    // Use in expressions
+    var c = Color::GREEN;
+    total = total + (c == 10);              // 1
+
+    // Status enum with scope resolution
+    total = total + (Status::OK == 0);      // 1
+    total = total + (Status::ERROR == 1);   // 1
+    total = total + (Status::PENDING == 2); // 1
+
+    // Compare scope-resolved with underscore-style
+    total = total + (Color::RED == Color_RED);     // 1
+    total = total + (Status::ERROR == Status_ERROR); // 1
+
+    // Use in switch
+    var s = Status::ERROR;
+    switch (s) {
+        case 0: { break; }
+        case 1: {
+            total = total + 1;  // 1
+            break;
+        }
+        case 2: { break; }
+    }
+
+    // Use in conditions
+    if (c == Color::GREEN) {
+        total = total + 1;  // 1
+    }
+
+    // total = 11
+    println(total);
+    return total;
+}
