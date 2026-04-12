@@ -1709,36 +1709,47 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     while (true) {
         auto* orInst = llvm::dyn_cast<llvm::BinaryOperator>(cur);
         if (!orInst || orInst->getOpcode() != llvm::Instruction::Or) break;
-        auto* shrInst = llvm::dyn_cast<llvm::BinaryOperator>(orInst->getOperand(1));
-        if (!shrInst) {
-            shrInst = llvm::dyn_cast<llvm::BinaryOperator>(orInst->getOperand(0));
-            if (!shrInst) break;
+        llvm::Value* shrCandidate = orInst->getOperand(1);
+        llvm::Value* prevCandidate = orInst->getOperand(0);
+        auto* shrInst = llvm::dyn_cast<llvm::BinaryOperator>(shrCandidate);
+        if (!shrInst || (shrInst->getOpcode() != llvm::Instruction::LShr &&
+                         shrInst->getOpcode() != llvm::Instruction::AShr)) {
+            // Try the other ordering: or(shr, prev)
+            std::swap(shrCandidate, prevCandidate);
+            shrInst = llvm::dyn_cast<llvm::BinaryOperator>(shrCandidate);
+            if (!shrInst || (shrInst->getOpcode() != llvm::Instruction::LShr &&
+                             shrInst->getOpcode() != llvm::Instruction::AShr))
+                break;
         }
-        if (shrInst->getOpcode() != llvm::Instruction::LShr &&
-            shrInst->getOpcode() != llvm::Instruction::AShr) break;
         ++orLayers;
-        // The non-shift operand is the previous layer
-        llvm::Value* prev = orInst->getOperand(0);
-        if (prev == shrInst) prev = orInst->getOperand(1);
-        if (auto* prevShr = llvm::dyn_cast<llvm::BinaryOperator>(prev)) {
-            if (prevShr == shrInst) break;
-        }
-        cur = prev;
-        if (orLayers >= 4) break; // enough evidence
+        cur = prevCandidate;
+        if (orLayers >= 8) break;  // safety cap — at most 6 layers (1,2,4,8,16,32)
     }
 
     if (orLayers < 3) return std::nullopt;
 
-    // The base (before smearing) should be: sub(original_x, 1)
+    // The base (before smearing) should be: sub(original_x, 1) or add(original_x, -1)
+    // LLVM normalizes x - 1 to x + (-1) in many cases, so we must accept both.
     auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(cur);
-    if (!subInst || subInst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
-    auto subOne = getConstIntValue(subInst->getOperand(1));
-    if (!subOne || *subOne != 1) return std::nullopt;
+    if (!subInst) return std::nullopt;
+    llvm::Value* baseX = nullptr;
+    if (subInst->getOpcode() == llvm::Instruction::Sub) {
+        auto subOne = getConstIntValue(subInst->getOperand(1));
+        if (!subOne || *subOne != 1) return std::nullopt;
+        baseX = subInst->getOperand(0);
+    } else if (subInst->getOpcode() == llvm::Instruction::Add) {
+        // add(x, -1) = x - 1 in two's complement
+        auto addVal = getConstIntValue(subInst->getOperand(1));
+        if (!addVal || *addVal != -1LL) return std::nullopt;
+        baseX = subInst->getOperand(0);
+    } else {
+        return std::nullopt;
+    }
 
     IdiomMatch match;
     match.idiom = Idiom::NextPowerOf2;
     match.rootInst = inst;
-    match.operands = {subInst->getOperand(0)};  // original x
+    match.operands = {baseX};  // original x
     match.bitWidth = inst->getType()->getIntegerBitWidth();
     return match;
 }
