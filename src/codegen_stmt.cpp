@@ -1967,9 +1967,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // SCEV to compute exact trip counts and prove induction variable
     // monotonicity, which is critical for loop vectorization and unrolling.
     builder->SetInsertPoint(incBB);
-    // Reuse curIdx from condBB — the hidden index alloca is only modified
-    // here in incBB (and in entry).  User code cannot modify it, so the
-    // value from condBB is still valid.  This eliminates a redundant load.
+    // Reuse curIdx from condBB — the hidden index alloca is only modified in
+    // entry (store 0) and incBB (store next).  User code cannot modify it,
+    // so the value from condBB is still valid.  This eliminates a redundant load.
     llvm::Value* incIdx = builder->CreateAdd(curIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next",
                                              /*HasNUW=*/true, /*HasNSW=*/true);
     builder->CreateStore(incIdx, idxAlloca);

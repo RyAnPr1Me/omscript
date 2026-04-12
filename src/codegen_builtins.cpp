@@ -1375,9 +1375,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Value* v = builder->CreateSub(minSize, one64, "concat.pm1", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(),
                 llvm::Intrinsic::ctlz, {getDefaultType()});
-            // is_zero_poison=true: minSize is always >= 2 here (totalLen >= 1
-            // because both len1 and len2 are non-zero on this path), so
-            // v (= minSize - 1) is always >= 1, never zero.
+            // is_zero_poison=true: minSize = totalLen + 1 >= 2 (totalLen is the
+            // sum of two string lengths and is always >= 1 on any concat path),
+            // so v (= minSize - 1) is always >= 1, never zero.
             llvm::Value* lz = builder->CreateCall(ctlzFn,
                 {v, llvm::ConstantInt::getTrue(*context)}, "concat.lz");
             llvm::Value* shift = builder->CreateSub(
