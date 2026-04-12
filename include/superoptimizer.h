@@ -182,6 +182,28 @@ unsigned convertSDivToUDiv(llvm::Function& func);
 /// Returns the number of instructions updated.
 [[nodiscard]] unsigned inferNonNegativeFlags(llvm::Function& func);
 
+/// Expand urem-by-constant to multiplicative-inverse (mul/shift/sub) sequence
+/// at the IR level.  This enables the loop vectorizer to vectorize loops
+/// containing modulo operations: the expanded form uses only vectorizable
+/// instructions (zext, mul, lshr, trunc, sub) instead of a single non-
+/// vectorizable urem.  Only targets non-power-of-2 constants in [3, 1024].
+/// Returns the number of urem instructions expanded.
+unsigned constantModuloStrengthReduce(llvm::Function& func);
+
+/// Lower small switch instructions (≤4 non-default cases) to chained select
+/// instructions.  Eliminates control flow inside hot loops, enabling
+/// vectorization and removing branch misprediction penalties.
+/// Only applies when all cases and default converge to a single merge block
+/// and produce values through PHI nodes with no side effects.
+/// Returns the number of switches lowered.
+unsigned lowerSmallSwitch(llvm::Function& func);
+
+/// Propagate llvm.assume bounds information to eliminate redundant
+/// comparisons in dominated basic blocks.  Targets patterns like:
+///   llvm.assume(i < len)  ...  icmp ult i, len  →  true
+/// Returns the number of comparisons eliminated.
+unsigned propagateAssumeBounds(llvm::Function& func);
+
 } // namespace superopt
 } // namespace omscript
 

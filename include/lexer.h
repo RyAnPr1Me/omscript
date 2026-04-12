@@ -20,6 +20,7 @@ enum class TokenType {
     INTEGER,
     FLOAT,
     STRING,
+    BYTES_LITERAL,  // 0x"AABBCC" — hex byte array literal
     IDENTIFIER,
 
     // Keywords

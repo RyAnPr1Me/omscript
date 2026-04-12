@@ -144,6 +144,40 @@ Token Lexer::scanNumber() {
     if (peek() == '0') {
         const char prefix = peek(1);
         if (prefix == 'x' || prefix == 'X') {
+            // Peek further: 0x"..." is a bytes literal, 0x<hexdigit> is an integer
+            if (peek(2) == '"') {
+                // Bytes literal: 0x"AABBCC..." — pairs of hex digits become byte values
+                advance(); // '0'
+                advance(); // 'x'/'X'
+                advance(); // '"'
+                std::string hexBytes;
+                while (!isAtEnd() && peek() != '"') {
+                    const char c1 = peek();
+                    if (c1 == ' ' || c1 == '\t' || c1 == '_') {
+                        advance(); // allow whitespace/underscore separators
+                        continue;
+                    }
+                    if (!isHexDigit(c1)) {
+                        lexError("Expected hex digit in bytes literal", line, column);
+                    }
+                    advance();
+                    const char c2 = peek();
+                    if (isAtEnd() || c2 == '"') {
+                        lexError("Bytes literal requires pairs of hex digits (odd digit count)", line, column);
+                    }
+                    if (!isHexDigit(c2)) {
+                        lexError("Expected second hex digit in bytes literal pair", line, column);
+                    }
+                    advance();
+                    hexBytes += c1;
+                    hexBytes += c2;
+                }
+                if (isAtEnd()) {
+                    lexError("Unterminated bytes literal", line, column);
+                }
+                advance(); // closing '"'
+                return makeToken(TokenType::BYTES_LITERAL, hexBytes);
+            }
             // Hex literal: 0x...
             num += advance(); // '0'
             num += advance(); // 'x'/'X'

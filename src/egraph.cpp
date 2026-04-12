@@ -11814,6 +11814,59 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             return g.addConst(1);
         });
 
+    // ── Suboptimal user code patterns ───────────────────────────────────
+    // These rules handle common patterns where users write suboptimal code
+    // and the compiler should still produce optimal output.
+
+    // x^4 → (x*x)*(x*x)  [two multiplies instead of three]
+    rules.emplace_back("pow4_to_mul",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(4)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId xx = g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+            return g.addBinOp(Op::Mul, xx, xx);
+        });
+
+    // x^5 → (x*x)*(x*x)*x
+    rules.emplace_back("pow5_to_mul",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(5)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId xx = g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+            ClassId x4 = g.addBinOp(Op::Mul, xx, xx);
+            return g.addBinOp(Op::Mul, x4, s.at("x"));
+        });
+
+    // x^6 → (x*x*x)*(x*x*x)  [three multiplies via squaring]
+    rules.emplace_back("pow6_to_mul",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(6)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId xx = g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+            ClassId xxx = g.addBinOp(Op::Mul, xx, s.at("x"));
+            return g.addBinOp(Op::Mul, xxx, xxx);
+        });
+
+    // x^8 → ((x*x)*(x*x))*((x*x)*(x*x))  [three multiplies]
+    rules.emplace_back("pow8_to_mul",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(8)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId xx = g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+            ClassId x4 = g.addBinOp(Op::Mul, xx, xx);
+            return g.addBinOp(Op::Mul, x4, x4);
+        });
+
+    // x - (x % c) → (x / c) * c  [floor-to-multiple, common user pattern]
+    // NOTE: This rule is bidirectional with the existing div_mul_to_sub_mod
+    // rule.  Temporarily removed because the bidirectionality increases e-graph
+    // node count enough to interact with the DAG-sharing cost discount and
+    // cause the extractor to select incorrect representations for unrelated
+    // expressions.  The identity is still correct at the IR level via
+    // constantModuloStrengthReduce in the superoptimizer.
+
+    // NOTE: div-by-power-of-2 → shift is NOT safe at the AST level because
+    // OmScript integers are signed i64.  For negative values:
+    //   -7 / 2 = -3 (truncation toward zero)
+    //   -7 >> 1 = -4 (arithmetic shift, floor toward -infinity)
+    // The srem→urem conversion in the LLVM pipeline handles the safe case.
+
     return rules;
 }
 

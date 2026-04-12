@@ -2307,6 +2307,28 @@ std::unique_ptr<Expression> Parser::parseCall() {
 }
 
 std::unique_ptr<Expression> Parser::parsePrimary() {
+    if (match(TokenType::BYTES_LITERAL)) {
+        // 0x"AABBCC" — hex byte array literal.
+        // Desugar at parse time into an ArrayExpr of integer literals,
+        // so no changes are needed in the type system or codegen.
+        const Token token = tokens[current - 1];
+        const std::string& hexStr = token.lexeme; // pairs of hex digits, e.g. "DEADBEEF"
+        std::vector<std::unique_ptr<Expression>> elems;
+        elems.reserve(hexStr.size() / 2);
+        for (size_t i = 0; i < hexStr.size(); i += 2) {
+            const std::string pair = hexStr.substr(i, 2);
+            const long long byteVal = std::stoll(pair, nullptr, 16);
+            auto lit = std::make_unique<LiteralExpr>(byteVal);
+            lit->line = token.line;
+            lit->column = token.column;
+            elems.push_back(std::move(lit));
+        }
+        auto arr = std::make_unique<ArrayExpr>(std::move(elems));
+        arr->line = token.line;
+        arr->column = token.column;
+        return arr;
+    }
+
     if (match(TokenType::INTEGER)) {
         const Token token = tokens[current - 1];
         auto expr = std::make_unique<LiteralExpr>(token.intValue);
