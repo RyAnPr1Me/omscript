@@ -281,6 +281,9 @@ class CodeGenerator {
     // Enum constant values (name → integer value), populated from enum declarations.
     llvm::StringMap<long long> enumConstants_;
 
+    // Enum scope registry: maps enum name → set of member names for scope resolution validation.
+    std::unordered_map<std::string, std::vector<std::string>> enumMembers_;
+
     // Struct type definitions: struct name → ordered list of field names.
     std::unordered_map<std::string, std::vector<std::string>> structDefs_;
     // Rich struct field metadata: struct name → ordered list of StructField with attributes.
@@ -533,6 +536,7 @@ class CodeGenerator {
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateDict(DictExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
+    llvm::Value* generateScopeResolution(ScopeResolutionExpr* expr);
 
     // ── Array Escape Analysis ──────────────────────────────────────
     /// Check whether an array literal assigned to @p varName can be

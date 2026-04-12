@@ -125,6 +125,9 @@ class Parser {
     /// Known struct names for parsing struct literals.
     std::unordered_set<std::string> structNames_;
 
+    /// Known enum names for scope resolution validation.
+    std::unordered_set<std::string> enumNames_;
+
     std::unique_ptr<Expression> parseExpression();
     std::unique_ptr<Expression> parseAssignment();
     std::unique_ptr<Expression> parseTernary();

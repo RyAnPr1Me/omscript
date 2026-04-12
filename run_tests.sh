@@ -710,6 +710,15 @@ test_program "examples/assume_unreachable_expect_test.om" 125
 test_program "examples/array_string_builtins_test.om" 178
 test_program "examples/method_call_test.om" 129
 
+# New syntax and optimization features
+test_program "examples/scientific_notation_test.om" 7
+test_program "examples/scope_resolution_test.om" 11
+test_program "examples/slice_syntax_test.om" 11
+test_program "examples/in_operator_test.om" 5
+test_program "examples/logical_assign_test.om" 8
+test_program "examples/elvis_operator_test.om" 5
+test_program "examples/chained_comparison_test.om" 7
+
 echo ""
 echo "============================================"
 if [ $FAILURES -eq 0 ]; then

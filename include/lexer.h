@@ -116,6 +116,9 @@ enum class TokenType {
     FAT_ARROW,
     PIPE_FORWARD,
     SPREAD,
+    SCOPE,              // :: — scope resolution operator
+    AND_ASSIGN,         // &&= — logical AND compound assignment
+    OR_ASSIGN,          // ||= — logical OR compound assignment
 
     // Delimiters
     LPAREN,

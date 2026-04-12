@@ -1,0 +1,37 @@
+// Test scientific notation for float literals
+fn main() {
+    var total = 0;
+
+    // Basic scientific notation
+    var a = 1e2;       // 100.0
+    total = total + (a == 100.0);  // 1
+
+    var b = 1.5e2;     // 150.0
+    total = total + (b == 150.0);  // 1
+
+    // Negative exponent
+    var c = 1e0;       // 1.0
+    total = total + (c == 1.0);    // 1
+
+    // Capital E
+    var d = 2E3;       // 2000.0
+    total = total + (d == 2000.0); // 1
+
+    // Explicit positive exponent
+    var e = 5e+1;      // 50.0
+    total = total + (e == 50.0);   // 1
+
+    // Negative exponent
+    var f = 1e-1;      // 0.1
+    // Can't easily compare floats directly, use multiplication check
+    var f10 = f * 10.0;
+    total = total + (f10 == 1.0);  // 1
+
+    // Integer part with scientific notation becomes float
+    var g = 3e1;       // 30.0
+    total = total + (g == 30.0);   // 1
+
+    // total = 7
+    println(total);
+    return total;
+}

@@ -1,0 +1,37 @@
+// Test 'in' operator for containment testing
+fn main() {
+    var total = 0;
+    var arr = [10, 20, 30, 40, 50];
+
+    // Basic containment check
+    if (20 in arr) {
+        total = total + 1;  // 1
+    }
+
+    // Non-contained element
+    if (99 in arr) {
+        total = total + 100;  // should NOT execute
+    }
+
+    // Use in expression context
+    total = total + (10 in arr);   // 1
+    total = total + (50 in arr);   // 1
+    total = total + (999 in arr);  // 0
+
+    // In with variables
+    var needle = 30;
+    total = total + (needle in arr);  // 1
+
+    // Empty array
+    var empty = [];
+    total = total + (1 in empty);  // 0 (should not be found)
+
+    // Single element
+    var single = [42];
+    total = total + (42 in single);   // 1
+    total = total + (43 in single);   // 0
+
+    // total = 5
+    println(total);
+    return total;
+}

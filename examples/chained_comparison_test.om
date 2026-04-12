@@ -1,0 +1,55 @@
+// Test chained comparisons: a < b < c desugars to (a < b) && (b < c)
+fn main() {
+    var total = 0;
+
+    // Simple chained comparison
+    var x = 5;
+    if (1 < x < 10) {
+        total = total + 1;  // 1
+    }
+
+    // Chained comparison that fails
+    if (1 < x < 3) {
+        total = total + 100;  // should NOT execute (x=5, 5 < 3 is false)
+    }
+
+    // Chained with <=
+    if (1 <= x <= 5) {
+        total = total + 1;  // 1
+    }
+
+    // Chained with >
+    if (10 > x > 0) {
+        total = total + 1;  // 1
+    }
+
+    // Mixed operators
+    if (0 < x <= 5) {
+        total = total + 1;  // 1
+    }
+
+    // Chained with variables
+    var lo = 1;
+    var hi = 10;
+    if (lo < x < hi) {
+        total = total + 1;  // 1
+    }
+
+    // Fails when middle value doesn't satisfy both
+    var y = 15;
+    if (1 < y < 10) {
+        total = total + 100;  // should NOT execute
+    }
+
+    // Simple non-chained still works
+    if (x > 3) {
+        total = total + 1;  // 1
+    }
+    if (x < 10) {
+        total = total + 1;  // 1
+    }
+
+    // total = 7
+    println(total);
+    return total;
+}

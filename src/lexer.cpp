@@ -273,6 +273,29 @@ Token Lexer::scanNumber() {
         }
     }
 
+    // Scientific notation: e.g. 1e5, 1.5e-3, 2E10, 3e+2
+    // Consume 'e' or 'E' followed by optional '+'/'-' and digits.
+    if (!isAtEnd() && (peek() == 'e' || peek() == 'E')) {
+        // Only treat as exponent if followed by a digit or +/- then digit.
+        const char next1 = peek(1);
+        bool hasExp = false;
+        if (isDigit(next1)) {
+            hasExp = true;
+        } else if ((next1 == '+' || next1 == '-') && isDigit(peek(2))) {
+            hasExp = true;
+        }
+        if (hasExp) {
+            isFloat = true;
+            num += advance(); // consume 'e'/'E'
+            if (peek() == '+' || peek() == '-') {
+                num += advance(); // consume sign
+            }
+            while (!isAtEnd() && isDigit(peek())) {
+                num += advance();
+            }
+        }
+    }
+
     Token token = makeToken(isFloat ? TokenType::FLOAT : TokenType::INTEGER, num);
     if (isFloat) {
         try {
@@ -577,7 +600,12 @@ Token Lexer::scanMultiLineString() {
             tokens.push_back(makeToken(TokenType::COMMA, ","));
             break;
         case ':':
-            tokens.push_back(makeToken(TokenType::COLON, ":"));
+            if (peek() == ':') {
+                advance();
+                tokens.push_back(makeToken(TokenType::SCOPE, "::"));
+            } else {
+                tokens.push_back(makeToken(TokenType::COLON, ":"));
+            }
             break;
         case '?':
             if (peek() == '?') {
@@ -654,7 +682,12 @@ Token Lexer::scanMultiLineString() {
         case '&':
             if (peek() == '&') {
                 advance();
-                tokens.push_back(makeToken(TokenType::AND, "&&"));
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::AND_ASSIGN, "&&="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::AND, "&&"));
+                }
             } else if (peek() == '=') {
                 advance();
                 tokens.push_back(makeToken(TokenType::AMPERSAND_ASSIGN, "&="));
@@ -666,7 +699,12 @@ Token Lexer::scanMultiLineString() {
         case '|':
             if (peek() == '|') {
                 advance();
-                tokens.push_back(makeToken(TokenType::OR, "||"));
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::OR_ASSIGN, "||="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::OR, "||"));
+                }
             } else if (peek() == '>') {
                 advance();
                 tokens.push_back(makeToken(TokenType::PIPE_FORWARD, "|>"));
