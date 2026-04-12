@@ -2918,15 +2918,18 @@ static bool replaceIdiom(IdiomMatch& match) {
                         for (unsigned m = 0; m < 2; ++m) {
                             llvm::Value* factorA = mul->getOperand(m);
                             llvm::Value* factorB = mul->getOperand(1-m);
-                            // Check if factorB = add(factorA, ±1)
+                            // Check if factorB = add(factorA, ±1) in either order
                             auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(
                                 factorB);
                             if (!addInst) continue;
                             if (addInst->getOpcode() != llvm::Instruction::Add)
                                 continue;
-                            if (addInst->getOperand(0) != factorA) continue;
-                            auto cv = getConstIntValue(addInst->getOperand(1));
-                            if (cv && (*cv == 1 || *cv == -1)) return true;
+                            // Check both add(factorA, ±1) and add(±1, factorA)
+                            for (unsigned addOp = 0; addOp < 2; ++addOp) {
+                                if (addInst->getOperand(addOp) != factorA) continue;
+                                auto cv = getConstIntValue(addInst->getOperand(1-addOp));
+                                if (cv && (*cv == 1 || *cv == -1)) return true;
+                            }
                         }
                         return false;
                     };
@@ -5402,20 +5405,24 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
                 // for x ≥ 2.
                 //
                 // To correctly cover BOTH paths through the LCSSA phi we use:
-                //   select(x > 1, 63 - ctlz(x, true), 0)
+                //   select(x > 1, 63 - ctlz(x, false), 0)
                 //
                 // Verification:
                 //   x = 0 → select false → 0 ✓  (loop never runs)
                 //   x = 1 → select false → 0 ✓  (loop never runs)
-                //   x = 2 → select true  → 63 - ctlz(2,true)=63-62=1 ✓
-                //   x = 4 → select true  → 63 - ctlz(4,true)=63-61=2 ✓
+                //   x = 2 → select true  → 63 - ctlz(2,false)=63-62=1 ✓
+                //   x = 4 → select true  → 63 - ctlz(4,false)=63-61=2 ✓
                 //   x = -1 → select false (signed > 1 is false) → 0
                 //           but loop also gives 0 for negative x (never enters)
+                //
+                // Use is_zero_undef=false for safety: LLVM may speculatively
+                // evaluate both arms of a select, so ctlz(0, true) could be
+                // undefined when x=0. ctlz(0, false)=64 is safe (result is
+                // discarded by the select anyway since guardCmp is false).
                 llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(M,
                     llvm::Intrinsic::ctlz, {i64Ty});
-                // ctlz(x, /*is_zero_undef=*/true) — guarded by select(x>1, ...)
-                llvm::Constant* trueVal = llvm::ConstantInt::getTrue(ctx);
-                llvm::Value* clz = builder.CreateCall(ctlzFn, {xInit, trueVal},
+                llvm::Constant* falseVal = llvm::ConstantInt::getFalse(ctx);
+                llvm::Value* clz = builder.CreateCall(ctlzFn, {xInit, falseVal},
                                                       "loop.ctlz");
                 // 63 - clz = bit_width - 1 - clz
                 llvm::Value* log2val = builder.CreateSub(
@@ -5493,10 +5500,41 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
                             auto* newBr = bodyBuilder.CreateBr(exitBB);
                             (void)newBr;
                             bodyTerm->eraseFromParent();
-                            // Remove bb from PHI nodes in the loop header
+                            // Remove bb from PHI nodes in the loop header.
                             // (the back-edge is now dead)
+                            // If a PHI had exactly 2 incoming values (preheader
+                            // + back-edge), removing the back-edge leaves it with
+                            // 1 incoming value which is invalid in LLVM IR.  We
+                            // must replace such PHIs with their remaining value.
+                            llvm::SmallVector<llvm::PHINode*, 4> toCollapse;
                             for (auto& phi2 : bb.phis()) {
-                                phi2.removeIncomingValue(&bb, /*DeletePHIIfEmpty=*/false);
+                                if (phi2.getNumIncomingValues() == 2) {
+                                    // Will be left with 1 value after removal.
+                                    toCollapse.push_back(&phi2);
+                                } else {
+                                    phi2.removeIncomingValue(&bb,
+                                        /*DeletePHIIfEmpty=*/false);
+                                }
+                            }
+                            for (auto* phi2 : toCollapse) {
+                                // Find the non-back-edge incoming value
+                                // (the one that comes from outside the loop).
+                                llvm::Value* survivor = nullptr;
+                                for (unsigned i = 0; i < phi2->getNumIncomingValues(); ++i) {
+                                    if (phi2->getIncomingBlock(i) != &bb) {
+                                        survivor = phi2->getIncomingValue(i);
+                                        break;
+                                    }
+                                }
+                                if (survivor) {
+                                    phi2->replaceAllUsesWith(survivor);
+                                    phi2->eraseFromParent();
+                                } else {
+                                    // All incoming edges were back-edges — shouldn't
+                                    // happen in well-formed LLVM IR but handle it.
+                                    phi2->removeIncomingValue(&bb,
+                                        /*DeletePHIIfEmpty=*/true);
+                                }
                             }
                         }
                     }
