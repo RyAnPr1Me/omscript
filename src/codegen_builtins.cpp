@@ -877,9 +877,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "sum.elem");
         llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* newAcc = builder->CreateAdd(acc, elem, "sum.newacc");
-        llvm::Value* newIdx = builder->CreateAdd(idx, llvm::ConstantInt::get(getDefaultType(), 1), "sum.newidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        // Eliminates a redundant add and provides SCEV with tight nsw+nuw flags.
         acc->addIncoming(newAcc, bodyBB);
-        idx->addIncoming(newIdx, bodyBB);
+        idx->addIncoming(offset, bodyBB);
         auto* backBr_674 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 4> mds;
@@ -1587,9 +1588,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // If memchr returns null, return -1; otherwise return (found - strPtr)
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNull = builder->CreateICmpEQ(found, nullPtr, "strfind.isnull");
-        llvm::Value* foundInt = builder->CreatePtrToInt(found, getDefaultType(), "strfind.foundint");
-        llvm::Value* baseInt = builder->CreatePtrToInt(strPtr, getDefaultType(), "strfind.baseint");
-        llvm::Value* offset = builder->CreateSub(foundInt, baseInt, "strfind.offset");
+        llvm::Value* offset = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), found, strPtr, "strfind.offset");
         llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
         return builder->CreateSelect(isNull, negOne, offset, "strfind.result");
     }
@@ -2099,9 +2098,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNull = builder->CreateICmpEQ(result, nullPtr, "indexof.isnull");
-        llvm::Value* foundInt = builder->CreatePtrToInt(result, getDefaultType(), "indexof.foundint");
-        llvm::Value* baseInt = builder->CreatePtrToInt(haystackPtr, getDefaultType(), "indexof.baseint");
-        llvm::Value* offset = builder->CreateSub(foundInt, baseInt, "indexof.offset");
+        llvm::Value* offset = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), result, haystackPtr, "indexof.offset");
         llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
         return builder->CreateSelect(isNull, negOne, offset, "indexof.result");
     }
@@ -2234,9 +2231,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // bSrc and bDst are live values from the loop header (single predecessor).
         builder->SetInsertPoint(buildDoneBB);
         // Copy remaining chars: tail = strLen - (bSrc - strPtr)
-        llvm::Value* srcBase  = builder->CreatePtrToInt(strPtr, getDefaultType(), "replace.srcbase");
-        llvm::Value* srcCurr  = builder->CreatePtrToInt(bSrc,   getDefaultType(), "replace.srccurr");
-        llvm::Value* consumed = builder->CreateSub(srcCurr, srcBase, "replace.consumed");
+        llvm::Value* consumed = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), bSrc, strPtr, "replace.consumed");
         llvm::Value* tail     = builder->CreateSub(strLen, consumed, "replace.tail");
         builder->CreateCall(getOrDeclareMemcpy(), {bDst, bSrc, tail});
         llvm::Value* endPtr   = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), bDst, tail, "replace.end");
@@ -3484,9 +3479,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         //     SIMD vpcmpq+vpminsd (AVX2) or vpminq (AVX-512) instructions
         llvm::Function* sminFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
         llvm::Value* newMin = builder->CreateCall(sminFn, {elem, curMin}, "amin.newmin");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "amin.newidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        // Eliminates a redundant add and provides SCEV with tight nsw+nuw flags.
         curMin->addIncoming(newMin, bodyBB);
-        idx->addIncoming(newIdx, bodyBB);
+        idx->addIncoming(offset, bodyBB);
         auto* backBr_2825 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 4> mds;
@@ -5393,9 +5389,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "aprod.elem");
         llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* newAcc = builder->CreateMul(acc, elem, "aprod.newacc");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aprod.newidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        // Eliminates a redundant add and provides SCEV with tight nsw+nuw flags.
         acc->addIncoming(newAcc, bodyBB);
-        idx->addIncoming(newIdx, bodyBB);
+        idx->addIncoming(offset, bodyBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
