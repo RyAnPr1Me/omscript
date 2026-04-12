@@ -11854,12 +11854,12 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // x - (x % c) → (x / c) * c  [floor-to-multiple, common user pattern]
-    rules.emplace_back("sub_mod_to_div_mul",
-        P::OpPat(Op::Sub, {P::Wild("x"), P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c")})}),
-        [](EGraph& g, const Subst& s) {
-            ClassId div = g.addBinOp(Op::Div, s.at("x"), s.at("c"));
-            return g.addBinOp(Op::Mul, div, s.at("c"));
-        });
+    // NOTE: This rule is bidirectional with the existing div_mul_to_sub_mod
+    // rule.  Temporarily removed because the bidirectionality increases e-graph
+    // node count enough to interact with the DAG-sharing cost discount and
+    // cause the extractor to select incorrect representations for unrelated
+    // expressions.  The identity is still correct at the IR level via
+    // constantModuloStrengthReduce in the superoptimizer.
 
     // NOTE: div-by-power-of-2 → shift is NOT safe at the AST level because
     // OmScript integers are signed i64.  For negative values:
