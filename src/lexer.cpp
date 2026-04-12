@@ -191,7 +191,7 @@ Token Lexer::scanNumber() {
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
-                token.intValue = std::stoll(num, nullptr, 16);
+                token.intValue = static_cast<int64_t>(std::stoull(num, nullptr, 16));
             } catch (const std::out_of_range&) {
                 lexError("Integer literal out of range: " + num, token.line, token.column);
             }
@@ -210,7 +210,7 @@ Token Lexer::scanNumber() {
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
-                token.intValue = std::stoll(num.substr(2), nullptr, 8);
+                token.intValue = static_cast<int64_t>(std::stoull(num.substr(2), nullptr, 8));
             } catch (const std::out_of_range&) {
                 lexError("Integer literal out of range: " + num, token.line, token.column);
             }
@@ -229,7 +229,7 @@ Token Lexer::scanNumber() {
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
-                token.intValue = std::stoll(num.substr(2), nullptr, 2);
+                token.intValue = static_cast<int64_t>(std::stoull(num.substr(2), nullptr, 2));
             } catch (const std::out_of_range&) {
                 lexError("Integer literal out of range: " + num, token.line, token.column);
             }

@@ -718,6 +718,7 @@ test_program "examples/in_operator_test.om" 5
 test_program "examples/logical_assign_test.om" 8
 test_program "examples/elvis_operator_test.om" 5
 test_program "examples/chained_comparison_test.om" 7
+test_program "examples/large_int_literal_test.om" 7
 
 echo ""
 echo "============================================"
