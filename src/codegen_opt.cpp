@@ -1229,6 +1229,16 @@ void CodeGenerator::runOptimizationPasses() {
             superopt::convertSRemToURem(func);
             superopt::convertSDivToUDiv(func);
         }
+        // Post-srem→urem: expand urem-by-constant to multiplicative-inverse
+        // (mul/shift/sub) sequences.  TEMPORARILY DISABLED for debugging.
+        // unsigned moduloExpanded = 0;
+        // for (auto& func : *module) {
+        //     moduloExpanded += superopt::constantModuloStrengthReduce(func);
+        // }
+        // if (verbose_ && moduloExpanded > 0) {
+        //     std::cout << "    Pre-pipeline modulo strength reduction: "
+        //               << moduloExpanded << " urem instructions expanded" << std::endl;
+        // }
     }
     // Pre-pipeline HGOE loop annotation: set target-optimal unroll count,
     // interleave count, and vector width on loops BEFORE the LLVM pipeline

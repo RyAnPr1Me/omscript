@@ -5102,6 +5102,406 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Constant Modulo Strength Reduction
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Magic number for unsigned division by constant d.
+/// For d in [3, 2^32], udiv(x, d) = mulhu(x, magic) >> shift.
+/// When needsAdd is true, uses the "add-fixup" form:
+///   t = mulhu(x, magic)
+///   q = (t + ((x - t) >> 1)) >> shift
+struct UDivMagic {
+    uint64_t magic;
+    unsigned shift;
+    bool needsAdd;
+};
+
+/// Compute the magic number for unsigned 64-bit division by constant d.
+/// Based on the algorithm from Warren's "Hacker's Delight", Chapter 10.
+/// For d in [3, 2^32], the simple (no add-fixup) form always works.
+static UDivMagic computeUDivMagic64(uint64_t d) {
+    // For each shift value s, try magic = ceil(2^(64+s) / d).
+    // The formula floor(x/d) = mulhu(x, magic) >> s is valid when:
+    //   magic * d - 2^(64+s) < 2^s   (no-add case, magic < 2^64)
+    //   OR use add-fixup form         (when magic >= 2^64)
+    for (unsigned s = 0; s <= 64; ++s) {
+        __uint128_t pow2 = (__uint128_t)1 << (64 + s);
+        __uint128_t m = (pow2 + d - 1) / d;  // ceil(2^(64+s) / d)
+
+        if (m <= UINT64_MAX) {
+            // Simple case: check validity condition
+            __uint128_t md = m * d;
+            __uint128_t residual = md - pow2;
+            if (residual < ((__uint128_t)1 << s)) {
+                return {(uint64_t)m, s, false};
+            }
+        } else {
+            // Add-fixup case: magic overflows 64 bits
+            uint64_t mReduced = (uint64_t)(m - ((__uint128_t)1 << 64));
+            unsigned fixupShift = (s > 0) ? s - 1 : 0;
+            return {mReduced, fixupShift, true};
+        }
+    }
+    // Fallback (should never reach for d < 2^64)
+    return {0, 0, false};
+}
+
+/// Expand `urem i64 %x, C` to a multiplicative-inverse sequence:
+///   quotient = mulhu(x, magic) >> shift
+///   remainder = x - quotient * C
+///
+/// All operations (zext, mul, lshr, trunc, mul, sub) are individually
+/// vectorizable, enabling the loop vectorizer to process modulo operations
+/// in SIMD lanes.  LLVM's backend already does this for scalar code, but
+/// doing it at IR level exposes the pattern to the loop vectorizer.
+///
+/// Cost:  urem (scalar) ≈ 25 cycles → mul+shift+mul+sub ≈ 8 cycles
+///        urem (vector) = scalarized div ≈ 25*VF → vectorized mul+shift ≈ 3*VF+4
+static unsigned expandURemByConstant(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+    llvm::Type* i64Ty = llvm::Type::getInt64Ty(func.getContext());
+    llvm::Type* i128Ty = llvm::Type::getInt128Ty(func.getContext());
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::URem) continue;
+            if (inst.getType() != i64Ty) continue;
+
+            auto* divisorCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
+            if (!divisorCI) continue;
+            uint64_t d = divisorCI->getZExtValue();
+
+            // Only handle non-power-of-2 constants in [3, 1024].
+            // Power-of-2 is already handled as x & (d-1) by algebraic simplification.
+            if (d < 3 || d > 1024) continue;
+            if ((d & (d - 1)) == 0) continue;  // skip power-of-2
+
+            UDivMagic magic = computeUDivMagic64(d);
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* x = inst.getOperand(0);
+            llvm::Value* quotient = nullptr;
+
+            if (!magic.needsAdd) {
+                // Simple case: q = mulhu(x, magic) >> shift
+                llvm::Value* xWide = builder.CreateZExt(x, i128Ty, "modsr.zext");
+                llvm::Value* magicVal = llvm::ConstantInt::get(i128Ty, magic.magic);
+                llvm::Value* prod = builder.CreateMul(xWide, magicVal, "modsr.mul",
+                                                       /*HasNUW=*/true, /*HasNSW=*/false);
+                llvm::Value* hi = builder.CreateLShr(prod,
+                    llvm::ConstantInt::get(i128Ty, 64), "modsr.hi");
+                llvm::Value* hi64 = builder.CreateTrunc(hi, i64Ty, "modsr.trunc");
+                if (magic.shift > 0) {
+                    quotient = builder.CreateLShr(hi64,
+                        llvm::ConstantInt::get(i64Ty, magic.shift), "modsr.q");
+                } else {
+                    quotient = hi64;
+                }
+            } else {
+                // Add-fixup case:
+                //   t = mulhu(x, magic)
+                //   q = (t + ((x - t) >> 1)) >> shift
+                llvm::Value* xWide = builder.CreateZExt(x, i128Ty, "modsr.zext");
+                llvm::Value* magicVal = llvm::ConstantInt::get(i128Ty, magic.magic);
+                llvm::Value* prod = builder.CreateMul(xWide, magicVal, "modsr.mul",
+                                                       /*HasNUW=*/true, /*HasNSW=*/false);
+                llvm::Value* hi = builder.CreateLShr(prod,
+                    llvm::ConstantInt::get(i128Ty, 64), "modsr.hi");
+                llvm::Value* t = builder.CreateTrunc(hi, i64Ty, "modsr.t");
+                llvm::Value* diff = builder.CreateSub(x, t, "modsr.diff");
+                llvm::Value* half = builder.CreateLShr(diff,
+                    llvm::ConstantInt::get(i64Ty, 1), "modsr.half");
+                llvm::Value* sum = builder.CreateAdd(t, half, "modsr.sum");
+                quotient = builder.CreateLShr(sum,
+                    llvm::ConstantInt::get(i64Ty, magic.shift), "modsr.q");
+            }
+
+            // remainder = x - quotient * d
+            llvm::Value* qd = builder.CreateMul(quotient, divisorCI, "modsr.qd");
+            llvm::Value* rem = builder.CreateSub(x, qd, "modsr.rem");
+
+            replacements.emplace_back(&inst, rem);
+            ++count;
+        }
+    }
+
+    for (auto& [oldInst, newVal] : replacements) {
+        oldInst->replaceAllUsesWith(newVal);
+        oldInst->eraseFromParent();
+    }
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Small Switch → Select Chain Lowering
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lower a switch instruction with ≤4 non-default cases to a chain of
+/// select instructions.  This eliminates control flow inside hot loops,
+/// enabling vectorization and removing branch misprediction penalties.
+///
+/// Pattern (before):
+///   switch i64 %val, label %default [
+///     i64 0, label %case0
+///     i64 1, label %case1
+///     i64 2, label %case2
+///   ]
+///   ; merge block has PHIs selecting values from each case
+///
+/// Pattern (after):
+///   %c0 = icmp eq i64 %val, 0
+///   %c1 = icmp eq i64 %val, 1
+///   %c2 = icmp eq i64 %val, 2
+///   %s2 = select i1 %c2, CASE2_VAL, DEFAULT_VAL
+///   %s1 = select i1 %c1, CASE1_VAL, %s2
+///   %result = select i1 %c0, CASE0_VAL, %s1
+static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
+    unsigned count = 0;
+    llvm::SmallVector<llvm::SwitchInst*, 4> toProcess;
+
+    for (auto& bb : func) {
+        if (auto* sw = llvm::dyn_cast<llvm::SwitchInst>(bb.getTerminator())) {
+            // Only handle small switches (≤4 non-default cases)
+            if (sw->getNumCases() >= 2 && sw->getNumCases() <= 4) {
+                toProcess.push_back(sw);
+            }
+        }
+    }
+
+    for (auto* sw : toProcess) {
+        llvm::BasicBlock* defaultBB = sw->getDefaultDest();
+
+        // All case blocks AND default must have a single common merge successor.
+        // Collect all successors.
+        llvm::BasicBlock* mergeBB = nullptr;
+
+        // Check default block
+        auto* defaultTerm = llvm::dyn_cast<llvm::BranchInst>(defaultBB->getTerminator());
+        if (!defaultTerm || !defaultTerm->isUnconditional()) continue;
+        mergeBB = defaultTerm->getSuccessor(0);
+
+        // Check all case blocks converge to the same merge block
+        bool allConverge = true;
+        bool anySideEffects = false;
+        for (auto& caseIt : sw->cases()) {
+            llvm::BasicBlock* caseBB = caseIt.getCaseSuccessor();
+            // Skip if case destination IS the merge block (no intermediate block)
+            if (caseBB == mergeBB) continue;
+            auto* caseTerm = llvm::dyn_cast<llvm::BranchInst>(caseBB->getTerminator());
+            if (!caseTerm || !caseTerm->isUnconditional() ||
+                caseTerm->getSuccessor(0) != mergeBB) {
+                allConverge = false;
+                break;
+            }
+            // Check for side effects in case block
+            for (auto& inst : *caseBB) {
+                if (inst.isTerminator()) continue;
+                if (inst.mayHaveSideEffects()) {
+                    anySideEffects = true;
+                    break;
+                }
+            }
+            // Check case block is small (≤3 non-terminator instructions)
+            unsigned instCount = 0;
+            for (auto& inst : *caseBB) {
+                if (!inst.isTerminator()) instCount++;
+            }
+            if (instCount > 3) { allConverge = false; break; }
+        }
+        if (!allConverge || anySideEffects) continue;
+
+        // Check default block for side effects and size
+        for (auto& inst : *defaultBB) {
+            if (inst.isTerminator()) continue;
+            if (inst.mayHaveSideEffects()) { anySideEffects = true; break; }
+        }
+        if (anySideEffects) continue;
+        unsigned defaultInstCount = 0;
+        for (auto& inst : *defaultBB) {
+            if (!inst.isTerminator()) defaultInstCount++;
+        }
+        if (defaultInstCount > 3) continue;
+
+        // Collect PHI nodes in the merge block that reference our switch's successors
+        if (mergeBB->phis().empty()) continue;
+
+        llvm::BasicBlock* switchBB = sw->getParent();
+        llvm::IRBuilder<> builder(sw);
+        llvm::Value* cond = sw->getCondition();
+        bool transformed = false;
+
+        for (auto& phi : mergeBB->phis()) {
+            // Get default value
+            llvm::Value* defaultVal = phi.getIncomingValueForBlock(defaultBB);
+            if (!defaultVal) continue;
+
+            // Build select chain from last case to first
+            llvm::Value* result = defaultVal;
+            for (auto& caseIt : sw->cases()) {
+                llvm::BasicBlock* caseBB = caseIt.getCaseSuccessor();
+                llvm::Value* caseVal = phi.getIncomingValueForBlock(caseBB);
+                if (!caseVal) {
+                    // If the case jumps directly to merge, get value for switchBB
+                    caseVal = defaultVal;
+                }
+
+                llvm::Value* cmp = builder.CreateICmpEQ(
+                    cond, caseIt.getCaseValue(), "sw.sel.cmp");
+                result = builder.CreateSelect(cmp, caseVal, result, "sw.sel");
+            }
+
+            // Replace the PHI with the select chain result.
+            // We need to update the PHI to get its value from the switch block.
+            phi.addIncoming(result, switchBB);
+            transformed = true;
+        }
+
+        if (transformed) {
+            // Replace the switch with an unconditional branch to the merge block.
+            // Remove the switch's entries from PHI nodes in case blocks.
+            for (auto& caseIt : sw->cases()) {
+                llvm::BasicBlock* caseBB = caseIt.getCaseSuccessor();
+                caseBB->removePredecessor(switchBB);
+            }
+            defaultBB->removePredecessor(switchBB);
+
+            builder.CreateBr(mergeBB);
+            sw->eraseFromParent();
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Assume-based Bounds Check Elimination
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Propagate conditions from llvm.assume intrinsics to eliminate redundant
+/// comparisons in dominated basic blocks.  Uses a simple dominance check:
+/// if block A dominates block B, and A contains llvm.assume(cond), then
+/// any identical comparison in B can be replaced with `true`.
+///
+/// Targets patterns generated by OmScript's for-loop bounds checking:
+///   llvm.assume(i < len)  →  later icmp ult i, len  →  replaced with true
+///
+/// Also handles:
+///   llvm.assume(len > 0)  →  later icmp ugt len, 0  →  replaced with true
+///   llvm.assume(i < len)  →  later icmp uge i, len  →  replaced with false
+static unsigned eliminateRedundantBoundsChecks(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+
+    unsigned count = 0;
+    llvm::DominatorTree DT(func);
+
+    // Collect all assume conditions and their blocks
+    struct AssumeInfo {
+        llvm::ICmpInst* cmp;
+        llvm::BasicBlock* block;
+    };
+    llvm::SmallVector<AssumeInfo, 8> assumes;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* call = llvm::dyn_cast<llvm::CallInst>(&inst);
+            if (!call) continue;
+            auto* callee = call->getCalledFunction();
+            if (!callee || callee->getIntrinsicID() != llvm::Intrinsic::assume)
+                continue;
+            // Extract the condition
+            if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(call->getArgOperand(0))) {
+                assumes.push_back({cmp, &bb});
+            }
+        }
+    }
+
+    if (assumes.empty()) return 0;
+
+    // For each assume, find redundant comparisons in dominated blocks
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& assume : assumes) {
+        llvm::ICmpInst* assumeCmp = assume.cmp;
+        llvm::CmpInst::Predicate assumePred = assumeCmp->getPredicate();
+        llvm::Value* lhs = assumeCmp->getOperand(0);
+        llvm::Value* rhs = assumeCmp->getOperand(1);
+
+        for (auto& bb : func) {
+            if (&bb == assume.block) continue;
+            if (!DT.dominates(assume.block, &bb)) continue;
+
+            for (auto& inst : bb) {
+                auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst);
+                if (!cmp) continue;
+
+                llvm::Value* cmpLhs = cmp->getOperand(0);
+                llvm::Value* cmpRhs = cmp->getOperand(1);
+                llvm::CmpInst::Predicate cmpPred = cmp->getPredicate();
+
+                // Case 1: Identical comparison → replace with true
+                if (cmpLhs == lhs && cmpRhs == rhs && cmpPred == assumePred) {
+                    replacements.emplace_back(cmp,
+                        llvm::ConstantInt::getTrue(func.getContext()));
+                    continue;
+                }
+
+                // Case 2: Inverse comparison → replace with false
+                if (cmpLhs == lhs && cmpRhs == rhs &&
+                    cmpPred == llvm::ICmpInst::getInversePredicate(assumePred)) {
+                    replacements.emplace_back(cmp,
+                        llvm::ConstantInt::getFalse(func.getContext()));
+                    continue;
+                }
+
+                // Case 3: assume(a < b) implies a != b → true
+                if (cmpLhs == lhs && cmpRhs == rhs) {
+                    if ((assumePred == llvm::ICmpInst::ICMP_ULT ||
+                         assumePred == llvm::ICmpInst::ICMP_SLT) &&
+                        cmpPred == llvm::ICmpInst::ICMP_NE) {
+                        replacements.emplace_back(cmp,
+                            llvm::ConstantInt::getTrue(func.getContext()));
+                        continue;
+                    }
+                    // assume(a < b) implies a <= b → true
+                    if ((assumePred == llvm::ICmpInst::ICMP_ULT &&
+                         cmpPred == llvm::ICmpInst::ICMP_ULE) ||
+                        (assumePred == llvm::ICmpInst::ICMP_SLT &&
+                         cmpPred == llvm::ICmpInst::ICMP_SLE)) {
+                        replacements.emplace_back(cmp,
+                            llvm::ConstantInt::getTrue(func.getContext()));
+                        continue;
+                    }
+                }
+
+                // Case 4: Swapped operands
+                if (cmpLhs == rhs && cmpRhs == lhs) {
+                    llvm::CmpInst::Predicate swappedAssume =
+                        llvm::ICmpInst::getSwappedPredicate(assumePred);
+                    if (cmpPred == swappedAssume) {
+                        replacements.emplace_back(cmp,
+                            llvm::ConstantInt::getTrue(func.getContext()));
+                        continue;
+                    }
+                    if (cmpPred == llvm::ICmpInst::getInversePredicate(swappedAssume)) {
+                        replacements.emplace_back(cmp,
+                            llvm::ConstantInt::getFalse(func.getContext()));
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto& [inst, replacement] : replacements) {
+        inst->replaceAllUsesWith(replacement);
+        ++count;
+    }
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Dead code elimination
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -5217,6 +5617,18 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     if (config.enableAlgebraic) {
         stats.algebraicSimplified += applyMacs(func);
     }
+
+    // Phase 3.9: Small switch → select chain lowering.
+    // TEMPORARILY DISABLED for debugging
+    // if (config.enableBranchOpt) {
+    //     stats.branchesSimplified += lowerSmallSwitchToSelect(func);
+    // }
+
+    // Phase 3.10: Assume-based bounds check elimination.
+    // TEMPORARILY DISABLED for debugging
+    // if (config.enableAlgebraic) {
+    //     stats.algebraicSimplified += eliminateRedundantBoundsChecks(func);
+    // }
 
     // Phase 4: Enumerative synthesis on remaining expensive instructions
     if (config.enableSynthesis) {
@@ -5537,6 +5949,18 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
     }
     for (auto* inst : toErase) inst->eraseFromParent();
     return count;
+}
+
+unsigned superopt::constantModuloStrengthReduce(llvm::Function& func) {
+    return expandURemByConstant(func);
+}
+
+unsigned superopt::lowerSmallSwitch(llvm::Function& func) {
+    return lowerSmallSwitchToSelect(func);
+}
+
+unsigned superopt::propagateAssumeBounds(llvm::Function& func) {
+    return eliminateRedundantBoundsChecks(func);
 }
 
 } // namespace omscript
