@@ -952,6 +952,42 @@ TEST(SuperoptimizerTest, DetectCountTrailingZerosViaIsolate) {
     }
 }
 
+TEST(SuperoptimizerTest, DetectNextPowerOf2WithAddNeg1) {
+    // Build the bit-smear pattern: (x + (-1)) | ((x+(-1)) >> 1) | ... | >> 32) + 1
+    // This simulates what LLVM emits after optimizing `x - 1` to `x + (-1)`.
+    TestModule tm;
+    auto* x = tm.arg(0);
+    auto* minusOne = llvm::ConstantInt::get(tm.i64Ty(), uint64_t(-1LL));
+
+    // xm1 = x + (-1)  [LLVM normalization of x - 1]
+    auto* xm1 = tm.builder.CreateAdd(x, minusOne, "xm1");
+
+    // Smear all bits below the highest set bit:
+    auto* s1 = tm.builder.CreateOr(xm1,
+        tm.builder.CreateLShr(xm1, llvm::ConstantInt::get(tm.i64Ty(), 1)), "s1");
+    auto* s2 = tm.builder.CreateOr(s1,
+        tm.builder.CreateLShr(s1, llvm::ConstantInt::get(tm.i64Ty(), 2)), "s2");
+    auto* s3 = tm.builder.CreateOr(s2,
+        tm.builder.CreateLShr(s2, llvm::ConstantInt::get(tm.i64Ty(), 4)), "s3");
+    auto* s4 = tm.builder.CreateOr(s3,
+        tm.builder.CreateLShr(s3, llvm::ConstantInt::get(tm.i64Ty(), 8)), "s4");
+    auto* s5 = tm.builder.CreateOr(s4,
+        tm.builder.CreateLShr(s4, llvm::ConstantInt::get(tm.i64Ty(), 16)), "s5");
+    auto* s6 = tm.builder.CreateOr(s5,
+        tm.builder.CreateLShr(s5, llvm::ConstantInt::get(tm.i64Ty(), 32)), "s6");
+
+    auto* result = tm.builder.CreateAdd(s6,
+        llvm::ConstantInt::get(tm.i64Ty(), 1), "np2");
+    tm.builder.CreateRet(result);
+
+    auto idioms = detectIdioms(*tm.entry);
+    bool found = false;
+    for (const auto& m : idioms) {
+        if (m.idiom == Idiom::NextPowerOf2) { found = true; break; }
+    }
+    EXPECT_TRUE(found) << "next_power_of_2 bit-smear pattern with add(x,-1) should be detected";
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Concrete evaluator tests for new ops
 // ─────────────────────────────────────────────────────────────────────────────
