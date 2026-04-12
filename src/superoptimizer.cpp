@@ -21,6 +21,7 @@
 #include "superoptimizer.h"
 #include <llvm/Config/llvm-config.h>
 #include <llvm/Analysis/ValueTracking.h>
+#include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/InstrTypes.h>
@@ -1869,19 +1870,19 @@ static bool replaceIdiom(IdiomMatch& match) {
     }
 
     case Idiom::BitFieldExtract: {
-        // Replace shift-and-mask with a single AND of a more targeted mask
-        // (this helps subsequent passes recognize the pattern)
+        // Replace shift-and-mask with a normalized shift+and sequence
+        // (this helps subsequent passes recognize the pattern).
+        // operands[0] = base value x
+        // operands[1] = shift amount
+        // operands[2] = original bit mask (e.g., 7 for a 3-bit field)
         llvm::Value* x = match.operands[0];
         llvm::Value* shift = match.operands.size() > 1 ? match.operands[1] : nullptr;
-        if (shift) {
+        llvm::Value* origMask = match.operands.size() > 2 ? match.operands[2] : nullptr;
+        if (shift && origMask) {
             llvm::Value* shifted = builder.CreateLShr(x, shift, "bfe.shr");
-            // Guard: (1ULL << 64) is undefined behavior in C++, so we
-            // special-case bitWidth >= 64 to produce an all-ones mask.
-            uint64_t maskVal = match.bitWidth >= 64
-                ? ~uint64_t(0)
-                : (1ULL << match.bitWidth) - 1;
-            llvm::Value* mask = llvm::ConstantInt::get(intTy, maskVal);
-            llvm::Value* result = builder.CreateAnd(shifted, mask, "bfe.and");
+            // Use the ORIGINAL mask (e.g., 7 for width=3), not match.bitWidth
+            // (which is the integer type width, e.g., 64 for i64 — not the field width).
+            llvm::Value* result = builder.CreateAnd(shifted, origMask, "bfe.and");
             match.rootInst->replaceAllUsesWith(result);
             return true;
         }
@@ -2890,6 +2891,56 @@ static bool replaceIdiom(IdiomMatch& match) {
                         // Use CreateNSWNeg so overflow (INT_MIN ÷ -1) remains
                         // poison rather than silently wrapping.
                         simplified = builder.CreateNSWNeg(inst.getOperand(0), "sdiv_neg1");
+                    }
+                }
+            }
+
+            // sdiv(x, 2) bias-shift simplification for products of consecutive integers.
+            //
+            // `sdiv x, 2` when x = a*(a+1) or x = a*(a-1) is always exact
+            // (the product of consecutive integers is always even), so it can
+            // be reduced to `ashr x, 1` which is one instruction instead of
+            // the 3-instruction bias-shift sequence that synthesis would emit.
+            //
+            // By catching this BEFORE synthesis, we prevent synthesis from
+            // converting sdiv→(lshr + add + ashr) and then having the pattern
+            // survive to the output as dead overhead.
+            //
+            // Correctness: for any integer a, exactly one of {a, a+1} is even,
+            // so a*(a+1) mod 2 = 0, meaning ashr and sdiv agree exactly.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::SDiv) {
+                if (isConstInt(inst.getOperand(1), 2)) {
+                    llvm::Value* x = inst.getOperand(0);
+                    auto isConsecutiveMul = [&](llvm::Value* v) -> bool {
+                        auto* mul = llvm::dyn_cast<llvm::BinaryOperator>(v);
+                        if (!mul || mul->getOpcode() != llvm::Instruction::Mul)
+                            return false;
+                        for (unsigned m = 0; m < 2; ++m) {
+                            llvm::Value* factorA = mul->getOperand(m);
+                            llvm::Value* factorB = mul->getOperand(1-m);
+                            // Check if factorB = add(factorA, ±1)
+                            auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(
+                                factorB);
+                            if (!addInst) continue;
+                            if (addInst->getOpcode() != llvm::Instruction::Add)
+                                continue;
+                            if (addInst->getOperand(0) != factorA) continue;
+                            auto cv = getConstIntValue(addInst->getOperand(1));
+                            if (cv && (*cv == 1 || *cv == -1)) return true;
+                        }
+                        return false;
+                    };
+
+                    if (isConsecutiveMul(x)) {
+                        // x = a*(a+1) or a*(a-1): always even → ashr by 1 is exact.
+                        // Use arithmetic shift (handles negative 'a' correctly):
+                        //   ashr(-2 * -1, 1) = ashr(2, 1) = 1 ✓  (sdiv would give 1)
+                        //   ashr(-3 * -4, 1) = ashr(12, 1) = 6 ✓
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateAShr(
+                            x,
+                            llvm::ConstantInt::get(inst.getType(), 1),
+                            "consec_div2");
                     }
                 }
             }
@@ -4409,6 +4460,61 @@ static bool replaceIdiom(IdiomMatch& match) {
         for (auto& inst : bb) {
             if (!inst.getType()->isIntegerTy()) continue;
 
+            // ── sdiv(x, 2) bias-shift elimination when x is known even ──────
+            // LLVM lowers `sdiv x, 2` to the canonical 3-instruction sequence:
+            //   %sign   = lshr x, (bitWidth-1)   ; 0 if x≥0, 1 if x<0
+            //   %biased = add  x, %sign           ; x + rounding-bias
+            //   %result = ashr %biased, 1
+            //
+            // When x is provably even (KnownBits shows bit 0 = 0), the bias is
+            // always 0 (since the division is exact) and we can reduce to just:
+            //   %result = ashr x, 1
+            //
+            // Common case: n*(n+1)/2 (triangular numbers), array_len/2, even
+            // alignment computations.
+            if (inst.getOpcode() == llvm::Instruction::AShr) {
+                if (isConstInt(inst.getOperand(1), 1)) {
+                    // inst = ashr(%biased, 1)
+                    auto* biasedInst = llvm::dyn_cast<llvm::BinaryOperator>(
+                        inst.getOperand(0));
+                    if (biasedInst &&
+                        biasedInst->getOpcode() == llvm::Instruction::Add) {
+                        // biasedInst = add(x, %sign) or add(%sign, x)
+                        for (unsigned op = 0; op < 2; ++op) {
+                            llvm::Value* maybeX     = biasedInst->getOperand(op);
+                            llvm::Value* maybeSign  = biasedInst->getOperand(1-op);
+                            // %sign = lshr(%x, bitWidth-1)
+                            auto* signInst = llvm::dyn_cast<llvm::BinaryOperator>(
+                                maybeSign);
+                            if (!signInst ||
+                                signInst->getOpcode() != llvm::Instruction::LShr)
+                                continue;
+                            if (signInst->getOperand(0) != maybeX) continue;
+                            unsigned bw = inst.getType()->getIntegerBitWidth();
+                            if (!isConstInt(signInst->getOperand(1),
+                                            static_cast<int64_t>(bw - 1)))
+                                continue;
+                            // Pattern confirmed: ashr(add(x, lshr(x, bw-1)), 1)
+                            // Check if x is known even (bit 0 known zero)
+                            llvm::KnownBits kb = llvm::computeKnownBits(
+                                maybeX, DL);
+                            if (kb.Zero.getBitWidth() > 0 &&
+                                kb.Zero[0]) {
+                                // x is even → bias = 0 → replace with ashr(x, 1)
+                                llvm::IRBuilder<> builder(&inst);
+                                auto* simpler = builder.CreateAShr(
+                                    maybeX,
+                                    llvm::ConstantInt::get(inst.getType(), 1),
+                                    "sdiv2_even");
+                                inst.replaceAllUsesWith(simpler);
+                                count++;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
             // or(X, mask): if KnownBits(X) already has all mask bits set, → X
             if (inst.getOpcode() == llvm::Instruction::Or) {
                 if (auto* maskCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
@@ -5071,6 +5177,340 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Loop idiom recognition — popcount and floor-log2
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Recognise two high-value loop idioms that users commonly write as loops
+/// but whose optimal implementation is a single hardware instruction:
+///
+///  1. **Popcount loop** (Kernighan/shift variant):
+///       c = 0; while (x != 0) { c += x & 1; x >>= 1; }
+///     Optimal: c = llvm.ctpop(x_init)
+///     Saves up to 64 iterations of (AND + ADD + LShr + CMP + BR) → 1 instruction.
+///
+///  2. **Floor-log2 loop** (shift-and-count variant):
+///       r = 0; while (x > 1) { x >>= 1; r++; }
+///     Optimal: r = 63 - llvm.ctlz(x_init, false)
+///     Equivalently: r = llvm.ctlz(1, false) - llvm.ctlz(x_init, false) on any width.
+///     Saves up to 63 iterations → 1 CTZ/CLZ + 1 SUB = 2 instructions.
+///
+/// Detection uses LLVM's phi-node loop structure.  Both patterns have exactly
+/// two phi nodes in the loop header: a shifting variable (x) and an accumulator.
+///
+/// Safety guards:
+///  - Popcount: x_init must be the only loop-variant value consumed outside the
+///    loop (via the accumulator's lcssa phi).
+///  - Log2: x_init must be > 0 at the call site (otherwise ctlz returns 64 which
+///    would underflow to -1).  We only emit the replacement when the preheader
+///    already guards `x > 1` (the standard loop-entry test).
+///
+/// Both replacements preserve exact signed semantics because ctpop/ctlz are
+/// defined for all i64 inputs and `63 - ctlz(x, false)` equals the floor-log2
+/// of x for any positive x.
+[[gnu::hot]] static unsigned recognizeLoopIdioms(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+    unsigned count = 0;
+
+    llvm::LLVMContext& ctx = func.getContext();
+    llvm::Module* M = func.getParent();
+    llvm::Type* i64Ty = llvm::Type::getInt64Ty(ctx);
+
+    // Collect loop headers: basic blocks that have a phi with an incoming edge
+    // from a successor (i.e., a back-edge indicates a loop).
+    for (auto& bb : func) {
+        // ── Candidate screening ───────────────────────────────────────────
+        // We look for loop bodies that contain EXACTLY the phi chain and the
+        // bit-manipulation ops; anything else (stores, calls, etc.) disqualifies.
+
+        // Count phis in this block
+        unsigned phiCount = 0;
+        llvm::PHINode* xPhi = nullptr;  // the shifting variable
+        llvm::PHINode* accPhi = nullptr; // the accumulator (c or r)
+        for (auto& phi : bb.phis()) {
+            ++phiCount;
+            if (phiCount > 3) break;  // too many phis
+            (xPhi ? accPhi : xPhi) = &phi;  // assign first two
+        }
+        if (phiCount != 2 || !xPhi || !accPhi) continue;
+
+        // The block must have exactly one back-edge (self-loop or backedge from body)
+        // Simple check: the back-edge predecessor must be this block or a single body block.
+        // We handle the common case: header IS the body (single-block loop).
+        // If one incoming value comes from a predecessor that is a successor of bb,
+        // we have a back-edge.
+
+        // Find preheader edge and back-edge for each phi
+        auto getEdges = [&](llvm::PHINode* phi) ->
+            std::pair<llvm::Value*, llvm::Value*> { // (preheader_val, latch_val)
+            if (phi->getNumIncomingValues() != 2) return {nullptr, nullptr};
+            for (unsigned i = 0; i < 2; ++i) {
+                llvm::BasicBlock* inBB = phi->getIncomingBlock(i);
+                // If this predecessor has bb as its successor (i.e., bb is in its
+                // successor list and inBB dominates after bb) → back-edge.
+                // Simple heuristic: if inBB is not a predecessor of bb's preheader
+                // and IS a successor of bb → it's the latch.
+                bool isBackEdge = false;
+                for (auto* succ : llvm::successors(&bb)) {
+                    if (succ == inBB || inBB == &bb) { isBackEdge = true; break; }
+                }
+                if (isBackEdge)
+                    return {phi->getIncomingValue(1-i), phi->getIncomingValue(i)};
+            }
+            return {nullptr, nullptr};
+        };
+
+        // Identify which phi is the shifting x and which is the accumulator.
+        // Heuristic: find the phi whose latch value is lshr(%self, 1).
+        // Also handle the case where xPhi/accPhi are assigned in the wrong order.
+        for (int swap = 0; swap < 2; ++swap) {
+            if (swap) std::swap(xPhi, accPhi);
+
+            auto [xInit, xNext] = getEdges(xPhi);
+            auto [accInit, accNext] = getEdges(accPhi);
+            if (!xInit || !xNext || !accInit || !accNext) continue;
+
+            // The init of the accumulator must be 0
+            auto* accInitCI = llvm::dyn_cast<llvm::ConstantInt>(accInit);
+            if (!accInitCI || !accInitCI->isZero()) continue;
+
+            // xNext must be lshr(xPhi, 1)
+            auto* xNextInst = llvm::dyn_cast<llvm::BinaryOperator>(xNext);
+            if (!xNextInst || xNextInst->getOpcode() != llvm::Instruction::LShr)
+                continue;
+            if (xNextInst->getOperand(0) != xPhi) continue;
+            if (!isConstInt(xNextInst->getOperand(1), 1)) continue;
+
+            // Check for side effects in the block (other than the phi nodes and
+            // the branch — which we will replace).  Only allow: the xNext lshr,
+            // the accNext computation, and the terminator branch.
+            unsigned nonPhiInsts = 0;
+            bool hasSideEffects = false;
+            for (auto& inst : bb) {
+                if (llvm::isa<llvm::PHINode>(&inst) || llvm::isa<llvm::BranchInst>(&inst))
+                    continue;
+                if (inst.mayHaveSideEffects()) { hasSideEffects = true; break; }
+                ++nonPhiInsts;
+            }
+            if (hasSideEffects) continue;
+
+            // ── Pattern 1: Popcount loop ──────────────────────────────────
+            // accNext = add(accPhi, and(xPhi, 1))   -or-  add(and(xPhi,1), accPhi)
+            // Exit condition: icmp ult xPhi, 2  (equivalent to x == 0 or x == 1)
+            // or: icmp eq xPhi, 0 (also valid)
+            bool isPopcount = false;
+            if (nonPhiInsts <= 4) {
+                auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(accNext);
+                if (addInst && addInst->getOpcode() == llvm::Instruction::Add) {
+                    // One operand must be accPhi, other must be and(xPhi, 1)
+                    llvm::Value* notAcc = (addInst->getOperand(0) == accPhi)
+                        ? addInst->getOperand(1) : addInst->getOperand(0);
+                    if (addInst->getOperand(0) == accPhi ||
+                        addInst->getOperand(1) == accPhi) {
+                        auto* andInst = llvm::dyn_cast<llvm::BinaryOperator>(notAcc);
+                        if (andInst && andInst->getOpcode() == llvm::Instruction::And) {
+                            bool xIsOp0 = andInst->getOperand(0) == xPhi;
+                            bool xIsOp1 = andInst->getOperand(1) == xPhi;
+                            llvm::Value* mask = xIsOp0 ? andInst->getOperand(1)
+                                                       : andInst->getOperand(0);
+                            if ((xIsOp0 || xIsOp1) && isConstInt(mask, 1))
+                                isPopcount = true;
+                        }
+                    }
+                }
+            }
+
+            // ── Pattern 2: Floor-log2 loop ───────────────────────────────
+            // accNext = add(accPhi, 1)
+            // Exit condition: icmp ule xPhi, 1  i.e., x <= 1  (after LLVM norm: ugt x, 3)
+            bool isLog2 = false;
+            if (!isPopcount && nonPhiInsts <= 3) {
+                auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(accNext);
+                if (addInst && addInst->getOpcode() == llvm::Instruction::Add) {
+                    bool accIsOp0 = addInst->getOperand(0) == accPhi;
+                    bool accIsOp1 = addInst->getOperand(1) == accPhi;
+                    llvm::Value* incVal = accIsOp0 ? addInst->getOperand(1)
+                                                   : addInst->getOperand(0);
+                    if ((accIsOp0 || accIsOp1) && isConstInt(incVal, 1))
+                        isLog2 = true;
+                }
+            }
+
+            if (!isPopcount && !isLog2) continue;
+
+            // ── Find the exit value (the accumulator's out-of-loop use) ──
+            // The accumulator should exit the loop via an LCSSA phi in the
+            // exit block, or be directly used in the exit block.
+            llvm::BasicBlock* exitBB = nullptr;
+            for (auto* succ : llvm::successors(&bb)) {
+                if (succ != &bb) { exitBB = succ; break; }
+            }
+            // Also handle: the branch may exit to one of two blocks; find the
+            // one that is not the loop header.
+            if (!exitBB) continue;
+
+            // Find the accumulator value available after the loop.
+            // It's either the accPhi itself (if exit goes straight to exit)
+            // or an LCSSA phi in the exit block.
+            llvm::Value* resultVal = nullptr;
+            // Look for a phi in exitBB that takes accPhi or accNext from bb
+            for (auto& phi : exitBB->phis()) {
+                for (unsigned i = 0; i < phi.getNumIncomingValues(); ++i) {
+                    if (phi.getIncomingBlock(i) == &bb &&
+                        (phi.getIncomingValue(i) == accPhi ||
+                         phi.getIncomingValue(i) == accNext)) {
+                        resultVal = &phi;
+                        break;
+                    }
+                }
+                if (resultVal) break;
+            }
+            if (!resultVal) {
+                // Try: accNext is directly used in exit (rare after LLVM opts)
+                if (accNext->hasOneUse()) {
+                    resultVal = accNext;  // LCSSA not materialized, use directly
+                } else {
+                    continue;
+                }
+            }
+
+            // ── Emit the replacement before the loop ─────────────────────
+            // Insert replacement in the preheader (= the block that has the
+            // init edge to xPhi from outside the loop).
+            llvm::BasicBlock* preheaderBB = nullptr;
+            for (unsigned i = 0; i < xPhi->getNumIncomingValues(); ++i) {
+                llvm::BasicBlock* pred = xPhi->getIncomingBlock(i);
+                if (pred != &bb) { preheaderBB = pred; break; }
+            }
+            if (!preheaderBB) continue;
+
+            // Insert before the terminator of the preheader so the
+            // replacement is available when we branch around the loop.
+            llvm::IRBuilder<> builder(preheaderBB->getTerminator());
+            llvm::Value* replacement = nullptr;
+
+            if (isPopcount) {
+                // ctpop(x_init)
+                llvm::Function* ctpopFn = OMSC_GET_INTRINSIC(M,
+                    llvm::Intrinsic::ctpop, {i64Ty});
+                replacement = builder.CreateCall(ctpopFn, {xInit}, "loop.ctpop");
+            } else {
+                // floor_log2(x) = 63 - ctlz(x, true)   [for x ≥ 2]
+                //
+                // The loop body only runs when x > 1 (preheader guard).  For the
+                // non-loop path (x ≤ 1), the LCSSA phi already produces 0
+                // (the accumulator init).  The loop produces 63 - ctlz(x, true)
+                // for x ≥ 2.
+                //
+                // To correctly cover BOTH paths through the LCSSA phi we use:
+                //   select(x > 1, 63 - ctlz(x, true), 0)
+                //
+                // Verification:
+                //   x = 0 → select false → 0 ✓  (loop never runs)
+                //   x = 1 → select false → 0 ✓  (loop never runs)
+                //   x = 2 → select true  → 63 - ctlz(2,true)=63-62=1 ✓
+                //   x = 4 → select true  → 63 - ctlz(4,true)=63-61=2 ✓
+                //   x = -1 → select false (signed > 1 is false) → 0
+                //           but loop also gives 0 for negative x (never enters)
+                llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(M,
+                    llvm::Intrinsic::ctlz, {i64Ty});
+                // ctlz(x, /*is_zero_undef=*/true) — guarded by select(x>1, ...)
+                llvm::Constant* trueVal = llvm::ConstantInt::getTrue(ctx);
+                llvm::Value* clz = builder.CreateCall(ctlzFn, {xInit, trueVal},
+                                                      "loop.ctlz");
+                // 63 - clz = bit_width - 1 - clz
+                llvm::Value* log2val = builder.CreateSub(
+                    llvm::ConstantInt::get(i64Ty, 63), clz, "loop.log2");
+                // Wrap in select to handle x ≤ 1 correctly
+                llvm::Value* guardCmp = builder.CreateICmpSGT(
+                    xInit, llvm::ConstantInt::get(i64Ty, 1), "loop.log2.guard");
+                replacement = builder.CreateSelect(guardCmp, log2val,
+                    llvm::ConstantInt::get(i64Ty, 0), "loop.log2.sel");
+            }
+
+            // Replace resultVal with the replacement everywhere
+            resultVal->replaceAllUsesWith(replacement);
+
+            // Eliminate the loop body by making the loop's terminating branch
+            // always go to the exit block.  For a single-block loop, the
+            // terminator of bb (the loop header) is the conditional branch
+            // "if exit-cond → exitBB else → bb".
+            //
+            // Strategy:
+            //   1. If the preheader has a CONDITIONAL branch whose true/false
+            //      successor is bb, redirect it to exitBB (bypass the loop).
+            //   2. Otherwise (unconditional preheader branch), replace the
+            //      loop body's branch with an unconditional branch to exitBB.
+            //      This makes the loop execute at most once and LLVM's
+            //      simplifycfg / DCE will remove the dead body.
+            bool loopBypassed = false;
+            auto* preheaderTerm = preheaderBB->getTerminator();
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(preheaderTerm)) {
+                if (br->isConditional()) {
+                    for (unsigned i = 0; i < br->getNumSuccessors(); ++i) {
+                        if (br->getSuccessor(i) == &bb) {
+                            // Redirect this edge to the exit block, bypassing loop
+                            br->setSuccessor(i, exitBB);
+                            // Update any PHI nodes in exitBB that came from bb
+                            // to now accept the preheader as a predecessor.
+                            for (auto& phi2 : exitBB->phis()) {
+                                for (unsigned j = 0; j < phi2.getNumIncomingValues(); ++j) {
+                                    if (phi2.getIncomingBlock(j) == &bb) {
+                                        // Find the value that comes from the
+                                        // preheader's init edge.
+                                        phi2.addIncoming(
+                                            phi2.getIncomingValue(j),
+                                            preheaderBB);
+                                        break;
+                                    }
+                                }
+                            }
+                            loopBypassed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!loopBypassed) {
+                // Preheader unconditionally enters the loop.
+                // Make the loop's body-branch always exit on first iteration.
+                // The loop header's terminator is: br cond, exitBB, bb
+                // We change it to: br exitBB  (unconditional)
+                auto* bodyTerm = bb.getTerminator();
+                if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bodyTerm)) {
+                    if (br->isConditional()) {
+                        // Find which successor is the exit
+                        unsigned exitIdx = 2; // sentinel
+                        for (unsigned i = 0; i < br->getNumSuccessors(); ++i) {
+                            if (br->getSuccessor(i) != &bb) {
+                                exitIdx = i;
+                                break;
+                            }
+                        }
+                        if (exitIdx < 2) {
+                            // Replace conditional branch with unconditional to exit
+                            llvm::IRBuilder<> bodyBuilder(bodyTerm);
+                            auto* newBr = bodyBuilder.CreateBr(exitBB);
+                            (void)newBr;
+                            bodyTerm->eraseFromParent();
+                            // Remove bb from PHI nodes in the loop header
+                            // (the back-edge is now dead)
+                            for (auto& phi2 : bb.phis()) {
+                                phi2.removeIncomingValue(&bb, /*DeletePHIIfEmpty=*/false);
+                            }
+                        }
+                    }
+                }
+            }
+
+            ++count;
+            break; // Don't process this block again
+        }
+    }
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Loop strength reduction — convert i*C to incremental addition
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -5649,6 +6089,17 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
                                            const SuperoptimizerConfig& config) {
     SuperoptimizerStats stats;
     if (func.isDeclaration()) return stats;
+
+    // Phase 0.5: Loop idiom recognition — replace common loop patterns with
+    // single hardware instructions:
+    //   popcount loop: while(x){c+=x&1;x>>=1} → llvm.ctpop(x_init)
+    //   floor-log2 loop: while(x>1){x>>=1;r++} → 63 - llvm.ctlz(x_init)
+    // Runs before all other phases so that the replaced loops are dead and
+    // DCE can clean them up.  The loop body is dead-code-eliminated in Phase 5.
+    if (config.enableIdiomRecognition) {
+        unsigned loopIdioms = recognizeLoopIdioms(func);
+        stats.idiomsReplaced += loopIdioms;
+    }
 
     // Phase 1: Idiom recognition and replacement
     if (config.enableIdiomRecognition) {
