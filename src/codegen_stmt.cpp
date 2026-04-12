@@ -1217,6 +1217,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             startNonNeg = startCI->getSExtValue() >= 0;
         }
         if (startNonNeg) {
+            // Load the iterator once and reuse for all assume conditions.
+            // All assumes are in the same basic block (loop header), so a
+            // single load is sufficient — avoids emitting redundant loads
+            // that mem2reg/GVN would otherwise need to clean up.
             llvm::Value* iterVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.assume");
             llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
                 module.get(), llvm::Intrinsic::assume, {});
@@ -1230,9 +1234,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // strength-reducing `(iter - WIN) % k` patterns in sliding-window loops.
             if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
                 if (startCI->getSExtValue() > 0) {
-                    llvm::Value* iterValLB = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.lb");
                     llvm::Value* isGeStart = builder->CreateICmpSGE(
-                        iterValLB, startVal, "iter.ge.start");
+                        iterVal, startVal, "iter.ge.start");
                     builder->CreateCall(assumeFn, {isGeStart});
                 }
             }
@@ -1246,9 +1249,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // C compilers emit this implicitly when the variable is loop-local
             // and the loop condition is visible; for function arguments (like n)
             // C cannot propagate this across call boundaries without LTO.
-            llvm::Value* iterVal2 = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.ub");
             llvm::Value* isLtEnd = builder->CreateICmpSLT(
-                iterVal2, endVal, "iter.lt.end");
+                iterVal, endVal, "iter.lt.end");
             builder->CreateCall(assumeFn, {isLtEnd});
             // Track the alloca as producing non-negative values so that
             // expressions derived from the loop counter can emit urem/udiv
@@ -1897,7 +1899,11 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     // Body: load current element into iterator variable, then execute body
     builder->SetInsertPoint(bodyBB);
-    llvm::Value* bodyIdx = builder->CreateAlignedLoad(getDefaultType(), idxAlloca, llvm::MaybeAlign(8), "foreach.bidx");
+    // Reuse curIdx from condBB — condBB dominates bodyBB and the hidden index
+    // alloca is never modified between condBB and bodyBB, so the value is
+    // identical.  Emitting a single load avoids redundant IR that mem2reg/GVN
+    // would otherwise need to clean up.
+    llvm::Value* bodyIdx = curIdx;
 
     // Emit @llvm.assume(idx >= 0) so LLVM's CorrelatedValuePropagation and
     // SCEV passes can prove non-negativity of the foreach index.  This
@@ -1961,8 +1967,10 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // SCEV to compute exact trip counts and prove induction variable
     // monotonicity, which is critical for loop vectorization and unrolling.
     builder->SetInsertPoint(incBB);
-    llvm::Value* nextIdx = builder->CreateAlignedLoad(getDefaultType(), idxAlloca, llvm::MaybeAlign(8), "foreach.nidx");
-    llvm::Value* incIdx = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next",
+    // Reuse curIdx from condBB — the hidden index alloca is only modified
+    // here in incBB (and in entry).  User code cannot modify it, so the
+    // value from condBB is still valid.  This eliminates a redundant load.
+    llvm::Value* incIdx = builder->CreateAdd(curIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next",
                                              /*HasNUW=*/true, /*HasNSW=*/true);
     builder->CreateStore(incIdx, idxAlloca);
     auto* backBr = builder->CreateBr(condBB);

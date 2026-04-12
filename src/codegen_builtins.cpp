@@ -1364,17 +1364,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
         } else if (lhsIsHeap) {
             // Heap LHS without capacity tracking: use power-of-2 realloc.
+            // nextPow2 via ctlz intrinsic: 1 << (64 - ctlz(minSize - 1))
+            // This replaces a 6-shift OR-cascade (~14 instructions) with 4
+            // instructions (sub, ctlz, sub, shl), which maps to a single
+            // BSR/LZCNT + shift on x86-64.
             llvm::Value* minSize =
                 builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.minsize", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
             llvm::Value* v = builder->CreateSub(minSize, one64, "concat.pm1", /*HasNUW=*/true, /*HasNSW=*/true);
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)));
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)));
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 4)));
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 8)));
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)));
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)));
-            llvm::Value* allocSize = builder->CreateAdd(v, one64, "concat.allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
+            llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(),
+                llvm::Intrinsic::ctlz, {getDefaultType()});
+            // is_zero_poison=true: minSize is always >= 2 here (totalLen >= 1
+            // because both len1 and len2 are non-zero on this path), so
+            // v (= minSize - 1) is always >= 1, never zero.
+            llvm::Value* lz = builder->CreateCall(ctlzFn,
+                {v, llvm::ConstantInt::getTrue(*context)}, "concat.lz");
+            llvm::Value* shift = builder->CreateSub(
+                llvm::ConstantInt::get(getDefaultType(), 64), lz, "concat.shift");
+            llvm::Value* allocSize = builder->CreateShl(one64, shift, "concat.allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
             buf = builder->CreateCall(getOrDeclareRealloc(), {lhsPtr, allocSize}, "concat.buf");
             // memcpy(buf + len1, rhs, len2) — only append the RHS portion
             llvm::Value* dst2 = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
