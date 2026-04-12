@@ -1138,23 +1138,27 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — count trailing zeros via isolate lowest bit
+// Idiom detection — clear lowest set bit (x & (x-1))
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Detect: x & (-x) → isolate lowest set bit (related to CTZ)
-/// Pattern: and(x, sub(0, x))
-[[nodiscard]] static std::optional<IdiomMatch> detectIsolateLowestBit(llvm::Instruction* inst) {
+/// Detect: x & (x - 1) → clear lowest set bit (used in is_power_of_2, bit-loop)
+/// Pattern: and(x, sub(x, 1))
+/// NOTE: x & (-x) isolates the lowest set bit VALUE (= 1 << ctz(x)), not the
+/// count.  We do NOT replace x & (-x) with cttz(x) because that changes the
+/// result (e.g., 12 & -12 = 4, but cttz(12) = 2).  LLVM's backend already
+/// emits `blsi` for x & (-x) on BMI1 targets, so no IR transformation is needed.
+[[nodiscard]] static std::optional<IdiomMatch> detectClearLowestBit(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::And) return std::nullopt;
 
     llvm::Value* op0 = inst->getOperand(0);
     llvm::Value* op1 = inst->getOperand(1);
 
-    // Try both orderings: and(x, sub(0, x)) or and(sub(0, x), x)
-    auto tryMatch = [](llvm::Value* x, llvm::Value* negCandidate) -> llvm::Value* {
-        auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(negCandidate);
+    // Try both orderings: and(x, sub(x, 1)) or and(sub(x, 1), x)
+    auto tryMatch = [](llvm::Value* x, llvm::Value* candidate) -> llvm::Value* {
+        auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(candidate);
         if (sub && sub->getOpcode() == llvm::Instruction::Sub &&
-            isConstInt(sub->getOperand(0), 0) &&
-            sub->getOperand(1) == x) {
+            sub->getOperand(0) == x &&
+            isConstInt(sub->getOperand(1), 1)) {
             return x;
         }
         return nullptr;
@@ -1164,12 +1168,11 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     if (!x) x = tryMatch(op1, op0);
     if (!x) return std::nullopt;
 
-    IdiomMatch match;
-    match.idiom = Idiom::CountTrailingZeros;
-    match.rootInst = inst;
-    match.operands = {x};
-    match.bitWidth = inst->getType()->getIntegerBitWidth();
-    return match;
+    // x & (x-1) is already optimal: on BMI1 x86, the backend emits `blsr`.
+    // No beneficial IR transformation exists, so we return nullopt to leave
+    // the pattern as-is and let LLVM's backend handle it.
+    (void)x;
+    return std::nullopt;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1777,7 +1780,7 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
             results.push_back(std::move(*m));
             continue;
         }
-        if (auto m = detectIsolateLowestBit(&inst)) {
+        if (auto m = detectClearLowestBit(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -4533,6 +4536,74 @@ static bool replaceIdiom(IdiomMatch& match) {
                         llvm::ConstantInt::get(inst.getType(),
                             static_cast<int64_t>(mask)), "divmul_mask");
                     (void)divInst;
+                }
+            }
+
+            // ── neg(neg(x)) → x  (double negation elimination) ───────────────
+            // sub(0, sub(0, x)) = x.  This arises when two sign flips are applied
+            // in sequence, e.g., `(0 - (0 - v))` in user code or after inlining.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                if (isConstInt(inst.getOperand(0), 0)) {
+                    auto* innerSub = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                    if (innerSub && innerSub->getOpcode() == llvm::Instruction::Sub &&
+                        isConstInt(innerSub->getOperand(0), 0) && hasOneUse(innerSub)) {
+                        simplified = innerSub->getOperand(1);
+                    }
+                }
+            }
+
+            // ── xor(xor(x, C), C) → x  (double XOR with same constant) ─────────
+            // Useful after constant folding of bitwise-not-not or mask-unmask chains.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    auto* innerXor = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                    if (innerXor && innerXor->getOpcode() == llvm::Instruction::Xor &&
+                        hasOneUse(innerXor)) {
+                        if (auto* ci2 = llvm::dyn_cast<llvm::ConstantInt>(
+                                innerXor->getOperand(1))) {
+                            if (ci->getValue() == ci2->getValue()) {
+                                simplified = innerXor->getOperand(0);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── add(x, sub(y, x)) → y  [add cancels sub] ─────────────────────
+            // Arises in expression trees like `base + (target - base) = target`.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                // Check both orderings: add(x, sub(y,x)) and add(sub(y,x), x)
+                for (unsigned op = 0; op < 2 && !simplified; ++op) {
+                    llvm::Value* xv = inst.getOperand(op);
+                    auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(
+                        inst.getOperand(1 - op));
+                    if (subInst && subInst->getOpcode() == llvm::Instruction::Sub &&
+                        subInst->getOperand(1) == xv) {
+                        simplified = subInst->getOperand(0);  // y
+                    }
+                }
+            }
+
+            // ── and(or(x, y), and(x, ~y)) → 0  / impossible mask ─────────────
+            // or(x, y) has bits where x or y are set, and(x, ~y) has bits where
+            // x is set but y is not.  Their AND can simplify in specific cases;
+            // however, the general form is not simple.  Skip.
+
+            // ── or(and(x, C), and(x, ~C)) → x  [partition complement mask] ───
+            // When two AND-masks are complements, their OR reconstructs x.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* andA = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* andB = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (andA && andB &&
+                    andA->getOpcode() == llvm::Instruction::And &&
+                    andB->getOpcode() == llvm::Instruction::And &&
+                    andA->getOperand(0) == andB->getOperand(0) &&
+                    hasOneUse(andA) && hasOneUse(andB)) {
+                    auto* cA = llvm::dyn_cast<llvm::ConstantInt>(andA->getOperand(1));
+                    auto* cB = llvm::dyn_cast<llvm::ConstantInt>(andB->getOperand(1));
+                    if (cA && cB && cA->getValue() == ~cB->getValue()) {
+                        simplified = andA->getOperand(0);  // x
+                    }
                 }
             }
 

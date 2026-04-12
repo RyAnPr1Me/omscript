@@ -941,9 +941,15 @@ TEST(SuperoptimizerTest, DetectCountTrailingZerosViaIsolate) {
     auto* iso = tm.builder.CreateAnd(x, neg, "isolate_low");
     tm.builder.CreateRet(iso);
 
+    // x & (-x) isolates the lowest set bit VALUE (1 << ctz(x)), NOT the count.
+    // The superoptimizer intentionally does NOT replace this with cttz(x) since
+    // that would change the result.  LLVM's backend emits `blsi` directly.
     auto idioms = detectIdioms(*tm.entry);
-    ASSERT_GE(idioms.size(), 1u);
-    EXPECT_EQ(idioms[0].idiom, Idiom::CountTrailingZeros);
+    // No CountTrailingZeros idiom should fire for x & (-x)
+    for (const auto& m : idioms) {
+        EXPECT_NE(m.idiom, Idiom::CountTrailingZeros)
+            << "x & (-x) must NOT be replaced with cttz: semantics differ";
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
