@@ -4952,6 +4952,55 @@ static bool replaceIdiom(IdiomMatch& match) {
                     }
                 }
             }
+
+            // sub(X, C): add NUW flag when KnownBits proves X >= C (unsigned)
+            // This lets downstream passes use the nuw flag for further rewrites.
+            if (inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
+                if (bo && !bo->hasNoUnsignedWrap()) {
+                    if (auto* subCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                        // Safe only for the constant-subtrahend form (X - C).
+                        // X >= C (unsigned) is guaranteed if the minimum value of X >= C.
+                        // Minimum value of X with leadingZeros known-zero bits is 0.
+                        // But we can prove X >= C if the known-one bits of X are >= C.
+                        llvm::KnownBits kb = llvm::computeKnownBits(inst.getOperand(0), DL);
+                        llvm::APInt cVal = subCI->getValue();
+                        // If the minimum possible value of X (= known-one bits) >= C,
+                        // then X >= C always holds and X - C cannot underflow.
+                        if (kb.One.uge(cVal)) {
+                            bo->setHasNoUnsignedWrap(true);
+                            count++;
+                        }
+                    }
+                }
+            }
+
+            // mul(X, C): add NUW when KnownBits proves no unsigned overflow
+            // X * C fits in bitWidth iff the leading zeros of X are enough:
+            //   ceil_log2(C) <= leadingZeros(X)
+            if (inst.getOpcode() == llvm::Instruction::Mul) {
+                auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
+                if (bo && !bo->hasNoUnsignedWrap()) {
+                    if (auto* mulCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                        llvm::APInt cVal = mulCI->getValue();
+                        if (cVal.ugt(1)) {
+                            llvm::KnownBits kb = llvm::computeKnownBits(
+                                inst.getOperand(0), DL);
+                            unsigned leadingZeros = kb.countMinLeadingZeros();
+                            unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+                            // Number of bits needed to represent C
+                            unsigned cBits = cVal.getActiveBits();
+                            // If leadingZeros(X) + leadingZeros(C) >= bitWidth,
+                            // then X * C cannot overflow unsigned.
+                            unsigned cLeadingZeros = bitWidth - cBits;
+                            if (leadingZeros + cLeadingZeros >= bitWidth) {
+                                bo->setHasNoUnsignedWrap(true);
+                                count++;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -5244,9 +5293,10 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             llvm::Value* replacement = nullptr;
 
             // Case 1: left operand is the common factor  →  binop(x, select(a, b))
-            if (tL == fL && opcode != llvm::Instruction::Sub) {
-                // sub(x, a) vs sub(x, b): common left, but sub(x, select(a,b))
-                // is only valid if we keep x on the left.
+            if (tL == fL) {
+                // For Sub: select(c, x-a, x-b) → x - select(c, a, b).
+                // This is valid because both arms have the same minuend x.
+                // Note: select(c, a-x, b-x) is handled by Case 2 below.
                 llvm::Value* inner = builder.CreateSelect(
                     sel->getCondition(), tR, fR, "sel.sink");
                 replacement = builder.CreateBinOp(opcode, tL, inner, "binop.sink");
