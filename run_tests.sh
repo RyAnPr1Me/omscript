@@ -683,6 +683,7 @@ test_program "examples/inverse_op_test.om" 59
 test_program "examples/musttail_test.om" 175
 test_program "examples/string_interning_test.om" 15
 test_program "examples/constfold_builtins_test.om" 15
+test_program "examples/cttz_loop_test.om" 6
 
 # Syntactic features tests
 test_program "examples/unless_test.om" 31

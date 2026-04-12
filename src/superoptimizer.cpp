@@ -5743,7 +5743,62 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
                 }
             }
 
-            if (!isPopcount && !isLog2) continue;
+            // ── Pattern 3: Count-trailing-zeros loop ─────────────────────
+            // Same phi structure as log2 (xNext = lshr(x, 1), accNext = add(acc, 1))
+            // but the exit condition is based on the low bit of xPhi:
+            //   loop while (xPhi & 1) == 0   →   exit when (xPhi & 1) != 0
+            // Replacement: cttz(xInit, false)
+            //
+            // We distinguish from log2 by inspecting the branch condition.
+            bool isCttz = false;
+            if (!isPopcount && !isLog2 && nonPhiInsts <= 4) {
+                auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(accNext);
+                if (addInst && addInst->getOpcode() == llvm::Instruction::Add) {
+                    bool accIsOp0 = addInst->getOperand(0) == accPhi;
+                    bool accIsOp1 = addInst->getOperand(1) == accPhi;
+                    llvm::Value* incVal = accIsOp0 ? addInst->getOperand(1)
+                                                   : addInst->getOperand(0);
+                    if ((accIsOp0 || accIsOp1) && isConstInt(incVal, 1)) {
+                        // Check loop exit condition: branch on (xPhi & 1) == 0
+                        auto* term = bb.getTerminator();
+                        auto* brInst = llvm::dyn_cast<llvm::BranchInst>(term);
+                        if (brInst && brInst->isConditional()) {
+                            auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(brInst->getCondition());
+                            if (icmp) {
+                                llvm::Value* lhs = icmp->getOperand(0);
+                                llvm::Value* rhs = icmp->getOperand(1);
+                                // Normalize: rhs should be the constant 0
+                                if (isConstInt(lhs, 0) && !isConstInt(rhs, 0))
+                                    std::swap(lhs, rhs);
+                                if (isConstInt(rhs, 0)) {
+                                    auto pred = icmp->getPredicate();
+                                    // Accept eq (continue while low-bit clear) or
+                                    // ne (exit when low-bit set; loop body is the
+                                    // ne-false/eq-true branch).
+                                    if (pred == llvm::ICmpInst::ICMP_EQ ||
+                                        pred == llvm::ICmpInst::ICMP_NE) {
+                                        // lhs must be (xPhi & 1)
+                                        auto* andInst =
+                                            llvm::dyn_cast<llvm::BinaryOperator>(lhs);
+                                        if (andInst &&
+                                            andInst->getOpcode() == llvm::Instruction::And) {
+                                            bool xIsOp0 = andInst->getOperand(0) == xPhi;
+                                            bool xIsOp1 = andInst->getOperand(1) == xPhi;
+                                            llvm::Value* mask = xIsOp0
+                                                ? andInst->getOperand(1)
+                                                : andInst->getOperand(0);
+                                            if ((xIsOp0 || xIsOp1) && isConstInt(mask, 1))
+                                                isCttz = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!isPopcount && !isLog2 && !isCttz) continue;
 
             // ── Find the exit value (the accumulator's out-of-loop use) ──
             // The accumulator should exit the loop via an LCSSA phi in the
@@ -5801,7 +5856,7 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
                 llvm::Function* ctpopFn = OMSC_GET_INTRINSIC(M,
                     llvm::Intrinsic::ctpop, {i64Ty});
                 replacement = builder.CreateCall(ctpopFn, {xInit}, "loop.ctpop");
-            } else {
+            } else if (isLog2) {
                 // floor_log2(x) = 63 - ctlz(x, true)   [for x ≥ 2]
                 //
                 // The loop body only runs when x > 1 (preheader guard).  For the
@@ -5837,6 +5892,25 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
                     xInit, llvm::ConstantInt::get(i64Ty, 1), "loop.log2.guard");
                 replacement = builder.CreateSelect(guardCmp, log2val,
                     llvm::ConstantInt::get(i64Ty, 0), "loop.log2.sel");
+            } else {
+                // isCttz: count trailing zeros
+                //   while ((x & 1) == 0) { x >>= 1; count++; }
+                // Replacement: cttz(xInit, false)
+                //
+                // Correctness:
+                //   xInit = 0  → cttz(0, false) = 64  (loop would run forever;
+                //               this case is UB in most callers, but cttz(0,false)
+                //               is well-defined as 64 in LLVM).
+                //   xInit = 1  → cttz(1) = 0    ✓  (loop never runs, acc = 0)
+                //   xInit = 4  → cttz(4) = 2    ✓  (two right-shifts)
+                //   xInit = -8 → cttz(-8) = 3   ✓  (three trailing zeros)
+                //
+                // Use is_zero_undef=false for safety (same reasoning as ctlz above).
+                llvm::Function* cttzFn = OMSC_GET_INTRINSIC(M,
+                    llvm::Intrinsic::cttz, {i64Ty});
+                llvm::Constant* falseVal = llvm::ConstantInt::getFalse(ctx);
+                replacement = builder.CreateCall(cttzFn, {xInit, falseVal},
+                                                 "loop.cttz");
             }
 
             // Replace resultVal with the replacement everywhere

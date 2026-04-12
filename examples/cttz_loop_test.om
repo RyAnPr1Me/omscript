@@ -1,0 +1,26 @@
+// Test count-trailing-zeros loop idiom recognition.
+// while ((x & 1) == 0) { x = x >> 1; count = count + 1; }
+// Should be lowered to llvm.cttz(xInit, false) by the superoptimizer.
+
+fn count_trailing_zeros(x) {
+    var count = 0;
+    var v = x;
+    while ((v & 1) == 0) {
+        v = v >> 1;
+        count = count + 1;
+    }
+    return count;
+}
+
+fn main() {
+    // 8  = 0b1000   → 3 trailing zeros
+    // 12 = 0b1100   → 2 trailing zeros
+    // 6  = 0b0110   → 1 trailing zero
+    // 1  = 0b0001   → 0 trailing zeros
+    var a = count_trailing_zeros(8);   // 3
+    var b = count_trailing_zeros(12);  // 2
+    var c = count_trailing_zeros(6);   // 1
+    var d = count_trailing_zeros(1);   // 0
+    // a + b + c + d = 3 + 2 + 1 + 0 = 6
+    return a + b + c + d;
+}
