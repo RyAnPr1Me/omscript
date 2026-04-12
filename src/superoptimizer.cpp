@@ -847,6 +847,53 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         }
     }
 
+    // Pattern 3: abs(a - b) from select(a > b, a-b, b-a) or select(a < b, b-a, a-b)
+    //
+    // This is the canonical "absolute difference" or "distance" pattern:
+    //   if (a > b) return a - b; else return b - a;
+    // Which can be expressed as: abs(a - b)
+    //
+    // The select has:
+    //   cond: icmp sgt a, b  or  icmp sge a, b  or  icmp slt a, b  or  icmp sle a, b
+    //   true: a - b  (or b - a, depending on predicate)
+    //   false: b - a  (or a - b)
+    if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
+        auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition());
+        if (cmp) {
+            llvm::Value* cmpA = cmp->getOperand(0);
+            llvm::Value* cmpB = cmp->getOperand(1);
+            llvm::Value* trueV = sel->getTrueValue();
+            llvm::Value* falseV = sel->getFalseValue();
+
+            // Helper: check if instruction is sub(p, q)
+            auto isSub = [](llvm::Value* v, llvm::Value* p, llvm::Value* q) -> bool {
+                auto* bin = llvm::dyn_cast<llvm::BinaryOperator>(v);
+                return bin && bin->getOpcode() == llvm::Instruction::Sub &&
+                       bin->getOperand(0) == p && bin->getOperand(1) == q;
+            };
+
+            // Pattern: select(a > b, a-b, b-a) or select(a >= b, a-b, b-a)
+            bool gtOrGe = (cmp->getPredicate() == llvm::ICmpInst::ICMP_SGT ||
+                           cmp->getPredicate() == llvm::ICmpInst::ICMP_SGE);
+            bool ltOrLe = (cmp->getPredicate() == llvm::ICmpInst::ICMP_SLT ||
+                           cmp->getPredicate() == llvm::ICmpInst::ICMP_SLE);
+
+            if ((gtOrGe && isSub(trueV, cmpA, cmpB) && isSub(falseV, cmpB, cmpA)) ||
+                (ltOrLe && isSub(trueV, cmpB, cmpA) && isSub(falseV, cmpA, cmpB))) {
+                // abs(a - b)
+                // Build a - b as a new instruction; the intrinsic needs the diff
+                llvm::IRBuilder<> diffBuilder(inst);
+                llvm::Value* diff = diffBuilder.CreateSub(cmpA, cmpB, "absdiff");
+                IdiomMatch match;
+                match.idiom = Idiom::AbsoluteValue;
+                match.rootInst = inst;
+                match.operands = {diff};
+                match.bitWidth = inst->getType()->getIntegerBitWidth();
+                return match;
+            }
+        }
+    }
+
     return std::nullopt;
 }
 
@@ -1463,6 +1510,34 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     // These are handled by LLVM's instcombine (select canonicalization),
     // so we don't need to detect them here.
 
+    // Pattern 3: select(cond, C+1, C) where C is a constant integer  →  C + zext(cond)
+    // This is a specialization of Pattern 1 for constant bases. It arises naturally
+    // when boolean conditions are accumulated: `count += (x > 0)` compiles to
+    //   result = select(x > 0, count+1, count)
+    // which reduces to count + zext(x>0).  When `count` starts as a literal like 0
+    // or 1, the trueVal and falseVal are integer constants differing by 1.
+    {
+        auto cvTrue  = getConstIntValue(trueVal);
+        auto cvFalse = getConstIntValue(falseVal);
+        if (cvTrue && cvFalse && *cvTrue == *cvFalse + 1) {
+            IdiomMatch match;
+            match.idiom = Idiom::ConditionalIncrement;
+            match.rootInst = inst;
+            match.operands = {falseVal, cond};
+            match.bitWidth = inst->getType()->getIntegerBitWidth();
+            return match;
+        }
+        // Pattern 4: select(cond, C-1, C) where C is a constant integer  →  C - zext(cond)
+        if (cvTrue && cvFalse && *cvTrue == *cvFalse - 1) {
+            IdiomMatch match;
+            match.idiom = Idiom::ConditionalDecrement;
+            match.rootInst = inst;
+            match.operands = {falseVal, cond};
+            match.bitWidth = inst->getType()->getIntegerBitWidth();
+            return match;
+        }
+    }
+
     return std::nullopt;
 }
 
@@ -1915,9 +1990,25 @@ static bool replaceIdiom(IdiomMatch& match) {
         // Replace select(cond, x+1, x) → x + zext(cond, type)
         // This eliminates the select and the intermediate add, producing
         // a single zext + add sequence that is cheaper on all targets.
+        //
+        // Reuse an existing zext(cond, intTy) in the same basic block to
+        // avoid creating a duplicate that prevents value-equality checks in
+        // downstream passes (applyAlgebraicSimplifications, select chains).
         llvm::Value* x = match.operands[0];
         llvm::Value* cond = match.operands[1];
-        llvm::Value* ext = builder.CreateZExt(cond, intTy, "cond.zext");
+        llvm::Value* ext = nullptr;
+        if (auto* rootBB = match.rootInst->getParent()) {
+            for (auto& i : *rootBB) {
+                if (&i == match.rootInst) break;
+                if (auto* z = llvm::dyn_cast<llvm::ZExtInst>(&i)) {
+                    if (z->getOperand(0) == cond && z->getType() == intTy) {
+                        ext = z;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!ext) ext = builder.CreateZExt(cond, intTy, "cond.zext");
         llvm::Value* result = builder.CreateAdd(x, ext, "cond.inc");
         match.rootInst->replaceAllUsesWith(result);
         return true;
@@ -1927,7 +2018,19 @@ static bool replaceIdiom(IdiomMatch& match) {
         // Replace select(cond, x-1, x) → x - zext(cond, type)
         llvm::Value* x = match.operands[0];
         llvm::Value* cond = match.operands[1];
-        llvm::Value* ext = builder.CreateZExt(cond, intTy, "cond.zext");
+        llvm::Value* ext = nullptr;
+        if (auto* rootBB = match.rootInst->getParent()) {
+            for (auto& i : *rootBB) {
+                if (&i == match.rootInst) break;
+                if (auto* z = llvm::dyn_cast<llvm::ZExtInst>(&i)) {
+                    if (z->getOperand(0) == cond && z->getType() == intTy) {
+                        ext = z;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!ext) ext = builder.CreateZExt(cond, intTy, "cond.zext");
         llvm::Value* result = builder.CreateSub(x, ext, "cond.dec");
         match.rootInst->replaceAllUsesWith(result);
         return true;
@@ -4093,6 +4196,74 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
 
+            // ── select(cond, x+1, x) → x + zext(cond)  [conditional increment] ──
+            // ── select(cond, x-1, x) → x - zext(cond)  [conditional decrement] ──
+            // These arise when the idiom recognition phase (Phase 1) replaces inner
+            // select(C, N+1, N) with add(N, zext(C)), and an outer select(D, inner, x)
+            // then becomes select(D, x+1, x) after the inner is simplified.
+            // Running this in the algebraic phase ensures the full chain collapses.
+            if (!simplified) {
+                if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst)) {
+                    llvm::Value* cond   = sel->getCondition();
+                    llvm::Value* trueV  = sel->getTrueValue();
+                    llvm::Value* falseV = sel->getFalseValue();
+                    // Pattern: select(cond, x+1, x) where trueV = add(x, 1) or add(1, x)
+                    // Also handles the case where trueV's base and falseV are equivalent
+                    // zext instructions of the same source (arising from idiom replacement
+                    // creating a new zext while an equivalent one already existed).
+                    auto zextSrc = [](llvm::Value* v) -> llvm::Value* {
+                        if (auto* z = llvm::dyn_cast<llvm::ZExtInst>(v))
+                            return z->getOperand(0);
+                        return nullptr;
+                    };
+                    auto valuesEquivalent = [&](llvm::Value* a, llvm::Value* b) -> bool {
+                        if (a == b) return true;
+                        // Both are zext of the same source value
+                        auto* sa = zextSrc(a);
+                        auto* sb = zextSrc(b);
+                        return sa && sb && sa == sb && a->getType() == b->getType();
+                    };
+                    if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(trueV)) {
+                        if (addInst->getOpcode() == llvm::Instruction::Add) {
+                            bool lhsIsBase = (valuesEquivalent(addInst->getOperand(0), falseV) &&
+                                              isConstInt(addInst->getOperand(1), 1));
+                            bool rhsIsBase = (valuesEquivalent(addInst->getOperand(1), falseV) &&
+                                              isConstInt(addInst->getOperand(0), 1));
+                            if (lhsIsBase || rhsIsBase) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* ext = builder.CreateZExt(cond, inst.getType(), "cond.zext");
+                                simplified = builder.CreateAdd(falseV, ext, "cond.inc");
+                            }
+                        }
+                        // select(cond, x-1, x) → x - zext(cond)
+                        if (!simplified && addInst->getOpcode() == llvm::Instruction::Sub &&
+                            valuesEquivalent(addInst->getOperand(0), falseV) &&
+                            isConstInt(addInst->getOperand(1), 1)) {
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::Value* ext = builder.CreateZExt(cond, inst.getType(), "cond.zext");
+                            simplified = builder.CreateSub(falseV, ext, "cond.dec");
+                        }
+                    }
+                    // Constant variant: select(cond, C+1, C) → C + zext(cond)
+                    // (handles cases not already caught by idiom detection Phase 1)
+                    if (!simplified) {
+                        auto cvTrue  = getConstIntValue(trueV);
+                        auto cvFalse = getConstIntValue(falseV);
+                        if (cvTrue && cvFalse) {
+                            if (*cvTrue == *cvFalse + 1) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* ext = builder.CreateZExt(cond, inst.getType(), "cond.zext");
+                                simplified = builder.CreateAdd(falseV, ext, "cond.inc");
+                            } else if (*cvTrue == *cvFalse - 1) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* ext = builder.CreateZExt(cond, inst.getType(), "cond.zext");
+                                simplified = builder.CreateSub(falseV, ext, "cond.dec");
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── or(and(x, mask), and(y, ~mask)) → select ────────────────────
             // Bit-select pattern: pick bits from x where mask=1, y where mask=0
             // This can be lowered to a single blend instruction on x86 (vpblendvb)
@@ -4260,6 +4431,108 @@ static bool replaceIdiom(IdiomMatch& match) {
                             simplified = trunc;
                         }
                     }
+                }
+            }
+
+            // ── Div-mod identity: (a / b) * b + (a % b) → a ─────────────────
+            // This is an exact arithmetic identity for integer division:
+            //   (a / b) * b + (a % b) = a  for any non-zero b and any a.
+            // Users sometimes write this by accident when they mean a round-trip
+            // through division (e.g., alignment checks), or as the inverse of
+            // modular reduction to verify the quotient.
+            //
+            // We detect two forms:
+            //   Form 1: add( mul(sdiv(a,b), b), srem(a,b) ) → a
+            //   Form 2: add( mul(udiv(a,b), b), urem(a,b) ) → a
+            // The operands to add may be in either order.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                for (unsigned addLHS = 0; addLHS < 2 && !simplified; ++addLHS) {
+                    auto* mulInst = llvm::dyn_cast<llvm::BinaryOperator>(
+                        inst.getOperand(addLHS));
+                    auto* remInst = llvm::dyn_cast<llvm::BinaryOperator>(
+                        inst.getOperand(1 - addLHS));
+                    if (!mulInst || !remInst) continue;
+                    if (mulInst->getOpcode() != llvm::Instruction::Mul) continue;
+                    bool isSigned = (remInst->getOpcode() == llvm::Instruction::SRem);
+                    bool isUnsigned = (remInst->getOpcode() == llvm::Instruction::URem);
+                    if (!isSigned && !isUnsigned) continue;
+
+                    // remInst = srem(a, b) or urem(a, b)
+                    llvm::Value* remA = remInst->getOperand(0);
+                    llvm::Value* remB = remInst->getOperand(1);
+
+                    // mulInst = mul(divInst, b) or mul(b, divInst)
+                    for (unsigned mulLHS = 0; mulLHS < 2 && !simplified; ++mulLHS) {
+                        auto* divInst = llvm::dyn_cast<llvm::BinaryOperator>(
+                            mulInst->getOperand(mulLHS));
+                        llvm::Value* mulB = mulInst->getOperand(1 - mulLHS);
+                        if (!divInst) continue;
+                        bool divSigned   = (divInst->getOpcode() == llvm::Instruction::SDiv);
+                        bool divUnsigned = (divInst->getOpcode() == llvm::Instruction::UDiv);
+                        if (!(divSigned && isSigned) && !(divUnsigned && isUnsigned)) continue;
+
+                        llvm::Value* divA = divInst->getOperand(0);
+                        llvm::Value* divB = divInst->getOperand(1);
+
+                        // All of: divA == remA, divB == remB, mulB == remB
+                        if (divA == remA && divB == remB && mulB == remB) {
+                            simplified = remA;  // → a
+                        }
+                    }
+                }
+            }
+
+            // ── x / C * C → x - (x % C)  [floor-to-multiple for integer x] ──
+            // This is the "round down to multiple of C" pattern.  For pow-2 C
+            // with non-negative x, this is just `x & ~(C-1)`.  But even for
+            // arbitrary C and signed x, we can express it as `x - (x % C)`.
+            // We don't emit the subtraction form here because it introduces a
+            // new div/rem, but we CAN simplify the converse:
+            //   x - (x % C) → x & ~(C-1)  when C is pow-2 and x >= 0
+            // (already handled by the unsigned-rem → and pattern above)
+            //
+            // What IS worth doing here: recognize x/C*C when C is a known-
+            // power-of-2 constant and x is known non-negative, and simplify to
+            // and(x, ~(C-1)) which is 1 instruction vs 2.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                llvm::Value* xv = nullptr;
+                int64_t cvDiv = 0, cvMul = 0;
+                llvm::BinaryOperator* divInst = nullptr;
+                // Try mul( div(x, C), C )
+                for (unsigned mulOp = 0; mulOp < 2 && !simplified; ++mulOp) {
+                    auto cvMulVal = getConstIntValue(inst.getOperand(mulOp));
+                    if (!cvMulVal) continue;
+                    cvMul = *cvMulVal;
+                    if (cvMul <= 1) continue;
+                    auto* innerDiv = llvm::dyn_cast<llvm::BinaryOperator>(
+                        inst.getOperand(1 - mulOp));
+                    if (!innerDiv) continue;
+                    bool isSDiv = (innerDiv->getOpcode() == llvm::Instruction::SDiv);
+                    bool isUDiv = (innerDiv->getOpcode() == llvm::Instruction::UDiv);
+                    if (!isSDiv && !isUDiv) continue;
+                    auto cvDivVal = getConstIntValue(innerDiv->getOperand(1));
+                    if (!cvDivVal || *cvDivVal != cvMul) continue;
+                    cvDiv = *cvDivVal;
+                    xv = innerDiv->getOperand(0);
+                    divInst = innerDiv;
+
+                    // Check: C is a power of 2
+                    uint64_t uC = static_cast<uint64_t>(cvDiv);
+                    if (uC < 2 || (uC & (uC - 1)) != 0) continue;
+                    uint64_t mask = ~(uC - 1);
+
+                    // For udiv: x is always non-negative in the unsigned sense.
+                    // For sdiv: check if x is known non-negative.
+                    const llvm::DataLayout& DL2 = inst.getModule()->getDataLayout();
+                    bool xNonNeg = isUDiv || isValueNonNegative(xv, DL2);
+                    if (!xNonNeg) continue;
+
+                    // sdiv(x, C) * C → and(x, ~(C-1))  when x >= 0 and C is pow2
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateAnd(xv,
+                        llvm::ConstantInt::get(inst.getType(),
+                            static_cast<int64_t>(mask)), "divmul_mask");
+                    (void)divInst;
                 }
             }
 
