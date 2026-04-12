@@ -6245,8 +6245,8 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
 
     for (auto& bb : func) {
         if (auto* sw = llvm::dyn_cast<llvm::SwitchInst>(bb.getTerminator())) {
-            // Only handle small switches (≤4 non-default cases)
-            if (sw->getNumCases() >= 2 && sw->getNumCases() <= 4) {
+            // Only handle small switches (≤8 non-default cases)
+            if (sw->getNumCases() >= 2 && sw->getNumCases() <= 8) {
                 toProcess.push_back(sw);
             }
         }
@@ -6356,6 +6356,262 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
             sw->eraseFromParent();
             ++count;
         }
+    }
+
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Switch Table → Branchless Arithmetic
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Analyze constant global arrays used as switch lookup tables and replace
+/// GEP+load pairs with branchless arithmetic when possible:
+///
+/// 1. Boolean table (all values 0 or 1): replace with bitmask test.
+///    table[i] → (BITMASK >> i) & 1
+///    Eliminates memory access entirely — single shift+and.
+///
+/// 2. Arithmetic progression (values = base + stride*i): replace with
+///    formula.  table[i] → base + stride*i.  Common in sequential scoring.
+///
+/// 3. Packed byte table (values fit in 8 bits, ≤8 entries): pack the whole
+///    table into a 64-bit immediate, extract byte with shift.
+///    table[i] → (PACKED >> (i*8)) & 0xFF
+///
+/// These transformations eliminate the conditional branch (range check +
+/// br to lookup block) by replacing the load with pure arithmetic, which
+/// the CPU can execute speculatively without a misprediction penalty and
+/// which the vectorizer can handle inside loops.
+static unsigned analyzeSwitchTableGlobals(llvm::Function& func) {
+    unsigned count = 0;
+    llvm::Module* M = func.getParent();
+    if (!M) return 0;
+
+    llvm::LLVMContext& ctx = func.getContext();
+    llvm::Type* i64Ty = llvm::Type::getInt64Ty(ctx);
+
+    // Collect candidate GEP+load pairs: GEP into a private constant global
+    // array of i64s, followed immediately by a load.
+    struct TableLoad {
+        llvm::LoadInst* load;
+        llvm::GetElementPtrInst* gep;
+        llvm::GlobalVariable* global;
+        uint64_t numEntries;
+    };
+    llvm::SmallVector<TableLoad, 8> candidates;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst);
+            if (!load) continue;
+            if (!load->getType()->isIntegerTy(64)) continue;
+
+            auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(load->getPointerOperand());
+            if (!gep) continue;
+            if (gep->getNumIndices() != 2) continue;
+
+            // First index must be 0 (array base)
+            auto* idx0 = llvm::dyn_cast<llvm::ConstantInt>(gep->getOperand(1));
+            if (!idx0 || !idx0->isZero()) continue;
+
+            // The table index (second GEP operand) must be a runtime value
+            if (llvm::isa<llvm::Constant>(gep->getOperand(2))) continue;
+
+            auto* global = llvm::dyn_cast<llvm::GlobalVariable>(gep->getPointerOperand());
+            if (!global) continue;
+            if (!global->isConstant() || !global->hasPrivateLinkage()) continue;
+            if (!global->hasInitializer()) continue;
+
+            auto* arrTy = llvm::dyn_cast<llvm::ArrayType>(global->getValueType());
+            if (!arrTy) continue;
+            if (!arrTy->getElementType()->isIntegerTy(64)) continue;
+
+            const uint64_t N = arrTy->getNumElements();
+            if (N < 2 || N > 64) continue; // only small tables
+
+            candidates.push_back({load, gep, global, N});
+        }
+    }
+
+    for (auto& cand : candidates) {
+        llvm::GlobalVariable* global = cand.global;
+        const uint64_t N = cand.numEntries;
+
+        // Extract table values
+        auto* init = llvm::dyn_cast<llvm::ConstantDataArray>(global->getInitializer());
+        if (!init) {
+            // Could be ConstantArray of i64s
+            auto* caInit = llvm::dyn_cast<llvm::ConstantArray>(global->getInitializer());
+            if (!caInit) continue;
+            // Read values
+            llvm::SmallVector<int64_t, 64> vals;
+            vals.reserve(N);
+            for (uint64_t i = 0; i < N; i++) {
+                auto* ci = llvm::dyn_cast<llvm::ConstantInt>(caInit->getOperand(i));
+                if (!ci) goto next_candidate;
+                vals.push_back(static_cast<int64_t>(ci->getSExtValue()));
+            }
+            {
+                // --- Check: boolean table (all 0 or 1) ---
+                bool allBool = true;
+                for (auto v : vals) if (v != 0 && v != 1) { allBool = false; break; }
+                if (allBool && N <= 64) {
+                    uint64_t mask = 0;
+                    for (uint64_t i = 0; i < N; i++)
+                        if (vals[i]) mask |= (uint64_t(1) << i);
+                    llvm::IRBuilder<> builder(cand.load);
+                    llvm::Value* idx = cand.gep->getOperand(2);
+                    llvm::Value* maskV = llvm::ConstantInt::get(i64Ty, mask);
+                    llvm::Value* shifted = builder.CreateLShr(maskV, idx, "boolmask.shr");
+                    llvm::Value* bit = builder.CreateAnd(shifted,
+                        llvm::ConstantInt::get(i64Ty, 1), "boolmask.and");
+                    cand.load->replaceAllUsesWith(bit);
+                    cand.load->eraseFromParent();
+                    ++count;
+                    continue;
+                }
+
+                // --- Check: arithmetic progression (base + stride*i) ---
+                if (N >= 2) {
+                    const int64_t base   = vals[0];
+                    const int64_t stride = vals[1] - vals[0];
+                    bool isArith = true;
+                    for (uint64_t i = 1; i < N; i++) {
+                        if (vals[i] != base + static_cast<int64_t>(i) * stride) {
+                            isArith = false; break;
+                        }
+                    }
+                    if (isArith) {
+                        llvm::IRBuilder<> builder(cand.load);
+                        llvm::Value* idx = cand.gep->getOperand(2);
+                        llvm::Value* result;
+                        if (stride == 0) {
+                            result = llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(base));
+                        } else {
+                            llvm::Value* stridV = llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(stride));
+                            llvm::Value* mul = builder.CreateMul(idx, stridV, "arith.mul",
+                                /*HasNUW=*/false, /*HasNSW=*/stride > 0);
+                            llvm::Value* baseV = llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(base));
+                            result = builder.CreateAdd(mul, baseV, "arith.add");
+                        }
+                        cand.load->replaceAllUsesWith(result);
+                        cand.load->eraseFromParent();
+                        ++count;
+                        continue;
+                    }
+                }
+
+                // --- Check: byte-packed table (all values fit in u8, ≤8 entries) ---
+                if (N <= 8) {
+                    bool allByte = true;
+                    for (auto v : vals) if (v < 0 || v > 255) { allByte = false; break; }
+                    if (allByte) {
+                        uint64_t packed = 0;
+                        for (uint64_t i = 0; i < N; i++)
+                            packed |= (static_cast<uint64_t>(vals[i]) << (i * 8));
+                        llvm::IRBuilder<> builder(cand.load);
+                        llvm::Value* idx = cand.gep->getOperand(2);
+                        llvm::Value* packedV = llvm::ConstantInt::get(i64Ty, packed);
+                        // shift = idx * 8
+                        llvm::Value* shiftAmt = builder.CreateMul(idx,
+                            llvm::ConstantInt::get(i64Ty, 8), "bytepack.shift");
+                        llvm::Value* shifted = builder.CreateLShr(packedV, shiftAmt, "bytepack.shr");
+                        llvm::Value* byte = builder.CreateAnd(shifted,
+                            llvm::ConstantInt::get(i64Ty, 0xFF), "bytepack.and");
+                        cand.load->replaceAllUsesWith(byte);
+                        cand.load->eraseFromParent();
+                        ++count;
+                        continue;
+                    }
+                }
+            }
+            next_candidate:;
+            continue;
+        }
+
+        // ConstantDataArray path (common for i64 arrays)
+        llvm::SmallVector<int64_t, 64> vals;
+        vals.reserve(N);
+        for (uint64_t i = 0; i < N; i++) {
+            auto* ci = llvm::dyn_cast<llvm::ConstantInt>(init->getElementAsConstant(i));
+            if (!ci) goto skip_cda;
+            vals.push_back(static_cast<int64_t>(ci->getSExtValue()));
+        }
+        {
+            // Boolean table
+            bool allBool = true;
+            for (auto v : vals) if (v != 0 && v != 1) { allBool = false; break; }
+            if (allBool && N <= 64) {
+                uint64_t mask = 0;
+                for (uint64_t i = 0; i < N; i++)
+                    if (vals[i]) mask |= (uint64_t(1) << i);
+                llvm::IRBuilder<> builder(cand.load);
+                llvm::Value* idx = cand.gep->getOperand(2);
+                llvm::Value* maskV = llvm::ConstantInt::get(i64Ty, mask);
+                llvm::Value* shifted = builder.CreateLShr(maskV, idx, "boolmask.shr");
+                llvm::Value* bit = builder.CreateAnd(shifted,
+                    llvm::ConstantInt::get(i64Ty, 1), "boolmask.and");
+                cand.load->replaceAllUsesWith(bit);
+                cand.load->eraseFromParent();
+                ++count;
+                continue;
+            }
+
+            // Arithmetic progression
+            if (N >= 2) {
+                const int64_t base   = vals[0];
+                const int64_t stride = vals[1] - vals[0];
+                bool isArith = true;
+                for (uint64_t i = 1; i < N; i++) {
+                    if (vals[i] != base + static_cast<int64_t>(i) * stride) {
+                        isArith = false; break;
+                    }
+                }
+                if (isArith) {
+                    llvm::IRBuilder<> builder(cand.load);
+                    llvm::Value* idx = cand.gep->getOperand(2);
+                    llvm::Value* result;
+                    if (stride == 0) {
+                        result = llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(base));
+                    } else {
+                        llvm::Value* stridV = llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(stride));
+                        llvm::Value* mul = builder.CreateMul(idx, stridV, "arith.mul",
+                            /*HasNUW=*/false, /*HasNSW=*/stride > 0);
+                        llvm::Value* baseV = llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(base));
+                        result = builder.CreateAdd(mul, baseV, "arith.add");
+                    }
+                    cand.load->replaceAllUsesWith(result);
+                    cand.load->eraseFromParent();
+                    ++count;
+                    continue;
+                }
+            }
+
+            // Byte-packed table
+            if (N <= 8) {
+                bool allByte = true;
+                for (auto v : vals) if (v < 0 || v > 255) { allByte = false; break; }
+                if (allByte) {
+                    uint64_t packed = 0;
+                    for (uint64_t i = 0; i < N; i++)
+                        packed |= (static_cast<uint64_t>(vals[i]) << (i * 8));
+                    llvm::IRBuilder<> builder(cand.load);
+                    llvm::Value* idx = cand.gep->getOperand(2);
+                    llvm::Value* packedV = llvm::ConstantInt::get(i64Ty, packed);
+                    llvm::Value* shiftAmt = builder.CreateMul(idx,
+                        llvm::ConstantInt::get(i64Ty, 8), "bytepack.shift");
+                    llvm::Value* shifted = builder.CreateLShr(packedV, shiftAmt, "bytepack.shr");
+                    llvm::Value* byte = builder.CreateAnd(shifted,
+                        llvm::ConstantInt::get(i64Ty, 0xFF), "bytepack.and");
+                    cand.load->replaceAllUsesWith(byte);
+                    cand.load->eraseFromParent();
+                    ++count;
+                    continue;
+                }
+            }
+        }
+        skip_cda:;
     }
 
     return count;
@@ -6620,11 +6876,23 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     }
 
     // Phase 3.9: Small switch → select chain lowering.
-    // Converts switch(x) with 2-4 cases that converge to a merge block with
+    // Converts switch(x) with 2-8 cases that converge to a merge block with
     // PHI nodes into a chain of icmp+select instructions.  Eliminates branch
     // mispredictions and exposes the pattern to the vectorizer.
     if (config.enableBranchOpt) {
         stats.branchesSimplified += lowerSmallSwitchToSelect(func);
+    }
+
+    // Phase 3.91: Switch table global → branchless arithmetic.
+    // Analyzes constant global arrays used as switch lookup tables and
+    // replaces GEP+load with pure arithmetic where possible:
+    //   - Boolean table (0/1 entries) → bitmask shift-and (no memory access)
+    //   - Arithmetic progression → base + stride*i formula
+    //   - Byte-packed table (≤8 entries, values ≤255) → packed 64-bit immediate
+    // Runs after lowerSmallSwitchToSelect so that any remaining switch-table
+    // loads (created by LLVM's SimplifyCFG) are also handled.
+    if (config.enableBranchOpt) {
+        stats.branchesSimplified += analyzeSwitchTableGlobals(func);
     }
 
     // Phase 3.10: Assume-based bounds check elimination.

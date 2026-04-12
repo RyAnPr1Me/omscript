@@ -147,6 +147,7 @@ test_cli_output "lex-bitwise-assign" "AMPERSAND_ASSIGN" 0 ./build/omsc lex examp
 test_cli_output "lex-hex-literal" "INTEGER '0xFF'" 0 ./build/omsc lex examples/hex_oct_bin_test.om
 test_cli_output "lex-octal-literal" "INTEGER '0o77'" 0 ./build/omsc lex examples/hex_oct_bin_test.om
 test_cli_output "lex-binary-literal" "INTEGER '0b1111'" 0 ./build/omsc lex examples/hex_oct_bin_test.om
+test_cli_output "lex-bytes-literal" "BYTES_LITERAL" 0 ./build/omsc lex examples/bytes_literal_test.om
 test_cli_output "lex-underscore-decimal" "INTEGER '1000000'" 0 ./build/omsc lex examples/underscore_num_test.om
 test_cli_output "lex-underscore-hex" "INTEGER '0xFF00'" 0 ./build/omsc lex examples/underscore_num_test.om
 test_cli_output "lex-power-operator" "STAR_STAR '**'" 0 ./build/omsc lex examples/power_operator_test.om
@@ -317,6 +318,7 @@ test_program "examples/bitwise_assign_test.om" 55
 test_program "examples/array_compound_test.om" 164
 test_program "examples/print_char_return_test.om" 1
 test_program "examples/hex_oct_bin_test.om" 543
+test_program "examples/bytes_literal_test.om" 56
 test_program "examples/array_incdec_test.om" 162
 test_program "examples/hex_escape_test.om" 0
 test_program "examples/underscore_num_test.om" 178

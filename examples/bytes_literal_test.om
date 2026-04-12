@@ -1,0 +1,35 @@
+// Test hex bytes literal: 0x"AABBCC" -> array of byte values
+fn main() {
+    var data = 0x"DEADBEEF";
+    assert(len(data) == 4);
+    assert(data[0] == 0xDE);
+    assert(data[1] == 0xAD);
+    assert(data[2] == 0xBE);
+    assert(data[3] == 0xEF);
+
+    var b2 = 0x"CAFEBABE";
+    assert(b2[0] == 0xCA);
+    assert(b2[3] == 0xBE);
+
+    // Space separators
+    var b3 = 0x"01 02 03 04";
+    assert(len(b3) == 4);
+    assert(b3[0] == 1);
+    assert(b3[3] == 4);
+
+    // Single byte
+    var b4 = 0x"FF";
+    assert(len(b4) == 1);
+    assert(b4[0] == 255);
+
+    // Lowercase
+    var b5 = 0x"ff00ff";
+    assert(len(b5) == 3);
+    assert(b5[0] == 255);
+    assert(b5[1] == 0);
+    assert(b5[2] == 255);
+
+    // sum of DE+AD+BE+EF = 222+173+190+239 = 824; 824 % 256 = 56
+    var total = data[0] + data[1] + data[2] + data[3];
+    return total % 256;
+}
