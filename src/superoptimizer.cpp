@@ -2781,6 +2781,104 @@ static bool replaceIdiom(IdiomMatch& match) {
                         llvm::ConstantInt::get(inst.getType(), *c - 1), "urem_pow2");
                 }
             }
+            // ── Signed rem/sub by power-of-2 — non-negative dividend fast path ─
+            // srem(x, 2^n) → and(x, 2^n - 1) when x is provably non-negative.
+            // Safe because srem == urem for non-negative dividends.  Avoids the
+            // 25-cycle signed remainder operation entirely.  Critical for loops
+            // where the induction variable (always ≥ 0) is used in modulo
+            // expressions like `i % 8` to compute bucket indices or alignment.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::SRem) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    int64_t c = ci->getSExtValue();
+                    if (c > 1 && (c & (c - 1)) == 0) {  // positive power-of-2
+                        const llvm::DataLayout& DL = inst.getModule()->getDataLayout();
+                        if (isValueNonNegative(inst.getOperand(0), DL)) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateAnd(inst.getOperand(0),
+                                llvm::ConstantInt::get(inst.getType(), c - 1),
+                                "srem_pow2_nn");
+                        }
+                    }
+                }
+            }
+            // sub(x, srem(x, 2^n)) → and(x, ~(2^n - 1)) when x is non-negative.
+            // This is the "floor to nearest multiple of 2^n" pattern that users
+            // commonly write as `x - (x % 8)` to align a byte offset to a cache
+            // line, SIMD boundary, or page size.  With a non-negative x the
+            // signed mod is equal to the unsigned mod, so:
+            //   x - (x & (C-1))  =  x & ~(C-1)
+            // Saves 1 srem (≈25 cycles) + 1 sub → 1 and (1 cycle).
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                llvm::Value* dividend = inst.getOperand(0);
+                if (auto* sremInst =
+                        llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1))) {
+                    if (sremInst->getOpcode() == llvm::Instruction::SRem &&
+                        sremInst->getOperand(0) == dividend &&
+                        hasOneUse(sremInst)) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(
+                                sremInst->getOperand(1))) {
+                            int64_t c = ci->getSExtValue();
+                            if (c > 1 && (c & (c - 1)) == 0) {  // positive power-of-2
+                                const llvm::DataLayout& DL =
+                                    inst.getModule()->getDataLayout();
+                                if (isValueNonNegative(dividend, DL)) {
+                                    llvm::IRBuilder<> builder(&inst);
+                                    // ~(C-1) as a two's-complement mask
+                                    uint64_t mask = ~static_cast<uint64_t>(c - 1);
+                                    simplified = builder.CreateAnd(dividend,
+                                        llvm::ConstantInt::get(inst.getType(), mask),
+                                        "floor_pow2_nn");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // sub(x, and(x, C-1)) → and(x, ~(C-1)) for power-of-2 C, valid for ALL x.
+            // This fires when the srem→urem→urem_pow2 chain has already simplified
+            // srem(x, C) to and(x, C-1), leaving sub(x, and(x, C-1)) in the IR.
+            // Identity: x = (x & ~(C-1)) + (x & (C-1)), so
+            //           x - (x & (C-1)) = x & ~(C-1), unconditionally.
+            // No sign constraint needed — this is a pure bitwise identity.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                llvm::Value* lhs = inst.getOperand(0);
+                if (auto* andInst =
+                        llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1))) {
+                    if (andInst->getOpcode() == llvm::Instruction::And &&
+                        andInst->getOperand(0) == lhs &&
+                        hasOneUse(andInst)) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(
+                                andInst->getOperand(1))) {
+                            uint64_t mask = ci->getZExtValue();
+                            // mask must be of the form 2^n - 1 (all low bits set)
+                            if (mask > 0 && (mask & (mask + 1)) == 0) {
+                                llvm::IRBuilder<> builder(&inst);
+                                simplified = builder.CreateAnd(lhs,
+                                    llvm::ConstantInt::get(inst.getType(),
+                                                           ~mask),
+                                    "floor_and_mask");
+                            }
+                        }
+                    }
+                    // Also handle: sub(x, and(C-1, x)) — commuted operand
+                    if (!simplified &&
+                        andInst->getOpcode() == llvm::Instruction::And &&
+                        andInst->getOperand(1) == lhs &&
+                        hasOneUse(andInst)) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(
+                                andInst->getOperand(0))) {
+                            uint64_t mask = ci->getZExtValue();
+                            if (mask > 0 && (mask & (mask + 1)) == 0) {
+                                llvm::IRBuilder<> builder(&inst);
+                                simplified = builder.CreateAnd(lhs,
+                                    llvm::ConstantInt::get(inst.getType(),
+                                                           ~mask),
+                                    "floor_and_mask_c");
+                            }
+                        }
+                    }
+                }
+            }
             // sdiv x, -1 → 0 - x  (negate via nsw sub from zero)
             // Guard: INT_MIN / -1 is undefined behaviour (overflows).  The
             // LLVM `sub nsw` carries the same UB semantics as C negation, so
@@ -5619,16 +5717,21 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     }
 
     // Phase 3.9: Small switch → select chain lowering.
-    // TEMPORARILY DISABLED for debugging
-    // if (config.enableBranchOpt) {
-    //     stats.branchesSimplified += lowerSmallSwitchToSelect(func);
-    // }
+    // Converts switch(x) with 2-4 cases that converge to a merge block with
+    // PHI nodes into a chain of icmp+select instructions.  Eliminates branch
+    // mispredictions and exposes the pattern to the vectorizer.
+    if (config.enableBranchOpt) {
+        stats.branchesSimplified += lowerSmallSwitchToSelect(func);
+    }
 
     // Phase 3.10: Assume-based bounds check elimination.
-    // TEMPORARILY DISABLED for debugging
-    // if (config.enableAlgebraic) {
-    //     stats.algebraicSimplified += eliminateRedundantBoundsChecks(func);
-    // }
+    // Propagates conditions from llvm.assume intrinsics to dominated blocks,
+    // replacing redundant icmp comparisons with true/false constants.
+    // Targets OmScript for-loop bounds check patterns:
+    //   llvm.assume(i < len)  →  later icmp ult i, len  →  replaced with true
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += eliminateRedundantBoundsChecks(func);
+    }
 
     // Phase 4: Enumerative synthesis on remaining expensive instructions
     if (config.enableSynthesis) {
