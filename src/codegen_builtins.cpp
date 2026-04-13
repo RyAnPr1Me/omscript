@@ -2401,7 +2401,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrncmp(),
             {strPtr, prefixPtr, prefixLen}, "startswith.cmp");
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "startswith.eq");
-        return builder->CreateZExt(isEqual, getDefaultType(), "startswith.result");
+        auto* swResult = builder->CreateZExt(isEqual, getDefaultType(), "startswith.result");
+        nonNegValues_.insert(swResult);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            if (auto* li = llvm::dyn_cast<llvm::Instruction>(swResult))
+                li->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        return swResult;
     }
 
     if (bid == BuiltinId::STR_ENDS_WITH) {
@@ -2456,6 +2461,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "endswith.phi");
         result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), failBB);
         result->addIncoming(resultCheck, checkBB);
+        nonNegValues_.insert(result);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
         return result;
     }
 
