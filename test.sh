@@ -366,7 +366,7 @@ fn bench_struct(@prefetch n:int) -> int {
 }
 
 // ── 7. switch_branch ─────────────────────────────────────────
-@hot @static @nounwind @
+@hot @static @nounwind 
 fn bench_branch(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
