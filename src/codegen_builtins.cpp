@@ -269,7 +269,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             }
             builder->CreateCall(getPrintfFunction(), {floatFmt, arg});
             return llvm::ConstantInt::get(getDefaultType(), 0);
-        } else if (arg->getType()->isPointerTy() || isStringExpr(argExpr)) {
+        } else if (isStringExpr(argExpr)) {
             // Print string (literal, local string variable, or i64 holding a
             // string pointer that crossed a function boundary via ptrtoint).
             if (!arg->getType()->isPointerTy()) {
@@ -377,7 +377,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         //      boundaries).  In that case the IntToPtr below reconstructs the
         //      char* needed by strlen.
         // If neither is true the argument is assumed to be an array.
-        if (arg->getType()->isPointerTy() || isStringExpr(argExpr)) {
+        if (isStringExpr(argExpr)) {
             // Reconstruct the char* for strlen when the value is stored as i64.
             llvm::Value* strPtr = arg->getType()->isPointerTy()
                                       ? arg
@@ -642,7 +642,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             arg = builder->CreateFPToSI(arg, getDefaultType(), "ftoi");
         }
         llvm::Value* charCode;
-        if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+        if (isStringExpr(expr->arguments[0].get())) {
             // Argument is a string (e.g. result of to_char): load the first byte.
             llvm::Value* ptr = arg->getType()->isPointerTy()
                                    ? arg
@@ -1091,7 +1091,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         long long tag;
         if (arg->getType()->isDoubleTy()) {
             tag = 2; // float
-        } else if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+        } else if (isStringExpr(expr->arguments[0].get())) {
             tag = 3; // string
         } else {
             tag = 1; // integer (default for all i64 values including arrays)
@@ -1776,7 +1776,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             return builder->CreateFPToSI(arg, getDefaultType(), "toint.ftoi");
         }
         // If the argument is a string, parse it with strtoll.
-        if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+        if (isStringExpr(expr->arguments[0].get())) {
             auto* ptrTy = llvm::PointerType::getUnqual(*context);
             llvm::Value* strPtr = arg->getType()->isPointerTy()
                                       ? arg
@@ -1810,7 +1810,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // If the argument is a string, parse it with strtod.
-        if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+        if (isStringExpr(expr->arguments[0].get())) {
             auto* ptrTy = llvm::PointerType::getUnqual(*context);
             llvm::Value* strPtr = arg->getType()->isPointerTy()
                                       ? arg
@@ -3856,7 +3856,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 floatFmt = builder->CreateGlobalString("%g\n", "println_float_fmt");
             }
             builder->CreateCall(getPrintfFunction(), {floatFmt, arg});
-        } else if (arg->getType()->isPointerTy() || isStringExpr(argExpr)) {
+        } else if (isStringExpr(argExpr)) {
             if (!arg->getType()->isPointerTy()) {
                 arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "println.str.ptr");
             }
@@ -3886,7 +3886,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 floatFmt = builder->CreateGlobalString("%g", "write_float_fmt");
             }
             builder->CreateCall(getPrintfFunction(), {floatFmt, arg});
-        } else if (arg->getType()->isPointerTy() || isStringExpr(argExpr)) {
+        } else if (isStringExpr(argExpr)) {
             if (!arg->getType()->isPointerTy()) {
                 arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "write.str.ptr");
             }

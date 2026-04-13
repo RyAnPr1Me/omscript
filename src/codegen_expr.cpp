@@ -869,8 +869,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // Pre-compute string flags once, used by both the float-skip guard below
     // and the string concatenation block that follows.
-    const bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
-    const bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
+    // Use isStringExpr() as the sole discriminator — pointer type alone is
+    // ambiguous since arrays/structs/dicts also use pointer-typed allocas.
+    const bool leftIsStr = isStringExpr(expr->left.get());
+    const bool rightIsStr = isStringExpr(expr->right.get());
 
     // Float operations path — but only when neither operand is a string.
     // When the '+' operator has one string and one float (e.g. "pi=" + 3.14),
@@ -4275,7 +4277,9 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         updateBound(value);
     }
     // Update string variable tracking after assignment.
-    if (value->getType()->isPointerTy() || isStringExpr(expr->value.get()))
+    // Use isStringExpr() — pointer type alone is ambiguous since
+    // arrays/structs/dicts also use pointer-typed allocas.
+    if (isStringExpr(expr->value.get()))
         stringVars_.insert(expr->name);
     else
         stringVars_.erase(expr->name);
@@ -5047,7 +5051,9 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // Detect whether the base expression is a string.  Strings are raw char
     // pointers without a length header; arrays have the layout [length, e0,
     // e1, ...] and each element is 8 bytes (i64).
-    const bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
+    // Use isStringExpr() as the sole discriminator — pointer type alone is
+    // ambiguous since arrays/structs/dicts also use pointer-typed allocas.
+    const bool isStr = isStringExpr(expr->array.get());
 
     // Convert i64 → pointer (strings may arrive as i64 via ptrtoint)
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -5190,7 +5196,9 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     idxVal = toDefaultType(idxVal);
 
     // Detect whether the base is a string (raw char* without a length header).
-    const bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
+    // Use isStringExpr() as the sole discriminator — pointer type alone is
+    // ambiguous since arrays/structs/dicts also use pointer-typed allocas.
+    const bool isStr = isStringExpr(expr->array.get());
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     llvm::Value* basePtr =

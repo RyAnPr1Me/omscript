@@ -174,6 +174,37 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             dictVarNames_.insert(stmt->name);
     }
 
+    // Track array variables so isStringExpr() can distinguish array pointers
+    // from string pointers (both now use pointer-typed allocas).
+    {
+        bool isArray = false;
+        if (!stmt->typeName.empty() &&
+            stmt->typeName.size() >= 2 &&
+            stmt->typeName.compare(stmt->typeName.size() - 2, 2, "[]") == 0) {
+            isArray = true;
+        }
+        if (!isArray && stmt->initializer) {
+            if (stmt->initializer->type == ASTNodeType::ARRAY_EXPR) {
+                isArray = true;
+            } else if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+                auto* call = static_cast<CallExpr*>(stmt->initializer.get());
+                if (call->callee == "array_fill" || call->callee == "array_concat" ||
+                    call->callee == "array_copy" || call->callee == "array_map" ||
+                    call->callee == "array_filter" || call->callee == "array_slice" ||
+                    call->callee == "push" || call->callee == "pop" ||
+                    call->callee == "sort" || call->callee == "reverse" ||
+                    call->callee == "array_remove" || call->callee == "array_reduce" ||
+                    call->callee == "str_split" || call->callee == "str_chars") {
+                    isArray = true;
+                }
+            }
+        }
+        if (isArray)
+            arrayVars_.insert(stmt->name);
+        else
+            arrayVars_.erase(stmt->name);
+    }
+
     bindVariable(stmt->name, alloca, stmt->isConst);
 
     if (initValue) {
@@ -253,10 +284,10 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
         }
         // Track whether this variable holds a string value so that print(),
-        // concatenation, and comparison operators handle it correctly when
-        // the variable's alloca type is i64 (e.g. assigned from a function
-        // call that returns a string as i64 via ptrtoint).
-        if (initValue->getType()->isPointerTy() || isStringExpr(stmt->initializer.get()))
+        // concatenation, and comparison operators handle it correctly.
+        // Use isStringExpr() — pointer type alone is ambiguous since
+        // arrays/structs/dicts also use pointer-typed allocas.
+        if (isStringExpr(stmt->initializer.get()))
             stringVars_.insert(stmt->name);
         else
             stringVars_.erase(stmt->name);
@@ -350,7 +381,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
         llvm::Value* retValue = generateExpression(stmt->value.get());
         // Record that the current function returns a string value so that
         // callers can use isStringExpr() on the CallExpr and track the result.
-        if (retValue->getType()->isPointerTy() || isStringExpr(stmt->value.get())) {
+        if (isStringExpr(stmt->value.get())) {
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent())
                 stringReturningFunctions_.insert(builder->GetInsertBlock()->getParent()->getName());
         }
@@ -1838,7 +1869,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     // Detect whether the collection is a string.  Strings are raw char
     // pointers without a length header; arrays use [length, e0, e1, ...].
-    const bool isStr = collVal->getType()->isPointerTy() || isStringExpr(stmt->collection.get());
+    // Use isStringExpr() — pointer type alone is ambiguous since
+    // arrays/structs/dicts also use pointer-typed allocas.
+    const bool isStr = isStringExpr(stmt->collection.get());
     // Detect whether this is an array whose elements are string pointers.
     const bool isStrArray = !isStr && isStringArrayExpr(stmt->collection.get());
 

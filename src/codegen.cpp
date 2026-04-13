@@ -924,8 +924,26 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::FixedVectorType::get(llvm::Type::getInt64Ty(*context), 2);
     if (ann == "i64x4")
         return llvm::FixedVectorType::get(llvm::Type::getInt64Ty(*context), 4);
-    // "int", "i64", "u64", "string", array types, struct names, generics,
-    // and empty annotations all map to the default i64 representation.
+    // -----------------------------------------------------------------------
+    // Pointer-holding types — use LLVM pointer type instead of i64.
+    // This preserves pointer provenance through LLVM's alias analysis.
+    // Without this, ptr→i64→ptr round-trips at alloca boundaries destroy
+    // BasicAA / SCEVAA tracking, preventing LICM from hoisting loads and
+    // the vectorizer from proving non-aliasing.
+    // -----------------------------------------------------------------------
+    if (ann == "string")
+        return llvm::PointerType::getUnqual(*context);
+    // Array types: int[], string[], float[], etc.
+    if (ann.size() >= 2 && ann.compare(ann.size() - 2, 2, "[]") == 0)
+        return llvm::PointerType::getUnqual(*context);
+    // Dict/map types
+    if (ann == "dict" || ann.rfind("dict[", 0) == 0)
+        return llvm::PointerType::getUnqual(*context);
+    // Known struct types — heap-allocated, accessed via pointer
+    if (structDefs_.count(ann))
+        return llvm::PointerType::getUnqual(*context);
+
+    // "int", "i64", "u64", generics, and empty annotations map to i64.
     return getDefaultType();
 }
 
@@ -3242,16 +3260,25 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         return static_cast<LiteralExpr*>(expr)->literalType == LiteralExpr::LiteralType::STRING;
     if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
         auto* id = static_cast<IdentifierExpr*>(expr);
-        // Check the LLVM alloca type (handles local vars initialized with string literals).
+        // Check the runtime string-variable tracker first (handles params and
+        // vars assigned from string function returns).
+        if (stringVars_.count(id->name) > 0)
+            return true;
+        // Check the LLVM alloca type: a pointer-typed alloca is a string ONLY
+        // if the variable is not known to be another pointer-holding type
+        // (array, struct, dict).  Since resolveAnnotatedType now returns ptr
+        // for arrays/structs/dicts, we must exclude those to avoid false
+        // positives that would misroute array indexing to strlen-based paths.
+        if (arrayVars_.count(id->name) || dictVarNames_.count(id->name)
+            || structVars_.count(id->name) || stringArrayVars_.count(id->name))
+            return false;
         auto it = namedValues.find(id->name);
         if (it != namedValues.end() && it->second) {
             auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
             if (alloca && alloca->getAllocatedType()->isPointerTy())
                 return true;
         }
-        // Check the runtime string-variable tracker (handles params and vars
-        // assigned from string function returns).
-        return stringVars_.count(id->name) > 0;
+        return false;
     }
     // arr[i] where arr is a string array → the element is a string.
     if (expr->type == ASTNodeType::INDEX_EXPR)

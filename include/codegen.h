@@ -314,6 +314,11 @@ class CodeGenerator {
     llvm::StringSet<> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
     llvm::StringSet<> stringArrayVars_;
+    // arrayVars_: names of variables that hold array values (non-string pointers).
+    // Used to disambiguate pointer-typed allocas: since arrays, structs, and
+    // dicts now use pointer-typed allocas (instead of i64), we need to
+    // distinguish them from string pointers in isStringExpr().
+    llvm::StringSet<> arrayVars_;
     // stringLenCache_: maps string variable names to an alloca that caches the
     // current strlen of the variable's value.  Used by str_concat to avoid
     // O(n) strlen calls on growing strings in append loops.
