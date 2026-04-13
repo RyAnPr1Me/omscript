@@ -492,6 +492,47 @@ class CodeGenerator {
     std::optional<int64_t> tryConstEval(const FunctionDecl* func,
                                         const std::vector<int64_t>& argVals);
 
+    /// A compile-time constant value — either a 64-bit integer or a string.
+    /// Used by tryFoldExprToConst and tryConstEvalFull for unified int+string
+    /// constant propagation.
+    struct ConstValue {
+        enum class Kind { Integer, String } kind = Kind::Integer;
+        int64_t intVal = 0;
+        std::string strVal;
+        static ConstValue fromInt(int64_t v)     { return {Kind::Integer, v, {}}; }
+        static ConstValue fromStr(std::string s) { return {Kind::String, 0, std::move(s)}; }
+    };
+
+    /// tryFoldExprToConst: attempt to reduce any expression to a compile-time
+    /// constant using all currently available compile-time information:
+    ///   - integer / string literals
+    ///   - identifiers tracked in constIntFolds_ or constStringFolds_
+    ///   - enum constants
+    ///   - zero-arg calls to functions in constIntReturnFunctions_ /
+    ///     constStringReturnFunctions_
+    ///   - recursive evaluation of multi-arg user functions via tryConstEvalFull
+    ///   - arithmetic / concat on any of the above
+    /// Returns nullopt for any expression that requires runtime information.
+    std::optional<ConstValue> tryFoldExprToConst(Expression* expr,
+                                                 int depth = 0) const;
+
+    /// tryConstEvalFull: evaluate a function body at compile time given a
+    /// fully-known argument environment (maps param names → ConstValues).
+    /// Unlike the @const_eval-only tryConstEval, this works on ANY function
+    /// and handles both integer and string types.  It supports:
+    ///   - const and non-const VarDecls (both tracked in the local env)
+    ///   - assignments (ASSIGN_EXPR in EXPR_STMT)
+    ///   - if statements with foldable conditions
+    ///   - blocks
+    ///   - builtins: len, abs, min, max
+    ///   - recursive calls to any user function with all-const args
+    /// Returns nullopt if any step requires runtime information (I/O,
+    /// loops with dynamic bounds, calls to non-foldable functions, etc.).
+    std::optional<ConstValue> tryConstEvalFull(
+        const FunctionDecl* func,
+        const std::unordered_map<std::string, ConstValue>& argEnv,
+        int depth = 0) const;
+
     /// Variables with SIMD vector types for operator dispatch.
     llvm::StringSet<> simdVars_;
 

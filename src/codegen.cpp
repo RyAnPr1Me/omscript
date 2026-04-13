@@ -4701,6 +4701,11 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
         }
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<CallExpr*>(e);
+            // Zero-arg constant-returning functions (classified by pre-pass).
+            if (call->arguments.empty()) {
+                auto it = constIntReturnFunctions_.find(call->callee);
+                if (it != constIntReturnFunctions_.end()) return it->second;
+            }
             // Recursive @const_eval call
             if (!constEvalFunctions_.count(call->callee))
                 return std::nullopt;
@@ -4797,18 +4802,399 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
     return retVal.value_or(0);
 }
 
+// ── Unified Compile-Time Expression & Function Evaluator ─────────────────
+//
+// tryFoldExprToConst: evaluate any expression to a compile-time ConstValue
+// using all statically-known information (constIntFolds_, constStringFolds_,
+// constIntReturnFunctions_, constStringReturnFunctions_, enumConstants_).
+// This is the "call-site evaluator" — it knows about constants in the CURRENT
+// function's scope and delegates to tryConstEvalFull for nested calls.
+//
+// tryConstEvalFull: evaluate a function body with a known argument environment.
+// This is the "body evaluator" — it keeps its own local int+string env seeded
+// from the caller-provided argEnv, and handles all common statement/expr forms.
+// Returns nullopt if any step requires runtime information (I/O, unsupported
+// constructs, non-foldable function calls).
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::optional<CodeGenerator::ConstValue>
+CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
+    if (!expr || depth > 64) return std::nullopt;
+    switch (expr->type) {
+    case ASTNodeType::LITERAL_EXPR: {
+        auto* lit = static_cast<LiteralExpr*>(expr);
+        if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+            return ConstValue::fromInt(static_cast<int64_t>(lit->intValue));
+        if (lit->literalType == LiteralExpr::LiteralType::STRING)
+            return ConstValue::fromStr(lit->stringValue);
+        return std::nullopt;
+    }
+    case ASTNodeType::IDENTIFIER_EXPR: {
+        auto* id = static_cast<IdentifierExpr*>(expr);
+        auto iit = constIntFolds_.find(id->name);
+        if (iit != constIntFolds_.end()) return ConstValue::fromInt(iit->second);
+        auto sit = constStringFolds_.find(id->name);
+        if (sit != constStringFolds_.end()) return ConstValue::fromStr(sit->second);
+        auto eit = enumConstants_.find(id->name);
+        if (eit != enumConstants_.end())
+            return ConstValue::fromInt(static_cast<int64_t>(eit->second));
+        return std::nullopt;
+    }
+    case ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<BinaryExpr*>(expr);
+        if (bin->op == "&&") {
+            auto lv = tryFoldExprToConst(bin->left.get(), depth + 1);
+            if (!lv || lv->kind != ConstValue::Kind::Integer) return std::nullopt;
+            if (lv->intVal == 0) return ConstValue::fromInt(0);
+            auto rv = tryFoldExprToConst(bin->right.get(), depth + 1);
+            if (!rv || rv->kind != ConstValue::Kind::Integer) return std::nullopt;
+            return ConstValue::fromInt(rv->intVal != 0 ? 1 : 0);
+        }
+        if (bin->op == "||") {
+            auto lv = tryFoldExprToConst(bin->left.get(), depth + 1);
+            if (!lv || lv->kind != ConstValue::Kind::Integer) return std::nullopt;
+            if (lv->intVal != 0) return ConstValue::fromInt(1);
+            auto rv = tryFoldExprToConst(bin->right.get(), depth + 1);
+            if (!rv || rv->kind != ConstValue::Kind::Integer) return std::nullopt;
+            return ConstValue::fromInt(rv->intVal != 0 ? 1 : 0);
+        }
+        auto lv = tryFoldExprToConst(bin->left.get(), depth + 1);
+        auto rv = tryFoldExprToConst(bin->right.get(), depth + 1);
+        if (!lv || !rv) return std::nullopt;
+        // String concatenation
+        if (bin->op == "+" && lv->kind == ConstValue::Kind::String &&
+            rv->kind == ConstValue::Kind::String)
+            return ConstValue::fromStr(lv->strVal + rv->strVal);
+        // Integer arithmetic / comparisons
+        if (lv->kind != ConstValue::Kind::Integer ||
+            rv->kind != ConstValue::Kind::Integer)
+            return std::nullopt;
+        int64_t a = lv->intVal, b = rv->intVal;
+        if (bin->op == "+")  return ConstValue::fromInt(a + b);
+        if (bin->op == "-")  return ConstValue::fromInt(a - b);
+        if (bin->op == "*")  return ConstValue::fromInt(a * b);
+        if (bin->op == "/" && b != 0) return ConstValue::fromInt(a / b);
+        if (bin->op == "%" && b != 0) return ConstValue::fromInt(a % b);
+        if (bin->op == "&")  return ConstValue::fromInt(a & b);
+        if (bin->op == "|")  return ConstValue::fromInt(a | b);
+        if (bin->op == "^")  return ConstValue::fromInt(a ^ b);
+        if (bin->op == "<<" && b >= 0 && b < 64) return ConstValue::fromInt(a << b);
+        if (bin->op == ">>" && b >= 0 && b < 64) return ConstValue::fromInt(a >> b);
+        if (bin->op == "==") return ConstValue::fromInt(int64_t(a == b));
+        if (bin->op == "!=") return ConstValue::fromInt(int64_t(a != b));
+        if (bin->op == "<")  return ConstValue::fromInt(int64_t(a < b));
+        if (bin->op == "<=") return ConstValue::fromInt(int64_t(a <= b));
+        if (bin->op == ">")  return ConstValue::fromInt(int64_t(a > b));
+        if (bin->op == ">=") return ConstValue::fromInt(int64_t(a >= b));
+        return std::nullopt;
+    }
+    case ASTNodeType::UNARY_EXPR: {
+        auto* un = static_cast<UnaryExpr*>(expr);
+        auto v = tryFoldExprToConst(un->operand.get(), depth + 1);
+        if (!v || v->kind != ConstValue::Kind::Integer) return std::nullopt;
+        if (un->op == "-") return ConstValue::fromInt(-v->intVal);
+        if (un->op == "~") return ConstValue::fromInt(~v->intVal);
+        if (un->op == "!") return ConstValue::fromInt(v->intVal == 0 ? 1 : 0);
+        return std::nullopt;
+    }
+    case ASTNodeType::TERNARY_EXPR: {
+        auto* tern = static_cast<TernaryExpr*>(expr);
+        auto cond = tryFoldExprToConst(tern->condition.get(), depth + 1);
+        if (!cond || cond->kind != ConstValue::Kind::Integer) return std::nullopt;
+        return cond->intVal != 0
+                   ? tryFoldExprToConst(tern->thenExpr.get(), depth + 1)
+                   : tryFoldExprToConst(tern->elseExpr.get(), depth + 1);
+    }
+    case ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<CallExpr*>(expr);
+        // Zero-arg: pre-classified constant-returning functions.
+        if (call->arguments.empty()) {
+            auto iit = constIntReturnFunctions_.find(call->callee);
+            if (iit != constIntReturnFunctions_.end())
+                return ConstValue::fromInt(iit->second);
+            auto sit = constStringReturnFunctions_.find(call->callee);
+            if (sit != constStringReturnFunctions_.end())
+                return ConstValue::fromStr(sit->second);
+        }
+        // Multi-arg: try to fold all args, then evaluate the callee's body.
+        auto declIt = functionDecls_.find(call->callee);
+        if (declIt != functionDecls_.end() && declIt->second->body &&
+            call->arguments.size() == declIt->second->parameters.size()) {
+            std::unordered_map<std::string, ConstValue> callArgEnv;
+            bool allConst = true;
+            for (size_t i = 0; i < call->arguments.size(); ++i) {
+                auto av = tryFoldExprToConst(call->arguments[i].get(), depth + 1);
+                if (!av) { allConst = false; break; }
+                callArgEnv[declIt->second->parameters[i].name] = *av;
+            }
+            if (allConst)
+                return tryConstEvalFull(declIt->second, callArgEnv, depth + 1);
+        }
+        return std::nullopt;
+    }
+    case ASTNodeType::SCOPE_RESOLUTION_EXPR: {
+        auto* sr = static_cast<ScopeResolutionExpr*>(expr);
+        auto eit = enumConstants_.find(sr->scopeName + "_" + sr->memberName);
+        if (eit != enumConstants_.end())
+            return ConstValue::fromInt(static_cast<int64_t>(eit->second));
+        return std::nullopt;
+    }
+    default: return std::nullopt;
+    }
+}
+
+// tryConstEvalFull: evaluate a user function body to a compile-time constant
+// given fully-known argument values.  Unlike tryConstEval (int-only, @const_eval
+// required), this handles both integer and string types and works on any function.
+std::optional<CodeGenerator::ConstValue>
+CodeGenerator::tryConstEvalFull(
+    const FunctionDecl* func,
+    const std::unordered_map<std::string, ConstValue>& argEnv,
+    int depth) const {
+
+    if (!func || !func->body || depth > 48) return std::nullopt;
+
+    // Local environment: params + any local const/non-const vars discovered
+    // during body evaluation (var name → current ConstValue).
+    std::unordered_map<std::string, ConstValue> env(argEnv);
+
+    std::optional<ConstValue> retVal;
+
+    // Forward-declare for mutual recursion.
+    std::function<std::optional<ConstValue>(Expression*)> evalE;
+    std::function<bool(Statement*)>                        evalS;
+
+    evalE = [&](Expression* e) -> std::optional<ConstValue> {
+        if (!e) return std::nullopt;
+        // IDENTIFIER: check local env first, then fall through to global constants.
+        if (e->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* id = static_cast<IdentifierExpr*>(e);
+            auto it = env.find(id->name);
+            if (it != env.end()) return it->second;
+            // Global enum constants
+            auto eit = enumConstants_.find(id->name);
+            if (eit != enumConstants_.end())
+                return ConstValue::fromInt(static_cast<int64_t>(eit->second));
+            // Pre-classified zero-arg constant functions acting as "globals"
+            auto iit = constIntReturnFunctions_.find(id->name);
+            if (iit != constIntReturnFunctions_.end()) return ConstValue::fromInt(iit->second);
+            auto sit = constStringReturnFunctions_.find(id->name);
+            if (sit != constStringReturnFunctions_.end()) return ConstValue::fromStr(sit->second);
+            return std::nullopt;
+        }
+        // LITERAL
+        if (e->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<LiteralExpr*>(e);
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+                return ConstValue::fromInt(static_cast<int64_t>(lit->intValue));
+            if (lit->literalType == LiteralExpr::LiteralType::STRING)
+                return ConstValue::fromStr(lit->stringValue);
+            return std::nullopt;
+        }
+        // BINARY
+        if (e->type == ASTNodeType::BINARY_EXPR) {
+            auto* bin = static_cast<BinaryExpr*>(e);
+            if (bin->op == "&&") {
+                auto lv = evalE(bin->left.get());
+                if (!lv || lv->kind != ConstValue::Kind::Integer) return std::nullopt;
+                if (lv->intVal == 0) return ConstValue::fromInt(0);
+                auto rv = evalE(bin->right.get());
+                if (!rv || rv->kind != ConstValue::Kind::Integer) return std::nullopt;
+                return ConstValue::fromInt(rv->intVal != 0 ? 1 : 0);
+            }
+            if (bin->op == "||") {
+                auto lv = evalE(bin->left.get());
+                if (!lv || lv->kind != ConstValue::Kind::Integer) return std::nullopt;
+                if (lv->intVal != 0) return ConstValue::fromInt(1);
+                auto rv = evalE(bin->right.get());
+                if (!rv || rv->kind != ConstValue::Kind::Integer) return std::nullopt;
+                return ConstValue::fromInt(rv->intVal != 0 ? 1 : 0);
+            }
+            auto lv = evalE(bin->left.get());
+            auto rv = evalE(bin->right.get());
+            if (!lv || !rv) return std::nullopt;
+            if (bin->op == "+" && lv->kind == ConstValue::Kind::String &&
+                rv->kind == ConstValue::Kind::String)
+                return ConstValue::fromStr(lv->strVal + rv->strVal);
+            if (lv->kind != ConstValue::Kind::Integer ||
+                rv->kind != ConstValue::Kind::Integer)
+                return std::nullopt;
+            int64_t a = lv->intVal, b = rv->intVal;
+            if (bin->op == "+")  return ConstValue::fromInt(a + b);
+            if (bin->op == "-")  return ConstValue::fromInt(a - b);
+            if (bin->op == "*")  return ConstValue::fromInt(a * b);
+            if (bin->op == "/" && b != 0) return ConstValue::fromInt(a / b);
+            if (bin->op == "%" && b != 0) return ConstValue::fromInt(a % b);
+            if (bin->op == "&")  return ConstValue::fromInt(a & b);
+            if (bin->op == "|")  return ConstValue::fromInt(a | b);
+            if (bin->op == "^")  return ConstValue::fromInt(a ^ b);
+            if (bin->op == "<<" && b >= 0 && b < 64) return ConstValue::fromInt(a << b);
+            if (bin->op == ">>" && b >= 0 && b < 64) return ConstValue::fromInt(a >> b);
+            if (bin->op == "==") return ConstValue::fromInt(int64_t(a == b));
+            if (bin->op == "!=") return ConstValue::fromInt(int64_t(a != b));
+            if (bin->op == "<")  return ConstValue::fromInt(int64_t(a < b));
+            if (bin->op == "<=") return ConstValue::fromInt(int64_t(a <= b));
+            if (bin->op == ">")  return ConstValue::fromInt(int64_t(a > b));
+            if (bin->op == ">=") return ConstValue::fromInt(int64_t(a >= b));
+            return std::nullopt;
+        }
+        // UNARY
+        if (e->type == ASTNodeType::UNARY_EXPR) {
+            auto* un = static_cast<UnaryExpr*>(e);
+            auto v = evalE(un->operand.get());
+            if (!v || v->kind != ConstValue::Kind::Integer) return std::nullopt;
+            if (un->op == "-") return ConstValue::fromInt(-v->intVal);
+            if (un->op == "~") return ConstValue::fromInt(~v->intVal);
+            if (un->op == "!") return ConstValue::fromInt(v->intVal == 0 ? 1 : 0);
+            return std::nullopt;
+        }
+        // TERNARY
+        if (e->type == ASTNodeType::TERNARY_EXPR) {
+            auto* tern = static_cast<TernaryExpr*>(e);
+            auto cond = evalE(tern->condition.get());
+            if (!cond || cond->kind != ConstValue::Kind::Integer) return std::nullopt;
+            return cond->intVal != 0 ? evalE(tern->thenExpr.get())
+                                     : evalE(tern->elseExpr.get());
+        }
+        // SCOPE RESOLUTION (enum)
+        if (e->type == ASTNodeType::SCOPE_RESOLUTION_EXPR) {
+            auto* sr = static_cast<ScopeResolutionExpr*>(e);
+            auto eit = enumConstants_.find(sr->scopeName + "_" + sr->memberName);
+            if (eit != enumConstants_.end())
+                return ConstValue::fromInt(static_cast<int64_t>(eit->second));
+            return std::nullopt;
+        }
+        // CALL
+        if (e->type == ASTNodeType::CALL_EXPR) {
+            auto* call = static_cast<CallExpr*>(e);
+            // Pure builtins that can be evaluated at compile time.
+            if (call->callee == "len" && call->arguments.size() == 1) {
+                auto av = evalE(call->arguments[0].get());
+                if (av && av->kind == ConstValue::Kind::String)
+                    return ConstValue::fromInt(static_cast<int64_t>(av->strVal.size()));
+                return std::nullopt;
+            }
+            if (call->callee == "abs" && call->arguments.size() == 1) {
+                auto av = evalE(call->arguments[0].get());
+                if (av && av->kind == ConstValue::Kind::Integer)
+                    return ConstValue::fromInt(av->intVal < 0 ? -av->intVal : av->intVal);
+                return std::nullopt;
+            }
+            if (call->callee == "min" && call->arguments.size() == 2) {
+                auto a = evalE(call->arguments[0].get());
+                auto b = evalE(call->arguments[1].get());
+                if (a && b && a->kind == ConstValue::Kind::Integer &&
+                    b->kind == ConstValue::Kind::Integer)
+                    return ConstValue::fromInt(std::min(a->intVal, b->intVal));
+                return std::nullopt;
+            }
+            if (call->callee == "max" && call->arguments.size() == 2) {
+                auto a = evalE(call->arguments[0].get());
+                auto b = evalE(call->arguments[1].get());
+                if (a && b && a->kind == ConstValue::Kind::Integer &&
+                    b->kind == ConstValue::Kind::Integer)
+                    return ConstValue::fromInt(std::max(a->intVal, b->intVal));
+                return std::nullopt;
+            }
+            // Zero-arg: pre-classified constant functions.
+            if (call->arguments.empty()) {
+                auto iit = constIntReturnFunctions_.find(call->callee);
+                if (iit != constIntReturnFunctions_.end())
+                    return ConstValue::fromInt(iit->second);
+                auto sit = constStringReturnFunctions_.find(call->callee);
+                if (sit != constStringReturnFunctions_.end())
+                    return ConstValue::fromStr(sit->second);
+            }
+            // User function: try to evaluate recursively.
+            auto declIt = functionDecls_.find(call->callee);
+            if (declIt != functionDecls_.end() && declIt->second->body &&
+                call->arguments.size() == declIt->second->parameters.size()) {
+                std::unordered_map<std::string, ConstValue> callEnv;
+                bool allConst = true;
+                for (size_t i = 0; i < call->arguments.size(); ++i) {
+                    auto av = evalE(call->arguments[i].get());
+                    if (!av) { allConst = false; break; }
+                    callEnv[declIt->second->parameters[i].name] = *av;
+                }
+                if (allConst)
+                    return tryConstEvalFull(declIt->second, callEnv, depth + 1);
+            }
+            return std::nullopt;
+        }
+        return std::nullopt;
+    };
+
+    evalS = [&](Statement* s) -> bool {
+        if (!s || retVal) return true;
+        switch (s->type) {
+        case ASTNodeType::RETURN_STMT: {
+            auto* ret = static_cast<ReturnStmt*>(s);
+            if (!ret->value) { retVal = ConstValue::fromInt(0); return true; }
+            auto v = evalE(ret->value.get());
+            if (!v) return false;
+            retVal = *v;
+            return true;
+        }
+        case ASTNodeType::VAR_DECL: {
+            auto* decl = static_cast<VarDecl*>(s);
+            if (decl->initializer) {
+                auto v = evalE(decl->initializer.get());
+                if (!v) return false;
+                env[decl->name] = *v;
+            } else {
+                env[decl->name] = ConstValue::fromInt(0);
+            }
+            return true;
+        }
+        case ASTNodeType::EXPR_STMT: {
+            auto* es = static_cast<ExprStmt*>(s);
+            if (es->expression->type == ASTNodeType::ASSIGN_EXPR) {
+                auto* assign = static_cast<AssignExpr*>(es->expression.get());
+                auto v = evalE(assign->value.get());
+                if (!v) return false;
+                env[assign->name] = *v;
+                return true;
+            }
+            // Any other expression statement (e.g. a function call with side
+            // effects) — we can't safely evaluate it, so give up.
+            return false;
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifs = static_cast<IfStmt*>(s);
+            auto cond = evalE(ifs->condition.get());
+            if (!cond || cond->kind != ConstValue::Kind::Integer) return false;
+            if (cond->intVal != 0) return evalS(ifs->thenBranch.get());
+            if (ifs->elseBranch)   return evalS(ifs->elseBranch.get());
+            return true;
+        }
+        case ASTNodeType::BLOCK: {
+            auto* blk = static_cast<BlockStmt*>(s);
+            for (auto& stmt : blk->statements) {
+                if (!evalS(stmt.get())) return false;
+                if (retVal) return true;
+            }
+            return true;
+        }
+        default:
+            // Loops, try/catch, I/O, etc. — not safe to fold.
+            return false;
+        }
+    };
+
+    for (auto& stmt : func->body->statements) {
+        if (!evalS(stmt.get())) return std::nullopt;
+        if (retVal) return retVal;
+    }
+    return retVal;
+}
+
 // ── Deep Compile-Time Constant Return Value Analysis ─────────────────────
 // Pre-pass over the program AST that identifies zero-parameter, pure functions
-// whose return value is always the same compile-time constant.  A function
-// qualifies as "pure constant-returning" if its body contains ONLY:
-//   - const VarDecl statements with foldable initializer expressions
-//   - a single ReturnStmt with a foldable expression
-// This is intentionally conservative (no if/for/while, no non-const vars,
-// no non-pure calls) to guarantee soundness: we only fold away a call when
-// we can guarantee the function has no observable side effects.
+// whose return value is always the same compile-time constant.
 //
-// The analysis runs as a fixed-point loop because a function may depend on
-// another function that has not been classified yet:
+// Uses tryConstEvalFull with an empty argument environment to evaluate each
+// zero-parameter function body.  The analysis runs as a fixed-point loop
+// because a function may depend on another not yet classified:
 //   fn a() { return "hello"; }          // classified in iteration 1
 //   fn b() { return a() + " world"; }   // classified in iteration 2 (uses a)
 //
@@ -4816,259 +5202,26 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
 void CodeGenerator::analyzeConstantReturnValues(Program* program) {
     if (optimizationLevel < OptimizationLevel::O1) return;
 
-    // Recursion depth guard for mutually-recursive helper lambdas.
-    // Reset to 0 at entry so re-entrant or exception-interrupted calls start
-    // with a clean depth counter (thread_local is per-compilation-unit here).
-    static thread_local int anaDepth = 0;
-    anaDepth = 0;
-    static constexpr int kAnaDepthMax = 32;
-
     bool changed = true;
     while (changed) {
         changed = false;
         for (auto& func : program->functions) {
             const std::string& fname = func->name;
-            // Only analyze zero-parameter functions.  Multi-parameter functions
-            // are handled at call sites by tryConstEval (integers) or by
-            // argument propagation when all args are known constants.
             if (!func->body || !func->parameters.empty()) continue;
-            // Skip if already classified in a previous iteration.
             if (constStringReturnFunctions_.count(fname) ||
                 constIntReturnFunctions_.count(fname)) continue;
 
-            // Local environments mapping variable names → known constant values.
-            std::unordered_map<std::string, std::string> strEnv;
-            std::unordered_map<std::string, int64_t>     intEnv;
-            std::optional<std::string> retStr;
-            std::optional<int64_t>     retInt;
-            bool failed = false;
+            // Evaluate with empty arg environment (zero-parameter function).
+            static const std::unordered_map<std::string, ConstValue> emptyEnv;
+            auto result = tryConstEvalFull(func.get(), emptyEnv);
+            if (!result) continue;
 
-            // Forward-declare for mutual recursion.
-            std::function<std::optional<std::string>(Expression*)> evalStr;
-            std::function<std::optional<int64_t>(Expression*)>     evalInt;
-            std::function<bool(Statement*)>                        evalStmt;
-
-            evalStr = [&](Expression* e) -> std::optional<std::string> {
-                if (!e || failed) return std::nullopt;
-                if (anaDepth >= kAnaDepthMax) return std::nullopt;
-                ++anaDepth;
-                struct Guard { int& d; ~Guard() { --d; } } g{anaDepth};
-                switch (e->type) {
-                case ASTNodeType::LITERAL_EXPR: {
-                    auto* lit = static_cast<LiteralExpr*>(e);
-                    if (lit->literalType == LiteralExpr::LiteralType::STRING)
-                        return lit->stringValue;
-                    return std::nullopt;
-                }
-                case ASTNodeType::IDENTIFIER_EXPR: {
-                    auto* id = static_cast<IdentifierExpr*>(e);
-                    auto it = strEnv.find(id->name);
-                    if (it != strEnv.end()) return it->second;
-                    return std::nullopt;
-                }
-                case ASTNodeType::BINARY_EXPR: {
-                    auto* bin = static_cast<BinaryExpr*>(e);
-                    if (bin->op == "+") {
-                        auto l = evalStr(bin->left.get());
-                        if (!l) return std::nullopt;
-                        auto r = evalStr(bin->right.get());
-                        if (!r) return std::nullopt;
-                        return *l + *r;
-                    }
-                    return std::nullopt;
-                }
-                case ASTNodeType::CALL_EXPR: {
-                    auto* call = static_cast<CallExpr*>(e);
-                    if (call->arguments.empty()) {
-                        auto it = constStringReturnFunctions_.find(call->callee);
-                        if (it != constStringReturnFunctions_.end()) return it->second;
-                    }
-                    return std::nullopt;
-                }
-                case ASTNodeType::TERNARY_EXPR: {
-                    auto* tern = static_cast<TernaryExpr*>(e);
-                    auto cond = evalInt(tern->condition.get());
-                    if (!cond) return std::nullopt;
-                    return *cond ? evalStr(tern->thenExpr.get())
-                                 : evalStr(tern->elseExpr.get());
-                }
-                default: return std::nullopt;
-                }
-            };
-
-            evalInt = [&](Expression* e) -> std::optional<int64_t> {
-                if (!e || failed) return std::nullopt;
-                if (anaDepth >= kAnaDepthMax) return std::nullopt;
-                ++anaDepth;
-                struct Guard { int& d; ~Guard() { --d; } } g{anaDepth};
-                switch (e->type) {
-                case ASTNodeType::LITERAL_EXPR: {
-                    auto* lit = static_cast<LiteralExpr*>(e);
-                    if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
-                        return static_cast<int64_t>(lit->intValue);
-                    return std::nullopt;
-                }
-                case ASTNodeType::IDENTIFIER_EXPR: {
-                    auto* id = static_cast<IdentifierExpr*>(e);
-                    auto it = intEnv.find(id->name);
-                    if (it != intEnv.end()) return it->second;
-                    // Enum constants are globally known.
-                    auto eit = enumConstants_.find(id->name);
-                    if (eit != enumConstants_.end()) return static_cast<int64_t>(eit->second);
-                    return std::nullopt;
-                }
-                case ASTNodeType::BINARY_EXPR: {
-                    auto* bin = static_cast<BinaryExpr*>(e);
-                    if (bin->op == "&&") {
-                        auto lv = evalInt(bin->left.get());
-                        if (!lv) return std::nullopt;
-                        if (*lv == 0) return int64_t(0);
-                        auto rv = evalInt(bin->right.get());
-                        return rv ? std::optional<int64_t>(*rv != 0 ? 1 : 0) : std::nullopt;
-                    }
-                    if (bin->op == "||") {
-                        auto lv = evalInt(bin->left.get());
-                        if (!lv) return std::nullopt;
-                        if (*lv != 0) return int64_t(1);
-                        auto rv = evalInt(bin->right.get());
-                        return rv ? std::optional<int64_t>(*rv != 0 ? 1 : 0) : std::nullopt;
-                    }
-                    auto lv = evalInt(bin->left.get());
-                    auto rv = evalInt(bin->right.get());
-                    if (!lv || !rv) return std::nullopt;
-                    int64_t a = *lv, b = *rv;
-                    if (bin->op == "+")  return a + b;
-                    if (bin->op == "-")  return a - b;
-                    if (bin->op == "*")  return a * b;
-                    if (bin->op == "/" && b != 0) return a / b;
-                    if (bin->op == "%" && b != 0) return a % b;
-                    if (bin->op == "&")  return a & b;
-                    if (bin->op == "|")  return a | b;
-                    if (bin->op == "^")  return a ^ b;
-                    if (bin->op == "<<" && b >= 0 && b < 64) return a << b;
-                    if (bin->op == ">>" && b >= 0 && b < 64) return a >> b;
-                    if (bin->op == "==") return int64_t(a == b);
-                    if (bin->op == "!=") return int64_t(a != b);
-                    if (bin->op == "<")  return int64_t(a < b);
-                    if (bin->op == "<=") return int64_t(a <= b);
-                    if (bin->op == ">")  return int64_t(a > b);
-                    if (bin->op == ">=") return int64_t(a >= b);
-                    if (bin->op == "**") {
-                        if (b < 0) return (a == 1) ? std::optional<int64_t>(int64_t(1)) : std::nullopt;
-                        int64_t r = 1;
-                        for (int64_t i = 0; i < b && i < 64; ++i) r *= a;
-                        return r;
-                    }
-                    return std::nullopt;
-                }
-                case ASTNodeType::UNARY_EXPR: {
-                    auto* un = static_cast<UnaryExpr*>(e);
-                    auto v = evalInt(un->operand.get());
-                    if (!v) return std::nullopt;
-                    if (un->op == "-") return -*v;
-                    if (un->op == "~") return ~*v;
-                    if (un->op == "!") return int64_t(*v == 0 ? 1 : 0);
-                    return std::nullopt;
-                }
-                case ASTNodeType::TERNARY_EXPR: {
-                    auto* tern = static_cast<TernaryExpr*>(e);
-                    auto cond = evalInt(tern->condition.get());
-                    if (!cond) return std::nullopt;
-                    return *cond ? evalInt(tern->thenExpr.get())
-                                 : evalInt(tern->elseExpr.get());
-                }
-                case ASTNodeType::CALL_EXPR: {
-                    auto* call = static_cast<CallExpr*>(e);
-                    // Zero-param constant-returning function.
-                    if (call->arguments.empty()) {
-                        auto it = constIntReturnFunctions_.find(call->callee);
-                        if (it != constIntReturnFunctions_.end()) return it->second;
-                    }
-                    // @const_eval function with all-constant arguments.
-                    if (constEvalFunctions_.count(call->callee)) {
-                        auto declIt = functionDecls_.find(call->callee);
-                        if (declIt != functionDecls_.end()) {
-                            std::vector<int64_t> cargs;
-                            bool allConst = true;
-                            for (auto& arg : call->arguments) {
-                                auto av = evalInt(arg.get());
-                                if (!av) { allConst = false; break; }
-                                cargs.push_back(*av);
-                            }
-                            if (allConst) return tryConstEval(declIt->second, cargs);
-                        }
-                    }
-                    return std::nullopt;
-                }
-                case ASTNodeType::SCOPE_RESOLUTION_EXPR: {
-                    auto* sr = static_cast<ScopeResolutionExpr*>(e);
-                    auto eit = enumConstants_.find(sr->scopeName + "_" + sr->memberName);
-                    if (eit != enumConstants_.end()) return static_cast<int64_t>(eit->second);
-                    return std::nullopt;
-                }
-                default: return std::nullopt;
-                }
-            };
-
-            evalStmt = [&](Statement* s) -> bool {
-                if (!s || failed || retStr || retInt) return true;
-                switch (s->type) {
-                case ASTNodeType::RETURN_STMT: {
-                    auto* ret = static_cast<ReturnStmt*>(s);
-                    if (!ret->value) { retInt = 0; return true; }
-                    // Try string first (a string return is unambiguous); then int.
-                    auto sv = evalStr(ret->value.get());
-                    if (sv) { retStr = std::move(sv); return true; }
-                    auto iv = evalInt(ret->value.get());
-                    if (iv) { retInt = iv; return true; }
-                    // Return value not foldable → give up on this function.
-                    failed = true;
-                    return false;
-                }
-                case ASTNodeType::VAR_DECL: {
-                    auto* decl = static_cast<VarDecl*>(s);
-                    // Non-const variables could be reassigned → conservatively
-                    // reject (we can't track their values safely).
-                    if (!decl->isConst) { failed = true; return false; }
-                    if (!decl->initializer) return true;
-                    auto sv = evalStr(decl->initializer.get());
-                    if (sv) { strEnv[decl->name] = std::move(*sv); return true; }
-                    auto iv = evalInt(decl->initializer.get());
-                    if (iv) { intEnv[decl->name] = *iv; return true; }
-                    // Const var with non-foldable initializer → give up.
-                    failed = true;
-                    return false;
-                }
-                case ASTNodeType::BLOCK: {
-                    auto* blk = static_cast<BlockStmt*>(s);
-                    for (auto& stmt : blk->statements) {
-                        if (!evalStmt(stmt.get())) return false;
-                        if (retStr || retInt || failed) return !failed;
-                    }
-                    return true;
-                }
-                default:
-                    // Any other statement (if, for, while, non-const assignment,
-                    // I/O calls, etc.) → conservatively reject.
-                    failed = true;
-                    return false;
-                }
-            };
-
-            for (auto& stmt : func->body->statements) {
-                if (!evalStmt(stmt.get())) break;
-                if (retStr || retInt || failed) break;
+            if (result->kind == ConstValue::Kind::Integer) {
+                constIntReturnFunctions_[fname] = result->intVal;
+            } else {
+                constStringReturnFunctions_[fname] = result->strVal;
             }
-
-            if (!failed) {
-                if (retStr) {
-                    constStringReturnFunctions_[fname] = std::move(*retStr);
-                    changed = true;
-                } else if (retInt) {
-                    constIntReturnFunctions_[fname] = *retInt;
-                    changed = true;
-                }
-            }
+            changed = true;
         }
     }
 }
