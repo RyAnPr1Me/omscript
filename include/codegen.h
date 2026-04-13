@@ -496,42 +496,68 @@ class CodeGenerator {
     /// Used by tryFoldExprToConst and tryConstEvalFull for unified int+string
     /// constant propagation.
     struct ConstValue {
-        enum class Kind { Integer, String } kind = Kind::Integer;
+        enum class Kind { Integer, String, Array } kind = Kind::Integer;
         int64_t intVal = 0;
         std::string strVal;
-        static ConstValue fromInt(int64_t v)     { return {Kind::Integer, v, {}}; }
-        static ConstValue fromStr(std::string s) { return {Kind::String, 0, std::move(s)}; }
+        std::vector<ConstValue> arrVal;  // for Kind::Array
+        static ConstValue fromInt(int64_t v)     { return {Kind::Integer, v, {}, {}}; }
+        static ConstValue fromStr(std::string s) { return {Kind::String, 0, std::move(s), {}}; }
+        static ConstValue fromArr(std::vector<ConstValue> a)
+                                                 { return {Kind::Array, 0, {}, std::move(a)}; }
     };
 
     /// tryFoldExprToConst: attempt to reduce any expression to a compile-time
     /// constant using all currently available compile-time information:
-    ///   - integer / string literals
+    ///   - integer / string / array literals
     ///   - identifiers tracked in constIntFolds_ or constStringFolds_
     ///   - enum constants
     ///   - zero-arg calls to functions in constIntReturnFunctions_ /
     ///     constStringReturnFunctions_
     ///   - recursive evaluation of multi-arg user functions via tryConstEvalFull
-    ///   - arithmetic / concat on any of the above
+    ///   - arithmetic / concat / array indexing on any of the above
+    ///   - builtins: sign, clamp, pow, abs, min, max, gcd, lcm, is_even, is_odd,
+    ///               str_len, str_eq, str_concat, to_char, is_alpha, is_digit,
+    ///               to_string, to_int, char_code, str_find, log2, is_power_of_2,
+    ///               popcount, clz, ctz, bswap, bitreverse, rotate_left/right,
+    ///               saturating_add/sub, str_repeat, str_substr, str_starts_with,
+    ///               str_ends_with, str_contains, str_upper, str_lower
     /// Returns nullopt for any expression that requires runtime information.
     std::optional<ConstValue> tryFoldExprToConst(Expression* expr,
                                                  int depth = 0) const;
 
     /// tryConstEvalFull: evaluate a function body at compile time given a
     /// fully-known argument environment (maps param names → ConstValues).
-    /// Unlike the @const_eval-only tryConstEval, this works on ANY function
-    /// and handles both integer and string types.  It supports:
+    /// Handles all common statement/expression forms including:
     ///   - const and non-const VarDecls (both tracked in the local env)
-    ///   - assignments (ASSIGN_EXPR in EXPR_STMT)
-    ///   - if statements with foldable conditions
-    ///   - blocks
-    ///   - builtins: len, abs, min, max
+    ///   - assignments, compound assignments (desugared by parser)
+    ///   - index assignment (arr[i] = val) with array const tracking
+    ///   - if/else, for-range, while, do-while, foreach, switch, break, continue
+    ///   - blocks with proper scope save/restore for shadowed variables
+    ///   - 30+ builtins (arithmetic, string, bitwise, etc.)
     ///   - recursive calls to any user function with all-const args
+    ///   - fuel limit (10 000 loop iterations) prevents runaway evaluation
     /// Returns nullopt if any step requires runtime information (I/O,
     /// loops with dynamic bounds, calls to non-foldable functions, etc.).
     std::optional<ConstValue> tryConstEvalFull(
         const FunctionDecl* func,
         const std::unordered_map<std::string, ConstValue>& argEnv,
         int depth = 0) const;
+
+    /// Convenience wrappers used by generateBuiltin: fold an expression to a
+    /// compile-time integer or string using all currently available information
+    /// (const variables, enum constants, binary ops on constants, etc.).
+    /// More powerful than the file-local getConstantInt() helper which only
+    /// recognises plain integer literals.
+    std::optional<int64_t>     tryFoldInt(Expression* e) const;
+    std::optional<std::string> tryFoldStr(Expression* e) const;
+
+    /// Apply a named pure built-in function to a list of already-evaluated
+    /// compile-time ConstValues.  Returns nullopt if the builtin is unknown,
+    /// impure, or the argument types/count are wrong.  Used by both
+    /// tryFoldExprToConst and tryConstEvalFull so the fold logic is defined
+    /// in exactly one place.
+    static std::optional<ConstValue> evalConstBuiltin(
+        const std::string& name, const std::vector<ConstValue>& args);
 
     /// Variables with SIMD vector types for operator dispatch.
     llvm::StringSet<> simdVars_;

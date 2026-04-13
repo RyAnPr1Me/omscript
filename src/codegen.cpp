@@ -4804,6 +4804,350 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
 
 // ── Unified Compile-Time Expression & Function Evaluator ─────────────────
 //
+// evalConstBuiltin: shared helper called by both tryFoldExprToConst and
+// tryConstEvalFull.  Given an already-evaluated argument list (ConstValues),
+// applies the named built-in pure function and returns the result.
+// Returns nullopt if the builtin is unknown, impure, or the args are the
+// wrong type/count.
+// ─────────────────────────────────────────────────────────────────────────────
+std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
+    const std::string& name,
+    const std::vector<CodeGenerator::ConstValue>& args)
+{
+    using CV = CodeGenerator::ConstValue;
+    const size_t n = args.size();
+    auto intArg = [&](size_t i) -> std::optional<int64_t> {
+        if (i < n && args[i].kind == CV::Kind::Integer) return args[i].intVal;
+        return std::nullopt;
+    };
+    auto strArg = [&](size_t i) -> std::optional<std::string> {
+        if (i < n && args[i].kind == CV::Kind::String) return args[i].strVal;
+        return std::nullopt;
+    };
+
+    // ── len(x) ─────────────────────────────────────────────────────────────
+    if (name == "len" && n == 1) {
+        if (auto s = strArg(0)) return CV::fromInt(static_cast<int64_t>(s->size()));
+        if (n == 1 && args[0].kind == CV::Kind::Array)
+            return CV::fromInt(static_cast<int64_t>(args[0].arrVal.size()));
+        return std::nullopt;
+    }
+    // ── abs(x) ─────────────────────────────────────────────────────────────
+    if (name == "abs" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(*v < 0 ? -*v : *v);
+        return std::nullopt;
+    }
+    // ── min/max ────────────────────────────────────────────────────────────
+    if (name == "min" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b) return CV::fromInt(std::min(*a, *b));
+        return std::nullopt;
+    }
+    if (name == "max" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b) return CV::fromInt(std::max(*a, *b));
+        return std::nullopt;
+    }
+    // ── sign ───────────────────────────────────────────────────────────────
+    if (name == "sign" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(*v > 0 ? 1 : (*v < 0 ? -1 : 0));
+        return std::nullopt;
+    }
+    // ── clamp ──────────────────────────────────────────────────────────────
+    if (name == "clamp" && n == 3) {
+        auto v = intArg(0), lo = intArg(1), hi = intArg(2);
+        if (v && lo && hi) return CV::fromInt(std::max(*lo, std::min(*v, *hi)));
+        return std::nullopt;
+    }
+    // ── pow ────────────────────────────────────────────────────────────────
+    if (name == "pow" && n == 2) {
+        auto b = intArg(0), e = intArg(1);
+        if (b && e) {
+            int64_t base = *b, exp = *e;
+            if (exp < 0) return (base == 1) ? std::optional<CV>(CV::fromInt(1)) : std::nullopt;
+            int64_t r = 1;
+            while (exp > 0) { if (exp & 1) r *= base; base *= base; exp >>= 1; }
+            return CV::fromInt(r);
+        }
+        return std::nullopt;
+    }
+    // ── is_even / is_odd ───────────────────────────────────────────────────
+    if (name == "is_even" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt((*v & 1) == 0 ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_odd" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt((*v & 1) ? 1 : 0);
+        return std::nullopt;
+    }
+    // ── gcd ────────────────────────────────────────────────────────────────
+    if (name == "gcd" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b) {
+            uint64_t ua = static_cast<uint64_t>(std::abs(*a));
+            uint64_t ub = static_cast<uint64_t>(std::abs(*b));
+            while (ub) { uint64_t t = ub; ub = ua % ub; ua = t; }
+            return CV::fromInt(static_cast<int64_t>(ua));
+        }
+        return std::nullopt;
+    }
+    // ── lcm ────────────────────────────────────────────────────────────────
+    if (name == "lcm" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b) {
+            uint64_t ua = static_cast<uint64_t>(std::abs(*a));
+            uint64_t ub = static_cast<uint64_t>(std::abs(*b));
+            if (ua == 0 || ub == 0) return CV::fromInt(0);
+            uint64_t g = ua, tb = ub;
+            while (tb) { uint64_t t = tb; tb = g % tb; g = t; }
+            return CV::fromInt(static_cast<int64_t>(ua / g * ub));
+        }
+        return std::nullopt;
+    }
+    // ── char_at ────────────────────────────────────────────────────────────
+    if (name == "char_at" && n == 2) {
+        auto s = strArg(0); auto i = intArg(1);
+        if (s && i && *i >= 0 && *i < static_cast<int64_t>(s->size()))
+            return CV::fromInt(static_cast<unsigned char>((*s)[static_cast<size_t>(*i)]));
+        return std::nullopt;
+    }
+    // ── str_len ────────────────────────────────────────────────────────────
+    if (name == "str_len" && n == 1) {
+        if (auto s = strArg(0)) return CV::fromInt(static_cast<int64_t>(s->size()));
+        return std::nullopt;
+    }
+    // ── str_eq ─────────────────────────────────────────────────────────────
+    if (name == "str_eq" && n == 2) {
+        auto a = strArg(0), b = strArg(1);
+        if (a && b) return CV::fromInt(*a == *b ? 1 : 0);
+        return std::nullopt;
+    }
+    // ── str_concat ─────────────────────────────────────────────────────────
+    if (name == "str_concat" && n == 2) {
+        auto a = strArg(0), b = strArg(1);
+        if (a && b) return CV::fromStr(*a + *b);
+        return std::nullopt;
+    }
+    // ── to_char(n) → single char string ────────────────────────────────────
+    if (name == "to_char" && n == 1) {
+        if (auto v = intArg(0)) {
+            char c = static_cast<char>(static_cast<uint8_t>(*v & 0xFF));
+            return CV::fromStr(std::string(1, c));
+        }
+        return std::nullopt;
+    }
+    // ── is_alpha / is_digit ────────────────────────────────────────────────
+    if (name == "is_alpha" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(std::isalpha(static_cast<int>(*v)) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_digit" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(std::isdigit(static_cast<int>(*v)) ? 1 : 0);
+        return std::nullopt;
+    }
+    // ── to_string / number_to_string ───────────────────────────────────────
+    if ((name == "to_string" || name == "number_to_string") && n == 1) {
+        if (auto v = intArg(0)) return CV::fromStr(std::to_string(*v));
+        return std::nullopt;
+    }
+    // ── to_int / string_to_number ──────────────────────────────────────────
+    if ((name == "to_int" || name == "string_to_number") && n == 1) {
+        if (auto s = strArg(0)) {
+            try { return CV::fromInt(static_cast<int64_t>(std::stoll(*s))); }
+            catch (...) {}
+        }
+        return std::nullopt;
+    }
+    // ── char_code(s) → ASCII of first char ─────────────────────────────────
+    if (name == "char_code" && n == 1) {
+        if (auto s = strArg(0))
+            if (!s->empty()) return CV::fromInt(static_cast<unsigned char>((*s)[0]));
+        return std::nullopt;
+    }
+    // ── str_find(haystack, needle) ─────────────────────────────────────────
+    if (name == "str_find" && n == 2) {
+        auto hay = strArg(0), needle = strArg(1);
+        if (hay && needle) {
+            auto pos = hay->find(*needle);
+            return CV::fromInt(pos == std::string::npos ? -1 : static_cast<int64_t>(pos));
+        }
+        return std::nullopt;
+    }
+    // ── str_index_of (alias for str_find) ──────────────────────────────────
+    if (name == "str_index_of" && n == 2) {
+        auto hay = strArg(0), needle = strArg(1);
+        if (hay && needle) {
+            auto pos = hay->find(*needle);
+            return CV::fromInt(pos == std::string::npos ? -1 : static_cast<int64_t>(pos));
+        }
+        return std::nullopt;
+    }
+    // ── str_contains ───────────────────────────────────────────────────────
+    if (name == "str_contains" && n == 2) {
+        auto hay = strArg(0), needle = strArg(1);
+        if (hay && needle) return CV::fromInt(hay->find(*needle) != std::string::npos ? 1 : 0);
+        return std::nullopt;
+    }
+    // ── str_starts_with ────────────────────────────────────────────────────
+    if (name == "str_starts_with" && n == 2) {
+        auto s = strArg(0), prefix = strArg(1);
+        if (s && prefix) {
+            bool result = s->size() >= prefix->size() &&
+                          s->compare(0, prefix->size(), *prefix) == 0;
+            return CV::fromInt(result ? 1 : 0);
+        }
+        return std::nullopt;
+    }
+    // ── str_ends_with ──────────────────────────────────────────────────────
+    if (name == "str_ends_with" && n == 2) {
+        auto s = strArg(0), suffix = strArg(1);
+        if (s && suffix) {
+            bool result = s->size() >= suffix->size() &&
+                          s->compare(s->size() - suffix->size(), suffix->size(), *suffix) == 0;
+            return CV::fromInt(result ? 1 : 0);
+        }
+        return std::nullopt;
+    }
+    // ── str_substr(s, start, len) ──────────────────────────────────────────
+    if (name == "str_substr" && n == 3) {
+        auto s = strArg(0); auto start = intArg(1); auto slen = intArg(2);
+        if (s && start && slen) {
+            int64_t sz = static_cast<int64_t>(s->size());
+            int64_t st = std::max(int64_t(0), std::min(*start, sz));
+            int64_t ln = std::max(int64_t(0), std::min(*slen, sz - st));
+            return CV::fromStr(s->substr(static_cast<size_t>(st), static_cast<size_t>(ln)));
+        }
+        return std::nullopt;
+    }
+    // ── str_upper / str_lower ──────────────────────────────────────────────
+    if (name == "str_upper" && n == 1) {
+        if (auto s = strArg(0)) {
+            std::string r = *s;
+            for (char& c : r) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            return CV::fromStr(std::move(r));
+        }
+        return std::nullopt;
+    }
+    if (name == "str_lower" && n == 1) {
+        if (auto s = strArg(0)) {
+            std::string r = *s;
+            for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return CV::fromStr(std::move(r));
+        }
+        return std::nullopt;
+    }
+    // ── str_repeat(s, n) ───────────────────────────────────────────────────
+    if (name == "str_repeat" && n == 2) {
+        auto s = strArg(0); auto cnt = intArg(1);
+        if (s && cnt) {
+            if (*cnt <= 0) return CV::fromStr("");
+            if (*cnt > 1000) return std::nullopt;  // guard against huge strings
+            std::string r;
+            r.reserve(s->size() * static_cast<size_t>(*cnt));
+            for (int64_t i = 0; i < *cnt; ++i) r += *s;
+            return CV::fromStr(std::move(r));
+        }
+        return std::nullopt;
+    }
+    // ── log2(n) ────────────────────────────────────────────────────────────
+    if (name == "log2" && n == 1) {
+        if (auto v = intArg(0)) {
+            if (*v <= 0) return std::nullopt;
+            int64_t x = *v, r = 0;
+            while (x > 1) { x >>= 1; r++; }
+            return CV::fromInt(r);
+        }
+        return std::nullopt;
+    }
+    // ── is_power_of_2 ──────────────────────────────────────────────────────
+    if (name == "is_power_of_2" && n == 1) {
+        if (auto v = intArg(0))
+            return CV::fromInt((*v > 0 && (*v & (*v - 1)) == 0) ? 1 : 0);
+        return std::nullopt;
+    }
+    // ── popcount ───────────────────────────────────────────────────────────
+    if (name == "popcount" && n == 1) {
+        if (auto v = intArg(0))
+            return CV::fromInt(static_cast<int64_t>(
+                __builtin_popcountll(static_cast<uint64_t>(*v))));
+        return std::nullopt;
+    }
+    // ── clz (count leading zeros) ──────────────────────────────────────────
+    if (name == "clz" && n == 1) {
+        if (auto v = intArg(0))
+            if (*v != 0) return CV::fromInt(static_cast<int64_t>(
+                __builtin_clzll(static_cast<uint64_t>(*v))));
+        return std::nullopt;
+    }
+    // ── ctz (count trailing zeros) ─────────────────────────────────────────
+    if (name == "ctz" && n == 1) {
+        if (auto v = intArg(0))
+            if (*v != 0) return CV::fromInt(static_cast<int64_t>(
+                __builtin_ctzll(static_cast<uint64_t>(*v))));
+        return std::nullopt;
+    }
+    // ── bswap ──────────────────────────────────────────────────────────────
+    if (name == "bswap" && n == 1) {
+        if (auto v = intArg(0))
+            return CV::fromInt(static_cast<int64_t>(
+                __builtin_bswap64(static_cast<uint64_t>(*v))));
+        return std::nullopt;
+    }
+    // ── bitreverse ─────────────────────────────────────────────────────────
+    if (name == "bitreverse" && n == 1) {
+        if (auto v = intArg(0)) {
+            uint64_t x = static_cast<uint64_t>(*v);
+            x = ((x >> 1) & 0x5555555555555555ULL) | ((x & 0x5555555555555555ULL) << 1);
+            x = ((x >> 2) & 0x3333333333333333ULL) | ((x & 0x3333333333333333ULL) << 2);
+            x = ((x >> 4) & 0x0F0F0F0F0F0F0F0FULL) | ((x & 0x0F0F0F0F0F0F0F0FULL) << 4);
+            x = __builtin_bswap64(x);
+            return CV::fromInt(static_cast<int64_t>(x));
+        }
+        return std::nullopt;
+    }
+    // ── rotate_left / rotate_right ─────────────────────────────────────────
+    if (name == "rotate_left" && n == 2) {
+        auto v = intArg(0), k = intArg(1);
+        if (v && k) {
+            uint64_t x = static_cast<uint64_t>(*v);
+            int sh = static_cast<int>(*k) & 63;
+            return CV::fromInt(static_cast<int64_t>((x << sh) | (x >> (64 - sh))));
+        }
+        return std::nullopt;
+    }
+    if (name == "rotate_right" && n == 2) {
+        auto v = intArg(0), k = intArg(1);
+        if (v && k) {
+            uint64_t x = static_cast<uint64_t>(*v);
+            int sh = static_cast<int>(*k) & 63;
+            return CV::fromInt(static_cast<int64_t>((x >> sh) | (x << (64 - sh))));
+        }
+        return std::nullopt;
+    }
+    // ── saturating_add / saturating_sub ────────────────────────────────────
+    if (name == "saturating_add" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b) {
+            int64_t r;
+            if (__builtin_add_overflow(*a, *b, &r))
+                r = (*a > 0) ? INT64_MAX : INT64_MIN;
+            return CV::fromInt(r);
+        }
+        return std::nullopt;
+    }
+    if (name == "saturating_sub" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b) {
+            int64_t r;
+            if (__builtin_sub_overflow(*a, *b, &r))
+                r = (*a > 0) ? INT64_MAX : INT64_MIN;
+            return CV::fromInt(r);
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 // tryFoldExprToConst: evaluate any expression to a compile-time ConstValue
 // using all statically-known information (constIntFolds_, constStringFolds_,
 // constIntReturnFunctions_, constStringReturnFunctions_, enumConstants_).
@@ -4811,10 +5155,9 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
 // function's scope and delegates to tryConstEvalFull for nested calls.
 //
 // tryConstEvalFull: evaluate a function body with a known argument environment.
-// This is the "body evaluator" — it keeps its own local int+string env seeded
-// from the caller-provided argEnv, and handles all common statement/expr forms.
-// Returns nullopt if any step requires runtime information (I/O, unsupported
-// constructs, non-foldable function calls).
+// This is the "body evaluator" — it keeps its own local int+string+array env
+// seeded from the caller-provided argEnv, and handles all common statement/
+// expression forms. Returns nullopt if any step requires runtime information.
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::optional<CodeGenerator::ConstValue>
@@ -4838,6 +5181,35 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         auto eit = enumConstants_.find(id->name);
         if (eit != enumConstants_.end())
             return ConstValue::fromInt(static_cast<int64_t>(eit->second));
+        return std::nullopt;
+    }
+    case ASTNodeType::ARRAY_EXPR: {
+        auto* ae = static_cast<ArrayExpr*>(expr);
+        std::vector<ConstValue> elems;
+        elems.reserve(ae->elements.size());
+        for (auto& el : ae->elements) {
+            auto v = tryFoldExprToConst(el.get(), depth + 1);
+            if (!v) return std::nullopt;
+            elems.push_back(std::move(*v));
+        }
+        return ConstValue::fromArr(std::move(elems));
+    }
+    case ASTNodeType::INDEX_EXPR: {
+        auto* idx = static_cast<IndexExpr*>(expr);
+        auto arrVal = tryFoldExprToConst(idx->array.get(), depth + 1);
+        auto idxVal = tryFoldExprToConst(idx->index.get(), depth + 1);
+        if (!arrVal || !idxVal || idxVal->kind != ConstValue::Kind::Integer)
+            return std::nullopt;
+        int64_t i = idxVal->intVal;
+        if (arrVal->kind == ConstValue::Kind::String) {
+            const std::string& s = arrVal->strVal;
+            if (i < 0 || i >= static_cast<int64_t>(s.size())) return std::nullopt;
+            return ConstValue::fromInt(static_cast<unsigned char>(s[static_cast<size_t>(i)]));
+        }
+        if (arrVal->kind == ConstValue::Kind::Array) {
+            if (i < 0 || i >= static_cast<int64_t>(arrVal->arrVal.size())) return std::nullopt;
+            return arrVal->arrVal[static_cast<size_t>(i)];
+        }
         return std::nullopt;
     }
     case ASTNodeType::BINARY_EXPR: {
@@ -4865,6 +5237,13 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         if (bin->op == "+" && lv->kind == ConstValue::Kind::String &&
             rv->kind == ConstValue::Kind::String)
             return ConstValue::fromStr(lv->strVal + rv->strVal);
+        // String == / != comparison
+        if ((bin->op == "==" || bin->op == "!=") &&
+            lv->kind == ConstValue::Kind::String &&
+            rv->kind == ConstValue::Kind::String) {
+            bool eq = (lv->strVal == rv->strVal);
+            return ConstValue::fromInt(bin->op == "==" ? (eq ? 1 : 0) : (eq ? 0 : 1));
+        }
         // Integer arithmetic / comparisons
         if (lv->kind != ConstValue::Kind::Integer ||
             rv->kind != ConstValue::Kind::Integer)
@@ -4880,6 +5259,12 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         if (bin->op == "^")  return ConstValue::fromInt(a ^ b);
         if (bin->op == "<<" && b >= 0 && b < 64) return ConstValue::fromInt(a << b);
         if (bin->op == ">>" && b >= 0 && b < 64) return ConstValue::fromInt(a >> b);
+        if (bin->op == "**") {
+            if (b < 0) return (a == 1) ? std::optional<ConstValue>(ConstValue::fromInt(1)) : std::nullopt;
+            int64_t r = 1; int64_t cur = a; int64_t rem = b;
+            while (rem > 0) { if (rem & 1) r *= cur; cur *= cur; rem >>= 1; }
+            return ConstValue::fromInt(r);
+        }
         if (bin->op == "==") return ConstValue::fromInt(int64_t(a == b));
         if (bin->op == "!=") return ConstValue::fromInt(int64_t(a != b));
         if (bin->op == "<")  return ConstValue::fromInt(int64_t(a < b));
@@ -4916,19 +5301,28 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
             if (sit != constStringReturnFunctions_.end())
                 return ConstValue::fromStr(sit->second);
         }
-        // Multi-arg: try to fold all args, then evaluate the callee's body.
-        auto declIt = functionDecls_.find(call->callee);
-        if (declIt != functionDecls_.end() && declIt->second->body &&
-            call->arguments.size() == declIt->second->parameters.size()) {
-            std::unordered_map<std::string, ConstValue> callArgEnv;
-            bool allConst = true;
-            for (size_t i = 0; i < call->arguments.size(); ++i) {
-                auto av = tryFoldExprToConst(call->arguments[i].get(), depth + 1);
-                if (!av) { allConst = false; break; }
-                callArgEnv[declIt->second->parameters[i].name] = *av;
-            }
-            if (allConst)
+        // Try to fold all args to constants.
+        std::vector<ConstValue> foldedArgs;
+        bool allConst = true;
+        foldedArgs.reserve(call->arguments.size());
+        for (auto& arg : call->arguments) {
+            auto av = tryFoldExprToConst(arg.get(), depth + 1);
+            if (!av) { allConst = false; break; }
+            foldedArgs.push_back(std::move(*av));
+        }
+        if (allConst) {
+            // Try built-in pure functions first.
+            if (auto bv = evalConstBuiltin(call->callee, foldedArgs))
+                return bv;
+            // Then try user-defined functions via body evaluation.
+            auto declIt = functionDecls_.find(call->callee);
+            if (declIt != functionDecls_.end() && declIt->second->body &&
+                call->arguments.size() == declIt->second->parameters.size()) {
+                std::unordered_map<std::string, ConstValue> callArgEnv;
+                for (size_t i = 0; i < foldedArgs.size(); ++i)
+                    callArgEnv[declIt->second->parameters[i].name] = foldedArgs[i];
                 return tryConstEvalFull(declIt->second, callArgEnv, depth + 1);
+            }
         }
         return std::nullopt;
     }
@@ -4941,6 +5335,22 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
     }
     default: return std::nullopt;
     }
+}
+
+// tryFoldInt / tryFoldStr: convenience wrappers used by generateBuiltin.
+// Evaluate an expression to an integer or string constant using all
+// currently-available compile-time information.
+std::optional<int64_t> CodeGenerator::tryFoldInt(Expression* e) const {
+    if (!e) return std::nullopt;
+    if (auto cv = tryFoldExprToConst(e))
+        if (cv->kind == ConstValue::Kind::Integer) return cv->intVal;
+    return std::nullopt;
+}
+std::optional<std::string> CodeGenerator::tryFoldStr(Expression* e) const {
+    if (!e) return std::nullopt;
+    if (auto cv = tryFoldExprToConst(e))
+        if (cv->kind == ConstValue::Kind::String) return cv->strVal;
+    return std::nullopt;
 }
 
 // tryConstEvalFull: Aggressively evaluate a function body at compile time.
@@ -5034,6 +5444,13 @@ CodeGenerator::tryConstEvalFull(
             if (bin->op == "+" && lv->kind == ConstValue::Kind::String &&
                 rv->kind == ConstValue::Kind::String)
                 return ConstValue::fromStr(lv->strVal + rv->strVal);
+            // String == / !=
+            if ((bin->op == "==" || bin->op == "!=") &&
+                lv->kind == ConstValue::Kind::String &&
+                rv->kind == ConstValue::Kind::String) {
+                bool eq = (lv->strVal == rv->strVal);
+                return ConstValue::fromInt(bin->op == "==" ? (eq ? 1 : 0) : (eq ? 0 : 1));
+            }
             if (lv->kind != ConstValue::Kind::Integer || rv->kind != ConstValue::Kind::Integer)
                 return std::nullopt;
             int64_t a = lv->intVal, b = rv->intVal;
@@ -5108,18 +5525,45 @@ CodeGenerator::tryConstEvalFull(
                                      : evalE(tern->elseExpr.get());
         }
 
-        // ── String / array indexing: s[i] → ASCII code ───────────────────
+        // ── Array literal ─────────────────────────────────────────────────
+        case ASTNodeType::ARRAY_EXPR: {
+            auto* ae = static_cast<ArrayExpr*>(e);
+            std::vector<ConstValue> elems;
+            elems.reserve(ae->elements.size());
+            for (auto& el : ae->elements) {
+                auto v = evalE(el.get());
+                if (!v) return std::nullopt;
+                elems.push_back(std::move(*v));
+            }
+            return ConstValue::fromArr(std::move(elems));
+        }
+
+        // ── String / array indexing ───────────────────────────────────────
         case ASTNodeType::INDEX_EXPR: {
             auto* idx = static_cast<IndexExpr*>(e);
             auto arrVal = evalE(idx->array.get());
             auto idxVal = evalE(idx->index.get());
-            if (!arrVal || !idxVal) return std::nullopt;
-            if (arrVal->kind == ConstValue::Kind::String &&
-                idxVal->kind == ConstValue::Kind::Integer) {
-                int64_t i = idxVal->intVal;
+            if (!arrVal || !idxVal || idxVal->kind != ConstValue::Kind::Integer)
+                return std::nullopt;
+            int64_t i = idxVal->intVal;
+            if (arrVal->kind == ConstValue::Kind::String) {
                 const std::string& s = arrVal->strVal;
                 if (i < 0 || i >= static_cast<int64_t>(s.size())) return std::nullopt;
                 return ConstValue::fromInt(static_cast<unsigned char>(s[static_cast<size_t>(i)]));
+            }
+            if (arrVal->kind == ConstValue::Kind::Array) {
+                if (i < 0 || i >= static_cast<int64_t>(arrVal->arrVal.size())) return std::nullopt;
+                return arrVal->arrVal[static_cast<size_t>(i)];
+            }
+            // Try looking up named array from env via the array expression
+            if (idx->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* idE = static_cast<IdentifierExpr*>(idx->array.get());
+                auto ait = env.find(idE->name);
+                if (ait != env.end() && ait->second.kind == ConstValue::Kind::Array) {
+                    if (i < 0 || i >= static_cast<int64_t>(ait->second.arrVal.size()))
+                        return std::nullopt;
+                    return ait->second.arrVal[static_cast<size_t>(i)];
+                }
             }
             return std::nullopt;
         }
@@ -5137,43 +5581,6 @@ CodeGenerator::tryConstEvalFull(
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<CallExpr*>(e);
 
-            // Pure builtins
-            if (call->callee == "len" && call->arguments.size() == 1) {
-                auto av = evalE(call->arguments[0].get());
-                if (av && av->kind == ConstValue::Kind::String)
-                    return ConstValue::fromInt(static_cast<int64_t>(av->strVal.size()));
-                return std::nullopt;
-            }
-            if (call->callee == "abs" && call->arguments.size() == 1) {
-                auto av = evalE(call->arguments[0].get());
-                if (av && av->kind == ConstValue::Kind::Integer)
-                    return ConstValue::fromInt(av->intVal < 0 ? -av->intVal : av->intVal);
-                return std::nullopt;
-            }
-            if ((call->callee == "min" || call->callee == "max") &&
-                call->arguments.size() == 2) {
-                auto a = evalE(call->arguments[0].get());
-                auto b = evalE(call->arguments[1].get());
-                if (a && b && a->kind == ConstValue::Kind::Integer &&
-                    b->kind == ConstValue::Kind::Integer)
-                    return ConstValue::fromInt(call->callee == "min"
-                                                   ? std::min(a->intVal, b->intVal)
-                                                   : std::max(a->intVal, b->intVal));
-                return std::nullopt;
-            }
-            if (call->callee == "char_at" && call->arguments.size() == 2) {
-                auto sv = evalE(call->arguments[0].get());
-                auto iv = evalE(call->arguments[1].get());
-                if (sv && iv && sv->kind == ConstValue::Kind::String &&
-                    iv->kind == ConstValue::Kind::Integer) {
-                    int64_t i = iv->intVal;
-                    if (i >= 0 && i < static_cast<int64_t>(sv->strVal.size()))
-                        return ConstValue::fromInt(
-                            static_cast<unsigned char>(sv->strVal[static_cast<size_t>(i)]));
-                }
-                return std::nullopt;
-            }
-
             // Zero-arg pre-classified functions
             if (call->arguments.empty()) {
                 auto iit = constIntReturnFunctions_.find(call->callee);
@@ -5184,19 +5591,28 @@ CodeGenerator::tryConstEvalFull(
                     return ConstValue::fromStr(sit->second);
             }
 
-            // Arbitrary user function: evaluate recursively when all args are known
-            auto declIt = functionDecls_.find(call->callee);
-            if (declIt != functionDecls_.end() && declIt->second->body &&
-                call->arguments.size() == declIt->second->parameters.size()) {
-                std::unordered_map<std::string, ConstValue> callEnv;
-                bool allConst = true;
-                for (size_t i = 0; i < call->arguments.size(); ++i) {
-                    auto av = evalE(call->arguments[i].get());
-                    if (!av) { allConst = false; break; }
-                    callEnv[declIt->second->parameters[i].name] = *av;
-                }
-                if (allConst)
+            // Evaluate all arguments.
+            std::vector<ConstValue> foldedArgs;
+            foldedArgs.reserve(call->arguments.size());
+            bool allConst = true;
+            for (auto& arg : call->arguments) {
+                auto av = evalE(arg.get());
+                if (!av) { allConst = false; break; }
+                foldedArgs.push_back(std::move(*av));
+            }
+            if (allConst) {
+                // Try built-in pure functions first.
+                if (auto bv = evalConstBuiltin(call->callee, foldedArgs))
+                    return bv;
+                // Try user-defined functions via body evaluation.
+                auto declIt = functionDecls_.find(call->callee);
+                if (declIt != functionDecls_.end() && declIt->second->body &&
+                    call->arguments.size() == declIt->second->parameters.size()) {
+                    std::unordered_map<std::string, ConstValue> callEnv;
+                    for (size_t i = 0; i < foldedArgs.size(); ++i)
+                        callEnv[declIt->second->parameters[i].name] = foldedArgs[i];
                     return tryConstEvalFull(declIt->second, callEnv, depth + 1);
+                }
             }
             return std::nullopt;
         }
@@ -5242,6 +5658,28 @@ CodeGenerator::tryConstEvalFull(
                 if (!v) return false;
                 env[assign->name] = *v;
                 return true;
+            }
+            // Array element assignment: arr[i] = val
+            if (es->expression->type == ASTNodeType::INDEX_ASSIGN_EXPR) {
+                auto* ia = static_cast<IndexAssignExpr*>(es->expression.get());
+                if (ia->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    auto* idE = static_cast<IdentifierExpr*>(ia->array.get());
+                    auto ait = env.find(idE->name);
+                    if (ait != env.end() && ait->second.kind == ConstValue::Kind::Array) {
+                        auto idxv = evalE(ia->index.get());
+                        auto valv = evalE(ia->value.get());
+                        if (idxv && valv && idxv->kind == ConstValue::Kind::Integer) {
+                            int64_t i = idxv->intVal;
+                            auto& arr = ait->second.arrVal;
+                            if (i >= 0 && i < static_cast<int64_t>(arr.size())) {
+                                arr[static_cast<size_t>(i)] = std::move(*valv);
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // Can't model the mutation — give up.
+                return false;
             }
             // Any other expr (x++, f(), etc.): evaluate for side effects.
             // If the expression is not foldable (e.g. it calls a function with
@@ -5289,20 +5727,36 @@ CodeGenerator::tryConstEvalFull(
             return true;
         }
 
-        // ── ForEach loop: for (c in string) ──────────────────────────────
+        // ── ForEach loop: for (c in collection) ──────────────────────────
         case ASTNodeType::FOR_EACH_STMT: {
             auto* fes = static_cast<ForEachStmt*>(s);
             auto collVal = evalE(fes->collection.get());
-            if (!collVal || collVal->kind != ConstValue::Kind::String) return false;
-            const std::string str = collVal->strVal;  // copy in case env mutates
-            for (size_t i = 0; i < str.size(); ++i) {
-                if (++fuel > kFuelLimit) return false;
-                env[fes->iteratorVar] =
-                    ConstValue::fromInt(static_cast<unsigned char>(str[i]));
-                if (!evalS(fes->body.get())) return false;
-                if (retVal) { env.erase(fes->iteratorVar); return true; }
-                if (breakSeen) { breakSeen = false; break; }
-                continueSeen = false;
+            if (!collVal) return false;
+            if (collVal->kind == ConstValue::Kind::String) {
+                // Iterate over characters (as integer char codes)
+                const std::string str = collVal->strVal;  // copy in case env mutates
+                for (size_t i = 0; i < str.size(); ++i) {
+                    if (++fuel > kFuelLimit) return false;
+                    env[fes->iteratorVar] =
+                        ConstValue::fromInt(static_cast<unsigned char>(str[i]));
+                    if (!evalS(fes->body.get())) return false;
+                    if (retVal) { env.erase(fes->iteratorVar); return true; }
+                    if (breakSeen) { breakSeen = false; break; }
+                    continueSeen = false;
+                }
+            } else if (collVal->kind == ConstValue::Kind::Array) {
+                // Iterate over array elements
+                const auto arr = collVal->arrVal;  // copy in case env mutates
+                for (size_t i = 0; i < arr.size(); ++i) {
+                    if (++fuel > kFuelLimit) return false;
+                    env[fes->iteratorVar] = arr[i];
+                    if (!evalS(fes->body.get())) return false;
+                    if (retVal) { env.erase(fes->iteratorVar); return true; }
+                    if (breakSeen) { breakSeen = false; break; }
+                    continueSeen = false;
+                }
+            } else {
+                return false;
             }
             env.erase(fes->iteratorVar);
             return true;
@@ -5388,9 +5842,37 @@ CodeGenerator::tryConstEvalFull(
         // ── Block ────────────────────────────────────────────────────────
         case ASTNodeType::BLOCK: {
             auto* blk = static_cast<BlockStmt*>(s);
+            // Track variables declared in this block so they can be removed
+            // (or their shadowed values restored) when the block exits.
+            // This correctly handles shadowing: if inner `var x` shadows outer
+            // `x`, we save the outer value and restore it on exit.
+            std::vector<std::pair<std::string, std::optional<ConstValue>>> scopeGuard;
             for (auto& stmt : blk->statements) {
-                if (!evalS(stmt.get())) return false;
-                if (retVal || breakSeen || continueSeen) return true;
+                if (stmt->type == ASTNodeType::VAR_DECL) {
+                    auto* decl = static_cast<VarDecl*>(stmt.get());
+                    auto it = env.find(decl->name);
+                    if (it != env.end())
+                        scopeGuard.emplace_back(decl->name, it->second);
+                    else
+                        scopeGuard.emplace_back(decl->name, std::nullopt);
+                }
+                if (!evalS(stmt.get())) {
+                    // Restore scope on failure
+                    for (auto& [nm, val] : scopeGuard) {
+                        if (val) env[nm] = *val; else env.erase(nm);
+                    }
+                    return false;
+                }
+                if (retVal || breakSeen || continueSeen) {
+                    for (auto& [nm, val] : scopeGuard) {
+                        if (val) env[nm] = *val; else env.erase(nm);
+                    }
+                    return true;
+                }
+            }
+            // Normal exit: restore scope
+            for (auto& [nm, val] : scopeGuard) {
+                if (val) env[nm] = *val; else env.erase(nm);
             }
             return true;
         }
@@ -5438,8 +5920,12 @@ void CodeGenerator::analyzeConstantReturnValues(Program* program) {
 
             if (result->kind == ConstValue::Kind::Integer) {
                 constIntReturnFunctions_[fname] = result->intVal;
-            } else {
+            } else if (result->kind == ConstValue::Kind::String) {
                 constStringReturnFunctions_[fname] = result->strVal;
+            } else {
+                // Array or other compound type — not representable as a simple
+                // constant return value; skip without registering.
+                continue;
             }
             changed = true;
         }
