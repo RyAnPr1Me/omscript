@@ -692,6 +692,42 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
                 llvm::MDBuilder(*context).createBranchWeights(thenW, elseW);
             br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
         }();
+
+        // Infer branch probability from zero/null equality patterns.
+        // Pattern: if (x == 0) / if (x != 0) — zero is a common error sentinel.
+        // Comparing against 0 is often a null/error check: the non-zero path
+        // (normal execution) is taken ~99% of the time.
+        if (!br->getMetadata(llvm::LLVMContext::MD_prof)) {
+            [&]() {
+                // Peel outermost icmp ne %x, 0 (from toBool)
+                auto* outerNE = llvm::dyn_cast<llvm::ICmpInst>(condBool);
+                if (!outerNE || outerNE->getPredicate() != llvm::ICmpInst::ICMP_NE) return;
+                auto* outerRHS = llvm::dyn_cast<llvm::ConstantInt>(outerNE->getOperand(1));
+                if (!outerRHS || !outerRHS->isZero()) return;
+                // Peel optional zext
+                llvm::Value* inner = outerNE->getOperand(0);
+                if (auto* z = llvm::dyn_cast<llvm::ZExtInst>(inner))
+                    inner = z->getOperand(0);
+                // Must be an icmp eq/ne against zero
+                auto* innerCmp = llvm::dyn_cast<llvm::ICmpInst>(inner);
+                if (!innerCmp) return;
+                llvm::ConstantInt* zeroC = nullptr;
+                llvm::Value* tested = nullptr;
+                if ((zeroC = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(1))))
+                    tested = innerCmp->getOperand(0);
+                else if ((zeroC = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(0))))
+                    tested = innerCmp->getOperand(1);
+                if (!zeroC || !zeroC->isZero() || !tested) return;
+                const bool isEqZero = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_EQ);
+                const bool isNeZero = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_NE);
+                if (!isEqZero && !isNeZero) return;
+                // eq 0 → then-branch (zero path) is rare; ne 0 → then-branch is common.
+                const uint32_t thenW = isEqZero ? 1u : 99u;
+                const uint32_t elseW = isEqZero ? 99u : 1u;
+                llvm::MDNode* w = llvm::MDBuilder(*context).createBranchWeights(thenW, elseW);
+                br->setMetadata(llvm::LLVMContext::MD_prof, w);
+            }();
+        }
     }
 
     // Save pre-if non-neg state so each branch starts from the same baseline.

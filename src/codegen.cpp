@@ -3802,7 +3802,15 @@ void CodeGenerator::generate(Program* program) {
     // argmemonly enables LLVM to prove that calls don't alias globals or
     // heap state, unlocking store-to-load forwarding and dead store
     // elimination across call sites.
+    //
+    // We run multiple fixpoint iterations so that memory effects propagate
+    // interprocedurally: once a callee gets readnone/readonly from iteration N,
+    // its callers can be promoted in iteration N+1.  Converges in O(call depth)
+    // passes — typically 2-3 for real programs.
     if (optimizationLevel >= OptimizationLevel::O1) {
+        bool memEffChanged = true;
+        while (memEffChanged) {
+        memEffChanged = false;
         for (auto& func : module->functions()) {
             if (func.isDeclaration() || func.getName() == "main")
                 continue;
@@ -3908,6 +3916,7 @@ void CodeGenerator::generate(Program* program) {
                 // transitively through calls) → readnone.
                 func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                     *context, llvm::MemoryEffects::none()));
+                memEffChanged = true;
             } else if (!hasUnknownSideEffect && allAccessesThroughArgs) {
                 // All non-local memory accesses go through function arguments.
                 // This enables LLVM to prove non-interference with globals and
@@ -3919,12 +3928,15 @@ void CodeGenerator::generate(Program* program) {
                     func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                         *context, llvm::MemoryEffects::argMemOnly()));
                 }
+                memEffChanged = true;
             } else if (!hasUnknownSideEffect && !hasMemoryWrite) {
                 // Function reads memory (possibly non-arg) → readonly.
                 func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                     *context, llvm::MemoryEffects::readOnly()));
+                memEffChanged = true;
             }
-        }
+        } // end for each function
+        } // end while memEffChanged
     }
 
     // Infer norecurse attribute on user-defined functions.
