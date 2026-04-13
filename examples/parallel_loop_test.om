@@ -1,0 +1,25 @@
+// Test parallel keyword on loops
+fn main() {
+    // parallel for
+    var sum = 0;
+    parallel for (i in 0...10) {
+        sum = sum + i;
+    }
+
+    // parallel while
+    var n = 0;
+    var wsum = 0;
+    parallel while (n < 5) {
+        wsum = wsum + n;
+        n = n + 1;
+    }
+
+    // parallel foreach
+    var arr = [1, 2, 3, 4, 5];
+    var fsum = 0;
+    parallel foreach (x in arr) {
+        fsum = fsum + x;
+    }
+
+    return sum + wsum + fsum;   // 45 + 10 + 15 = 70
+}

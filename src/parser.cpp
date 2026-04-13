@@ -656,6 +656,38 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    // parallel for / parallel while / parallel foreach — auto-parallelizes the loop.
+    // Sets loopHints.parallel = true on the loop statement.
+    if (match(TokenType::PARALLEL)) {
+        const Token kw = tokens[current - 1];
+        if (match(TokenType::FOR)) {
+            auto stmt = parseForStmt();
+            stmt->line = kw.line;
+            stmt->column = kw.column;
+            if (auto* forStmt = dynamic_cast<ForStmt*>(stmt.get())) {
+                forStmt->loopHints.parallel = true;
+            }
+            return stmt;
+        } else if (match(TokenType::WHILE)) {
+            auto stmt = parseWhileStmt();
+            stmt->line = kw.line;
+            stmt->column = kw.column;
+            if (auto* whileStmt = dynamic_cast<WhileStmt*>(stmt.get())) {
+                whileStmt->loopHints.parallel = true;
+            }
+            return stmt;
+        } else if (match(TokenType::FOREACH)) {
+            auto stmt = parseForEachStmt();
+            stmt->line = kw.line;
+            stmt->column = kw.column;
+            if (auto* feStmt = dynamic_cast<ForEachStmt*>(stmt.get())) {
+                feStmt->loopHints.parallel = true;
+            }
+            return stmt;
+        } else {
+            error("Expected 'for', 'while', or 'foreach' after 'parallel'");
+        }
+    }
     if (match(TokenType::RETURN)) {
         const Token kw = tokens[current - 1];
         auto stmt = parseReturnStmt();
@@ -2660,6 +2692,25 @@ std::unique_ptr<Expression> Parser::parseCall() {
 }
 
 std::unique_ptr<Expression> Parser::parsePrimary() {
+    // comptime { ... } — compile-time evaluated block expression.
+    // Evaluates the block at compile time and returns its result as a constant.
+    if (match(TokenType::COMPTIME)) {
+        const Token kw = tokens[current - 1];
+        consume(TokenType::LBRACE, "Expected '{' after 'comptime'");
+        // Re-use parseBlock but we've already consumed the '{'.
+        // Collect statements until '}'.
+        std::vector<std::unique_ptr<Statement>> stmts;
+        while (!check(TokenType::RBRACE) && !isAtEnd()) {
+            stmts.push_back(parseStatement());
+        }
+        consume(TokenType::RBRACE, "Expected '}' to close comptime block");
+        auto block = std::make_unique<BlockStmt>(std::move(stmts));
+        auto expr = std::make_unique<ComptimeExpr>(std::move(block));
+        expr->line = kw.line;
+        expr->column = kw.column;
+        return expr;
+    }
+
     if (match(TokenType::BYTES_LITERAL)) {
         // 0x"AABBCC" — hex byte array literal.
         // Desugar at parse time into an ArrayExpr of integer literals,

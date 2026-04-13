@@ -2305,11 +2305,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // parallel_accesses: mark for-each as having iteration-independent
         // memory accesses at O3, enabling the vectorizer and loop distribution
         // to treat array loads/stores as independent across iterations.
-        if (optimizationLevel >= OptimizationLevel::O3
-            && enableParallelize_ && !currentFuncHintNoParallelize_
-            && loopNestDepth_ == 0
-            && (currentFuncHintParallelize_ || currentFuncHintHot_
-                || optimizationLevel >= OptimizationLevel::O3)) {
+        if ((stmt->loopHints.parallel)
+            || (optimizationLevel >= OptimizationLevel::O3
+                && enableParallelize_ && !currentFuncHintNoParallelize_
+                && loopNestDepth_ == 0
+                && (currentFuncHintParallelize_ || currentFuncHintHot_
+                    || optimizationLevel >= OptimizationLevel::O3))) {
             llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(*context, {});
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),

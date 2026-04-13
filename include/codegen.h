@@ -631,6 +631,12 @@ class CodeGenerator {
         const std::unordered_map<std::string, ConstValue>& argEnv,
         int depth = 0) const;
 
+    /// Overload that evaluates a BlockStmt directly (used by comptime blocks).
+    std::optional<ConstValue> tryConstEvalFull(
+        const BlockStmt* body,
+        const std::unordered_map<std::string, ConstValue>& argEnv,
+        int depth = 0) const;
+
     /// Convenience wrappers used by generateBuiltin: fold an expression to a
     /// compile-time integer or string using all currently available information
     /// (const variables, enum constants, binary ops on constants, etc.).

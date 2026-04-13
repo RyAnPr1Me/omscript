@@ -4956,6 +4956,30 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateDict(static_cast<DictExpr*>(expr));
     case ASTNodeType::SCOPE_RESOLUTION_EXPR:
         return generateScopeResolution(static_cast<ScopeResolutionExpr*>(expr));
+    case ASTNodeType::COMPTIME_EXPR: {
+        // comptime { ... } — evaluate the block at compile time.
+        // Uses the constant evaluator (tryConstEvalFull) with an empty env.
+        // If evaluation fails, emits a compile error.
+        auto* ct = static_cast<ComptimeExpr*>(expr);
+        static const std::unordered_map<std::string, ConstValue> emptyEnv;
+        auto result = tryConstEvalFull(ct->body.get(), emptyEnv);
+        if (!result) {
+            codegenError("comptime block could not be evaluated at compile time "
+                         "(only pure integer/string arithmetic is supported)", expr);
+        }
+        if (result->kind == ConstValue::Kind::Integer) {
+            return llvm::ConstantInt::get(getDefaultType(), result->intVal, /*isSigned=*/true);
+        }
+        if (result->kind == ConstValue::Kind::String) {
+            llvm::GlobalVariable* gv = internString(result->strVal);
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
+        codegenError("comptime block returned an unsupported type (only int/string supported)", expr);
+    }
     default:
         codegenError("Unknown expression type", expr);
     }
@@ -6327,7 +6351,26 @@ CodeGenerator::tryConstEvalFull(
     return retVal;
 }
 
-// ── Deep Compile-Time Constant Return Value Analysis ─────────────────────
+// BlockStmt overload: evaluate a standalone block at compile time.
+// Used by comptime {} expressions that aren't attached to a FunctionDecl.
+std::optional<CodeGenerator::ConstValue>
+CodeGenerator::tryConstEvalFull(
+    const BlockStmt* body,
+    const std::unordered_map<std::string, ConstValue>& argEnv,
+    int depth) const {
+    if (!body || depth > 48) return std::nullopt;
+    // Synthesize a minimal FunctionDecl pointing at the block.
+    // We use a raw pointer without ownership transfer — the block is owned
+    // by the ComptimeExpr AST node that called us.
+    FunctionDecl synFn("__comptime__", {}, {}, nullptr);
+    // Temporarily assign the body pointer for the duration of evaluation.
+    // We must restore it (set to nullptr) before the synFn destructor runs
+    // to avoid double-free since synFn doesn't own the body.
+    synFn.body.reset(const_cast<BlockStmt*>(body));
+    auto result = tryConstEvalFull(&synFn, argEnv, depth);
+    synFn.body.release(); // release without deleting — body is not owned here
+    return result;
+}
 // Pre-pass over the program AST that identifies zero-parameter, pure functions
 // whose return value is always the same compile-time constant.
 //

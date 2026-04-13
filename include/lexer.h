@@ -72,6 +72,8 @@ enum class TokenType {
     SWAP,
     TIMES,
     WITH,
+    PARALLEL,  // parallel — marks a loop for auto-parallelization
+    COMPTIME,  // comptime — compile-time evaluation block
 
     // Operators
     PLUS,

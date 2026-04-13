@@ -63,7 +63,8 @@ enum class ASTNodeType {
     PREFETCH_STMT,
     DEFER_STMT,
     SCOPE_RESOLUTION_EXPR,
-    ASSUME_STMT
+    ASSUME_STMT,
+    COMPTIME_EXPR  // comptime { ... } — compile-time evaluated block expression
 };
 
 class ASTNode {
@@ -365,6 +366,7 @@ class ForEachStmt : public Statement {
     std::string iteratorVar;
     std::unique_ptr<Expression> collection;
     std::unique_ptr<Statement> body;
+    LoopConfig loopHints;
 
     ForEachStmt(const std::string& iter, std::unique_ptr<Expression> coll, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::FOR_EACH_STMT), iteratorVar(iter), collection(std::move(coll)), body(std::move(b)) {}
@@ -716,6 +718,25 @@ class FreezeStmt : public Statement {
 
     explicit FreezeStmt(const std::string& name)
         : Statement(ASTNodeType::FREEZE_STMT), varName(name) {}
+};
+
+/// `comptime { statements... }` — compile-time evaluated block expression.
+/// The block is evaluated at compile time by the OmScript constant evaluator.
+/// The result (the value of the last return statement) is a compile-time
+/// constant that replaces the expression wherever it is used.
+///
+/// Typical uses:
+///   var x = comptime { return 2 * 3 + 1; }     // x = 7, a compile-time const
+///   var y = comptime { var n = 10; return n * n; } // y = 100
+///
+/// If the block cannot be evaluated at compile time (e.g. it calls I/O),
+/// a compile error is emitted.
+class ComptimeExpr : public Expression {
+  public:
+    std::unique_ptr<BlockStmt> body;
+
+    explicit ComptimeExpr(std::unique_ptr<BlockStmt> b)
+        : Expression(ASTNodeType::COMPTIME_EXPR), body(std::move(b)) {}
 };
 
 } // namespace omscript
