@@ -1,0 +1,16 @@
+// freeze_test.om — test the `freeze x;` keyword
+// Expected exit code: 42
+
+fn main() -> int {
+    var x = 10;
+    var y = 32;
+    // Mutate before freeze is fine
+    x = x + 5;          // x == 15
+    freeze x;           // x is now immutable for the rest of its lifetime
+    freeze y;           // y is also frozen
+
+    // Read frozen variables
+    var result = x + y; // 15 + 32 == 47
+    result = result - 5;// 42
+    return result;
+}

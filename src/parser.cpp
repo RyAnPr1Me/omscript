@@ -947,14 +947,23 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return parseExprStmt();
     }
     if (match(TokenType::BORROW)) {
-        // `borrow var ref = expr;` or `borrow type ref = expr;` or `borrow ref:type = expr;`
+        // `borrow var ref = expr;`       — immutable borrow
+        // `borrow mut ref = expr;`       — mutable borrow (single mutable alias)
+        // `borrow type ref = expr;`      — typed immutable borrow
+        // `borrow ref:type = expr;`      — typed immutable borrow
         const Token kw = tokens[current - 1];
+        bool isMut = false;
+        if (match(TokenType::MUT)) {
+            isMut = true;
+        }
         std::string typeName;
-        if (match(TokenType::VAR)) {
-            typeName = "";
-        } else if (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
-                   tokens[current + 1].type == TokenType::IDENTIFIER) {
-            typeName = advance().lexeme;
+        if (!isMut) {
+            if (match(TokenType::VAR)) {
+                typeName = "";
+            } else if (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
+                       tokens[current + 1].type == TokenType::IDENTIFIER) {
+                typeName = advance().lexeme;
+            }
         }
         const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in borrow declaration");
         // Support name:type syntax: borrow j:u32 = expr;
@@ -965,10 +974,20 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         auto init = parseExpression();
         consume(TokenType::SEMICOLON, "Expected ';' after borrow declaration");
         // Create a VarDecl with a BorrowExpr wrapper
-        auto borrowExpr = std::make_unique<BorrowExpr>(std::move(init));
+        auto borrowExpr = std::make_unique<BorrowExpr>(std::move(init), isMut);
         borrowExpr->line = kw.line;
         borrowExpr->column = kw.column;
         auto stmt = std::make_unique<VarDecl>(name.lexeme, std::move(borrowExpr), false, typeName);
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::FREEZE)) {
+        // `freeze x;` — mark variable x immutable for the rest of its lifetime.
+        const Token kw = tokens[current - 1];
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'freeze'");
+        consume(TokenType::SEMICOLON, "Expected ';' after 'freeze'");
+        auto stmt = std::make_unique<FreezeStmt>(name.lexeme);
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;

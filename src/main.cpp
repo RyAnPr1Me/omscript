@@ -1597,6 +1597,10 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "INVALIDATE";
     case omscript::TokenType::BORROW:
         return "BORROW";
+    case omscript::TokenType::FREEZE:
+        return "FREEZE";
+    case omscript::TokenType::MUT:
+        return "MUT";
     case omscript::TokenType::PREFETCH:
         return "PREFETCH";
     case omscript::TokenType::LIKELY:
@@ -2084,6 +2088,11 @@ void dumpStatement(const omscript::Statement* stmt, int indent) {
     case omscript::ASTNodeType::INVALIDATE_STMT: {
         auto* inv = static_cast<const omscript::InvalidateStmt*>(stmt);
         std::cout << "InvalidateStmt '" << inv->varName << "'\n";
+        break;
+    }
+    case omscript::ASTNodeType::FREEZE_STMT: {
+        auto* fr = static_cast<const omscript::FreezeStmt*>(stmt);
+        std::cout << "FreezeStmt '" << fr->varName << "'\n";
         break;
     }
     case omscript::ASTNodeType::MOVE_DECL: {

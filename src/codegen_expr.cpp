@@ -495,15 +495,18 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     auto* load = builder->CreateAlignedLoad(loadType, it->second,
         llvm::MaybeAlign(8), expr->name.c_str());
 
-    // If this is a const variable or a prefetch-immut variable, mark the
-    // load as invariant so LLVM knows the value never changes and can
-    // hoist/CSE it aggressively.
+    // If this is a const variable, a prefetch-immut variable, or a frozen
+    // variable, mark the load as invariant so LLVM knows the value never
+    // changes and can hoist/CSE it aggressively.
     bool isInvariant = false;
     auto constIt = constValues.find(expr->name);
     if (constIt != constValues.end() && constIt->second) {
         isInvariant = true;
     }
     if (prefetchedImmutVars_.count(expr->name)) {
+        isInvariant = true;
+    }
+    if (frozenVars_.count(expr->name)) {
         isInvariant = true;
     }
     // Register variables are mutable; do not mark loads as invariant.

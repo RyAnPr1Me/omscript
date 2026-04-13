@@ -52,19 +52,27 @@ enum class OptimizationLevel {
 /// these states:
 ///
 ///  Owned → Borrowed → (back to Owned when borrow ends)
+///  Owned → MutBorrowed → (back to Owned when mut borrow ends)
+///  Owned → Frozen → (permanent; stays Frozen for rest of lifetime)
 ///  Owned → Moved → (variable is dead, use-after-move error)
 ///  Owned/Borrowed/Moved → Invalidated → (explicitly killed)
 ///
 /// Rules:
 ///  - Owned: full control — may read, write, move, borrow, or invalidate.
 ///  - Borrowed: read-only alias — may NOT mutate, move, or invalidate.
+///  - MutBorrowed: has one mutable alias — source may NOT be mutated
+///    or borrowed again until the borrow ends.
+///  - Frozen: permanently immutable — reads are !invariant.load, writes
+///    are compile-time errors.  Cannot be moved or mut-borrowed.
 ///  - Moved: ownership transferred — any use is a compile-time error.
 ///  - Invalidated: explicitly killed — any use is a compile-time error.
 enum class OwnershipState {
-    Owned,       ///< Variable owns its value — full read/write access
-    Borrowed,    ///< Variable is borrowed — read-only, cannot resize/move
-    Moved,       ///< Ownership transferred out — use is a compile error
-    Invalidated  ///< Explicitly killed — use is a compile error
+    Owned,        ///< Variable owns its value — full read/write access
+    Borrowed,     ///< Variable is borrowed (read-only) — cannot resize/move
+    MutBorrowed,  ///< Has one mutable alias — source is locked during borrow
+    Frozen,       ///< Permanently immutable — all loads are invariant
+    Moved,        ///< Ownership transferred out — use is a compile error
+    Invalidated   ///< Explicitly killed — use is a compile error
 };
 
 class CodeGenerator {
@@ -379,6 +387,14 @@ class CodeGenerator {
     /// Populated when a borrow expression creates an alias; cleared when
     /// the borrowing variable goes out of scope.
     llvm::StringSet<> borrowedVars_;
+
+    /// Variables currently mutably borrowed — the source variable is locked
+    /// (no other borrows or mutations) while the mutable borrow is live.
+    llvm::StringSet<> mutBorrowedVars_;
+
+    /// Variables frozen via `freeze x;` — immutable for the rest of their
+    /// lifetime.  Loads become !invariant.load; writes are compile errors.
+    llvm::StringSet<> frozenVars_;
 
     /// Functions explicitly annotated with @cold by the user.
     /// These are preserved when the post-pipeline cold-stripping pass runs.
@@ -698,6 +714,7 @@ class CodeGenerator {
     void generateThrow(ThrowStmt* stmt);
     void generateInvalidate(InvalidateStmt* stmt);
     void generateMoveDecl(MoveDecl* stmt);
+    void generateFreeze(FreezeStmt* stmt);
     void generatePrefetch(PrefetchStmt* stmt);
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
@@ -710,8 +727,20 @@ class CodeGenerator {
     /// that mutations and moves are rejected at compile time.
     void markVariableBorrowed(const std::string& varName);
 
+    /// Mark a variable as mutably borrowed: source variable locked (no
+    /// concurrent borrows or mutations) while the mutable borrow is live.
+    void markVariableMutBorrowed(const std::string& varName);
+
+    /// Mark a variable as frozen: immutable for the rest of its lifetime.
+    /// Emits llvm.invariant.start and marks constValues[name]=true so all
+    /// subsequent loads get !invariant.load and writes are rejected.
+    void markVariableFrozen(const std::string& varName);
+
     /// Check if a variable is currently borrowed (read-only).
     bool isVariableBorrowed(const std::string& varName) const;
+
+    /// Check if a variable is frozen (permanently immutable).
+    bool isVariableFrozen(const std::string& varName) const;
 
     /// Get the ownership state of a variable.  Returns Owned if not tracked.
     OwnershipState getOwnershipState(const std::string& varName) const;

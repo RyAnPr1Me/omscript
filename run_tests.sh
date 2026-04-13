@@ -362,6 +362,8 @@ test_program "examples/hint_cold_hot.om" 0
 test_program "examples/hint_pure_static.om" 0
 test_program "examples/hint_prefetch.om" 0
 test_program "examples/prefetch_use_site.om" 0
+test_program "examples/freeze_test.om" 42
+test_program "examples/borrow_mut_test.om" 7
 test_program "examples/hint_flatten.om" 0
 test_program "examples/hint_vectorize.om" 0
 test_program "examples/unsigned_types.om" 0

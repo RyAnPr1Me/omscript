@@ -59,6 +59,7 @@ enum class ASTNodeType {
     DICT_EXPR,
     INVALIDATE_STMT,
     MOVE_DECL,
+    FREEZE_STMT,
     PREFETCH_STMT,
     DEFER_STMT,
     SCOPE_RESOLUTION_EXPR
@@ -586,12 +587,14 @@ class MoveExpr : public Expression {
 };
 
 /// `borrow ref = &x` — non-owning reference hint for alias analysis.
+/// `borrow mut ref = x` — single mutable reference (unique mutable alias).
 class BorrowExpr : public Expression {
   public:
     std::unique_ptr<Expression> source;
+    bool isMut = false; ///< true for `borrow mut` — mutable borrow
 
-    explicit BorrowExpr(std::unique_ptr<Expression> src)
-        : Expression(ASTNodeType::BORROW_EXPR), source(std::move(src)) {}
+    explicit BorrowExpr(std::unique_ptr<Expression> src, bool mut = false)
+        : Expression(ASTNodeType::BORROW_EXPR), source(std::move(src)), isMut(mut) {}
 };
 
 /// Dict literal: `{"key": val, ...}` — zero-cost map construction.
@@ -653,6 +656,20 @@ class PrefetchStmt : public Statement {
     PrefetchStmt(std::unique_ptr<VarDecl> decl, bool hot, bool immut, int64_t offset = 0)
         : Statement(ASTNodeType::PREFETCH_STMT), varDecl(std::move(decl)),
           hintHot(hot), hintImmut(immut), offsetBytes(offset) {}
+};
+
+/// `freeze x;` — marks variable `x` immutable for the rest of its lifetime.
+/// After freeze:
+///   - All loads become !invariant.load (LLVM can hoist/CSE across loops).
+///   - Writes to the variable are a compile-time error (same as const).
+///   - llvm.invariant.start is emitted so the optimizer can eliminate
+///     redundant loads and fold the value into constants where possible.
+class FreezeStmt : public Statement {
+  public:
+    std::string varName;
+
+    explicit FreezeStmt(const std::string& name)
+        : Statement(ASTNodeType::FREEZE_STMT), varName(name) {}
 };
 
 } // namespace omscript

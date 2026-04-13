@@ -39,6 +39,8 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"move", TokenType::MOVE},
     {"invalidate", TokenType::INVALIDATE},
     {"borrow", TokenType::BORROW},
+    {"freeze", TokenType::FREEZE},
+    {"mut", TokenType::MUT},
     {"prefetch", TokenType::PREFETCH},
     {"likely", TokenType::LIKELY},
     {"unlikely", TokenType::UNLIKELY},

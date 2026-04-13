@@ -53,6 +53,8 @@ enum class TokenType {
     MOVE,
     INVALIDATE,
     BORROW,
+    FREEZE,
+    MUT,
     PREFETCH,
     LIKELY,
     UNLIKELY,

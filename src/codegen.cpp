@@ -1173,8 +1173,22 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
     auto constIt = constValues.find(name);
     if (constIt != constValues.end() && constIt->second) {
+        // Give a more specific error message for frozen variables
+        if (frozenVars_.count(name)) {
+            throw DiagnosticError(
+                Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
+                           "Cannot " + action + " frozen variable '" + name +
+                           "' — variable was frozen and is immutable for the rest of its lifetime"});
+        }
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "Cannot " + action + " const variable: " + name});
+    }
+    // Also block writes to the source of an active mutable borrow
+    if (mutBorrowedVars_.count(name)) {
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
+                       "Cannot " + action + " variable '" + name +
+                       "' — it has an active mutable borrow"});
     }
 }
 
@@ -1262,12 +1276,24 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addRetAttr(llvm::Attribute::NonNull);
     // allocsize(0): parameter 0 is the allocation size — enables LLVM to
     // reason about the returned buffer size for alias analysis and to
     // eliminate redundant bounds checks on the allocated memory.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, std::nullopt));
+    // allockind("alloc,uninitialized"): malloc returns freshly allocated
+    // memory; LLVM treats it as an allocation function for AA and LICM.
+    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
+                                       static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
+                                                             llvm::AllocFnKind::Uninitialized)));
+    // inaccessiblememonly: malloc only touches allocator-internal state
+    // (inaccessible to the caller) — allows LICM to hoist malloc calls out
+    // of loops when the size argument is loop-invariant.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }
 
@@ -1281,12 +1307,22 @@ llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addRetAttr(llvm::Attribute::NonNull); // OmScript assumes alloc always succeeds
     // allocsize(0, 1): allocation size is arg0 * arg1 — enables LLVM to
     // reason about the returned buffer size for alias analysis and to
     // eliminate redundant bounds checks on the allocated memory.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, 1));
+    // allockind("alloc,zeroed"): calloc returns zeroed freshly allocated memory.
+    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
+                                       static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
+                                                             llvm::AllocFnKind::Zeroed)));
+    // inaccessiblememonly: allows LICM to hoist calloc calls out of loops
+    // when the size arguments are loop-invariant.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }
 
@@ -1814,6 +1850,12 @@ llvm::Function* CodeGenerator::getOrDeclareStrndup() {
     fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
                                        static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
                                                              llvm::AllocFnKind::Uninitialized)));
+    // memory(argmem: read, inaccessiblemem: readwrite): strndup reads the source
+    // string and writes to allocator-internal structures (same as strdup).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects(
+            llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref) |
+            llvm::MemoryEffects::inaccessibleMemOnly())));
     return fn;
 }
 
@@ -4800,6 +4842,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         break;
     case ASTNodeType::MOVE_DECL:
         generateMoveDecl(static_cast<MoveDecl*>(stmt));
+        break;
+    case ASTNodeType::FREEZE_STMT:
+        generateFreeze(static_cast<FreezeStmt*>(stmt));
         break;
     case ASTNodeType::PREFETCH_STMT:
         generatePrefetch(static_cast<PrefetchStmt*>(stmt));
