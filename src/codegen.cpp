@@ -2176,6 +2176,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
     }, "hmap.buf");
     // OmScript assumes allocations always succeed — annotate call-site result.
     llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+        llvm::Attribute::getWithDereferenceableBytes(*context, 208));
     // Store capacity in slot 0
     {   auto* st = builder->CreateAlignedStore(cap, buf, llvm::MaybeAlign(8));
         st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
@@ -2924,6 +2926,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
     llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* arrBytes = builder->CreateMul(arrSlots, eight, "arrbytes", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrBytes}, "buf");
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+        llvm::Attribute::getWithDereferenceableBytes(*context, 8));
     builder->CreateAlignedStore(size, buf, llvm::MaybeAlign(8));
     builder->CreateBr(loopBB);
 
@@ -3014,6 +3018,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
     llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* arrBytes = builder->CreateMul(arrSlots, eight, "arrbytes", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrBytes}, "buf");
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+        llvm::Attribute::getWithDereferenceableBytes(*context, 8));
     builder->CreateAlignedStore(size, buf, llvm::MaybeAlign(8));
     builder->CreateBr(loopBB);
 

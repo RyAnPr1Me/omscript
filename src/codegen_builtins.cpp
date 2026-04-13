@@ -674,6 +674,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Allocate a 1024-byte buffer
         llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 1024);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "inputln.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1024));
         // Declare stdin as external global
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::GlobalVariable* stdinVar = module->getGlobalVariable("stdin");
@@ -1054,6 +1056,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         code = toDefaultType(code);  // ensure i64
         llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {two}, "tochar.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 2));
         llvm::Value* byteVal = builder->CreateTrunc(code, llvm::Type::getInt8Ty(*context), "tochar.byte");
         builder->CreateStore(byteVal, buf);
         llvm::Value* nulPtr = builder->CreateInBoundsGEP(
@@ -1439,7 +1443,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Value* allocSize =
                 builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
             buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "concat.buf");
-            // memcpy(buf, lhs, len1) — copy LHS into the new buffer
+            llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                llvm::Attribute::getWithDereferenceableBytes(*context, 1));
             builder->CreateCall(getOrDeclareMemcpy(), {buf, lhsPtr, len1});
             // memcpy(buf + len1, rhs, len2) — append RHS
             llvm::Value* dst2 = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
@@ -1609,6 +1614,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // Float: use a 32-byte buffer and %g format to preserve decimal places.
             llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
             llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "tostr.buf");
+            llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                llvm::Attribute::getWithDereferenceableBytes(*context, 32));
             llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_float_fmt", true);
             if (!fmtStr)
                 fmtStr = builder->CreateGlobalString("%g", "tostr_float_fmt");
@@ -1619,7 +1626,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Integer: 21 bytes is enough for any 64-bit signed decimal plus null terminator.
         llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "tostr.buf");
-        // snprintf(buf, 21, "%lld", val)
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 21));
         llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_fmt", true);
         if (!fmtStr) {
             fmtStr = builder->CreateGlobalString("%lld", "tostr_fmt");
@@ -1951,7 +1959,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* allocSize =
             builder->CreateAdd(lenArg, llvm::ConstantInt::get(getDefaultType(), 1), "substr.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "substr.buf");
-        // memcpy(buf, strPtr + start, len)
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         llvm::Value* srcPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, startArg, "substr.src");
         builder->CreateCall(getOrDeclareMemcpy(), {buf, srcPtr, lenArg});
         // Null-terminate: buf[len] = 0
@@ -1978,7 +1987,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* allocSize = builder->CreateAdd(strLen, llvm::ConstantInt::get(getDefaultType(), 1), "upper.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "upper.buf");
-        // Copy string then transform each character in a loop
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         builder->CreateCall(getOrDeclareStrcpy(), {buf, strPtr});
         // Loop: for i = 0; i < strLen; i++ { buf[i] = toupper(buf[i]); }
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2051,7 +2061,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* allocSize = builder->CreateAdd(strLen, llvm::ConstantInt::get(getDefaultType(), 1), "lower.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "lower.buf");
-        builder->CreateCall(getOrDeclareStrcpy(), {buf, strPtr});
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* preheader = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "lower.loop", function);
@@ -2271,7 +2282,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(emptyOldBB);
         llvm::Value* copySize0 = builder->CreateAdd(strLen, one, "replace.copysize0", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* copyBuf0  = builder->CreateCall(getOrDeclareMalloc(), {copySize0}, "replace.copybuf0");
-        builder->CreateCall(getOrDeclareStrcpy(), {copyBuf0, strPtr});
+        llvm::cast<llvm::CallInst>(copyBuf0)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
 
         llvm::BasicBlock* emptyOldExitBB = builder->GetInsertBlock();
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "replace.merge", function);
@@ -2320,6 +2332,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* resultLen = builder->CreateAdd(strLen, extraLen, "replace.resultlen");
         llvm::Value* resultSize= builder->CreateAdd(resultLen, one, "replace.resultsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* resultBuf = builder->CreateCall(getOrDeclareMalloc(), {resultSize}, "replace.resultbuf");
+        llvm::cast<llvm::CallInst>(resultBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
 
         // ---------------------------------------------------------------
         // Pass 2: build output string, replacing every occurrence
@@ -2468,6 +2482,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* trimLen = builder->CreateSub(trimEnd, trimStart, "trim.len2");
         llvm::Value* trimAlloc = builder->CreateAdd(trimLen, llvm::ConstantInt::get(getDefaultType(), 1), "trim.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* trimBuf = builder->CreateCall(getOrDeclareMalloc(), {trimAlloc}, "trim.buf");
+        llvm::cast<llvm::CallInst>(trimBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         llvm::Value* trimSrc = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, trimStart, "trim.src");
         builder->CreateCall(getOrDeclareMemcpy(), {trimBuf, trimSrc, trimLen});
         llvm::Value* trimEndPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), trimBuf, trimLen, "trim.endptr");
@@ -2628,7 +2644,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* allocSize =
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "repeat.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "repeat.buf");
-        // Use memcpy with tracked offset instead of strcat to avoid O(n²) rescanning
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* preheader = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "repeat.loop", function);
@@ -2680,7 +2697,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* allocSize =
             builder->CreateAdd(strLen, llvm::ConstantInt::get(getDefaultType(), 1), "strrev.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strrev.buf");
-        // Loop: buf[i] = str[len-1-i]
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* preheader = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "strrev.loop", function);
@@ -3111,13 +3129,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // fix up the header with the correct length.
             buf = builder->CreateCall(getOrDeclareCalloc(), {slots, eight}, "fill.buf");
             llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+            llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                llvm::Attribute::getWithDereferenceableBytes(*context, 8));
             // Store length in header (calloc zeroed it; overwrite with actual size)
             auto* fillLenSt = builder->CreateStore(sizeArg, buf);
             fillLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         } else {
             llvm::Value* bytes = builder->CreateMul(slots, eight, "fill.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
             buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "fill.buf");
-            // Store length
+            llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                llvm::Attribute::getWithDereferenceableBytes(*context, 8));
             auto* fillLenSt2 = builder->CreateStore(sizeArg, buf);
             fillLenSt2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             // Fill loop
@@ -3189,7 +3210,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "aconcat.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, llvm::ConstantInt::get(getDefaultType(), 8), "aconcat.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "aconcat.buf");
-        // Store length
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
         auto* aconcatLenSt = builder->CreateStore(totalLen, buf);
         aconcatLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         // Copy arr1 elements (len1 * 8 bytes starting at arr1[1])
@@ -3241,6 +3263,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(sliceLen, one, "slice.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "slice.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "slice.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
         auto* sliceLenSt = builder->CreateStore(sliceLen, buf);
         sliceLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         // Copy elements: arr[start+1..end+1) to buf[1..)
@@ -3268,7 +3292,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(arrLen, one, "acopy.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "acopy.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "acopy.buf");
-        // Copy all data: (length + 1) * 8 bytes
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
         builder->CreateCall(getOrDeclareMemcpy(), {buf, arrPtr, bytes});
         return builder->CreatePtrToInt(buf, getDefaultType(), "acopy.result");
     }
@@ -3368,6 +3393,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(arrLen, one, "amap.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "amap.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "amap.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
         auto* amapLenSt = builder->CreateStore(arrLen, buf);
         amapLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
@@ -3443,6 +3470,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(arrLen, one, "afilt.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "afilt.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "afilt.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
         // Initialize length to 0 (will be updated as we add elements)
         auto* afiltInitSt = builder->CreateStore(zero, buf);
         afiltInitSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
@@ -4343,6 +4372,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(cnt, one, "split.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "split.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrBuf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "split.arr");
+        llvm::cast<llvm::CallInst>(arrBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
         builder->CreateStore(cnt, arrBuf);
 
         // Split pass: iterate and create substrings
