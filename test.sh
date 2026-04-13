@@ -265,7 +265,7 @@ struct Point { hot int x, hot int y }
 OPTMAX=:
 
 // ── 0. integer_math ──────────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @static @const_eval
 fn bench_math(@prefetch n:int) -> int {
     prefetch var acc:int = 0;
     for (i:int in 1...n) {
@@ -305,7 +305,7 @@ fn bench_push(@prefetch n:int) -> int {
 }
 
 // ── 3. array_hof ─────────────────────────────────────────────
-@hot @flatten @pure @unroll @vectorize
+@hot @flatten @pure  @vectorize @nounwind @const_eval
 fn bench_hof(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
     prefetch arr;
@@ -324,7 +324,7 @@ fn bench_hof(@prefetch n:int) -> int {
 }
 
 // ── 4. string_concat ─────────────────────────────────────────
-@hot @unroll @flatten @pure
+@hot @unroll @flatten @pure @static
 fn bench_strcat(@prefetch n:int) -> int {
     var s:str = "x";
     for (i:int in 0...n) {
@@ -337,7 +337,7 @@ fn bench_strcat(@prefetch n:int) -> int {
 }
 
 // ── 5. string_ops ────────────────────────────────────────────
-@hot @flatten
+@hot @flatten @static
 fn bench_strops(@prefetch n:int) -> int {
     var haystack:str = str_repeat("abcdefghij", 100);
     var count:int = 0;
@@ -351,7 +351,7 @@ fn bench_strops(@prefetch n:int) -> int {
 }
 
 // ── 6. struct_access ─────────────────────────────────────────
-@hot @flatten @pure @unroll @vectorize
+@hot @flatten @pure @unroll @vectorize @static
 fn bench_struct(@prefetch n:int) -> int {
     prefetch var p:struct = Point { x: 1, y: 2 };
     var sum:int = 0;
@@ -366,7 +366,7 @@ fn bench_struct(@prefetch n:int) -> int {
 }
 
 // ── 7. switch_branch ─────────────────────────────────────────
-@hot
+@hot @static @nounwind @
 fn bench_branch(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -382,7 +382,7 @@ fn bench_branch(@prefetch n:int) -> int {
 }
 
 // ── 8. if_else_chain ─────────────────────────────────────────
-@hot @inline
+@hot @inline @static @pure
 fn classify(x:int) -> int {
     if (x < 10)    { return 1; }
     if (x < 100)   { return 2; }
@@ -391,7 +391,7 @@ fn classify(x:int) -> int {
     if (x < 100000){ return 5; }
     return 6;
 }
-@hot @flatten @vectorize
+@hot @flatten @vectorize @static
 fn bench_ifelse(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -401,7 +401,7 @@ fn bench_ifelse(@prefetch n:int) -> int {
 }
 
 // ── 9. while_loop ────────────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @vectorize @static
 fn bench_while(@prefetch n:int) -> int {
     var i:int = 0;
     var acc:int = 0;
@@ -414,12 +414,12 @@ fn bench_while(@prefetch n:int) -> int {
 }
 
 // ── 10. recursion_fib ────────────────────────────────────────
-@hot @pure
+@hot @pure @static 
 fn fib(n:int) -> int {
     if (n <= 1) { return n; }
     return fib(n - 1) + fib(n - 2);
 }
-@flatten @hot
+@flatten @hot @const_eval @static
 fn bench_recurse(n:int) -> int {
     return fib(n);
 }
@@ -439,7 +439,7 @@ fn bench_nested(@prefetch n:int) -> int {
 }
 
 // ── 12. array_indexing ───────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @static
 fn bench_arrindex(@prefetch n:int) -> int {
     const sz:int = 10000;
     var arr:int[] = array_fill(sz, 0);
@@ -458,13 +458,13 @@ fn bench_arrindex(@prefetch n:int) -> int {
 }
 
 // ── 13. function_calls ───────────────────────────────────────
-@hot @inline
+@hot @inline @static @nounwind
 fn add_one(x:int) -> int { return x + 1; }
-@hot @inline
+@hot @inline @static @nounwind
 fn add_two(x:int) -> int { return add_one(add_one(x)); }
-@hot @inline
+@hot @inline @static @nounwind
 fn add_four(x:int) -> int { return add_two(add_two(x)); }
-@hot @flatten
+@hot @flatten @static @nounwind
 fn bench_calls(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
@@ -475,7 +475,7 @@ fn bench_calls(@prefetch n:int) -> int {
 }
 
 // ── 14. bitwise_ops ──────────────────────────────────────────
-@hot @flatten @vectorize @unroll
+@hot @flatten @vectorize @unroll @static 
 fn bench_bitwise(@prefetch n:int) -> int {
     var a:int = 0;
     var b:int = 0;
@@ -490,7 +490,7 @@ fn bench_bitwise(@prefetch n:int) -> int {
 }
 
 // ── 15. bitwise_intrinsics ───────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @static @nounwind @vectorize
 fn bench_bitintrinsics(@prefetch n:int) -> int {
     var acc:int = 0;
     for (i:int in 1...n) {
@@ -503,7 +503,7 @@ fn bench_bitintrinsics(@prefetch n:int) -> int {
 }
 
 // ── 16. polynomial_eval ──────────────────────────────────────
-@hot @flatten @pure @unroll @inline
+@hot @flatten @pure @unroll @inline @vectorize @static
 fn poly_eval(x:int) -> int {
     var r:int = 3;
     r = r * x + 2;
@@ -513,7 +513,7 @@ fn poly_eval(x:int) -> int {
     r = r * x + 11;
     return r;
 }
-@hot @flatten @vectorize
+@hot @flatten @vectorize @static
 fn bench_poly(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -523,7 +523,7 @@ fn bench_poly(@prefetch n:int) -> int {
 }
 
 // ── 17. reduction ────────────────────────────────────────────
-@hot @flatten @vectorize
+@hot @flatten @vectorize @static
 fn bench_reduction(@prefetch n:int) -> int {
     var sum:int = 0;
     var sum2:int = 0;
@@ -535,7 +535,7 @@ fn bench_reduction(@prefetch n:int) -> int {
 }
 
 // ── 18. combined ─────────────────────────────────────────────
-@hot @unroll @flatten
+@hot @vectorize @flatten @static @
 fn bench_combined(n:int) -> int {
     var total:int = 0;
     var acc:int = 0;
