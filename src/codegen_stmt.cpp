@@ -194,7 +194,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     call->callee == "push" || call->callee == "pop" ||
                     call->callee == "sort" || call->callee == "reverse" ||
                     call->callee == "array_remove" || call->callee == "array_reduce" ||
-                    call->callee == "str_split" || call->callee == "str_chars") {
+                    call->callee == "str_split" || call->callee == "str_chars" ||
+                    arrayReturningFunctions_.count(call->callee)) {
                     isArray = true;
                 }
             }
@@ -1466,6 +1467,28 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                         }
                         addedUnrollHint = true;
                     }
+                    // Trip count multiple hint: when the trip count is a multiple
+                    // of the preferred vector width (or at least a power of 2),
+                    // emit llvm.loop.trip.count.multiple so the vectorizer can
+                    // use a vector width that divides the trip count evenly —
+                    // eliminating the scalar epilogue and enabling full-width SIMD.
+                    // Only emit when the trip count is large enough to vectorize.
+                    if (optimizationLevel >= OptimizationLevel::O3
+                            && enableVectorize_ && tripCount > 8) {
+                        // Find the largest power-of-2 that divides tripCount.
+                        uint64_t multiple = 1;
+                        for (uint64_t p = 64; p >= 2; p >>= 1) {
+                            if (tripCount % p == 0) { multiple = p; break; }
+                        }
+                        if (multiple >= 2) {
+                            loopMDs.push_back(llvm::MDNode::get(
+                                *context,
+                                {llvm::MDString::get(*context, "llvm.loop.trip.count.multiple"),
+                                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                     llvm::Type::getInt32Ty(*context),
+                                     static_cast<uint32_t>(multiple)))}));
+                        }
+                    }
                 }
             }
         }
@@ -2231,6 +2254,27 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
         }
 
         if (nonDefaultCases > 0 && totalCaseValues <= 2) {
+            // Validate all case values (float check, constant check, duplicate check)
+            // before emitting any IR, matching the regular switch path's semantics.
+            std::set<int64_t> seenSmall;
+            for (auto& sc : stmt->cases) {
+                if (sc.isDefault) continue;
+                auto checkVal = [&](Expression* expr) {
+                    llvm::Value* v = generateExpression(expr);
+                    if (v->getType()->isDoubleTy())
+                        codegenError("case value must be an integer constant, not a float", expr);
+                    v = toDefaultType(v);
+                    auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v);
+                    if (!ci)
+                        codegenError("case value must be a compile-time integer constant", expr);
+                    int64_t cv = ci->getSExtValue();
+                    if (!seenSmall.insert(cv).second)
+                        codegenError("duplicate case value " + std::to_string(cv) + " in switch statement", expr);
+                };
+                checkVal(sc.value.get());
+                for (auto& ev : sc.values) checkVal(ev.get());
+            }
+
             llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
             loopStack.push_back({mergeBB, nullptr});
 
@@ -2246,16 +2290,12 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             for (auto& sc : stmt->cases) {
                 if (sc.isDefault) continue;
 
-                // Collect all case values for this arm.
+                // Collect all case values for this arm (already validated above).
                 std::vector<llvm::ConstantInt*> caseConstants;
                 auto addVal = [&](Expression* expr) {
                     llvm::Value* v = generateExpression(expr);
-                    if (v->getType()->isDoubleTy())
-                        codegenError("case value must be an integer constant, not a float", expr);
                     v = toDefaultType(v);
                     auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v);
-                    if (!ci)
-                        codegenError("case value must be a compile-time integer constant", expr);
                     caseConstants.push_back(ci);
                 };
                 addVal(sc.value.get());
@@ -2394,22 +2434,31 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     loopStack.pop_back();
 
     // At O2+, add branch weight metadata to the switch instruction.
-    // Uniform weights tell the optimizer that all cases are equally likely,
-    // which enables SimplifyCFG's switch-to-lookup-table conversion and
-    // prevents the backend from biasing layout toward any particular case.
-    // Without explicit weights, LLVM may assume the default case is cold
-    // and misoptimize the jump table structure.
+    // The default case is weighted lower than explicit cases when there are
+    // many cases: developers list the common cases explicitly and use default
+    // as an error/catch-all handler. This guides the backend to place hot
+    // case blocks before cold default blocks and optimizes jump-table layout.
+    // With ≤2 cases we fall into the if-else path above; this code handles
+    // switches with ≥3 total case values where a native switch is emitted.
     if (optimizationLevel >= OptimizationLevel::O2) {
         const unsigned numCases = switchInst->getNumCases();
         const bool hasDefault = (defaultBB != mergeBB);
         const unsigned totalSuccessors = numCases + (hasDefault ? 1 : 0);
         if (totalSuccessors > 0) {
             llvm::SmallVector<uint32_t, 16> weights;
-            // Default case weight (first weight in the metadata)
-            weights.push_back(hasDefault ? 1 : 0);
-            // Per-case weights: uniform distribution
+            // Default case: weight it as cold when there are many explicit cases
+            // (≥4). The more cases present, the less likely the default fires.
+            // 0 cases: default not present; 1-3 cases: equal weight; 4+: cold.
+            uint32_t defaultWeight = 0;
+            if (hasDefault) {
+                defaultWeight = (numCases >= 4) ? 1u : numCases;
+            }
+            weights.push_back(defaultWeight);
+            // Each explicit case: equal weight of numCases so the total
+            // probability mass for all explicit cases >> default.
+            const uint32_t caseWeight = numCases;
             for (unsigned i = 0; i < numCases; ++i) {
-                weights.push_back(1);
+                weights.push_back(caseWeight);
             }
             llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(weights);
             switchInst->setMetadata(llvm::LLVMContext::MD_prof, brWeights);

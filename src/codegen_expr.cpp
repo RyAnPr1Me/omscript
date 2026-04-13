@@ -4288,6 +4288,26 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         stringArrayVars_.insert(expr->name);
     else
         stringArrayVars_.erase(expr->name);
+    // Update array-variable tracking after assignment.
+    {
+        bool isArr = false;
+        if (expr->value->type == ASTNodeType::ARRAY_EXPR) {
+            isArr = true;
+        } else if (expr->value->type == ASTNodeType::CALL_EXPR) {
+            auto* call = static_cast<CallExpr*>(expr->value.get());
+            if (call->callee == "array_fill" || call->callee == "array_concat" ||
+                call->callee == "array_copy" || call->callee == "array_map" ||
+                call->callee == "array_filter" || call->callee == "array_slice" ||
+                call->callee == "push" || call->callee == "pop" ||
+                call->callee == "sort" || call->callee == "reverse" ||
+                call->callee == "array_remove" || call->callee == "array_reduce" ||
+                call->callee == "str_split" || call->callee == "str_chars" ||
+                arrayReturningFunctions_.count(call->callee))
+                isArr = true;
+        }
+        if (isArr) arrayVars_.insert(expr->name);
+        else       arrayVars_.erase(expr->name);
+    }
     // When a variable is reassigned, its previous knownArraySize(Allocas) entry
     // is no longer valid — the new value may have a different length.
     knownArraySizes_.erase(expr->name);
@@ -5112,13 +5132,15 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     bool boundsCheckElided = canElideBoundsCheck(
         expr->array.get(), expr->index.get(), basePtr, isStr, "idx");
 
-    // Ownership-aware optimization: borrowed arrays cannot be resized,
-    // so their length is invariant.  Mark the length load with !invariant.load
-    // so LLVM can hoist/CSE it across the loop.
+    // Ownership-aware optimization: borrowed arrays and const arrays cannot be
+    // resized, so their length is invariant.  Mark the length load with
+    // !invariant.load so LLVM can hoist/CSE it across the loop.
     bool arrayIsBorrowed = false;
     if (!isStr) {
         if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-            arrayIsBorrowed = isVariableBorrowed(static_cast<IdentifierExpr*>(expr->array.get())->name);
+            const std::string& arrName = static_cast<IdentifierExpr*>(expr->array.get())->name;
+            arrayIsBorrowed = isVariableBorrowed(arrName)
+                || (constValues.count(arrName) && constValues.find(arrName)->second);
         }
     }
 

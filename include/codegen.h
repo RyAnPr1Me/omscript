@@ -319,6 +319,15 @@ class CodeGenerator {
     // dicts now use pointer-typed allocas (instead of i64), we need to
     // distinguish them from string pointers in isStringExpr().
     llvm::StringSet<> arrayVars_;
+    // Whole-program array type information (mirrors string type system):
+    // arrayReturningFunctions_: functions whose return type is an array type.
+    // funcParamArrayTypes_: maps function name → set of parameter indices that
+    //   receive array arguments (annotated with [] suffix or known from call sites).
+    // These are populated by preAnalyzeArrayTypes() and used to:
+    //   (a) keep arrayVars_ accurate for variables assigned from function calls,
+    //   (b) ensure isStringExpr() returns false for array-typed call results.
+    llvm::StringSet<> arrayReturningFunctions_;
+    std::unordered_map<std::string, std::unordered_set<size_t>> funcParamArrayTypes_;
     // stringLenCache_: maps string variable names to an alloca that caches the
     // current strlen of the variable's value.  Used by str_concat to avoid
     // O(n) strlen calls on growing strings in append loops.
@@ -776,6 +785,13 @@ class CodeGenerator {
     //   populate stringReturningFunctions_ and funcParamStringTypes_ before
     //   any function body is generated.
     void preAnalyzeStringTypes(Program* program);
+    // preAnalyzeArrayTypes: mirror of preAnalyzeStringTypes for array types.
+    //   Populates arrayReturningFunctions_ and funcParamArrayTypes_ from
+    //   explicit [] annotations and call-site argument types.  Results let
+    //   isStringExpr() correctly return false for variables assigned from
+    //   array-returning function calls, and keep arrayVars_ accurate across
+    //   function boundaries.
+    void preAnalyzeArrayTypes(Program* program);
     // analyzeConstantReturnValues: pre-pass over the full program AST that
     //   identifies zero-parameter, pure functions whose return value is always
     //   the same compile-time constant (string or integer).  Results are stored

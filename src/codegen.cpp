@@ -3253,6 +3253,143 @@ void CodeGenerator::preAnalyzeStringTypes(Program* program) {
     }
 }
 
+// Helper: true if a type annotation string looks like an array type (ends with []).
+static bool isArrayAnnotation(const std::string& ann) {
+    return ann.size() >= 2 && ann.compare(ann.size() - 2, 2, "[]") == 0;
+}
+
+// Helper: true if an expression at the pre-analysis stage looks like it
+// produces an array value (annotated [], array literal, array builtins).
+static bool isPreAnalysisArrayExpr(Expression* expr,
+                                    const llvm::StringSet<>& arrayReturningFunctions,
+                                    const std::unordered_map<std::string, std::unordered_set<size_t>>& funcParamArrayTypes,
+                                    const FunctionDecl* func) {
+    if (!expr) return false;
+    if (expr->type == ASTNodeType::ARRAY_EXPR) return true;
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<CallExpr*>(expr);
+        // Known array-returning builtins
+        static const std::unordered_set<std::string> arrayBuiltins = {
+            "array_fill", "array_concat", "array_copy", "array_map",
+            "array_filter", "array_slice", "sort", "reverse",
+            "str_split", "str_chars", "push", "pop", "array_remove"
+        };
+        if (arrayBuiltins.count(call->callee)) return true;
+        if (arrayReturningFunctions.count(call->callee)) return true;
+    }
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR && func) {
+        auto* id = static_cast<IdentifierExpr*>(expr);
+        auto it = funcParamArrayTypes.find(func->name);
+        if (it != funcParamArrayTypes.end()) {
+            for (size_t i = 0; i < func->parameters.size(); ++i) {
+                if (func->parameters[i].name == id->name && it->second.count(i))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+void CodeGenerator::preAnalyzeArrayTypes(Program* program) {
+    // Seed from explicit [] type annotations.
+    for (auto& func : program->functions) {
+        if (isArrayAnnotation(func->returnType)) {
+            arrayReturningFunctions_.insert(func->name);
+        }
+        for (size_t i = 0; i < func->parameters.size(); ++i) {
+            if (isArrayAnnotation(func->parameters[i].typeName)) {
+                funcParamArrayTypes_[func->name].insert(i);
+            }
+        }
+    }
+
+    // Iterative propagation: scan bodies for array-returning return stmts and
+    // call sites that pass array arguments.
+    auto scanStmt = [&](auto& self, Statement* s) -> bool {
+        if (!s) return false;
+        if (auto* ret = dynamic_cast<ReturnStmt*>(s)) {
+            return ret->value && isPreAnalysisArrayExpr(
+                ret->value.get(), arrayReturningFunctions_, funcParamArrayTypes_, nullptr);
+        }
+        if (auto* blk = dynamic_cast<BlockStmt*>(s)) {
+            for (auto& st : blk->statements)
+                if (self(self, st.get())) return true;
+        } else if (auto* ifS = dynamic_cast<IfStmt*>(s)) {
+            if (self(self, ifS->thenBranch.get())) return true;
+            if (self(self, ifS->elseBranch.get())) return true;
+        } else if (auto* wh = dynamic_cast<WhileStmt*>(s)) {
+            if (self(self, wh->body.get())) return true;
+        } else if (auto* dw = dynamic_cast<DoWhileStmt*>(s)) {
+            if (self(self, dw->body.get())) return true;
+        } else if (auto* forS = dynamic_cast<ForStmt*>(s)) {
+            if (self(self, forS->body.get())) return true;
+        } else if (auto* fe = dynamic_cast<ForEachStmt*>(s)) {
+            if (self(self, fe->body.get())) return true;
+        }
+        return false;
+    };
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& func : program->functions) {
+            if (!arrayReturningFunctions_.count(func->name)) {
+                if (scanStmt(scanStmt, func->body.get())) {
+                    arrayReturningFunctions_.insert(func->name);
+                    changed = true;
+                }
+            }
+            // Scan call sites to propagate array-ness to callee parameters.
+            std::function<void(Statement*)> scanCallSites = [&](Statement* st) {
+                if (!st) return;
+                auto scanExpr = [&](auto& se, Expression* e) -> void {
+                    if (!e) return;
+                    if (e->type == ASTNodeType::CALL_EXPR) {
+                        auto* call = static_cast<CallExpr*>(e);
+                        for (size_t i = 0; i < call->arguments.size(); ++i) {
+                            if (isPreAnalysisArrayExpr(call->arguments[i].get(),
+                                                       arrayReturningFunctions_,
+                                                       funcParamArrayTypes_, func.get())) {
+                                if (funcParamArrayTypes_[call->callee].insert(i).second)
+                                    changed = true;
+                            }
+                            se(se, call->arguments[i].get());
+                        }
+                    } else if (e->type == ASTNodeType::BINARY_EXPR) {
+                        auto* bin = static_cast<BinaryExpr*>(e);
+                        se(se, bin->left.get()); se(se, bin->right.get());
+                    } else if (e->type == ASTNodeType::UNARY_EXPR) {
+                        se(se, static_cast<UnaryExpr*>(e)->operand.get());
+                    }
+                };
+                auto scanSt = [&](auto& ss, Statement* s) -> void {
+                    if (!s) return;
+                    if (auto* es = dynamic_cast<ExprStmt*>(s))
+                        scanExpr(scanExpr, es->expression.get());
+                    else if (auto* vd = dynamic_cast<VarDecl*>(s))
+                        scanExpr(scanExpr, vd->initializer.get());
+                    else if (auto* rs = dynamic_cast<ReturnStmt*>(s))
+                        scanExpr(scanExpr, rs->value.get());
+                    else if (auto* blk = dynamic_cast<BlockStmt*>(s))
+                        for (auto& st2 : blk->statements) ss(ss, st2.get());
+                    else if (auto* ifS = dynamic_cast<IfStmt*>(s))
+                        { ss(ss, ifS->thenBranch.get()); ss(ss, ifS->elseBranch.get()); }
+                    else if (auto* wh = dynamic_cast<WhileStmt*>(s))
+                        ss(ss, wh->body.get());
+                    else if (auto* dw = dynamic_cast<DoWhileStmt*>(s))
+                        ss(ss, dw->body.get());
+                    else if (auto* fo = dynamic_cast<ForStmt*>(s))
+                        ss(ss, fo->body.get());
+                    else if (auto* fe = dynamic_cast<ForEachStmt*>(s))
+                        ss(ss, fe->body.get());
+                };
+                scanSt(scanSt, st);
+            };
+            scanCallSites(func->body.get());
+        }
+    }
+}
+
 bool CodeGenerator::isStringExpr(Expression* expr) const {
     if (!expr)
         return false;
@@ -3296,8 +3433,12 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         auto* tern = static_cast<TernaryExpr*>(expr);
         return isStringExpr(tern->thenExpr.get()) || isStringExpr(tern->elseExpr.get());
     }
-    if (expr->type == ASTNodeType::CALL_EXPR)
-        return stringReturningFunctions_.count(static_cast<CallExpr*>(expr)->callee) > 0;
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<CallExpr*>(expr);
+        // If the callee is known to return an array, it is NOT a string.
+        if (arrayReturningFunctions_.count(call->callee)) return false;
+        return stringReturningFunctions_.count(call->callee) > 0;
+    }
     return false;
 }
 
@@ -3602,6 +3743,13 @@ void CodeGenerator::generate(Program* program) {
     // which parameters receive string arguments, so that print/concat/etc.
     // work correctly when strings cross function boundaries.
     preAnalyzeStringTypes(program);
+
+    // Pre-analyze array types: mirror of string type analysis for array types.
+    // Populates arrayReturningFunctions_ and funcParamArrayTypes_ so that
+    // isStringExpr() correctly returns false for variables assigned from
+    // array-returning function calls, and arrayVars_ stays accurate across
+    // function boundaries.
+    preAnalyzeArrayTypes(program);
 
     // Pre-analyze constant return values: determine which zero-parameter, pure
     // functions always return the same compile-time constant (string or integer).
