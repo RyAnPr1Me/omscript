@@ -1055,6 +1055,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     bodyHasNonPow2ModuloArrayStore_ = false;
     const bool savedBodyHasBackwardArrayRef = bodyHasBackwardArrayRef_;
     bodyHasBackwardArrayRef_ = false;
+    // Save/restore per-loop array dependency tracking sets.
+    auto savedLoopWrittenArrays = std::move(loopWrittenArrays_);
+    loopWrittenArrays_.clear();
+    auto savedLoopBackwardReadArrays = std::move(loopBackwardReadArrays_);
+    loopBackwardReadArrays_.clear();
     // Track this loop's iterator name unconditionally (used to detect backward
     // array references at all optimization levels, not just O1+).
     loopIterVars_.insert(stmt->iteratorVar);
@@ -1854,6 +1859,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Backward refs don't propagate upward: a backward access in an inner loop
     // doesn't imply the outer loop's iterations are dependent.
     bodyHasBackwardArrayRef_ = savedBodyHasBackwardArrayRef;
+    loopWrittenArrays_ = std::move(savedLoopWrittenArrays);
+    loopBackwardReadArrays_ = std::move(savedLoopBackwardReadArrays);
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {

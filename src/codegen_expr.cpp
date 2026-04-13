@@ -5074,9 +5074,12 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     // ── Backward array reference detection (must run BEFORE boundsCheckElided) ──
     // Detect arr[i - K] where i is a safe loop iterator and K > 0.
-    // This sets bodyHasBackwardArrayRef_ which suppresses parallel_accesses
-    // metadata on the enclosing loop, allowing LLVM to recognize the
-    // loop-carried dependency and promote arr[i-1] to a register accumulator.
+    // Record the array name in loopBackwardReadArrays_; after the loop body
+    // is generated, bodyHasBackwardArrayRef_ is set only if the same array
+    // is also written to (a true loop-carried write→read dependency).
+    // Read-only backward references (e.g., result[i] = data[i] + data[i-1])
+    // do NOT suppress LICM versioning or parallel_accesses, since LICM and
+    // vectorization are safe when the read array isn't modified.
     // Must be checked BEFORE boundsCheckElided is set, because OPTMAX and @hot
     // functions start with boundsCheckElided=true, which would skip this check.
     if (!isStr && loopNestDepth_ > 0
@@ -5090,7 +5093,17 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                 if (loopIterVars_.count(binIter->name)
                         && binOffset->literalType == LiteralExpr::LiteralType::INTEGER
                         && binOffset->intValue > 0) {
-                    bodyHasBackwardArrayRef_ = true;
+                    // Record the array name for dependency analysis.
+                    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                        auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+                        loopBackwardReadArrays_.insert(arrId->name);
+                        // Check if this array is already known to be written.
+                        if (loopWrittenArrays_.count(arrId->name))
+                            bodyHasBackwardArrayRef_ = true;
+                    } else {
+                        // Conservative: non-identifier array base → assume dependency.
+                        bodyHasBackwardArrayRef_ = true;
+                    }
                 }
             }
         }
@@ -5178,6 +5191,17 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
                 return updated;
             }
         }
+    }
+
+    // Track array writes for backward array reference dependency analysis.
+    // When arr[i] = val is inside a loop, record 'arr' in loopWrittenArrays_.
+    // If loopBackwardReadArrays_ already has 'arr', this is a true write→read
+    // dependency and bodyHasBackwardArrayRef_ is set.
+    if (loopNestDepth_ > 0 && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+        loopWrittenArrays_.insert(arrId->name);
+        if (loopBackwardReadArrays_.count(arrId->name))
+            bodyHasBackwardArrayRef_ = true;
     }
 
     llvm::Value* arrVal = generateExpression(expr->array.get());
