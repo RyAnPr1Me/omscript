@@ -1321,6 +1321,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
             builder->SetInsertPoint(strlenBB);
             llvm::Value* realLen = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1.real");
+            nonNegValues_.insert(realLen);
+            if (optimizationLevel >= OptimizationLevel::O1)
+                llvm::cast<llvm::Instruction>(realLen)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             builder->CreateBr(mergeBB);
 
             builder->SetInsertPoint(mergeBB);
@@ -1328,8 +1332,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             phi->addIncoming(cachedLen, cachedBB);
             phi->addIncoming(realLen, strlenBB);
             len1 = phi;
+            // Both incoming values are non-negative (cached len from nonNegValues_, strlen has !range);
+            // track the PHI and annotate it as well.
+            nonNegValues_.insert(phi);
+            if (optimizationLevel >= OptimizationLevel::O1)
+                phi->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         } else {
             len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
+            nonNegValues_.insert(len1);
+            if (optimizationLevel >= OptimizationLevel::O1)
+                llvm::cast<llvm::Instruction>(len1)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         }
         llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {rhsPtr}, "concat.len2");
         nonNegValues_.insert(len2);
@@ -2137,6 +2150,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // memchr(haystack, char, strlen(haystack)) is SIMD-optimized on
             // modern libc, ~2-3x faster than strstr for single-char searches.
             llvm::Value* len = builder->CreateCall(getOrDeclareStrlen(), {haystackPtr}, "contains.len");
+            nonNegValues_.insert(len);
+            if (optimizationLevel >= OptimizationLevel::O1)
+                llvm::cast<llvm::Instruction>(len)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // Cast char to i32 for memchr.  Use unsigned char intermediate to
             // ensure correct zero-extension (plain char may be signed on some
             // platforms, which would sign-extend values > 127 incorrectly).
@@ -2192,6 +2209,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* result;
         if (isSingleChar) {
             llvm::Value* len = builder->CreateCall(getOrDeclareStrlen(), {haystackPtr}, "indexof.len");
+            nonNegValues_.insert(len);
+            if (optimizationLevel >= OptimizationLevel::O1)
+                llvm::cast<llvm::Instruction>(len)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // Cast char to i32 for memchr (see str_contains above for rationale).
             auto unsignedCharValue = static_cast<uint32_t>(static_cast<unsigned char>(singleCharVal));
             llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), unsignedCharValue);
@@ -2499,6 +2520,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // strncmp only examines the first prefix_len bytes, while strstr
         // would scan the entire string looking for the prefix anywhere.
         llvm::Value* prefixLen = builder->CreateCall(getOrDeclareStrlen(), {prefixPtr}, "startswith.plen");
+        nonNegValues_.insert(prefixLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(prefixLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrncmp(),
             {strPtr, prefixPtr, prefixLen}, "startswith.cmp");
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "startswith.eq");
@@ -2536,7 +2561,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 ? suffixArg
                 : builder->CreateIntToPtr(suffixArg, llvm::PointerType::getUnqual(*context), "endswith.suffix");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "endswith.strlen");
+        nonNegValues_.insert(strLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(strLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* sufLen = builder->CreateCall(getOrDeclareStrlen(), {suffixPtr}, "endswith.suflen");
+        nonNegValues_.insert(sufLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(sufLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         // If suffix longer than string, return 0
         llvm::Value* tooLong = builder->CreateICmpSGT(sufLen, strLen, "endswith.toolong");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2609,6 +2642,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 ? strArg
                 : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "repeat.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "repeat.len");
+        nonNegValues_.insert(strLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(strLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* totalLen = builder->CreateMul(strLen, countArg, "repeat.total", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* allocSize =
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "repeat.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -3297,6 +3334,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* removedVal = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "aremove.removed");
         // TBAA: removed value is an array element, never aliases the length header.
         llvm::cast<llvm::LoadInst>(removedVal)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::LoadInst>(removedVal)->setMetadata(llvm::LLVMContext::MD_noundef,
+                llvm::MDNode::get(*context, {}));
         // memmove(&arr[idx+1], &arr[idx+2], (length - idx - 1) * 8)
         llvm::Value* srcOffset =
             builder->CreateAdd(idxArg, llvm::ConstantInt::get(getDefaultType(), 2), "aremove.srcoff", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4531,6 +4571,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::MDNode::get(*context, {}));
         llvm::Value* elemPtr = builder->CreateIntToPtr(elemInt, ptrTy, "join.elemptr");
         llvm::Value* elemLen = builder->CreateCall(getOrDeclareStrlen(), {elemPtr}, "join.elemlen");
+        nonNegValues_.insert(elemLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(elemLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* newTotal = builder->CreateAdd(totalLen, elemLen, "join.newtot", /*HasNUW=*/true, /*HasNSW=*/true);
         // Add delimiter length for all elements except the first
         llvm::Value* isFirst = builder->CreateICmpEQ(li, zero, "join.isfirst");
