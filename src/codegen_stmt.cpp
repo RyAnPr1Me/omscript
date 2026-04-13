@@ -862,15 +862,25 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         loopMDs.push_back(mustProgress);
         // While-loop unrolling: when truly nested inside another loop
         // (depth > 1, since we already incremented loopNestDepth_ for
-        // this while-loop), cap the unroll factor to prevent LLVM from
-        // over-unrolling branch-heavy inner loops that create massive
-        // I-cache pressure.  Top-level while-loops (depth == 1) are
-        // left to LLVM's cost model for optimal unrolling decisions.
+        // this while-loop), suggest a conservative unroll factor rather
+        // than outright disabling unrolling.  The annotations are hints —
+        // if LLVM's cost model determines that unrolling would produce
+        // better code, it should be free to do so.  A count of 2 limits
+        // I-cache pressure while still allowing the cost model to veto
+        // unrolling entirely if it deems even 2× unprofitable.
+        // Top-level while-loops (depth == 1) are left to LLVM's cost
+        // model for optimal unrolling decisions.
         // When the function has @unroll, trust the user's intent and
         // let LLVM's cost model decide the factor for all nested loops.
         if (!inOptMaxFunction && !currentFuncHintUnroll_ && loopNestDepth_ > 1 && optimizationLevel >= OptimizationLevel::O2) {
+            // Emit unroll.count=2 as a suggestion instead of unroll.disable.
+            // LLVM's cost model may still choose not to unroll if it's not
+            // profitable, but it won't be prevented from trying.
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), 2u))}));
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         // Suppress vectorize.enable when the body contains a non-power-of-2
@@ -1647,37 +1657,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
              // LLVM's O3 cost-model unroller decide freely, matching clang.
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
-        // At O3, also enable vectorization for @hot functions even without
-        // an explicit @vectorize annotation.  LLVM's vectorizer cost model
-        // can be overly conservative for i64 loops (e.g. those containing
-        // urem/udiv by constant) where the magic-number-multiply cost is
-        // overestimated.  Explicitly enabling vectorization lets the
-        // vectorizer proceed and produce profitable SIMD code that matches
-        // clang's aggressive auto-vectorization of hot loops.
-        if (currentFuncHintNoVectorize_
-                || (bodyHasNonPow2Modulo_ && !bodyHasNonPow2ModuloValue_
-                    && !currentFuncHintVectorize_)
-                || (bodyHasNonPow2ModuloArrayStore_ && !currentFuncHintVectorize_)) {
-            // Disable vectorization when:
-            //  (a) @novectorize is set explicitly, OR
-            //  (b) loop has non-power-of-2 modular arithmetic used ONLY as a
-            //      branch condition (e.g. i%3==0), not as a value (i%100 for max).
-            // Vectorizing case (b) generates urem <N x i64> — N serialized
-            // ~25-cycle divisions vs scalar ~5-cycle magic-multiply reduction.
-            // Case (b) is detected via inComparisonContext_ during codegen:
-            //   bodyHasNonPow2Modulo_=true && bodyHasNonPow2ModuloValue_=false
-            // When modulo feeds into max(a%100, b%100), bodyHasNonPow2ModuloValue_
-            // is set, so we keep vectorize.enable=true for SIMD abs/min/max.
-            //  (c) loop stores modulo result to an array element (arr[i]=val%K):
-            //      x86-64 has no native 64-bit vector division — the vectorizer
-            //      scalarizes urem <N x i64> to N sequential extract/divide/insert
-            //      sequences.  Scalar unrolled code achieves better ILP because
-            //      the CPU's OOO engine can pipeline N independent magic-multiply
-            //      chains simultaneously, while the scalar extract overhead is zero.
-            //  (d) loop has a backward array reference (arr[i] += arr[i-1]):
-            //      serial loop-carried dependency — the vectorizer will correctly
-            //      reject it, but not before adding unroll.disable to the metadata
-            //      when it fails with vectorize.enable=true.  Suppress upfront.
+        // Annotations are treated as hints — only @novectorize (explicit user
+        // annotation) forces vectorization off.  For heuristic cases (non-pow2
+        // modulo, backward array refs), we let LLVM's cost model decide rather
+        // than overriding it, as the cost model has more information about
+        // target-specific profitability than static analysis.
+        if (currentFuncHintNoVectorize_) {
+            // @novectorize is the user's explicit request — always honour it.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
