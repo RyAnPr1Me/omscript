@@ -428,13 +428,8 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
-    // Check for use-after-move or use-after-invalidate.
-    auto deadIt = deadVars_.find(expr->name);
-    if (deadIt != deadVars_.end()) {
-        auto reasonIt = deadVarReason_.find(expr->name);
-        const std::string reason = (reasonIt != deadVarReason_.end()) ? reasonIt->second : "moved or invalidated";
-        codegenError("Use of " + reason + " variable '" + expr->name + "'", expr);
-    }
+    // Check for use-after-move, use-after-invalidate, or read-while-mut-borrowed.
+    checkVariableReadable(expr->name, expr);
 
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {

@@ -1072,12 +1072,23 @@ void CodeGenerator::beginScope() {
     validateScopeStacksMatch(__func__);
     scopeStack.emplace_back();
     constScopeStack.emplace_back();
+    borrowScopeStack_.emplace_back(); // new borrow scope
 }
 
 void CodeGenerator::endScope() {
     validateScopeStacksMatch(__func__);
     if (scopeStack.empty()) {
         return;
+    }
+
+    // Release all borrows introduced in this scope before restoring variables.
+    // This must happen first so that checkConstModification / borrow-state
+    // queries made during scope teardown see the correct unlocked state.
+    if (!borrowScopeStack_.empty()) {
+        for (const auto& info : borrowScopeStack_.back()) {
+            releaseBorrow(info.refVar);
+        }
+        borrowScopeStack_.pop_back();
     }
 
     auto& scope = scopeStack.back();
@@ -1095,19 +1106,16 @@ void CodeGenerator::endScope() {
         } else {
             constValues.erase(entry.first);
         }
-        // Restore constIntFolds_ to the value that was in scope before this scope was entered.
         if (entry.second.hadPreviousIntFold) {
             constIntFolds_[entry.first] = entry.second.previousIntFold;
         } else {
             constIntFolds_.erase(entry.first);
         }
-        // Restore constFloatFolds_ to the value that was in scope before this scope was entered.
         if (entry.second.hadPreviousFloatFold) {
             constFloatFolds_[entry.first] = entry.second.previousFloatFold;
         } else {
             constFloatFolds_.erase(entry.first);
         }
-        // Restore constStringFolds_ to the value that was in scope before this scope was entered.
         if (entry.second.hadPreviousStringFold) {
             constStringFolds_[entry.first] = entry.second.previousStringFold;
         } else {
@@ -1183,12 +1191,21 @@ void CodeGenerator::checkConstModification(const std::string& name, const std::s
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "Cannot " + action + " const variable: " + name});
     }
-    // Also block writes to the source of an active mutable borrow
-    if (mutBorrowedVars_.count(name)) {
+    // Block writes to the source variable of an active mutable borrow.
+    auto* bs = getBorrowStateOpt(name);
+    if (bs && bs->mutBorrowed) {
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
                        "Cannot " + action + " variable '" + name +
-                       "' — it has an active mutable borrow"});
+                       "' — it has an active mutable borrow (release the borrow first)"});
+    }
+    // Block writes to source while any immutable borrows are alive.
+    if (bs && bs->immutBorrowCount > 0) {
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
+                       "Cannot " + action + " variable '" + name +
+                       "' — it has " + std::to_string(bs->immutBorrowCount) +
+                       " active immutable borrow(s)"});
     }
 }
 
@@ -4641,6 +4658,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     stringCapCache_.clear();
     deadVars_.clear();
     deadVarReason_.clear();
+    varBorrowStates_.clear();
+    borrowMap_.clear();
+    borrowScopeStack_.clear();
+    frozenVars_.clear();
     prefetchedParams_.clear();
     prefetchedVars_.clear();
     prefetchedImmutVars_.clear();

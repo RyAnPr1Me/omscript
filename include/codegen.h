@@ -51,7 +51,7 @@ enum class OptimizationLevel {
 /// Every variable tracked by the ownership system transitions through
 /// these states:
 ///
-///  Owned → Borrowed → (back to Owned when borrow ends)
+///  Owned → Borrowed (×N) → (back to Owned when all borrows end)
 ///  Owned → MutBorrowed → (back to Owned when mut borrow ends)
 ///  Owned → Frozen → (permanent; stays Frozen for rest of lifetime)
 ///  Owned → Moved → (variable is dead, use-after-move error)
@@ -59,20 +59,57 @@ enum class OptimizationLevel {
 ///
 /// Rules:
 ///  - Owned: full control — may read, write, move, borrow, or invalidate.
-///  - Borrowed: read-only alias — may NOT mutate, move, or invalidate.
-///  - MutBorrowed: has one mutable alias — source may NOT be mutated
-///    or borrowed again until the borrow ends.
+///  - Borrowed (immutBorrowCount > 0): multiple concurrent read-only aliases
+///    are allowed; source may NOT be written or mutably borrowed.
+///  - MutBorrowed: exactly one mutable alias — source is completely locked;
+///    no reads, writes, or new borrows until the mutable borrow ends.
 ///  - Frozen: permanently immutable — reads are !invariant.load, writes
 ///    are compile-time errors.  Cannot be moved or mut-borrowed.
 ///  - Moved: ownership transferred — any use is a compile-time error.
 ///  - Invalidated: explicitly killed — any use is a compile-time error.
 enum class OwnershipState {
     Owned,        ///< Variable owns its value — full read/write access
-    Borrowed,     ///< Variable is borrowed (read-only) — cannot resize/move
-    MutBorrowed,  ///< Has one mutable alias — source is locked during borrow
+    Borrowed,     ///< Has ≥1 immutable borrows — readable but not writable
+    MutBorrowed,  ///< Has one mutable alias — source is completely locked
     Frozen,       ///< Permanently immutable — all loads are invariant
     Moved,        ///< Ownership transferred out — use is a compile error
     Invalidated   ///< Explicitly killed — use is a compile error
+};
+
+/// Per-variable borrow state tracked by the ownership system.
+/// Replaces the separate StringSet approach with precise count-based tracking.
+struct VarBorrowState {
+    int  immutBorrowCount = 0;  ///< Number of active immutable borrows
+    bool mutBorrowed      = false; ///< True if there is one active mutable borrow
+    bool moved            = false;
+    bool invalidated      = false;
+    bool frozen           = false;
+
+    bool isDead()     const { return moved || invalidated; }
+    /// Source can be read when not mutably borrowed and not dead.
+    bool isReadable() const { return !isDead() && !mutBorrowed; }
+    /// Source can be written only when no borrows exist, not frozen, not dead.
+    bool isWritable() const {
+        return !isDead() && !mutBorrowed && immutBorrowCount == 0 && !frozen;
+    }
+    /// Derive the canonical OwnershipState (for compatibility with callers
+    /// that still consume OwnershipState).
+    OwnershipState state() const {
+        if (invalidated)         return OwnershipState::Invalidated;
+        if (moved)               return OwnershipState::Moved;
+        if (frozen)              return OwnershipState::Frozen;
+        if (mutBorrowed)         return OwnershipState::MutBorrowed;
+        if (immutBorrowCount > 0) return OwnershipState::Borrowed;
+        return OwnershipState::Owned;
+    }
+};
+
+/// Per-scope record of the borrow aliases introduced in that scope.
+/// When the scope ends every borrow is released.
+struct BorrowInfo {
+    std::string refVar;    ///< Name of the borrow variable (the alias)
+    std::string srcVar;    ///< Name of the source variable being borrowed
+    bool        isMut;     ///< true for mutable borrow, false for immutable
 };
 
 class CodeGenerator {
@@ -368,12 +405,17 @@ class CodeGenerator {
     /// (move, invalidate, borrow).  Variables not in this map are implicitly
     /// Owned with full read/write access.
     ///
+    /// Per-variable borrow state.  Only populated for variables that participate
+    /// in the ownership system; variables absent from this map are implicitly
+    /// fully Owned.
+    ///
     /// Transitions:
-    ///   Owned → Borrowed (via borrow expression)
-    ///   Owned → Moved (via move expression)
-    ///   Any → Invalidated (via invalidate statement)
-    ///   Borrowed → Owned (when borrow scope ends)
-    std::unordered_map<std::string, OwnershipState> varOwnership_;
+    ///   Owned → immutBorrowCount++ (via `borrow ref = x`)
+    ///   Owned → mutBorrowed = true (via `borrow mut ref = x`)
+    ///   Any   → moved / invalidated (via move / invalidate)
+    ///   Any   → frozen = true (via `freeze x;`)
+    ///   borrow release: immutBorrowCount-- or mutBorrowed = false (on scope exit)
+    std::unordered_map<std::string, VarBorrowState> varBorrowStates_;
 
     /// Variables that have been explicitly moved or invalidated.
     /// Used to detect use-after-move and use-after-invalidate at compile time.
@@ -383,17 +425,21 @@ class CodeGenerator {
     /// Tracks the reason a variable became dead: "moved" or "invalidated".
     std::unordered_map<std::string, std::string> deadVarReason_;
 
-    /// Variables currently borrowed — these cannot be mutated or moved.
-    /// Populated when a borrow expression creates an alias; cleared when
-    /// the borrowing variable goes out of scope.
-    llvm::StringSet<> borrowedVars_;
+    /// Maps borrow-alias variable names to information about the borrow:
+    ///   borrowMap_["b"] = {"a", false}   // `borrow b = a;`
+    ///   borrowMap_["b"] = {"a", true}    // `borrow mut b = a;`
+    /// Used when a scope pops to release borrows held by aliases going OOS.
+    std::unordered_map<std::string, BorrowInfo> borrowMap_;
 
-    /// Variables currently mutably borrowed — the source variable is locked
-    /// (no other borrows or mutations) while the mutable borrow is live.
-    llvm::StringSet<> mutBorrowedVars_;
+    /// Scope-indexed borrow tracking.  Each scope level stores the list of
+    /// BorrowInfo records introduced in that scope.  On scope pop every
+    /// borrow in the scope is released (decrement or clear the source's
+    /// VarBorrowState).
+    std::vector<std::vector<BorrowInfo>> borrowScopeStack_;
 
     /// Variables frozen via `freeze x;` — immutable for the rest of their
     /// lifetime.  Loads become !invariant.load; writes are compile errors.
+    /// Kept as a separate set for fast O(1) lookup in generateIdentifier.
     llvm::StringSet<> frozenVars_;
 
     /// Functions explicitly annotated with @cold by the user.
@@ -723,24 +769,36 @@ class CodeGenerator {
     /// and record it in deadVars_ for use-after-move detection.
     void markVariableMoved(const std::string& varName);
 
-    /// Mark a variable as borrowed: records it in the ownership lattice so
-    /// that mutations and moves are rejected at compile time.
-    void markVariableBorrowed(const std::string& varName);
+    /// Increment immutable borrow count for srcVar, recording the alias in
+    /// the current borrow scope so it is released on scope exit.
+    void markVariableBorrowed(const std::string& refVar, const std::string& srcVar);
 
-    /// Mark a variable as mutably borrowed: source variable locked (no
-    /// concurrent borrows or mutations) while the mutable borrow is live.
-    void markVariableMutBorrowed(const std::string& varName);
+    /// Lock srcVar as mutably borrowed, recording the alias in the current
+    /// borrow scope so it is released on scope exit.
+    void markVariableMutBorrowed(const std::string& refVar, const std::string& srcVar);
 
     /// Mark a variable as frozen: immutable for the rest of its lifetime.
     /// Emits llvm.invariant.start and marks constValues[name]=true so all
     /// subsequent loads get !invariant.load and writes are rejected.
     void markVariableFrozen(const std::string& varName);
 
-    /// Check if a variable is currently borrowed (read-only).
+    /// Release the borrow held by alias variable refVar against its source.
+    /// Called by endScope when a borrow alias goes out of scope.
+    void releaseBorrow(const std::string& refVar);
+
+    /// Get the mutable borrow state for a variable, creating a default entry if absent.
+    VarBorrowState& getBorrowState(const std::string& varName);
+    const VarBorrowState* getBorrowStateOpt(const std::string& varName) const;
+
+    /// Check if a variable is currently borrowed (immutably, count ≥ 1).
     bool isVariableBorrowed(const std::string& varName) const;
 
     /// Check if a variable is frozen (permanently immutable).
     bool isVariableFrozen(const std::string& varName) const;
+
+    /// Validate that varName can be read at this point.
+    /// Errors on: moved, invalidated, or mutably-borrowed-by-someone-else.
+    void checkVariableReadable(const std::string& varName, ASTNode* site);
 
     /// Get the ownership state of a variable.  Returns Owned if not tracked.
     OwnershipState getOwnershipState(const std::string& varName) const;

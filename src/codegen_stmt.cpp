@@ -208,6 +208,21 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     bindVariable(stmt->name, alloca, stmt->isConst);
 
+    // If the initializer was a borrow expression, register the alias mapping
+    // now that we know the ref variable's name.  This enables scope-based
+    // borrow release and alias tracking.
+    if (stmt->initializer && stmt->initializer->type == ASTNodeType::BORROW_EXPR) {
+        auto* bw = static_cast<BorrowExpr*>(stmt->initializer.get());
+        if (!bw->pendingSrcVar.empty()) {
+            if (bw->isMut) {
+                markVariableMutBorrowed(stmt->name, bw->pendingSrcVar);
+            } else {
+                markVariableBorrowed(stmt->name, bw->pendingSrcVar);
+            }
+            bw->pendingSrcVar.clear(); // consumed
+        }
+    }
+
     if (initValue) {
         builder->CreateStore(initValue, alloca);
         // Track non-negativity: if a variable is initialized with a
@@ -2811,7 +2826,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     // Mark the variable as dead for use-after-invalidate detection.
     deadVars_.insert(stmt->varName);
     deadVarReason_[stmt->varName] = "invalidated";
-    varOwnership_[stmt->varName] = OwnershipState::Invalidated;
+    getBorrowState(stmt->varName).invalidated = true;
 }
 
 void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
@@ -2868,60 +2883,78 @@ llvm::Value* CodeGenerator::generateMoveExpr(MoveExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
-    // Generate the source value.
+    // Generate the source value first.
     llvm::Value* val = generateExpression(expr->source.get());
 
+    // The borrow variable name isn't known here (it's set by the surrounding
+    // VarDecl statement), so we record a placeholder and patch it up in
+    // generateVarDecl after the variable name is bound.  For now we use an
+    // empty string; the real name is injected by the VarDecl path.
+    // We do all validation and state mutations here.
     if (auto* srcIdent = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
         const std::string& srcName = srcIdent->name;
 
         if (expr->isMut) {
             // ---------------------------------------------------------------
             // Mutable borrow: `borrow mut ref = x;`
-            // Enforce single-mutable-reference invariant:
-            //   - Source must not already be borrowed or frozen.
-            //   - Source must not be moved or invalidated.
+            // Enforce exclusive-mutable-reference invariant:
+            //   - Source must not be moved, invalidated, or frozen.
+            //   - Source must have NO active borrows (immut or mut).
             // ---------------------------------------------------------------
-            auto state = getOwnershipState(srcName);
-            if (state == OwnershipState::Borrowed) {
-                codegenError("Cannot create mutable borrow of '" + srcName +
-                             "' — it already has an active immutable borrow", expr);
+            auto* bs = getBorrowStateOpt(srcName);
+            if (bs) {
+                if (bs->immutBorrowCount > 0) {
+                    codegenError("Cannot create mutable borrow of '" + srcName +
+                                 "' — it already has " +
+                                 std::to_string(bs->immutBorrowCount) +
+                                 " active immutable borrow(s)", expr);
+                }
+                if (bs->mutBorrowed) {
+                    codegenError("Cannot create mutable borrow of '" + srcName +
+                                 "' — it already has an active mutable borrow", expr);
+                }
+                if (bs->frozen) {
+                    codegenError("Cannot create mutable borrow of frozen variable '" + srcName + "'", expr);
+                }
+                if (bs->moved || bs->invalidated) {
+                    codegenError("Cannot borrow dead variable '" + srcName + "'", expr);
+                }
             }
-            if (state == OwnershipState::MutBorrowed) {
-                codegenError("Cannot create mutable borrow of '" + srcName +
-                             "' — it already has an active mutable borrow", expr);
-            }
-            if (state == OwnershipState::Frozen) {
-                codegenError("Cannot create mutable borrow of frozen variable '" + srcName + "'", expr);
-            }
-            if (state == OwnershipState::Moved || state == OwnershipState::Invalidated) {
-                codegenError("Cannot borrow dead variable '" + srcName + "'", expr);
-            }
-            // Lock the source variable as mutably borrowed.
-            markVariableMutBorrowed(srcName);
+            // Lock source.  Ref name not known yet; use a sentinel — the
+            // surrounding VarDecl will call markVariableMutBorrowed with the
+            // real name immediately after binding the alloca.
+            expr->pendingSrcVar = srcName; // stash for VarDecl to consume
         } else {
-            // Immutable borrow: lock the source as (read-only) borrowed.
-            markVariableBorrowed(srcName);
+            // ---------------------------------------------------------------
+            // Immutable borrow: `borrow ref = x;`
+            // Multiple concurrent immutable borrows are allowed.
+            // Disallow only if source is mutably borrowed or dead.
+            // ---------------------------------------------------------------
+            auto* bs = getBorrowStateOpt(srcName);
+            if (bs) {
+                if (bs->mutBorrowed) {
+                    codegenError("Cannot create immutable borrow of '" + srcName +
+                                 "' — it already has an active mutable borrow", expr);
+                }
+                if (bs->moved || bs->invalidated) {
+                    codegenError("Cannot borrow dead variable '" + srcName + "'", expr);
+                }
+            }
+            expr->pendingSrcVar = srcName;
         }
     }
 
-    // Attach !alias.scope and !noalias metadata to the load instruction.
-    // The alias.scope declares which alias domain this access belongs to,
-    // and noalias declares which domains it is guaranteed not to alias with.
-    // Together, they tell LLVM that a borrowed pointer does not alias other
-    // pointers in the function — this is safe because OmScript's ownership
-    // model guarantees that borrows are unique references and no concurrent
-    // mutable alias can exist.
-    //
-    // LLVM's scoped noalias metadata structure:
+    // -----------------------------------------------------------------------
+    // Attach scoped noalias metadata to the load instruction.
+    // LLVM's scoped noalias structure:
     //   !domain = distinct !{!domain, !"omscript.borrow.domain"}
-    //   !scope  = distinct !{!scope, !domain, !"omscript.borrow.<name>"}
+    //   !scope  = distinct !{!scope, !domain, !"omscript.borrow.{mut|ref}.<name>"}
     //   !alias.scope = !{!scope}    — "this access is in this scope"
     //   !noalias     = !{!scope}    — "this access does NOT alias this scope"
     //
-    // Setting BOTH alias.scope and noalias on the borrow load enables LLVM's
-    // ScopedNoAliasAA to prove that loads through the borrow don't alias
-    // stores through other pointers, enabling vectorization, LICM, and
-    // load/store reordering across borrow boundaries.
+    // Immutable borrow:  alias.scope + noalias + !invariant.load
+    // Mutable borrow:    alias.scope only (the write side must be in scope)
+    // -----------------------------------------------------------------------
     if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(val)) {
         const std::string suffix = expr->isMut ? "mut" : "ref";
         std::string scopeName = "omscript.borrow." + suffix;
@@ -2942,8 +2975,7 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
         if (!expr->isMut) {
             // Immutable borrow: the load does NOT alias any other mutable access.
             loadInst->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
-            // Also mark as invariant_load — an immutable borrow guarantees the
-            // value does not change while the borrow is alive.
+            // !invariant.load: value will not change while the borrow is alive.
             loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
                                   llvm::MDNode::get(*context, {}));
         }
@@ -3143,27 +3175,62 @@ void CodeGenerator::markVariableMoved(const std::string& varName) {
     }
     deadVars_.insert(varName);
     deadVarReason_[varName] = "moved";
-    varOwnership_[varName] = OwnershipState::Moved;
+    getBorrowState(varName).moved = true;
 }
 
-void CodeGenerator::markVariableBorrowed(const std::string& varName) {
-    borrowedVars_.insert(varName);
-    varOwnership_[varName] = OwnershipState::Borrowed;
+VarBorrowState& CodeGenerator::getBorrowState(const std::string& varName) {
+    return varBorrowStates_[varName];
 }
 
-void CodeGenerator::markVariableMutBorrowed(const std::string& varName) {
-    mutBorrowedVars_.insert(varName);
-    varOwnership_[varName] = OwnershipState::MutBorrowed;
+const VarBorrowState* CodeGenerator::getBorrowStateOpt(const std::string& varName) const {
+    auto it = varBorrowStates_.find(varName);
+    return it == varBorrowStates_.end() ? nullptr : &it->second;
+}
+
+void CodeGenerator::markVariableBorrowed(const std::string& refVar, const std::string& srcVar) {
+    getBorrowState(srcVar).immutBorrowCount++;
+    BorrowInfo info{refVar, srcVar, false};
+    borrowMap_[refVar] = info;
+    // Register in the current borrow scope so endScope releases it automatically.
+    if (!borrowScopeStack_.empty()) {
+        borrowScopeStack_.back().push_back(info);
+    }
+}
+
+void CodeGenerator::markVariableMutBorrowed(const std::string& refVar, const std::string& srcVar) {
+    getBorrowState(srcVar).mutBorrowed = true;
+    BorrowInfo info{refVar, srcVar, true};
+    borrowMap_[refVar] = info;
+    if (!borrowScopeStack_.empty()) {
+        borrowScopeStack_.back().push_back(info);
+    }
+}
+
+void CodeGenerator::releaseBorrow(const std::string& refVar) {
+    auto mapIt = borrowMap_.find(refVar);
+    if (mapIt == borrowMap_.end()) return;
+    const BorrowInfo& info = mapIt->second;
+    auto stateIt = varBorrowStates_.find(info.srcVar);
+    if (stateIt != varBorrowStates_.end()) {
+        if (info.isMut) {
+            stateIt->second.mutBorrowed = false;
+        } else {
+            if (stateIt->second.immutBorrowCount > 0)
+                stateIt->second.immutBorrowCount--;
+        }
+    }
+    borrowMap_.erase(mapIt);
 }
 
 void CodeGenerator::markVariableFrozen(const std::string& varName) {
     frozenVars_.insert(varName);
     constValues[varName] = true; // prevent writes via checkConstModification
-    varOwnership_[varName] = OwnershipState::Frozen;
+    getBorrowState(varName).frozen = true;
 }
 
 bool CodeGenerator::isVariableBorrowed(const std::string& varName) const {
-    return borrowedVars_.count(varName) > 0;
+    auto* s = getBorrowStateOpt(varName);
+    return s && s->immutBorrowCount > 0;
 }
 
 bool CodeGenerator::isVariableFrozen(const std::string& varName) const {
@@ -3171,8 +3238,26 @@ bool CodeGenerator::isVariableFrozen(const std::string& varName) const {
 }
 
 OwnershipState CodeGenerator::getOwnershipState(const std::string& varName) const {
-    auto it = varOwnership_.find(varName);
-    return (it != varOwnership_.end()) ? it->second : OwnershipState::Owned;
+    auto* s = getBorrowStateOpt(varName);
+    if (!s) return OwnershipState::Owned;
+    return s->state();
+}
+
+void CodeGenerator::checkVariableReadable(const std::string& varName, ASTNode* site) {
+    // Dead check (moved / invalidated)
+    auto deadIt = deadVars_.find(varName);
+    if (deadIt != deadVars_.end()) {
+        auto reasonIt = deadVarReason_.find(varName);
+        const std::string reason = (reasonIt != deadVarReason_.end()) ? reasonIt->second : "moved or invalidated";
+        codegenError("Use of " + reason + " variable '" + varName + "'", site);
+    }
+    // Mutably borrowed: source is completely locked — no reads allowed.
+    auto* s = getBorrowStateOpt(varName);
+    if (s && s->mutBorrowed) {
+        codegenError("Cannot read variable '" + varName +
+                     "' — it has an active mutable borrow (the mutable alias must"
+                     " go out of scope before the source can be read)", site);
+    }
 }
 
 void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
@@ -3185,17 +3270,15 @@ void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
     }
 
     // Validate: cannot freeze a moved or invalidated variable
-    auto ownerIt = varOwnership_.find(name);
-    if (ownerIt != varOwnership_.end()) {
-        if (ownerIt->second == OwnershipState::Moved) {
-            codegenError("Cannot freeze moved variable '" + name + "'", stmt);
-        }
-        if (ownerIt->second == OwnershipState::Invalidated) {
-            codegenError("Cannot freeze invalidated variable '" + name + "'", stmt);
-        }
-        if (ownerIt->second == OwnershipState::MutBorrowed) {
-            codegenError("Cannot freeze variable '" + name + "' while it has an active mutable borrow", stmt);
-        }
+    auto state = getOwnershipState(name);
+    if (state == OwnershipState::Moved) {
+        codegenError("Cannot freeze moved variable '" + name + "'", stmt);
+    }
+    if (state == OwnershipState::Invalidated) {
+        codegenError("Cannot freeze invalidated variable '" + name + "'", stmt);
+    }
+    if (state == OwnershipState::MutBorrowed) {
+        codegenError("Cannot freeze variable '" + name + "' while it has an active mutable borrow", stmt);
     }
 
     // Mark the variable as frozen in the ownership lattice

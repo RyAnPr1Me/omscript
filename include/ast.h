@@ -593,6 +593,11 @@ class BorrowExpr : public Expression {
     std::unique_ptr<Expression> source;
     bool isMut = false; ///< true for `borrow mut` — mutable borrow
 
+    /// Set by generateBorrowExpr to the source variable name so that the
+    /// surrounding VarDecl codegen can register the alias mapping after
+    /// the ref variable's name is known.
+    mutable std::string pendingSrcVar;
+
     explicit BorrowExpr(std::unique_ptr<Expression> src, bool mut = false)
         : Expression(ASTNodeType::BORROW_EXPR), source(std::move(src)), isMut(mut) {}
 };
