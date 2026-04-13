@@ -393,6 +393,36 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     }
 }
 
+std::string Parser::resolveNamespacedPath(const std::vector<std::string>& segments) {
+    // Try progressively shorter namespace prefixes (longest-match first).
+    // For segments [a, b, c]:
+    //   1st pass: ns="a__b",  fn="c"
+    //   2nd pass: ns="a",     fn="b__c"
+    for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
+        std::string ns;
+        for (int i = 0; i < cut; ++i) {
+            if (i > 0) ns += "__";
+            ns += segments[i];
+        }
+        auto nsIt = importNamespaces_.find(ns);
+        if (nsIt == importNamespaces_.end()) continue;
+
+        // Namespace found — build function name from remaining segments.
+        std::string fn;
+        for (int i = cut; i < (int)segments.size(); ++i) {
+            if (i > cut) fn += "__";
+            fn += segments[i];
+        }
+        auto fnIt = nsIt->second.find(fn);
+        if (fnIt != nsIt->second.end()) {
+            return fnIt->second; // actual (original) function name
+        }
+        // Namespace exists but the requested function is not in it.
+        error("Function '" + fn + "' not found in namespace '" + ns + "'");
+    }
+    return ""; // no namespace prefix matched — caller uses flat-name fallback
+}
+
 std::string Parser::parseTypeAnnotation() {
     // Support reference type annotations: &type (e.g., &i32, &f64)
     std::string prefix;
@@ -2640,7 +2670,169 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             }
 
             if (check(TokenType::LPAREN)) {
-                // Qualified call site: try real namespace resolution first.
+                // ── Priority 1: built-in type method dispatch ───────────────────
+                // Recognises  type::method(args...)  for the core primitive types
+                // and desugars to the appropriate BinaryExpr, UnaryExpr, or
+                // CallExpr — completely at parse time, zero extra codegen.
+                if (segments.size() == 2) {
+                    const std::string& tname  = segments[0];
+                    const std::string& mname  = segments[1];
+
+                    // Canonical type groups
+                    static const std::unordered_set<std::string> kIntTypes{
+                        "int","i64","i32","i16","i8","u64","u32","u16","u8","uint"};
+                    static const std::unordered_set<std::string> kFloatTypes{
+                        "float","f64","f32","double"};
+                    static const std::unordered_set<std::string> kStrTypes{
+                        "string","str"};
+                    static const std::unordered_set<std::string> kArrTypes{
+                        "array","arr"};
+                    static const std::unordered_set<std::string> kBoolTypes{
+                        "bool"};
+
+                    const bool isInt   = kIntTypes.count(tname)   != 0;
+                    const bool isFloat = kFloatTypes.count(tname)  != 0;
+                    const bool isStr   = kStrTypes.count(tname)    != 0;
+                    const bool isArr   = kArrTypes.count(tname)    != 0;
+                    const bool isBool  = kBoolTypes.count(tname)   != 0;
+
+                    if (isInt || isFloat || isStr || isArr || isBool) {
+                        // Determine the kind of this method BEFORE consuming args.
+                        // Supported kinds:
+                        //   "B:<op>"  — binary expression
+                        //   "U:<op>"  — unary expression
+                        //   "C:<fn>"  — call to named builtin
+                        //   ""        — unknown method for this type, fall through
+                        std::string kind;
+
+                        // ── Shared int+float methods ─────────────────────────────
+                        if (isInt || isFloat) {
+                            if      (mname=="add")       kind="B:+";
+                            else if (mname=="sub")       kind="B:-";
+                            else if (mname=="mul")       kind="B:*";
+                            else if (mname=="div")       kind="B:/";
+                            else if (mname=="neg")       kind="U:-";
+                            else if (mname=="abs")       kind="C:abs";
+                            else if (mname=="min")       kind="C:min";
+                            else if (mname=="max")       kind="C:max";
+                            else if (mname=="pow")       kind="C:pow";
+                            else if (mname=="clamp")     kind="C:clamp";
+                            else if (mname=="eq")        kind="B:==";
+                            else if (mname=="ne")        kind="B:!=";
+                            else if (mname=="lt")        kind="B:<";
+                            else if (mname=="le")        kind="B:<=";
+                            else if (mname=="gt")        kind="B:>";
+                            else if (mname=="ge")        kind="B:>=";
+                            else if (mname=="to_string") kind="C:to_string";
+                        }
+                        // ── Int-only methods ─────────────────────────────────────
+                        if (isInt && kind.empty()) {
+                            if      (mname=="mod")       kind="B:%";
+                            else if (mname=="sign")      kind="C:sign";
+                            else if (mname=="is_even")   kind="C:is_even";
+                            else if (mname=="is_odd")    kind="C:is_odd";
+                            else if (mname=="to_float")  kind="C:to_float";
+                            else if (mname=="bitand")    kind="B:&";
+                            else if (mname=="bitor")     kind="B:|";
+                            else if (mname=="bitxor")    kind="B:^";
+                            else if (mname=="bitnot")    kind="U:~";
+                            else if (mname=="shl")       kind="B:<<";
+                            else if (mname=="shr")       kind="B:>>";
+                        }
+                        // ── Float-only methods ───────────────────────────────────
+                        if (isFloat && kind.empty()) {
+                            if      (mname=="sqrt")      kind="C:sqrt";
+                            else if (mname=="floor")     kind="C:floor";
+                            else if (mname=="ceil")      kind="C:ceil";
+                            else if (mname=="round")     kind="C:round";
+                            else if (mname=="to_int")    kind="C:to_int";
+                        }
+                        // ── String methods ───────────────────────────────────────
+                        if (isStr) {
+                            if      (mname=="len")          kind="C:len";
+                            else if (mname=="concat")       kind="B:+";
+                            else if (mname=="eq")           kind="C:str_eq";
+                            else if (mname=="contains")     kind="C:str_contains";
+                            else if (mname=="starts_with")  kind="C:str_starts_with";
+                            else if (mname=="ends_with")    kind="C:str_ends_with";
+                            else if (mname=="index_of")     kind="C:str_index_of";
+                            else if (mname=="replace")      kind="C:str_replace";
+                            else if (mname=="repeat")       kind="C:str_repeat";
+                            else if (mname=="char_at")      kind="C:char_at";
+                            else if (mname=="to_upper")     kind="C:to_upper";
+                            else if (mname=="to_lower")     kind="C:to_lower";
+                            else if (mname=="trim")         kind="C:str_trim";
+                            else if (mname=="split")        kind="C:str_split";
+                            else if (mname=="to_int")       kind="C:to_int";
+                            else if (mname=="to_float")     kind="C:to_float";
+                            else if (mname=="is_alpha")     kind="C:is_alpha";
+                            else if (mname=="is_digit")     kind="C:is_digit";
+                            else if (mname=="to_string")    kind="C:to_string";
+                        }
+                        // ── Array methods ────────────────────────────────────────
+                        if (isArr) {
+                            if      (mname=="len")          kind="C:len";
+                            else if (mname=="fill")         kind="C:array_fill";
+                            else if (mname=="contains")     kind="C:array_contains";
+                            else if (mname=="pop")          kind="C:pop";
+                            else if (mname=="push")         kind="C:push";
+                            else if (mname=="remove")       kind="C:array_remove";
+                            else if (mname=="sort")         kind="C:sort";
+                            else if (mname=="min")          kind="C:array_min";
+                            else if (mname=="max")          kind="C:array_max";
+                        }
+                        // ── Bool methods ─────────────────────────────────────────
+                        if (isBool) {
+                            if      (mname=="and")          kind="B:&&";
+                            else if (mname=="or")           kind="B:||";
+                            else if (mname=="not")          kind="U:!";
+                            else if (mname=="to_string")    kind="C:to_string";
+                        }
+
+                        if (!kind.empty()) {
+                            // Now safe to consume the argument list.
+                            advance(); // consume '('
+                            std::vector<std::unique_ptr<Expression>> args;
+                            if (!check(TokenType::RPAREN)) {
+                                do {
+                                    args.push_back(parseExpression());
+                                } while (match(TokenType::COMMA));
+                            }
+                            consume(TokenType::RPAREN,
+                                    "Expected ')' after '" + tname + "::" + mname + "' arguments");
+
+                            const char   kp  = kind[0];       // 'B', 'U', or 'C'
+                            std::string  val = kind.substr(2); // op / function name
+
+                            if (kp == 'B') {
+                                if (args.size() != 2)
+                                    error("'" + tname + "::" + mname +
+                                          "' requires exactly 2 arguments");
+                                auto e = std::make_unique<BinaryExpr>(
+                                    val, std::move(args[0]), std::move(args[1]));
+                                e->line = token.line; e->column = token.column;
+                                return e;
+                            }
+                            if (kp == 'U') {
+                                if (args.size() != 1)
+                                    error("'" + tname + "::" + mname +
+                                          "' requires exactly 1 argument");
+                                auto e = std::make_unique<UnaryExpr>(
+                                    val, std::move(args[0]));
+                                e->line = token.line; e->column = token.column;
+                                return e;
+                            }
+                            // kp == 'C': named builtin call
+                            auto e = std::make_unique<CallExpr>(val, std::move(args));
+                            e->line = token.line; e->column = token.column;
+                            return e;
+                        }
+                        // Unknown method for this type — fall through to other
+                        // resolution strategies (namespace registry, flat name).
+                    }
+                }
+
+                // ── Priority 2: namespace registry resolution ───────────────────
                 const std::string resolved = resolveNamespacedPath(segments);
                 if (!resolved.empty()) {
                     auto e = std::make_unique<IdentifierExpr>(resolved);
@@ -2648,8 +2840,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                     e->column = token.column;
                     return e;
                 }
-                // Fallback: flat name mangling (a::b::c → a__b__c).
-                // Handles unaliased imports and backward-compatible uses.
+                // ── Priority 3: flat name mangling (a::b::c → a__b__c) ─────────
+                // Handles unaliased imports and any remaining backward-compat uses.
                 std::string flatName = segments[0];
                 for (size_t i = 1; i < segments.size(); ++i)
                     flatName += "__" + segments[i];
