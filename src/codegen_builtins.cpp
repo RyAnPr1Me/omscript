@@ -1087,9 +1087,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* result = builder->CreateZExt(isAlpha, getDefaultType(), "alphaval");
         // is_alpha always returns 0 or 1.
         nonNegValues_.insert(result);
-        if (optimizationLevel >= OptimizationLevel::O1)
-            if (auto* li = llvm::dyn_cast<llvm::Instruction>(result))
-                li->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
         return result;
     }
 
@@ -1109,9 +1106,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* result = builder->CreateZExt(isDigit, getDefaultType(), "digitval");
         // is_digit always returns 0 or 1.
         nonNegValues_.insert(result);
-        if (optimizationLevel >= OptimizationLevel::O1)
-            if (auto* li = llvm::dyn_cast<llvm::Instruction>(result))
-                li->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
         return result;
     }
 
@@ -1236,9 +1230,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Zero-extend to i64; result is always in [0, 256).
         auto* result = builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
         nonNegValues_.insert(result);
-        if (optimizationLevel >= OptimizationLevel::O1)
-            if (auto* li = llvm::dyn_cast<llvm::Instruction>(result))
-                li->setMetadata(llvm::LLVMContext::MD_range, charRangeMD_);
         return result;
     }
 
@@ -1260,9 +1251,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "streq.eq");
         auto* streqResult = builder->CreateZExt(isEqual, getDefaultType(), "streq.result");
         nonNegValues_.insert(streqResult);
-        if (optimizationLevel >= OptimizationLevel::O1)
-            if (auto* li = llvm::dyn_cast<llvm::Instruction>(streqResult))
-                li->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
         return streqResult;
     }
 
@@ -1333,10 +1321,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             phi->addIncoming(realLen, strlenBB);
             len1 = phi;
             // Both incoming values are non-negative (cached len from nonNegValues_, strlen has !range);
-            // track the PHI and annotate it as well.
+            // track the PHI so downstream operations benefit from the non-negative hint.
             nonNegValues_.insert(phi);
-            if (optimizationLevel >= OptimizationLevel::O1)
-                phi->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         } else {
             len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
             nonNegValues_.insert(len1);
@@ -2172,9 +2158,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isNotNull = builder->CreateICmpNE(result, nullPtr, "contains.notnull");
         auto* containsResult = builder->CreateZExt(isNotNull, getDefaultType(), "contains.result");
         nonNegValues_.insert(containsResult);
-        if (optimizationLevel >= OptimizationLevel::O1)
-            if (auto* li = llvm::dyn_cast<llvm::Instruction>(containsResult))
-                li->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
         return containsResult;
     }
 
@@ -2529,9 +2512,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "startswith.eq");
         auto* swResult = builder->CreateZExt(isEqual, getDefaultType(), "startswith.result");
         nonNegValues_.insert(swResult);
-        if (optimizationLevel >= OptimizationLevel::O1)
-            if (auto* li = llvm::dyn_cast<llvm::Instruction>(swResult))
-                li->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
         return swResult;
     }
 
@@ -2596,8 +2576,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), failBB);
         result->addIncoming(resultCheck, checkBB);
         nonNegValues_.insert(result);
-        if (optimizationLevel >= OptimizationLevel::O1)
-            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
         return result;
     }
 
