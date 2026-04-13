@@ -1513,7 +1513,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                             && enableVectorize_ && tripCount > 8) {
                         // Find the largest power-of-2 that divides tripCount.
                         uint64_t multiple = 1;
-                        for (uint64_t p = 64; p >= 2; p >>= 1) {
+                        for (uint64_t p = 64; p > 1; p >>= 1) {
                             if (tripCount % p == 0) { multiple = p; break; }
                         }
                         if (multiple >= 2) {
@@ -2348,8 +2348,10 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
                 falseBB = llvm::BasicBlock::Create(*context, "switch.next", function, mergeBB);
 
                 auto* br = builder->CreateCondBr(cmp, caseBB, falseBB);
-                // Weight: case-match slightly more likely than fall-through.
-                llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1, nonDefaultCases);
+                // Uniform weights: each explicit case is equally likely to match.
+                // With N non-default cases in the chain, each comparison has
+                // roughly equal probability of matching.
+                llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1, 1);
                 br->setMetadata(llvm::LLVMContext::MD_prof, brW);
 
                 // Generate case body.
