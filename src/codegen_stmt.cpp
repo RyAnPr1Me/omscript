@@ -2210,6 +2210,104 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
         return;
     }
 
+    // ── Small switch → if-else chain optimization (O2+) ───────────────
+    // For switches with ≤2 non-default cases, emit an if-else chain instead
+    // of a switch instruction.  This produces simpler CFG that LLVM can
+    // better optimize: conditional moves, PHI nodes, and predicated
+    // execution are all easier for InstCombine/SimplifyCFG to reason about
+    // when there are only 1-2 comparisons instead of a jump table stub.
+    //
+    // For larger switches, LLVM's SimplifyCFG already converts to lookup
+    // tables or jump tables as appropriate — we emit a native switch inst.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        // Count total case values (including multi-value cases).
+        unsigned totalCaseValues = 0;
+        unsigned nonDefaultCases = 0;
+        for (auto& sc : stmt->cases) {
+            if (!sc.isDefault) {
+                ++nonDefaultCases;
+                totalCaseValues += 1 + static_cast<unsigned>(sc.values.size());
+            }
+        }
+
+        if (nonDefaultCases > 0 && totalCaseValues <= 2) {
+            llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
+            loopStack.push_back({mergeBB, nullptr});
+
+            // Find the default case.
+            SwitchCase* defaultCase = nullptr;
+            for (auto& sc : stmt->cases) {
+                if (sc.isDefault) { defaultCase = &sc; break; }
+            }
+
+            // Chain: for each non-default case, emit cmp + condbr.
+            // Last false-branch falls through to default (or merge if no default).
+            llvm::BasicBlock* falseBB = nullptr;
+            for (auto& sc : stmt->cases) {
+                if (sc.isDefault) continue;
+
+                // Collect all case values for this arm.
+                std::vector<llvm::ConstantInt*> caseConstants;
+                auto addVal = [&](Expression* expr) {
+                    llvm::Value* v = generateExpression(expr);
+                    if (v->getType()->isDoubleTy())
+                        codegenError("case value must be an integer constant, not a float", expr);
+                    v = toDefaultType(v);
+                    auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v);
+                    if (!ci)
+                        codegenError("case value must be a compile-time integer constant", expr);
+                    caseConstants.push_back(ci);
+                };
+                addVal(sc.value.get());
+                for (auto& ev : sc.values) addVal(ev.get());
+
+                // Build the comparison: condVal == c1 || condVal == c2 || ...
+                llvm::Value* cmp = builder->CreateICmpEQ(condVal, caseConstants[0], "switch.cmp");
+                for (unsigned i = 1; i < caseConstants.size(); ++i) {
+                    llvm::Value* cmp2 = builder->CreateICmpEQ(condVal, caseConstants[i], "switch.cmp");
+                    cmp = builder->CreateOr(cmp, cmp2, "switch.or");
+                }
+
+                llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);
+                falseBB = llvm::BasicBlock::Create(*context, "switch.next", function, mergeBB);
+
+                auto* br = builder->CreateCondBr(cmp, caseBB, falseBB);
+                // Weight: case-match slightly more likely than fall-through.
+                llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1, nonDefaultCases);
+                br->setMetadata(llvm::LLVMContext::MD_prof, brW);
+
+                // Generate case body.
+                builder->SetInsertPoint(caseBB);
+                {
+                    const ScopeGuard scope(*this);
+                    for (auto& s : sc.body) {
+                        generateStatement(s.get());
+                        if (builder->GetInsertBlock()->getTerminator()) break;
+                    }
+                }
+                if (!builder->GetInsertBlock()->getTerminator())
+                    builder->CreateBr(mergeBB);
+
+                builder->SetInsertPoint(falseBB);
+            }
+
+            // Generate default (or fall through to merge).
+            if (defaultCase) {
+                const ScopeGuard scope(*this);
+                for (auto& s : defaultCase->body) {
+                    generateStatement(s.get());
+                    if (builder->GetInsertBlock()->getTerminator()) break;
+                }
+            }
+            if (!builder->GetInsertBlock()->getTerminator())
+                builder->CreateBr(mergeBB);
+
+            loopStack.pop_back();
+            builder->SetInsertPoint(mergeBB);
+            return;
+        }
+    }
+
     llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
     llvm::BasicBlock* defaultBB = mergeBB; // fall through to merge if no default
 
