@@ -339,18 +339,29 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             }
         }
 
-        // Constant-fold len(array_fill(N, val)): when N is a constant the
-        // array length is known at compile time.  Avoids a runtime load from
-        // the array header and enables further constant propagation.
+        // Constant-fold len(array_fill(N, val)): when N is a compile-time
+        // constant the array length is known at compile time.  Avoids a
+        // runtime load from the array header and enables further constant
+        // propagation.  Use tryFoldInt so const variables work too, not just
+        // plain integer literals.
         if (auto* call = dynamic_cast<CallExpr*>(expr->arguments[0].get())) {
             if (call->callee == "array_fill" && call->arguments.size() == 2) {
-                if (auto* sizelit = dynamic_cast<LiteralExpr*>(call->arguments[0].get())) {
-                    if (sizelit->literalType == LiteralExpr::LiteralType::INTEGER && sizelit->intValue >= 0) {
-                        auto* result = llvm::ConstantInt::get(getDefaultType(), sizelit->intValue);
+                if (auto n = tryFoldInt(call->arguments[0].get())) {
+                    if (*n >= 0) {
+                        auto* result = llvm::ConstantInt::get(getDefaultType(), *n);
                         nonNegValues_.insert(result);
                         return result;
                     }
                 }
+            }
+        }
+        // Also fold len(array_const_expr) via the unified evaluator.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                auto* result = llvm::ConstantInt::get(
+                    getDefaultType(), static_cast<int64_t>(cv->arrVal.size()));
+                nonNegValues_.insert(result);
+                return result;
             }
         }
 
@@ -1522,6 +1533,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::TO_STRING) {
         validateArgCount(expr, "to_string", 1);
+        // ── Compile-time fold: to_string(integer_const) ─────────────
+        if (auto iv = tryFoldInt(expr->arguments[0].get())) {
+            std::string s = std::to_string(*iv);
+            llvm::GlobalVariable* gv = internString(s);
+            stringReturningFunctions_.insert("to_string");
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         bool isFloat = val->getType()->isDoubleTy();
         if (!isFloat)
@@ -1735,20 +1757,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "to_int", 1);
 
         // ── Compile-time to_int folding ─────────────────────────────
-        // to_int("42") → 42, to_int(3.14) → 3 at compile time.
-        if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
-                try {
-                    int64_t parsed = std::stoll(lit->stringValue);
-                    return llvm::ConstantInt::get(getDefaultType(), parsed);
-                } catch (...) {
-                    // Fall through to runtime parsing if conversion fails.
-                }
-            } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
-                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(lit->floatValue));
-            } else if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                return llvm::ConstantInt::get(getDefaultType(), lit->intValue);
+        // Handles: const variables, enum members, string constants, int
+        // constants — anything tryFoldStr/tryFoldInt can resolve.
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            try {
+                int64_t parsed = std::stoll(*sv);
+                return llvm::ConstantInt::get(getDefaultType(), parsed);
+            } catch (...) {
+                // Fall through to runtime parsing if conversion fails.
             }
+        }
+        if (auto iv = tryFoldInt(expr->arguments[0].get())) {
+            return llvm::ConstantInt::get(getDefaultType(), *iv);
         }
 
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
@@ -1878,8 +1898,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_UPPER) {
         validateArgCount(expr, "str_upper", 1);
-        // NOTE: Cannot constant-fold str_upper — callers may mutate the returned
-        // heap-allocated string via s[i]=v, and a read-only global would segfault.
+        // NOTE: Cannot fold str_upper to an interned global — callers may
+        // mutate the returned string via s[i]=v.  evalConstBuiltin handles
+        // the abstract fold for pure-evaluation contexts (tryConstEvalFull).
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -1923,8 +1944,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_LOWER) {
         validateArgCount(expr, "str_lower", 1);
-        // NOTE: Cannot constant-fold str_lower — callers may mutate the returned
-        // heap-allocated string via s[i]=v, and a read-only global would segfault.
+        // NOTE: Cannot fold str_lower to an interned global — callers may
+        // mutate the returned string via s[i]=v.  evalConstBuiltin handles
+        // the abstract fold for pure-evaluation contexts (tryConstEvalFull).
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -2216,8 +2238,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_TRIM) {
         validateArgCount(expr, "str_trim", 1);
-        // NOTE: Cannot constant-fold str_trim — callers may mutate the returned
-        // heap-allocated string via s[i]=v, and a read-only global would segfault.
+        // NOTE: Cannot fold str_trim to an interned global — callers may
+        // mutate the returned string via s[i]=v.  evalConstBuiltin handles
+        // the abstract fold for pure-evaluation contexts (tryConstEvalFull).
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
                                   ? strArg
@@ -2478,21 +2501,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::STR_REVERSE) {
         validateArgCount(expr, "str_reverse", 1);
 
-        // ── Compile-time str_reverse folding ────────────────────────
-        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
-                std::string reversed = strLit->stringValue;
-                std::reverse(reversed.begin(), reversed.end());
-                llvm::GlobalVariable* gv = internString(reversed);
-                return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                    gv->getValueType(),
-                    gv,
-                    llvm::ArrayRef<llvm::Constant*>{
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
-                    });
-            }
-        }
+        // NOTE: Cannot fold str_reverse to an interned global — callers may
+        // mutate the returned string via s[i]=v.  evalConstBuiltin handles
+        // the abstract fold for pure-evaluation contexts (tryConstEvalFull).
 
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
@@ -4319,21 +4330,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "str_count", 2);
 
         // ── Compile-time str_count folding ──────────────────────────
-        if (auto* sLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (sLit->literalType == LiteralExpr::LiteralType::STRING) {
-                if (auto* subLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
-                    if (subLit->literalType == LiteralExpr::LiteralType::STRING &&
-                        !subLit->stringValue.empty()) {
-                        const std::string& haystack = sLit->stringValue;
-                        const std::string& needle = subLit->stringValue;
-                        int64_t count = 0;
-                        size_t pos = 0;
-                        while ((pos = haystack.find(needle, pos)) != std::string::npos) {
-                            ++count;
-                            pos += needle.size();
-                        }
-                        return llvm::ConstantInt::get(getDefaultType(), count);
+        if (auto hayConst = tryFoldStr(expr->arguments[0].get())) {
+            if (auto needleConst = tryFoldStr(expr->arguments[1].get())) {
+                if (!needleConst->empty()) {
+                    int64_t count = 0;
+                    size_t pos = 0;
+                    while ((pos = hayConst->find(*needleConst, pos)) != std::string::npos) {
+                        ++count;
+                        pos += needleConst->size();
                     }
+                    return llvm::ConstantInt::get(getDefaultType(), count);
                 }
             }
         }
@@ -4804,6 +4810,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CHAR_CODE) {
         validateArgCount(expr, "char_code", 1);
+        // ── Compile-time fold: char_code(str_const) ─────────────────
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            if (!sv->empty())
+                return llvm::ConstantInt::get(getDefaultType(),
+                    static_cast<int64_t>(static_cast<unsigned char>((*sv)[0])));
+        }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
@@ -4814,6 +4826,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::NUMBER_TO_STRING) {
         validateArgCount(expr, "number_to_string", 1);
+        // ── Compile-time fold: number_to_string(integer_const) ──────
+        if (auto iv = tryFoldInt(expr->arguments[0].get())) {
+            std::string s = std::to_string(*iv);
+            llvm::GlobalVariable* gv = internString(s);
+            stringReturningFunctions_.insert("number_to_string");
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         bool isFloat = val->getType()->isDoubleTy();
         if (!isFloat)
@@ -4840,6 +4863,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STRING_TO_NUMBER) {
         validateArgCount(expr, "string_to_number", 1);
+        // ── Compile-time fold: string_to_number(str_const) ──────────
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            try { return llvm::ConstantInt::get(getDefaultType(),
+                      static_cast<int64_t>(std::stoll(*sv))); }
+            catch (...) {}
+        }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strPtr = strArg->getType()->isPointerTy()

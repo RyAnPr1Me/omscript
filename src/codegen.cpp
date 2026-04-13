@@ -5049,6 +5049,58 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         }
         return std::nullopt;
     }
+    // ── str_trim(s) ────────────────────────────────────────────────────────
+    if (name == "str_trim" && n == 1) {
+        if (auto s = strArg(0)) {
+            const std::string& sv = *s;
+            size_t start = 0, end = sv.size();
+            while (start < end && std::isspace(static_cast<unsigned char>(sv[start]))) ++start;
+            while (end > start && std::isspace(static_cast<unsigned char>(sv[end - 1]))) --end;
+            return CV::fromStr(sv.substr(start, end - start));
+        }
+        return std::nullopt;
+    }
+    // ── str_reverse(s) ─────────────────────────────────────────────────────
+    if (name == "str_reverse" && n == 1) {
+        if (auto s = strArg(0)) {
+            std::string r = *s;
+            std::reverse(r.begin(), r.end());
+            return CV::fromStr(std::move(r));
+        }
+        return std::nullopt;
+    }
+    // ── str_count(s, sub) ──────────────────────────────────────────────────
+    if (name == "str_count" && n == 2) {
+        auto s = strArg(0), sub = strArg(1);
+        if (s && sub && !sub->empty()) {
+            int64_t count = 0;
+            size_t pos = 0;
+            while ((pos = s->find(*sub, pos)) != std::string::npos) {
+                ++count;
+                pos += sub->size();
+            }
+            return CV::fromInt(count);
+        }
+        return std::nullopt;
+    }
+    // ── str_replace(s, old, new) ───────────────────────────────────────────
+    if (name == "str_replace" && n == 3) {
+        auto s = strArg(0), old_sub = strArg(1), new_sub = strArg(2);
+        if (s && old_sub && new_sub) {
+            if (old_sub->empty()) return CV::fromStr(*s);
+            std::string r;
+            r.reserve(s->size());
+            size_t pos = 0, prev = 0;
+            while ((pos = s->find(*old_sub, prev)) != std::string::npos) {
+                r.append(*s, prev, pos - prev);
+                r += *new_sub;
+                prev = pos + old_sub->size();
+            }
+            r.append(*s, prev, std::string::npos);
+            return CV::fromStr(std::move(r));
+        }
+        return std::nullopt;
+    }
     // ── log2(n) ────────────────────────────────────────────────────────────
     if (name == "log2" && n == 1) {
         if (auto v = intArg(0)) {
