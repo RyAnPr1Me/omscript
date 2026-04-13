@@ -2106,6 +2106,19 @@ void dumpStatement(const omscript::Statement* stmt, int indent) {
         }
         break;
     }
+    case omscript::ASTNodeType::ASSUME_STMT: {
+        auto* assumeStmt = static_cast<const omscript::AssumeStmt*>(stmt);
+        std::cout << "AssumeStmt\n";
+        if (assumeStmt->condition) {
+            dumpExpression(assumeStmt->condition.get(), indent + 1);
+        }
+        if (assumeStmt->deoptBody) {
+            printIndent(indent + 1);
+            std::cout << "deopt:\n";
+            dumpStatement(assumeStmt->deoptBody.get(), indent + 2);
+        }
+        break;
+    }
     default:
         std::cout << "Statement(unknown)\n";
         break;
@@ -2118,6 +2131,15 @@ void dumpAST(const omscript::Program* program) {
         std::cout << "  FunctionDecl '" << fn->name << "' params=" << fn->parameters.size();
         if (fn->isOptMax)
             std::cout << " [OPTMAX]";
+        if (fn->optMaxConfig.enabled) {
+            std::cout << " [OPTMAX_V2 safety=";
+            switch(fn->optMaxConfig.safety) {
+                case omscript::SafetyLevel::Off: std::cout << "off"; break;
+                case omscript::SafetyLevel::Relaxed: std::cout << "relaxed"; break;
+                default: std::cout << "on"; break;
+            }
+            std::cout << "]";
+        }
         std::cout << "\n";
         for (const auto& p : fn->parameters) {
             std::cout << "    Param '" << p.name << "'";

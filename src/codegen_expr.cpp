@@ -56,8 +56,17 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                                          bool isStr,
                                          const char* prefix) {
     // Always elide in OPTMAX functions or @hot functions at O2+.
-    if (inOptMaxFunction)
-        return true;
+    if (inOptMaxFunction) {
+        // v2 config: respect safety level
+        if (currentOptMaxConfig_.enabled) {
+            if (currentOptMaxConfig_.safety == SafetyLevel::Off) return true;
+            if (currentOptMaxConfig_.safety == SafetyLevel::Relaxed && !isStr) return true;
+            // SafetyLevel::On: don't elide bounds checks, fall through
+        } else {
+            // legacy optmax block: elide all bounds checks (original behavior)
+            return true;
+        }
+    }
     if (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2)
         return true;
     // Skip array-specific elision for strings or below O1.

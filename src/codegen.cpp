@@ -4184,7 +4184,13 @@ void CodeGenerator::generate(Program* program) {
 llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     inOptMaxFunction = func->isOptMax;
     hasOptMaxFunctions = hasOptMaxFunctions || func->isOptMax;
+    currentOptMaxConfig_ = func->optMaxConfig;
     if (func->isOptMax) {
+        currentOptMaxConfig_.enabled = currentOptMaxConfig_.enabled || !func->optMaxConfig.enabled;
+        // safety=off implies fastMath
+        if (currentOptMaxConfig_.safety == SafetyLevel::Off) {
+            currentOptMaxConfig_.fastMath = true;
+        }
         optimizeOptMaxBlock(func->body.get());
     }
 
@@ -4869,6 +4875,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         break;
     case ASTNodeType::PREFETCH_STMT:
         generatePrefetch(static_cast<PrefetchStmt*>(stmt));
+        break;
+    case ASTNodeType::ASSUME_STMT:
+        generateAssume(static_cast<AssumeStmt*>(stmt));
         break;
     case ASTNodeType::DEFER_STMT:
         // Defer outside a block: just execute the body immediately
@@ -6380,6 +6389,30 @@ llvm::GlobalVariable* CodeGenerator::internString(const std::string& content) {
 
     internedStrings_[content] = gv;
     return gv;
+}
+
+void CodeGenerator::generateAssume(AssumeStmt* stmt) {
+    llvm::Value* cond = generateExpression(stmt->condition.get());
+    // Convert to i1 if needed
+    if (!cond->getType()->isIntegerTy(1)) {
+        cond = builder->CreateICmpNE(cond, llvm::ConstantInt::get(cond->getType(), 0), "assume.cond");
+    }
+    llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
+    builder->CreateCall(assumeFn, {cond});
+
+    if (stmt->deoptBody) {
+        // if (!cond) { deoptBody }
+        llvm::Function* parent = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* deoptBB = llvm::BasicBlock::Create(*context, "deopt", parent);
+        llvm::BasicBlock* afterBB = llvm::BasicBlock::Create(*context, "after.assume", parent);
+        builder->CreateCondBr(cond, afterBB, deoptBB);
+        builder->SetInsertPoint(deoptBB);
+        generateStatement(stmt->deoptBody.get());
+        if (!builder->GetInsertBlock()->getTerminator()) {
+            builder->CreateBr(afterBB);
+        }
+        builder->SetInsertPoint(afterBB);
+    }
 }
 
 } // namespace omscript

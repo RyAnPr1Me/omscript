@@ -992,6 +992,36 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
             currentLoopAccessGroup_ = nullptr;
         }
 
+        // Apply per-loop @loop hints for WhileStmt
+        const LoopConfig& whileLoopHints = (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize || stmt->loopHints.parallel)
+            ? stmt->loopHints
+            : currentOptMaxConfig_.loop;
+        if (whileLoopHints.unrollCount > 0) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), (unsigned)whileLoopHints.unrollCount))}));
+        }
+        if (whileLoopHints.vectorize) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+        if (whileLoopHints.noVectorize) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        }
+        if (whileLoopHints.parallel) {
+            llvm::MDNode* accessGroup2 = llvm::MDNode::getDistinct(*context, {});
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           accessGroup2}));
+        }
+
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBrWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -1987,6 +2017,36 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             currentLoopAccessGroup_ = accessGroup;
         } else {
             currentLoopAccessGroup_ = nullptr;
+        }
+
+        // Apply per-loop @loop hints (override/augment function-level) for ForStmt
+        const LoopConfig& loopHintsCfg = (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize || stmt->loopHints.parallel)
+            ? stmt->loopHints
+            : currentOptMaxConfig_.loop;
+        if (loopHintsCfg.unrollCount > 0) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), (unsigned)loopHintsCfg.unrollCount))}));
+        }
+        if (loopHintsCfg.vectorize) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+        if (loopHintsCfg.noVectorize) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        }
+        if (loopHintsCfg.parallel) {
+            llvm::MDNode* accessGroup2 = llvm::MDNode::getDistinct(*context, {});
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           accessGroup2}));
         }
 
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);

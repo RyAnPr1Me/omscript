@@ -305,6 +305,7 @@ class CodeGenerator {
     bool inOptMaxFunction;
     bool hasOptMaxFunctions;
     llvm::StringSet<> optMaxFunctions;
+    OptMaxConfig currentOptMaxConfig_;
 
     struct ConstBinding {
         bool wasPreviouslyDefined;
@@ -762,6 +763,7 @@ class CodeGenerator {
     void generateMoveDecl(MoveDecl* stmt);
     void generateFreeze(FreezeStmt* stmt);
     void generatePrefetch(PrefetchStmt* stmt);
+    void generateAssume(AssumeStmt* stmt);
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
 

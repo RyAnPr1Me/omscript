@@ -178,6 +178,8 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintParallelize = false, hintNoParallelize = false;
             bool hintMinSize = false, hintOptNone = false, hintNoUnwind = false;
             bool hintConstEval = false;
+            bool isOptMaxFromAnnotation = false;
+            OptMaxConfig optMaxCfgFromAnnotation;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -221,12 +223,17 @@ std::unique_ptr<Program> Parser::parse() {
                     hintNoUnwind = true;
                 } else if (ann.lexeme == "const_eval") {
                     hintConstEval = true;
+                } else if (ann.lexeme == "optmax") {
+                    isOptMaxFromAnnotation = true;
+                    if (check(TokenType::LPAREN)) {
+                        optMaxCfgFromAnnotation = parseOptMaxConfig();
+                    }
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
                           "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval (use @prefetch on parameters)");
                 }
             }
-            auto func = parseFunction(optMaxTagActive);
+            auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
             func->hintInline = hintInline;
             func->hintNoInline = hintNoInline;
             func->hintCold = hintCold;
@@ -246,6 +253,11 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintOptNone = hintOptNone;
             func->hintNoUnwind = hintNoUnwind;
             func->hintConstEval = hintConstEval;
+            if (isOptMaxFromAnnotation) {
+                func->isOptMax = true;
+                func->optMaxConfig = optMaxCfgFromAnnotation;
+                func->optMaxConfig.enabled = true;
+            }
             // Warn about conflicting annotations at parse time.
             if (hintOptNone && hintInline) {
                 std::cerr << "warning: '@optnone' and '@inline' are mutually exclusive on function '"
@@ -774,6 +786,14 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
         return decl;
     }
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "assume") {
+        advance(); // consume 'assume'
+        const Token kw = tokens[current - 1];
+        auto stmt = parseAssumeStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
     if (check(TokenType::LBRACE)) {
         const Token kw = peek();
         auto stmt = parseBlock();
@@ -1075,12 +1095,25 @@ std::unique_ptr<Statement> Parser::parseWhileStmt() {
     auto condition = parseExpression();
     consume(TokenType::RPAREN, "Expected ')' after condition");
 
+    LoopConfig loopHints;
+    if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+        advance(); // @
+        advance(); // loop
+        loopHints = parseLoopAnnotation();
+    }
     auto body = parseStatement();
-
-    return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+    auto stmt = std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+    stmt->loopHints = loopHints;
+    return stmt;
 }
 
 std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
+    LoopConfig loopHints;
+    if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+        advance(); // @
+        advance(); // loop
+        loopHints = parseLoopAnnotation();
+    }
     auto body = parseStatement();
 
     // Support both: do { ... } while (cond); and do { ... } until (cond);
@@ -1098,9 +1131,13 @@ std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
     if (isUntil) {
         // Negate: do { ... } until (c) => do { ... } while (!c)
         auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
-        return std::make_unique<DoWhileStmt>(std::move(body), std::move(negated));
+        auto doStmt = std::make_unique<DoWhileStmt>(std::move(body), std::move(negated));
+        doStmt->loopHints = loopHints;
+        return doStmt;
     }
-    return std::make_unique<DoWhileStmt>(std::move(body), std::move(condition));
+    auto doStmt = std::make_unique<DoWhileStmt>(std::move(body), std::move(condition));
+    doStmt->loopHints = loopHints;
+    return doStmt;
 }
 
 std::unique_ptr<Statement> Parser::parseForStmt() {
@@ -1182,10 +1219,17 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         }
 
         consume(TokenType::RPAREN, "Expected ')' after for range");
+        LoopConfig loopHints;
+        if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+            advance(); // @
+            advance(); // loop
+            loopHints = parseLoopAnnotation();
+        }
         auto body = parseStatement();
-
-        return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step),
+        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step),
                                          std::move(body), iteratorType);
+        forStmt->loopHints = loopHints;
+        return forStmt;
     }
 
     // for (i in 10 downto 0) => for (i in 10...0...-1)
@@ -1200,17 +1244,33 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             // The step is positive in user syntax, we negate it for downto
             // Desugar to: for (i in start...end...-step)
             consume(TokenType::RPAREN, "Expected ')' after for downto range");
+            LoopConfig loopHints;
+            if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+                advance(); // @
+                advance(); // loop
+                loopHints = parseLoopAnnotation();
+            }
             auto body = parseStatement();
             auto negStep = std::make_unique<UnaryExpr>("-", std::move(stepExpr));
-            return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
+            auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
                                              std::move(negStep), std::move(body), iteratorType);
+            forStmt->loopHints = loopHints;
+            return forStmt;
         }
 
         consume(TokenType::RPAREN, "Expected ')' after for downto range");
+        LoopConfig loopHints;
+        if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+            advance(); // @
+            advance(); // loop
+            loopHints = parseLoopAnnotation();
+        }
         auto body = parseStatement();
         auto negOne = std::make_unique<LiteralExpr>(static_cast<long long>(-1));
-        return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
+        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
                                          std::move(negOne), std::move(body), iteratorType);
+        forStmt->loopHints = loopHints;
+        return forStmt;
     }
 
     // Otherwise this is a for-each loop: for (var in collection)
@@ -3087,6 +3147,128 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     nameLit->line = pipeToken.line;
     nameLit->column = pipeToken.column;
     return nameLit;
+}
+
+OptMaxConfig Parser::parseOptMaxConfig() {
+    OptMaxConfig cfg;
+    cfg.enabled = true;
+    consume(TokenType::LPAREN, "Expected '(' after @optmax");
+    if (!check(TokenType::RPAREN)) {
+        do {
+            const Token key = consume(TokenType::IDENTIFIER, "Expected key in @optmax config");
+            consume(TokenType::ASSIGN, "Expected '=' after key in @optmax config");
+            if (key.lexeme == "safety") {
+                const Token val = consume(TokenType::IDENTIFIER, "Expected value for safety");
+                if (val.lexeme == "off") cfg.safety = SafetyLevel::Off;
+                else if (val.lexeme == "relaxed") cfg.safety = SafetyLevel::Relaxed;
+                else cfg.safety = SafetyLevel::On;
+            } else if (key.lexeme == "fast_math") {
+                const Token val = consume(TokenType::IDENTIFIER, "Expected value for fast_math");
+                cfg.fastMath = (val.lexeme == "true");
+            } else if (key.lexeme == "report") {
+                const Token val = consume(TokenType::IDENTIFIER, "Expected value for report");
+                cfg.report = (val.lexeme == "true");
+            } else if (key.lexeme == "loop") {
+                consume(TokenType::LBRACE, "Expected '{' for loop config");
+                while (!check(TokenType::RBRACE) && !isAtEnd()) {
+                    const Token lk = consume(TokenType::IDENTIFIER, "Expected loop config key");
+                    consume(TokenType::ASSIGN, "Expected '=' in loop config");
+                    if (lk.lexeme == "unroll") {
+                        const Token v = advance();
+                        try { cfg.loop.unrollCount = std::stoi(v.lexeme); } catch(...) {}
+                    } else if (lk.lexeme == "vectorize") {
+                        const Token v = consume(TokenType::IDENTIFIER, "Expected bool for vectorize");
+                        cfg.loop.vectorize = (v.lexeme == "true");
+                    } else if (lk.lexeme == "tile") {
+                        const Token v = advance();
+                        try { cfg.loop.tileSize = std::stoi(v.lexeme); } catch(...) {}
+                    } else if (lk.lexeme == "parallel") {
+                        const Token v = consume(TokenType::IDENTIFIER, "Expected bool for parallel");
+                        cfg.loop.parallel = (v.lexeme == "true");
+                    }
+                    if (!check(TokenType::RBRACE)) match(TokenType::COMMA);
+                }
+                consume(TokenType::RBRACE, "Expected '}' after loop config");
+            } else if (key.lexeme == "memory") {
+                consume(TokenType::LBRACE, "Expected '{' for memory config");
+                while (!check(TokenType::RBRACE) && !isAtEnd()) {
+                    const Token mk = consume(TokenType::IDENTIFIER, "Expected memory config key");
+                    consume(TokenType::ASSIGN, "Expected '=' in memory config");
+                    const Token mv = consume(TokenType::IDENTIFIER, "Expected bool for memory config");
+                    if (mk.lexeme == "prefetch") cfg.memory.prefetch = (mv.lexeme == "true");
+                    else if (mk.lexeme == "noalias") cfg.memory.noalias = (mv.lexeme == "true");
+                    else if (mk.lexeme == "stack") cfg.memory.preferStack = (mv.lexeme == "true");
+                    if (!check(TokenType::RBRACE)) match(TokenType::COMMA);
+                }
+                consume(TokenType::RBRACE, "Expected '}' after memory config");
+            } else if (key.lexeme == "assume") {
+                consume(TokenType::LBRACKET, "Expected '[' for assume list");
+                while (!check(TokenType::RBRACKET) && !isAtEnd()) {
+                    const Token s = consume(TokenType::STRING, "Expected string in assume list");
+                    cfg.assumes.push_back(s.lexeme);
+                    if (!check(TokenType::RBRACKET)) match(TokenType::COMMA);
+                }
+                consume(TokenType::RBRACKET, "Expected ']' after assume list");
+            } else if (key.lexeme == "specialize") {
+                consume(TokenType::LBRACKET, "Expected '[' for specialize list");
+                while (!check(TokenType::RBRACKET) && !isAtEnd()) {
+                    const Token s = consume(TokenType::STRING, "Expected string in specialize list");
+                    cfg.specialize.push_back(s.lexeme);
+                    if (!check(TokenType::RBRACKET)) match(TokenType::COMMA);
+                }
+                consume(TokenType::RBRACKET, "Expected ']' after specialize list");
+            }
+            // skip unknown keys
+        } while (match(TokenType::COMMA));
+    }
+    consume(TokenType::RPAREN, "Expected ')' after @optmax config");
+    return cfg;
+}
+
+LoopConfig Parser::parseLoopAnnotation() {
+    LoopConfig cfg;
+    consume(TokenType::LPAREN, "Expected '(' after @loop");
+    if (!check(TokenType::RPAREN)) {
+        do {
+            const Token key = consume(TokenType::IDENTIFIER, "Expected key in @loop config");
+            consume(TokenType::ASSIGN, "Expected '=' after key in @loop");
+            if (key.lexeme == "unroll") {
+                const Token v = advance();
+                try { cfg.unrollCount = std::stoi(v.lexeme); } catch(...) {}
+            } else if (key.lexeme == "vectorize") {
+                const Token v = consume(TokenType::IDENTIFIER, "Expected bool for vectorize");
+                cfg.vectorize = (v.lexeme == "true");
+                cfg.noVectorize = (v.lexeme == "false");
+            } else if (key.lexeme == "tile") {
+                const Token v = advance();
+                try { cfg.tileSize = std::stoi(v.lexeme); } catch(...) {}
+            } else if (key.lexeme == "parallel") {
+                const Token v = consume(TokenType::IDENTIFIER, "Expected bool for parallel");
+                cfg.parallel = (v.lexeme == "true");
+            }
+        } while (match(TokenType::COMMA));
+    }
+    consume(TokenType::RPAREN, "Expected ')' after @loop config");
+    return cfg;
+}
+
+std::unique_ptr<Statement> Parser::parseAssumeStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'assume'");
+    auto cond = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after assume condition");
+
+    std::unique_ptr<Statement> deoptBody = nullptr;
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "else") {
+        advance(); // consume 'else'
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "deopt") {
+            advance(); // consume 'deopt'
+        }
+        deoptBody = parseStatement();
+    }
+
+    match(TokenType::SEMICOLON); // optional semicolon
+
+    return std::make_unique<AssumeStmt>(std::move(cond), std::move(deoptBody));
 }
 
 } // namespace omscript

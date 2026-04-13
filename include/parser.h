@@ -113,6 +113,9 @@ class Parser {
     std::unique_ptr<Statement> parseWhenStmt();
     std::unique_ptr<Statement> parseForeverStmt();
     std::unique_ptr<Statement> parseForEachStmt();
+    std::unique_ptr<Statement> parseAssumeStmt();
+    OptMaxConfig parseOptMaxConfig();
+    LoopConfig parseLoopAnnotation();
     std::unique_ptr<Statement> parseElifStmt();
     std::unique_ptr<Statement> parseSwapStmt();
     std::unique_ptr<Statement> parseTimesStmt();

@@ -62,7 +62,8 @@ enum class ASTNodeType {
     FREEZE_STMT,
     PREFETCH_STMT,
     DEFER_STMT,
-    SCOPE_RESOLUTION_EXPR
+    SCOPE_RESOLUTION_EXPR,
+    ASSUME_STMT
 };
 
 class ASTNode {
@@ -269,6 +270,34 @@ class ReturnStmt : public Statement {
     explicit ReturnStmt(std::unique_ptr<Expression> val) : Statement(ASTNodeType::RETURN_STMT), value(std::move(val)) {}
 };
 
+struct LoopConfig {
+    int  unrollCount  = 0;    // 0 = auto
+    bool vectorize    = false;
+    bool noVectorize  = false;
+    int  tileSize     = 0;    // 0 = no tiling
+    bool parallel     = false;
+};
+
+struct MemoryConfig {
+    bool preferStack  = false;
+    bool prefetch     = false;
+    bool noalias      = false;
+};
+
+enum class SafetyLevel { On, Relaxed, Off };
+
+struct OptMaxConfig {
+    bool         enabled       = false;
+    SafetyLevel  safety        = SafetyLevel::On;
+    bool         fastMath      = false;
+    bool         aggressiveVec = false;
+    LoopConfig   loop;
+    MemoryConfig memory;
+    std::vector<std::string> assumes;
+    std::vector<std::string> specialize;
+    bool         report        = false;
+};
+
 class IfStmt : public Statement {
   public:
     std::unique_ptr<Expression> condition;
@@ -289,6 +318,7 @@ class WhileStmt : public Statement {
   public:
     std::unique_ptr<Expression> condition;
     std::unique_ptr<Statement> body;
+    LoopConfig loopHints;
 
     WhileStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::WHILE_STMT), condition(std::move(cond)), body(std::move(b)) {}
@@ -298,6 +328,7 @@ class DoWhileStmt : public Statement {
   public:
     std::unique_ptr<Statement> body;
     std::unique_ptr<Expression> condition;
+    LoopConfig loopHints;
 
     DoWhileStmt(std::unique_ptr<Statement> b, std::unique_ptr<Expression> cond)
         : Statement(ASTNodeType::DO_WHILE_STMT), body(std::move(b)), condition(std::move(cond)) {}
@@ -311,6 +342,7 @@ class ForStmt : public Statement {
     std::unique_ptr<Expression> end;
     std::unique_ptr<Expression> step; // Optional, can be nullptr
     std::unique_ptr<Statement> body;
+    LoopConfig loopHints;
 
     ForStmt(const std::string& iter, std::unique_ptr<Expression> s, std::unique_ptr<Expression> e,
             std::unique_ptr<Expression> st, std::unique_ptr<Statement> b, const std::string& iterType = "")
@@ -401,6 +433,14 @@ class DeferStmt : public Statement {
     std::unique_ptr<Statement> body;
 
     explicit DeferStmt(std::unique_ptr<Statement> b) : Statement(ASTNodeType::DEFER_STMT), body(std::move(b)) {}
+};
+
+class AssumeStmt : public Statement {
+  public:
+    std::unique_ptr<Expression> condition;
+    std::unique_ptr<Statement> deoptBody;  // nullptr if no else deopt
+    AssumeStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> body = nullptr)
+        : Statement(ASTNodeType::ASSUME_STMT), condition(std::move(cond)), deoptBody(std::move(body)) {}
 };
 
 class EnumDecl : public Statement {
@@ -533,6 +573,7 @@ class FunctionDecl : public ASTNode {
     bool hintOptNone = false;     ///< @optnone — disable all optimizations (useful for debugging)
     bool hintNoUnwind = false;    ///< @nounwind — function never throws C++ exceptions
     bool hintConstEval = false;   ///< @const_eval — evaluate at compile time when all args are constants
+    OptMaxConfig optMaxConfig;    ///< OPTMAX v2 configuration (enabled when @optmax(...) annotation is used)
 
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {
