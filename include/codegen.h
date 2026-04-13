@@ -447,6 +447,17 @@ class CodeGenerator {
     /// Array lengths are always non-negative (they're sizes).
     llvm::MDNode* arrayLenRangeMD_ = nullptr;
 
+    /// !range metadata for boolean-valued i64 results (0 or 1):
+    /// is_alpha, is_digit, str_eq, str_contains, str_starts_with,
+    /// str_ends_with, array_contains.  Allows CVP/LVI/InstCombine to
+    /// fold comparisons like (is_alpha(c) == 1) → (is_alpha(c) != 0).
+    llvm::MDNode* boolRangeMD_ = nullptr;
+
+    /// !range metadata for char-valued i64 results (0..255):
+    /// char_at.  Allows CVP/LVI to prove non-negativity and drop any
+    /// >255 branches.
+    llvm::MDNode* charRangeMD_ = nullptr;
+
     /// Compile-time known array sizes: maps variable name → LLVM Value*
     /// representing the known element count.  Populated when an array is
     /// created via array_fill(N, val) where N is a compile-time constant

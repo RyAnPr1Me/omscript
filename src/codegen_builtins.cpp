@@ -1055,15 +1055,28 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_alpha() is an integer operation
         x = toDefaultType(x);
-        // is_alpha: (x >= 'A' && x <= 'Z') || (x >= 'a' && x <= 'z')
-        llvm::Value* geA = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 65), "ge.A");
-        llvm::Value* leZ = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 90), "le.Z");
-        llvm::Value* upper = builder->CreateAnd(geA, leZ, "isupper");
-        llvm::Value* gea = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 97), "ge.a");
-        llvm::Value* lez = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 122), "le.z");
-        llvm::Value* lower = builder->CreateAnd(gea, lez, "islower");
+        // Use the unsigned-subtract range-check trick:
+        //   uppercase: (x - 'A') <=u 25  (covers 'A'..'Z' in one comparison)
+        //   lowercase: (x - 'a') <=u 25  (covers 'a'..'z' in one comparison)
+        // This produces 4 instructions (2 subs + 2 unsigned-compares + or +
+        // zext) vs the previous 6 (4 signed-compares + 2 ands + or + zext),
+        // and LLVM's loop vectorizer handles the unsigned-compare pattern
+        // better when scanning strings.
+        auto* cA = llvm::ConstantInt::get(getDefaultType(), 65);   // 'A'
+        auto* ca = llvm::ConstantInt::get(getDefaultType(), 97);   // 'a'
+        auto* c25 = llvm::ConstantInt::get(getDefaultType(), 25);  // 'Z'-'A'
+        llvm::Value* upper = builder->CreateICmpULE(
+            builder->CreateSub(x, cA, "sub.A"), c25, "isupper");
+        llvm::Value* lower = builder->CreateICmpULE(
+            builder->CreateSub(x, ca, "sub.a"), c25, "islower");
         llvm::Value* isAlpha = builder->CreateOr(upper, lower, "isalpha");
-        return builder->CreateZExt(isAlpha, getDefaultType(), "alphaval");
+        auto* result = builder->CreateZExt(isAlpha, getDefaultType(), "alphaval");
+        // is_alpha always returns 0 or 1.
+        nonNegValues_.insert(result);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            if (auto* li = llvm::dyn_cast<llvm::Instruction>(result))
+                li->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        return result;
     }
 
     if (bid == BuiltinId::IS_DIGIT) {
@@ -1071,11 +1084,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_digit() is an integer operation
         x = toDefaultType(x);
-        // is_digit: x >= '0' && x <= '9'
-        llvm::Value* ge0 = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 48), "ge.0");
-        llvm::Value* le9 = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 57), "le.9");
-        llvm::Value* isDigit = builder->CreateAnd(ge0, le9, "isdigit");
-        return builder->CreateZExt(isDigit, getDefaultType(), "digitval");
+        // Use the unsigned-subtract range-check trick:
+        //   (x - '0') <=u 9  covers exactly '0'..'9' in a single comparison.
+        // This is one instruction fewer than the previous two-comparison form
+        // (ge0 + le9 + and) and is the canonical pattern used by libc/LLVM.
+        auto* c0 = llvm::ConstantInt::get(getDefaultType(), 48);  // '0'
+        auto* c9 = llvm::ConstantInt::get(getDefaultType(), 9);   // '9'-'0'
+        llvm::Value* isDigit = builder->CreateICmpULE(
+            builder->CreateSub(x, c0, "sub.0"), c9, "isdigit");
+        auto* result = builder->CreateZExt(isDigit, getDefaultType(), "digitval");
+        // is_digit always returns 0 or 1.
+        nonNegValues_.insert(result);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            if (auto* li = llvm::dyn_cast<llvm::Instruction>(result))
+                li->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        return result;
     }
 
     // typeof(x) returns a type tag: 1=integer, 2=float, 3=string.
@@ -1189,8 +1212,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, idxArg, "charat.gep");
         auto* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "charat.char");
         charVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        // Zero-extend to i64
-        return builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
+        // Zero-extend to i64; result is always in [0, 256).
+        auto* result = builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
+        nonNegValues_.insert(result);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            if (auto* li = llvm::dyn_cast<llvm::Instruction>(result))
+                li->setMetadata(llvm::LLVMContext::MD_range, charRangeMD_);
+        return result;
     }
 
     if (bid == BuiltinId::STR_EQ) {
@@ -1209,7 +1237,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lhsPtr, rhsPtr}, "streq.cmp");
         // strcmp returns 0 on equality; convert to boolean (1 if equal, 0 otherwise)
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "streq.eq");
-        return builder->CreateZExt(isEqual, getDefaultType(), "streq.result");
+        auto* streqResult = builder->CreateZExt(isEqual, getDefaultType(), "streq.result");
+        nonNegValues_.insert(streqResult);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            if (auto* li = llvm::dyn_cast<llvm::Instruction>(streqResult))
+                li->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        return streqResult;
     }
 
     if (bid == BuiltinId::STR_CONCAT) {
@@ -2035,7 +2068,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNotNull = builder->CreateICmpNE(result, nullPtr, "contains.notnull");
-        return builder->CreateZExt(isNotNull, getDefaultType(), "contains.result");
+        auto* containsResult = builder->CreateZExt(isNotNull, getDefaultType(), "contains.result");
+        nonNegValues_.insert(containsResult);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            if (auto* li = llvm::dyn_cast<llvm::Instruction>(containsResult))
+                li->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        return containsResult;
     }
 
     if (bid == BuiltinId::STR_INDEX_OF) {

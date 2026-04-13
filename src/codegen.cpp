@@ -833,6 +833,16 @@ void CodeGenerator::initTBAAMetadata() {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
             i64Ty, static_cast<uint64_t>(INT64_MAX)))
     });
+    // !range [0, 2): boolean i64 results (is_alpha, is_digit, str_eq, etc.)
+    boolRangeMD_ = llvm::MDNode::get(C, {
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 2))
+    });
+    // !range [0, 256): char i64 results (char_at)
+    charRangeMD_ = llvm::MDNode::get(C, {
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 256))
+    });
 }
 
 llvm::MDNode* CodeGenerator::getOrCreateFieldTBAA(const std::string& structType, size_t fieldIdx) {
@@ -1612,8 +1622,16 @@ llvm::Function* CodeGenerator::getOrDeclareStrtoll() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy, ptrTy, llvm::Type::getInt32Ty(*context)}, false);
     llvm::Function* fn = declareExternalFn("strtoll", ty);
+    // memory(argmem: read): strtoll reads the string via param 0; param 1
+    // (endptr) is always null at OmScript call sites so no write occurs.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // param 1 (endptr) is always passed as null in OmScript — nocapture is
+    // still valid (the pointer itself is never stored anywhere by strtoll).
+    OMSC_ADD_NOCAPTURE(fn, 1);
     return fn;
 }
 
@@ -1623,8 +1641,14 @@ llvm::Function* CodeGenerator::getOrDeclareStrtod() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(getFloatType(), {ptrTy, ptrTy}, false);
     llvm::Function* fn = declareExternalFn("strtod", ty);
+    // memory(argmem: read): strtod reads the string via param 0; param 1
+    // (endptr) is always null at OmScript call sites so no write occurs.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
     return fn;
 }
 
