@@ -270,6 +270,9 @@ class CodeGenerator {
         // Previous constFloatFolds_ value for this variable (if any).
         bool hadPreviousFloatFold = false;
         double previousFloatFold = 0.0;
+        // Previous constStringFolds_ value for this variable (if any).
+        bool hadPreviousStringFold = false;
+        std::string previousStringFold;
     };
     llvm::StringMap<bool> constValues;
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
@@ -462,6 +465,18 @@ class CodeGenerator {
     /// a compile-time string literal.  Enables compile-time evaluation of
     /// string builtins: `const s = "hello"; var n = len(s);` folds to 5.
     llvm::StringMap<std::string> constStringFolds_;
+
+    /// Functions determined at compile time to always return the same integer
+    /// constant (zero-parameter, pure body with only const-decls + return).
+    /// Populated by analyzeConstantReturnValues() before any function codegen.
+    /// Enables folding of: abs(f()), min(f(), 5), for (i in 0..f()) { }.
+    llvm::StringMap<int64_t> constIntReturnFunctions_;
+
+    /// Functions determined at compile time to always return the same string
+    /// constant (zero-parameter, pure body with only const-decls + return).
+    /// Populated by analyzeConstantReturnValues() before any function codegen.
+    /// Enables folding of: len(f()), f() + "suffix", const s = f(); len(s).
+    llvm::StringMap<std::string> constStringReturnFunctions_;
 
     /// Set of function names marked with @const_eval.
     /// When called with all-constant integer arguments, the compiler evaluates
@@ -687,6 +702,13 @@ class CodeGenerator {
     //   populate stringReturningFunctions_ and funcParamStringTypes_ before
     //   any function body is generated.
     void preAnalyzeStringTypes(Program* program);
+    // analyzeConstantReturnValues: pre-pass over the full program AST that
+    //   identifies zero-parameter, pure functions whose return value is always
+    //   the same compile-time constant (string or integer).  Results are stored
+    //   in constStringReturnFunctions_ and constIntReturnFunctions_ and used by
+    //   len(), tryFoldStringConcat(), and const-variable initialization to fold
+    //   cross-function calls at compile time.
+    void analyzeConstantReturnValues(Program* program);
     // isPreAnalysisStringExpr: lightweight AST-only string check used by the
     //   pre-analysis (no access to namedValues; uses stringReturningFunctions_
     //   and paramStringIndices to track string parameters).

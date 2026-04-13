@@ -230,13 +230,26 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 constFloatFolds_[stmt->name] = cf->getValueAPF().convertToDouble();
         }
         // Track const string values for compile-time string builtin folding.
-        // When a const variable is initialized with a string literal, record
-        // the literal content so that len(var), str_starts_with(var, ...) etc.
-        // can be folded at compile time without a runtime strlen/strcmp.
+        // When a const variable is initialized with a compile-time constant
+        // string expression, record the string content so that len(var),
+        // str_starts_with(var, ...) etc. can be folded at compile time.
+        // Handles: string literals, const-var identifiers, concat trees, and
+        // calls to zero-parameter pure constant-string functions.
         if (stmt->isConst && stmt->initializer) {
-            if (auto* lit = dynamic_cast<LiteralExpr*>(stmt->initializer.get())) {
-                if (lit->literalType == LiteralExpr::LiteralType::STRING)
-                    constStringFolds_[stmt->name] = lit->stringValue;
+            std::string foldedStr;
+            if (tryFoldStringConcat(stmt->initializer.get(), foldedStr))
+                constStringFolds_[stmt->name] = std::move(foldedStr);
+        }
+        // Propagate integer constant from a zero-param constant-returning fn:
+        // `const n = get_n()` where get_n() is in constIntReturnFunctions_
+        // should record n as a compile-time constant integer.
+        if (stmt->isConst && stmt->initializer &&
+            stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+            auto* callInit = static_cast<CallExpr*>(stmt->initializer.get());
+            if (callInit->arguments.empty()) {
+                auto it = constIntReturnFunctions_.find(callInit->callee);
+                if (it != constIntReturnFunctions_.end())
+                    constIntFolds_.try_emplace(stmt->name, it->second);
             }
         }
         // Track whether this variable holds a string value so that print(),

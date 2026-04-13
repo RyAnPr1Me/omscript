@@ -327,26 +327,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::LEN) {
         validateArgCount(expr, "len", 1);
 
-        // Constant-fold len() on string literals: the length is known at
-        // compile time, so emit a constant instead of a runtime strlen call.
-        // This eliminates O(n) work per literal and enables further constant
-        // propagation / dead code elimination in the optimizer.
-        if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
-                int64_t len = static_cast<int64_t>(lit->stringValue.size());
-                auto* result = llvm::ConstantInt::get(getDefaultType(), len);
-                nonNegValues_.insert(result);
-                return result;
-            }
-        }
-
-        // Constant-fold len() on const string variables: when a variable
-        // was declared as `const s = "hello"`, len(s) folds to 5.
-        if (auto* ident = dynamic_cast<IdentifierExpr*>(expr->arguments[0].get())) {
-            auto it = constStringFolds_.find(ident->name);
-            if (it != constStringFolds_.end()) {
-                int64_t len = static_cast<int64_t>(it->second.size());
-                auto* result = llvm::ConstantInt::get(getDefaultType(), len);
+        // Constant-fold len() on any expression that can be reduced to a
+        // compile-time constant string at the AST level.  tryFoldStringConcat
+        // handles all of: string literals, const string variables, zero-param
+        // pure functions that return a constant string, and arbitrary concat
+        // trees of those forms.  For example:
+        //   len("hello")         → 5
+        //   len(s)               (const s = "hello") → 5
+        //   len("a" + "b")      → 2
+        //   len(make_str())      (fn make_str() { return "hi"; }) → 2
+        {
+            std::string folded;
+            if (tryFoldStringConcat(expr->arguments[0].get(), folded)) {
+                auto* result = llvm::ConstantInt::get(getDefaultType(),
+                                                      static_cast<int64_t>(folded.size()));
                 nonNegValues_.insert(result);
                 return result;
             }
@@ -5616,6 +5610,33 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
     }
+
+    // Short-circuit calls to zero-parameter pure functions whose return value
+    // is a compile-time constant (classified by analyzeConstantReturnValues).
+    // We only do this when the call has no arguments (matching the analysis
+    // precondition) and the function is not an OPTMAX function (which may have
+    // side effects we cannot elide).
+    if (expr->arguments.empty() && !inOptMaxFunction) {
+        // Integer constant return: emit a ConstantInt directly.
+        auto intIt = constIntReturnFunctions_.find(expr->callee);
+        if (intIt != constIntReturnFunctions_.end()) {
+            auto* ci = llvm::ConstantInt::get(getDefaultType(), intIt->second);
+            if (intIt->second >= 0) nonNegValues_.insert(ci);
+            return ci;
+        }
+        // String constant return: emit a pointer to an interned string constant.
+        auto strIt = constStringReturnFunctions_.find(expr->callee);
+        if (strIt != constStringReturnFunctions_.end()) {
+            llvm::GlobalVariable* gv = internString(strIt->second);
+            stringReturningFunctions_.insert(expr->callee);
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
+    }
+
     auto calleeIt = functions.find(expr->callee);
     if (calleeIt == functions.end() || !calleeIt->second) {
         // Build "did you mean?" suggestion from known functions.

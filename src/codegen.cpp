@@ -1079,6 +1079,12 @@ void CodeGenerator::endScope() {
         } else {
             constFloatFolds_.erase(entry.first);
         }
+        // Restore constStringFolds_ to the value that was in scope before this scope was entered.
+        if (entry.second.hadPreviousStringFold) {
+            constStringFolds_[entry.first] = entry.second.previousStringFold;
+        } else {
+            constStringFolds_.erase(entry.first);
+        }
     }
     scopeStack.pop_back();
     constScopeStack.pop_back();
@@ -1096,11 +1102,13 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
         auto& constScope = constScopeStack.back();
         if (constScope.find(name) == constScope.end()) {
             auto existingConst = constValues.find(name);
-            ConstBinding binding;
+            ConstBinding binding{};
             if (existingConst == constValues.end()) {
-                binding = {false, false};
+                binding.wasPreviouslyDefined = false;
+                binding.previousIsConst = false;
             } else {
-                binding = {true, existingConst->second};
+                binding.wasPreviouslyDefined = true;
+                binding.previousIsConst = existingConst->second;
             }
             // Save previous constIntFolds_ entry for this variable (for scope restoration).
             auto foldIt = constIntFolds_.find(name);
@@ -1114,16 +1122,23 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
                 binding.hadPreviousFloatFold = true;
                 binding.previousFloatFold = floatFoldIt->second;
             }
+            // Save previous constStringFolds_ entry for this variable (for scope restoration).
+            auto stringFoldIt = constStringFolds_.find(name);
+            if (stringFoldIt != constStringFolds_.end()) {
+                binding.hadPreviousStringFold = true;
+                binding.previousStringFold = stringFoldIt->second;
+            }
             constScope[name] = binding;
         }
     }
     namedValues[name] = value;
     constValues[name] = isConst;
-    // If the variable is being rebound (not a const), remove its int/float fold entry
+    // If the variable is being rebound (not a const), remove its int/float/string fold entries
     // since the new binding may have a different value.
     if (!isConst) {
         constIntFolds_.erase(name);
         constFloatFolds_.erase(name);
+        constStringFolds_.erase(name);
     }
 }
 
@@ -3561,6 +3576,14 @@ void CodeGenerator::generate(Program* program) {
     // work correctly when strings cross function boundaries.
     preAnalyzeStringTypes(program);
 
+    // Pre-analyze constant return values: determine which zero-parameter, pure
+    // functions always return the same compile-time constant (string or integer).
+    // Results enable deep inter-procedural constant folding during codegen:
+    //   len(make_str())      → compile-time constant (no runtime strlen)
+    //   const n = get_n();   → n is tracked as a compile-time constant
+    //   for (i in 0..get_n()) → loop bound folded to a constant
+    analyzeConstantReturnValues(program);
+
     // E-Graph Equality Saturation: apply algebraic simplification, constant
     // folding, strength reduction, and other rewrites at the AST level using
     // an e-graph.  This discovers globally optimal expression representations
@@ -4774,7 +4797,283 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
     return retVal.value_or(0);
 }
 
-// ── String Interning ────────────────────────────────────────────
+// ── Deep Compile-Time Constant Return Value Analysis ─────────────────────
+// Pre-pass over the program AST that identifies zero-parameter, pure functions
+// whose return value is always the same compile-time constant.  A function
+// qualifies as "pure constant-returning" if its body contains ONLY:
+//   - const VarDecl statements with foldable initializer expressions
+//   - a single ReturnStmt with a foldable expression
+// This is intentionally conservative (no if/for/while, no non-const vars,
+// no non-pure calls) to guarantee soundness: we only fold away a call when
+// we can guarantee the function has no observable side effects.
+//
+// The analysis runs as a fixed-point loop because a function may depend on
+// another function that has not been classified yet:
+//   fn a() { return "hello"; }          // classified in iteration 1
+//   fn b() { return a() + " world"; }   // classified in iteration 2 (uses a)
+//
+// Results are stored in constStringReturnFunctions_ and constIntReturnFunctions_.
+void CodeGenerator::analyzeConstantReturnValues(Program* program) {
+    if (optimizationLevel < OptimizationLevel::O1) return;
+
+    // Recursion depth guard for mutually-recursive helper lambdas.
+    // Reset to 0 at entry so re-entrant or exception-interrupted calls start
+    // with a clean depth counter (thread_local is per-compilation-unit here).
+    static thread_local int anaDepth = 0;
+    anaDepth = 0;
+    static constexpr int kAnaDepthMax = 32;
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& func : program->functions) {
+            const std::string& fname = func->name;
+            // Only analyze zero-parameter functions.  Multi-parameter functions
+            // are handled at call sites by tryConstEval (integers) or by
+            // argument propagation when all args are known constants.
+            if (!func->body || !func->parameters.empty()) continue;
+            // Skip if already classified in a previous iteration.
+            if (constStringReturnFunctions_.count(fname) ||
+                constIntReturnFunctions_.count(fname)) continue;
+
+            // Local environments mapping variable names → known constant values.
+            std::unordered_map<std::string, std::string> strEnv;
+            std::unordered_map<std::string, int64_t>     intEnv;
+            std::optional<std::string> retStr;
+            std::optional<int64_t>     retInt;
+            bool failed = false;
+
+            // Forward-declare for mutual recursion.
+            std::function<std::optional<std::string>(Expression*)> evalStr;
+            std::function<std::optional<int64_t>(Expression*)>     evalInt;
+            std::function<bool(Statement*)>                        evalStmt;
+
+            evalStr = [&](Expression* e) -> std::optional<std::string> {
+                if (!e || failed) return std::nullopt;
+                if (anaDepth >= kAnaDepthMax) return std::nullopt;
+                ++anaDepth;
+                struct Guard { int& d; ~Guard() { --d; } } g{anaDepth};
+                switch (e->type) {
+                case ASTNodeType::LITERAL_EXPR: {
+                    auto* lit = static_cast<LiteralExpr*>(e);
+                    if (lit->literalType == LiteralExpr::LiteralType::STRING)
+                        return lit->stringValue;
+                    return std::nullopt;
+                }
+                case ASTNodeType::IDENTIFIER_EXPR: {
+                    auto* id = static_cast<IdentifierExpr*>(e);
+                    auto it = strEnv.find(id->name);
+                    if (it != strEnv.end()) return it->second;
+                    return std::nullopt;
+                }
+                case ASTNodeType::BINARY_EXPR: {
+                    auto* bin = static_cast<BinaryExpr*>(e);
+                    if (bin->op == "+") {
+                        auto l = evalStr(bin->left.get());
+                        if (!l) return std::nullopt;
+                        auto r = evalStr(bin->right.get());
+                        if (!r) return std::nullopt;
+                        return *l + *r;
+                    }
+                    return std::nullopt;
+                }
+                case ASTNodeType::CALL_EXPR: {
+                    auto* call = static_cast<CallExpr*>(e);
+                    if (call->arguments.empty()) {
+                        auto it = constStringReturnFunctions_.find(call->callee);
+                        if (it != constStringReturnFunctions_.end()) return it->second;
+                    }
+                    return std::nullopt;
+                }
+                case ASTNodeType::TERNARY_EXPR: {
+                    auto* tern = static_cast<TernaryExpr*>(e);
+                    auto cond = evalInt(tern->condition.get());
+                    if (!cond) return std::nullopt;
+                    return *cond ? evalStr(tern->thenExpr.get())
+                                 : evalStr(tern->elseExpr.get());
+                }
+                default: return std::nullopt;
+                }
+            };
+
+            evalInt = [&](Expression* e) -> std::optional<int64_t> {
+                if (!e || failed) return std::nullopt;
+                if (anaDepth >= kAnaDepthMax) return std::nullopt;
+                ++anaDepth;
+                struct Guard { int& d; ~Guard() { --d; } } g{anaDepth};
+                switch (e->type) {
+                case ASTNodeType::LITERAL_EXPR: {
+                    auto* lit = static_cast<LiteralExpr*>(e);
+                    if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+                        return static_cast<int64_t>(lit->intValue);
+                    return std::nullopt;
+                }
+                case ASTNodeType::IDENTIFIER_EXPR: {
+                    auto* id = static_cast<IdentifierExpr*>(e);
+                    auto it = intEnv.find(id->name);
+                    if (it != intEnv.end()) return it->second;
+                    // Enum constants are globally known.
+                    auto eit = enumConstants_.find(id->name);
+                    if (eit != enumConstants_.end()) return static_cast<int64_t>(eit->second);
+                    return std::nullopt;
+                }
+                case ASTNodeType::BINARY_EXPR: {
+                    auto* bin = static_cast<BinaryExpr*>(e);
+                    if (bin->op == "&&") {
+                        auto lv = evalInt(bin->left.get());
+                        if (!lv) return std::nullopt;
+                        if (*lv == 0) return int64_t(0);
+                        auto rv = evalInt(bin->right.get());
+                        return rv ? std::optional<int64_t>(*rv != 0 ? 1 : 0) : std::nullopt;
+                    }
+                    if (bin->op == "||") {
+                        auto lv = evalInt(bin->left.get());
+                        if (!lv) return std::nullopt;
+                        if (*lv != 0) return int64_t(1);
+                        auto rv = evalInt(bin->right.get());
+                        return rv ? std::optional<int64_t>(*rv != 0 ? 1 : 0) : std::nullopt;
+                    }
+                    auto lv = evalInt(bin->left.get());
+                    auto rv = evalInt(bin->right.get());
+                    if (!lv || !rv) return std::nullopt;
+                    int64_t a = *lv, b = *rv;
+                    if (bin->op == "+")  return a + b;
+                    if (bin->op == "-")  return a - b;
+                    if (bin->op == "*")  return a * b;
+                    if (bin->op == "/" && b != 0) return a / b;
+                    if (bin->op == "%" && b != 0) return a % b;
+                    if (bin->op == "&")  return a & b;
+                    if (bin->op == "|")  return a | b;
+                    if (bin->op == "^")  return a ^ b;
+                    if (bin->op == "<<" && b >= 0 && b < 64) return a << b;
+                    if (bin->op == ">>" && b >= 0 && b < 64) return a >> b;
+                    if (bin->op == "==") return int64_t(a == b);
+                    if (bin->op == "!=") return int64_t(a != b);
+                    if (bin->op == "<")  return int64_t(a < b);
+                    if (bin->op == "<=") return int64_t(a <= b);
+                    if (bin->op == ">")  return int64_t(a > b);
+                    if (bin->op == ">=") return int64_t(a >= b);
+                    if (bin->op == "**") {
+                        if (b < 0) return (a == 1) ? std::optional<int64_t>(int64_t(1)) : std::nullopt;
+                        int64_t r = 1;
+                        for (int64_t i = 0; i < b && i < 64; ++i) r *= a;
+                        return r;
+                    }
+                    return std::nullopt;
+                }
+                case ASTNodeType::UNARY_EXPR: {
+                    auto* un = static_cast<UnaryExpr*>(e);
+                    auto v = evalInt(un->operand.get());
+                    if (!v) return std::nullopt;
+                    if (un->op == "-") return -*v;
+                    if (un->op == "~") return ~*v;
+                    if (un->op == "!") return int64_t(*v == 0 ? 1 : 0);
+                    return std::nullopt;
+                }
+                case ASTNodeType::TERNARY_EXPR: {
+                    auto* tern = static_cast<TernaryExpr*>(e);
+                    auto cond = evalInt(tern->condition.get());
+                    if (!cond) return std::nullopt;
+                    return *cond ? evalInt(tern->thenExpr.get())
+                                 : evalInt(tern->elseExpr.get());
+                }
+                case ASTNodeType::CALL_EXPR: {
+                    auto* call = static_cast<CallExpr*>(e);
+                    // Zero-param constant-returning function.
+                    if (call->arguments.empty()) {
+                        auto it = constIntReturnFunctions_.find(call->callee);
+                        if (it != constIntReturnFunctions_.end()) return it->second;
+                    }
+                    // @const_eval function with all-constant arguments.
+                    if (constEvalFunctions_.count(call->callee)) {
+                        auto declIt = functionDecls_.find(call->callee);
+                        if (declIt != functionDecls_.end()) {
+                            std::vector<int64_t> cargs;
+                            bool allConst = true;
+                            for (auto& arg : call->arguments) {
+                                auto av = evalInt(arg.get());
+                                if (!av) { allConst = false; break; }
+                                cargs.push_back(*av);
+                            }
+                            if (allConst) return tryConstEval(declIt->second, cargs);
+                        }
+                    }
+                    return std::nullopt;
+                }
+                case ASTNodeType::SCOPE_RESOLUTION_EXPR: {
+                    auto* sr = static_cast<ScopeResolutionExpr*>(e);
+                    auto eit = enumConstants_.find(sr->scopeName + "_" + sr->memberName);
+                    if (eit != enumConstants_.end()) return static_cast<int64_t>(eit->second);
+                    return std::nullopt;
+                }
+                default: return std::nullopt;
+                }
+            };
+
+            evalStmt = [&](Statement* s) -> bool {
+                if (!s || failed || retStr || retInt) return true;
+                switch (s->type) {
+                case ASTNodeType::RETURN_STMT: {
+                    auto* ret = static_cast<ReturnStmt*>(s);
+                    if (!ret->value) { retInt = 0; return true; }
+                    // Try string first (a string return is unambiguous); then int.
+                    auto sv = evalStr(ret->value.get());
+                    if (sv) { retStr = std::move(sv); return true; }
+                    auto iv = evalInt(ret->value.get());
+                    if (iv) { retInt = iv; return true; }
+                    // Return value not foldable → give up on this function.
+                    failed = true;
+                    return false;
+                }
+                case ASTNodeType::VAR_DECL: {
+                    auto* decl = static_cast<VarDecl*>(s);
+                    // Non-const variables could be reassigned → conservatively
+                    // reject (we can't track their values safely).
+                    if (!decl->isConst) { failed = true; return false; }
+                    if (!decl->initializer) return true;
+                    auto sv = evalStr(decl->initializer.get());
+                    if (sv) { strEnv[decl->name] = std::move(*sv); return true; }
+                    auto iv = evalInt(decl->initializer.get());
+                    if (iv) { intEnv[decl->name] = *iv; return true; }
+                    // Const var with non-foldable initializer → give up.
+                    failed = true;
+                    return false;
+                }
+                case ASTNodeType::BLOCK: {
+                    auto* blk = static_cast<BlockStmt*>(s);
+                    for (auto& stmt : blk->statements) {
+                        if (!evalStmt(stmt.get())) return false;
+                        if (retStr || retInt || failed) return !failed;
+                    }
+                    return true;
+                }
+                default:
+                    // Any other statement (if, for, while, non-const assignment,
+                    // I/O calls, etc.) → conservatively reject.
+                    failed = true;
+                    return false;
+                }
+            };
+
+            for (auto& stmt : func->body->statements) {
+                if (!evalStmt(stmt.get())) break;
+                if (retStr || retInt || failed) break;
+            }
+
+            if (!failed) {
+                if (retStr) {
+                    constStringReturnFunctions_[fname] = std::move(*retStr);
+                    changed = true;
+                } else if (retInt) {
+                    constIntReturnFunctions_[fname] = *retInt;
+                    changed = true;
+                }
+            }
+        }
+    }
+}
+
+
 // Deduplicates identical string literals across the entire module by
 // maintaining a pool of interned global string constants.  When the
 // same string content is used in multiple places, this returns a
