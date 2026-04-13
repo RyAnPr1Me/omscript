@@ -6566,3 +6566,149 @@ TEST(CodegenTest, RangeMetadataOnNonNegLoad) {
     EXPECT_TRUE(foundRangeLoad)
         << "Expected at least one i64 load with !range metadata";
 }
+
+// ===========================================================================
+// Deep compile-time constant evaluation (inter-procedural)
+// ===========================================================================
+
+// Helper: return true if a function's IR has no call to strlen (i.e. the
+// len() call was folded to a constant at compile time).
+static bool hasNoStrlen(llvm::Function* fn) {
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I))
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == "strlen")
+                    return false;
+    return true;
+}
+
+// Helper: return true if a function's IR has no call to any user-defined
+// function (only intrinsics / libc are permitted).
+static bool hasNoUserCall(llvm::Module* mod, llvm::Function* fn,
+                          const std::string& calleeName) {
+    (void)mod;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I))
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == calleeName)
+                    return false;
+    return true;
+}
+
+// 1. len() of a zero-param function returning a string literal should fold
+//    to a ConstantInt — no strlen call, no make_str call.
+TEST(CodegenTest, DeepConstEval_LenOfConstantReturningFunction) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn make_str() { return \"hello world\"; }"
+        "fn main() { return len(make_str()); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // The return value should be a ConstantInt(11) — no strlen, no make_str call.
+    EXPECT_TRUE(hasNoStrlen(mainFn))
+        << "len(make_str()) should be folded to a constant — no strlen expected";
+    EXPECT_TRUE(hasNoUserCall(mod, mainFn, "make_str"))
+        << "make_str() should be short-circuited — no call site expected";
+}
+
+// 2. const s = make_str(); len(s) should also fold — the const var inherits
+//    the compile-time string value from the function's return analysis.
+TEST(CodegenTest, DeepConstEval_ConstVarFromConstantReturningFunction) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn make_str() { return \"hi\"; }"
+        "fn main() { const s = make_str(); return len(s); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_TRUE(hasNoStrlen(mainFn))
+        << "len(s) where s = make_str() (const) should fold — no strlen expected";
+}
+
+// 3. len("a" + "b" + "c") should fold to 3 — all parts are string literals.
+TEST(CodegenTest, DeepConstEval_LenOfStringConcatLiterals) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main() { return len(\"a\" + \"b\" + \"c\"); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_TRUE(hasNoStrlen(mainFn))
+        << "len(\"a\" + \"b\" + \"c\") should fold to 3 at compile time";
+}
+
+// 4. const s = "hello"; len(s + " world") should fold.
+TEST(CodegenTest, DeepConstEval_LenOfConstVarConcat) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main() { const s = \"hello\"; return len(s + \" world\"); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_TRUE(hasNoStrlen(mainFn))
+        << "len(s + \" world\") where s is const should fold";
+}
+
+// 5. Two-hop chain: fn a() { return "x"; } fn b() { return a() + "y"; }
+//    len(b()) should fold to 2.
+TEST(CodegenTest, DeepConstEval_TwoHopChainFolding) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn a() { return \"x\"; }"
+        "fn b() { return a() + \"y\"; }"
+        "fn main() { return len(b()); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_TRUE(hasNoStrlen(mainFn))
+        << "len(b()) with two-hop chain should fold to 2";
+    EXPECT_TRUE(hasNoUserCall(mod, mainFn, "b"))
+        << "b() should be short-circuited in main";
+}
+
+// 6. Integer constant-returning function: fn get_n() { return 42; }
+//    const n = get_n() should record n as a compile-time constant so that
+//    subsequent uses don't emit a call.
+TEST(CodegenTest, DeepConstEval_IntConstantReturningFunction) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn get_n() { return 42; }"
+        "fn main() { return get_n(); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_TRUE(hasNoUserCall(mod, mainFn, "get_n"))
+        << "get_n() returning a constant integer should be short-circuited";
+}
+
+// 7. Functions with side-effects (non-const var, reassignment) should NOT
+//    be marked as constant-returning.
+TEST(CodegenTest, DeepConstEval_SideEffectFunctionNotFolded) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    // This function has a non-const var — the analysis must reject it.
+    auto* mod = generateIR(
+        "fn make_str() { var s = \"a\"; s = s + \"b\"; return s; }"
+        "fn main() { return len(make_str()); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    // We just verify compilation succeeds — the function call must not be
+    // elided (it has a non-const var), so strlen will be present.
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // The function should still be called (not short-circuited).
+    bool callsStrlen = !hasNoStrlen(mainFn);
+    bool callsMakeStr = !hasNoUserCall(mod, mainFn, "make_str");
+    // Either strlen is present (runtime len) OR make_str is called (not elided)
+    // — at least one of these must be true.
+    EXPECT_TRUE(callsStrlen || callsMakeStr)
+        << "make_str() with side effects must not be short-circuited";
+}

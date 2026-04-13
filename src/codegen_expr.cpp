@@ -560,16 +560,39 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
 // ---------------------------------------------------------------------------
 // Recursive string literal constant folding
 // ---------------------------------------------------------------------------
-// Walk a tree of BinaryExpr(+) nodes.  If every leaf is a string literal,
-// append all of them (left-to-right) into `out` and return true.
+// Walk a tree of BinaryExpr(+) nodes.  If every leaf is a compile-time
+// constant string (literal, const variable, or zero-parameter pure function
+// call), append all of them (left-to-right) into `out` and return true.
 // This turns  "a" + "b" + "c"  into a single compile-time constant "abc",
 // eliminating all runtime malloc + strlen + memcpy work.
+// Also handles: `const s = "hi"; "prefix" + s + "suffix"` → "prefixhisuffix"
+// and: `fn greet() { return "hello"; }; greet() + " world"` → "hello world"
 bool CodeGenerator::tryFoldStringConcat(Expression* expr, std::string& out) const {
     if (expr->type == ASTNodeType::LITERAL_EXPR) {
         auto* lit = static_cast<LiteralExpr*>(expr);
         if (lit->literalType == LiteralExpr::LiteralType::STRING) {
             out += lit->stringValue;
             return true;
+        }
+        return false;
+    }
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* id = static_cast<IdentifierExpr*>(expr);
+        auto it = constStringFolds_.find(id->name);
+        if (it != constStringFolds_.end()) {
+            out += it->second;
+            return true;
+        }
+        return false;
+    }
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<CallExpr*>(expr);
+        if (call->arguments.empty()) {
+            auto it = constStringReturnFunctions_.find(call->callee);
+            if (it != constStringReturnFunctions_.end()) {
+                out += it->second;
+                return true;
+            }
         }
         return false;
     }

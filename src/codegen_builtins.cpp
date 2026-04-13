@@ -232,16 +232,6 @@ static BuiltinId lookupBuiltin(const std::string& name) {
 
 // ---------------------------------------------------------------------------
 // Compile-time constant folding helper
-// ---------------------------------------------------------------------------
-// Extract a compile-time integer constant from an AST expression node.
-// Returns std::nullopt if the expression isn't a plain integer literal.
-static std::optional<int64_t> getConstantInt(Expression* expr) {
-    if (!expr || expr->type != ASTNodeType::LITERAL_EXPR) return std::nullopt;
-    auto* lit = static_cast<LiteralExpr*>(expr);
-    if (lit->literalType != LiteralExpr::LiteralType::INTEGER) return std::nullopt;
-    return static_cast<int64_t>(lit->intValue);
-}
-
 void CodeGenerator::validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected) {
     if (expr->arguments.size() != expected) {
         codegenError("Built-in function '" + funcName + "' expects " + std::to_string(expected) +
@@ -302,10 +292,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::ABS) {
         validateArgCount(expr, "abs", 1);
-        // Constant-fold abs(literal): eliminates the intrinsic call entirely.
-        if (auto cv = getConstantInt(expr->arguments[0].get())) {
-            int64_t v = *cv;
-            int64_t result = (v < 0) ? -v : v;
+        // Constant-fold abs(any const expr): eliminates the intrinsic call entirely.
+        if (auto cv = tryFoldInt(expr->arguments[0].get())) {
+            int64_t result = (*cv < 0) ? -*cv : *cv;
             auto* c = llvm::ConstantInt::get(getDefaultType(), result);
             nonNegValues_.insert(c);
             return c;
@@ -327,43 +316,52 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::LEN) {
         validateArgCount(expr, "len", 1);
 
-        // Constant-fold len() on string literals: the length is known at
-        // compile time, so emit a constant instead of a runtime strlen call.
-        // This eliminates O(n) work per literal and enables further constant
-        // propagation / dead code elimination in the optimizer.
-        if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
-                int64_t len = static_cast<int64_t>(lit->stringValue.size());
-                auto* result = llvm::ConstantInt::get(getDefaultType(), len);
+        // Constant-fold len() on any expression that can be reduced to a
+        // compile-time constant string at the AST level.  Try both the
+        // fast string-concat folder and the full unified evaluator so that
+        // multi-param string-returning functions are also handled.
+        {
+            std::string folded;
+            if (tryFoldStringConcat(expr->arguments[0].get(), folded)) {
+                auto* result = llvm::ConstantInt::get(getDefaultType(),
+                                                      static_cast<int64_t>(folded.size()));
+                nonNegValues_.insert(result);
+                return result;
+            }
+            // tryFoldExprToConst handles multi-param calls (e.g. greet("world"))
+            // that tryFoldStringConcat doesn't traverse.
+            auto cv = tryFoldExprToConst(expr->arguments[0].get());
+            if (cv && cv->kind == ConstValue::Kind::String) {
+                auto* result = llvm::ConstantInt::get(
+                    getDefaultType(), static_cast<int64_t>(cv->strVal.size()));
                 nonNegValues_.insert(result);
                 return result;
             }
         }
 
-        // Constant-fold len() on const string variables: when a variable
-        // was declared as `const s = "hello"`, len(s) folds to 5.
-        if (auto* ident = dynamic_cast<IdentifierExpr*>(expr->arguments[0].get())) {
-            auto it = constStringFolds_.find(ident->name);
-            if (it != constStringFolds_.end()) {
-                int64_t len = static_cast<int64_t>(it->second.size());
-                auto* result = llvm::ConstantInt::get(getDefaultType(), len);
-                nonNegValues_.insert(result);
-                return result;
-            }
-        }
-
-        // Constant-fold len(array_fill(N, val)): when N is a constant the
-        // array length is known at compile time.  Avoids a runtime load from
-        // the array header and enables further constant propagation.
+        // Constant-fold len(array_fill(N, val)): when N is a compile-time
+        // constant the array length is known at compile time.  Avoids a
+        // runtime load from the array header and enables further constant
+        // propagation.  Use tryFoldInt so const variables work too, not just
+        // plain integer literals.
         if (auto* call = dynamic_cast<CallExpr*>(expr->arguments[0].get())) {
             if (call->callee == "array_fill" && call->arguments.size() == 2) {
-                if (auto* sizelit = dynamic_cast<LiteralExpr*>(call->arguments[0].get())) {
-                    if (sizelit->literalType == LiteralExpr::LiteralType::INTEGER && sizelit->intValue >= 0) {
-                        auto* result = llvm::ConstantInt::get(getDefaultType(), sizelit->intValue);
+                if (auto n = tryFoldInt(call->arguments[0].get())) {
+                    if (*n >= 0) {
+                        auto* result = llvm::ConstantInt::get(getDefaultType(), *n);
                         nonNegValues_.insert(result);
                         return result;
                     }
                 }
+            }
+        }
+        // Also fold len(array_const_expr) via the unified evaluator.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                auto* result = llvm::ConstantInt::get(
+                    getDefaultType(), static_cast<int64_t>(cv->arrVal.size()));
+                nonNegValues_.insert(result);
+                return result;
             }
         }
 
@@ -406,9 +404,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::MIN) {
         validateArgCount(expr, "min", 2);
-        // Constant-fold min(a, b) when both are integer literals.
-        if (auto ca = getConstantInt(expr->arguments[0].get())) {
-            if (auto cb = getConstantInt(expr->arguments[1].get())) {
+        // Constant-fold min(a, b) when both are compile-time constants.
+        if (auto ca = tryFoldInt(expr->arguments[0].get())) {
+            if (auto cb = tryFoldInt(expr->arguments[1].get())) {
                 int64_t result = std::min(*ca, *cb);
                 auto* c = llvm::ConstantInt::get(getDefaultType(), result);
                 if (result >= 0) nonNegValues_.insert(c);
@@ -438,9 +436,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::MAX) {
         validateArgCount(expr, "max", 2);
-        // Constant-fold max(a, b) when both are integer literals.
-        if (auto ca = getConstantInt(expr->arguments[0].get())) {
-            if (auto cb = getConstantInt(expr->arguments[1].get())) {
+        // Constant-fold max(a, b) when both are compile-time constants.
+        if (auto ca = tryFoldInt(expr->arguments[0].get())) {
+            if (auto cb = tryFoldInt(expr->arguments[1].get())) {
                 int64_t result = std::max(*ca, *cb);
                 auto* c = llvm::ConstantInt::get(getDefaultType(), result);
                 if (result >= 0) nonNegValues_.insert(c);
@@ -470,8 +468,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SIGN) {
         validateArgCount(expr, "sign", 1);
-        // Constant-fold sign(literal).
-        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+        // Constant-fold sign(any const expr).
+        if (auto cv = tryFoldInt(expr->arguments[0].get())) {
             int64_t result = (*cv > 0) ? 1 : ((*cv < 0) ? -1 : 0);
             return llvm::ConstantInt::get(getDefaultType(), result, true);
         }
@@ -497,10 +495,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CLAMP) {
         validateArgCount(expr, "clamp", 3);
-        // Constant-fold clamp(val, lo, hi) when all three are integer literals.
-        if (auto cv = getConstantInt(expr->arguments[0].get())) {
-            if (auto cl = getConstantInt(expr->arguments[1].get())) {
-                if (auto ch = getConstantInt(expr->arguments[2].get())) {
+        // Constant-fold clamp(val, lo, hi) when all three are compile-time constants.
+        if (auto cv = tryFoldInt(expr->arguments[0].get())) {
+            if (auto cl = tryFoldInt(expr->arguments[1].get())) {
+                if (auto ch = tryFoldInt(expr->arguments[2].get())) {
                     int64_t result = std::max(*cl, std::min(*cv, *ch));
                     auto* c = llvm::ConstantInt::get(getDefaultType(), result, true);
                     if (result >= 0) nonNegValues_.insert(c);
@@ -537,10 +535,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::POW) {
         validateArgCount(expr, "pow", 2);
-        // Constant-fold pow(base, exp) when both are integer literals and exp >= 0.
+        // Constant-fold pow(base, exp) when both are compile-time constants and exp >= 0.
         // Eliminates the entire exponentiation loop at compile time.
-        if (auto cb = getConstantInt(expr->arguments[0].get())) {
-            if (auto ce = getConstantInt(expr->arguments[1].get())) {
+        if (auto cb = tryFoldInt(expr->arguments[0].get())) {
+            if (auto ce = tryFoldInt(expr->arguments[1].get())) {
                 int64_t b = *cb, e = *ce;
                 if (e >= 0) {
                     int64_t result = 1;
@@ -797,8 +795,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::IS_EVEN) {
         validateArgCount(expr, "is_even", 1);
-        // Constant-fold is_even(literal).
-        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+        // Constant-fold is_even(any const expr).
+        if (auto cv = tryFoldInt(expr->arguments[0].get())) {
             int64_t result = ((*cv & 1) == 0) ? 1 : 0;
             auto* c = llvm::ConstantInt::get(getDefaultType(), result);
             nonNegValues_.insert(c);
@@ -818,8 +816,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::IS_ODD) {
         validateArgCount(expr, "is_odd", 1);
-        // Constant-fold is_odd(literal).
-        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+        // Constant-fold is_odd(any const expr).
+        if (auto cv = tryFoldInt(expr->arguments[0].get())) {
             int64_t result = (*cv & 1) ? 1 : 0;
             auto* c = llvm::ConstantInt::get(getDefaultType(), result);
             nonNegValues_.insert(c);
@@ -877,9 +875,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "sum.elem");
         llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* newAcc = builder->CreateAdd(acc, elem, "sum.newacc");
-        llvm::Value* newIdx = builder->CreateAdd(idx, llvm::ConstantInt::get(getDefaultType(), 1), "sum.newidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        // Eliminates a redundant add and provides SCEV with tight nsw+nuw flags.
         acc->addIncoming(newAcc, bodyBB);
-        idx->addIncoming(newIdx, bodyBB);
+        idx->addIncoming(offset, bodyBB);
         auto* backBr_674 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 4> mds;
@@ -1144,20 +1143,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // When both the string and index are compile-time constants,
         // fold char_at("hello", 1) → 'e' (ASCII 101) at compile time.
         // This eliminates the runtime strlen + bounds check + load entirely.
-        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
-                if (auto* idxLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
-                    if (idxLit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                        int64_t idx = idxLit->intValue;
-                        int64_t len = static_cast<int64_t>(strLit->stringValue.size());
-                        if (idx >= 0 && idx < len) {
-                            // Valid index — fold to the character value.
-                            char ch = strLit->stringValue[static_cast<size_t>(idx)];
-                            return llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(static_cast<unsigned char>(ch)));
-                        }
-                        // Out-of-bounds index with literals → still emit runtime
-                        // error path (don't silently UB).
-                    }
+        if (auto strConst = tryFoldStr(expr->arguments[0].get())) {
+            if (auto idxConst = tryFoldInt(expr->arguments[1].get())) {
+                int64_t idx = *idxConst;
+                int64_t len = static_cast<int64_t>(strConst->size());
+                if (idx >= 0 && idx < len) {
+                    char ch = (*strConst)[static_cast<size_t>(idx)];
+                    return llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(static_cast<unsigned char>(ch)));
                 }
             }
         }
@@ -1364,17 +1356,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
         } else if (lhsIsHeap) {
             // Heap LHS without capacity tracking: use power-of-2 realloc.
+            // nextPow2 via ctlz intrinsic: 1 << (64 - ctlz(minSize - 1))
+            // This replaces a 6-shift OR-cascade (~14 instructions) with 4
+            // instructions (sub, ctlz, sub, shl), which maps to a single
+            // BSR/LZCNT + shift on x86-64.
             llvm::Value* minSize =
                 builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.minsize", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
             llvm::Value* v = builder->CreateSub(minSize, one64, "concat.pm1", /*HasNUW=*/true, /*HasNSW=*/true);
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)));
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)));
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 4)));
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 8)));
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)));
-            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)));
-            llvm::Value* allocSize = builder->CreateAdd(v, one64, "concat.allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
+            llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(),
+                llvm::Intrinsic::ctlz, {getDefaultType()});
+            // is_zero_poison=true: minSize = totalLen + 1 >= 2 (totalLen is the
+            // sum of two string lengths and is always >= 1 on any concat path),
+            // so v (= minSize - 1) is always >= 1, never zero.
+            llvm::Value* lz = builder->CreateCall(ctlzFn,
+                {v, llvm::ConstantInt::getTrue(*context)}, "concat.lz");
+            llvm::Value* shift = builder->CreateSub(
+                llvm::ConstantInt::get(getDefaultType(), 64), lz, "concat.shift");
+            llvm::Value* allocSize = builder->CreateShl(one64, shift, "concat.allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
             buf = builder->CreateCall(getOrDeclareRealloc(), {lhsPtr, allocSize}, "concat.buf");
             // memcpy(buf + len1, rhs, len2) — only append the RHS portion
             llvm::Value* dst2 = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
@@ -1425,9 +1424,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::GCD) {
         validateArgCount(expr, "gcd", 2);
-        // Constant-fold gcd(a, b) when both are integer literals.
-        if (auto va = getConstantInt(expr->arguments[0].get())) {
-            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+        // Constant-fold gcd(a, b) when both are compile-time constants.
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
                 uint64_t a = static_cast<uint64_t>(std::abs(*va));
                 uint64_t b = static_cast<uint64_t>(std::abs(*vb));
                 while (b) { uint64_t t = b; b = a % b; a = t; }
@@ -1534,6 +1533,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::TO_STRING) {
         validateArgCount(expr, "to_string", 1);
+        // ── Compile-time fold: to_string(integer_const) ─────────────
+        if (auto iv = tryFoldInt(expr->arguments[0].get())) {
+            std::string s = std::to_string(*iv);
+            llvm::GlobalVariable* gv = internString(s);
+            stringReturningFunctions_.insert("to_string");
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         bool isFloat = val->getType()->isDoubleTy();
         if (!isFloat)
@@ -1580,9 +1590,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // If memchr returns null, return -1; otherwise return (found - strPtr)
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNull = builder->CreateICmpEQ(found, nullPtr, "strfind.isnull");
-        llvm::Value* foundInt = builder->CreatePtrToInt(found, getDefaultType(), "strfind.foundint");
-        llvm::Value* baseInt = builder->CreatePtrToInt(strPtr, getDefaultType(), "strfind.baseint");
-        llvm::Value* offset = builder->CreateSub(foundInt, baseInt, "strfind.offset");
+        llvm::Value* offset = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), found, strPtr, "strfind.offset");
         llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
         return builder->CreateSelect(isNull, negOne, offset, "strfind.result");
     }
@@ -1749,20 +1757,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "to_int", 1);
 
         // ── Compile-time to_int folding ─────────────────────────────
-        // to_int("42") → 42, to_int(3.14) → 3 at compile time.
-        if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
-                try {
-                    int64_t parsed = std::stoll(lit->stringValue);
-                    return llvm::ConstantInt::get(getDefaultType(), parsed);
-                } catch (...) {
-                    // Fall through to runtime parsing if conversion fails.
-                }
-            } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
-                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(lit->floatValue));
-            } else if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                return llvm::ConstantInt::get(getDefaultType(), lit->intValue);
+        // Handles: const variables, enum members, string constants, int
+        // constants — anything tryFoldStr/tryFoldInt can resolve.
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            try {
+                int64_t parsed = std::stoll(*sv);
+                return llvm::ConstantInt::get(getDefaultType(), parsed);
+            } catch (...) {
+                // Fall through to runtime parsing if conversion fails.
             }
+        }
+        if (auto iv = tryFoldInt(expr->arguments[0].get())) {
+            return llvm::ConstantInt::get(getDefaultType(), *iv);
         }
 
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
@@ -1827,33 +1833,26 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // ── Compile-time str_substr folding ─────────────────────────
         // When all three arguments are compile-time constants, fold the
         // substr to a string literal.  This eliminates malloc + memcpy.
-        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
-                if (auto* startLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
-                    if (startLit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                        if (auto* lenLit = dynamic_cast<LiteralExpr*>(expr->arguments[2].get())) {
-                            if (lenLit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                                const auto& s = strLit->stringValue;
-                                int64_t slen = static_cast<int64_t>(s.size());
-                                int64_t startVal = static_cast<int64_t>(startLit->intValue);
-                                int64_t lenVal = static_cast<int64_t>(lenLit->intValue);
-                                if (startVal < 0) startVal = 0;
-                                if (startVal > slen) startVal = slen;
-                                int64_t maxLen = slen - startVal;
-                                if (lenVal < 0) lenVal = 0;
-                                if (lenVal > maxLen) lenVal = maxLen;
-                                std::string result = s.substr(static_cast<size_t>(startVal), static_cast<size_t>(lenVal));
-                                llvm::GlobalVariable* gv = internString(result);
-                                return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                                    gv->getValueType(),
-                                    gv,
-                                    llvm::ArrayRef<llvm::Constant*>{
-                                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
-                                    });
-                            }
-                        }
-                    }
+        if (auto strConst = tryFoldStr(expr->arguments[0].get())) {
+            if (auto startConst = tryFoldInt(expr->arguments[1].get())) {
+                if (auto lenConst = tryFoldInt(expr->arguments[2].get())) {
+                    const auto& s = *strConst;
+                    int64_t slen = static_cast<int64_t>(s.size());
+                    int64_t startVal = *startConst, lenVal = *lenConst;
+                    if (startVal < 0) startVal = 0;
+                    if (startVal > slen) startVal = slen;
+                    int64_t maxLen = slen - startVal;
+                    if (lenVal < 0) lenVal = 0;
+                    if (lenVal > maxLen) lenVal = maxLen;
+                    std::string result = s.substr(static_cast<size_t>(startVal), static_cast<size_t>(lenVal));
+                    llvm::GlobalVariable* gv = internString(result);
+                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                        gv->getValueType(),
+                        gv,
+                        llvm::ArrayRef<llvm::Constant*>{
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                        });
                 }
             }
         }
@@ -1899,8 +1898,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_UPPER) {
         validateArgCount(expr, "str_upper", 1);
-        // NOTE: Cannot constant-fold str_upper — callers may mutate the returned
-        // heap-allocated string via s[i]=v, and a read-only global would segfault.
+        // NOTE: Cannot fold str_upper to an interned global — callers may
+        // mutate the returned string via s[i]=v.  evalConstBuiltin handles
+        // the abstract fold for pure-evaluation contexts (tryConstEvalFull).
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -1944,8 +1944,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_LOWER) {
         validateArgCount(expr, "str_lower", 1);
-        // NOTE: Cannot constant-fold str_lower — callers may mutate the returned
-        // heap-allocated string via s[i]=v, and a read-only global would segfault.
+        // NOTE: Cannot fold str_lower to an interned global — callers may
+        // mutate the returned string via s[i]=v.  evalConstBuiltin handles
+        // the abstract fold for pure-evaluation contexts (tryConstEvalFull).
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -1989,28 +1990,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "str_contains", 2);
 
         // ── Compile-time str_contains folding ───────────────────────
-        // When both arguments are string literals, fold at compile time.
-        if (auto* hayLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (hayLit->literalType == LiteralExpr::LiteralType::STRING) {
-                if (auto* needleLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
-                    if (needleLit->literalType == LiteralExpr::LiteralType::STRING) {
-                        bool found = hayLit->stringValue.find(needleLit->stringValue) != std::string::npos;
-                        return llvm::ConstantInt::get(getDefaultType(), found ? 1 : 0);
-                    }
-                }
+        // When both arguments are compile-time string constants, fold at compile time.
+        if (auto hayConst = tryFoldStr(expr->arguments[0].get())) {
+            if (auto needleConst = tryFoldStr(expr->arguments[1].get())) {
+                bool found = hayConst->find(*needleConst) != std::string::npos;
+                return llvm::ConstantInt::get(getDefaultType(), found ? 1 : 0);
             }
         }
 
-        // Detect single-character literal needle → use memchr (SIMD-optimized)
+        // Detect single-character needle → use memchr (SIMD-optimized)
         // instead of strstr (byte-by-byte scan).
         Expression* needleExpr = expr->arguments[1].get();
         bool isSingleChar = false;
         char singleCharVal = 0;
-        if (needleExpr->type == ASTNodeType::LITERAL_EXPR) {
-            auto* lit = static_cast<LiteralExpr*>(needleExpr);
-            if (lit->literalType == LiteralExpr::LiteralType::STRING && lit->stringValue.size() == 1) {
+        if (auto needleConst = tryFoldStr(needleExpr)) {
+            if (needleConst->size() == 1) {
                 isSingleChar = true;
-                singleCharVal = lit->stringValue[0];
+                singleCharVal = (*needleConst)[0];
             }
         }
         llvm::Value* haystackArg = generateExpression(expr->arguments[0].get());
@@ -2046,28 +2042,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "str_index_of", 2);
 
         // ── Compile-time str_index_of folding ───────────────────────
-        if (auto* hayLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (hayLit->literalType == LiteralExpr::LiteralType::STRING) {
-                if (auto* needleLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
-                    if (needleLit->literalType == LiteralExpr::LiteralType::STRING) {
-                        auto pos = hayLit->stringValue.find(needleLit->stringValue);
-                        int64_t result = (pos == std::string::npos) ? -1 : static_cast<int64_t>(pos);
-                        return llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(result));
-                    }
-                }
+        if (auto hayConst = tryFoldStr(expr->arguments[0].get())) {
+            if (auto needleConst = tryFoldStr(expr->arguments[1].get())) {
+                auto pos = hayConst->find(*needleConst);
+                int64_t result = (pos == std::string::npos) ? -1 : static_cast<int64_t>(pos);
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(result));
             }
         }
 
-        // Detect single-character literal needle → use memchr (SIMD-optimized)
+        // Detect single-character needle → use memchr (SIMD-optimized)
         // instead of strstr (byte-by-byte scan).
         Expression* needleExpr = expr->arguments[1].get();
         bool isSingleChar = false;
         char singleCharVal = 0;
-        if (needleExpr->type == ASTNodeType::LITERAL_EXPR) {
-            auto* lit = static_cast<LiteralExpr*>(needleExpr);
-            if (lit->literalType == LiteralExpr::LiteralType::STRING && lit->stringValue.size() == 1) {
+        if (auto needleConst = tryFoldStr(needleExpr)) {
+            if (needleConst->size() == 1) {
                 isSingleChar = true;
-                singleCharVal = lit->stringValue[0];
+                singleCharVal = (*needleConst)[0];
             }
         }
         llvm::Value* haystackArg = generateExpression(expr->arguments[0].get());
@@ -2092,9 +2083,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNull = builder->CreateICmpEQ(result, nullPtr, "indexof.isnull");
-        llvm::Value* foundInt = builder->CreatePtrToInt(result, getDefaultType(), "indexof.foundint");
-        llvm::Value* baseInt = builder->CreatePtrToInt(haystackPtr, getDefaultType(), "indexof.baseint");
-        llvm::Value* offset = builder->CreateSub(foundInt, baseInt, "indexof.offset");
+        llvm::Value* offset = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), result, haystackPtr, "indexof.offset");
         llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
         return builder->CreateSelect(isNull, negOne, offset, "indexof.result");
     }
@@ -2227,9 +2216,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // bSrc and bDst are live values from the loop header (single predecessor).
         builder->SetInsertPoint(buildDoneBB);
         // Copy remaining chars: tail = strLen - (bSrc - strPtr)
-        llvm::Value* srcBase  = builder->CreatePtrToInt(strPtr, getDefaultType(), "replace.srcbase");
-        llvm::Value* srcCurr  = builder->CreatePtrToInt(bSrc,   getDefaultType(), "replace.srccurr");
-        llvm::Value* consumed = builder->CreateSub(srcCurr, srcBase, "replace.consumed");
+        llvm::Value* consumed = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), bSrc, strPtr, "replace.consumed");
         llvm::Value* tail     = builder->CreateSub(strLen, consumed, "replace.tail");
         builder->CreateCall(getOrDeclareMemcpy(), {bDst, bSrc, tail});
         llvm::Value* endPtr   = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), bDst, tail, "replace.end");
@@ -2251,8 +2238,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_TRIM) {
         validateArgCount(expr, "str_trim", 1);
-        // NOTE: Cannot constant-fold str_trim — callers may mutate the returned
-        // heap-allocated string via s[i]=v, and a read-only global would segfault.
+        // NOTE: Cannot fold str_trim to an interned global — callers may
+        // mutate the returned string via s[i]=v.  evalConstBuiltin handles
+        // the abstract fold for pure-evaluation contexts (tryConstEvalFull).
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
                                   ? strArg
@@ -2349,16 +2337,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "str_starts_with", 2);
 
         // ── Compile-time str_starts_with folding ────────────────────
-        // When both arguments are string literals, fold at compile time.
-        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
-                if (auto* prefixLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
-                    if (prefixLit->literalType == LiteralExpr::LiteralType::STRING) {
-                        bool result = strLit->stringValue.substr(0, prefixLit->stringValue.size())
-                                      == prefixLit->stringValue;
-                        return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
-                    }
-                }
+        // When both arguments are compile-time string constants, fold at compile time.
+        if (auto strConst = tryFoldStr(expr->arguments[0].get())) {
+            if (auto prefixConst = tryFoldStr(expr->arguments[1].get())) {
+                bool result = strConst->size() >= prefixConst->size() &&
+                              strConst->compare(0, prefixConst->size(), *prefixConst) == 0;
+                return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
             }
         }
 
@@ -2386,18 +2370,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "str_ends_with", 2);
 
         // ── Compile-time str_ends_with folding ──────────────────────
-        // When both arguments are string literals, fold at compile time.
-        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
-                if (auto* suffixLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
-                    if (suffixLit->literalType == LiteralExpr::LiteralType::STRING) {
-                        const auto& s = strLit->stringValue;
-                        const auto& suffix = suffixLit->stringValue;
-                        bool result = s.size() >= suffix.size() &&
-                                      s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
-                        return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
-                    }
-                }
+        // When both arguments are compile-time string constants, fold at compile time.
+        if (auto strConst = tryFoldStr(expr->arguments[0].get())) {
+            if (auto suffixConst = tryFoldStr(expr->arguments[1].get())) {
+                const auto& s = *strConst;
+                const auto& suffix = *suffixConst;
+                bool result = s.size() >= suffix.size() &&
+                              s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+                return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
             }
         }
 
@@ -2447,29 +2427,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // ── Compile-time str_repeat folding ─────────────────────────
         // When both arguments are compile-time constants and the result
         // is reasonably small, fold at compile time.
-        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
-                if (auto* countLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
-                    if (countLit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                        int64_t count = countLit->intValue;
-                        // Only fold for small results (≤ 256 bytes) to avoid
-                        // bloating the data section.
-                        if (count >= 0 && count * static_cast<int64_t>(strLit->stringValue.size()) <= 256) {
-                            std::string result;
-                            result.reserve(static_cast<size_t>(count) * strLit->stringValue.size());
-                            for (int64_t i = 0; i < count; ++i) {
-                                result += strLit->stringValue;
-                            }
-                            llvm::GlobalVariable* gv = internString(result);
-                            return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                                gv->getValueType(),
-                                gv,
-                                llvm::ArrayRef<llvm::Constant*>{
-                                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
-                                });
-                        }
-                    }
+        if (auto strConst = tryFoldStr(expr->arguments[0].get())) {
+            if (auto countConst = tryFoldInt(expr->arguments[1].get())) {
+                int64_t count = *countConst;
+                // Only fold for small results (≤ 256 bytes) to avoid
+                // bloating the data section.
+                if (count >= 0 && count * static_cast<int64_t>(strConst->size()) <= 256) {
+                    std::string result;
+                    result.reserve(static_cast<size_t>(count) * strConst->size());
+                    for (int64_t i = 0; i < count; ++i) result += *strConst;
+                    llvm::GlobalVariable* gv = internString(result);
+                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                        gv->getValueType(),
+                        gv,
+                        llvm::ArrayRef<llvm::Constant*>{
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                        });
                 }
             }
         }
@@ -2527,21 +2501,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::STR_REVERSE) {
         validateArgCount(expr, "str_reverse", 1);
 
-        // ── Compile-time str_reverse folding ────────────────────────
-        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
-                std::string reversed = strLit->stringValue;
-                std::reverse(reversed.begin(), reversed.end());
-                llvm::GlobalVariable* gv = internString(reversed);
-                return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                    gv->getValueType(),
-                    gv,
-                    llvm::ArrayRef<llvm::Constant*>{
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
-                    });
-            }
-        }
+        // NOTE: Cannot fold str_reverse to an interned global — callers may
+        // mutate the returned string via s[i]=v.  evalConstBuiltin handles
+        // the abstract fold for pure-evaluation contexts (tryConstEvalFull).
 
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
@@ -3477,9 +3439,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         //     SIMD vpcmpq+vpminsd (AVX2) or vpminq (AVX-512) instructions
         llvm::Function* sminFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
         llvm::Value* newMin = builder->CreateCall(sminFn, {elem, curMin}, "amin.newmin");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "amin.newidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        // Eliminates a redundant add and provides SCEV with tight nsw+nuw flags.
         curMin->addIncoming(newMin, bodyBB);
-        idx->addIncoming(newIdx, bodyBB);
+        idx->addIncoming(offset, bodyBB);
         auto* backBr_2825 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 4> mds;
@@ -4367,21 +4330,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "str_count", 2);
 
         // ── Compile-time str_count folding ──────────────────────────
-        if (auto* sLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (sLit->literalType == LiteralExpr::LiteralType::STRING) {
-                if (auto* subLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
-                    if (subLit->literalType == LiteralExpr::LiteralType::STRING &&
-                        !subLit->stringValue.empty()) {
-                        const std::string& haystack = sLit->stringValue;
-                        const std::string& needle = subLit->stringValue;
-                        int64_t count = 0;
-                        size_t pos = 0;
-                        while ((pos = haystack.find(needle, pos)) != std::string::npos) {
-                            ++count;
-                            pos += needle.size();
-                        }
-                        return llvm::ConstantInt::get(getDefaultType(), count);
+        if (auto hayConst = tryFoldStr(expr->arguments[0].get())) {
+            if (auto needleConst = tryFoldStr(expr->arguments[1].get())) {
+                if (!needleConst->empty()) {
+                    int64_t count = 0;
+                    size_t pos = 0;
+                    while ((pos = hayConst->find(*needleConst, pos)) != std::string::npos) {
+                        ++count;
+                        pos += needleConst->size();
                     }
+                    return llvm::ConstantInt::get(getDefaultType(), count);
                 }
             }
         }
@@ -4852,6 +4810,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CHAR_CODE) {
         validateArgCount(expr, "char_code", 1);
+        // ── Compile-time fold: char_code(str_const) ─────────────────
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            if (!sv->empty())
+                return llvm::ConstantInt::get(getDefaultType(),
+                    static_cast<int64_t>(static_cast<unsigned char>((*sv)[0])));
+        }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
@@ -4862,6 +4826,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::NUMBER_TO_STRING) {
         validateArgCount(expr, "number_to_string", 1);
+        // ── Compile-time fold: number_to_string(integer_const) ──────
+        if (auto iv = tryFoldInt(expr->arguments[0].get())) {
+            std::string s = std::to_string(*iv);
+            llvm::GlobalVariable* gv = internString(s);
+            stringReturningFunctions_.insert("number_to_string");
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         bool isFloat = val->getType()->isDoubleTy();
         if (!isFloat)
@@ -4888,6 +4863,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STRING_TO_NUMBER) {
         validateArgCount(expr, "string_to_number", 1);
+        // ── Compile-time fold: string_to_number(str_const) ──────────
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            try { return llvm::ConstantInt::get(getDefaultType(),
+                      static_cast<int64_t>(std::stoll(*sv))); }
+            catch (...) {}
+        }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
@@ -5013,8 +4994,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // ── Bitwise intrinsic builtins ─────────────────────────────────────
     if (bid == BuiltinId::POPCOUNT) {
         validateArgCount(expr, "popcount", 1);
-        // Constant-fold popcount(literal).
-        if (auto val = getConstantInt(expr->arguments[0].get())) {
+        // Constant-fold popcount(any const expr).
+        if (auto val = tryFoldInt(expr->arguments[0].get())) {
             uint64_t bits = static_cast<uint64_t>(*val);
             return llvm::ConstantInt::get(getDefaultType(), __builtin_popcountll(bits));
         }
@@ -5028,8 +5009,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CLZ) {
         validateArgCount(expr, "clz", 1);
-        // Constant-fold clz(literal).
-        if (auto val = getConstantInt(expr->arguments[0].get())) {
+        // Constant-fold clz(any const expr).
+        if (auto val = tryFoldInt(expr->arguments[0].get())) {
             uint64_t bits = static_cast<uint64_t>(*val);
             int64_t result = bits == 0 ? 64 : __builtin_clzll(bits);
             return llvm::ConstantInt::get(getDefaultType(), result);
@@ -5044,8 +5025,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CTZ) {
         validateArgCount(expr, "ctz", 1);
-        // Constant-fold ctz(literal).
-        if (auto val = getConstantInt(expr->arguments[0].get())) {
+        // Constant-fold ctz(any const expr).
+        if (auto val = tryFoldInt(expr->arguments[0].get())) {
             uint64_t bits = static_cast<uint64_t>(*val);
             int64_t result = bits == 0 ? 64 : __builtin_ctzll(bits);
             return llvm::ConstantInt::get(getDefaultType(), result);
@@ -5060,8 +5041,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::BITREVERSE) {
         validateArgCount(expr, "bitreverse", 1);
-        // Constant-fold bitreverse(literal).
-        if (auto val = getConstantInt(expr->arguments[0].get())) {
+        // Constant-fold bitreverse(any const expr).
+        if (auto val = tryFoldInt(expr->arguments[0].get())) {
             uint64_t bits = static_cast<uint64_t>(*val);
             uint64_t reversed = 0;
             for (int i = 0; i < 64; ++i)
@@ -5084,8 +5065,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::IS_POWER_OF_2) {
         validateArgCount(expr, "is_power_of_2", 1);
-        // Constant-fold is_power_of_2(literal).
-        if (auto val = getConstantInt(expr->arguments[0].get())) {
+        // Constant-fold is_power_of_2(any const expr).
+        if (auto val = tryFoldInt(expr->arguments[0].get())) {
             int64_t v = *val;
             bool result = v > 0 && (v & (v - 1)) == 0;
             return llvm::ConstantInt::get(getDefaultType(), result ? 1 : 0);
@@ -5109,9 +5090,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::LCM) {
         validateArgCount(expr, "lcm", 2);
-        // Constant-fold lcm(a, b) when both are integer literals.
-        if (auto va = getConstantInt(expr->arguments[0].get())) {
-            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+        // Constant-fold lcm(a, b) when both are compile-time constants.
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
                 uint64_t a = static_cast<uint64_t>(std::abs(*va));
                 uint64_t b = static_cast<uint64_t>(std::abs(*vb));
                 if (a == 0 || b == 0)
@@ -5174,8 +5155,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::ROTATE_LEFT) {
         validateArgCount(expr, "rotate_left", 2);
         // Constant-fold rotate_left(val, amt).
-        if (auto vv = getConstantInt(expr->arguments[0].get())) {
-            if (auto va = getConstantInt(expr->arguments[1].get())) {
+        if (auto vv = tryFoldInt(expr->arguments[0].get())) {
+            if (auto va = tryFoldInt(expr->arguments[1].get())) {
                 uint64_t v = static_cast<uint64_t>(*vv);
                 unsigned amt = static_cast<unsigned>(*va) & 63;
                 uint64_t result = (v << amt) | (v >> (64 - amt));
@@ -5194,8 +5175,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::ROTATE_RIGHT) {
         validateArgCount(expr, "rotate_right", 2);
         // Constant-fold rotate_right(val, amt).
-        if (auto vv = getConstantInt(expr->arguments[0].get())) {
-            if (auto va = getConstantInt(expr->arguments[1].get())) {
+        if (auto vv = tryFoldInt(expr->arguments[0].get())) {
+            if (auto va = tryFoldInt(expr->arguments[1].get())) {
                 uint64_t v = static_cast<uint64_t>(*vv);
                 unsigned amt = static_cast<unsigned>(*va) & 63;
                 uint64_t result = (v >> amt) | (v << (64 - amt));
@@ -5213,8 +5194,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::BSWAP) {
         validateArgCount(expr, "bswap", 1);
-        // Constant-fold bswap(literal).
-        if (auto val = getConstantInt(expr->arguments[0].get())) {
+        // Constant-fold bswap(any const expr).
+        if (auto val = tryFoldInt(expr->arguments[0].get())) {
             uint64_t bits = static_cast<uint64_t>(*val);
             uint64_t swapped = __builtin_bswap64(bits);
             return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(swapped));
@@ -5227,9 +5208,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SATURATING_ADD) {
         validateArgCount(expr, "saturating_add", 2);
-        // Constant-fold saturating_add(a, b) when both are integer literals.
-        if (auto va = getConstantInt(expr->arguments[0].get())) {
-            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+        // Constant-fold saturating_add(a, b) when both are compile-time constants.
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
                 int64_t a = *va, b = *vb;
                 // Signed saturating add: clamp to INT64_MIN/INT64_MAX on overflow.
                 __int128 sum = static_cast<__int128>(a) + static_cast<__int128>(b);
@@ -5248,9 +5229,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SATURATING_SUB) {
         validateArgCount(expr, "saturating_sub", 2);
-        // Constant-fold saturating_sub(a, b) when both are integer literals.
-        if (auto va = getConstantInt(expr->arguments[0].get())) {
-            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+        // Constant-fold saturating_sub(a, b) when both are compile-time constants.
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
                 int64_t a = *va, b = *vb;
                 // Signed saturating sub: clamp to INT64_MIN/INT64_MAX on overflow.
                 __int128 diff = static_cast<__int128>(a) - static_cast<__int128>(b);
@@ -5386,9 +5367,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "aprod.elem");
         llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* newAcc = builder->CreateMul(acc, elem, "aprod.newacc");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aprod.newidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        // Eliminates a redundant add and provides SCEV with tight nsw+nuw flags.
         acc->addIncoming(newAcc, bodyBB);
-        idx->addIncoming(newIdx, bodyBB);
+        idx->addIncoming(offset, bodyBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
@@ -5612,6 +5594,67 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
     }
+
+    // Short-circuit calls to zero-parameter pure functions whose return value
+    // is a compile-time constant (classified by analyzeConstantReturnValues).
+    if (expr->arguments.empty() && !inOptMaxFunction) {
+        auto intIt = constIntReturnFunctions_.find(expr->callee);
+        if (intIt != constIntReturnFunctions_.end()) {
+            auto* ci = llvm::ConstantInt::get(getDefaultType(), intIt->second);
+            if (intIt->second >= 0) nonNegValues_.insert(ci);
+            return ci;
+        }
+        auto strIt = constStringReturnFunctions_.find(expr->callee);
+        if (strIt != constStringReturnFunctions_.end()) {
+            llvm::GlobalVariable* gv = internString(strIt->second);
+            stringReturningFunctions_.insert(expr->callee);
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
+    }
+
+    // Multi-param constant folding: if all arguments are compile-time constants
+    // and the function body is pure-foldable, evaluate entirely at compile time.
+    if (!inOptMaxFunction && !expr->arguments.empty() &&
+        optimizationLevel >= OptimizationLevel::O1) {
+        auto declIt2 = functionDecls_.find(expr->callee);
+        if (declIt2 != functionDecls_.end() && declIt2->second->body &&
+            expr->arguments.size() == declIt2->second->parameters.size()) {
+            std::unordered_map<std::string, ConstValue> argEnv;
+            bool allConst = true;
+            for (size_t i = 0; i < expr->arguments.size(); ++i) {
+                auto cv = tryFoldExprToConst(expr->arguments[i].get());
+                if (!cv) { allConst = false; break; }
+                argEnv[declIt2->second->parameters[i].name] = *cv;
+            }
+            if (allConst) {
+                auto result = tryConstEvalFull(declIt2->second, argEnv);
+                if (result) {
+                    if (result->kind == ConstValue::Kind::Integer) {
+                        auto* ci = llvm::ConstantInt::get(getDefaultType(), result->intVal);
+                        if (result->intVal >= 0) nonNegValues_.insert(ci);
+                        return ci;
+                    }
+                    // String result: intern and return a GEP pointer
+                    if (result->kind == ConstValue::Kind::String) {
+                        llvm::GlobalVariable* gv = internString(result->strVal);
+                        stringReturningFunctions_.insert(expr->callee);
+                        return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                            gv->getValueType(), gv,
+                            llvm::ArrayRef<llvm::Constant*>{
+                                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                    }
+                    // Array or other compound type — not representable as a
+                    // compile-time LLVM constant; fall through to normal call.
+                }
+            }
+        }
+    }
+
     auto calleeIt = functions.find(expr->callee);
     if (calleeIt == functions.end() || !calleeIt->second) {
         // Build "did you mean?" suggestion from known functions.
