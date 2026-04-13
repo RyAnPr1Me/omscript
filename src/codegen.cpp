@@ -3653,6 +3653,18 @@ void CodeGenerator::generate(Program* program) {
             else
                 function->addRetAttr(llvm::Attribute::SExt);
         }
+        // For functions with pointer return types (-> string, -> int[], -> dict,
+        // -> StructType): OmScript guarantees non-null (runtime aborts on
+        // allocation failure) and at least 8 bytes dereferenceable (every
+        // array/string has a valid header slot).  These attributes propagate
+        // through the optimizer and caller context even at O0, helping the
+        // inliner and GVN prove non-null access without the full optimization
+        // pipeline.
+        if (retType->isPointerTy() && optimizationLevel >= OptimizationLevel::O1) {
+            function->addRetAttr(llvm::Attribute::NonNull);
+            function->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(
+                *context, 8));
+        }
         functions[func->name] = function;
         functionDecls_[func->name] = func.get();
     }
@@ -4417,6 +4429,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // null/bounds checks without runtime verification.
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                // OmScript arrays/strings are allocated via calloc/malloc which
+                // guarantees at least 16-byte alignment on 64-bit Linux.  The
+                // align(8) attribute (conservative lower bound) tells LLVM's
+                // vectorizer that the pointer is at least 8-byte aligned, enabling
+                // it to emit aligned vector load/store instructions.
+                function->addParamAttr(i, llvm::Attribute::getWithAlignment(
+                    *context, llvm::Align(8)));
                 OMSC_ADD_NOCAPTURE(function, i);
             }
         }
@@ -4439,6 +4458,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // OmScript arrays always have a valid header (at least 8 bytes).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                function->addParamAttr(i, llvm::Attribute::getWithAlignment(
+                    *context, llvm::Align(8)));
                 OMSC_ADD_NOCAPTURE(function, i);
             }
         }
@@ -4462,6 +4483,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // size for any OmScript pointer (arrays, strings).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                // OmScript arrays/strings are always at least 8-byte aligned
+                // (calloc/malloc on 64-bit Linux guarantees ≥16-byte alignment).
+                // align(8) is the conservative lower bound; it tells LLVM's
+                // vectorizer to use aligned load/store instructions, avoiding
+                // alignment masking and enabling better SLP vectorization.
+                function->addParamAttr(i, llvm::Attribute::getWithAlignment(
+                    *context, llvm::Align(8)));
                 // OmScript's ownership model ensures pointer parameters are
                 // never captured (stored into global state or returned as
                 // pointers).  The borrow checker prevents escaping references.
