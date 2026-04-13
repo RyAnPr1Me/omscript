@@ -521,6 +521,20 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             loadInst->setMetadata(llvm::LLVMContext::MD_noundef,
                                   llvm::MDNode::get(*context, {}));
+            // !nonnull on pointer-typed loads: when the loaded value is a
+            // string or array pointer, OmScript guarantees non-null (runtime
+            // aborts on allocation failure).  This lets LLVM eliminate any
+            // null checks on the loaded pointer, speculate subsequent loads,
+            // and hoist accesses out of loops that test for null.
+            // Only applies to loads that return ptr type (annotated params);
+            // unannotated local array variables are stored as i64 and use
+            // the !range [0, INT64_MAX) path below for non-negativity instead.
+            if (loadInst->getType()->isPointerTy()) {
+                if (stringVars_.count(expr->name) || arrayVars_.count(expr->name)) {
+                    loadInst->setMetadata(llvm::LLVMContext::MD_nonnull,
+                                          llvm::MDNode::get(*context, {}));
+                }
+            }
         }
     }
     // Track non-negativity: if the alloca is known to hold a non-negative

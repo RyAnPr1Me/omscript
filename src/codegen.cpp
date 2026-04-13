@@ -1579,6 +1579,8 @@ llvm::Function* CodeGenerator::getOrDeclareToupper() {
     // memory(none): toupper is a pure function — no reads or writes to memory.
     // This lets the optimizer hoist it out of loops and CSE duplicate calls.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
+    // speculatable: toupper has no side effects, LLVM may hoist/CSE calls.
+    fn->addFnAttr(llvm::Attribute::Speculatable);
     return fn;
 }
 
@@ -1589,6 +1591,7 @@ llvm::Function* CodeGenerator::getOrDeclareTolower() {
     llvm::Function* fn = declareExternalFn("tolower", ty);
     // memory(none): tolower is a pure function — no reads or writes to memory.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
+    fn->addFnAttr(llvm::Attribute::Speculatable);
     return fn;
 }
 
@@ -1599,6 +1602,7 @@ llvm::Function* CodeGenerator::getOrDeclareIsspace() {
     llvm::Function* fn = declareExternalFn("isspace", ty);
     // memory(none): isspace is a pure function — no reads or writes to memory.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
+    fn->addFnAttr(llvm::Attribute::Speculatable);
     return fn;
 }
 
@@ -4579,6 +4583,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
+    auto paramArrIt = funcParamArrayTypes_.find(func->name);
     auto argIt = function->arg_begin();
     for (size_t paramIdx = 0; paramIdx < func->parameters.size(); ++paramIdx) {
         auto& param = func->parameters[paramIdx];
@@ -4591,6 +4596,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
         if (paramStrIt != funcParamStringTypes_.end() && paramStrIt->second.count(paramIdx))
             stringVars_.insert(param.name);
+        // Pre-populate arrayVars_ for parameters known to receive array arguments.
+        // This ensures !nonnull and !range annotations propagate to loads of
+        // array parameter variables inside the function body.
+        if (paramArrIt != funcParamArrayTypes_.end() && paramArrIt->second.count(paramIdx))
+            arrayVars_.insert(param.name);
 
         // @prefetch: emit llvm.prefetch at function entry for annotated params.
         // This hints to the CPU to load the parameter's memory into cache
