@@ -14,6 +14,7 @@
 #include "lexer.h"
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -127,6 +128,26 @@ class Parser {
 
     /// Known enum names for scope resolution validation.
     std::unordered_set<std::string> enumNames_;
+
+    /// Namespace registry populated by 'import "file" as alias' statements.
+    ///
+    /// importNamespaces_[alias][funcName] = actualFuncName
+    ///
+    /// The alias key uses '__' as separator for multi-level aliases:
+    ///   import "file" as john::int  →  key "john__int"
+    ///
+    /// At call sites, a::b::c(args) is resolved via longest-prefix matching:
+    /// try "a__b" → c, then "a" → b__c, and use the first hit.
+    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> importNamespaces_;
+
+    /// Resolve a scope chain (segments separated by ::) to an actual function
+    /// name using the importNamespaces_ registry.
+    ///
+    /// Tries longest-prefix namespace matching.  Returns the resolved function
+    /// name on success.  Calls error() if a namespace is found but the function
+    /// is absent.  Returns an empty string when no namespace prefix matches
+    /// (caller falls back to flat name mangling for backward compatibility).
+    std::string resolveNamespacedPath(const std::vector<std::string>& segments);
 
     std::unique_ptr<Expression> parseExpression();
     std::unique_ptr<Expression> parseAssignment();

@@ -292,6 +292,23 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                          std::vector<std::unique_ptr<EnumDecl>>& enums,
                          std::vector<std::unique_ptr<StructDecl>>& structs) {
     const Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
+
+    // Optional alias: import "file" as alias
+    // The alias may itself be multi-level: import "file" as john::int
+    // which allows calling imported functions as john::int::funcname().
+    std::string alias;
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "as") {
+        advance(); // consume 'as'
+        const Token aliasTok = consume(TokenType::IDENTIFIER, "Expected alias name after 'as'");
+        alias = aliasTok.lexeme;
+        // Support multi-level alias: as john::int  →  internal prefix "john__int"
+        while (check(TokenType::SCOPE)) {
+            advance(); // consume '::'
+            const Token seg = consume(TokenType::IDENTIFIER, "Expected identifier in alias path");
+            alias += "__" + seg.lexeme;
+        }
+    }
+
     consume(TokenType::SEMICOLON, "Expected ';' after import statement");
 
     std::string filename = fileToken.lexeme;
@@ -346,8 +363,17 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 
     auto importedProgram = importParser.parse();
 
-    // Merge imported declarations into the current program
+    // Merge imported declarations into the current program.
+    // When an alias was given, register every imported function in the
+    // namespace map so that alias::funcname(args) resolves directly to the
+    // original function — no forwarder overhead, and the compiler can detect
+    // typos in function names at parse time.
+    // The original (unqualified) function is also kept so intra-module calls
+    // inside the imported file continue to resolve correctly.
     for (auto& fn : importedProgram->functions) {
+        if (!alias.empty()) {
+            importNamespaces_[alias][fn->name] = fn->name;
+        }
         functions.push_back(std::move(fn));
     }
     for (auto& en : importedProgram->enums) {
@@ -479,9 +505,47 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 
     std::unique_ptr<BlockStmt> body;
 
-    // Shorthand: fn name(params) = expr;
-    // Desugars to: fn name(params) { return expr; }
-    if (match(TokenType::ASSIGN)) {
+    // Function alias: fn name(params) [-> ret] == target::path;
+    // The target path is resolved through the namespace registry when possible,
+    // falling back to flat name mangling (a::b::c → a__b__c) for compatibility.
+    // Desugars to a thin wrapper: fn name(params) { return target(params...); }
+    if (match(TokenType::EQ)) {
+        // Collect the full target path.
+        std::vector<std::string> segs;
+        segs.push_back(
+            consume(TokenType::IDENTIFIER, "Expected function path after '=='").lexeme);
+        while (check(TokenType::SCOPE)) {
+            advance(); // consume '::'
+            segs.push_back(
+                consume(TokenType::IDENTIFIER, "Expected identifier in function path").lexeme);
+        }
+        consume(TokenType::SEMICOLON, "Expected ';' after function alias");
+        // Resolve via namespace registry, fall back to flat name.
+        std::string resolvedTarget;
+        if (segs.size() >= 2) {
+            resolvedTarget = resolveNamespacedPath(segs);
+        }
+        if (resolvedTarget.empty()) {
+            resolvedTarget = segs[0];
+            for (size_t i = 1; i < segs.size(); ++i)
+                resolvedTarget += "__" + segs[i];
+        }
+        // Build: return resolvedTarget(params...);
+        std::vector<std::unique_ptr<Expression>> callArgs;
+        for (const auto& param : parameters) {
+            auto argExpr = std::make_unique<IdentifierExpr>(param.name);
+            callArgs.push_back(std::move(argExpr));
+        }
+        auto callExpr = std::make_unique<CallExpr>(resolvedTarget, std::move(callArgs));
+        callExpr->line = name.line;
+        callExpr->column = name.column;
+        auto retStmt = std::make_unique<ReturnStmt>(std::move(callExpr));
+        retStmt->line = name.line;
+        retStmt->column = name.column;
+        std::vector<std::unique_ptr<Statement>> stmts;
+        stmts.push_back(std::move(retStmt));
+        body = std::make_unique<BlockStmt>(std::move(stmts));
+    } else if (match(TokenType::ASSIGN)) {
         auto expr = parseExpression();
         consume(TokenType::SEMICOLON, "Expected ';' after expression-body function");
         auto retStmt = std::make_unique<ReturnStmt>(std::move(expr));
@@ -2551,14 +2615,65 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
 
     if (match(TokenType::IDENTIFIER)) {
         const Token token = tokens[current - 1];
-        // Scope resolution: Enum::Member creates a ScopeResolutionExpr
-        // that is resolved in codegen with proper scope validation.
+        // Scope resolution: handles single-level (Enum::Member) and multi-level
+        // (alias::sub::func) paths.
+        //
+        // Rules:
+        //  - If the chain ends with '(' it is a qualified function call: build a
+        //    flat identifier "a__b__c" that parseCall() will wrap into CallExpr.
+        //  - If the chain is exactly 2 levels and NOT followed by '(' it is an
+        //    enum member access: preserve the existing ScopeResolutionExpr path.
+        //  - Any other multi-level use not followed by '(' also becomes a flat
+        //    IdentifierExpr (e.g. used as a first-class value, error caught later).
         if (match(TokenType::SCOPE)) {
-            const Token memberToken = consume(TokenType::IDENTIFIER, "Expected member name after '::'");
-            auto expr = std::make_unique<ScopeResolutionExpr>(token.lexeme, memberToken.lexeme);
-            expr->line = token.line;
-            expr->column = token.column;
-            return expr;
+            // Collect the full scope chain into a segment vector.
+            std::vector<std::string> segments;
+            segments.push_back(token.lexeme);
+            segments.push_back(
+                consume(TokenType::IDENTIFIER, "Expected identifier after '::'").lexeme);
+            int depth = 1;
+            while (check(TokenType::SCOPE)) {
+                advance(); // consume '::'
+                segments.push_back(
+                    consume(TokenType::IDENTIFIER, "Expected identifier after '::'").lexeme);
+                ++depth;
+            }
+
+            if (check(TokenType::LPAREN)) {
+                // Qualified call site: try real namespace resolution first.
+                const std::string resolved = resolveNamespacedPath(segments);
+                if (!resolved.empty()) {
+                    auto e = std::make_unique<IdentifierExpr>(resolved);
+                    e->line = token.line;
+                    e->column = token.column;
+                    return e;
+                }
+                // Fallback: flat name mangling (a::b::c → a__b__c).
+                // Handles unaliased imports and backward-compatible uses.
+                std::string flatName = segments[0];
+                for (size_t i = 1; i < segments.size(); ++i)
+                    flatName += "__" + segments[i];
+                auto e = std::make_unique<IdentifierExpr>(flatName);
+                e->line = token.line;
+                e->column = token.column;
+                return e;
+            }
+
+            // Not a call: single-level → classic enum member access.
+            if (depth == 1) {
+                auto e = std::make_unique<ScopeResolutionExpr>(segments[0], segments[1]);
+                e->line = token.line;
+                e->column = token.column;
+                return e;
+            }
+            // Multi-level value reference without '()': flat identifier.
+            std::string flatName = segments[0];
+            for (size_t i = 1; i < segments.size(); ++i)
+                flatName += "__" + segments[i];
+            auto e = std::make_unique<IdentifierExpr>(flatName);
+            e->line = token.line;
+            e->column = token.column;
+            return e;
         }
         // Check if this is a struct literal: StructName { field: value, ... }
         if (structNames_.count(token.lexeme) && check(TokenType::LBRACE)) {
