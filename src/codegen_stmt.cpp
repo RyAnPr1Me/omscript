@@ -2865,8 +2865,37 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
         codegenError("Variable '" + stmt->varName + "' not found for invalidate", stmt);
     }
     llvm::Value* alloca = it->second;
+    const std::string& name = stmt->varName;
 
-    // Emit llvm.lifetime.end to mark the variable as dead.
+    // ── Heap-free heap-allocated variables ────────────────────────────────
+    // `invalidate` is the user's explicit deallocation command.  For any
+    // variable whose storage lives on the heap (string, array, dict/map), we
+    // load the heap pointer from the alloca and emit free() immediately.
+    // Stack-allocated arrays (stackAllocatedArrays_) are skipped — they live
+    // on the stack and must not be freed.
+    const bool isHeapString = stringVars_.count(name) > 0;
+    const bool isHeapArray  = arrayVars_.count(name) > 0 &&
+                               !stackAllocatedArrays_.count(name);
+    const bool isHeapDict   = dictVarNames_.count(name) > 0;
+
+    if (isHeapString || isHeapArray || isHeapDict) {
+        // Load the heap pointer from the alloca (i64 stored as int, ptr cast needed).
+        auto* allocaInst2 = llvm::dyn_cast<llvm::AllocaInst>(alloca);
+        if (allocaInst2) {
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* heapPtr = builder->CreateLoad(
+                allocaInst2->getAllocatedType(), allocaInst2, name + ".ptr");
+            // Cast i64 → ptr if necessary (OmScript stores heap pointers as i64)
+            if (!heapPtr->getType()->isPointerTy()) {
+                heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy, name + ".heapptr");
+            }
+            // Emit free().  The compiler already knows free() is
+            // InaccessibleOrArgMemOnly so this is safe to CSE/hoist.
+            builder->CreateCall(getOrDeclareFree(), {heapPtr});
+        }
+    }
+
+    // Emit llvm.lifetime.end to mark the alloca slot as dead.
     // This allows LLVM to reuse the stack slot and eliminate dead stores.
     auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca);
     if (allocaInst) {
@@ -2884,9 +2913,9 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     builder->CreateStore(llvm::UndefValue::get(allocaType), alloca);
 
     // Mark the variable as dead for use-after-invalidate detection.
-    deadVars_.insert(stmt->varName);
-    deadVarReason_[stmt->varName] = "invalidated";
-    getBorrowState(stmt->varName).invalidated = true;
+    deadVars_.insert(name);
+    deadVarReason_[name] = "invalidated";
+    getBorrowState(name).invalidated = true;
 }
 
 void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
