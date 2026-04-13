@@ -899,6 +899,14 @@ class CodeGenerator {
     //   len(), tryFoldStringConcat(), and const-variable initialization to fold
     //   cross-function calls at compile time.
     void analyzeConstantReturnValues(Program* program);
+    // autoDetectConstEvalFunctions: companion pass to analyzeConstantReturnValues
+    //   that identifies user-defined functions with parameters that are "pure"
+    //   (no I/O, no global mutations, only arithmetic/logical/conditional ops) and
+    //   registers them in constEvalFunctions_.  This enables the existing
+    //   tryConstEval/tryConstEvalFull machinery to fold calls to these functions
+    //   at compile time when all arguments are constants — without requiring an
+    //   explicit @const_eval annotation.
+    void autoDetectConstEvalFunctions(Program* program);
     // isPreAnalysisStringExpr: lightweight AST-only string check used by the
     //   pre-analysis (no access to namedValues; uses stringReturningFunctions_
     //   and paramStringIndices to track string parameters).

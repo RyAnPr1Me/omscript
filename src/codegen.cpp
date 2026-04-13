@@ -3864,6 +3864,15 @@ void CodeGenerator::generate(Program* program) {
     //   for (i in 0..get_n()) → loop bound folded to a constant
     analyzeConstantReturnValues(program);
 
+    // Auto-detect pure user-defined functions: identify functions with parameters
+    // whose bodies are pure (no I/O, no global mutations) and register them in
+    // constEvalFunctions_.  This enables the existing tryConstEval/tryConstEvalFull
+    // machinery to fold calls to these functions at compile time when all arguments
+    // are constants, without requiring explicit @const_eval annotations.
+    // Runs after analyzeConstantReturnValues so zero-arg const-returning functions
+    // are already classified and can be recognized as pure callees.
+    autoDetectConstEvalFunctions(program);
+
     // E-Graph Equality Saturation: apply algebraic simplification, constant
     // folding, strength reduction, and other rewrites at the AST level using
     // an e-graph.  This discovers globally optimal expression representations
@@ -6360,8 +6369,219 @@ void CodeGenerator::analyzeConstantReturnValues(Program* program) {
     }
 }
 
+// autoDetectConstEvalFunctions: identify user-defined functions with parameters
+// that are "pure" (no I/O, no global mutations, arithmetic/logic/conditional
+// bodies only) and register them in constEvalFunctions_.  This enables the
+// existing tryConstEval/tryConstEvalFull machinery to fold calls to these
+// functions at compile time when all arguments are constants, without requiring
+// explicit @const_eval annotations.
+//
+// Purity is detected via a fixed-point analysis:
+//   - A function is pure if its body contains only pure statements/expressions
+//   - A call expression is pure only if the callee is a known-pure function
+//   - The fixed-point loop handles mutual recursion (A calls B calls A) by
+//     conservatively marking mutually-recursive functions as not pure
+//
+// Runs at O1+ after analyzeConstantReturnValues so that zero-arg const funcs
+// are already in constIntReturnFunctions_ and can be recognized as pure calls.
+void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
+    if (!program || optimizationLevel < OptimizationLevel::O1) return;
 
-// Deduplicates identical string literals across the entire module by
+    // Set of builtins known to be pure (no I/O, no heap mutation observable
+    // to the caller, deterministic output for given inputs).
+    static const std::unordered_set<std::string> kPureBuiltins = {
+        "abs", "min", "max", "sign", "clamp", "pow", "sqrt", "log2", "gcd",
+        "is_even", "is_odd", "floor", "ceil", "round",
+        "to_int", "to_float", "to_string", "str_len", "len", "typeof",
+        "char_at", "str_eq", "str_find", "startswith", "endswith",
+        "str_upper", "str_lower", "str_trim",
+    };
+
+    // Set of builtin/user names that are impure (I/O, heap side-effects, etc.)
+    static const std::unordered_set<std::string> kImpureBuiltins = {
+        "print", "println", "printf", "input", "input_line", "assert",
+        "push", "pop", "insert", "remove", "reverse", "sort", "shuffle",
+        "swap", "resize", "clear", "append",
+        "fopen", "fclose", "fread", "fwrite", "fappend",
+        "exit", "abort", "panic", "error",
+        "random", "rand", "time", "sleep",
+    };
+
+    // Build index of all user function declarations for O(1) lookup.
+    std::unordered_map<std::string, const FunctionDecl*> allFuncs;
+    for (const auto& func : program->functions) {
+        allFuncs[func->name] = func.get();
+    }
+
+    // Track which user functions are currently known-pure.
+    std::unordered_set<std::string> knownPure;
+
+    // Seed with functions already in constEvalFunctions_ (explicit @const_eval).
+    for (auto it = constEvalFunctions_.begin(); it != constEvalFunctions_.end(); ++it) {
+        knownPure.insert(it->getKey().str());
+    }
+    // Seed with zero-arg functions already analyzed as const-return.
+    for (const auto& kv : constIntReturnFunctions_) {
+        knownPure.insert(kv.first().str());
+    }
+    for (const auto& kv : constStringReturnFunctions_) {
+        knownPure.insert(kv.first().str());
+    }
+
+    // Helpers to check purity of AST nodes (forward-declared via lambdas).
+    std::function<bool(const Expression*)> isExprPure;
+    std::function<bool(const Statement*)> isStmtPure;
+
+    isExprPure = [&](const Expression* expr) -> bool {
+        if (!expr) return true;
+        switch (expr->type) {
+        case ASTNodeType::LITERAL_EXPR:
+        case ASTNodeType::IDENTIFIER_EXPR:
+            return true;
+
+        case ASTNodeType::BINARY_EXPR: {
+            auto* bin = static_cast<const BinaryExpr*>(expr);
+            return isExprPure(bin->left.get()) && isExprPure(bin->right.get());
+        }
+        case ASTNodeType::UNARY_EXPR: {
+            auto* un = static_cast<const UnaryExpr*>(expr);
+            return isExprPure(un->operand.get());
+        }
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* tern = static_cast<const TernaryExpr*>(expr);
+            return isExprPure(tern->condition.get()) &&
+                   isExprPure(tern->thenExpr.get()) &&
+                   isExprPure(tern->elseExpr.get());
+        }
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<const CallExpr*>(expr);
+            // Impure builtins: not pure.
+            if (kImpureBuiltins.count(call->callee)) return false;
+            // Known-pure builtins: OK.
+            if (kPureBuiltins.count(call->callee)) {
+                for (const auto& arg : call->arguments) {
+                    if (!isExprPure(arg.get())) return false;
+                }
+                return true;
+            }
+            // User-defined function: pure only if we already know it's pure.
+            if (knownPure.count(call->callee)) {
+                for (const auto& arg : call->arguments) {
+                    if (!isExprPure(arg.get())) return false;
+                }
+                return true;
+            }
+            // Unknown/impure function.
+            return false;
+        }
+        case ASTNodeType::MOVE_EXPR: {
+            auto* mv = static_cast<const MoveExpr*>(expr);
+            return isExprPure(mv->source.get());
+        }
+        case ASTNodeType::BORROW_EXPR: {
+            auto* bw = static_cast<const BorrowExpr*>(expr);
+            return isExprPure(bw->source.get());
+        }
+        default:
+            // IndexExpr, AssignExpr, ArrayLiteral, etc. — conservative: not pure
+            // for const-eval purposes (may allocate or mutate).
+            return false;
+        }
+    };
+
+    isStmtPure = [&](const Statement* stmt) -> bool {
+        if (!stmt) return true;
+        switch (stmt->type) {
+        case ASTNodeType::RETURN_STMT: {
+            auto* ret = static_cast<const ReturnStmt*>(stmt);
+            return !ret->value || isExprPure(ret->value.get());
+        }
+        case ASTNodeType::VAR_DECL: {
+            auto* vd = static_cast<const VarDecl*>(stmt);
+            return !vd->initializer || isExprPure(vd->initializer.get());
+        }
+        case ASTNodeType::MOVE_DECL: {
+            auto* md = static_cast<const MoveDecl*>(stmt);
+            return !md->initializer || isExprPure(md->initializer.get());
+        }
+        case ASTNodeType::BLOCK: {
+            auto* block = static_cast<const BlockStmt*>(stmt);
+            for (const auto& s : block->statements) {
+                if (!isStmtPure(s.get())) return false;
+            }
+            return true;
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifS = static_cast<const IfStmt*>(stmt);
+            return isExprPure(ifS->condition.get()) &&
+                   isStmtPure(ifS->thenBranch.get()) &&
+                   isStmtPure(ifS->elseBranch.get());
+        }
+        case ASTNodeType::WHILE_STMT: {
+            auto* ws = static_cast<const WhileStmt*>(stmt);
+            return isExprPure(ws->condition.get()) && isStmtPure(ws->body.get());
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            auto* dws = static_cast<const DoWhileStmt*>(stmt);
+            return isStmtPure(dws->body.get()) && isExprPure(dws->condition.get());
+        }
+        case ASTNodeType::FOR_STMT: {
+            auto* fs = static_cast<const ForStmt*>(stmt);
+            return isExprPure(fs->start.get()) &&
+                   isExprPure(fs->end.get()) &&
+                   (!fs->step || isExprPure(fs->step.get())) &&
+                   isStmtPure(fs->body.get());
+        }
+        case ASTNodeType::EXPR_STMT: {
+            // Allow pure expression statements (e.g. function calls used for
+            // their return value stored in a variable).
+            auto* es = static_cast<const ExprStmt*>(stmt);
+            return isExprPure(es->expression.get());
+        }
+        case ASTNodeType::INVALIDATE_STMT:
+            // invalidate frees memory — conservative: not pure.
+            return false;
+        default:
+            return false;
+        }
+    };
+
+    // Fixed-point iteration: keep adding functions to knownPure until no more
+    // can be classified.  This handles call chains A→B→C where B and C must
+    // be proven pure before A can be classified.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& func : program->functions) {
+            const std::string& fname = func->name;
+            // Skip functions already known pure or already in constEvalFunctions_.
+            if (knownPure.count(fname)) continue;
+            // Must have a body to analyze.
+            if (!func->body) continue;
+            // Must have at least one parameter (zero-arg handled separately).
+            if (func->parameters.empty()) continue;
+            // Skip functions annotated @const_eval already (handled at registration time).
+            if (func->hintConstEval) continue;
+            // Skip functions with @optnone or @noinline.
+            if (func->hintOptNone) continue;
+
+            // Check if the entire body is pure.
+            bool bodyIsPure = true;
+            for (const auto& stmt : func->body->statements) {
+                if (!isStmtPure(stmt.get())) {
+                    bodyIsPure = false;
+                    break;
+                }
+            }
+
+            if (bodyIsPure) {
+                knownPure.insert(fname);
+                constEvalFunctions_.insert(fname);
+                changed = true;
+            }
+        }
+    }
+}
 // maintaining a pool of interned global string constants.  When the
 // same string content is used in multiple places, this returns a
 // pointer to the single canonical global, enabling:
