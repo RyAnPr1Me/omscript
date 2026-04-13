@@ -3937,6 +3937,52 @@ void CodeGenerator::generate(Program* program) {
             }
         } // end for each function
         } // end while memEffChanged
+
+        // Speculatable inference: after memory effects have converged, any
+        // user function that is memory(none) + willreturn + nounwind is by
+        // definition speculatable — it has no observable side effects and
+        // always returns.  Marking it speculatable allows LLVM to:
+        //   - hoist calls out of loops (LICM treats speculatable calls as pure)
+        //   - eliminate duplicate calls (CSE / GVN merge call results)
+        //   - speculate calls past conditional branches (SimplifyCFG/InstCombine)
+        //   - prove that hoisting the call from a taken branch to a join point
+        //     does not change program behavior
+        // We only apply this to non-recursive user functions (recursive +
+        // speculatable would let LLVM speculate recursive calls past the
+        // base-case branch, turning finite recursion into infinite recursion).
+        // @pure functions already get Speculatable earlier; skip them here.
+        for (auto& func : module->functions()) {
+            if (func.isDeclaration() || func.getName() == "main")
+                continue;
+            // Skip if already speculatable (set by @pure annotation).
+            if (func.hasFnAttribute(llvm::Attribute::Speculatable))
+                continue;
+            // Requires memory(none) — no memory operations at all.
+            if (!func.doesNotAccessMemory())
+                continue;
+            // Requires willreturn — the function always terminates.
+            if (!func.hasFnAttribute(llvm::Attribute::WillReturn))
+                continue;
+            // Requires nounwind — already set for all user functions, but verify.
+            if (!func.doesNotThrow())
+                continue;
+            // Exclude recursive functions to prevent infinite-recursion bugs.
+            // A function is self-recursive if it directly calls itself.
+            bool isSelfRecursive = false;
+            for (auto& BB : func) {
+                for (auto& I : BB) {
+                    if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                        if (CI->getCalledFunction() == &func) {
+                            isSelfRecursive = true;
+                            break;
+                        }
+                    }
+                }
+                if (isSelfRecursive) break;
+            }
+            if (isSelfRecursive) continue;
+            func.addFnAttr(llvm::Attribute::Speculatable);
+        }
     }
 
     // Infer norecurse attribute on user-defined functions.

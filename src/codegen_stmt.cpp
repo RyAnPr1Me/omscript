@@ -1204,6 +1204,38 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     llvm::Value* zero = llvm::ConstantInt::get(stepVal->getType(), 0, true);
 
+    // Tight upper-bound tracking for body iterator loads.
+    // When the loop has a constant non-negative start and a constant positive
+    // end with a known-positive step, register the iterator alloca's upper
+    // bound so that any load of the iterator variable inside the loop body
+    // (via generateIdentifier) gets !range [0, end) instead of the generic
+    // !range [0, INT64_MAX).  The tighter range helps LLVM's LVI/CVP passes
+    // prove tighter bounds on expressions derived from the iterator (e.g.
+    // i*k, i%m, i+offset) without relying solely on llvm.assume hints.
+    // Preconditions:
+    //   - step known positive (ascending loop)
+    //   - start is a non-negative constant (or proven non-negative)
+    //   - end is a positive constant > start
+    // The body range is [start, end) ⊆ [0, end), so [0, end) is a safe
+    // (conservative) upper-bound annotation for all body and increment loads.
+    if (stepKnownPositive) {
+        const bool startNonNegConst = [&]() -> bool {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(startVal))
+                return ci->getSExtValue() >= 0;
+            return nonNegValues_.count(startVal) > 0;
+        }();
+        if (startNonNegConst) {
+            if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+                int64_t ev = endCI->getSExtValue();
+                if (ev > 0 && iterType->isIntegerTy(64)) {
+                    // Set tight upper bound on the iterator alloca so body loads
+                    // get !range [0, ev) — much tighter than [0, INT64_MAX).
+                    allocaUpperBound_[iterAlloca] = ev;
+                }
+            }
+        }
+    }
+
     // Create blocks
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "forcond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "forbody", function);
@@ -1237,6 +1269,40 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     builder->SetInsertPoint(condBB);
     llvm::Value* curVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
+    // !range on the condition block load: when the loop has constant bounds
+    // and step == 1, the iterator at the condition check is in [0, end]
+    // inclusive (it can equal end right before the loop exits).  Annotating
+    // !range [0, end+1) = [0, end] inclusive is correct and tighter than
+    // the generic [0, INT64_MAX) annotation that would otherwise apply.
+    // Only applied for step == 1 (default ascending): for step > 1, the
+    // value at the condition check can exceed end before the condition fails.
+    if (stepKnownPositive && iterType->isIntegerTy(64)) {
+        auto bit = allocaUpperBound_.find(iterAlloca);
+        if (bit != allocaUpperBound_.end()) {
+            // Check if step is compile-time 1 (safe to use end+1 as upper bound).
+            const bool stepIsOne = [&]() -> bool {
+                if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(stepVal))
+                    return stepCI->getSExtValue() == 1;
+                return false;
+            }();
+            if (stepIsOne && bit->second > 0 && bit->second < llvm::APInt::getSignedMaxValue(64).getSExtValue()) {
+                // curVal ∈ [0, end] = [0, end+1) exclusive.
+                llvm::MDBuilder mdB(*context);
+                auto* curLoad = llvm::cast<llvm::LoadInst>(curVal);
+                curLoad->setMetadata(llvm::LLVMContext::MD_range,
+                    mdB.createRange(llvm::APInt(64, 0),
+                                    llvm::APInt(64, bit->second + 1)));
+            } else if (!stepIsOne) {
+                // For step > 1, use the generic non-negative range.
+                auto* curLoad = llvm::cast<llvm::LoadInst>(curVal);
+                curLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            }
+        } else if (nonNegValues_.count(iterAlloca)) {
+            auto* curLoad = llvm::cast<llvm::LoadInst>(curVal);
+            curLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
+    }
+
     llvm::Value* continueCond;
     if (stepKnownPositive) {
         // Fast path: known ascending loop.
@@ -1416,6 +1482,27 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Increment block
     builder->SetInsertPoint(incBB);
     llvm::Value* nextVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
+    // !range on the increment block load: we reach incBB only after the
+    // condition `iter < end` passed and the body executed, so nextVal (the
+    // iterator value before incrementing) is always in [start, end-1].
+    // If we have a tight upper bound registered, annotate !range [0, end) —
+    // this tells LLVM's value-range passes the iterator is strictly below
+    // end at this point, which is correct regardless of step size (the
+    // condition check guarantees it).
+    if (stepKnownPositive && iterType->isIntegerTy(64)) {
+        auto bit = allocaUpperBound_.find(iterAlloca);
+        if (bit != allocaUpperBound_.end()) {
+            llvm::MDBuilder mdB(*context);
+            llvm::cast<llvm::LoadInst>(nextVal)->setMetadata(
+                llvm::LLVMContext::MD_range,
+                mdB.createRange(llvm::APInt(64, 0),
+                                llvm::APInt(64, bit->second)));
+        } else if (nonNegValues_.count(iterAlloca)) {
+            llvm::cast<llvm::LoadInst>(nextVal)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
+    }
+
     // OmScript advantage: for ascending loops starting from a non-negative
     // value, both nsw AND nuw flags are correct on the increment.
     //
@@ -1987,6 +2074,18 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // comparison enables better loop vectorization and SCEV analysis.
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), idxAlloca, llvm::MaybeAlign(8), "foreach.idx");
+    // !range [0, INT64_MAX): the foreach index is always non-negative (starts
+    // at 0 and increments by 1).  This annotation makes the non-negativity
+    // visible to load-specific passes (LVI, CVP, InstCombine) without
+    // relying solely on the llvm.assume emitted in the body block.  The
+    // same annotation is applied to identifier loads (via nonNegValues_),
+    // but the condBB load is a direct CreateAlignedLoad that bypasses
+    // generateIdentifier, so we must annotate it here explicitly.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        llvm::cast<llvm::LoadInst>(curIdx)->setMetadata(
+            llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+    }
+
     llvm::Value* cond = builder->CreateICmpULT(curIdx, lenVal, "foreach.cmp");
     auto* foreachCondBr = builder->CreateCondBr(cond, bodyBB, endBB);
     // Hint the back-edge (body) as likely-taken.
