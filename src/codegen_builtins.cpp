@@ -328,19 +328,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "len", 1);
 
         // Constant-fold len() on any expression that can be reduced to a
-        // compile-time constant string at the AST level.  tryFoldStringConcat
-        // handles all of: string literals, const string variables, zero-param
-        // pure functions that return a constant string, and arbitrary concat
-        // trees of those forms.  For example:
-        //   len("hello")         → 5
-        //   len(s)               (const s = "hello") → 5
-        //   len("a" + "b")      → 2
-        //   len(make_str())      (fn make_str() { return "hi"; }) → 2
+        // compile-time constant string at the AST level.  Try both the
+        // fast string-concat folder and the full unified evaluator so that
+        // multi-param string-returning functions are also handled.
         {
             std::string folded;
             if (tryFoldStringConcat(expr->arguments[0].get(), folded)) {
                 auto* result = llvm::ConstantInt::get(getDefaultType(),
                                                       static_cast<int64_t>(folded.size()));
+                nonNegValues_.insert(result);
+                return result;
+            }
+            // tryFoldExprToConst handles multi-param calls (e.g. greet("world"))
+            // that tryFoldStringConcat doesn't traverse.
+            auto cv = tryFoldExprToConst(expr->arguments[0].get());
+            if (cv && cv->kind == ConstValue::Kind::String) {
+                auto* result = llvm::ConstantInt::get(
+                    getDefaultType(), static_cast<int64_t>(cv->strVal.size()));
                 nonNegValues_.insert(result);
                 return result;
             }
@@ -5613,18 +5617,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     // Short-circuit calls to zero-parameter pure functions whose return value
     // is a compile-time constant (classified by analyzeConstantReturnValues).
-    // We only do this when the call has no arguments (matching the analysis
-    // precondition) and the function is not an OPTMAX function (which may have
-    // side effects we cannot elide).
     if (expr->arguments.empty() && !inOptMaxFunction) {
-        // Integer constant return: emit a ConstantInt directly.
         auto intIt = constIntReturnFunctions_.find(expr->callee);
         if (intIt != constIntReturnFunctions_.end()) {
             auto* ci = llvm::ConstantInt::get(getDefaultType(), intIt->second);
             if (intIt->second >= 0) nonNegValues_.insert(ci);
             return ci;
         }
-        // String constant return: emit a pointer to an interned string constant.
         auto strIt = constStringReturnFunctions_.find(expr->callee);
         if (strIt != constStringReturnFunctions_.end()) {
             llvm::GlobalVariable* gv = internString(strIt->second);
@@ -5634,6 +5633,41 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::ArrayRef<llvm::Constant*>{
                     llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
                     llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
+    }
+
+    // Multi-param constant folding: if all arguments are compile-time constants
+    // and the function body is pure-foldable, evaluate entirely at compile time.
+    if (!inOptMaxFunction && !expr->arguments.empty() &&
+        optimizationLevel >= OptimizationLevel::O1) {
+        auto declIt2 = functionDecls_.find(expr->callee);
+        if (declIt2 != functionDecls_.end() && declIt2->second->body &&
+            expr->arguments.size() == declIt2->second->parameters.size()) {
+            std::unordered_map<std::string, ConstValue> argEnv;
+            bool allConst = true;
+            for (size_t i = 0; i < expr->arguments.size(); ++i) {
+                auto cv = tryFoldExprToConst(expr->arguments[i].get());
+                if (!cv) { allConst = false; break; }
+                argEnv[declIt2->second->parameters[i].name] = *cv;
+            }
+            if (allConst) {
+                auto result = tryConstEvalFull(declIt2->second, argEnv);
+                if (result) {
+                    if (result->kind == ConstValue::Kind::Integer) {
+                        auto* ci = llvm::ConstantInt::get(getDefaultType(), result->intVal);
+                        if (result->intVal >= 0) nonNegValues_.insert(ci);
+                        return ci;
+                    }
+                    // String result: intern and return a GEP pointer
+                    llvm::GlobalVariable* gv = internString(result->strVal);
+                    stringReturningFunctions_.insert(expr->callee);
+                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                        gv->getValueType(), gv,
+                        llvm::ArrayRef<llvm::Constant*>{
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                }
+            }
         }
     }
 
