@@ -1008,6 +1008,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* valHi = builder->CreateAlignedLoad(getDefaultType(), ptrHi, llvm::MaybeAlign(8), "rev.valhi");
         llvm::cast<llvm::Instruction>(valLo)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::cast<llvm::Instruction>(valHi)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (optimizationLevel >= OptimizationLevel::O1) {
+            llvm::cast<llvm::Instruction>(valLo)->setMetadata(llvm::LLVMContext::MD_noundef,
+                llvm::MDNode::get(*context, {}));
+            llvm::cast<llvm::Instruction>(valHi)->setMetadata(llvm::LLVMContext::MD_noundef,
+                llvm::MDNode::get(*context, {}));
+        }
         auto* stLo = builder->CreateAlignedStore(valHi, ptrLo, llvm::MaybeAlign(8));
         auto* stHi = builder->CreateAlignedStore(valLo, ptrHi, llvm::MaybeAlign(8));
         stLo->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
@@ -4270,6 +4276,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Count delimiters to know array size
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "split.strlen");
+        nonNegValues_.insert(strLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(strLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Function* function = builder->GetInsertBlock()->getParent();
 
         // Count pass
@@ -4306,7 +4316,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nextCi = builder->CreateAdd(ci, one, "split.nextci", /*HasNUW=*/true, /*HasNSW=*/true);
         ci->addIncoming(nextCi, countIncBB);
         cnt->addIncoming(newCnt, countIncBB);
-        builder->CreateBr(countLoopBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(countLoopBB)));
 
         builder->SetInsertPoint(countDoneBB);
         // cnt now holds the number of parts
@@ -4374,7 +4384,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         si->addIncoming(nextSi, splitContBB);
         partIdx->addIncoming(mergedIdx, splitContBB);
         partStart->addIncoming(mergedStart, splitContBB);
-        builder->CreateBr(splitLoopBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(splitLoopBB)));
 
         builder->SetInsertPoint(splitDoneBB);
         return builder->CreatePtrToInt(arrBuf, getDefaultType(), "split.result");
@@ -4391,6 +4401,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 ? strArg
                 : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "chars.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "chars.len");
+        nonNegValues_.insert(strLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(strLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
 
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
@@ -4426,7 +4440,30 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateStore(chExt, arrSlotPtr);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "chars.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
-        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        {
+            auto* backBr = llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB));
+            if (optimizationLevel >= OptimizationLevel::O1) {
+                llvm::SmallVector<llvm::Metadata*, 4> mds;
+                mds.push_back(nullptr);
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+                if (optimizationLevel >= OptimizationLevel::O2) {
+                    // str_chars: ZExt(i8→i64) store loop — vectorizable with
+                    // zext-widening when destination is i64 array.
+                    mds.push_back(llvm::MDNode::get(*context,
+                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                         llvm::ConstantAsMetadata::get(
+                             llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                    mds.push_back(llvm::MDNode::get(*context,
+                        {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                         llvm::ConstantAsMetadata::get(
+                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+                }
+                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
+                md->replaceOperandWith(0, md);
+                backBr->setMetadata(llvm::LLVMContext::MD_loop, md);
+            }
+        }
 
         builder->SetInsertPoint(doneBB);
         return builder->CreatePtrToInt(buf, getDefaultType(), "chars.result");
@@ -4460,6 +4497,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         joinLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* arrLen = joinLenLoad;
         llvm::Value* delimLen = builder->CreateCall(getOrDeclareStrlen(), {delimPtr}, "join.delimlen");
+        nonNegValues_.insert(delimLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(delimLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
 
@@ -4485,6 +4526,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* lslotPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, lslot, "join.lslotptr");
         llvm::Value* elemInt = builder->CreateAlignedLoad(getDefaultType(), lslotPtr, llvm::MaybeAlign(8), "join.elemint");
         llvm::cast<llvm::Instruction>(elemInt)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(elemInt)->setMetadata(llvm::LLVMContext::MD_noundef,
+                llvm::MDNode::get(*context, {}));
         llvm::Value* elemPtr = builder->CreateIntToPtr(elemInt, ptrTy, "join.elemptr");
         llvm::Value* elemLen = builder->CreateCall(getOrDeclareStrlen(), {elemPtr}, "join.elemlen");
         llvm::Value* newTotal = builder->CreateAdd(totalLen, elemLen, "join.newtot", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4495,7 +4539,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nextLi = builder->CreateAdd(li, one, "join.nextli", /*HasNUW=*/true, /*HasNSW=*/true);
         li->addIncoming(nextLi, lenBodyBB);
         totalLen->addIncoming(newTotal2, lenBodyBB);
-        builder->CreateBr(lenLoopBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(lenLoopBB)));
 
         // --- Allocate output buffer ---
         builder->SetInsertPoint(lenDoneBB);
@@ -4533,6 +4577,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* cslotPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, cslot, "join.cslotptr");
         llvm::Value* celemInt = builder->CreateAlignedLoad(getDefaultType(), cslotPtr, llvm::MaybeAlign(8), "join.celemint");
         llvm::cast<llvm::Instruction>(celemInt)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(celemInt)->setMetadata(llvm::LLVMContext::MD_noundef,
+                llvm::MDNode::get(*context, {}));
         llvm::Value* celemPtr = builder->CreateIntToPtr(celemInt, ptrTy, "join.celemptr");
         llvm::Value* celemLen = builder->CreateCall(getOrDeclareStrlen(), {celemPtr}, "join.celemlen");
         llvm::Value* elemDst = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, afterDelim, "join.elemdst");
@@ -4541,7 +4588,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nextCi = builder->CreateAdd(ci, one, "join.nextci", /*HasNUW=*/true, /*HasNSW=*/true);
         ci->addIncoming(nextCi, catBodyBB);
         writePos->addIncoming(afterElem, catBodyBB);
-        builder->CreateBr(catLoopBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(catLoopBB)));
 
         // --- Null-terminate and return ---
         builder->SetInsertPoint(catDoneBB);
