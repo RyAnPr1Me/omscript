@@ -3265,10 +3265,12 @@ OptMaxConfig Parser::parseOptMaxConfig() {
     consume(TokenType::LPAREN, "Expected '(' after @optmax");
     if (!check(TokenType::RPAREN)) {
         do {
-            const Token key = consume(TokenType::IDENTIFIER, "Expected key in @optmax config");
+            // Use advance() so keyword tokens (loop=LOOP, parallel=PARALLEL)
+            // are accepted as config keys by their lexeme string.
+            const Token key = advance();
             consume(TokenType::ASSIGN, "Expected '=' after key in @optmax config");
             if (key.lexeme == "safety") {
-                const Token val = consume(TokenType::IDENTIFIER, "Expected value for safety");
+                const Token val = advance();
                 if (val.lexeme == "off") cfg.safety = SafetyLevel::Off;
                 else if (val.lexeme == "relaxed") cfg.safety = SafetyLevel::Relaxed;
                 else cfg.safety = SafetyLevel::On;
@@ -3284,7 +3286,8 @@ OptMaxConfig Parser::parseOptMaxConfig() {
             } else if (key.lexeme == "loop") {
                 consume(TokenType::LBRACE, "Expected '{' for loop config");
                 while (!check(TokenType::RBRACE) && !isAtEnd()) {
-                    const Token lk = consume(TokenType::IDENTIFIER, "Expected loop config key");
+                    // advance() handles `parallel` which is a keyword token
+                    const Token lk = advance();
                     consume(TokenType::ASSIGN, "Expected '=' in loop config");
                     if (lk.lexeme == "unroll") {
                         const Token v = advance();
@@ -3305,7 +3308,7 @@ OptMaxConfig Parser::parseOptMaxConfig() {
             } else if (key.lexeme == "memory") {
                 consume(TokenType::LBRACE, "Expected '{' for memory config");
                 while (!check(TokenType::RBRACE) && !isAtEnd()) {
-                    const Token mk = consume(TokenType::IDENTIFIER, "Expected memory config key");
+                    const Token mk = advance();
                     consume(TokenType::ASSIGN, "Expected '=' in memory config");
                     const Token mv = advance();
                     if (mk.lexeme == "prefetch") cfg.memory.prefetch = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
