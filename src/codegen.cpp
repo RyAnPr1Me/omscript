@@ -642,9 +642,12 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "array_fill",
                                                                 "array_filter",
                                                                 "array_find",
+                                                                "array_insert",
+                                                                "array_last",
                                                                 "array_map",
                                                                 "array_max",
                                                                 "array_min",
+                                                                "array_product",
                                                                 "array_reduce",
                                                                 "array_remove",
                                                                 "array_slice",
@@ -725,6 +728,8 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "str_join",
                                                                 "str_len",
                                                                 "str_lower",
+                                                                "str_pad_left",
+                                                                "str_pad_right",
                                                                 "str_repeat",
                                                                 "str_replace",
                                                                 "str_reverse",
@@ -5673,6 +5678,70 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         }
         return std::nullopt;
     }
+    // ── str_to_int(s) ──────────────────────────────────────────────────────
+    if (name == "str_to_int" && n == 1) {
+        if (auto s = strArg(0)) {
+            try { return CV::fromInt(static_cast<int64_t>(std::stoll(*s))); }
+            catch (...) {}
+        }
+        return std::nullopt;
+    }
+    // ── str_pad_left(s, width, fill) ───────────────────────────────────────
+    if (name == "str_pad_left" && n == 3) {
+        auto s = strArg(0); auto w = intArg(1); auto fill = strArg(2);
+        if (s && w && fill && !fill->empty()) {
+            int64_t slen = static_cast<int64_t>(s->size());
+            if (*w <= slen) return CV::fromStr(*s);
+            if (*w > 65536) return std::nullopt; // guard against huge strings
+            std::string r(*w - slen, (*fill)[0]);
+            r += *s;
+            return CV::fromStr(std::move(r));
+        }
+        return std::nullopt;
+    }
+    // ── str_pad_right(s, width, fill) ──────────────────────────────────────
+    if (name == "str_pad_right" && n == 3) {
+        auto s = strArg(0); auto w = intArg(1); auto fill = strArg(2);
+        if (s && w && fill && !fill->empty()) {
+            int64_t slen = static_cast<int64_t>(s->size());
+            if (*w <= slen) return CV::fromStr(*s);
+            if (*w > 65536) return std::nullopt; // guard against huge strings
+            std::string r(*s);
+            r.append(*w - slen, (*fill)[0]);
+            return CV::fromStr(std::move(r));
+        }
+        return std::nullopt;
+    }
+    // ── sum(arr) ───────────────────────────────────────────────────────────
+    if (name == "sum" && n == 1) {
+        if (n == 1 && args[0].kind == CV::Kind::Array) {
+            int64_t total = 0;
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind != CV::Kind::Integer) return std::nullopt;
+                total += elem.intVal;
+            }
+            return CV::fromInt(total);
+        }
+        return std::nullopt;
+    }
+    // ── array_product(arr) ─────────────────────────────────────────────────
+    if (name == "array_product" && n == 1) {
+        if (n == 1 && args[0].kind == CV::Kind::Array) {
+            int64_t product = 1;
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind != CV::Kind::Integer) return std::nullopt;
+                product *= elem.intVal;
+            }
+            return CV::fromInt(product);
+        }
+        return std::nullopt;
+    }
+    // ── array_last(arr) ────────────────────────────────────────────────────
+    if (name == "array_last" && n == 1) {
+        if (n == 1 && args[0].kind == CV::Kind::Array && !args[0].arrVal.empty())
+            return args[0].arrVal.back();
+        return std::nullopt;
+    }
     return std::nullopt;
 }
 // using all statically-known information (constIntFolds_, constStringFolds_,
@@ -6524,13 +6593,14 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         "popcount", "clz", "ctz", "bswap", "bitreverse",
         "rotate_left", "rotate_right", "saturating_add", "saturating_sub",
         "to_int", "to_float", "to_string", "number_to_string",
-        "string_to_number", "char_code", "to_char",
+        "string_to_number", "str_to_int", "char_code", "to_char",
         "str_len", "len", "typeof",
         "char_at", "str_eq", "str_find", "str_index_of",
         "str_starts_with", "str_ends_with", "startswith", "endswith",
         "str_upper", "str_lower", "str_trim", "str_reverse",
         "str_substr", "str_contains", "str_replace", "str_repeat",
-        "str_count",
+        "str_count", "str_pad_left", "str_pad_right",
+        "sum", "array_product", "array_last",
     };
 
     // Set of builtin/user names that are impure (I/O, heap side-effects, etc.)

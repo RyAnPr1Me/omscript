@@ -5,7 +5,24 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.0.0] - 2026-04-14
+## [4.1.0] - 2026-04-14
+
+### Changed (compiler optimization improvements)
+
+- **Constant folding extended to newer builtins** — the following builtins are now folded at compile time when their arguments are literal constants, eliminating the function call and all associated runtime overhead entirely:
+  - `str_to_int("42")` → integer `42`
+  - `str_pad_left("hi", 5, " ")` → interned string `"   hi"`
+  - `str_pad_right("hi", 5, " ")` → interned string `"hi   "`
+  - `sum([1, 2, 3])` → integer `6`
+  - `array_product([2, 3, 4])` → integer `24`
+  - `array_last([10, 20, 30])` → integer `30`
+  Each of these has a matching IR-level early-out (before generating the loop/branch structure) and is also handled by `evalConstBuiltin` for cross-function constant propagation through `tryConstEvalFull`.
+
+- **Purity analysis coverage** — `str_to_int`, `str_pad_left`, `str_pad_right`, `sum`, `array_product`, and `array_last` are now registered in `kPureBuiltins`, enabling `autoDetectConstEvalFunctions` to classify user functions that call these builtins as pure and eligible for cross-function constant propagation.
+
+- **`stdlibFunctions` completeness** — `array_insert`, `array_last`, `array_product`, `str_pad_left`, and `str_pad_right` were missing from the canonical stdlib function set used to validate `@optmax` function bodies. They are now registered, so OPTMAX functions can call these builtins without a false "cannot invoke non-OPTMAX function" error.
+
+
 
 ### Added
 

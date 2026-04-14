@@ -843,6 +843,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SUM) {
         validateArgCount(expr, "sum", 1);
+        // Constant-fold sum([c0, c1, ...]) when the array is a compile-time literal.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                int64_t total = 0;
+                bool allInt = true;
+                for (const auto& elem : cv->arrVal) {
+                    if (elem.kind != ConstValue::Kind::Integer) { allInt = false; break; }
+                    total += elem.intVal;
+                }
+                if (allInt) {
+                    optStats_.constFolded++;
+                    return llvm::ConstantInt::get(getDefaultType(), total);
+                }
+            }
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // Array layout: [length, elem0, elem1, ...]
         llvm::Value* arrPtr =
@@ -4289,6 +4304,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::STR_TO_INT) {
         validateArgCount(expr, "str_to_int", 1);
+        // Constant-fold str_to_int("literal") at compile time.
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            try {
+                int64_t val = static_cast<int64_t>(std::stoll(*sv));
+                optStats_.constFolded++;
+                auto* ci = llvm::ConstantInt::get(getDefaultType(), val);
+                if (val >= 0) nonNegValues_.insert(ci);
+                return ci;
+            } catch (...) {}
+        }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -5705,6 +5730,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_PRODUCT) {
         validateArgCount(expr, "array_product", 1);
+        // Constant-fold array_product([c0, c1, ...]) when all elements are known.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                int64_t product = 1;
+                bool allInt = true;
+                for (const auto& elem : cv->arrVal) {
+                    if (elem.kind != ConstValue::Kind::Integer) { allInt = false; break; }
+                    product *= elem.intVal;
+                }
+                if (allInt) {
+                    optStats_.constFolded++;
+                    return llvm::ConstantInt::get(getDefaultType(), product);
+                }
+            }
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* arrPtr =
             arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "aprod.arrptr");
@@ -5789,6 +5829,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_LAST) {
         validateArgCount(expr, "array_last", 1);
+        // Constant-fold array_last([c0, ..., cN]) when the array is known at compile time.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array && !cv->arrVal.empty()) {
+                const auto& last = cv->arrVal.back();
+                if (last.kind == ConstValue::Kind::Integer) {
+                    optStats_.constFolded++;
+                    auto* ci = llvm::ConstantInt::get(getDefaultType(), last.intVal);
+                    if (last.intVal >= 0) nonNegValues_.insert(ci);
+                    return ci;
+                }
+            }
+        }
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
@@ -5910,6 +5962,35 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::STR_PAD_LEFT || bid == BuiltinId::STR_PAD_RIGHT) {
         const char* fnName = (bid == BuiltinId::STR_PAD_LEFT) ? "str_pad_left" : "str_pad_right";
         validateArgCount(expr, fnName, 3);
+        // Constant-fold str_pad_left/right when all arguments are compile-time constants.
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            if (auto wv = tryFoldInt(expr->arguments[1].get())) {
+                if (auto fv = tryFoldStr(expr->arguments[2].get())) {
+                    if (!fv->empty() && *wv >= 0 && *wv <= 65536) {
+                        int64_t slen = static_cast<int64_t>(sv->size());
+                        std::string result;
+                        if (*wv <= slen) {
+                            result = *sv;
+                        } else if (bid == BuiltinId::STR_PAD_LEFT) {
+                            result.assign(*wv - slen, (*fv)[0]);
+                            result += *sv;
+                        } else {
+                            result = *sv;
+                            result.append(*wv - slen, (*fv)[0]);
+                        }
+                        optStats_.constFolded++;
+                        llvm::GlobalVariable* gv = internString(result);
+                        stringReturningFunctions_.insert(fnName);
+                        return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                            gv->getValueType(), gv,
+                            llvm::ArrayRef<llvm::Constant*>{
+                                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                            });
+                    }
+                }
+            }
+        }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* widthArg = generateExpression(expr->arguments[1].get());
         llvm::Value* fillArg = generateExpression(expr->arguments[2].get());
