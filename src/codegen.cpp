@@ -5914,6 +5914,12 @@ CodeGenerator::tryConstEvalFull(
             if (iit != constIntReturnFunctions_.end()) return ConstValue::fromInt(iit->second);
             auto sit = constStringReturnFunctions_.find(id->name);
             if (sit != constStringReturnFunctions_.end()) return ConstValue::fromStr(sit->second);
+            // Global const variables (constIntFolds_ / constStringFolds_):
+            // functions may reference file-level constants not in their argEnv.
+            auto git = constIntFolds_.find(id->name);
+            if (git != constIntFolds_.end()) return ConstValue::fromInt(git->second);
+            auto gst = constStringFolds_.find(id->name);
+            if (gst != constStringFolds_.end()) return ConstValue::fromStr(gst->second);
             return std::nullopt;
         }
 
