@@ -109,6 +109,11 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     } catch (const std::exception& e) {
         throw FileError(sourceFile + ": " + e.what());
     }
+    // Emit parser warnings (annotation conflicts, import preprocessor messages)
+    // to stderr so they are visible to the user at compile time.
+    for (const auto& w : parser.warnings()) {
+        std::cerr << w << "\n";
+    }
 
     // Code generation
     if (verbose_) {

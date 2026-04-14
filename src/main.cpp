@@ -2659,6 +2659,7 @@ int main(int argc, char* argv[]) {
             auto parseStart = std::chrono::steady_clock::now();
             omscript::Parser parser(tokens);
             auto program = parser.parse();
+            for (const auto& w : parser.warnings()) { std::cerr << w << "\n"; }
             auto parseEnd = std::chrono::steady_clock::now();
 
             if (command == Command::Check) {
@@ -2759,6 +2760,7 @@ int main(int argc, char* argv[]) {
             auto parseStart = std::chrono::steady_clock::now();
             omscript::Parser parser(tokens);
             auto program = parser.parse();
+            for (const auto& w : parser.warnings()) { std::cerr << w << "\n"; }
             auto parseEnd = std::chrono::steady_clock::now();
 
             auto codegenStart = std::chrono::steady_clock::now();
@@ -2811,6 +2813,7 @@ int main(int argc, char* argv[]) {
             auto tokens = lexer.tokenize();
             omscript::Parser parser(tokens);
             auto program = parser.parse();
+            for (const auto& w : parser.warnings()) { std::cerr << w << "\n"; }
 
             omscript::CodeGenerator codegen(optLevel);
             codegen.setMarch(marchCpu);

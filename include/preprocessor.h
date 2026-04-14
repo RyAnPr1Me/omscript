@@ -25,7 +25,7 @@ class Preprocessor {
     explicit Preprocessor(std::string filename = "<input>");
 
     /// Run the preprocessor on @p source and return the processed text.
-    /// Throws std::runtime_error on #error / failed #assert / #require.
+    /// Throws DiagnosticError on #error / failed #assert / #require.
     std::string process(const std::string& source);
 
     /// Warnings accumulated during processing (from #warning / #info).

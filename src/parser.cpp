@@ -3,7 +3,6 @@
 #include "preprocessor.h"
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <llvm/Support/ErrorHandling.h>
 #include <stdexcept>
 
@@ -109,7 +108,7 @@ std::unique_ptr<Program> Parser::parse() {
         if (match(TokenType::IMPORT)) {
             try {
                 parseImport(functions, enums, structs);
-            } catch (const std::runtime_error& e) {
+            } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
             }
@@ -132,7 +131,7 @@ std::unique_ptr<Program> Parser::parse() {
         if (match(TokenType::ENUM)) {
             try {
                 enums.push_back(parseEnumDecl());
-            } catch (const std::runtime_error& e) {
+            } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
             }
@@ -141,7 +140,7 @@ std::unique_ptr<Program> Parser::parse() {
         if (match(TokenType::STRUCT)) {
             try {
                 structs.push_back(parseStructDecl());
-            } catch (const std::runtime_error& e) {
+            } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
             }
@@ -282,15 +281,15 @@ std::unique_ptr<Program> Parser::parse() {
             }
             // Warn about conflicting annotations at parse time.
             if (hintOptNone && hintInline) {
-                std::cerr << "warning: '@optnone' and '@inline' are mutually exclusive on function '"
-                          << func->name << "' — '@inline' will be ignored (optnone requires noinline)\n";
+                warnings_.push_back("warning: '@optnone' and '@inline' are mutually exclusive on function '"
+                    + func->name + "' — '@inline' will be ignored (optnone requires noinline)");
             }
             if (hintOptNone && hintHot) {
-                std::cerr << "warning: '@optnone' disables all optimizations on function '"
-                          << func->name << "' — '@hot' annotation will have no effect\n";
+                warnings_.push_back("warning: '@optnone' disables all optimizations on function '"
+                    + func->name + "' — '@hot' annotation will have no effect");
             }
             functions.push_back(std::move(func));
-        } catch (const std::runtime_error& e) {
+        } catch (const std::exception& e) {
             errors_.push_back(e.what());
             synchronize();
         }
@@ -383,7 +382,7 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
         Preprocessor importPP(fullPath);
         source = importPP.process(source);
         for (const auto& w : importPP.warnings()) {
-            std::cerr << w << "\n";
+            warnings_.push_back(w);
         }
     }
     Lexer importLexer(std::move(source));
@@ -396,6 +395,11 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     importParser.importedFiles_ = importedFiles_; // Share import tracking
 
     auto importedProgram = importParser.parse();
+    // Propagate warnings from the imported file back to this parser so they
+    // are all visible to the caller without requiring stderr.
+    for (const auto& w : importParser.warnings()) {
+        warnings_.push_back(w);
+    }
 
     // Merge imported declarations into the current program.
     // When an alias was given, register every imported function in the

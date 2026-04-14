@@ -34,11 +34,18 @@ class Parser {
         return errors_;
     }
 
+    /// Returns non-fatal parse warnings (e.g. conflicting annotations, preprocessor
+    /// warnings from imported files).  Populated alongside errors() during parse().
+    [[nodiscard]] const std::vector<std::string>& warnings() const noexcept {
+        return warnings_;
+    }
+
   private:
     std::vector<Token> tokens;
     size_t current;
     bool inOptMaxFunction;
     std::vector<std::string> errors_;
+    std::vector<std::string> warnings_;
     int lambdaCounter_ = 0;
     int recursionDepth_ = 0;
 
