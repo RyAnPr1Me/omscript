@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (compiler optimization improvements)
 
+- **`generateIncDec` IR quality improvements** — the `++`/`--` operators on integer variables now emit higher-quality IR that allows LLVM to perform stronger downstream optimizations:
+  - The load emitted inside `x++`/`x--` is now a proper aligned load (`CreateAlignedLoad`, 8-byte alignment) matching what `generateIdentifier` emits for regular variable reads.
+  - At O1+, the load carries `!noundef` metadata, matching the OmScript invariant that all variables are initialized before use. This enables LLVM to speculate, CSE, and hoist the load more aggressively.
+  - When the variable is tracked as non-negative (in `nonNegValues_`), the load now carries `!range [0, INT64_MAX)` metadata (with tight upper bound if available), making non-negativity visible to every IR-level pass (LVI, CVP, InstCombine, SCEV) — not just through `llvm.assume` intrinsics.
+  - `x++` on a non-negative variable now sets the `nuw` (no unsigned wrap) flag on the increment instruction in addition to the existing `nsw` flag. When `x ∈ [0, INT64_MAX]`, `x + 1 ∈ [1, INT64_MAX]` which is strictly less than UINT64_MAX, so unsigned wrap is impossible. The `nuw` flag enables LLVM's SCEV to compute tighter unsigned ranges and helps the loop unroller propagate non-negativity to unrolled copies.
+  - After `x++` on a non-negative variable, both the alloca and the result value are inserted into `nonNegValues_`, so downstream operations (e.g. `y = x + 1` after `x++`) can also benefit from `nuw+nsw`. After `x--`, the alloca is conservatively removed from `nonNegValues_` (the result may be −1 if `x` was 0).
+
+
 - **Constant folding extended to newer builtins** — the following builtins are now folded at compile time when their arguments are literal constants, eliminating the function call and all associated runtime overhead entirely:
   - `str_to_int("42")` → integer `42`
   - `str_pad_left("hi", 5, " ")` → interned string `"   hi"`

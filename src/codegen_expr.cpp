@@ -4441,7 +4441,34 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
     auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
-    llvm::Value* current = builder->CreateLoad(loadType, it->second, identifier->name.c_str());
+    // Use aligned load (all variable allocas are 8-byte aligned) so the
+    // load instruction matches what generateIdentifier emits.
+    auto* loadInst = builder->CreateAlignedLoad(loadType, it->second,
+        llvm::MaybeAlign(8), identifier->name.c_str());
+    // OmScript guarantees variables are initialized before use → !noundef.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        loadInst->setMetadata(llvm::LLVMContext::MD_noundef,
+                              llvm::MDNode::get(*context, {}));
+    }
+    // Propagate non-negativity: if the alloca is known non-negative, the
+    // loaded value inherits the property.  Emit !range [0, INT64_MAX) so
+    // LLVM IR-level passes (LVI, CVP, InstCombine) see it directly on the
+    // load instruction, matching what generateIdentifier does.
+    const bool allocaNonNeg = allocaInst && nonNegValues_.count(allocaInst);
+    if (allocaNonNeg && loadType->isIntegerTy(64)
+            && optimizationLevel >= OptimizationLevel::O1) {
+        auto bit = allocaUpperBound_.find(allocaInst);
+        if (bit != allocaUpperBound_.end()) {
+            llvm::MDBuilder mdB(*context);
+            loadInst->setMetadata(llvm::LLVMContext::MD_range,
+                mdB.createRange(llvm::APInt(64, 0),
+                                llvm::APInt(64, bit->second)));
+        } else {
+            loadInst->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
+        nonNegValues_.insert(loadInst);
+    }
+    llvm::Value* current = loadInst;
 
     llvm::Value* updated;
     if (current->getType()->isDoubleTy()) {
@@ -4449,11 +4476,33 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         updated = (op == "++") ? builder->CreateFAdd(current, one, "finc") : builder->CreateFSub(current, one, "fdec");
     } else {
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        updated = (op == "++") ? builder->CreateAdd(current, delta, "inc", /*HasNUW=*/false, /*HasNSW=*/true)
-                               : builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
+        if (op == "++") {
+            // When the variable is provably non-negative, x + 1 with nsw is
+            // also nuw: result ∈ [1, INT64_MAX] ⊂ [0, UINT64_MAX), so
+            // unsigned wrap cannot occur.  The nuw flag enables LLVM's SCEV
+            // to compute tighter ranges and prove non-negativity of derived
+            // expressions, matching the add codegen in generateBinary.
+            const bool canNUW = allocaNonNeg;
+            updated = builder->CreateAdd(current, delta, "inc", /*HasNUW=*/canNUW, /*HasNSW=*/true);
+        } else {
+            updated = builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
+        }
     }
 
     builder->CreateStore(updated, it->second);
+
+    // Update non-negativity state for the alloca after the mutation.
+    // x++ on a non-negative x: result ∈ [1, INT64_MAX] → still non-negative.
+    // x-- on a non-negative x: result may be -1 (if x was 0) → erase conservatively.
+    if (allocaInst) {
+        if (op == "++" && allocaNonNeg) {
+            nonNegValues_.insert(allocaInst);
+            nonNegValues_.insert(updated);
+        } else if (op == "--") {
+            nonNegValues_.erase(allocaInst);
+        }
+    }
+
     return isPostfix ? current : updated;
 }
 
