@@ -5449,7 +5449,7 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
         // inbounds: alloca is [numFields x i64], index i ∈ [0, numFields-1].
         llvm::Value* elemPtr =
             builder->CreateInBoundsGEP(getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), i), "struct.field.ptr");
-        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), elemPtr);
+        builder->CreateAlignedStore(llvm::ConstantInt::get(getDefaultType(), 0), elemPtr, llvm::MaybeAlign(8));
     }
 
     // Set provided field values
@@ -5463,7 +5463,7 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
         // inbounds: fit->second is a validated index ∈ [0, numFields-1].
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(
             getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), fit->second), "struct.field.ptr");
-        builder->CreateStore(val, elemPtr);
+        builder->CreateAlignedStore(val, elemPtr, llvm::MaybeAlign(8));
     }
 
     return builder->CreatePtrToInt(ptr, getDefaultType(), "struct.int");
@@ -5500,7 +5500,22 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
         load = builder->CreateAlignedLoad(getDefaultType(), elemPtr,
                                           llvm::MaybeAlign(fieldAlign), "struct.field.val");
     } else {
-        load = builder->CreateLoad(getDefaultType(), elemPtr, "struct.field.val");
+        // All struct fields are i64 and structs are malloc'd (≥ 8-byte aligned),
+        // so the field pointer is always 8-byte aligned.  Using CreateAlignedLoad
+        // communicates this to LLVM's backend for better instruction selection
+        // and enables the same scalar-evolution analysis as other aligned loads.
+        load = builder->CreateAlignedLoad(getDefaultType(), elemPtr,
+                                          llvm::MaybeAlign(8), "struct.field.val");
+    }
+
+    // OmScript structs are always initialized from struct literals (and
+    // subsequent field assignments are always explicit), so every field load
+    // is guaranteed to produce a defined value.  !noundef lets LLVM speculate,
+    // hoist, and CSE the load — matching the same annotation on variable
+    // loads (generateIdentifier) and array element loads (generateIndex).
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        load->setMetadata(llvm::LLVMContext::MD_noundef,
+                          llvm::MDNode::get(*context, {}));
     }
 
     // TBAA: use a per-field type node so different fields of the same struct
@@ -5588,7 +5603,10 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
         store = builder->CreateAlignedStore(newVal, elemPtr,
                                             llvm::MaybeAlign(static_cast<unsigned>(attrs->align)));
     } else {
-        store = builder->CreateStore(newVal, elemPtr);
+        // All struct fields are i64 and structs are malloc'd (≥ 8-byte aligned),
+        // so the field pointer is always 8-byte aligned.  Communicating this to
+        // LLVM enables better store merging and vectorization of struct initialization.
+        store = builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
     }
 
     // TBAA: per-field type node so writes to different fields don't alias reads
