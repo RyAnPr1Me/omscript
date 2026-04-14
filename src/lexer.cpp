@@ -60,7 +60,9 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"with", TokenType::WITH},
     {"parallel", TokenType::PARALLEL},
     {"comptime", TokenType::COMPTIME},
-    {"reborrow", TokenType::REBORROW}};
+    {"reborrow", TokenType::REBORROW},
+    {"pipeline", TokenType::PIPELINE},
+    {"stage",    TokenType::STAGE}};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] [[gnu::cold]] static void lexError(const std::string& msg, int ln, int col) {

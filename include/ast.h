@@ -65,7 +65,8 @@ enum class ASTNodeType {
     SCOPE_RESOLUTION_EXPR,
     ASSUME_STMT,
     COMPTIME_EXPR,  // comptime { ... } — compile-time evaluated block expression
-    REBORROW_EXPR   // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
+    REBORROW_EXPR,  // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
+    PIPELINE_STMT   // pipeline (i in start...end) { stage name { ... } ... }
 };
 
 class ASTNode {
@@ -774,6 +775,71 @@ class ComptimeExpr : public Expression {
 
     explicit ComptimeExpr(std::unique_ptr<BlockStmt> b)
         : Expression(ASTNodeType::COMPTIME_EXPR), body(std::move(b)) {}
+};
+
+// ---------------------------------------------------------------------------
+// Effect system
+// ---------------------------------------------------------------------------
+
+/// Inferred side-effect summary for a user function.
+///
+/// Populated by CodeGenerator::inferFunctionEffects() before any code is
+/// generated.  Drives automatic LLVM attribute inference (readonly, readnone,
+/// nosync, willreturn) and warns when @pure is annotated on a function whose
+/// body contains detectable effects.
+struct FunctionEffects {
+    bool readsMemory  = false; ///< Function reads from heap/params (loads)
+    bool writesMemory = false; ///< Function writes to heap/params (stores, push, pop, sort…)
+    bool hasIO        = false; ///< Function performs I/O (print, file_*, input, sleep…)
+    bool hasMutation  = false; ///< Function mutates a parameter observable outside the callee
+
+    /// True when the function has no detectable effects at all (pure).
+    bool isReadNone() const { return !readsMemory && !writesMemory && !hasIO && !hasMutation; }
+    /// True when the function only reads memory and has no I/O or mutations.
+    bool isReadOnly() const { return readsMemory && !writesMemory && !hasIO && !hasMutation; }
+    /// True when the function is safe to mark nosync (no I/O, no concurrency).
+    bool isNoSync()   const { return !hasIO; }
+    /// True when the function can be inferred as @pure by the compiler.
+    bool inferredPure() const { return isReadNone() || isReadOnly(); }
+};
+
+// ---------------------------------------------------------------------------
+// Pipeline construct
+// ---------------------------------------------------------------------------
+
+/// A single named stage inside a pipeline block.
+/// Contains the stage name and its body statements.
+struct StageDecl {
+    std::string name;
+    std::unique_ptr<BlockStmt> body;
+
+    StageDecl(std::string n, std::unique_ptr<BlockStmt> b)
+        : name(std::move(n)), body(std::move(b)) {}
+};
+
+/// `pipeline (iterVar in start...end) { stage name { ... } ... }`
+///
+/// Desugared by codegen into a for-loop over [start, end) where the stages
+/// execute sequentially per iteration.  The compiler annotates the generated
+/// loop with software-pipeline metadata so LLVM's instruction scheduler and
+/// auto-vectorizer can exploit inter-stage parallelism.
+class PipelineStmt : public Statement {
+  public:
+    std::string iterVar;                     ///< Loop variable name (e.g. "i")
+    std::string iterType;                    ///< Optional type annotation (e.g. "int")
+    std::unique_ptr<Expression> start;       ///< Range start expression
+    std::unique_ptr<Expression> end;         ///< Range end expression (exclusive)
+    std::unique_ptr<Expression> step;        ///< Optional step (nullptr = 1)
+    std::vector<StageDecl> stages;           ///< Ordered list of stages
+
+    PipelineStmt(std::string iv, std::string it,
+                 std::unique_ptr<Expression> s, std::unique_ptr<Expression> e,
+                 std::unique_ptr<Expression> step_,
+                 std::vector<StageDecl> stgs)
+        : Statement(ASTNodeType::PIPELINE_STMT),
+          iterVar(std::move(iv)), iterType(std::move(it)),
+          start(std::move(s)), end(std::move(e)), step(std::move(step_)),
+          stages(std::move(stgs)) {}
 };
 
 } // namespace omscript
