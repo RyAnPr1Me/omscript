@@ -1,0 +1,11 @@
+// Test @allocator annotation: marks function as allocator wrapper.
+// LLVM adds allocsize attribute for alias analysis.
+@allocator(size=0)
+fn my_alloc(n: int) {
+    return n * 8;
+}
+
+fn main() {
+    var result = my_alloc(5);
+    return result;
+}

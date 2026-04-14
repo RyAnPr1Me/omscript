@@ -1,6 +1,6 @@
 # OmScript Language Reference
 
-> **Version:** 3.7.0
+> **Version:** 4.0.0
 > **Compiler:** `omsc` — OmScript Compiler
 > **Backend:** LLVM 18+ · Ahead-of-Time Compilation
 > **License:** See repository root
@@ -26,6 +26,14 @@
 15. [Enums](#15-enums)
 16. [Error Handling](#16-error-handling)
 17. [Memory Semantics and Ownership System](#17-memory-semantics-and-ownership-system)
+    - 17.0 Ownership States
+    - 17.1 move
+    - 17.2 borrow / borrow mut
+    - 17.3 invalidate
+    - 17.4 freeze
+    - 17.5 reborrow + partial borrow
+    - 17.6 prefetch
+    - 17.7 No-Aliasing Guarantee
 18. [OPTMAX Blocks](#18-optmax-blocks)
 19. [Built-in Functions](#19-built-in-functions)
 20. [Concurrency](#20-concurrency)
@@ -34,6 +42,17 @@
 23. [Import System](#23-import-system)
 24. [Compiler CLI Reference](#24-compiler-cli-reference)
 25. [Advanced Optimization Features](#25-advanced-optimization-features)
+    - 25.1 E-Graph Equality Saturation
+    - 25.2 Superoptimizer (+ Branch-to-Select)
+    - 25.3 Hardware Graph Optimization Engine (HGOE)
+    - 25.4 OPTMAX Blocks
+    - 25.5 Profile Guidance (PGO)
+    - 25.6 Escape Analysis (Stack Allocation)
+    - 25.7 Bounds Check Hoisting
+    - 25.8 Allocation Elimination
+    - 25.9 SROA (Struct/Array → Scalars)
+    - 25.10 Reduction Recognition
+    - 25.11 OptStats
 
 ---
 
@@ -43,8 +62,12 @@ OmScript is a statically-compiled, dynamically-typed language with optional type
 
 - **Dynamic typing with optional annotations** — variables are untyped by default; annotations enable advanced optimizations and SIMD types
 - **LLVM backend** — ahead-of-time compilation to native binaries
-- **Three-stage optimizer** — e-graph equality saturation, superoptimizer, and hardware graph optimization engine (HGOE)
+- **Four-stage optimizer** — AST pre-passes (comptime evaluation, loop fusion, escape analysis), e-graph equality saturation, superoptimizer, and hardware graph optimization engine (HGOE)
 - **C-compatible performance** — designed to match C performance with high-level syntax
+- **Compile-time ownership system** — `move`, `borrow`, `borrow mut`, `freeze`, `reborrow`, and `invalidate` keywords for static lifetime tracking and aggressive alias optimizations
+- **`comptime {}` blocks** — arbitrary expressions evaluated entirely at compile time and substituted as constants
+- **`parallel` loops** — assert iteration independence for auto-parallelization
+- **Loop annotations** — `@loop(independent=true)`, `@loop(fuse=true)`, `@loop(unroll=N)`, `@loop(vectorize=true/false)`, `@loop(tile=N)`
 
 ---
 
@@ -52,16 +75,27 @@ OmScript is a statically-compiled, dynamically-typed language with optional type
 
 ```
 Source (.om)
-  → Preprocessor     (macro expansion, conditional compilation)
-  → Lexer            (tokenization)
-  → Parser           (AST construction)
-  → Code Generator   (LLVM IR generation)
-  → E-Graph          (equality saturation, algebraic identities)
-  → Superoptimizer   (idiom recognition, branch-to-select)
-  → HGOE             (hardware-aware scheduling, FMA fusion)
-  → LLVM             (standard optimization passes)
+  → Preprocessor      (macro expansion, conditional compilation)
+  → Lexer             (tokenization)
+  → Parser            (AST construction)
+  → AST Pre-passes    (comptime eval, loop fusion, constant propagation)
+  → Code Generator    (LLVM IR generation, escape analysis, freeze/reborrow)
+  → E-Graph           (equality saturation, algebraic identities, O2+)
+  → Superoptimizer    (idiom recognition, branch-to-select, O2+)
+  → HGOE              (hardware-aware scheduling, FMA fusion, -march/-mtune)
+  → LLVM              (standard optimization passes: SROA, mem2reg, GVN, …)
   → Native Binary
 ```
+
+**AST pre-passes** run before LLVM IR generation and include:
+
+| Pass | Trigger | Effect |
+|---|---|---|
+| `comptime {}` evaluation | Always | Evaluates constant blocks, substitutes result as literal |
+| Cross-function const propagation | O1+ | Inlines pure zero-arg function results as constants |
+| Loop fusion | `@loop(fuse=true)` | Merges adjacent same-range loops into one |
+| Escape analysis | O1+ | Stack-allocates non-escaping small arrays |
+| Constant folding | Always | Folds arithmetic, builtins, string ops with literal args |
 
 ---
 
@@ -85,9 +119,11 @@ repeat    until     times     with      var       const
 register  break     continue  in        true      false
 null      switch    case      default   try       catch
 throw     enum      struct    import    move      invalidate
-borrow    prefetch  likely    unlikely  when      guard
-defer     swap
+borrow    freeze    reborrow  prefetch  likely    unlikely
+when      guard     defer     swap      parallel  comptime
 ```
+
+**v4.0.0 additions:** `freeze`, `reborrow`, `parallel`, `comptime`
 
 ### 3.3 Literals
 
@@ -303,7 +339,25 @@ const MAX:int = 100
 
 Constants must be initialized at declaration and cannot be reassigned. The compiler performs constant folding at compile time.
 
-### 6.3 Register Variables
+### 6.3 Compile-Time Blocks (`comptime`)
+
+A `comptime {}` block is executed **entirely at compile time** by the constant evaluator. The result must be a constant integer or string value, which is then substituted at the call site as a literal — no runtime code is emitted.
+
+```
+var a = comptime { return 6 * 7; };          // a = 42, compile-time constant
+var b = comptime { var n = 5; return n * n; }; // b = 25
+const c = comptime { return min(10, 20); };  // c = 10
+```
+
+**Rules:**
+- The body must be a sequence of `var` declarations and a final `return <expr>` where all values are statically known.
+- Builtin math functions (`abs`, `min`, `max`, `pow`, `sqrt`, `floor`, `ceil`, `round`, `exp2`, `log`, `clamp`, `sign`, `lcm`, `gcd`, `is_even`, `is_odd`, `is_power_of_2`, `popcount`, `clz`, `ctz`, `bswap`, `bitreverse`, `rotate_left`, `rotate_right`, `saturating_add`, `saturating_sub`) are recognized as pure and evaluated at compile time when arguments are constant.
+- A `comptime {}` result participates in the downstream constant-folding chain the same way a `const` declaration does — subsequent uses of the variable may also be folded.
+- A `var` initialized with `comptime {}` is treated like a `const` for the purpose of compile-time propagation even though it remains technically reassignable.
+
+**When a `comptime` block cannot be folded** (because the body references non-constant values), the compiler emits a hard error at compile time. This makes `comptime` a guarantee, not a hint.
+
+### 6.4 Register Variables
 
 ```
 register var x:int = 0    // hint to force variable into CPU register
@@ -311,7 +365,7 @@ register var x:int = 0    // hint to force variable into CPU register
 
 Instructs the compiler to promote the variable to an SSA register via LLVM's `mem2reg` pass. Only works for types that fit in a register (integers, floats, bools).
 
-### 6.4 Assignment
+### 6.5 Assignment
 
 ```
 x = 10
@@ -319,7 +373,7 @@ arr[i] = value
 obj.field = value
 ```
 
-### 6.5 Compound Assignment
+### 6.6 Compound Assignment
 
 ```
 x += 1     x -= 1     x *= 2     x /= 2     x %= 3
@@ -393,7 +447,7 @@ fn add(a:int, b:int) -> int = a + b;
 | `@noinline` | Prevent inlining |
 | `@cold` | Mark as cold (infrequently called) |
 | `@hot` | Mark as hot (optimize aggressively; elides bounds checks at O2+) |
-| `@pure` | Mark as pure (no side effects) |
+| `@pure` | Mark as pure (no side effects); enables cross-function constant propagation |
 | `@noreturn` | Function never returns |
 | `@static` | Internal linkage |
 | `@flatten` | Inline all call sites within this function |
@@ -409,6 +463,7 @@ fn add(a:int, b:int) -> int = a + b;
 | `@optnone` | Disable all optimizations (overrides `@inline`, `@hot`) |
 | `@nounwind` | Function never throws (no unwind tables) |
 | `@const_eval` | Evaluate at compile time when possible |
+| `@allocator(size=N)` | Function is a memory allocator; adds LLVM `allocsize(N)` + `noalias` on return (see §7.9) |
 
 **File-level annotation:**
 ```
@@ -428,6 +483,30 @@ At function return the compiler automatically emits cache-eviction prefetch hint
 ### 7.8 Tail Calls
 
 Self-recursive calls in tail position are automatically converted to jumps (guaranteed tail call elimination).
+
+### 7.9 Allocator Annotation (`@allocator`)
+
+```
+@allocator(size=0)
+fn my_alloc(nbytes) {
+    return malloc(nbytes);
+}
+
+@allocator(size=0, count=1)
+fn my_calloc(nmemb, size) {
+    return calloc(nmemb, size);
+}
+```
+
+`@allocator(size=N)` tells the compiler that this function **returns freshly allocated memory** of a size determined by parameter index `N` (zero-indexed). The compiler adds:
+
+- LLVM `allocsize(N)` attribute — informs alias analysis that the returned pointer covers exactly `param[N]` bytes
+- `noalias` on the return value — the returned pointer never aliases any existing pointer
+- `willreturn` + `nounwind` — the function always returns and never throws
+
+Optional `count=M` specifies that the total allocation size is `param[N] * param[M]` bytes (analogous to `calloc`).
+
+**Effect:** LLVM's `DeadArgumentElimination`, `InlinerPass`, and escape analysis can now reason about the allocation size and provenance, enabling allocation elimination when the result is proven dead.
 
 ---
 
@@ -690,6 +769,91 @@ Rotates values among two or more variables atomically:
 swap a, b;         // exchange a and b
 swap a, b, c;      // a←b, b←c, c←a (rotation)
 ```
+
+### 9.15 `parallel` Loops
+
+Prepend `parallel` to any `for`, `while`, or `foreach` loop to assert that **all iterations are independent** — there are no loop-carried data dependencies. The compiler emits `llvm.loop.parallel_accesses` metadata, allowing LLVM and the auto-vectorizer/parallelizer to treat iterations as fully independent.
+
+```
+parallel for (i in 0...n) {
+    result[i] = compute(data[i]);
+}
+
+parallel foreach item in arr {
+    process(item);
+}
+
+parallel while (cond) {
+    step();
+}
+```
+
+**Semantics:** You are asserting to the compiler that the loop body does not read memory written by a prior iteration and does not write memory read by a later iteration. Violating this assertion produces **undefined behavior** — the compiler will not verify it.
+
+**Difference from `@loop(vectorize=true)`:** `parallel` makes a stronger claim (no inter-iteration dependency of any kind), while `vectorize=true` only requests vectorization without suppressing alias checks.
+
+### 9.16 Loop Annotations (`@loop(...)`)
+
+The `@loop(...)` annotation is placed **between** the loop header's closing `)` and the loop body's opening `{`. It fine-tunes compiler hints for that specific loop:
+
+```
+for (i in 0...n) @loop(unroll=4) { ... }
+
+for (i in 0...n) @loop(vectorize=true, tile=32) { ... }
+
+for (i in 0...n) @loop(independent=true) { a[i] = b[i] + c[i]; }
+
+while (cond) @loop(parallel=true) { step(); }
+
+for (i in 0...n) @loop(fuse=true) { sum1 += a[i]; }
+for (i in 0...n) @loop(fuse=true) { sum2 += b[i]; }    // fused with the loop above
+```
+
+Supported keys:
+
+| Key | Type | Effect |
+|---|---|---|
+| `unroll=N` | integer | Unroll the loop N times (emits `llvm.loop.unroll.count`) |
+| `vectorize=true/false` | bool | Enable or disable auto-vectorization for this loop |
+| `tile=N` | integer | Tile/block the loop body with block size N |
+| `parallel=true/false` | bool | Same as the `parallel` keyword |
+| `independent=true` | bool | Emit `llvm.access.group` on all memory ops + `parallel_accesses` metadata — stronger than `parallel`, suppresses all cross-iteration alias conservatism |
+| `fuse=true` | bool | Merge this loop with the immediately following `@loop(fuse=true)` loop of the same range into a single loop body |
+
+#### `@loop(independent=true)` in depth
+
+When `independent=true`, the compiler:
+1. Creates a unique `llvm.access.group` metadata node for this loop.
+2. Attaches `!llvm.access.group` to every load and store in the loop body.
+3. Adds a `{!"llvm.loop.parallel_accesses", <access-group>}` entry to the loop's backedge metadata.
+
+This tells LLVM's vectorizer and loop-carried-dependency analyzer that **no memory operation in this loop aliases any other memory operation across iterations**. It is a stronger hint than LLVM's normal alias analysis and enables vectorization of loops that would otherwise be blocked by conservative aliasing.
+
+Only use `independent=true` when you are certain there are no cross-iteration aliases. Incorrect use is **undefined behavior**.
+
+#### `@loop(fuse=true)` in depth
+
+Two adjacent `for` loops annotated with `@loop(fuse=true)` that iterate over the **same range** (identical `start` and `end` expressions as integer literals or the same identifier) are merged by the AST-level loop fusion pre-pass into a single loop:
+
+```
+// Before fusion:
+for (i in 0...n) @loop(fuse=true) { a[i] = b[i] * 2; }
+for (i in 0...n) @loop(fuse=true) { c[i] = a[i] + 1; }
+
+// After fusion (logically equivalent):
+for (i in 0...n) {
+    a[i] = b[i] * 2;
+    c[i] = a[i] + 1;
+}
+```
+
+**Benefits:** Eliminates loop overhead (branch, counter update) for the second loop; improves cache reuse by processing both bodies for the same `i` in the same iteration; enables vectorization across the fused body.
+
+**Constraints:**
+- Both loops must be `for (i in start...end)` range loops with equal bounds.
+- The second iterator variable is mapped to the first loop's iterator inside the fused body.
+- At most one pair of adjacent loops is fused per pass (not recursive/chained). Apply `@loop(fuse=true)` to all loops in a chain to fuse all of them.
+- Fusion is skipped if the bounds expressions are not syntactically identical.
 
 ---
 
@@ -1025,11 +1189,13 @@ Every variable that participates in ownership annotations transitions through an
 | State | Meaning |
 |---|---|
 | **Owned** | Full control — may read, write, move, borrow, or invalidate |
-| **Borrowed** | Read-only alias — may NOT mutate, move, or invalidate the source |
+| **Borrowed** | Shared read-only alias — source may NOT be mutated, moved, or invalidated while any borrow is live; multiple immutable borrows may coexist |
+| **MutBorrowed** | Exclusive mutable alias — exactly one `borrow mut` is active; source may NOT be read, written, moved, or invalidated; no other borrow may coexist |
+| **Frozen** | Value is guaranteed non-poison; source is read-only for its remaining lifetime |
 | **Moved** | Ownership transferred out — any further use is a compile error |
 | **Invalidated** | Explicitly killed — any further use is a compile error |
 
-Variables that never use `move`, `borrow`, or `invalidate` remain in the Owned state and behave like ordinary variables.
+Variables that never use `move`, `borrow`, `freeze`, or `invalidate` remain in the Owned state and behave like ordinary variables.
 
 ### 17.1 move
 
@@ -1050,15 +1216,26 @@ fn transfer(data) {
 
 ### 17.2 borrow
 
+`borrow` uses a **statement** syntax (not an expression), distinct from ordinary variable declarations:
+
 ```
-fn process(data) {
-    var view = borrow data
-    // view shares data's storage; data cannot be mutated or moved
-    // while view is live
-}
+borrow view = data;           // immutable borrow — 'view' is a read-only alias of 'data'
+borrow mut ref = data;        // mutable borrow — 'ref' is an exclusive mutable alias of 'data'
+borrow typed_ref:int = data;  // typed immutable borrow
 ```
 
-`borrow` creates a read-only alias. The source variable transitions to the Borrowed state: it may still be read but cannot be mutated, moved, or invalidated while the borrow is active. The borrow ends at the end of the enclosing scope.
+`borrow` creates a **read-only alias**. The source variable transitions to the Borrowed state: it may still be read but cannot be mutated, moved, or invalidated while the borrow is active. The borrow ends at the end of the enclosing scope. Multiple simultaneous immutable borrows are allowed.
+
+**Mutable borrow (`borrow mut`):**
+
+```
+var buf = [0, 0, 0];
+borrow mut ref = buf;          // exclusive mutable alias
+// ref[0] = 42;               // writing through a mutable borrow is valid
+// buf[0] = 1;                // ERROR: 'buf' is MutBorrowed; direct mutation forbidden
+```
+
+`borrow mut` creates an **exclusive mutable alias**. The source transitions to the MutBorrowed state — no reads or writes to the source, and no new borrows, are allowed while the mutable borrow is live.
 
 The compiler attaches `!alias.scope` and `!noalias` LLVM scoped-noalias metadata to loads through borrowed pointers, enabling alias-analysis-dependent optimizations (vectorization, LICM, load/store reordering) across borrow boundaries.
 
@@ -1072,7 +1249,72 @@ After `invalidate`, any use of `a` is a **compile-time error**.
 
 Required before returning from a function in which a variable was declared with the `prefetch` statement — the compiler enforces that every prefetch-declared variable is either invalidated or returned before the function exits. This does **not** apply to `@prefetch`-annotated function parameters (those are handled automatically).
 
-### 17.4 prefetch
+### 17.4 freeze
+
+```
+freeze x;
+```
+
+`freeze x` does two things:
+
+1. **LLVM IR level** — emits an `llvm freeze` instruction on the current value of `x` and stores it back. This converts any possible **poison** or **undef** bits in `x` to a deterministic (but arbitrary) concrete value. After a `freeze`, `x` is guaranteed to have a well-defined value even if it was previously uninitialized or poison due to speculative execution.
+
+2. **Ownership level** — marks `x` as Frozen. A Frozen variable is **read-only** for the rest of its lifetime — it may not be mutated, moved, or invalidated after freezing.
+
+**Alias propagation:** When `freeze x` is called:
+- If `x` is a borrow alias of `y` (i.e., `borrow x = y`), then `y` is also marked Frozen.
+- If `y` is already Frozen and `borrow x = y` is created, then `x` inherits the Frozen state.
+
+This bidirectional propagation ensures that freeze semantics are consistent across all aliases of the same underlying storage.
+
+```
+var x = compute();
+freeze x;
+// x is now guaranteed non-poison, read-only
+// using x as a constant-like value is safe
+
+borrow ref = x;
+// ref inherits Frozen state — ref is also read-only
+```
+
+**When to use `freeze`:**
+- After reads from external / FFI sources where the value might be uninitialized
+- Before using a value in a context that would produce undefined behavior if the value is poison (e.g., as a shift amount, divisor, or branch condition)
+- To communicate to the optimizer that a value is stable and can be freely reordered or hoisted
+
+### 17.5 reborrow
+
+`reborrow` creates a new borrow reference from an existing variable, using `&` to take the address:
+
+```
+var x = 100;
+borrow r = x;          // borrow (no & needed)
+reborrow r2 = &x;      // reborrow — & is required
+reborrow mut r3 = &x;  // mutable reborrow
+```
+
+**Partial borrow — array element:**
+```
+var data = [10, 20, 30];
+reborrow elem = &data[1];       // borrows only element at index 1
+reborrow mut elem = &data[1];   // mutable borrow of element 1
+```
+
+**Partial borrow — struct field:**
+```
+struct Point { x, y }
+var p = Point{x: 3, y: 4};
+reborrow xref = &p.x;           // borrows only the 'x' field
+reborrow mut yref = &p.y;       // mutable borrow of 'y' field
+```
+
+**Semantics:**
+- A `reborrow` inherits its lifetime from the enclosing scope — when the scope ends, the reborrow is released and the original variable becomes accessible again.
+- A mutable `reborrow mut` of a sub-element is distinct from a mutable borrow of the whole — you may have a `reborrow mut` of `p.x` and a `reborrow mut` of `p.y` simultaneously because they refer to disjoint memory.
+- The reborrow is registered in the compiler's borrow map so the borrow checker tracks it correctly.
+- Accessing the source variable directly while a `reborrow mut` sub-element is live is permitted for fields/elements not covered by the reborrow.
+
+### 17.6 prefetch
 
 The `prefetch` statement issues software prefetch instructions and optionally declares a variable:
 
@@ -1084,7 +1326,7 @@ prefetch data:int = compute();    // declare 'data' and prefetch it
 
 Variables declared with the `prefetch` statement must be `invalidate`d before the function returns (unless they are returned via `move`).
 
-### 17.5 No-Aliasing Guarantee
+### 17.7 No-Aliasing Guarantee
 
 OmScript's ownership system provides a **language-level no-aliasing guarantee**: at any point in a function, no two live pointer-typed variables can refer to the same memory region. This guarantee is enforced by the borrow checker — the Borrowed state prevents the source from being concurrently mutated, and the Moved/Invalidated states prevent any use of the old reference after transfer.
 
@@ -1374,6 +1616,7 @@ All `-f` flags have a `-fno-` counterpart to disable:
 | `-fegraph` | on | E-graph equality saturation (active at O2+) |
 | `-fsuperopt` | on | Superoptimizer pass (active at O2+) |
 | `-fhgoe` | on | Hardware Graph Optimization Engine (active at O2+ with -march/-mtune) |
+| `-fescape-analysis` | on | Stack-allocate non-escaping small arrays (O1+) |
 
 ### 24.6 Superoptimizer Level
 
@@ -1388,9 +1631,22 @@ All `-f` flags have a `-fno-` counterpart to disable:
 
 ```
 -g / --debug   Emit debug information
--V / --verbose Verbose compiler output
+-V / --verbose Verbose compiler output (also prints OptStats counters)
 -static        Link statically
 -s / --strip   Strip debug symbols from output
+```
+
+**Verbose output (`-V` / `--verbose`):** In addition to standard compiler progress, prints an **opt-report** summary after compilation showing how many of each optimization class were applied:
+
+```
+[opt-report] Optimization statistics:
+  const-folded expressions : 127
+  calls inlined            :  22
+  stack allocs (escape)    :   9
+  loops fused              :   4
+  borrows frozen           :   3
+  independent loops        :   7
+  allocator wrappers       :   2
 ```
 
 ### 24.8 Package Manager
@@ -1416,20 +1672,42 @@ Enabled by default at O2+; disable with `-fno-egraph`.
 ### 25.2 Superoptimizer
 
 A post-LLVM optimization pass that applies:
-- **Idiom recognition**: popcount, bswap, rotate, min/max, abs, etc.
-- **Algebraic simplification**: algebraic identities on LLVM IR instructions
-- **Branch-to-select**: converts simple diamond CFGs to `select` instructions
-- **Enumerative synthesis** (level 3 only): enumerates short instruction sequences
+- **Idiom recognition**: popcount, bswap, rotate, min/max, abs, sdiv/srem by power-of-2, etc.
+- **Algebraic simplification**: 300+ algebraic identities on LLVM IR instructions
+- **Branch-to-select**: converts simple diamond CFGs (no side-effects in either branch, single-block arms) to `select` instructions — eliminates branch misprediction penalty on modern CPUs
+- **Enumerative synthesis** (level 3 only): enumerates short instruction sequences to find cheaper equivalents
 
 Enabled by default at O2+; configure with `-fsuperopt-level=<level>`.
+
+#### Branch-to-Select in Depth
+
+```omscript
+// Source
+var y = 0;
+if (x > 5) { y = x * 2; } else { y = x + 1; }
+
+// IR before superoptimizer:
+//   br i1 %cond, label %then, label %else
+//   then: %a = mul i64 %x, 2 → br %merge
+//   else: %b = add i64 %x, 1 → br %merge
+//   merge: %y = phi [%a, %then], [%b, %else]
+
+// IR after branch-to-select:
+//   %a = mul i64 %x, 2
+//   %b = add i64 %x, 1
+//   %y = select i1 %cond, i64 %a, i64 %b
+```
+
+The transformation fires when both arms have no side effects and contain at most one instruction each (configurable). This produces a `CMOV` on x86 or a conditional select on ARM, avoiding branch prediction entirely.
 
 ### 25.3 Hardware Graph Optimization Engine (HGOE)
 
 Activated at O2+ when `-march` or `-mtune` is provided (including `native`). When neither flag is set the pass is a complete no-op. Builds a structural model of the target CPU microarchitecture and:
 - Maps operations to hardware execution units
 - Inserts FMA (fused multiply-add) instructions where profitable
-- Applies hardware-specific strength reductions
-- Uses hardware-aware cost models for scheduling decisions
+- Applies hardware-specific strength reductions (`imul` → shift+add for constant multipliers)
+- Performs cycle-accurate instruction scheduling using real port models
+- Sets `target-cpu` and `target-features` on every function for proper ISA selection
 
 ### 25.4 OPTMAX Blocks
 
@@ -1438,3 +1716,113 @@ See [Section 18](#18-optmax-blocks).
 ### 25.5 Profile Guidance (PGO)
 
 The build system includes `benchmark_pgo.sh` for profile-guided optimization runs. PGO is coordinated externally via the build scripts — there is no language-level PGO syntax.
+
+### 25.6 Escape Analysis (Stack Allocation)
+
+The compiler performs **escape analysis** on array allocations at O1+ to determine whether an array can be stack-allocated instead of heap-allocated.
+
+**An array is stack-allocated when all of the following hold:**
+1. It is an array literal with ≤ 16 integer-constant elements.
+2. The array is never passed to a function that stores it into a non-local location.
+3. The array is never returned from its declaring function.
+4. The array is never assigned to a non-local variable or struct field.
+5. The array is never captured by a lambda expression.
+
+When escape analysis succeeds, the compiler replaces the `malloc` + header init with a fixed-size `alloca`. This eliminates both the malloc call and the corresponding free, with no observable semantic difference. The stack memory is automatically reclaimed at function exit.
+
+```omscript
+fn sum_small() -> int {
+    var a = [1, 2, 3, 4, 5]   // stack-allocated: 5 int literals, non-escaping
+    var s = 0
+    for (x in a) { s += x; }
+    return s;
+    // no free needed: 'a' is on the stack
+}
+```
+
+The OptStats counter `Stack allocs (escape)` reports how many arrays were successfully stack-allocated.
+
+**Disable:** `-fno-escape-analysis`
+
+### 25.7 Bounds Check Hoisting
+
+At O2+ inside `@hot`-annotated functions and OPTMAX blocks, redundant bounds checks within loops are **hoisted** out of the loop body. If the compiler can prove (via `llvm.assume` or range metadata) that the loop index `i` stays within `[0, len(arr))` for the entire loop duration, the per-iteration check is replaced with a single pre-loop check:
+
+```omscript
+@hot
+fn sum(arr, n) {
+    var s = 0;
+    for (i:int in 0...n) {
+        s += arr[i];   // check hoisted: verified once before the loop
+    }
+    return s;
+}
+```
+
+The hoisted check emits an `llvm.assume(n <= len(arr))` before the loop header, enabling the vectorizer and unroller to eliminate all in-loop guards.
+
+### 25.8 Allocation Elimination
+
+When a heap allocation's result is provably never used (dead allocation), or when the allocation is immediately followed by a `free` / goes out of scope without any read, the compiler's dead-code elimination pass (in combination with LLVM's `DeadArgumentElimination` and `GlobalDCE`) eliminates the malloc/free pair entirely.
+
+This is strengthened by the `@allocator(size=N)` annotation (§7.9), which marks user-defined allocation wrappers so that LLVM can reason about their return value's provenance and liveness.
+
+```omscript
+fn example() {
+    var tmp = [0, 0, 0]   // allocation — but tmp is never read
+    return 42;             // tmp's allocation is eliminated entirely
+}
+```
+
+### 25.9 SROA (Struct/Array → Scalars)
+
+LLVM's **Scalar Replacement of Aggregates** (SROA) pass is applied at O1+ and promotes struct fields and small fixed-size array elements to individual SSA scalar values when:
+- The aggregate is declared as a local variable (alloca).
+- All accesses use constant GEP indices (i.e., field accesses and constant-index array subscripts).
+- The aggregate address is never taken and stored into a non-local.
+
+OmScript assists SROA by:
+- Setting **high alignment** on all struct and array allocas (`align 8`) to maximize promotion likelihood.
+- Ensuring that `@loop(independent=true)` loops with fixed-size arrays use constant-index accesses where possible, enabling SROA to promote individual elements to registers.
+
+After SROA, individual elements are accessed as register values (SSA `load`/`store` pairs become direct `phi` nodes), and mem2reg promotes them fully to SSA form, eliminating all memory traffic for the aggregate.
+
+### 25.10 Reduction Recognition
+
+The compiler recognizes **loop-carried reduction** patterns — accumulators updated in every iteration using an associative, commutative operator — and annotates the loop with `llvm.loop.vectorize.enable` to allow LLVM to generate horizontal-reduction SIMD instructions:
+
+Recognized patterns:
+- `sum += arr[i]` → horizontal add reduction
+- `prod *= arr[i]` → horizontal multiply reduction
+- `mx = max(mx, arr[i])` → horizontal max reduction
+- `mn = min(mn, arr[i])` → horizontal min reduction
+- `flags |= arr[i]` / `bits &= arr[i]` → bitwise OR/AND reductions
+
+When combined with `@loop(vectorize=true)` or inside an OPTMAX block, the vectorizer emits SIMD reduction instructions (e.g., `vphaddd`, `vphaddw`, `vpmaxsd` on AVX2) that process multiple elements per clock cycle.
+
+### 25.11 OptStats
+
+When the compiler is run with `-V` / `--verbose`, it prints an **opt-report** summary after compilation listing all optimization counters:
+
+| Counter | What it counts |
+|---|---|
+| `const-folded expressions` | Total AST-level arithmetic, string, and builtin folds |
+| `calls inlined` | Call sites replaced with inlined constants via cross-function propagation |
+| `stack allocs (escape)` | Arrays stack-allocated by escape analysis |
+| `loops fused` | Pairs of loops merged by `@loop(fuse=true)` |
+| `borrows frozen` | Variables frozen by `freeze` + their propagated borrow aliases |
+| `independent loops` | Loops annotated with `@loop(independent=true)` |
+| `allocator wrappers` | User functions annotated with `@allocator` |
+
+Example output:
+```
+[opt-report] Optimization statistics:
+  const-folded expressions : 127
+  calls inlined            :  22
+  stack allocs (escape)    :   9
+  loops fused              :   4
+  borrows frozen           :   3
+  independent loops        :   7
+  allocator wrappers       :   2
+```
+

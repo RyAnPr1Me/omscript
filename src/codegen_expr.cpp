@@ -56,8 +56,17 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                                          bool isStr,
                                          const char* prefix) {
     // Always elide in OPTMAX functions or @hot functions at O2+.
-    if (inOptMaxFunction)
-        return true;
+    if (inOptMaxFunction) {
+        // v2 config: respect safety level
+        if (currentOptMaxConfig_.enabled) {
+            if (currentOptMaxConfig_.safety == SafetyLevel::Off) return true;
+            if (currentOptMaxConfig_.safety == SafetyLevel::Relaxed && !isStr) return true;
+            // SafetyLevel::On: don't elide bounds checks, fall through
+        } else {
+            // legacy optmax block: elide all bounds checks (original behavior)
+            return true;
+        }
+    }
     if (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2)
         return true;
     // Skip array-specific elision for strings or below O1.
@@ -428,13 +437,8 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
-    // Check for use-after-move or use-after-invalidate.
-    auto deadIt = deadVars_.find(expr->name);
-    if (deadIt != deadVars_.end()) {
-        auto reasonIt = deadVarReason_.find(expr->name);
-        const std::string reason = (reasonIt != deadVarReason_.end()) ? reasonIt->second : "moved or invalidated";
-        codegenError("Use of " + reason + " variable '" + expr->name + "'", expr);
-    }
+    // Check for use-after-move, use-after-invalidate, or read-while-mut-borrowed.
+    checkVariableReadable(expr->name, expr);
 
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
@@ -469,6 +473,7 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
             auto* ci = llvm::ConstantInt::get(getDefaultType(), foldIt->second);
             if (foldIt->second >= 0)
                 nonNegValues_.insert(ci);
+            optStats_.constFolded++;
             return ci;
         }
     }
@@ -495,15 +500,18 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     auto* load = builder->CreateAlignedLoad(loadType, it->second,
         llvm::MaybeAlign(8), expr->name.c_str());
 
-    // If this is a const variable or a prefetch-immut variable, mark the
-    // load as invariant so LLVM knows the value never changes and can
-    // hoist/CSE it aggressively.
+    // If this is a const variable, a prefetch-immut variable, or a frozen
+    // variable, mark the load as invariant so LLVM knows the value never
+    // changes and can hoist/CSE it aggressively.
     bool isInvariant = false;
     auto constIt = constValues.find(expr->name);
     if (constIt != constValues.end() && constIt->second) {
         isInvariant = true;
     }
     if (prefetchedImmutVars_.count(expr->name)) {
+        isInvariant = true;
+    }
+    if (frozenVars_.count(expr->name)) {
         isInvariant = true;
     }
     // Register variables are mutable; do not mark loads as invariant.
@@ -521,6 +529,20 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             loadInst->setMetadata(llvm::LLVMContext::MD_noundef,
                                   llvm::MDNode::get(*context, {}));
+            // !nonnull on pointer-typed loads: when the loaded value is a
+            // string or array pointer, OmScript guarantees non-null (runtime
+            // aborts on allocation failure).  This lets LLVM eliminate any
+            // null checks on the loaded pointer, speculate subsequent loads,
+            // and hoist accesses out of loops that test for null.
+            // Only applies to loads that return ptr type (annotated params);
+            // unannotated local array variables are stored as i64 and use
+            // the !range [0, INT64_MAX) path below for non-negativity instead.
+            if (loadInst->getType()->isPointerTy()) {
+                if (stringVars_.count(expr->name) || arrayVars_.count(expr->name)) {
+                    loadInst->setMetadata(llvm::LLVMContext::MD_nonnull,
+                                          llvm::MDNode::get(*context, {}));
+                }
+            }
         }
     }
     // Track non-negativity: if the alloca is known to hold a non-negative
@@ -869,8 +891,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // Pre-compute string flags once, used by both the float-skip guard below
     // and the string concatenation block that follows.
-    const bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
-    const bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
+    // Use isStringExpr() as the sole discriminator — pointer type alone is
+    // ambiguous since arrays/structs/dicts also use pointer-typed allocas.
+    const bool leftIsStr = isStringExpr(expr->left.get());
+    const bool rightIsStr = isStringExpr(expr->right.get());
 
     // Float operations path — but only when neither operand is a string.
     // When the '+' operator has one string and one float (e.g. "pi=" + 3.14),
@@ -4275,7 +4299,9 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         updateBound(value);
     }
     // Update string variable tracking after assignment.
-    if (value->getType()->isPointerTy() || isStringExpr(expr->value.get()))
+    // Use isStringExpr() — pointer type alone is ambiguous since
+    // arrays/structs/dicts also use pointer-typed allocas.
+    if (isStringExpr(expr->value.get()))
         stringVars_.insert(expr->name);
     else
         stringVars_.erase(expr->name);
@@ -4284,6 +4310,26 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         stringArrayVars_.insert(expr->name);
     else
         stringArrayVars_.erase(expr->name);
+    // Update array-variable tracking after assignment.
+    {
+        bool isArr = false;
+        if (expr->value->type == ASTNodeType::ARRAY_EXPR) {
+            isArr = true;
+        } else if (expr->value->type == ASTNodeType::CALL_EXPR) {
+            auto* call = static_cast<CallExpr*>(expr->value.get());
+            if (call->callee == "array_fill" || call->callee == "array_concat" ||
+                call->callee == "array_copy" || call->callee == "array_map" ||
+                call->callee == "array_filter" || call->callee == "array_slice" ||
+                call->callee == "push" || call->callee == "pop" ||
+                call->callee == "sort" || call->callee == "reverse" ||
+                call->callee == "array_remove" || call->callee == "array_reduce" ||
+                call->callee == "str_split" || call->callee == "str_chars" ||
+                arrayReturningFunctions_.count(call->callee))
+                isArr = true;
+        }
+        if (isArr) arrayVars_.insert(expr->name);
+        else       arrayVars_.erase(expr->name);
+    }
     // When a variable is reassigned, its previous knownArraySize(Allocas) entry
     // is no longer valid — the new value may have a different length.
     knownArraySizes_.erase(expr->name);
@@ -5047,7 +5093,9 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // Detect whether the base expression is a string.  Strings are raw char
     // pointers without a length header; arrays have the layout [length, e0,
     // e1, ...] and each element is 8 bytes (i64).
-    const bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
+    // Use isStringExpr() as the sole discriminator — pointer type alone is
+    // ambiguous since arrays/structs/dicts also use pointer-typed allocas.
+    const bool isStr = isStringExpr(expr->array.get());
 
     // Convert i64 → pointer (strings may arrive as i64 via ptrtoint)
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -5068,9 +5116,12 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     // ── Backward array reference detection (must run BEFORE boundsCheckElided) ──
     // Detect arr[i - K] where i is a safe loop iterator and K > 0.
-    // This sets bodyHasBackwardArrayRef_ which suppresses parallel_accesses
-    // metadata on the enclosing loop, allowing LLVM to recognize the
-    // loop-carried dependency and promote arr[i-1] to a register accumulator.
+    // Record the array name in loopBackwardReadArrays_; after the loop body
+    // is generated, bodyHasBackwardArrayRef_ is set only if the same array
+    // is also written to (a true loop-carried write→read dependency).
+    // Read-only backward references (e.g., result[i] = data[i] + data[i-1])
+    // do NOT suppress LICM versioning or parallel_accesses, since LICM and
+    // vectorization are safe when the read array isn't modified.
     // Must be checked BEFORE boundsCheckElided is set, because OPTMAX and @hot
     // functions start with boundsCheckElided=true, which would skip this check.
     if (!isStr && loopNestDepth_ > 0
@@ -5084,7 +5135,17 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                 if (loopIterVars_.count(binIter->name)
                         && binOffset->literalType == LiteralExpr::LiteralType::INTEGER
                         && binOffset->intValue > 0) {
-                    bodyHasBackwardArrayRef_ = true;
+                    // Record the array name for dependency analysis.
+                    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                        auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+                        loopBackwardReadArrays_.insert(arrId->name);
+                        // Check if this array is already known to be written.
+                        if (loopWrittenArrays_.count(arrId->name))
+                            bodyHasBackwardArrayRef_ = true;
+                    } else {
+                        // Conservative: non-identifier array base → assume dependency.
+                        bodyHasBackwardArrayRef_ = true;
+                    }
                 }
             }
         }
@@ -5093,13 +5154,15 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     bool boundsCheckElided = canElideBoundsCheck(
         expr->array.get(), expr->index.get(), basePtr, isStr, "idx");
 
-    // Ownership-aware optimization: borrowed arrays cannot be resized,
-    // so their length is invariant.  Mark the length load with !invariant.load
-    // so LLVM can hoist/CSE it across the loop.
+    // Ownership-aware optimization: borrowed arrays and const arrays cannot be
+    // resized, so their length is invariant.  Mark the length load with
+    // !invariant.load so LLVM can hoist/CSE it across the loop.
     bool arrayIsBorrowed = false;
     if (!isStr) {
         if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-            arrayIsBorrowed = isVariableBorrowed(static_cast<IdentifierExpr*>(expr->array.get())->name);
+            const std::string& arrName = static_cast<IdentifierExpr*>(expr->array.get())->name;
+            arrayIsBorrowed = isVariableBorrowed(arrName)
+                || (constValues.count(arrName) && constValues.find(arrName)->second);
         }
     }
 
@@ -5174,6 +5237,17 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         }
     }
 
+    // Track array writes for backward array reference dependency analysis.
+    // When arr[i] = val is inside a loop, record 'arr' in loopWrittenArrays_.
+    // If loopBackwardReadArrays_ already has 'arr', this is a true write→read
+    // dependency and bodyHasBackwardArrayRef_ is set.
+    if (loopNestDepth_ > 0 && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+        loopWrittenArrays_.insert(arrId->name);
+        if (loopBackwardReadArrays_.count(arrId->name))
+            bodyHasBackwardArrayRef_ = true;
+    }
+
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
     // Track whether the value expression contains a non-pow2 modulo being
@@ -5190,7 +5264,9 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     idxVal = toDefaultType(idxVal);
 
     // Detect whether the base is a string (raw char* without a length header).
-    const bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
+    // Use isStringExpr() as the sole discriminator — pointer type alone is
+    // ambiguous since arrays/structs/dicts also use pointer-typed allocas.
+    const bool isStr = isStringExpr(expr->array.get());
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     llvm::Value* basePtr =

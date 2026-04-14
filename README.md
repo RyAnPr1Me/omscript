@@ -2,6 +2,8 @@
 
 A low-level, C-like programming language with dynamic typing and **automatic reference counting memory management**. Features a **heavily optimized AOT compiler** using LLVM, a **lightweight adaptive JIT runtime** that recompiles hot functions with aggressive optimizations, and a **three-layer optimization engine** (equality-saturation E-graph, superoptimizer, and hardware-graph-driven instruction scheduler) that produces near-optimal native machine code for each target CPU.
 
+**Current version: 4.0.0**
+
 ## Key Features
 
 - **C-like Syntax**: Familiar syntax for C/JavaScript programmers
@@ -19,7 +21,9 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Switch/Case**: Multi-way branching with `switch`/`case`/`default`, multi-value `case 1, 2, 3:`
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
 - **Error Handling**: `try`/`catch`/`throw` for structured error handling
-- **Ownership System**: Optional `move`, `invalidate`, and `borrow` keywords for compile-time use-after-move/invalidate detection and LLVM optimization hints
+- **Ownership System**: `move`, `invalidate`, `borrow`, `borrow mut`, `freeze`, and `reborrow` keywords for compile-time lifetime tracking and LLVM optimization hints
+- **`comptime {}` Blocks**: Expressions evaluated entirely at compile time — result folded into a constant at the call site
+- **`parallel` Loops**: `parallel for`/`while`/`foreach` emits loop parallelization metadata for auto-vectorization and parallel execution
 - **Enum Declarations**: Named integer constants with auto-increment
 - **Default Parameters**: Optional function parameters with default values
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
@@ -27,10 +31,19 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
 - **140+ Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
 - **Adaptive JIT Runtime**: Hot functions are automatically recompiled at higher optimization levels using runtime profiling data
+- **Optimization Feedback**: Run with `-v` to see what the compiler folded, inlined, stack-allocated, and fused
 
 ## Optimization Pipeline
 
 OmScript runs a **three-layer optimizer** on top of LLVM's standard passes:
+
+### Layer 0 — AST-Level Pre-Passes (O1+)
+Run before LLVM codegen on the parsed AST:
+- **Cross-function constant propagation** — zero-argument pure functions whose return value is always a compile-time constant are identified via fixed-point analysis and inlined as constants at every call site
+- **`comptime {}` evaluation** — compile-time blocks are fully executed by the interpreter at compile time; results replace the expression with a literal constant
+- **`@fuse` loop fusion** — adjacent `for` loops over identical ranges are merged into a single loop body, reducing loop overhead and improving cache locality
+- **`@independent` access groups** — emits `llvm.access.group` + `llvm.loop.parallel_accesses` to suppress loop-carried alias analysis conservatism
+- **Escape analysis** — small integer-literal array allocations proven not to escape are stack-allocated (`alloca`) instead of heap-allocated, eliminating malloc/free overhead entirely
 
 ### Layer 1 — E-Graph Equality Saturation (O2+)
 Applied to the AST **before** LLVM codegen. Uses 600+ algebraic rewrite rules to find provably equivalent, cheaper expressions:

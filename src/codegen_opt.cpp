@@ -117,6 +117,8 @@
 #include <llvm/Transforms/IPO/CalledValuePropagation.h>
 #include <llvm/Transforms/IPO/Attributor.h>
 #include <llvm/Transforms/IPO/SCCP.h>
+#include <llvm/Transforms/IPO/SyntheticCountsPropagation.h>
+#include <llvm/Transforms/IPO/ElimAvailExtern.h>
 #include <llvm/Transforms/Scalar/SCCP.h>
 #if LLVM_VERSION_MAJOR < 20
 #include <llvm/Transforms/Scalar/LoopReroll.h>
@@ -501,6 +503,22 @@ void CodeGenerator::runOptimizationPasses() {
             llvm::FunctionPassManager EarlyFPM;
             EarlyFPM.addPass(llvm::LowerExpectIntrinsicPass());
             MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(EarlyFPM)));
+        });
+    }
+
+    // At O2+, add SyntheticCountsPropagation early in the pipeline.
+    // This propagates estimated call-count annotations through the call graph
+    // based on static heuristics, giving the inliner better information about
+    // which functions are called frequently.  Without PGO profile data, the
+    // inliner uses only function size as a heuristic; with synthetic counts,
+    // it can prioritize inlining of functions on hot call paths (e.g. inner
+    // loop helpers called transitively millions of times).  This is especially
+    // effective for OmScript's small-function style where helpers like min/max
+    // are called from loop bodies.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerPipelineStartEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            MPM.addPass(llvm::SyntheticCountsPropagation());
         });
     }
 
@@ -1088,6 +1106,59 @@ void CodeGenerator::runOptimizationPasses() {
             // bounds-check error paths that are cold; partial inlining moves
             // only the hot fast-path into callers.
             MPM.addPass(llvm::PartialInlinerPass());
+
+            // ── Second IPO constant-propagation round (O3 only) ────────────
+            // After inlining + PartialInliner, new call sites with constant
+            // arguments become visible.  A second IPSCCP pass propagates these
+            // newly-exposed constants inter-procedurally and folds them.  The
+            // subsequent function-level SCCP + InstCombine + GVN clean up the
+            // folded constants within each function, and a final DeadArgElim
+            // removes any parameters that became dead after specialization.
+            // This replicates the "round 2 IPO" strategy used in production
+            // compilers (GCC -O3's second IPCP pass, Clang ThinLTO pipeline).
+            if (isO3) {
+                MPM.addPass(llvm::IPSCCPPass());
+                llvm::FunctionPassManager IPO2FPM;
+                IPO2FPM.addPass(llvm::SCCPPass());
+                IPO2FPM.addPass(llvm::InstCombinePass());
+                IPO2FPM.addPass(llvm::GVNPass());
+                IPO2FPM.addPass(llvm::ADCEPass());
+                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(IPO2FPM)));
+                MPM.addPass(llvm::DeadArgumentEliminationPass());
+            }
+
+            // EliminateAvailableExternallyPass removes bodies of externally-
+            // available functions that are no longer needed after IPO.  After
+            // inlining and GlobalOpt have processed all call sites, many
+            // available_externally definitions exist only as "dead weight".
+            // Removing them shrinks the module, improves link time, and gives
+            // the linker a cleaner symbol table.
+            MPM.addPass(llvm::EliminateAvailableExternallyPass());
+        });
+    }
+
+    // At O3, add a module-level AttributorPass after the main IPSCCP/inliner
+    // rounds.  AttributorCGSCCPass (already registered above) processes one
+    // SCC at a time during inlining, but AttributorPass operates on the entire
+    // module at once.  This module-wide pass can propagate noalias, nofree,
+    // nosync, readnone, and nocapture across SCCs that are disconnected in the
+    // call graph — e.g. it can mark a function as "readnone" even if it calls
+    // another readnone function in a different SCC.  This is especially useful
+    // for OmScript programs where math helpers call other math helpers.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
+            MPM.addPass(llvm::AttributorPass());
+            // After Attributor propagates new attributes (e.g. marks functions
+            // as readnone), re-run LICM to hoist loads and function calls out
+            // of loops that Attributor proved are loop-invariant.
+            llvm::FunctionPassManager PostAttrFPM;
+            llvm::LoopPassManager PostAttrLPM;
+            PostAttrLPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
+            PostAttrFPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+                std::move(PostAttrLPM), /*UseMemorySSA=*/true));
+            PostAttrFPM.addPass(llvm::InstCombinePass());
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(PostAttrFPM)));
         });
     }
 

@@ -1,0 +1,11 @@
+// borrow_mut_test.om — test `borrow mut ref = x;` single mutable reference
+// Expected exit code: 7
+
+fn main() -> int {
+    var a = 4;
+    // Create a mutable borrow alias — b is a mutable reference to a
+    borrow mut b = a;
+    // Read through b — should see a's value
+    var result = b + 3; // 4 + 3 == 7
+    return result;
+}

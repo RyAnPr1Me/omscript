@@ -1,0 +1,6 @@
+// Test freeze correctness: LLVM freeze instruction + alias propagation
+fn main() {
+    var x = 42;
+    freeze x;
+    return x;
+}

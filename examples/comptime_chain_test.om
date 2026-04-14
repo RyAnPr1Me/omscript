@@ -1,0 +1,7 @@
+// Test comptime {} chain: result participates in further constant folding
+fn main() {
+    const A = comptime { return 3 * 4; };       // 12
+    const B = comptime { return A + 8; };       // 20
+    const C = comptime { var t = B * 2; return t + 5; }; // 45
+    return C;   // 45
+}

@@ -53,6 +53,8 @@ enum class TokenType {
     MOVE,
     INVALIDATE,
     BORROW,
+    FREEZE,
+    MUT,
     PREFETCH,
     LIKELY,
     UNLIKELY,
@@ -70,6 +72,9 @@ enum class TokenType {
     SWAP,
     TIMES,
     WITH,
+    PARALLEL,  // parallel — marks a loop for auto-parallelization
+    COMPTIME,  // comptime — compile-time evaluation block
+    REBORROW,  // reborrow — create a new borrow reference from existing borrow
 
     // Operators
     PLUS,

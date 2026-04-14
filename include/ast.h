@@ -59,9 +59,13 @@ enum class ASTNodeType {
     DICT_EXPR,
     INVALIDATE_STMT,
     MOVE_DECL,
+    FREEZE_STMT,
     PREFETCH_STMT,
     DEFER_STMT,
-    SCOPE_RESOLUTION_EXPR
+    SCOPE_RESOLUTION_EXPR,
+    ASSUME_STMT,
+    COMPTIME_EXPR,  // comptime { ... } — compile-time evaluated block expression
+    REBORROW_EXPR   // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
 };
 
 class ASTNode {
@@ -268,6 +272,36 @@ class ReturnStmt : public Statement {
     explicit ReturnStmt(std::unique_ptr<Expression> val) : Statement(ASTNodeType::RETURN_STMT), value(std::move(val)) {}
 };
 
+struct LoopConfig {
+    int  unrollCount  = 0;    // 0 = auto
+    bool vectorize    = false;
+    bool noVectorize  = false;
+    int  tileSize     = 0;    // 0 = no tiling
+    bool parallel     = false;
+    bool independent  = false; ///< @independent — no cross-iteration dependencies (alias-free)
+    bool fuse         = false; ///< @fuse — merge with adjacent compatible loop
+};
+
+struct MemoryConfig {
+    bool preferStack  = false;
+    bool prefetch     = false;
+    bool noalias      = false;
+};
+
+enum class SafetyLevel { On, Relaxed, Off };
+
+struct OptMaxConfig {
+    bool         enabled       = false;
+    SafetyLevel  safety        = SafetyLevel::On;
+    bool         fastMath      = false;
+    bool         aggressiveVec = false;
+    LoopConfig   loop;
+    MemoryConfig memory;
+    std::vector<std::string> assumes;
+    std::vector<std::string> specialize;
+    bool         report        = false;
+};
+
 class IfStmt : public Statement {
   public:
     std::unique_ptr<Expression> condition;
@@ -288,6 +322,7 @@ class WhileStmt : public Statement {
   public:
     std::unique_ptr<Expression> condition;
     std::unique_ptr<Statement> body;
+    LoopConfig loopHints;
 
     WhileStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::WHILE_STMT), condition(std::move(cond)), body(std::move(b)) {}
@@ -297,6 +332,7 @@ class DoWhileStmt : public Statement {
   public:
     std::unique_ptr<Statement> body;
     std::unique_ptr<Expression> condition;
+    LoopConfig loopHints;
 
     DoWhileStmt(std::unique_ptr<Statement> b, std::unique_ptr<Expression> cond)
         : Statement(ASTNodeType::DO_WHILE_STMT), body(std::move(b)), condition(std::move(cond)) {}
@@ -310,6 +346,7 @@ class ForStmt : public Statement {
     std::unique_ptr<Expression> end;
     std::unique_ptr<Expression> step; // Optional, can be nullptr
     std::unique_ptr<Statement> body;
+    LoopConfig loopHints;
 
     ForStmt(const std::string& iter, std::unique_ptr<Expression> s, std::unique_ptr<Expression> e,
             std::unique_ptr<Expression> st, std::unique_ptr<Statement> b, const std::string& iterType = "")
@@ -332,6 +369,7 @@ class ForEachStmt : public Statement {
     std::string iteratorVar;
     std::unique_ptr<Expression> collection;
     std::unique_ptr<Statement> body;
+    LoopConfig loopHints;
 
     ForEachStmt(const std::string& iter, std::unique_ptr<Expression> coll, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::FOR_EACH_STMT), iteratorVar(iter), collection(std::move(coll)), body(std::move(b)) {}
@@ -400,6 +438,14 @@ class DeferStmt : public Statement {
     std::unique_ptr<Statement> body;
 
     explicit DeferStmt(std::unique_ptr<Statement> b) : Statement(ASTNodeType::DEFER_STMT), body(std::move(b)) {}
+};
+
+class AssumeStmt : public Statement {
+  public:
+    std::unique_ptr<Expression> condition;
+    std::unique_ptr<Statement> deoptBody;  // nullptr if no else deopt
+    AssumeStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> body = nullptr)
+        : Statement(ASTNodeType::ASSUME_STMT), condition(std::move(cond)), deoptBody(std::move(body)) {}
 };
 
 class EnumDecl : public Statement {
@@ -532,6 +578,15 @@ class FunctionDecl : public ASTNode {
     bool hintOptNone = false;     ///< @optnone — disable all optimizations (useful for debugging)
     bool hintNoUnwind = false;    ///< @nounwind — function never throws C++ exceptions
     bool hintConstEval = false;   ///< @const_eval — evaluate at compile time when all args are constants
+    OptMaxConfig optMaxConfig;    ///< OPTMAX v2 configuration (enabled when @optmax(...) annotation is used)
+
+    /// @allocator(size=N) or @allocator(size=N, count=M) annotation.
+    /// Marks this function as an allocator wrapper: LLVM will add the
+    /// `allocsize` attribute so alias analysis can track allocation sizes.
+    ///   allocatorSizeParam >= 0: 0-based index of the "size" parameter
+    ///   allocatorCountParam >= 0: 0-based index of the "count" parameter (-1 = none)
+    int allocatorSizeParam  = -1; ///< -1 = not an allocator wrapper
+    int allocatorCountParam = -1; ///< -1 = no count parameter
 
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {
@@ -586,12 +641,38 @@ class MoveExpr : public Expression {
 };
 
 /// `borrow ref = &x` — non-owning reference hint for alias analysis.
+/// `borrow mut ref = x` — single mutable reference (unique mutable alias).
 class BorrowExpr : public Expression {
   public:
     std::unique_ptr<Expression> source;
+    bool isMut = false; ///< true for `borrow mut` — mutable borrow
 
-    explicit BorrowExpr(std::unique_ptr<Expression> src)
-        : Expression(ASTNodeType::BORROW_EXPR), source(std::move(src)) {}
+    /// Set by generateBorrowExpr to the source variable name so that the
+    /// surrounding VarDecl codegen can register the alias mapping after
+    /// the ref variable's name is known.
+    mutable std::string pendingSrcVar;
+
+    explicit BorrowExpr(std::unique_ptr<Expression> src, bool mut = false)
+        : Expression(ASTNodeType::BORROW_EXPR), source(std::move(src)), isMut(mut) {}
+};
+
+/// `reborrow ref = &src;` — create a new borrow reference from an existing borrow.
+/// `reborrow ref = &src.field;` — partial borrow of a struct field.
+/// `reborrow ref = &src[idx];` — partial borrow of an array element.
+class ReborrowExpr : public Expression {
+  public:
+    std::unique_ptr<Expression> source;  ///< The source expression (identifier, field access, index)
+    bool isMut = false;                  ///< true for mutable reborrow
+    std::string fieldName;               ///< Non-empty if partial borrow of a field
+    std::unique_ptr<Expression> indexExpr; ///< Non-null if partial borrow of an array element
+
+    /// Pending source variable name (set during codegen, mirrors BorrowExpr).
+    mutable std::string pendingSrcVar;
+
+    explicit ReborrowExpr(std::unique_ptr<Expression> src, bool mut = false,
+                          std::string field = "", std::unique_ptr<Expression> idx = nullptr)
+        : Expression(ASTNodeType::REBORROW_EXPR), source(std::move(src)), isMut(mut),
+          fieldName(std::move(field)), indexExpr(std::move(idx)) {}
 };
 
 /// Dict literal: `{"key": val, ...}` — zero-cost map construction.
@@ -653,6 +734,39 @@ class PrefetchStmt : public Statement {
     PrefetchStmt(std::unique_ptr<VarDecl> decl, bool hot, bool immut, int64_t offset = 0)
         : Statement(ASTNodeType::PREFETCH_STMT), varDecl(std::move(decl)),
           hintHot(hot), hintImmut(immut), offsetBytes(offset) {}
+};
+
+/// `freeze x;` — marks variable `x` immutable for the rest of its lifetime.
+/// After freeze:
+///   - All loads become !invariant.load (LLVM can hoist/CSE across loops).
+///   - Writes to the variable are a compile-time error (same as const).
+///   - llvm.invariant.start is emitted so the optimizer can eliminate
+///     redundant loads and fold the value into constants where possible.
+class FreezeStmt : public Statement {
+  public:
+    std::string varName;
+
+    explicit FreezeStmt(const std::string& name)
+        : Statement(ASTNodeType::FREEZE_STMT), varName(name) {}
+};
+
+/// `comptime { statements... }` — compile-time evaluated block expression.
+/// The block is evaluated at compile time by the OmScript constant evaluator.
+/// The result (the value of the last return statement) is a compile-time
+/// constant that replaces the expression wherever it is used.
+///
+/// Typical uses:
+///   var x = comptime { return 2 * 3 + 1; }     // x = 7, a compile-time const
+///   var y = comptime { var n = 10; return n * n; } // y = 100
+///
+/// If the block cannot be evaluated at compile time (e.g. it calls I/O),
+/// a compile error is emitted.
+class ComptimeExpr : public Expression {
+  public:
+    std::unique_ptr<BlockStmt> body;
+
+    explicit ComptimeExpr(std::unique_ptr<BlockStmt> b)
+        : Expression(ASTNodeType::COMPTIME_EXPR), body(std::move(b)) {}
 };
 
 } // namespace omscript

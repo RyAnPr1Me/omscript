@@ -60,23 +60,38 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
             initValue = vec;
         } else {
-            // Check if this is a const array literal eligible for stack allocation.
-            // Const arrays cannot escape via reassignment; if the array is small
-            // and has no spread elements, we hint generateArray to use alloca.
+            // Check if this array literal is eligible for stack allocation.
+            // Two cases:
+            //   1. const arrays (existing logic, N ≤ 64)
+            //   2. Non-const arrays with all-integer-literal elements, N ≤ 16,
+            //      that don't escape the function scope (escape analysis).
             bool useStackAlloc = false;
-            if (stmt->isConst &&
-                stmt->initializer->type == ASTNodeType::ARRAY_EXPR &&
+            if (stmt->initializer->type == ASTNodeType::ARRAY_EXPR &&
                 optimizationLevel >= OptimizationLevel::O1) {
                 auto* arrExpr = static_cast<ArrayExpr*>(stmt->initializer.get());
                 bool hasSpreadElem = false;
+                bool allIntLiterals = true;
                 for (const auto& elem : arrExpr->elements) {
                     if (elem->type == ASTNodeType::SPREAD_EXPR) {
                         hasSpreadElem = true;
                         break;
                     }
+                    if (elem->type != ASTNodeType::LITERAL_EXPR ||
+                        static_cast<LiteralExpr*>(elem.get())->literalType !=
+                            LiteralExpr::LiteralType::INTEGER) {
+                        allIntLiterals = false;
+                    }
                 }
-                if (!hasSpreadElem && arrExpr->elements.size() <= kMaxStackArrayElements) {
-                    useStackAlloc = true;
+                const size_t n = arrExpr->elements.size();
+                if (!hasSpreadElem) {
+                    if (stmt->isConst && n <= kMaxStackArrayElements) {
+                        useStackAlloc = true;
+                    } else if (!stmt->isConst && allIntLiterals && n <= 16 &&
+                               !doesVarEscapeCurrentScope(stmt->name)) {
+                        useStackAlloc = true;
+                    }
+                }
+                if (useStackAlloc) {
                     pendingArrayStackAlloc_ = true;
                 }
             }
@@ -84,6 +99,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             if (useStackAlloc) {
                 pendingArrayStackAlloc_ = false;
                 stackAllocatedArrays_.insert(stmt->name);
+                optStats_.escapeStackAllocs++;
             }
         }
 
@@ -174,7 +190,67 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             dictVarNames_.insert(stmt->name);
     }
 
+    // Track array variables so isStringExpr() can distinguish array pointers
+    // from string pointers (both now use pointer-typed allocas).
+    {
+        bool isArray = false;
+        if (!stmt->typeName.empty() &&
+            stmt->typeName.size() >= 2 &&
+            stmt->typeName.compare(stmt->typeName.size() - 2, 2, "[]") == 0) {
+            isArray = true;
+        }
+        if (!isArray && stmt->initializer) {
+            if (stmt->initializer->type == ASTNodeType::ARRAY_EXPR) {
+                isArray = true;
+            } else if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+                auto* call = static_cast<CallExpr*>(stmt->initializer.get());
+                if (call->callee == "array_fill" || call->callee == "array_concat" ||
+                    call->callee == "array_copy" || call->callee == "array_map" ||
+                    call->callee == "array_filter" || call->callee == "array_slice" ||
+                    call->callee == "push" || call->callee == "pop" ||
+                    call->callee == "sort" || call->callee == "reverse" ||
+                    call->callee == "array_remove" || call->callee == "array_reduce" ||
+                    call->callee == "str_split" || call->callee == "str_chars" ||
+                    arrayReturningFunctions_.count(call->callee)) {
+                    isArray = true;
+                }
+            }
+        }
+        if (isArray)
+            arrayVars_.insert(stmt->name);
+        else
+            arrayVars_.erase(stmt->name);
+    }
+
     bindVariable(stmt->name, alloca, stmt->isConst);
+
+    // If the initializer was a borrow expression, register the alias mapping
+    // now that we know the ref variable's name.  This enables scope-based
+    // borrow release and alias tracking.
+    if (stmt->initializer && stmt->initializer->type == ASTNodeType::BORROW_EXPR) {
+        auto* bw = static_cast<BorrowExpr*>(stmt->initializer.get());
+        if (!bw->pendingSrcVar.empty()) {
+            if (bw->isMut) {
+                markVariableMutBorrowed(stmt->name, bw->pendingSrcVar);
+            } else {
+                markVariableBorrowed(stmt->name, bw->pendingSrcVar);
+            }
+            bw->pendingSrcVar.clear(); // consumed
+        }
+    }
+
+    // If the initializer was a reborrow expression, register the alias mapping.
+    if (stmt->initializer && stmt->initializer->type == ASTNodeType::REBORROW_EXPR) {
+        auto* rb = static_cast<ReborrowExpr*>(stmt->initializer.get());
+        if (!rb->pendingSrcVar.empty()) {
+            if (rb->isMut) {
+                markVariableMutBorrowed(stmt->name, rb->pendingSrcVar);
+            } else {
+                markVariableBorrowed(stmt->name, rb->pendingSrcVar);
+            }
+            rb->pendingSrcVar.clear(); // consumed
+        }
+    }
 
     if (initValue) {
         builder->CreateStore(initValue, alloca);
@@ -216,10 +292,12 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         allocaUpperBound_[alloca] = bit->second;
                 }
             }
-            // Track constant integer values for `const` variables so that
-            // downstream div/mod can substitute the constant directly and
-            // use the fast urem/udiv path instead of the dynamic-divisor path.
-            if (stmt->isConst) {
+            // Track constant integer values for `const` variables and
+            // comptime {} initializers (always compile-time constants even
+            // if declared `var`) for downstream div/mod folding.
+            bool isComptimeInit = stmt->initializer &&
+                                  stmt->initializer->type == ASTNodeType::COMPTIME_EXPR;
+            if (stmt->isConst || isComptimeInit) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
                     constIntFolds_[stmt->name] = ci->getSExtValue();
             }
@@ -229,16 +307,17 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(initValue))
                 constFloatFolds_[stmt->name] = cf->getValueAPF().convertToDouble();
         }
-        // Track const string values for compile-time string builtin folding.
-        // When a const variable is initialized with a compile-time constant
-        // string expression, record the string content so that len(var),
-        // str_starts_with(var, ...) etc. can be folded at compile time.
-        // Handles: string literals, const-var identifiers, concat trees, and
-        // calls to zero-parameter pure constant-string functions.
-        if (stmt->isConst && stmt->initializer) {
-            std::string foldedStr;
-            if (tryFoldStringConcat(stmt->initializer.get(), foldedStr))
-                constStringFolds_[stmt->name] = std::move(foldedStr);
+        // Track const / comptime string initializers for compile-time string
+        // builtin folding: len(var), str_starts_with(var, ...) etc.
+        // Handles literals, const-var identifiers, concat trees, and calls to
+        // zero-parameter pure constant-string functions.
+        if (stmt->initializer) {
+            bool isComptimeInit2 = stmt->initializer->type == ASTNodeType::COMPTIME_EXPR;
+            if (stmt->isConst || isComptimeInit2) {
+                std::string foldedStr;
+                if (tryFoldStringConcat(stmt->initializer.get(), foldedStr))
+                    constStringFolds_[stmt->name] = std::move(foldedStr);
+            }
         }
         // Propagate integer constant from a zero-param constant-returning fn:
         // `const n = get_n()` where get_n() is in constIntReturnFunctions_
@@ -253,10 +332,10 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
         }
         // Track whether this variable holds a string value so that print(),
-        // concatenation, and comparison operators handle it correctly when
-        // the variable's alloca type is i64 (e.g. assigned from a function
-        // call that returns a string as i64 via ptrtoint).
-        if (initValue->getType()->isPointerTy() || isStringExpr(stmt->initializer.get()))
+        // concatenation, and comparison operators handle it correctly.
+        // Use isStringExpr() — pointer type alone is ambiguous since
+        // arrays/structs/dicts also use pointer-typed allocas.
+        if (isStringExpr(stmt->initializer.get()))
             stringVars_.insert(stmt->name);
         else
             stringVars_.erase(stmt->name);
@@ -350,7 +429,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
         llvm::Value* retValue = generateExpression(stmt->value.get());
         // Record that the current function returns a string value so that
         // callers can use isStringExpr() on the CallExpr and track the result.
-        if (retValue->getType()->isPointerTy() || isStringExpr(stmt->value.get())) {
+        if (isStringExpr(stmt->value.get())) {
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent())
                 stringReturningFunctions_.insert(builder->GetInsertBlock()->getParent()->getName());
         }
@@ -660,6 +739,42 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
                 llvm::MDBuilder(*context).createBranchWeights(thenW, elseW);
             br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
         }();
+
+        // Infer branch probability from zero/null equality patterns.
+        // Pattern: if (x == 0) / if (x != 0) — zero is a common error sentinel.
+        // Comparing against 0 is often a null/error check: the non-zero path
+        // (normal execution) is taken ~99% of the time.
+        if (!br->getMetadata(llvm::LLVMContext::MD_prof)) {
+            [&]() {
+                // Peel outermost icmp ne %x, 0 (from toBool)
+                auto* outerNE = llvm::dyn_cast<llvm::ICmpInst>(condBool);
+                if (!outerNE || outerNE->getPredicate() != llvm::ICmpInst::ICMP_NE) return;
+                auto* outerRHS = llvm::dyn_cast<llvm::ConstantInt>(outerNE->getOperand(1));
+                if (!outerRHS || !outerRHS->isZero()) return;
+                // Peel optional zext
+                llvm::Value* inner = outerNE->getOperand(0);
+                if (auto* z = llvm::dyn_cast<llvm::ZExtInst>(inner))
+                    inner = z->getOperand(0);
+                // Must be an icmp eq/ne against zero
+                auto* innerCmp = llvm::dyn_cast<llvm::ICmpInst>(inner);
+                if (!innerCmp) return;
+                llvm::ConstantInt* zeroC = nullptr;
+                llvm::Value* tested = nullptr;
+                if ((zeroC = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(1))))
+                    tested = innerCmp->getOperand(0);
+                else if ((zeroC = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(0))))
+                    tested = innerCmp->getOperand(1);
+                if (!zeroC || !zeroC->isZero() || !tested) return;
+                const bool isEqZero = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_EQ);
+                const bool isNeZero = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_NE);
+                if (!isEqZero && !isNeZero) return;
+                // eq 0 → then-branch (zero path) is rare; ne 0 → then-branch is common.
+                const uint32_t thenW = isEqZero ? 1u : 99u;
+                const uint32_t elseW = isEqZero ? 99u : 1u;
+                llvm::MDNode* w = llvm::MDBuilder(*context).createBranchWeights(thenW, elseW);
+                br->setMetadata(llvm::LLVMContext::MD_prof, w);
+            }();
+        }
     }
 
     // Save pre-if non-neg state so each branch starts from the same baseline.
@@ -813,7 +928,22 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 
     auto savedLenCacheW = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
+
+    // @independent for while loops: pre-create access group before body.
+    llvm::MDNode* whileIndependentAccessGroup = nullptr;
+    llvm::MDNode* savedWhileAccessGroup = currentLoopAccessGroup_;
+    if (stmt->loopHints.independent) {
+        whileIndependentAccessGroup = llvm::MDNode::getDistinct(*context, {});
+        currentLoopAccessGroup_ = whileIndependentAccessGroup;
+        optStats_.independentLoops++;
+    }
+
     generateStatement(stmt->body.get());
+
+    if (stmt->loopHints.independent) {
+        currentLoopAccessGroup_ = savedWhileAccessGroup;
+    }
+
     loopArrayLenCache_ = std::move(savedLenCacheW);
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
@@ -831,15 +961,25 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         loopMDs.push_back(mustProgress);
         // While-loop unrolling: when truly nested inside another loop
         // (depth > 1, since we already incremented loopNestDepth_ for
-        // this while-loop), cap the unroll factor to prevent LLVM from
-        // over-unrolling branch-heavy inner loops that create massive
-        // I-cache pressure.  Top-level while-loops (depth == 1) are
-        // left to LLVM's cost model for optimal unrolling decisions.
+        // this while-loop), suggest a conservative unroll factor rather
+        // than outright disabling unrolling.  The annotations are hints —
+        // if LLVM's cost model determines that unrolling would produce
+        // better code, it should be free to do so.  A count of 2 limits
+        // I-cache pressure while still allowing the cost model to veto
+        // unrolling entirely if it deems even 2× unprofitable.
+        // Top-level while-loops (depth == 1) are left to LLVM's cost
+        // model for optimal unrolling decisions.
         // When the function has @unroll, trust the user's intent and
         // let LLVM's cost model decide the factor for all nested loops.
         if (!inOptMaxFunction && !currentFuncHintUnroll_ && loopNestDepth_ > 1 && optimizationLevel >= OptimizationLevel::O2) {
+            // Emit unroll.count=2 as a suggestion instead of unroll.disable.
+            // LLVM's cost model may still choose not to unroll if it's not
+            // profitable, but it won't be prevented from trying.
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), 2u))}));
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         // Suppress vectorize.enable when the body contains a non-power-of-2
@@ -897,6 +1037,42 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
             currentLoopAccessGroup_ = accessGroup;
         } else {
             currentLoopAccessGroup_ = nullptr;
+        }
+
+        // Apply per-loop @loop hints for WhileStmt
+        const LoopConfig& whileLoopHints = (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize || stmt->loopHints.parallel || stmt->loopHints.independent || stmt->loopHints.fuse)
+            ? stmt->loopHints
+            : currentOptMaxConfig_.loop;
+        if (whileLoopHints.unrollCount > 0) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), (unsigned)whileLoopHints.unrollCount))}));
+        }
+        if (whileLoopHints.vectorize) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+        if (whileLoopHints.noVectorize) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        }
+        if (whileLoopHints.parallel) {
+            llvm::MDNode* accessGroup2 = llvm::MDNode::getDistinct(*context, {});
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           accessGroup2}));
+        }
+        // @independent for while loops
+        if (stmt->loopHints.independent && whileIndependentAccessGroup) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           whileIndependentAccessGroup}));
         }
 
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -1024,6 +1200,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     bodyHasNonPow2ModuloArrayStore_ = false;
     const bool savedBodyHasBackwardArrayRef = bodyHasBackwardArrayRef_;
     bodyHasBackwardArrayRef_ = false;
+    // Save/restore per-loop array dependency tracking sets.
+    auto savedLoopWrittenArrays = std::move(loopWrittenArrays_);
+    loopWrittenArrays_.clear();
+    auto savedLoopBackwardReadArrays = std::move(loopBackwardReadArrays_);
+    loopBackwardReadArrays_.clear();
     // Track this loop's iterator name unconditionally (used to detect backward
     // array references at all optimization levels, not just O1+).
     loopIterVars_.insert(stmt->iteratorVar);
@@ -1121,6 +1302,38 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     llvm::Value* zero = llvm::ConstantInt::get(stepVal->getType(), 0, true);
 
+    // Tight upper-bound tracking for body iterator loads.
+    // When the loop has a constant non-negative start and a constant positive
+    // end with a known-positive step, register the iterator alloca's upper
+    // bound so that any load of the iterator variable inside the loop body
+    // (via generateIdentifier) gets !range [0, end) instead of the generic
+    // !range [0, INT64_MAX).  The tighter range helps LLVM's LVI/CVP passes
+    // prove tighter bounds on expressions derived from the iterator (e.g.
+    // i*k, i%m, i+offset) without relying solely on llvm.assume hints.
+    // Preconditions:
+    //   - step known positive (ascending loop)
+    //   - start is a non-negative constant (or proven non-negative)
+    //   - end is a positive constant > start
+    // The body range is [start, end) ⊆ [0, end), so [0, end) is a safe
+    // (conservative) upper-bound annotation for all body and increment loads.
+    if (stepKnownPositive) {
+        const bool startNonNegConst = [&]() -> bool {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(startVal))
+                return ci->getSExtValue() >= 0;
+            return nonNegValues_.count(startVal) > 0;
+        }();
+        if (startNonNegConst) {
+            if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+                int64_t ev = endCI->getSExtValue();
+                if (ev > 0 && iterType->isIntegerTy(64)) {
+                    // Set tight upper bound on the iterator alloca so body loads
+                    // get !range [0, ev) — much tighter than [0, INT64_MAX).
+                    allocaUpperBound_[iterAlloca] = ev;
+                }
+            }
+        }
+    }
+
     // Create blocks
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "forcond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "forbody", function);
@@ -1154,6 +1367,40 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     builder->SetInsertPoint(condBB);
     llvm::Value* curVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
+    // !range on the condition block load: when the loop has constant bounds
+    // and step == 1, the iterator at the condition check is in [0, end]
+    // inclusive (it can equal end right before the loop exits).  Annotating
+    // !range [0, end+1) = [0, end] inclusive is correct and tighter than
+    // the generic [0, INT64_MAX) annotation that would otherwise apply.
+    // Only applied for step == 1 (default ascending): for step > 1, the
+    // value at the condition check can exceed end before the condition fails.
+    if (stepKnownPositive && iterType->isIntegerTy(64)) {
+        auto bit = allocaUpperBound_.find(iterAlloca);
+        if (bit != allocaUpperBound_.end()) {
+            // Check if step is compile-time 1 (safe to use end+1 as upper bound).
+            const bool stepIsOne = [&]() -> bool {
+                if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(stepVal))
+                    return stepCI->getSExtValue() == 1;
+                return false;
+            }();
+            if (stepIsOne && bit->second > 0 && bit->second < llvm::APInt::getSignedMaxValue(64).getSExtValue()) {
+                // curVal ∈ [0, end] = [0, end+1) exclusive.
+                llvm::MDBuilder mdB(*context);
+                auto* curLoad = llvm::cast<llvm::LoadInst>(curVal);
+                curLoad->setMetadata(llvm::LLVMContext::MD_range,
+                    mdB.createRange(llvm::APInt(64, 0),
+                                    llvm::APInt(64, bit->second + 1)));
+            } else if (!stepIsOne) {
+                // For step > 1, use the generic non-negative range.
+                auto* curLoad = llvm::cast<llvm::LoadInst>(curVal);
+                curLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            }
+        } else if (nonNegValues_.count(iterAlloca)) {
+            auto* curLoad = llvm::cast<llvm::LoadInst>(curVal);
+            curLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
+    }
+
     llvm::Value* continueCond;
     if (stepKnownPositive) {
         // Fast path: known ascending loop.
@@ -1316,7 +1563,25 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // get fresh values.  Save outer cache for nested loop restore.
     auto savedLenCache = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
+
+    // @independent: pre-create access group so all loads/stores in the
+    // body receive !llvm.access.group metadata, enabling LLVM to eliminate
+    // loop-carried dependency assumptions entirely.
+    llvm::MDNode* independentAccessGroup = nullptr;
+    llvm::MDNode* savedAccessGroup = currentLoopAccessGroup_;
+    if (stmt->loopHints.independent) {
+        independentAccessGroup = llvm::MDNode::getDistinct(*context, {});
+        currentLoopAccessGroup_ = independentAccessGroup;
+        optStats_.independentLoops++;
+    }
+
     generateStatement(stmt->body.get());
+
+    // Restore the outer loop's access group (or null).
+    if (stmt->loopHints.independent) {
+        currentLoopAccessGroup_ = savedAccessGroup;
+    }
+
     loopArrayLenCache_ = std::move(savedLenCache);
     loopStack.pop_back();
 
@@ -1333,6 +1598,27 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Increment block
     builder->SetInsertPoint(incBB);
     llvm::Value* nextVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
+    // !range on the increment block load: we reach incBB only after the
+    // condition `iter < end` passed and the body executed, so nextVal (the
+    // iterator value before incrementing) is always in [start, end-1].
+    // If we have a tight upper bound registered, annotate !range [0, end) —
+    // this tells LLVM's value-range passes the iterator is strictly below
+    // end at this point, which is correct regardless of step size (the
+    // condition check guarantees it).
+    if (stepKnownPositive && iterType->isIntegerTy(64)) {
+        auto bit = allocaUpperBound_.find(iterAlloca);
+        if (bit != allocaUpperBound_.end()) {
+            llvm::MDBuilder mdB(*context);
+            llvm::cast<llvm::LoadInst>(nextVal)->setMetadata(
+                llvm::LLVMContext::MD_range,
+                mdB.createRange(llvm::APInt(64, 0),
+                                llvm::APInt(64, bit->second)));
+        } else if (nonNegValues_.count(iterAlloca)) {
+            llvm::cast<llvm::LoadInst>(nextVal)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
+    }
+
     // OmScript advantage: for ascending loops starting from a non-negative
     // value, both nsw AND nuw flags are correct on the increment.
     //
@@ -1419,6 +1705,28 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                             loopMDs.push_back(unrollCount);
                         }
                         addedUnrollHint = true;
+                    }
+                    // Trip count multiple hint: when the trip count is a multiple
+                    // of the preferred vector width (or at least a power of 2),
+                    // emit llvm.loop.trip.count.multiple so the vectorizer can
+                    // use a vector width that divides the trip count evenly —
+                    // eliminating the scalar epilogue and enabling full-width SIMD.
+                    // Only emit when the trip count is large enough to vectorize.
+                    if (optimizationLevel >= OptimizationLevel::O3
+                            && enableVectorize_ && tripCount > 8) {
+                        // Find the largest power-of-2 that divides tripCount.
+                        uint64_t multiple = 1;
+                        for (uint64_t p = 64; p > 1; p >>= 1) {
+                            if (tripCount % p == 0) { multiple = p; break; }
+                        }
+                        if (multiple >= 2) {
+                            loopMDs.push_back(llvm::MDNode::get(
+                                *context,
+                                {llvm::MDString::get(*context, "llvm.loop.trip.count.multiple"),
+                                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                     llvm::Type::getInt32Ty(*context),
+                                     static_cast<uint32_t>(multiple)))}));
+                        }
                     }
                 }
             }
@@ -1611,37 +1919,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
              // LLVM's O3 cost-model unroller decide freely, matching clang.
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
-        // At O3, also enable vectorization for @hot functions even without
-        // an explicit @vectorize annotation.  LLVM's vectorizer cost model
-        // can be overly conservative for i64 loops (e.g. those containing
-        // urem/udiv by constant) where the magic-number-multiply cost is
-        // overestimated.  Explicitly enabling vectorization lets the
-        // vectorizer proceed and produce profitable SIMD code that matches
-        // clang's aggressive auto-vectorization of hot loops.
-        if (currentFuncHintNoVectorize_
-                || (bodyHasNonPow2Modulo_ && !bodyHasNonPow2ModuloValue_
-                    && !currentFuncHintVectorize_)
-                || (bodyHasNonPow2ModuloArrayStore_ && !currentFuncHintVectorize_)) {
-            // Disable vectorization when:
-            //  (a) @novectorize is set explicitly, OR
-            //  (b) loop has non-power-of-2 modular arithmetic used ONLY as a
-            //      branch condition (e.g. i%3==0), not as a value (i%100 for max).
-            // Vectorizing case (b) generates urem <N x i64> — N serialized
-            // ~25-cycle divisions vs scalar ~5-cycle magic-multiply reduction.
-            // Case (b) is detected via inComparisonContext_ during codegen:
-            //   bodyHasNonPow2Modulo_=true && bodyHasNonPow2ModuloValue_=false
-            // When modulo feeds into max(a%100, b%100), bodyHasNonPow2ModuloValue_
-            // is set, so we keep vectorize.enable=true for SIMD abs/min/max.
-            //  (c) loop stores modulo result to an array element (arr[i]=val%K):
-            //      x86-64 has no native 64-bit vector division — the vectorizer
-            //      scalarizes urem <N x i64> to N sequential extract/divide/insert
-            //      sequences.  Scalar unrolled code achieves better ILP because
-            //      the CPU's OOO engine can pipeline N independent magic-multiply
-            //      chains simultaneously, while the scalar extract overhead is zero.
-            //  (d) loop has a backward array reference (arr[i] += arr[i-1]):
-            //      serial loop-carried dependency — the vectorizer will correctly
-            //      reject it, but not before adding unroll.disable to the metadata
-            //      when it fails with vectorize.enable=true.  Suppress upfront.
+        // Annotations are treated as hints — only @novectorize (explicit user
+        // annotation) forces vectorization off.  For heuristic cases (non-pow2
+        // modulo, backward array refs), we let LLVM's cost model decide rather
+        // than overriding it, as the cost model has more information about
+        // target-specific profitability than static analysis.
+        if (currentFuncHintNoVectorize_) {
+            // @novectorize is the user's explicit request — always honour it.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -1806,6 +2090,43 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             currentLoopAccessGroup_ = nullptr;
         }
 
+        // Apply per-loop @loop hints (override/augment function-level) for ForStmt
+        const LoopConfig& loopHintsCfg = (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize || stmt->loopHints.parallel || stmt->loopHints.independent || stmt->loopHints.fuse)
+            ? stmt->loopHints
+            : currentOptMaxConfig_.loop;
+        if (loopHintsCfg.unrollCount > 0) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), (unsigned)loopHintsCfg.unrollCount))}));
+        }
+        if (loopHintsCfg.vectorize) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+        if (loopHintsCfg.noVectorize) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        }
+        if (loopHintsCfg.parallel) {
+            llvm::MDNode* accessGroup2 = llvm::MDNode::getDistinct(*context, {});
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           accessGroup2}));
+        }
+        // @independent: emit parallel_accesses with the pre-created access group.
+        // The access group was already attached to all loads/stores in the body.
+        if (loopHintsCfg.independent && independentAccessGroup) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           independentAccessGroup}));
+        }
+
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -1823,6 +2144,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Backward refs don't propagate upward: a backward access in an inner loop
     // doesn't imply the outer loop's iterations are dependent.
     bodyHasBackwardArrayRef_ = savedBodyHasBackwardArrayRef;
+    loopWrittenArrays_ = std::move(savedLoopWrittenArrays);
+    loopBackwardReadArrays_ = std::move(savedLoopBackwardReadArrays);
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {
@@ -1838,7 +2161,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     // Detect whether the collection is a string.  Strings are raw char
     // pointers without a length header; arrays use [length, e0, e1, ...].
-    const bool isStr = collVal->getType()->isPointerTy() || isStringExpr(stmt->collection.get());
+    // Use isStringExpr() — pointer type alone is ambiguous since
+    // arrays/structs/dicts also use pointer-typed allocas.
+    const bool isStr = isStringExpr(stmt->collection.get());
     // Detect whether this is an array whose elements are string pointers.
     const bool isStrArray = !isStr && isStringArrayExpr(stmt->collection.get());
 
@@ -1902,6 +2227,18 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // comparison enables better loop vectorization and SCEV analysis.
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), idxAlloca, llvm::MaybeAlign(8), "foreach.idx");
+    // !range [0, INT64_MAX): the foreach index is always non-negative (starts
+    // at 0 and increments by 1).  This annotation makes the non-negativity
+    // visible to load-specific passes (LVI, CVP, InstCombine) without
+    // relying solely on the llvm.assume emitted in the body block.  The
+    // same annotation is applied to identifier loads (via nonNegValues_),
+    // but the condBB load is a direct CreateAlignedLoad that bypasses
+    // generateIdentifier, so we must annotate it here explicitly.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        llvm::cast<llvm::LoadInst>(curIdx)->setMetadata(
+            llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+    }
+
     llvm::Value* cond = builder->CreateICmpULT(curIdx, lenVal, "foreach.cmp");
     auto* foreachCondBr = builder->CreateCondBr(cond, bodyBB, endBB);
     // Hint the back-edge (body) as likely-taken.
@@ -2046,11 +2383,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // parallel_accesses: mark for-each as having iteration-independent
         // memory accesses at O3, enabling the vectorizer and loop distribution
         // to treat array loads/stores as independent across iterations.
-        if (optimizationLevel >= OptimizationLevel::O3
-            && enableParallelize_ && !currentFuncHintNoParallelize_
-            && loopNestDepth_ == 0
-            && (currentFuncHintParallelize_ || currentFuncHintHot_
-                || optimizationLevel >= OptimizationLevel::O3)) {
+        if ((stmt->loopHints.parallel)
+            || (optimizationLevel >= OptimizationLevel::O3
+                && enableParallelize_ && !currentFuncHintNoParallelize_
+                && loopNestDepth_ == 0
+                && (currentFuncHintParallelize_ || currentFuncHintHot_
+                    || optimizationLevel >= OptimizationLevel::O3))) {
             llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(*context, {});
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
@@ -2184,6 +2522,123 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
         return;
     }
 
+    // ── Small switch → if-else chain optimization (O2+) ───────────────
+    // For switches with ≤2 non-default cases, emit an if-else chain instead
+    // of a switch instruction.  This produces simpler CFG that LLVM can
+    // better optimize: conditional moves, PHI nodes, and predicated
+    // execution are all easier for InstCombine/SimplifyCFG to reason about
+    // when there are only 1-2 comparisons instead of a jump table stub.
+    //
+    // For larger switches, LLVM's SimplifyCFG already converts to lookup
+    // tables or jump tables as appropriate — we emit a native switch inst.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        // Count total case values (including multi-value cases).
+        unsigned totalCaseValues = 0;
+        unsigned nonDefaultCases = 0;
+        for (auto& sc : stmt->cases) {
+            if (!sc.isDefault) {
+                ++nonDefaultCases;
+                totalCaseValues += 1 + static_cast<unsigned>(sc.values.size());
+            }
+        }
+
+        if (nonDefaultCases > 0 && totalCaseValues <= 2) {
+            // Validate all case values (float check, constant check, duplicate check)
+            // before emitting any IR, matching the regular switch path's semantics.
+            std::set<int64_t> seenSmall;
+            for (auto& sc : stmt->cases) {
+                if (sc.isDefault) continue;
+                auto checkVal = [&](Expression* expr) {
+                    llvm::Value* v = generateExpression(expr);
+                    if (v->getType()->isDoubleTy())
+                        codegenError("case value must be an integer constant, not a float", expr);
+                    v = toDefaultType(v);
+                    auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v);
+                    if (!ci)
+                        codegenError("case value must be a compile-time integer constant", expr);
+                    int64_t cv = ci->getSExtValue();
+                    if (!seenSmall.insert(cv).second)
+                        codegenError("duplicate case value " + std::to_string(cv) + " in switch statement", expr);
+                };
+                checkVal(sc.value.get());
+                for (auto& ev : sc.values) checkVal(ev.get());
+            }
+
+            llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
+            loopStack.push_back({mergeBB, nullptr});
+
+            // Find the default case.
+            SwitchCase* defaultCase = nullptr;
+            for (auto& sc : stmt->cases) {
+                if (sc.isDefault) { defaultCase = &sc; break; }
+            }
+
+            // Chain: for each non-default case, emit cmp + condbr.
+            // Last false-branch falls through to default (or merge if no default).
+            llvm::BasicBlock* falseBB = nullptr;
+            for (auto& sc : stmt->cases) {
+                if (sc.isDefault) continue;
+
+                // Collect all case values for this arm (already validated above).
+                std::vector<llvm::ConstantInt*> caseConstants;
+                auto addVal = [&](Expression* expr) {
+                    llvm::Value* v = generateExpression(expr);
+                    v = toDefaultType(v);
+                    auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v);
+                    caseConstants.push_back(ci);
+                };
+                addVal(sc.value.get());
+                for (auto& ev : sc.values) addVal(ev.get());
+
+                // Build the comparison: condVal == c1 || condVal == c2 || ...
+                llvm::Value* cmp = builder->CreateICmpEQ(condVal, caseConstants[0], "switch.cmp");
+                for (unsigned i = 1; i < caseConstants.size(); ++i) {
+                    llvm::Value* cmp2 = builder->CreateICmpEQ(condVal, caseConstants[i], "switch.cmp");
+                    cmp = builder->CreateOr(cmp, cmp2, "switch.or");
+                }
+
+                llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);
+                falseBB = llvm::BasicBlock::Create(*context, "switch.next", function, mergeBB);
+
+                auto* br = builder->CreateCondBr(cmp, caseBB, falseBB);
+                // Uniform weights: each explicit case is equally likely to match.
+                // With N non-default cases in the chain, each comparison has
+                // roughly equal probability of matching.
+                llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1, 1);
+                br->setMetadata(llvm::LLVMContext::MD_prof, brW);
+
+                // Generate case body.
+                builder->SetInsertPoint(caseBB);
+                {
+                    const ScopeGuard scope(*this);
+                    for (auto& s : sc.body) {
+                        generateStatement(s.get());
+                        if (builder->GetInsertBlock()->getTerminator()) break;
+                    }
+                }
+                if (!builder->GetInsertBlock()->getTerminator())
+                    builder->CreateBr(mergeBB);
+
+                builder->SetInsertPoint(falseBB);
+            }
+
+            // Generate default (or fall through to merge).
+            if (defaultCase) {
+                const ScopeGuard scope(*this);
+                for (auto& s : defaultCase->body) {
+                    generateStatement(s.get());
+                    if (builder->GetInsertBlock()->getTerminator()) break;
+                }
+            }
+            if (!builder->GetInsertBlock()->getTerminator())
+                builder->CreateBr(mergeBB);
+
+            loopStack.pop_back();
+            builder->SetInsertPoint(mergeBB);
+            return;
+        }
+    }
+
     llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
     llvm::BasicBlock* defaultBB = mergeBB; // fall through to merge if no default
 
@@ -2270,22 +2725,31 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     loopStack.pop_back();
 
     // At O2+, add branch weight metadata to the switch instruction.
-    // Uniform weights tell the optimizer that all cases are equally likely,
-    // which enables SimplifyCFG's switch-to-lookup-table conversion and
-    // prevents the backend from biasing layout toward any particular case.
-    // Without explicit weights, LLVM may assume the default case is cold
-    // and misoptimize the jump table structure.
+    // The default case is weighted lower than explicit cases when there are
+    // many cases: developers list the common cases explicitly and use default
+    // as an error/catch-all handler. This guides the backend to place hot
+    // case blocks before cold default blocks and optimizes jump-table layout.
+    // With ≤2 cases we fall into the if-else path above; this code handles
+    // switches with ≥3 total case values where a native switch is emitted.
     if (optimizationLevel >= OptimizationLevel::O2) {
         const unsigned numCases = switchInst->getNumCases();
         const bool hasDefault = (defaultBB != mergeBB);
         const unsigned totalSuccessors = numCases + (hasDefault ? 1 : 0);
         if (totalSuccessors > 0) {
             llvm::SmallVector<uint32_t, 16> weights;
-            // Default case weight (first weight in the metadata)
-            weights.push_back(hasDefault ? 1 : 0);
-            // Per-case weights: uniform distribution
+            // Default case: weight it as cold when there are many explicit cases
+            // (≥4). The more cases present, the less likely the default fires.
+            // 0 cases: default not present; 1-3 cases: equal weight; 4+: cold.
+            uint32_t defaultWeight = 0;
+            if (hasDefault) {
+                defaultWeight = (numCases >= 4) ? 1u : numCases;
+            }
+            weights.push_back(defaultWeight);
+            // Each explicit case: equal weight of numCases so the total
+            // probability mass for all explicit cases >> default.
+            const uint32_t caseWeight = numCases;
             for (unsigned i = 0; i < numCases; ++i) {
-                weights.push_back(1);
+                weights.push_back(caseWeight);
             }
             llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(weights);
             switchInst->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
@@ -2480,8 +2944,37 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
         codegenError("Variable '" + stmt->varName + "' not found for invalidate", stmt);
     }
     llvm::Value* alloca = it->second;
+    const std::string& name = stmt->varName;
 
-    // Emit llvm.lifetime.end to mark the variable as dead.
+    // ── Heap-free heap-allocated variables ────────────────────────────────
+    // `invalidate` is the user's explicit deallocation command.  For any
+    // variable whose storage lives on the heap (string, array, dict/map), we
+    // load the heap pointer from the alloca and emit free() immediately.
+    // Stack-allocated arrays (stackAllocatedArrays_) are skipped — they live
+    // on the stack and must not be freed.
+    const bool isHeapString = stringVars_.count(name) > 0;
+    const bool isHeapArray  = arrayVars_.count(name) > 0 &&
+                               !stackAllocatedArrays_.count(name);
+    const bool isHeapDict   = dictVarNames_.count(name) > 0;
+
+    if (isHeapString || isHeapArray || isHeapDict) {
+        // Load the heap pointer from the alloca (i64 stored as int, ptr cast needed).
+        auto* allocaInst2 = llvm::dyn_cast<llvm::AllocaInst>(alloca);
+        if (allocaInst2) {
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* heapPtr = builder->CreateLoad(
+                allocaInst2->getAllocatedType(), allocaInst2, name + ".ptr");
+            // Cast i64 → ptr if necessary (OmScript stores heap pointers as i64)
+            if (!heapPtr->getType()->isPointerTy()) {
+                heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy, name + ".heapptr");
+            }
+            // Emit free().  The compiler already knows free() is
+            // InaccessibleOrArgMemOnly so this is safe to CSE/hoist.
+            builder->CreateCall(getOrDeclareFree(), {heapPtr});
+        }
+    }
+
+    // Emit llvm.lifetime.end to mark the alloca slot as dead.
     // This allows LLVM to reuse the stack slot and eliminate dead stores.
     auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca);
     if (allocaInst) {
@@ -2499,9 +2992,9 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     builder->CreateStore(llvm::UndefValue::get(allocaType), alloca);
 
     // Mark the variable as dead for use-after-invalidate detection.
-    deadVars_.insert(stmt->varName);
-    deadVarReason_[stmt->varName] = "invalidated";
-    varOwnership_[stmt->varName] = OwnershipState::Invalidated;
+    deadVars_.insert(name);
+    deadVarReason_[name] = "invalidated";
+    getBorrowState(name).invalidated = true;
 }
 
 void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
@@ -2558,36 +3051,81 @@ llvm::Value* CodeGenerator::generateMoveExpr(MoveExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
-    // Generate the source value.
+    // Generate the source value first.
     llvm::Value* val = generateExpression(expr->source.get());
 
-    // Track the source variable as borrowed in the ownership lattice.
-    // Borrowed variables cannot be mutated, moved, or invalidated until
-    // the borrow ends.
+    // The borrow variable name isn't known here (it's set by the surrounding
+    // VarDecl statement), so we record a placeholder and patch it up in
+    // generateVarDecl after the variable name is bound.  For now we use an
+    // empty string; the real name is injected by the VarDecl path.
+    // We do all validation and state mutations here.
     if (auto* srcIdent = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
-        markVariableBorrowed(srcIdent->name);
+        const std::string& srcName = srcIdent->name;
+
+        if (expr->isMut) {
+            // ---------------------------------------------------------------
+            // Mutable borrow: `borrow mut ref = x;`
+            // Enforce exclusive-mutable-reference invariant:
+            //   - Source must not be moved, invalidated, or frozen.
+            //   - Source must have NO active borrows (immut or mut).
+            // ---------------------------------------------------------------
+            auto* bs = getBorrowStateOpt(srcName);
+            if (bs) {
+                if (bs->immutBorrowCount > 0) {
+                    codegenError("Cannot create mutable borrow of '" + srcName +
+                                 "' — it already has " +
+                                 std::to_string(bs->immutBorrowCount) +
+                                 " active immutable borrow(s)", expr);
+                }
+                if (bs->mutBorrowed) {
+                    codegenError("Cannot create mutable borrow of '" + srcName +
+                                 "' — it already has an active mutable borrow", expr);
+                }
+                if (bs->frozen) {
+                    codegenError("Cannot create mutable borrow of frozen variable '" + srcName + "'", expr);
+                }
+                if (bs->moved || bs->invalidated) {
+                    codegenError("Cannot borrow dead variable '" + srcName + "'", expr);
+                }
+            }
+            // Lock source.  Ref name not known yet; use a sentinel — the
+            // surrounding VarDecl will call markVariableMutBorrowed with the
+            // real name immediately after binding the alloca.
+            expr->pendingSrcVar = srcName; // stash for VarDecl to consume
+        } else {
+            // ---------------------------------------------------------------
+            // Immutable borrow: `borrow ref = x;`
+            // Multiple concurrent immutable borrows are allowed.
+            // Disallow only if source is mutably borrowed or dead.
+            // ---------------------------------------------------------------
+            auto* bs = getBorrowStateOpt(srcName);
+            if (bs) {
+                if (bs->mutBorrowed) {
+                    codegenError("Cannot create immutable borrow of '" + srcName +
+                                 "' — it already has an active mutable borrow", expr);
+                }
+                if (bs->moved || bs->invalidated) {
+                    codegenError("Cannot borrow dead variable '" + srcName + "'", expr);
+                }
+            }
+            expr->pendingSrcVar = srcName;
+        }
     }
 
-    // Attach !alias.scope and !noalias metadata to the load instruction.
-    // The alias.scope declares which alias domain this access belongs to,
-    // and noalias declares which domains it is guaranteed not to alias with.
-    // Together, they tell LLVM that a borrowed pointer does not alias other
-    // pointers in the function — this is safe because OmScript's ownership
-    // model guarantees that borrows are unique read-only references and
-    // no mutable alias can exist concurrently.
-    //
-    // LLVM's scoped noalias metadata structure:
+    // -----------------------------------------------------------------------
+    // Attach scoped noalias metadata to the load instruction.
+    // LLVM's scoped noalias structure:
     //   !domain = distinct !{!domain, !"omscript.borrow.domain"}
-    //   !scope  = distinct !{!scope, !domain, !"omscript.borrow.<name>"}
+    //   !scope  = distinct !{!scope, !domain, !"omscript.borrow.{mut|ref}.<name>"}
     //   !alias.scope = !{!scope}    — "this access is in this scope"
     //   !noalias     = !{!scope}    — "this access does NOT alias this scope"
     //
-    // Setting BOTH alias.scope and noalias on the borrow load enables LLVM's
-    // ScopedNoAliasAA to prove that loads through the borrow don't alias
-    // stores through other pointers, enabling vectorization, LICM, and
-    // load/store reordering across borrow boundaries.
+    // Immutable borrow:  alias.scope + noalias + !invariant.load
+    // Mutable borrow:    alias.scope only (the write side must be in scope)
+    // -----------------------------------------------------------------------
     if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(val)) {
-        std::string scopeName = "omscript.borrow";
+        const std::string suffix = expr->isMut ? "mut" : "ref";
+        std::string scopeName = "omscript.borrow." + suffix;
         if (auto* srcIdent = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
             scopeName += "." + srcIdent->name;
         }
@@ -2601,11 +3139,96 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
         scope->replaceOperandWith(0, scope);
 
         llvm::MDNode* scopeList = llvm::MDNode::get(*context, {scope});
-        // alias.scope: declares this access belongs to the borrow scope
         loadInst->setMetadata(llvm::LLVMContext::MD_alias_scope, scopeList);
-        // noalias: declares this access does not alias accesses in this scope
-        // (other borrows get their own distinct scopes)
-        loadInst->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
+        if (!expr->isMut) {
+            // Immutable borrow: the load does NOT alias any other mutable access.
+            loadInst->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
+            // !invariant.load: value will not change while the borrow is alive.
+            loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                  llvm::MDNode::get(*context, {}));
+        }
+    }
+
+    return val;
+}
+
+llvm::Value* CodeGenerator::generateReborrowExpr(ReborrowExpr* expr) {
+    // Find source variable name from the source expression
+    std::string srcName;
+    if (auto* srcId = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
+        srcName = srcId->name;
+    }
+
+    if (!srcName.empty()) {
+        // Check borrow validity — source must be readable/writable
+        auto* bs = getBorrowStateOpt(srcName);
+        if (bs) {
+            if (bs->moved || bs->invalidated) {
+                codegenError("Cannot reborrow dead variable '" + srcName + "'", expr);
+            }
+            if (expr->isMut && bs->mutBorrowed) {
+                codegenError("Cannot create mutable reborrow of '" + srcName +
+                             "' — it already has an active mutable borrow", expr);
+            }
+            if (expr->isMut && bs->immutBorrowCount > 0) {
+                codegenError("Cannot create mutable reborrow of '" + srcName +
+                             "' — it already has active immutable borrows", expr);
+            }
+            if (expr->isMut && bs->frozen) {
+                codegenError("Cannot create mutable reborrow of frozen variable '" + srcName + "'", expr);
+            }
+        }
+
+        // Resolve the original source (chase borrow chain once)
+        std::string realSrc = srcName;
+        auto bmit = borrowMap_.find(srcName);
+        if (bmit != borrowMap_.end()) {
+            realSrc = bmit->second.srcVar;
+        }
+        expr->pendingSrcVar = realSrc;
+    }
+
+    // Generate the value — for partial borrows compute a GEP pointer
+    llvm::Value* val = generateExpression(expr->source.get());
+
+    // Partial borrow: field access → use GEP on struct
+    if (!expr->fieldName.empty()) {
+        if (auto* srcId = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
+            auto stit = structVars_.find(srcId->name);
+            if (stit != structVars_.end()) {
+                const std::string& stType = stit->second;
+                auto fit = structDefs_.find(stType);
+                if (fit != structDefs_.end()) {
+                    const auto& fields = fit->second;
+                    for (size_t fi = 0; fi < fields.size(); ++fi) {
+                        if (fields[fi] == expr->fieldName) {
+                            auto it2 = namedValues.find(srcId->name);
+                            if (it2 != namedValues.end()) {
+                                auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(it2->second);
+                                if (srcAlloca) {
+                                    llvm::StructType* sty = llvm::dyn_cast<llvm::StructType>(
+                                        srcAlloca->getAllocatedType());
+                                    if (sty) {
+                                        val = builder->CreateStructGEP(sty, srcAlloca,
+                                                                       static_cast<unsigned>(fi),
+                                                                       "reborrow.field");
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } else if (expr->indexExpr) {
+        // Partial borrow: array element → GEP to element slot
+        llvm::Value* arrPtr = generateExpression(expr->source.get());
+        llvm::Value* idx = generateExpression(expr->indexExpr.get());
+        // Arrays: [len, e0, e1, ...]  — element i is at slot i+1
+        llvm::Value* elemIdx = builder->CreateAdd(
+            idx, llvm::ConstantInt::get(getDefaultType(), 1), "reborrow.idx");
+        val = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "reborrow.elem");
     }
 
     return val;
@@ -2802,21 +3425,160 @@ void CodeGenerator::markVariableMoved(const std::string& varName) {
     }
     deadVars_.insert(varName);
     deadVarReason_[varName] = "moved";
-    varOwnership_[varName] = OwnershipState::Moved;
+    getBorrowState(varName).moved = true;
 }
 
-void CodeGenerator::markVariableBorrowed(const std::string& varName) {
-    borrowedVars_.insert(varName);
-    varOwnership_[varName] = OwnershipState::Borrowed;
+VarBorrowState& CodeGenerator::getBorrowState(const std::string& varName) {
+    return varBorrowStates_[varName];
+}
+
+const VarBorrowState* CodeGenerator::getBorrowStateOpt(const std::string& varName) const {
+    auto it = varBorrowStates_.find(varName);
+    return it == varBorrowStates_.end() ? nullptr : &it->second;
+}
+
+void CodeGenerator::markVariableBorrowed(const std::string& refVar, const std::string& srcVar) {
+    getBorrowState(srcVar).immutBorrowCount++;
+    BorrowInfo info{refVar, srcVar, false};
+    borrowMap_[refVar] = info;
+    // Register in the current borrow scope so endScope releases it automatically.
+    if (!borrowScopeStack_.empty()) {
+        borrowScopeStack_.back().push_back(info);
+    }
+}
+
+void CodeGenerator::markVariableMutBorrowed(const std::string& refVar, const std::string& srcVar) {
+    getBorrowState(srcVar).mutBorrowed = true;
+    BorrowInfo info{refVar, srcVar, true};
+    borrowMap_[refVar] = info;
+    if (!borrowScopeStack_.empty()) {
+        borrowScopeStack_.back().push_back(info);
+    }
+}
+
+void CodeGenerator::releaseBorrow(const std::string& refVar) {
+    auto mapIt = borrowMap_.find(refVar);
+    if (mapIt == borrowMap_.end()) return;
+    const BorrowInfo& info = mapIt->second;
+    auto stateIt = varBorrowStates_.find(info.srcVar);
+    if (stateIt != varBorrowStates_.end()) {
+        if (info.isMut) {
+            stateIt->second.mutBorrowed = false;
+        } else {
+            if (stateIt->second.immutBorrowCount > 0)
+                stateIt->second.immutBorrowCount--;
+        }
+    }
+    borrowMap_.erase(mapIt);
+}
+
+void CodeGenerator::markVariableFrozen(const std::string& varName) {
+    frozenVars_.insert(varName);
+    constValues[varName] = true; // prevent writes via checkConstModification
+    getBorrowState(varName).frozen = true;
 }
 
 bool CodeGenerator::isVariableBorrowed(const std::string& varName) const {
-    return borrowedVars_.count(varName) > 0;
+    auto* s = getBorrowStateOpt(varName);
+    return s && s->immutBorrowCount > 0;
+}
+
+bool CodeGenerator::isVariableFrozen(const std::string& varName) const {
+    return frozenVars_.count(varName) > 0;
 }
 
 OwnershipState CodeGenerator::getOwnershipState(const std::string& varName) const {
-    auto it = varOwnership_.find(varName);
-    return (it != varOwnership_.end()) ? it->second : OwnershipState::Owned;
+    auto* s = getBorrowStateOpt(varName);
+    if (!s) return OwnershipState::Owned;
+    return s->state();
+}
+
+void CodeGenerator::checkVariableReadable(const std::string& varName, ASTNode* site) {
+    // Dead check (moved / invalidated)
+    auto deadIt = deadVars_.find(varName);
+    if (deadIt != deadVars_.end()) {
+        auto reasonIt = deadVarReason_.find(varName);
+        const std::string reason = (reasonIt != deadVarReason_.end()) ? reasonIt->second : "moved or invalidated";
+        codegenError("Use of " + reason + " variable '" + varName + "'", site);
+    }
+    // Mutably borrowed: source is completely locked — no reads allowed.
+    auto* s = getBorrowStateOpt(varName);
+    if (s && s->mutBorrowed) {
+        codegenError("Cannot read variable '" + varName +
+                     "' — it has an active mutable borrow (the mutable alias must"
+                     " go out of scope before the source can be read)", site);
+    }
+}
+
+void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
+    const std::string& name = stmt->varName;
+
+    // Validate: variable must exist
+    auto it = namedValues.find(name);
+    if (it == namedValues.end()) {
+        codegenError("Unknown variable '" + name + "' in freeze statement", stmt);
+    }
+
+    // Validate: cannot freeze a moved or invalidated variable
+    auto state = getOwnershipState(name);
+    if (state == OwnershipState::Moved) {
+        codegenError("Cannot freeze moved variable '" + name + "'", stmt);
+    }
+    if (state == OwnershipState::Invalidated) {
+        codegenError("Cannot freeze invalidated variable '" + name + "'", stmt);
+    }
+    if (state == OwnershipState::MutBorrowed) {
+        codegenError("Cannot freeze variable '" + name + "' while it has an active mutable borrow", stmt);
+    }
+
+    // Mark the variable as frozen in the ownership lattice
+    markVariableFrozen(name);
+    optStats_.borrowsFrozen++;
+
+    // ── Alias propagation: freeze x; also freezes the borrow source of x ──
+    // If x is a borrow alias (borrowMap_["x"].srcVar == "y"), freeze y too.
+    {
+        auto bmit = borrowMap_.find(name);
+        if (bmit != borrowMap_.end()) {
+            const std::string& srcVar = bmit->second.srcVar;
+            if (!isVariableFrozen(srcVar)) {
+                markVariableFrozen(srcVar);
+            }
+        }
+    }
+    // Also freeze all aliases that point to this variable.
+    for (auto& kv : borrowMap_) {
+        if (kv.second.srcVar == name && !isVariableFrozen(kv.first)) {
+            markVariableFrozen(kv.first);
+        }
+    }
+
+    // ── Emit LLVM freeze instruction ──────────────────────────────────────
+    // Load the current value, freeze it (ensures non-poison), store it back.
+    // This is the IR-level guarantee that the value is well-defined.
+    llvm::Value* alloca = it->second;
+    if (auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca)) {
+        llvm::Type* elemTy = allocaInst->getAllocatedType();
+        if (elemTy->isIntegerTy() || elemTy->isFloatingPointTy()) {
+            llvm::Value* loadedVal = builder->CreateAlignedLoad(
+                elemTy, allocaInst, llvm::MaybeAlign(8), (name + ".freeze.load").c_str());
+            llvm::Value* frozenVal = builder->CreateFreeze(loadedVal, (name + ".frozen").c_str());
+            builder->CreateAlignedStore(frozenVal, allocaInst, llvm::MaybeAlign(8));
+        }
+
+        // Emit llvm.invariant.start to tell LLVM the memory backing this variable
+        // will not change from this point forward.
+        const uint64_t sz = module->getDataLayout().getTypeAllocSize(elemTy);
+        auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
+#if LLVM_VERSION_MAJOR >= 19
+        auto* invariantStart = llvm::Intrinsic::getOrInsertDeclaration(
+#else
+        auto* invariantStart = llvm::Intrinsic::getDeclaration(
+#endif
+            module.get(), llvm::Intrinsic::invariant_start,
+            {llvm::PointerType::getUnqual(*context)});
+        builder->CreateCall(invariantStart, {szVal, allocaInst});
+    }
 }
 
 } // namespace omscript

@@ -1,0 +1,9 @@
+// Test @loop(vectorize=true) annotation
+fn main() {
+    var a = [1, 2, 3, 4, 5, 6, 7, 8];
+    var sum = 0;
+    for (i in 0...8) @loop(vectorize=true) {
+        sum = sum + a[i];
+    }
+    return sum;  // 36
+}

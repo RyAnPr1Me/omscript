@@ -1,0 +1,14 @@
+// Test escape analysis: small integer arrays should be stack-allocated
+// when they don't escape (not returned, not passed to functions).
+fn main() {
+    // This array should be stack-allocated (all int literals, N <= 16,
+    // not returned or passed to any function).
+    var data = [10, 20, 30, 40, 50];
+
+    var sum = 0;
+    for (i in 0...5) {
+        sum = sum + data[i];
+    }
+    // sum = 10+20+30+40+50 = 150
+    return sum;
+}

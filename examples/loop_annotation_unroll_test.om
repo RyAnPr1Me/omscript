@@ -1,0 +1,8 @@
+// Test @loop(unroll=4) annotation
+fn main() {
+    var sum = 0;
+    for (i in 0...16) @loop(unroll=4) {
+        sum = sum + i;
+    }
+    return sum;  // 0+1+...+15 = 120
+}

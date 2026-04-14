@@ -5,6 +5,45 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] - 2026-04-14
+
+### Added
+
+- **`comptime {}` blocks** — expressions evaluated entirely at compile time and stored to a variable. Any `comptime {}` initializer participates in the constant-folding chain just like a `const` declaration:
+  ```omscript
+  var a = comptime { return 6 * 7; };        // a = 42, folded
+  var b = comptime { var n = 5; return n * n; }; // b = 25
+  ```
+- **`parallel` keyword on loops** — prepend `parallel` to `for`, `while`, or `foreach` to assert that iterations are independent and allow auto-parallelization via `llvm.loop.parallel_accesses` metadata:
+  ```omscript
+  parallel for (i in 0...n) { sum = sum + arr[i]; }
+  ```
+- **`@loop(independent=true)`** — emits `llvm.access.group` on all memory operations in the loop body and attaches `llvm.loop.parallel_accesses` metadata, telling LLVM there are no loop-carried memory dependencies. More precise than `parallel` for scalar loops.
+- **`@loop(fuse=true)`** — adjacent `for` loops over the same range (same `start` and `end`) are merged into a single loop body at the AST level, reducing loop overhead and improving data locality.
+- **Escape analysis for small arrays** — array literals of ≤ 16 integer constants that are proven not to escape their declaring scope are stack-allocated (`alloca`) instead of heap-allocated (`malloc`), eliminating the allocation entirely.
+- **Freeze correctness** — `freeze x;` now emits an actual LLVM `freeze` instruction on the variable's current value and stores it back, guaranteeing non-poison semantics. Freeze state also propagates to borrow aliases: freezing a source variable freezes all its borrows, and vice versa.
+- **`reborrow` keyword** — creates a new borrow reference from an existing borrow, or borrows a sub-element (partial borrow):
+  ```omscript
+  borrow ref = &arr;
+  reborrow sub = &arr[0];     // partial borrow of first element
+  reborrow mut sub = &arr[0]; // partial mutable borrow
+  ```
+- **`@allocator(size=N)` annotation** — marks a user-defined function as an allocator. Applies LLVM `allocsize(N)` attribute, `noalias` on the return value, and `willreturn`/`nounwind`, enabling LLVM to reason about heap-allocated regions created by user code:
+  ```omscript
+  @allocator(size=0)
+  fn my_alloc(nbytes) { return malloc(nbytes); }
+  ```
+- **OptStats tracking** — the compiler now counts constant folds, stack-allocated arrays (escape analysis hits), frozen aliases, and loop fusions performed. When run with `-v` (verbose), a summary is printed after compilation.
+- **Constant folding extended**:
+  - `sqrt(N)`, `floor(N)`, `ceil(N)`, `round(N)`, `exp2(N)` with integer literal arguments are folded at compile time.
+  - `exp2`, `log`, `lcm`, `is_power_of_2`, `popcount`, `clz`, `ctz`, `bswap`, `bitreverse`, `rotate_left`, `rotate_right`, `saturating_add`, `saturating_sub`, all `str_*` builtins — added to `evalConstBuiltin` and `kPureBuiltins` for cross-function propagation.
+  - `comptime {}` sub-expressions participate in `tryFoldExprToConst` and `tryConstEvalFull`, enabling deeper compile-time evaluation chains.
+  - `tryConstEvalFull` now checks `constIntFolds_` and `constStringFolds_` for global constants, so functions referencing file-level `const` variables can be folded cross-function.
+- **Purity analysis extended** — `autoDetectConstEvalFunctions` now recognises `COMPTIME_EXPR` (always pure), `PREFIX_EXPR` (`!`/`-`/`+` are pure), `POSTFIX_EXPR` (mutations, not pure), `BREAK_STMT`, `CONTINUE_STMT`, `SWITCH_STMT` as pure statement forms. The `kPureBuiltins` set covers all string and math builtins.
+
+### Changed
+- Version bumped to **4.0.0** (major: new ownership extensions, `comptime`, `parallel`, `reborrow`).
+
 ## [3.9.0] - 2026-04-11
 
 ### Added

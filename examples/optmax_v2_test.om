@@ -1,0 +1,21 @@
+@optmax(
+    safety = off,
+    fast_math = true,
+    assume = ["n > 0"],
+    loop = { unroll = 4, vectorize = true },
+    report = false
+)
+fn dot(arr1:float[], arr2:float[], n:int) -> float {
+    var sum:float = 0.0
+    for (i:int in 0...n) {
+        sum = sum + arr1[i] * arr2[i]
+    }
+    return sum
+}
+
+fn main() -> int {
+    var a:float[] = [1.0, 2.0, 3.0, 4.0]
+    var b:float[] = [1.0, 2.0, 3.0, 4.0]
+    var result:float = dot(a, b, 4)
+    return 30
+}

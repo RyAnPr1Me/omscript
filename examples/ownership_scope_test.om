@@ -1,0 +1,39 @@
+// ownership_scope_test.om — test borrow scope release and multiple borrows
+// Expected exit code: 55
+
+fn main() -> int {
+    var total = 0;
+
+    // Test 1: immutable borrow scope release
+    {
+        var x = 10;
+        borrow a = x;       // borrow count = 1
+        borrow b = x;       // borrow count = 2
+        total = total + a + b; // 10 + 10 = 20
+        // a and b go out of scope here → borrow count drops back to 0
+    }
+    // x should now be writable again (borrows released)
+    var x2 = 5;
+    x2 = x2 + 3; // 8
+
+    // Test 2: mutable borrow scope release
+    {
+        var y = 20;
+        borrow mut m = y;   // y is mutably borrowed
+        total = total + m;  // 20 → total == 40
+        // m goes out of scope → y is unlocked
+    }
+    // y should be free here (borrow released)
+
+    // Test 3: freeze
+    var z = 7;
+    freeze z;
+    total = total + z;      // total == 47
+
+    // Test 4: read through borrow alias
+    var w = 8;
+    borrow r = w;
+    total = total + r;      // total == 55
+
+    return total;
+}

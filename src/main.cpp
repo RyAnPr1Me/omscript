@@ -1597,6 +1597,10 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "INVALIDATE";
     case omscript::TokenType::BORROW:
         return "BORROW";
+    case omscript::TokenType::FREEZE:
+        return "FREEZE";
+    case omscript::TokenType::MUT:
+        return "MUT";
     case omscript::TokenType::PREFETCH:
         return "PREFETCH";
     case omscript::TokenType::LIKELY:
@@ -2086,6 +2090,11 @@ void dumpStatement(const omscript::Statement* stmt, int indent) {
         std::cout << "InvalidateStmt '" << inv->varName << "'\n";
         break;
     }
+    case omscript::ASTNodeType::FREEZE_STMT: {
+        auto* fr = static_cast<const omscript::FreezeStmt*>(stmt);
+        std::cout << "FreezeStmt '" << fr->varName << "'\n";
+        break;
+    }
     case omscript::ASTNodeType::MOVE_DECL: {
         auto* md = static_cast<const omscript::MoveDecl*>(stmt);
         std::cout << "MoveDecl '" << md->name << "'";
@@ -2094,6 +2103,19 @@ void dumpStatement(const omscript::Statement* stmt, int indent) {
         std::cout << "\n";
         if (md->initializer) {
             dumpExpression(md->initializer.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::ASSUME_STMT: {
+        auto* assumeStmt = static_cast<const omscript::AssumeStmt*>(stmt);
+        std::cout << "AssumeStmt\n";
+        if (assumeStmt->condition) {
+            dumpExpression(assumeStmt->condition.get(), indent + 1);
+        }
+        if (assumeStmt->deoptBody) {
+            printIndent(indent + 1);
+            std::cout << "deopt:\n";
+            dumpStatement(assumeStmt->deoptBody.get(), indent + 2);
         }
         break;
     }
@@ -2109,6 +2131,15 @@ void dumpAST(const omscript::Program* program) {
         std::cout << "  FunctionDecl '" << fn->name << "' params=" << fn->parameters.size();
         if (fn->isOptMax)
             std::cout << " [OPTMAX]";
+        if (fn->optMaxConfig.enabled) {
+            std::cout << " [OPTMAX_V2 safety=";
+            switch(fn->optMaxConfig.safety) {
+                case omscript::SafetyLevel::Off: std::cout << "off"; break;
+                case omscript::SafetyLevel::Relaxed: std::cout << "relaxed"; break;
+                default: std::cout << "on"; break;
+            }
+            std::cout << "]";
+        }
         std::cout << "\n";
         for (const auto& p : fn->parameters) {
             std::cout << "    Param '" << p.name << "'";

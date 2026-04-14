@@ -1,0 +1,23 @@
+// Test comptime {} blocks: compile-time evaluated expressions
+fn main() {
+    // Basic arithmetic at compile time
+    var a = comptime { return 6 * 7; };
+
+    // Compile-time block with local variables
+    var b = comptime {
+        var x = 10;
+        var y = 20;
+        return x + y;
+    };
+
+    // Compile-time conditional
+    var c = comptime {
+        var n = 5;
+        if (n > 3) {
+            return 100;
+        }
+        return 0;
+    };
+
+    return a + b + c;   // 42 + 30 + 100 = 172
+}

@@ -1,0 +1,6 @@
+// Test borrow mut syntax: exclusive mutable alias
+fn main() {
+    var x = 10;
+    borrow mut r = x;
+    return r + 32;  // 42
+}

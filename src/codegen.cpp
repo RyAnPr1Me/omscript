@@ -833,6 +833,16 @@ void CodeGenerator::initTBAAMetadata() {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
             i64Ty, static_cast<uint64_t>(INT64_MAX)))
     });
+    // !range [0, 2): boolean i64 results (is_alpha, is_digit, str_eq, etc.)
+    boolRangeMD_ = llvm::MDNode::get(C, {
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 2))
+    });
+    // !range [0, 256): char i64 results (char_at)
+    charRangeMD_ = llvm::MDNode::get(C, {
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 256))
+    });
 }
 
 llvm::MDNode* CodeGenerator::getOrCreateFieldTBAA(const std::string& structType, size_t fieldIdx) {
@@ -924,8 +934,26 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::FixedVectorType::get(llvm::Type::getInt64Ty(*context), 2);
     if (ann == "i64x4")
         return llvm::FixedVectorType::get(llvm::Type::getInt64Ty(*context), 4);
-    // "int", "i64", "u64", "string", array types, struct names, generics,
-    // and empty annotations all map to the default i64 representation.
+    // -----------------------------------------------------------------------
+    // Pointer-holding types — use LLVM pointer type instead of i64.
+    // This preserves pointer provenance through LLVM's alias analysis.
+    // Without this, ptr→i64→ptr round-trips at alloca boundaries destroy
+    // BasicAA / SCEVAA tracking, preventing LICM from hoisting loads and
+    // the vectorizer from proving non-aliasing.
+    // -----------------------------------------------------------------------
+    if (ann == "string")
+        return llvm::PointerType::getUnqual(*context);
+    // Array types: int[], string[], float[], etc.
+    if (ann.size() >= 2 && ann.compare(ann.size() - 2, 2, "[]") == 0)
+        return llvm::PointerType::getUnqual(*context);
+    // Dict/map types
+    if (ann == "dict" || ann.rfind("dict[", 0) == 0)
+        return llvm::PointerType::getUnqual(*context);
+    // Known struct types — heap-allocated, accessed via pointer
+    if (structDefs_.count(ann))
+        return llvm::PointerType::getUnqual(*context);
+
+    // "int", "i64", "u64", generics, and empty annotations map to i64.
     return getDefaultType();
 }
 
@@ -1044,12 +1072,23 @@ void CodeGenerator::beginScope() {
     validateScopeStacksMatch(__func__);
     scopeStack.emplace_back();
     constScopeStack.emplace_back();
+    borrowScopeStack_.emplace_back(); // new borrow scope
 }
 
 void CodeGenerator::endScope() {
     validateScopeStacksMatch(__func__);
     if (scopeStack.empty()) {
         return;
+    }
+
+    // Release all borrows introduced in this scope before restoring variables.
+    // This must happen first so that checkConstModification / borrow-state
+    // queries made during scope teardown see the correct unlocked state.
+    if (!borrowScopeStack_.empty()) {
+        for (const auto& info : borrowScopeStack_.back()) {
+            releaseBorrow(info.refVar);
+        }
+        borrowScopeStack_.pop_back();
     }
 
     auto& scope = scopeStack.back();
@@ -1067,19 +1106,16 @@ void CodeGenerator::endScope() {
         } else {
             constValues.erase(entry.first);
         }
-        // Restore constIntFolds_ to the value that was in scope before this scope was entered.
         if (entry.second.hadPreviousIntFold) {
             constIntFolds_[entry.first] = entry.second.previousIntFold;
         } else {
             constIntFolds_.erase(entry.first);
         }
-        // Restore constFloatFolds_ to the value that was in scope before this scope was entered.
         if (entry.second.hadPreviousFloatFold) {
             constFloatFolds_[entry.first] = entry.second.previousFloatFold;
         } else {
             constFloatFolds_.erase(entry.first);
         }
-        // Restore constStringFolds_ to the value that was in scope before this scope was entered.
         if (entry.second.hadPreviousStringFold) {
             constStringFolds_[entry.first] = entry.second.previousStringFold;
         } else {
@@ -1145,8 +1181,31 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
     auto constIt = constValues.find(name);
     if (constIt != constValues.end() && constIt->second) {
+        // Give a more specific error message for frozen variables
+        if (frozenVars_.count(name)) {
+            throw DiagnosticError(
+                Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
+                           "Cannot " + action + " frozen variable '" + name +
+                           "' — variable was frozen and is immutable for the rest of its lifetime"});
+        }
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "Cannot " + action + " const variable: " + name});
+    }
+    // Block writes to the source variable of an active mutable borrow.
+    auto* bs = getBorrowStateOpt(name);
+    if (bs && bs->mutBorrowed) {
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
+                       "Cannot " + action + " variable '" + name +
+                       "' — it has an active mutable borrow (release the borrow first)"});
+    }
+    // Block writes to source while any immutable borrows are alive.
+    if (bs && bs->immutBorrowCount > 0) {
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
+                       "Cannot " + action + " variable '" + name +
+                       "' — it has " + std::to_string(bs->immutBorrowCount) +
+                       " active immutable borrow(s)"});
     }
 }
 
@@ -1234,12 +1293,24 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addRetAttr(llvm::Attribute::NonNull);
     // allocsize(0): parameter 0 is the allocation size — enables LLVM to
     // reason about the returned buffer size for alias analysis and to
     // eliminate redundant bounds checks on the allocated memory.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, std::nullopt));
+    // allockind("alloc,uninitialized"): malloc returns freshly allocated
+    // memory; LLVM treats it as an allocation function for AA and LICM.
+    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
+                                       static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
+                                                             llvm::AllocFnKind::Uninitialized)));
+    // inaccessiblememonly: malloc only touches allocator-internal state
+    // (inaccessible to the caller) — allows LICM to hoist malloc calls out
+    // of loops when the size argument is loop-invariant.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }
 
@@ -1253,12 +1324,22 @@ llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addRetAttr(llvm::Attribute::NonNull); // OmScript assumes alloc always succeeds
     // allocsize(0, 1): allocation size is arg0 * arg1 — enables LLVM to
     // reason about the returned buffer size for alias analysis and to
     // eliminate redundant bounds checks on the allocated memory.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, 1));
+    // allockind("alloc,zeroed"): calloc returns zeroed freshly allocated memory.
+    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
+                                       static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
+                                                             llvm::AllocFnKind::Zeroed)));
+    // inaccessiblememonly: allows LICM to hoist calloc calls out of loops
+    // when the size arguments are loop-invariant.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }
 
@@ -1561,6 +1642,8 @@ llvm::Function* CodeGenerator::getOrDeclareToupper() {
     // memory(none): toupper is a pure function — no reads or writes to memory.
     // This lets the optimizer hoist it out of loops and CSE duplicate calls.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
+    // speculatable: toupper has no side effects, LLVM may hoist/CSE calls.
+    fn->addFnAttr(llvm::Attribute::Speculatable);
     return fn;
 }
 
@@ -1571,6 +1654,7 @@ llvm::Function* CodeGenerator::getOrDeclareTolower() {
     llvm::Function* fn = declareExternalFn("tolower", ty);
     // memory(none): tolower is a pure function — no reads or writes to memory.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
+    fn->addFnAttr(llvm::Attribute::Speculatable);
     return fn;
 }
 
@@ -1581,6 +1665,7 @@ llvm::Function* CodeGenerator::getOrDeclareIsspace() {
     llvm::Function* fn = declareExternalFn("isspace", ty);
     // memory(none): isspace is a pure function — no reads or writes to memory.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
+    fn->addFnAttr(llvm::Attribute::Speculatable);
     return fn;
 }
 
@@ -1590,8 +1675,16 @@ llvm::Function* CodeGenerator::getOrDeclareStrtoll() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy, ptrTy, llvm::Type::getInt32Ty(*context)}, false);
     llvm::Function* fn = declareExternalFn("strtoll", ty);
+    // memory(argmem: read): strtoll reads the string via param 0; param 1
+    // (endptr) is always null at OmScript call sites so no write occurs.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // param 1 (endptr) is always passed as null in OmScript — nocapture is
+    // still valid (the pointer itself is never stored anywhere by strtoll).
+    OMSC_ADD_NOCAPTURE(fn, 1);
     return fn;
 }
 
@@ -1601,8 +1694,14 @@ llvm::Function* CodeGenerator::getOrDeclareStrtod() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(getFloatType(), {ptrTy, ptrTy}, false);
     llvm::Function* fn = declareExternalFn("strtod", ty);
+    // memory(argmem: read): strtod reads the string via param 0; param 1
+    // (endptr) is always null at OmScript call sites so no write occurs.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
     return fn;
 }
 
@@ -1768,6 +1867,12 @@ llvm::Function* CodeGenerator::getOrDeclareStrndup() {
     fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
                                        static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
                                                              llvm::AllocFnKind::Uninitialized)));
+    // memory(argmem: read, inaccessiblemem: readwrite): strndup reads the source
+    // string and writes to allocator-internal structures (same as strdup).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects(
+            llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref) |
+            llvm::MemoryEffects::inaccessibleMemOnly())));
     return fn;
 }
 
@@ -2130,6 +2235,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
     }, "hmap.buf");
     // OmScript assumes allocations always succeed — annotate call-site result.
     llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+        llvm::Attribute::getWithDereferenceableBytes(*context, 208));
     // Store capacity in slot 0
     {   auto* st = builder->CreateAlignedStore(cap, buf, llvm::MaybeAlign(8));
         st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
@@ -2878,6 +2985,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
     llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* arrBytes = builder->CreateMul(arrSlots, eight, "arrbytes", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrBytes}, "buf");
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+        llvm::Attribute::getWithDereferenceableBytes(*context, 8));
     builder->CreateAlignedStore(size, buf, llvm::MaybeAlign(8));
     builder->CreateBr(loopBB);
 
@@ -2968,6 +3077,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
     llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* arrBytes = builder->CreateMul(arrSlots, eight, "arrbytes", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrBytes}, "buf");
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+        llvm::Attribute::getWithDereferenceableBytes(*context, 8));
     builder->CreateAlignedStore(size, buf, llvm::MaybeAlign(8));
     builder->CreateBr(loopBB);
 
@@ -3235,6 +3346,143 @@ void CodeGenerator::preAnalyzeStringTypes(Program* program) {
     }
 }
 
+// Helper: true if a type annotation string looks like an array type (ends with []).
+static bool isArrayAnnotation(const std::string& ann) {
+    return ann.size() >= 2 && ann.compare(ann.size() - 2, 2, "[]") == 0;
+}
+
+// Helper: true if an expression at the pre-analysis stage looks like it
+// produces an array value (annotated [], array literal, array builtins).
+static bool isPreAnalysisArrayExpr(Expression* expr,
+                                    const llvm::StringSet<>& arrayReturningFunctions,
+                                    const std::unordered_map<std::string, std::unordered_set<size_t>>& funcParamArrayTypes,
+                                    const FunctionDecl* func) {
+    if (!expr) return false;
+    if (expr->type == ASTNodeType::ARRAY_EXPR) return true;
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<CallExpr*>(expr);
+        // Known array-returning builtins
+        static const std::unordered_set<std::string> arrayBuiltins = {
+            "array_fill", "array_concat", "array_copy", "array_map",
+            "array_filter", "array_slice", "sort", "reverse",
+            "str_split", "str_chars", "push", "pop", "array_remove"
+        };
+        if (arrayBuiltins.count(call->callee)) return true;
+        if (arrayReturningFunctions.count(call->callee)) return true;
+    }
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR && func) {
+        auto* id = static_cast<IdentifierExpr*>(expr);
+        auto it = funcParamArrayTypes.find(func->name);
+        if (it != funcParamArrayTypes.end()) {
+            for (size_t i = 0; i < func->parameters.size(); ++i) {
+                if (func->parameters[i].name == id->name && it->second.count(i))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+void CodeGenerator::preAnalyzeArrayTypes(Program* program) {
+    // Seed from explicit [] type annotations.
+    for (auto& func : program->functions) {
+        if (isArrayAnnotation(func->returnType)) {
+            arrayReturningFunctions_.insert(func->name);
+        }
+        for (size_t i = 0; i < func->parameters.size(); ++i) {
+            if (isArrayAnnotation(func->parameters[i].typeName)) {
+                funcParamArrayTypes_[func->name].insert(i);
+            }
+        }
+    }
+
+    // Iterative propagation: scan bodies for array-returning return stmts and
+    // call sites that pass array arguments.
+    auto scanStmt = [&](auto& self, Statement* s) -> bool {
+        if (!s) return false;
+        if (auto* ret = dynamic_cast<ReturnStmt*>(s)) {
+            return ret->value && isPreAnalysisArrayExpr(
+                ret->value.get(), arrayReturningFunctions_, funcParamArrayTypes_, nullptr);
+        }
+        if (auto* blk = dynamic_cast<BlockStmt*>(s)) {
+            for (auto& st : blk->statements)
+                if (self(self, st.get())) return true;
+        } else if (auto* ifS = dynamic_cast<IfStmt*>(s)) {
+            if (self(self, ifS->thenBranch.get())) return true;
+            if (self(self, ifS->elseBranch.get())) return true;
+        } else if (auto* wh = dynamic_cast<WhileStmt*>(s)) {
+            if (self(self, wh->body.get())) return true;
+        } else if (auto* dw = dynamic_cast<DoWhileStmt*>(s)) {
+            if (self(self, dw->body.get())) return true;
+        } else if (auto* forS = dynamic_cast<ForStmt*>(s)) {
+            if (self(self, forS->body.get())) return true;
+        } else if (auto* fe = dynamic_cast<ForEachStmt*>(s)) {
+            if (self(self, fe->body.get())) return true;
+        }
+        return false;
+    };
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& func : program->functions) {
+            if (!arrayReturningFunctions_.count(func->name)) {
+                if (scanStmt(scanStmt, func->body.get())) {
+                    arrayReturningFunctions_.insert(func->name);
+                    changed = true;
+                }
+            }
+            // Scan call sites to propagate array-ness to callee parameters.
+            std::function<void(Statement*)> scanCallSites = [&](Statement* st) {
+                if (!st) return;
+                auto scanExpr = [&](auto& se, Expression* e) -> void {
+                    if (!e) return;
+                    if (e->type == ASTNodeType::CALL_EXPR) {
+                        auto* call = static_cast<CallExpr*>(e);
+                        for (size_t i = 0; i < call->arguments.size(); ++i) {
+                            if (isPreAnalysisArrayExpr(call->arguments[i].get(),
+                                                       arrayReturningFunctions_,
+                                                       funcParamArrayTypes_, func.get())) {
+                                if (funcParamArrayTypes_[call->callee].insert(i).second)
+                                    changed = true;
+                            }
+                            se(se, call->arguments[i].get());
+                        }
+                    } else if (e->type == ASTNodeType::BINARY_EXPR) {
+                        auto* bin = static_cast<BinaryExpr*>(e);
+                        se(se, bin->left.get()); se(se, bin->right.get());
+                    } else if (e->type == ASTNodeType::UNARY_EXPR) {
+                        se(se, static_cast<UnaryExpr*>(e)->operand.get());
+                    }
+                };
+                auto scanSt = [&](auto& ss, Statement* s) -> void {
+                    if (!s) return;
+                    if (auto* es = dynamic_cast<ExprStmt*>(s))
+                        scanExpr(scanExpr, es->expression.get());
+                    else if (auto* vd = dynamic_cast<VarDecl*>(s))
+                        scanExpr(scanExpr, vd->initializer.get());
+                    else if (auto* rs = dynamic_cast<ReturnStmt*>(s))
+                        scanExpr(scanExpr, rs->value.get());
+                    else if (auto* blk = dynamic_cast<BlockStmt*>(s))
+                        for (auto& st2 : blk->statements) ss(ss, st2.get());
+                    else if (auto* ifS = dynamic_cast<IfStmt*>(s))
+                        { ss(ss, ifS->thenBranch.get()); ss(ss, ifS->elseBranch.get()); }
+                    else if (auto* wh = dynamic_cast<WhileStmt*>(s))
+                        ss(ss, wh->body.get());
+                    else if (auto* dw = dynamic_cast<DoWhileStmt*>(s))
+                        ss(ss, dw->body.get());
+                    else if (auto* fo = dynamic_cast<ForStmt*>(s))
+                        ss(ss, fo->body.get());
+                    else if (auto* fe = dynamic_cast<ForEachStmt*>(s))
+                        ss(ss, fe->body.get());
+                };
+                scanSt(scanSt, st);
+            };
+            scanCallSites(func->body.get());
+        }
+    }
+}
+
 bool CodeGenerator::isStringExpr(Expression* expr) const {
     if (!expr)
         return false;
@@ -3242,16 +3490,25 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         return static_cast<LiteralExpr*>(expr)->literalType == LiteralExpr::LiteralType::STRING;
     if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
         auto* id = static_cast<IdentifierExpr*>(expr);
-        // Check the LLVM alloca type (handles local vars initialized with string literals).
+        // Check the runtime string-variable tracker first (handles params and
+        // vars assigned from string function returns).
+        if (stringVars_.count(id->name) > 0)
+            return true;
+        // Check the LLVM alloca type: a pointer-typed alloca is a string ONLY
+        // if the variable is not known to be another pointer-holding type
+        // (array, struct, dict).  Since resolveAnnotatedType now returns ptr
+        // for arrays/structs/dicts, we must exclude those to avoid false
+        // positives that would misroute array indexing to strlen-based paths.
+        if (arrayVars_.count(id->name) || dictVarNames_.count(id->name)
+            || structVars_.count(id->name) || stringArrayVars_.count(id->name))
+            return false;
         auto it = namedValues.find(id->name);
         if (it != namedValues.end() && it->second) {
             auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
             if (alloca && alloca->getAllocatedType()->isPointerTy())
                 return true;
         }
-        // Check the runtime string-variable tracker (handles params and vars
-        // assigned from string function returns).
-        return stringVars_.count(id->name) > 0;
+        return false;
     }
     // arr[i] where arr is a string array → the element is a string.
     if (expr->type == ASTNodeType::INDEX_EXPR)
@@ -3269,8 +3526,12 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         auto* tern = static_cast<TernaryExpr*>(expr);
         return isStringExpr(tern->thenExpr.get()) || isStringExpr(tern->elseExpr.get());
     }
-    if (expr->type == ASTNodeType::CALL_EXPR)
-        return stringReturningFunctions_.count(static_cast<CallExpr*>(expr)->callee) > 0;
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<CallExpr*>(expr);
+        // If the callee is known to return an array, it is NOT a string.
+        if (arrayReturningFunctions_.count(call->callee)) return false;
+        return stringReturningFunctions_.count(call->callee) > 0;
+    }
     return false;
 }
 
@@ -3485,6 +3746,18 @@ void CodeGenerator::generate(Program* program) {
             else
                 function->addRetAttr(llvm::Attribute::SExt);
         }
+        // For functions with pointer return types (-> string, -> int[], -> dict,
+        // -> StructType): OmScript guarantees non-null (runtime aborts on
+        // allocation failure) and at least 8 bytes dereferenceable (every
+        // array/string has a valid header slot).  These attributes propagate
+        // through the optimizer and caller context even at O0, helping the
+        // inliner and GVN prove non-null access without the full optimization
+        // pipeline.
+        if (retType->isPointerTy() && optimizationLevel >= OptimizationLevel::O1) {
+            function->addRetAttr(llvm::Attribute::NonNull);
+            function->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(
+                *context, 8));
+        }
         functions[func->name] = function;
         functionDecls_[func->name] = func.get();
     }
@@ -3576,6 +3849,13 @@ void CodeGenerator::generate(Program* program) {
     // work correctly when strings cross function boundaries.
     preAnalyzeStringTypes(program);
 
+    // Pre-analyze array types: mirror of string type analysis for array types.
+    // Populates arrayReturningFunctions_ and funcParamArrayTypes_ so that
+    // isStringExpr() correctly returns false for variables assigned from
+    // array-returning function calls, and arrayVars_ stays accurate across
+    // function boundaries.
+    preAnalyzeArrayTypes(program);
+
     // Pre-analyze constant return values: determine which zero-parameter, pure
     // functions always return the same compile-time constant (string or integer).
     // Results enable deep inter-procedural constant folding during codegen:
@@ -3583,6 +3863,15 @@ void CodeGenerator::generate(Program* program) {
     //   const n = get_n();   → n is tracked as a compile-time constant
     //   for (i in 0..get_n()) → loop bound folded to a constant
     analyzeConstantReturnValues(program);
+
+    // Auto-detect pure user-defined functions: identify functions with parameters
+    // whose bodies are pure (no I/O, no global mutations) and register them in
+    // constEvalFunctions_.  This enables the existing tryConstEval/tryConstEvalFull
+    // machinery to fold calls to these functions at compile time when all arguments
+    // are constants, without requiring explicit @const_eval annotations.
+    // Runs after analyzeConstantReturnValues so zero-arg const-returning functions
+    // are already classified and can be recognized as pure callees.
+    autoDetectConstEvalFunctions(program);
 
     // E-Graph Equality Saturation: apply algebraic simplification, constant
     // folding, strength reduction, and other rewrites at the AST level using
@@ -3612,6 +3901,10 @@ void CodeGenerator::generate(Program* program) {
 
     // Generate all function bodies
     for (auto& func : program->functions) {
+        // Loop fusion pre-pass: merge adjacent @fuse-annotated loops
+        if (func->body) {
+            fuseLoops(func->body.get());
+        }
         generateFunction(func.get());
     }
 
@@ -3627,7 +3920,15 @@ void CodeGenerator::generate(Program* program) {
     // argmemonly enables LLVM to prove that calls don't alias globals or
     // heap state, unlocking store-to-load forwarding and dead store
     // elimination across call sites.
+    //
+    // We run multiple fixpoint iterations so that memory effects propagate
+    // interprocedurally: once a callee gets readnone/readonly from iteration N,
+    // its callers can be promoted in iteration N+1.  Converges in O(call depth)
+    // passes — typically 2-3 for real programs.
     if (optimizationLevel >= OptimizationLevel::O1) {
+        bool memEffChanged = true;
+        while (memEffChanged) {
+        memEffChanged = false;
         for (auto& func : module->functions()) {
             if (func.isDeclaration() || func.getName() == "main")
                 continue;
@@ -3733,6 +4034,7 @@ void CodeGenerator::generate(Program* program) {
                 // transitively through calls) → readnone.
                 func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                     *context, llvm::MemoryEffects::none()));
+                memEffChanged = true;
             } else if (!hasUnknownSideEffect && allAccessesThroughArgs) {
                 // All non-local memory accesses go through function arguments.
                 // This enables LLVM to prove non-interference with globals and
@@ -3744,11 +4046,60 @@ void CodeGenerator::generate(Program* program) {
                     func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                         *context, llvm::MemoryEffects::argMemOnly()));
                 }
+                memEffChanged = true;
             } else if (!hasUnknownSideEffect && !hasMemoryWrite) {
                 // Function reads memory (possibly non-arg) → readonly.
                 func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                     *context, llvm::MemoryEffects::readOnly()));
+                memEffChanged = true;
             }
+        } // end for each function
+        } // end while memEffChanged
+
+        // Speculatable inference: after memory effects have converged, any
+        // user function that is memory(none) + willreturn + nounwind is by
+        // definition speculatable — it has no observable side effects and
+        // always returns.  Marking it speculatable allows LLVM to:
+        //   - hoist calls out of loops (LICM treats speculatable calls as pure)
+        //   - eliminate duplicate calls (CSE / GVN merge call results)
+        //   - speculate calls past conditional branches (SimplifyCFG/InstCombine)
+        //   - prove that hoisting the call from a taken branch to a join point
+        //     does not change program behavior
+        // We only apply this to non-recursive user functions (recursive +
+        // speculatable would let LLVM speculate recursive calls past the
+        // base-case branch, turning finite recursion into infinite recursion).
+        // @pure functions already get Speculatable earlier; skip them here.
+        for (auto& func : module->functions()) {
+            if (func.isDeclaration() || func.getName() == "main")
+                continue;
+            // Skip if already speculatable (set by @pure annotation).
+            if (func.hasFnAttribute(llvm::Attribute::Speculatable))
+                continue;
+            // Requires memory(none) — no memory operations at all.
+            if (!func.doesNotAccessMemory())
+                continue;
+            // Requires willreturn — the function always terminates.
+            if (!func.hasFnAttribute(llvm::Attribute::WillReturn))
+                continue;
+            // Requires nounwind — already set for all user functions, but verify.
+            if (!func.doesNotThrow())
+                continue;
+            // Exclude recursive functions to prevent infinite-recursion bugs.
+            // A function is self-recursive if it directly calls itself.
+            bool isSelfRecursive = false;
+            for (auto& BB : func) {
+                for (auto& I : BB) {
+                    if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                        if (CI->getCalledFunction() == &func) {
+                            isSelfRecursive = true;
+                            break;
+                        }
+                    }
+                }
+                if (isSelfRecursive) break;
+            }
+            if (isSelfRecursive) continue;
+            func.addFnAttr(llvm::Attribute::Speculatable);
         }
     }
 
@@ -3841,12 +4192,23 @@ void CodeGenerator::generate(Program* program) {
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "Module verification failed: " + errorStr});
     }
+
+    // Print optimization statistics when verbose mode is enabled.
+    if (verbose_) {
+        optStats_.print();
+    }
 }
 
 llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     inOptMaxFunction = func->isOptMax;
     hasOptMaxFunctions = hasOptMaxFunctions || func->isOptMax;
+    currentOptMaxConfig_ = func->optMaxConfig;
     if (func->isOptMax) {
+        currentOptMaxConfig_.enabled = currentOptMaxConfig_.enabled || !func->optMaxConfig.enabled;
+        // safety=off implies fastMath
+        if (currentOptMaxConfig_.safety == SafetyLevel::Off) {
+            currentOptMaxConfig_.fastMath = true;
+        }
         optimizeOptMaxBlock(func->body.get());
     }
 
@@ -4122,6 +4484,26 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoUnwind);
     }
 
+    // @allocator(size=N) / @allocator(size=N, count=M): mark as allocator wrapper.
+    // Adds allocsize, noalias return (only for pointer returns), WillReturn,
+    // and NoUnwind so LLVM's alias analysis can track allocation sizes.
+    if (func->allocatorSizeParam >= 0) {
+        const unsigned sizeIdx  = static_cast<unsigned>(func->allocatorSizeParam);
+        if (func->allocatorCountParam >= 0) {
+            const unsigned countIdx = static_cast<unsigned>(func->allocatorCountParam);
+            function->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, sizeIdx, countIdx));
+        } else {
+            function->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, sizeIdx, std::nullopt));
+        }
+        // noalias is only valid on pointer return types.
+        if (function->getReturnType()->isPointerTy()) {
+            function->addRetAttr(llvm::Attribute::NoAlias);
+        }
+        function->addFnAttr(llvm::Attribute::WillReturn);
+        function->addFnAttr(llvm::Attribute::NoUnwind);
+        optStats_.allocatorFuncs++;
+    }
+
     // OmScript uses a flag-based error model (not C++ exceptions / DWARF
     // unwind), so all user-defined functions are inherently nounwind.  Adding
     // this unconditionally (at O2+) lets LLVM:
@@ -4184,6 +4566,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // null/bounds checks without runtime verification.
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                // OmScript arrays/strings are allocated via calloc/malloc which
+                // guarantees at least 16-byte alignment on 64-bit Linux.  The
+                // align(8) attribute (conservative lower bound) tells LLVM's
+                // vectorizer that the pointer is at least 8-byte aligned, enabling
+                // it to emit aligned vector load/store instructions.
+                function->addParamAttr(i, llvm::Attribute::getWithAlignment(
+                    *context, llvm::Align(8)));
                 OMSC_ADD_NOCAPTURE(function, i);
             }
         }
@@ -4206,6 +4595,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // OmScript arrays always have a valid header (at least 8 bytes).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                function->addParamAttr(i, llvm::Attribute::getWithAlignment(
+                    *context, llvm::Align(8)));
                 OMSC_ADD_NOCAPTURE(function, i);
             }
         }
@@ -4229,6 +4620,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // size for any OmScript pointer (arrays, strings).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                // OmScript arrays/strings are always at least 8-byte aligned
+                // (calloc/malloc on 64-bit Linux guarantees ≥16-byte alignment).
+                // align(8) is the conservative lower bound; it tells LLVM's
+                // vectorizer to use aligned load/store instructions, avoiding
+                // alignment masking and enabling better SLP vectorization.
+                function->addParamAttr(i, llvm::Attribute::getWithAlignment(
+                    *context, llvm::Align(8)));
                 // OmScript's ownership model ensures pointer parameters are
                 // never captured (stored into global state or returned as
                 // pointers).  The borrow checker prevents escaping references.
@@ -4251,6 +4649,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // These are stored and applied to every loop emitted within this function.
     currentFuncHintUnroll_ = func->hintUnroll;
     currentFuncHintNoUnroll_ = func->hintNoUnroll;
+    currentFuncDecl_ = func;
 
     // @vectorize / @novectorize: per-function loop vectorization control.
     // These are stored and applied to every loop emitted within this function.
@@ -4304,6 +4703,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     stringCapCache_.clear();
     deadVars_.clear();
     deadVarReason_.clear();
+    varBorrowStates_.clear();
+    borrowMap_.clear();
+    borrowScopeStack_.clear();
+    frozenVars_.clear();
     prefetchedParams_.clear();
     prefetchedVars_.clear();
     prefetchedImmutVars_.clear();
@@ -4318,6 +4721,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
+    auto paramArrIt = funcParamArrayTypes_.find(func->name);
     auto argIt = function->arg_begin();
     for (size_t paramIdx = 0; paramIdx < func->parameters.size(); ++paramIdx) {
         auto& param = func->parameters[paramIdx];
@@ -4330,6 +4734,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
         if (paramStrIt != funcParamStringTypes_.end() && paramStrIt->second.count(paramIdx))
             stringVars_.insert(param.name);
+        // Pre-populate arrayVars_ for parameters known to receive array arguments.
+        // This ensures !nonnull and !range annotations propagate to loads of
+        // array parameter variables inside the function body.
+        if (paramArrIt != funcParamArrayTypes_.end() && paramArrIt->second.count(paramIdx))
+            arrayVars_.insert(param.name);
 
         // @prefetch: emit llvm.prefetch at function entry for annotated params.
         // This hints to the CPU to load the parameter's memory into cache
@@ -4500,8 +4909,14 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::MOVE_DECL:
         generateMoveDecl(static_cast<MoveDecl*>(stmt));
         break;
+    case ASTNodeType::FREEZE_STMT:
+        generateFreeze(static_cast<FreezeStmt*>(stmt));
+        break;
     case ASTNodeType::PREFETCH_STMT:
         generatePrefetch(static_cast<PrefetchStmt*>(stmt));
+        break;
+    case ASTNodeType::ASSUME_STMT:
+        generateAssume(static_cast<AssumeStmt*>(stmt));
         break;
     case ASTNodeType::DEFER_STMT:
         // Defer outside a block: just execute the body immediately
@@ -4567,10 +4982,36 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateMoveExpr(static_cast<MoveExpr*>(expr));
     case ASTNodeType::BORROW_EXPR:
         return generateBorrowExpr(static_cast<BorrowExpr*>(expr));
+    case ASTNodeType::REBORROW_EXPR:
+        return generateReborrowExpr(static_cast<ReborrowExpr*>(expr));
     case ASTNodeType::DICT_EXPR:
         return generateDict(static_cast<DictExpr*>(expr));
     case ASTNodeType::SCOPE_RESOLUTION_EXPR:
         return generateScopeResolution(static_cast<ScopeResolutionExpr*>(expr));
+    case ASTNodeType::COMPTIME_EXPR: {
+        // comptime { ... } — evaluate the block at compile time.
+        // Uses the constant evaluator (tryConstEvalFull) with an empty env.
+        // If evaluation fails, emits a compile error.
+        auto* ct = static_cast<ComptimeExpr*>(expr);
+        static const std::unordered_map<std::string, ConstValue> emptyEnv;
+        auto result = tryConstEvalFull(ct->body.get(), emptyEnv);
+        if (!result) {
+            codegenError("comptime block could not be evaluated at compile time "
+                         "(only pure integer/string arithmetic is supported)", expr);
+        }
+        if (result->kind == ConstValue::Kind::Integer) {
+            return llvm::ConstantInt::get(getDefaultType(), result->intVal, /*isSigned=*/true);
+        }
+        if (result->kind == ConstValue::Kind::String) {
+            llvm::GlobalVariable* gv = internString(result->strVal);
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
+        codegenError("comptime block returned an unsupported type (only int/string supported)", expr);
+    }
     default:
         codegenError("Unknown expression type", expr);
     }
@@ -5197,10 +5638,43 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         }
         return std::nullopt;
     }
+    // ── sqrt(x) for integer args ────────────────────────────────────────────
+    if (name == "sqrt" && n == 1) {
+        if (auto v = intArg(0)) {
+            if (*v >= 0) return CV::fromInt(static_cast<int64_t>(std::sqrt(static_cast<double>(*v))));
+        }
+        return std::nullopt;
+    }
+    // ── floor(x), ceil(x), round(x) for integer args ───────────────────────
+    if (name == "floor" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(*v);  // floor of integer is itself
+        return std::nullopt;
+    }
+    if (name == "ceil" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(*v);  // ceil of integer is itself
+        return std::nullopt;
+    }
+    if (name == "round" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(*v);  // round of integer is itself
+        return std::nullopt;
+    }
+    // ── log2(x) / log(x) integer floor ─────────────────────────────────────
+    if (name == "log" && n == 1) {
+        if (auto v = intArg(0)) {
+            if (*v > 0) return CV::fromInt(static_cast<int64_t>(std::log(static_cast<double>(*v))));
+        }
+        return std::nullopt;
+    }
+    // ── exp2(n) for small non-negative integer exponents ───────────────────
+    if (name == "exp2" && n == 1) {
+        if (auto v = intArg(0)) {
+            if (*v >= 0 && *v < 63)
+                return CV::fromInt(int64_t(1) << static_cast<int>(*v));
+        }
+        return std::nullopt;
+    }
     return std::nullopt;
 }
-
-// tryFoldExprToConst: evaluate any expression to a compile-time ConstValue
 // using all statically-known information (constIntFolds_, constStringFolds_,
 // constIntReturnFunctions_, constStringReturnFunctions_, enumConstants_).
 // This is the "call-site evaluator" — it knows about constants in the CURRENT
@@ -5385,6 +5859,12 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
             return ConstValue::fromInt(static_cast<int64_t>(eit->second));
         return std::nullopt;
     }
+    case ASTNodeType::COMPTIME_EXPR: {
+        // A comptime {} block is always a compile-time constant — evaluate it.
+        auto* ct = static_cast<ComptimeExpr*>(expr);
+        static const std::unordered_map<std::string, ConstValue> emptyEnv;
+        return tryConstEvalFull(ct->body.get(), emptyEnv);
+    }
     default: return std::nullopt;
     }
 }
@@ -5466,6 +5946,12 @@ CodeGenerator::tryConstEvalFull(
             if (iit != constIntReturnFunctions_.end()) return ConstValue::fromInt(iit->second);
             auto sit = constStringReturnFunctions_.find(id->name);
             if (sit != constStringReturnFunctions_.end()) return ConstValue::fromStr(sit->second);
+            // Global const variables (constIntFolds_ / constStringFolds_):
+            // functions may reference file-level constants not in their argEnv.
+            auto git = constIntFolds_.find(id->name);
+            if (git != constIntFolds_.end()) return ConstValue::fromInt(git->second);
+            auto gst = constStringFolds_.find(id->name);
+            if (gst != constStringFolds_.end()) return ConstValue::fromStr(gst->second);
             return std::nullopt;
         }
 
@@ -5627,6 +6113,13 @@ CodeGenerator::tryConstEvalFull(
             if (eit != enumConstants_.end())
                 return ConstValue::fromInt(static_cast<int64_t>(eit->second));
             return std::nullopt;
+        }
+
+        // ── Nested comptime block ────────────────────────────────────────
+        case ASTNodeType::COMPTIME_EXPR: {
+            auto* ct = static_cast<ComptimeExpr*>(e);
+            std::unordered_map<std::string, ConstValue> nestedEnv;
+            return tryConstEvalFull(ct->body.get(), nestedEnv, depth + 1);
         }
 
         // ── Function calls ───────────────────────────────────────────────
@@ -5942,7 +6435,26 @@ CodeGenerator::tryConstEvalFull(
     return retVal;
 }
 
-// ── Deep Compile-Time Constant Return Value Analysis ─────────────────────
+// BlockStmt overload: evaluate a standalone block at compile time.
+// Used by comptime {} expressions that aren't attached to a FunctionDecl.
+std::optional<CodeGenerator::ConstValue>
+CodeGenerator::tryConstEvalFull(
+    const BlockStmt* body,
+    const std::unordered_map<std::string, ConstValue>& argEnv,
+    int depth) const {
+    if (!body || depth > 48) return std::nullopt;
+    // Synthesize a minimal FunctionDecl pointing at the block.
+    // We use a raw pointer without ownership transfer — the block is owned
+    // by the ComptimeExpr AST node that called us.
+    FunctionDecl synFn("__comptime__", {}, {}, nullptr);
+    // Temporarily assign the body pointer for the duration of evaluation.
+    // We must restore it (set to nullptr) before the synFn destructor runs
+    // to avoid double-free since synFn doesn't own the body.
+    synFn.body.reset(const_cast<BlockStmt*>(body));
+    auto result = tryConstEvalFull(&synFn, argEnv, depth);
+    synFn.body.release(); // release without deleting — body is not owned here
+    return result;
+}
 // Pre-pass over the program AST that identifies zero-parameter, pure functions
 // whose return value is always the same compile-time constant.
 //
@@ -5984,8 +6496,255 @@ void CodeGenerator::analyzeConstantReturnValues(Program* program) {
     }
 }
 
+// autoDetectConstEvalFunctions: identify user-defined functions with parameters
+// that are "pure" (no I/O, no global mutations, arithmetic/logic/conditional
+// bodies only) and register them in constEvalFunctions_.  This enables the
+// existing tryConstEval/tryConstEvalFull machinery to fold calls to these
+// functions at compile time when all arguments are constants, without requiring
+// explicit @const_eval annotations.
+//
+// Purity is detected via a fixed-point analysis:
+//   - A function is pure if its body contains only pure statements/expressions
+//   - A call expression is pure only if the callee is a known-pure function
+//   - The fixed-point loop handles mutual recursion (A calls B calls A) by
+//     conservatively marking mutually-recursive functions as not pure
+//
+// Runs at O1+ after analyzeConstantReturnValues so that zero-arg const funcs
+// are already in constIntReturnFunctions_ and can be recognized as pure calls.
+void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
+    if (!program || optimizationLevel < OptimizationLevel::O1) return;
 
-// Deduplicates identical string literals across the entire module by
+    // Set of builtins known to be pure (no I/O, no heap mutation observable
+    // to the caller, deterministic output for given inputs).
+    static const std::unordered_set<std::string> kPureBuiltins = {
+        "abs", "min", "max", "sign", "clamp", "pow", "sqrt", "log2", "log",
+        "gcd", "lcm", "exp2",
+        "is_even", "is_odd", "is_power_of_2", "is_alpha", "is_digit",
+        "floor", "ceil", "round",
+        "popcount", "clz", "ctz", "bswap", "bitreverse",
+        "rotate_left", "rotate_right", "saturating_add", "saturating_sub",
+        "to_int", "to_float", "to_string", "number_to_string",
+        "string_to_number", "char_code", "to_char",
+        "str_len", "len", "typeof",
+        "char_at", "str_eq", "str_find", "str_index_of",
+        "str_starts_with", "str_ends_with", "startswith", "endswith",
+        "str_upper", "str_lower", "str_trim", "str_reverse",
+        "str_substr", "str_contains", "str_replace", "str_repeat",
+        "str_count",
+    };
+
+    // Set of builtin/user names that are impure (I/O, heap side-effects, etc.)
+    static const std::unordered_set<std::string> kImpureBuiltins = {
+        "print", "println", "printf", "input", "input_line", "assert",
+        "push", "pop", "insert", "remove", "reverse", "sort", "shuffle",
+        "swap", "resize", "clear", "append",
+        "fopen", "fclose", "fread", "fwrite", "fappend",
+        "exit", "abort", "panic", "error",
+        "random", "rand", "time", "sleep",
+    };
+
+    // Build index of all user function declarations for O(1) lookup.
+    std::unordered_map<std::string, const FunctionDecl*> allFuncs;
+    for (const auto& func : program->functions) {
+        allFuncs[func->name] = func.get();
+    }
+
+    // Track which user functions are currently known-pure.
+    std::unordered_set<std::string> knownPure;
+
+    // Seed with functions already in constEvalFunctions_ (explicit @const_eval).
+    for (auto it = constEvalFunctions_.begin(); it != constEvalFunctions_.end(); ++it) {
+        knownPure.insert(it->getKey().str());
+    }
+    // Seed with zero-arg functions already analyzed as const-return.
+    for (const auto& kv : constIntReturnFunctions_) {
+        knownPure.insert(kv.first().str());
+    }
+    for (const auto& kv : constStringReturnFunctions_) {
+        knownPure.insert(kv.first().str());
+    }
+
+    // Helpers to check purity of AST nodes (forward-declared via lambdas).
+    std::function<bool(const Expression*)> isExprPure;
+    std::function<bool(const Statement*)> isStmtPure;
+
+    isExprPure = [&](const Expression* expr) -> bool {
+        if (!expr) return true;
+        switch (expr->type) {
+        case ASTNodeType::LITERAL_EXPR:
+        case ASTNodeType::IDENTIFIER_EXPR:
+            return true;
+
+        case ASTNodeType::BINARY_EXPR: {
+            auto* bin = static_cast<const BinaryExpr*>(expr);
+            return isExprPure(bin->left.get()) && isExprPure(bin->right.get());
+        }
+        case ASTNodeType::UNARY_EXPR: {
+            auto* un = static_cast<const UnaryExpr*>(expr);
+            return isExprPure(un->operand.get());
+        }
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* tern = static_cast<const TernaryExpr*>(expr);
+            return isExprPure(tern->condition.get()) &&
+                   isExprPure(tern->thenExpr.get()) &&
+                   isExprPure(tern->elseExpr.get());
+        }
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<const CallExpr*>(expr);
+            // Impure builtins: not pure.
+            if (kImpureBuiltins.count(call->callee)) return false;
+            // Known-pure builtins: OK.
+            if (kPureBuiltins.count(call->callee)) {
+                for (const auto& arg : call->arguments) {
+                    if (!isExprPure(arg.get())) return false;
+                }
+                return true;
+            }
+            // User-defined function: pure only if we already know it's pure.
+            if (knownPure.count(call->callee)) {
+                for (const auto& arg : call->arguments) {
+                    if (!isExprPure(arg.get())) return false;
+                }
+                return true;
+            }
+            // Unknown/impure function.
+            return false;
+        }
+        case ASTNodeType::MOVE_EXPR: {
+            auto* mv = static_cast<const MoveExpr*>(expr);
+            return isExprPure(mv->source.get());
+        }
+        case ASTNodeType::BORROW_EXPR: {
+            auto* bw = static_cast<const BorrowExpr*>(expr);
+            return isExprPure(bw->source.get());
+        }
+        case ASTNodeType::COMPTIME_EXPR:
+            // A comptime {} block is always a compile-time constant — always pure.
+            return true;
+        case ASTNodeType::POSTFIX_EXPR:
+            // ++/-- are mutations — not pure for const-eval.
+            return false;
+        case ASTNodeType::PREFIX_EXPR: {
+            auto* pre = static_cast<const PrefixExpr*>(expr);
+            if (pre->op == "!" || pre->op == "-" || pre->op == "+")
+                return isExprPure(pre->operand.get());
+            return false;  // ++/-- are mutations
+        }
+        default:
+            // IndexExpr, AssignExpr, ArrayLiteral, etc. — conservative: not pure
+            // for const-eval purposes (may allocate or mutate).
+            return false;
+        }
+    };
+
+    isStmtPure = [&](const Statement* stmt) -> bool {
+        if (!stmt) return true;
+        switch (stmt->type) {
+        case ASTNodeType::RETURN_STMT: {
+            auto* ret = static_cast<const ReturnStmt*>(stmt);
+            return !ret->value || isExprPure(ret->value.get());
+        }
+        case ASTNodeType::VAR_DECL: {
+            auto* vd = static_cast<const VarDecl*>(stmt);
+            return !vd->initializer || isExprPure(vd->initializer.get());
+        }
+        case ASTNodeType::MOVE_DECL: {
+            auto* md = static_cast<const MoveDecl*>(stmt);
+            return !md->initializer || isExprPure(md->initializer.get());
+        }
+        case ASTNodeType::BLOCK: {
+            auto* block = static_cast<const BlockStmt*>(stmt);
+            for (const auto& s : block->statements) {
+                if (!isStmtPure(s.get())) return false;
+            }
+            return true;
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifS = static_cast<const IfStmt*>(stmt);
+            return isExprPure(ifS->condition.get()) &&
+                   isStmtPure(ifS->thenBranch.get()) &&
+                   isStmtPure(ifS->elseBranch.get());
+        }
+        case ASTNodeType::WHILE_STMT: {
+            auto* ws = static_cast<const WhileStmt*>(stmt);
+            return isExprPure(ws->condition.get()) && isStmtPure(ws->body.get());
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            auto* dws = static_cast<const DoWhileStmt*>(stmt);
+            return isStmtPure(dws->body.get()) && isExprPure(dws->condition.get());
+        }
+        case ASTNodeType::FOR_STMT: {
+            auto* fs = static_cast<const ForStmt*>(stmt);
+            return isExprPure(fs->start.get()) &&
+                   isExprPure(fs->end.get()) &&
+                   (!fs->step || isExprPure(fs->step.get())) &&
+                   isStmtPure(fs->body.get());
+        }
+        case ASTNodeType::EXPR_STMT: {
+            // Allow pure expression statements (e.g. function calls used for
+            // their return value stored in a variable).
+            auto* es = static_cast<const ExprStmt*>(stmt);
+            return isExprPure(es->expression.get());
+        }
+        case ASTNodeType::INVALIDATE_STMT:
+            // invalidate frees memory — conservative: not pure.
+            return false;
+        case ASTNodeType::BREAK_STMT:
+        case ASTNodeType::CONTINUE_STMT:
+            return true;
+        case ASTNodeType::SWITCH_STMT: {
+            auto* sw = static_cast<const SwitchStmt*>(stmt);
+            if (!isExprPure(sw->condition.get())) return false;
+            for (const auto& c : sw->cases) {
+                if (c.value && !isExprPure(c.value.get())) return false;
+                for (const auto& v : c.values)
+                    if (!isExprPure(v.get())) return false;
+                for (const auto& s : c.body)
+                    if (!isStmtPure(s.get())) return false;
+            }
+            return true;
+        }
+        default:
+            return false;
+        }
+    };
+
+    // Fixed-point iteration: keep adding functions to knownPure until no more
+    // can be classified.  This handles call chains A→B→C where B and C must
+    // be proven pure before A can be classified.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& func : program->functions) {
+            const std::string& fname = func->name;
+            // Skip functions already known pure or already in constEvalFunctions_.
+            if (knownPure.count(fname)) continue;
+            // Must have a body to analyze.
+            if (!func->body) continue;
+            // Must have at least one parameter (zero-arg handled separately).
+            if (func->parameters.empty()) continue;
+            // Skip functions annotated @const_eval already (handled at registration time).
+            if (func->hintConstEval) continue;
+            // Skip functions with @optnone or @noinline.
+            if (func->hintOptNone) continue;
+
+            // Check if the entire body is pure.
+            bool bodyIsPure = true;
+            for (const auto& stmt : func->body->statements) {
+                if (!isStmtPure(stmt.get())) {
+                    bodyIsPure = false;
+                    break;
+                }
+            }
+
+            if (bodyIsPure) {
+                knownPure.insert(fname);
+                constEvalFunctions_.insert(fname);
+                changed = true;
+            }
+        }
+    }
+}
 // maintaining a pool of interned global string constants.  When the
 // same string content is used in multiple places, this returns a
 // pointer to the single canonical global, enabling:
@@ -6013,6 +6772,232 @@ llvm::GlobalVariable* CodeGenerator::internString(const std::string& content) {
 
     internedStrings_[content] = gv;
     return gv;
+}
+
+void CodeGenerator::generateAssume(AssumeStmt* stmt) {
+    llvm::Value* cond = generateExpression(stmt->condition.get());
+    // Convert to i1 if needed
+    if (!cond->getType()->isIntegerTy(1)) {
+        cond = builder->CreateICmpNE(cond, llvm::ConstantInt::get(cond->getType(), 0), "assume.cond");
+    }
+    llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
+    builder->CreateCall(assumeFn, {cond});
+
+    if (stmt->deoptBody) {
+        // if (!cond) { deoptBody }
+        llvm::Function* parent = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* deoptBB = llvm::BasicBlock::Create(*context, "deopt", parent);
+        llvm::BasicBlock* afterBB = llvm::BasicBlock::Create(*context, "after.assume", parent);
+        builder->CreateCondBr(cond, afterBB, deoptBB);
+        builder->SetInsertPoint(deoptBB);
+        generateStatement(stmt->deoptBody.get());
+        if (!builder->GetInsertBlock()->getTerminator()) {
+            builder->CreateBr(afterBB);
+        }
+        builder->SetInsertPoint(afterBB);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Escape analysis for stack allocation
+// ---------------------------------------------------------------------------
+// Check whether a local array variable escapes the current function scope.
+// Returns true if the array is safe for stack allocation (no escape).
+// Conservative: we only return true when we can PROVE it doesn't escape.
+// ---------------------------------------------------------------------------
+
+/// Scan an expression tree for any use of varName that would cause escape:
+///  - passed as an argument to a function call
+///  - used as the object of a return statement (detected at statement level)
+static bool exprUsesVar(Expression* expr, const std::string& varName) {
+    if (!expr) return false;
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+        return static_cast<IdentifierExpr*>(expr)->name == varName;
+    }
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<CallExpr*>(expr);
+        for (auto& arg : call->arguments) {
+            if (exprUsesVar(arg.get(), varName)) return true;
+        }
+        return false; // callee name is a string, not an expression
+    }
+    if (expr->type == ASTNodeType::BINARY_EXPR) {
+        auto* bin = static_cast<BinaryExpr*>(expr);
+        return exprUsesVar(bin->left.get(), varName) ||
+               exprUsesVar(bin->right.get(), varName);
+    }
+    if (expr->type == ASTNodeType::UNARY_EXPR) {
+        return exprUsesVar(static_cast<UnaryExpr*>(expr)->operand.get(), varName);
+    }
+    if (expr->type == ASTNodeType::INDEX_EXPR) {
+        auto* idx = static_cast<IndexExpr*>(expr);
+        return exprUsesVar(idx->array.get(), varName) ||
+               exprUsesVar(idx->index.get(), varName);
+    }
+    if (expr->type == ASTNodeType::ASSIGN_EXPR) {
+        auto* asgn = static_cast<AssignExpr*>(expr);
+        return exprUsesVar(asgn->value.get(), varName);
+    }
+    return false;
+}
+
+/// Returns true if varName escapes in any statement in the block (from stmtIdx onwards).
+static bool varEscapesInBlock(const BlockStmt* block, const std::string& varName,
+                               size_t startIdx) {
+    for (size_t i = startIdx; i < block->statements.size(); ++i) {
+        const Statement* s = block->statements[i].get();
+        // Return: escapes if returned
+        if (auto* ret = dynamic_cast<const ReturnStmt*>(s)) {
+            if (ret->value && exprUsesVar(ret->value.get(), varName)) return true;
+        }
+        // VarDecl initializer: could be assigned to another variable and passed
+        if (auto* vd = dynamic_cast<const VarDecl*>(s)) {
+            if (vd->initializer && exprUsesVar(vd->initializer.get(), varName)) return true;
+        }
+        // ExprStmt: call args
+        if (auto* es = dynamic_cast<const ExprStmt*>(s)) {
+            if (exprUsesVar(es->expression.get(), varName)) {
+                // Check if it's a call expression with varName as arg
+                if (es->expression->type == ASTNodeType::CALL_EXPR) {
+                    auto* call = static_cast<CallExpr*>(es->expression.get());
+                    for (auto& arg : call->arguments) {
+                        if (exprUsesVar(arg.get(), varName)) return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool CodeGenerator::doesVarEscapeCurrentScope(const std::string& varName) const {
+    if (!currentFuncDecl_ || !currentFuncDecl_->body) return true; // conservative
+    // Find the VarDecl statement index for this variable.
+    const BlockStmt* body = currentFuncDecl_->body.get();
+    for (size_t i = 0; i < body->statements.size(); ++i) {
+        const auto* vd = dynamic_cast<const VarDecl*>(body->statements[i].get());
+        if (vd && vd->name == varName) {
+            return varEscapesInBlock(body, varName, i + 1);
+        }
+    }
+    // Not at top-level: assume it might escape.
+    return true;
+}
+
+
+
+/// Compare two expressions for equality (only handles literals and identifiers).
+static bool exprEqual(const Expression* a, const Expression* b) {
+    if (!a || !b) return false;
+    if (a->type != b->type) return false;
+    if (a->type == ASTNodeType::LITERAL_EXPR) {
+        const auto* la = static_cast<const LiteralExpr*>(a);
+        const auto* lb = static_cast<const LiteralExpr*>(b);
+        if (la->literalType != lb->literalType) return false;
+        if (la->literalType == LiteralExpr::LiteralType::INTEGER)
+            return la->intValue == lb->intValue;
+        if (la->literalType == LiteralExpr::LiteralType::STRING)
+            return la->stringValue == lb->stringValue;
+        return la->floatValue == lb->floatValue;
+    }
+    if (a->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const auto* ia = static_cast<const IdentifierExpr*>(a);
+        const auto* ib = static_cast<const IdentifierExpr*>(b);
+        return ia->name == ib->name;
+    }
+    return false;
+}
+
+void CodeGenerator::fuseLoops(BlockStmt* block) {
+    // Recursively apply to nested blocks first.
+    for (auto& stmt : block->statements) {
+        if (auto* blk = dynamic_cast<BlockStmt*>(stmt.get())) {
+            fuseLoops(blk);
+        } else if (auto* fr = dynamic_cast<ForStmt*>(stmt.get())) {
+            if (fr->body) {
+                if (auto* innerBlk = dynamic_cast<BlockStmt*>(fr->body.get())) {
+                    fuseLoops(innerBlk);
+                }
+            }
+        }
+    }
+
+    // Single-pass fusion: walk statement list looking for adjacent ForStmt pairs.
+    auto& stmts = block->statements;
+    size_t i = 0;
+    while (i + 1 < stmts.size()) {
+        auto* first  = dynamic_cast<ForStmt*>(stmts[i].get());
+        auto* second = dynamic_cast<ForStmt*>(stmts[i + 1].get());
+
+        if (!first || !second) {
+            ++i;
+            continue;
+        }
+        // At least one must have @fuse.
+        if (!first->loopHints.fuse && !second->loopHints.fuse) {
+            ++i;
+            continue;
+        }
+        // Must have identical start and end bounds.
+        if (!exprEqual(first->start.get(), second->start.get()) ||
+            !exprEqual(first->end.get(),   second->end.get())) {
+            ++i;
+            continue;
+        }
+
+        // Merge: build a combined body.
+        // The second iterator is aliased to the first via a VarDecl.
+        std::vector<std::unique_ptr<Statement>> combined;
+
+        // Only add the alias if the second loop uses a different iterator name.
+        if (second->iteratorVar != first->iteratorVar) {
+            auto aliasIdent = std::make_unique<IdentifierExpr>(first->iteratorVar);
+            aliasIdent->line = first->line;
+            auto aliasDecl = std::make_unique<VarDecl>(
+                second->iteratorVar, std::move(aliasIdent), false, "");
+            aliasDecl->line = first->line;
+            combined.push_back(std::move(aliasDecl));
+        }
+
+        // Append first body's statements.
+        if (auto* firstBlk = dynamic_cast<BlockStmt*>(first->body.get())) {
+            for (auto& s : firstBlk->statements)
+                combined.push_back(std::move(s));
+        } else if (first->body) {
+            combined.push_back(std::move(first->body));
+        }
+
+        // Append second body's statements.
+        if (auto* secondBlk = dynamic_cast<BlockStmt*>(second->body.get())) {
+            for (auto& s : secondBlk->statements)
+                combined.push_back(std::move(s));
+        } else if (second->body) {
+            combined.push_back(std::move(second->body));
+        }
+
+        auto fusedBody = std::make_unique<BlockStmt>(std::move(combined));
+
+        // Build the fused ForStmt.
+        LoopConfig fusedHints = first->loopHints;
+        fusedHints.fuse = false; // already fused
+        auto fused = std::make_unique<ForStmt>(
+            first->iteratorVar,
+            std::move(first->start),
+            std::move(first->end),
+            std::move(first->step),
+            std::move(fusedBody),
+            first->iteratorType);
+        fused->loopHints = fusedHints;
+        fused->line = first->line;
+        fused->column = first->column;
+
+        // Replace first with fused, erase second.
+        stmts[i] = std::move(fused);
+        stmts.erase(stmts.begin() + static_cast<ptrdiff_t>(i + 1));
+
+        optStats_.loopsFused++;
+        // Don't advance i — try to fuse again with the next statement.
+    }
 }
 
 } // namespace omscript

@@ -178,6 +178,10 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintParallelize = false, hintNoParallelize = false;
             bool hintMinSize = false, hintOptNone = false, hintNoUnwind = false;
             bool hintConstEval = false;
+            bool isOptMaxFromAnnotation = false;
+            OptMaxConfig optMaxCfgFromAnnotation;
+            int allocatorSizeParam = -1;
+            int allocatorCountParam = -1;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -221,12 +225,34 @@ std::unique_ptr<Program> Parser::parse() {
                     hintNoUnwind = true;
                 } else if (ann.lexeme == "const_eval") {
                     hintConstEval = true;
+                } else if (ann.lexeme == "allocator") {
+                    // @allocator(size=N) or @allocator(size=N, count=M)
+                    consume(TokenType::LPAREN, "Expected '(' after @allocator");
+                    while (!check(TokenType::RPAREN) && !isAtEnd()) {
+                        const Token paramKey = consume(TokenType::IDENTIFIER, "Expected param name in @allocator");
+                        consume(TokenType::ASSIGN, "Expected '=' in @allocator");
+                        const Token paramVal = advance();
+                        int idx = 0;
+                        try { idx = std::stoi(paramVal.lexeme); } catch(...) {}
+                        if (paramKey.lexeme == "size") {
+                            allocatorSizeParam = idx;
+                        } else if (paramKey.lexeme == "count") {
+                            allocatorCountParam = idx;
+                        }
+                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' after @allocator params");
+                } else if (ann.lexeme == "optmax") {
+                    isOptMaxFromAnnotation = true;
+                    if (check(TokenType::LPAREN)) {
+                        optMaxCfgFromAnnotation = parseOptMaxConfig();
+                    }
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @allocator (use @prefetch on parameters)");
                 }
             }
-            auto func = parseFunction(optMaxTagActive);
+            auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
             func->hintInline = hintInline;
             func->hintNoInline = hintNoInline;
             func->hintCold = hintCold;
@@ -246,6 +272,13 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintOptNone = hintOptNone;
             func->hintNoUnwind = hintNoUnwind;
             func->hintConstEval = hintConstEval;
+            func->allocatorSizeParam = allocatorSizeParam;
+            func->allocatorCountParam = allocatorCountParam;
+            if (isOptMaxFromAnnotation) {
+                func->isOptMax = true;
+                func->optMaxConfig = optMaxCfgFromAnnotation;
+                func->optMaxConfig.enabled = true;
+            }
             // Warn about conflicting annotations at parse time.
             if (hintOptNone && hintInline) {
                 std::cerr << "warning: '@optnone' and '@inline' are mutually exclusive on function '"
@@ -292,6 +325,23 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                          std::vector<std::unique_ptr<EnumDecl>>& enums,
                          std::vector<std::unique_ptr<StructDecl>>& structs) {
     const Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
+
+    // Optional alias: import "file" as alias
+    // The alias may itself be multi-level: import "file" as john::int
+    // which allows calling imported functions as john::int::funcname().
+    std::string alias;
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "as") {
+        advance(); // consume 'as'
+        const Token aliasTok = consume(TokenType::IDENTIFIER, "Expected alias name after 'as'");
+        alias = aliasTok.lexeme;
+        // Support multi-level alias: as john::int  →  internal prefix "john__int"
+        while (check(TokenType::SCOPE)) {
+            advance(); // consume '::'
+            const Token seg = consume(TokenType::IDENTIFIER, "Expected identifier in alias path");
+            alias += "__" + seg.lexeme;
+        }
+    }
+
     consume(TokenType::SEMICOLON, "Expected ';' after import statement");
 
     std::string filename = fileToken.lexeme;
@@ -346,8 +396,17 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 
     auto importedProgram = importParser.parse();
 
-    // Merge imported declarations into the current program
+    // Merge imported declarations into the current program.
+    // When an alias was given, register every imported function in the
+    // namespace map so that alias::funcname(args) resolves directly to the
+    // original function — no forwarder overhead, and the compiler can detect
+    // typos in function names at parse time.
+    // The original (unqualified) function is also kept so intra-module calls
+    // inside the imported file continue to resolve correctly.
     for (auto& fn : importedProgram->functions) {
+        if (!alias.empty()) {
+            importNamespaces_[alias][fn->name] = fn->name;
+        }
         functions.push_back(std::move(fn));
     }
     for (auto& en : importedProgram->enums) {
@@ -365,6 +424,36 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     for (const auto& name : importParser.enumNames_) {
         enumNames_.insert(name);
     }
+}
+
+std::string Parser::resolveNamespacedPath(const std::vector<std::string>& segments) {
+    // Try progressively shorter namespace prefixes (longest-match first).
+    // For segments [a, b, c]:
+    //   1st pass: ns="a__b",  fn="c"
+    //   2nd pass: ns="a",     fn="b__c"
+    for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
+        std::string ns;
+        for (int i = 0; i < cut; ++i) {
+            if (i > 0) ns += "__";
+            ns += segments[i];
+        }
+        auto nsIt = importNamespaces_.find(ns);
+        if (nsIt == importNamespaces_.end()) continue;
+
+        // Namespace found — build function name from remaining segments.
+        std::string fn;
+        for (int i = cut; i < (int)segments.size(); ++i) {
+            if (i > cut) fn += "__";
+            fn += segments[i];
+        }
+        auto fnIt = nsIt->second.find(fn);
+        if (fnIt != nsIt->second.end()) {
+            return fnIt->second; // actual (original) function name
+        }
+        // Namespace exists but the requested function is not in it.
+        error("Function '" + fn + "' not found in namespace '" + ns + "'");
+    }
+    return ""; // no namespace prefix matched — caller uses flat-name fallback
 }
 
 std::string Parser::parseTypeAnnotation() {
@@ -479,9 +568,47 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 
     std::unique_ptr<BlockStmt> body;
 
-    // Shorthand: fn name(params) = expr;
-    // Desugars to: fn name(params) { return expr; }
-    if (match(TokenType::ASSIGN)) {
+    // Function alias: fn name(params) [-> ret] == target::path;
+    // The target path is resolved through the namespace registry when possible,
+    // falling back to flat name mangling (a::b::c → a__b__c) for compatibility.
+    // Desugars to a thin wrapper: fn name(params) { return target(params...); }
+    if (match(TokenType::EQ)) {
+        // Collect the full target path.
+        std::vector<std::string> segs;
+        segs.push_back(
+            consume(TokenType::IDENTIFIER, "Expected function path after '=='").lexeme);
+        while (check(TokenType::SCOPE)) {
+            advance(); // consume '::'
+            segs.push_back(
+                consume(TokenType::IDENTIFIER, "Expected identifier in function path").lexeme);
+        }
+        consume(TokenType::SEMICOLON, "Expected ';' after function alias");
+        // Resolve via namespace registry, fall back to flat name.
+        std::string resolvedTarget;
+        if (segs.size() >= 2) {
+            resolvedTarget = resolveNamespacedPath(segs);
+        }
+        if (resolvedTarget.empty()) {
+            resolvedTarget = segs[0];
+            for (size_t i = 1; i < segs.size(); ++i)
+                resolvedTarget += "__" + segs[i];
+        }
+        // Build: return resolvedTarget(params...);
+        std::vector<std::unique_ptr<Expression>> callArgs;
+        for (const auto& param : parameters) {
+            auto argExpr = std::make_unique<IdentifierExpr>(param.name);
+            callArgs.push_back(std::move(argExpr));
+        }
+        auto callExpr = std::make_unique<CallExpr>(resolvedTarget, std::move(callArgs));
+        callExpr->line = name.line;
+        callExpr->column = name.column;
+        auto retStmt = std::make_unique<ReturnStmt>(std::move(callExpr));
+        retStmt->line = name.line;
+        retStmt->column = name.column;
+        std::vector<std::unique_ptr<Statement>> stmts;
+        stmts.push_back(std::move(retStmt));
+        body = std::make_unique<BlockStmt>(std::move(stmts));
+    } else if (match(TokenType::ASSIGN)) {
         auto expr = parseExpression();
         consume(TokenType::SEMICOLON, "Expected ';' after expression-body function");
         auto retStmt = std::make_unique<ReturnStmt>(std::move(expr));
@@ -549,6 +676,38 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
+    }
+    // parallel for / parallel while / parallel foreach — auto-parallelizes the loop.
+    // Sets loopHints.parallel = true on the loop statement.
+    if (match(TokenType::PARALLEL)) {
+        const Token kw = tokens[current - 1];
+        if (match(TokenType::FOR)) {
+            auto stmt = parseForStmt();
+            stmt->line = kw.line;
+            stmt->column = kw.column;
+            if (auto* forStmt = dynamic_cast<ForStmt*>(stmt.get())) {
+                forStmt->loopHints.parallel = true;
+            }
+            return stmt;
+        } else if (match(TokenType::WHILE)) {
+            auto stmt = parseWhileStmt();
+            stmt->line = kw.line;
+            stmt->column = kw.column;
+            if (auto* whileStmt = dynamic_cast<WhileStmt*>(stmt.get())) {
+                whileStmt->loopHints.parallel = true;
+            }
+            return stmt;
+        } else if (match(TokenType::FOREACH)) {
+            auto stmt = parseForEachStmt();
+            stmt->line = kw.line;
+            stmt->column = kw.column;
+            if (auto* feStmt = dynamic_cast<ForEachStmt*>(stmt.get())) {
+                feStmt->loopHints.parallel = true;
+            }
+            return stmt;
+        } else {
+            error("Expected 'for', 'while', or 'foreach' after 'parallel'");
+        }
     }
     if (match(TokenType::RETURN)) {
         const Token kw = tokens[current - 1];
@@ -679,6 +838,14 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         auto decl = parseVarDecl(true);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
         return decl;
+    }
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "assume") {
+        advance(); // consume 'assume'
+        const Token kw = tokens[current - 1];
+        auto stmt = parseAssumeStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
     }
     if (check(TokenType::LBRACE)) {
         const Token kw = peek();
@@ -853,14 +1020,23 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return parseExprStmt();
     }
     if (match(TokenType::BORROW)) {
-        // `borrow var ref = expr;` or `borrow type ref = expr;` or `borrow ref:type = expr;`
+        // `borrow var ref = expr;`       — immutable borrow
+        // `borrow mut ref = expr;`       — mutable borrow (single mutable alias)
+        // `borrow type ref = expr;`      — typed immutable borrow
+        // `borrow ref:type = expr;`      — typed immutable borrow
         const Token kw = tokens[current - 1];
+        bool isMut = false;
+        if (match(TokenType::MUT)) {
+            isMut = true;
+        }
         std::string typeName;
-        if (match(TokenType::VAR)) {
-            typeName = "";
-        } else if (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
-                   tokens[current + 1].type == TokenType::IDENTIFIER) {
-            typeName = advance().lexeme;
+        if (!isMut) {
+            if (match(TokenType::VAR)) {
+                typeName = "";
+            } else if (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
+                       tokens[current + 1].type == TokenType::IDENTIFIER) {
+                typeName = advance().lexeme;
+            }
         }
         const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in borrow declaration");
         // Support name:type syntax: borrow j:u32 = expr;
@@ -871,10 +1047,53 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         auto init = parseExpression();
         consume(TokenType::SEMICOLON, "Expected ';' after borrow declaration");
         // Create a VarDecl with a BorrowExpr wrapper
-        auto borrowExpr = std::make_unique<BorrowExpr>(std::move(init));
+        auto borrowExpr = std::make_unique<BorrowExpr>(std::move(init), isMut);
         borrowExpr->line = kw.line;
         borrowExpr->column = kw.column;
         auto stmt = std::make_unique<VarDecl>(name.lexeme, std::move(borrowExpr), false, typeName);
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::REBORROW)) {
+        // `reborrow ref = &src;`         — reborrow existing borrow
+        // `reborrow mut ref = &src;`     — mutable reborrow
+        // `reborrow ref = &src.field;`   — partial borrow of struct field
+        // `reborrow ref = &src[idx];`    — partial borrow of array element
+        const Token kw = tokens[current - 1];
+        bool isMut = false;
+        if (match(TokenType::MUT)) {
+            isMut = true;
+        }
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in reborrow declaration");
+        consume(TokenType::ASSIGN, "Expected '=' in reborrow declaration");
+        // Expect &expr
+        consume(TokenType::AMPERSAND, "Expected '&' before source expression in reborrow");
+        auto src = parsePrimary();
+        std::string fieldName;
+        std::unique_ptr<Expression> indexExpr;
+        if (match(TokenType::DOT)) {
+            const Token fld = consume(TokenType::IDENTIFIER, "Expected field name after '.' in reborrow");
+            fieldName = fld.lexeme;
+        } else if (match(TokenType::LBRACKET)) {
+            indexExpr = parseExpression();
+            consume(TokenType::RBRACKET, "Expected ']' after index in reborrow");
+        }
+        consume(TokenType::SEMICOLON, "Expected ';' after reborrow declaration");
+        auto reborrowExpr = std::make_unique<ReborrowExpr>(std::move(src), isMut, std::move(fieldName), std::move(indexExpr));
+        reborrowExpr->line = kw.line;
+        reborrowExpr->column = kw.column;
+        auto stmt = std::make_unique<VarDecl>(name.lexeme, std::move(reborrowExpr), false, "");
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::FREEZE)) {
+        // `freeze x;` — mark variable x immutable for the rest of its lifetime.
+        const Token kw = tokens[current - 1];
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'freeze'");
+        consume(TokenType::SEMICOLON, "Expected ';' after 'freeze'");
+        auto stmt = std::make_unique<FreezeStmt>(name.lexeme);
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
@@ -962,12 +1181,25 @@ std::unique_ptr<Statement> Parser::parseWhileStmt() {
     auto condition = parseExpression();
     consume(TokenType::RPAREN, "Expected ')' after condition");
 
+    LoopConfig loopHints;
+    if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+        advance(); // @
+        advance(); // loop
+        loopHints = parseLoopAnnotation();
+    }
     auto body = parseStatement();
-
-    return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+    auto stmt = std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+    stmt->loopHints = loopHints;
+    return stmt;
 }
 
 std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
+    LoopConfig loopHints;
+    if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+        advance(); // @
+        advance(); // loop
+        loopHints = parseLoopAnnotation();
+    }
     auto body = parseStatement();
 
     // Support both: do { ... } while (cond); and do { ... } until (cond);
@@ -985,9 +1217,13 @@ std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
     if (isUntil) {
         // Negate: do { ... } until (c) => do { ... } while (!c)
         auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
-        return std::make_unique<DoWhileStmt>(std::move(body), std::move(negated));
+        auto doStmt = std::make_unique<DoWhileStmt>(std::move(body), std::move(negated));
+        doStmt->loopHints = loopHints;
+        return doStmt;
     }
-    return std::make_unique<DoWhileStmt>(std::move(body), std::move(condition));
+    auto doStmt = std::make_unique<DoWhileStmt>(std::move(body), std::move(condition));
+    doStmt->loopHints = loopHints;
+    return doStmt;
 }
 
 std::unique_ptr<Statement> Parser::parseForStmt() {
@@ -1069,10 +1305,17 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         }
 
         consume(TokenType::RPAREN, "Expected ')' after for range");
+        LoopConfig loopHints;
+        if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+            advance(); // @
+            advance(); // loop
+            loopHints = parseLoopAnnotation();
+        }
         auto body = parseStatement();
-
-        return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step),
+        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step),
                                          std::move(body), iteratorType);
+        forStmt->loopHints = loopHints;
+        return forStmt;
     }
 
     // for (i in 10 downto 0) => for (i in 10...0...-1)
@@ -1087,17 +1330,33 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             // The step is positive in user syntax, we negate it for downto
             // Desugar to: for (i in start...end...-step)
             consume(TokenType::RPAREN, "Expected ')' after for downto range");
+            LoopConfig loopHints;
+            if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+                advance(); // @
+                advance(); // loop
+                loopHints = parseLoopAnnotation();
+            }
             auto body = parseStatement();
             auto negStep = std::make_unique<UnaryExpr>("-", std::move(stepExpr));
-            return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
+            auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
                                              std::move(negStep), std::move(body), iteratorType);
+            forStmt->loopHints = loopHints;
+            return forStmt;
         }
 
         consume(TokenType::RPAREN, "Expected ')' after for downto range");
+        LoopConfig loopHints;
+        if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+            advance(); // @
+            advance(); // loop
+            loopHints = parseLoopAnnotation();
+        }
         auto body = parseStatement();
         auto negOne = std::make_unique<LiteralExpr>(static_cast<long long>(-1));
-        return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
+        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
                                          std::move(negOne), std::move(body), iteratorType);
+        forStmt->loopHints = loopHints;
+        return forStmt;
     }
 
     // Otherwise this is a for-each loop: for (var in collection)
@@ -2487,6 +2746,25 @@ std::unique_ptr<Expression> Parser::parseCall() {
 }
 
 std::unique_ptr<Expression> Parser::parsePrimary() {
+    // comptime { ... } — compile-time evaluated block expression.
+    // Evaluates the block at compile time and returns its result as a constant.
+    if (match(TokenType::COMPTIME)) {
+        const Token kw = tokens[current - 1];
+        consume(TokenType::LBRACE, "Expected '{' after 'comptime'");
+        // Re-use parseBlock but we've already consumed the '{'.
+        // Collect statements until '}'.
+        std::vector<std::unique_ptr<Statement>> stmts;
+        while (!check(TokenType::RBRACE) && !isAtEnd()) {
+            stmts.push_back(parseStatement());
+        }
+        consume(TokenType::RBRACE, "Expected '}' to close comptime block");
+        auto block = std::make_unique<BlockStmt>(std::move(stmts));
+        auto expr = std::make_unique<ComptimeExpr>(std::move(block));
+        expr->line = kw.line;
+        expr->column = kw.column;
+        return expr;
+    }
+
     if (match(TokenType::BYTES_LITERAL)) {
         // 0x"AABBCC" — hex byte array literal.
         // Desugar at parse time into an ArrayExpr of integer literals,
@@ -2551,14 +2829,227 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
 
     if (match(TokenType::IDENTIFIER)) {
         const Token token = tokens[current - 1];
-        // Scope resolution: Enum::Member creates a ScopeResolutionExpr
-        // that is resolved in codegen with proper scope validation.
+        // Scope resolution: handles single-level (Enum::Member) and multi-level
+        // (alias::sub::func) paths.
+        //
+        // Rules:
+        //  - If the chain ends with '(' it is a qualified function call: build a
+        //    flat identifier "a__b__c" that parseCall() will wrap into CallExpr.
+        //  - If the chain is exactly 2 levels and NOT followed by '(' it is an
+        //    enum member access: preserve the existing ScopeResolutionExpr path.
+        //  - Any other multi-level use not followed by '(' also becomes a flat
+        //    IdentifierExpr (e.g. used as a first-class value, error caught later).
         if (match(TokenType::SCOPE)) {
-            const Token memberToken = consume(TokenType::IDENTIFIER, "Expected member name after '::'");
-            auto expr = std::make_unique<ScopeResolutionExpr>(token.lexeme, memberToken.lexeme);
-            expr->line = token.line;
-            expr->column = token.column;
-            return expr;
+            // Collect the full scope chain into a segment vector.
+            std::vector<std::string> segments;
+            segments.push_back(token.lexeme);
+            segments.push_back(
+                consume(TokenType::IDENTIFIER, "Expected identifier after '::'").lexeme);
+            int depth = 1;
+            while (check(TokenType::SCOPE)) {
+                advance(); // consume '::'
+                segments.push_back(
+                    consume(TokenType::IDENTIFIER, "Expected identifier after '::'").lexeme);
+                ++depth;
+            }
+
+            if (check(TokenType::LPAREN)) {
+                // ── Priority 1: built-in type method dispatch ───────────────────
+                // Recognises  type::method(args...)  for the core primitive types
+                // and desugars to the appropriate BinaryExpr, UnaryExpr, or
+                // CallExpr — completely at parse time, zero extra codegen.
+                if (segments.size() == 2) {
+                    const std::string& tname  = segments[0];
+                    const std::string& mname  = segments[1];
+
+                    // Canonical type groups
+                    static const std::unordered_set<std::string> kIntTypes{
+                        "int","i64","i32","i16","i8","u64","u32","u16","u8","uint"};
+                    static const std::unordered_set<std::string> kFloatTypes{
+                        "float","f64","f32","double"};
+                    static const std::unordered_set<std::string> kStrTypes{
+                        "string","str"};
+                    static const std::unordered_set<std::string> kArrTypes{
+                        "array","arr"};
+                    static const std::unordered_set<std::string> kBoolTypes{
+                        "bool"};
+
+                    const bool isInt   = kIntTypes.count(tname)   != 0;
+                    const bool isFloat = kFloatTypes.count(tname)  != 0;
+                    const bool isStr   = kStrTypes.count(tname)    != 0;
+                    const bool isArr   = kArrTypes.count(tname)    != 0;
+                    const bool isBool  = kBoolTypes.count(tname)   != 0;
+
+                    if (isInt || isFloat || isStr || isArr || isBool) {
+                        // Determine the kind of this method BEFORE consuming args.
+                        // Supported kinds:
+                        //   "B:<op>"  — binary expression
+                        //   "U:<op>"  — unary expression
+                        //   "C:<fn>"  — call to named builtin
+                        //   ""        — unknown method for this type, fall through
+                        std::string kind;
+
+                        // ── Shared int+float methods ─────────────────────────────
+                        if (isInt || isFloat) {
+                            if      (mname=="add")       kind="B:+";
+                            else if (mname=="sub")       kind="B:-";
+                            else if (mname=="mul")       kind="B:*";
+                            else if (mname=="div")       kind="B:/";
+                            else if (mname=="neg")       kind="U:-";
+                            else if (mname=="abs")       kind="C:abs";
+                            else if (mname=="min")       kind="C:min";
+                            else if (mname=="max")       kind="C:max";
+                            else if (mname=="pow")       kind="C:pow";
+                            else if (mname=="clamp")     kind="C:clamp";
+                            else if (mname=="eq")        kind="B:==";
+                            else if (mname=="ne")        kind="B:!=";
+                            else if (mname=="lt")        kind="B:<";
+                            else if (mname=="le")        kind="B:<=";
+                            else if (mname=="gt")        kind="B:>";
+                            else if (mname=="ge")        kind="B:>=";
+                            else if (mname=="to_string") kind="C:to_string";
+                        }
+                        // ── Int-only methods ─────────────────────────────────────
+                        if (isInt && kind.empty()) {
+                            if      (mname=="mod")       kind="B:%";
+                            else if (mname=="sign")      kind="C:sign";
+                            else if (mname=="is_even")   kind="C:is_even";
+                            else if (mname=="is_odd")    kind="C:is_odd";
+                            else if (mname=="to_float")  kind="C:to_float";
+                            else if (mname=="bitand")    kind="B:&";
+                            else if (mname=="bitor")     kind="B:|";
+                            else if (mname=="bitxor")    kind="B:^";
+                            else if (mname=="bitnot")    kind="U:~";
+                            else if (mname=="shl")       kind="B:<<";
+                            else if (mname=="shr")       kind="B:>>";
+                        }
+                        // ── Float-only methods ───────────────────────────────────
+                        if (isFloat && kind.empty()) {
+                            if      (mname=="sqrt")      kind="C:sqrt";
+                            else if (mname=="floor")     kind="C:floor";
+                            else if (mname=="ceil")      kind="C:ceil";
+                            else if (mname=="round")     kind="C:round";
+                            else if (mname=="to_int")    kind="C:to_int";
+                        }
+                        // ── String methods ───────────────────────────────────────
+                        if (isStr) {
+                            if      (mname=="len")          kind="C:len";
+                            else if (mname=="concat")       kind="B:+";
+                            else if (mname=="eq")           kind="C:str_eq";
+                            else if (mname=="contains")     kind="C:str_contains";
+                            else if (mname=="starts_with")  kind="C:str_starts_with";
+                            else if (mname=="ends_with")    kind="C:str_ends_with";
+                            else if (mname=="index_of")     kind="C:str_index_of";
+                            else if (mname=="replace")      kind="C:str_replace";
+                            else if (mname=="repeat")       kind="C:str_repeat";
+                            else if (mname=="char_at")      kind="C:char_at";
+                            else if (mname=="to_upper")     kind="C:to_upper";
+                            else if (mname=="to_lower")     kind="C:to_lower";
+                            else if (mname=="trim")         kind="C:str_trim";
+                            else if (mname=="split")        kind="C:str_split";
+                            else if (mname=="to_int")       kind="C:to_int";
+                            else if (mname=="to_float")     kind="C:to_float";
+                            else if (mname=="is_alpha")     kind="C:is_alpha";
+                            else if (mname=="is_digit")     kind="C:is_digit";
+                            else if (mname=="to_string")    kind="C:to_string";
+                        }
+                        // ── Array methods ────────────────────────────────────────
+                        if (isArr) {
+                            if      (mname=="len")          kind="C:len";
+                            else if (mname=="fill")         kind="C:array_fill";
+                            else if (mname=="contains")     kind="C:array_contains";
+                            else if (mname=="pop")          kind="C:pop";
+                            else if (mname=="push")         kind="C:push";
+                            else if (mname=="remove")       kind="C:array_remove";
+                            else if (mname=="sort")         kind="C:sort";
+                            else if (mname=="min")          kind="C:array_min";
+                            else if (mname=="max")          kind="C:array_max";
+                        }
+                        // ── Bool methods ─────────────────────────────────────────
+                        if (isBool) {
+                            if      (mname=="and")          kind="B:&&";
+                            else if (mname=="or")           kind="B:||";
+                            else if (mname=="not")          kind="U:!";
+                            else if (mname=="to_string")    kind="C:to_string";
+                        }
+
+                        if (!kind.empty()) {
+                            // Now safe to consume the argument list.
+                            advance(); // consume '('
+                            std::vector<std::unique_ptr<Expression>> args;
+                            if (!check(TokenType::RPAREN)) {
+                                do {
+                                    args.push_back(parseExpression());
+                                } while (match(TokenType::COMMA));
+                            }
+                            consume(TokenType::RPAREN,
+                                    "Expected ')' after '" + tname + "::" + mname + "' arguments");
+
+                            const char   kp  = kind[0];       // 'B', 'U', or 'C'
+                            std::string  val = kind.substr(2); // op / function name
+
+                            if (kp == 'B') {
+                                if (args.size() != 2)
+                                    error("'" + tname + "::" + mname +
+                                          "' requires exactly 2 arguments");
+                                auto e = std::make_unique<BinaryExpr>(
+                                    val, std::move(args[0]), std::move(args[1]));
+                                e->line = token.line; e->column = token.column;
+                                return e;
+                            }
+                            if (kp == 'U') {
+                                if (args.size() != 1)
+                                    error("'" + tname + "::" + mname +
+                                          "' requires exactly 1 argument");
+                                auto e = std::make_unique<UnaryExpr>(
+                                    val, std::move(args[0]));
+                                e->line = token.line; e->column = token.column;
+                                return e;
+                            }
+                            // kp == 'C': named builtin call
+                            auto e = std::make_unique<CallExpr>(val, std::move(args));
+                            e->line = token.line; e->column = token.column;
+                            return e;
+                        }
+                        // Unknown method for this type — fall through to other
+                        // resolution strategies (namespace registry, flat name).
+                    }
+                }
+
+                // ── Priority 2: namespace registry resolution ───────────────────
+                const std::string resolved = resolveNamespacedPath(segments);
+                if (!resolved.empty()) {
+                    auto e = std::make_unique<IdentifierExpr>(resolved);
+                    e->line = token.line;
+                    e->column = token.column;
+                    return e;
+                }
+                // ── Priority 3: flat name mangling (a::b::c → a__b__c) ─────────
+                // Handles unaliased imports and any remaining backward-compat uses.
+                std::string flatName = segments[0];
+                for (size_t i = 1; i < segments.size(); ++i)
+                    flatName += "__" + segments[i];
+                auto e = std::make_unique<IdentifierExpr>(flatName);
+                e->line = token.line;
+                e->column = token.column;
+                return e;
+            }
+
+            // Not a call: single-level → classic enum member access.
+            if (depth == 1) {
+                auto e = std::make_unique<ScopeResolutionExpr>(segments[0], segments[1]);
+                e->line = token.line;
+                e->column = token.column;
+                return e;
+            }
+            // Multi-level value reference without '()': flat identifier.
+            std::string flatName = segments[0];
+            for (size_t i = 1; i < segments.size(); ++i)
+                flatName += "__" + segments[i];
+            auto e = std::make_unique<IdentifierExpr>(flatName);
+            e->line = token.line;
+            e->column = token.column;
+            return e;
         }
         // Check if this is a struct literal: StructName { field: value, ... }
         if (structNames_.count(token.lexeme) && check(TokenType::LBRACE)) {
@@ -2761,6 +3252,134 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     nameLit->line = pipeToken.line;
     nameLit->column = pipeToken.column;
     return nameLit;
+}
+
+OptMaxConfig Parser::parseOptMaxConfig() {
+    OptMaxConfig cfg;
+    cfg.enabled = true;
+    consume(TokenType::LPAREN, "Expected '(' after @optmax");
+    if (!check(TokenType::RPAREN)) {
+        do {
+            const Token key = consume(TokenType::IDENTIFIER, "Expected key in @optmax config");
+            consume(TokenType::ASSIGN, "Expected '=' after key in @optmax config");
+            if (key.lexeme == "safety") {
+                const Token val = consume(TokenType::IDENTIFIER, "Expected value for safety");
+                if (val.lexeme == "off") cfg.safety = SafetyLevel::Off;
+                else if (val.lexeme == "relaxed") cfg.safety = SafetyLevel::Relaxed;
+                else cfg.safety = SafetyLevel::On;
+            } else if (key.lexeme == "fast_math") {
+                const Token val = consume(TokenType::IDENTIFIER, "Expected value for fast_math");
+                cfg.fastMath = (val.lexeme == "true");
+            } else if (key.lexeme == "report") {
+                const Token val = consume(TokenType::IDENTIFIER, "Expected value for report");
+                cfg.report = (val.lexeme == "true");
+            } else if (key.lexeme == "loop") {
+                consume(TokenType::LBRACE, "Expected '{' for loop config");
+                while (!check(TokenType::RBRACE) && !isAtEnd()) {
+                    const Token lk = consume(TokenType::IDENTIFIER, "Expected loop config key");
+                    consume(TokenType::ASSIGN, "Expected '=' in loop config");
+                    if (lk.lexeme == "unroll") {
+                        const Token v = advance();
+                        try { cfg.loop.unrollCount = std::stoi(v.lexeme); } catch(...) {}
+                    } else if (lk.lexeme == "vectorize") {
+                        const Token v = consume(TokenType::IDENTIFIER, "Expected bool for vectorize");
+                        cfg.loop.vectorize = (v.lexeme == "true");
+                    } else if (lk.lexeme == "tile") {
+                        const Token v = advance();
+                        try { cfg.loop.tileSize = std::stoi(v.lexeme); } catch(...) {}
+                    } else if (lk.lexeme == "parallel") {
+                        const Token v = consume(TokenType::IDENTIFIER, "Expected bool for parallel");
+                        cfg.loop.parallel = (v.lexeme == "true");
+                    }
+                    if (!check(TokenType::RBRACE)) match(TokenType::COMMA);
+                }
+                consume(TokenType::RBRACE, "Expected '}' after loop config");
+            } else if (key.lexeme == "memory") {
+                consume(TokenType::LBRACE, "Expected '{' for memory config");
+                while (!check(TokenType::RBRACE) && !isAtEnd()) {
+                    const Token mk = consume(TokenType::IDENTIFIER, "Expected memory config key");
+                    consume(TokenType::ASSIGN, "Expected '=' in memory config");
+                    const Token mv = consume(TokenType::IDENTIFIER, "Expected bool for memory config");
+                    if (mk.lexeme == "prefetch") cfg.memory.prefetch = (mv.lexeme == "true");
+                    else if (mk.lexeme == "noalias") cfg.memory.noalias = (mv.lexeme == "true");
+                    else if (mk.lexeme == "stack") cfg.memory.preferStack = (mv.lexeme == "true");
+                    if (!check(TokenType::RBRACE)) match(TokenType::COMMA);
+                }
+                consume(TokenType::RBRACE, "Expected '}' after memory config");
+            } else if (key.lexeme == "assume") {
+                consume(TokenType::LBRACKET, "Expected '[' for assume list");
+                while (!check(TokenType::RBRACKET) && !isAtEnd()) {
+                    const Token s = consume(TokenType::STRING, "Expected string in assume list");
+                    cfg.assumes.push_back(s.lexeme);
+                    if (!check(TokenType::RBRACKET)) match(TokenType::COMMA);
+                }
+                consume(TokenType::RBRACKET, "Expected ']' after assume list");
+            } else if (key.lexeme == "specialize") {
+                consume(TokenType::LBRACKET, "Expected '[' for specialize list");
+                while (!check(TokenType::RBRACKET) && !isAtEnd()) {
+                    const Token s = consume(TokenType::STRING, "Expected string in specialize list");
+                    cfg.specialize.push_back(s.lexeme);
+                    if (!check(TokenType::RBRACKET)) match(TokenType::COMMA);
+                }
+                consume(TokenType::RBRACKET, "Expected ']' after specialize list");
+            }
+            // skip unknown keys
+        } while (match(TokenType::COMMA));
+    }
+    consume(TokenType::RPAREN, "Expected ')' after @optmax config");
+    return cfg;
+}
+
+LoopConfig Parser::parseLoopAnnotation() {
+    LoopConfig cfg;
+    consume(TokenType::LPAREN, "Expected '(' after @loop");
+    if (!check(TokenType::RPAREN)) {
+        do {
+            const Token key = consume(TokenType::IDENTIFIER, "Expected key in @loop config");
+            consume(TokenType::ASSIGN, "Expected '=' after key in @loop");
+            if (key.lexeme == "unroll") {
+                const Token v = advance();
+                try { cfg.unrollCount = std::stoi(v.lexeme); } catch(...) {}
+            } else if (key.lexeme == "vectorize") {
+                const Token v = advance(); // true/false may be keywords
+                cfg.vectorize = (v.lexeme == "true" || v.type == TokenType::TRUE);
+                cfg.noVectorize = (v.lexeme == "false" || v.type == TokenType::FALSE);
+            } else if (key.lexeme == "tile") {
+                const Token v = advance();
+                try { cfg.tileSize = std::stoi(v.lexeme); } catch(...) {}
+            } else if (key.lexeme == "parallel") {
+                const Token v = advance();
+                cfg.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);
+            } else if (key.lexeme == "independent") {
+                const Token v = advance();
+                cfg.independent = (v.lexeme == "true" || v.type == TokenType::TRUE);
+            } else if (key.lexeme == "fuse") {
+                const Token v = advance();
+                cfg.fuse = (v.lexeme == "true" || v.type == TokenType::TRUE);
+            }
+        } while (match(TokenType::COMMA));
+    }
+    consume(TokenType::RPAREN, "Expected ')' after @loop config");
+    return cfg;
+}
+
+std::unique_ptr<Statement> Parser::parseAssumeStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'assume'");
+    auto cond = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after assume condition");
+
+    std::unique_ptr<Statement> deoptBody = nullptr;
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "else") {
+        advance(); // consume 'else'
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "deopt") {
+            advance(); // consume 'deopt'
+        }
+        deoptBody = parseStatement();
+    }
+
+    match(TokenType::SEMICOLON); // optional semicolon
+
+    return std::make_unique<AssumeStmt>(std::move(cond), std::move(deoptBody));
 }
 
 } // namespace omscript

@@ -12,6 +12,7 @@
 
 #include "ast.h"
 #include "diagnostic.h"
+#include <iostream>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/ADT/StringSet.h>
@@ -46,25 +47,93 @@ enum class OptimizationLevel {
     O3  // Aggressive optimization
 };
 
+/// Counters tracking which optimizations fired during compilation.
+/// Printed when verbose mode is on or @optmax(report=true) is set.
+struct OptStats {
+    unsigned constFolded      = 0; ///< Expressions folded to compile-time constants
+    unsigned callsInlined     = 0; ///< Call sites inlined
+    unsigned escapeStackAllocs = 0; ///< Array/struct allocations moved to stack (escape analysis)
+    unsigned loopsFused       = 0; ///< Loop pairs fused by the @fuse pre-pass
+    unsigned borrowsFrozen    = 0; ///< Variables frozen (freeze + alias propagation)
+    unsigned independentLoops = 0; ///< Loops annotated with @independent
+    unsigned allocatorFuncs   = 0; ///< User functions annotated as @allocator
+
+    void print() const {
+        std::cout << "\n[opt-report] Optimization statistics:\n"
+                  << "  const-folded expressions : " << constFolded << "\n"
+                  << "  calls inlined            : " << callsInlined << "\n"
+                  << "  stack allocs (escape)    : " << escapeStackAllocs << "\n"
+                  << "  loops fused              : " << loopsFused << "\n"
+                  << "  borrows frozen           : " << borrowsFrozen << "\n"
+                  << "  independent loops        : " << independentLoops << "\n"
+                  << "  allocator wrappers       : " << allocatorFuncs << "\n";
+    }
+};
+
 /// Ownership lattice states for compile-time memory safety.
 ///
 /// Every variable tracked by the ownership system transitions through
 /// these states:
 ///
-///  Owned → Borrowed → (back to Owned when borrow ends)
+///  Owned → Borrowed (×N) → (back to Owned when all borrows end)
+///  Owned → MutBorrowed → (back to Owned when mut borrow ends)
+///  Owned → Frozen → (permanent; stays Frozen for rest of lifetime)
 ///  Owned → Moved → (variable is dead, use-after-move error)
 ///  Owned/Borrowed/Moved → Invalidated → (explicitly killed)
 ///
 /// Rules:
 ///  - Owned: full control — may read, write, move, borrow, or invalidate.
-///  - Borrowed: read-only alias — may NOT mutate, move, or invalidate.
+///  - Borrowed (immutBorrowCount > 0): multiple concurrent read-only aliases
+///    are allowed; source may NOT be written or mutably borrowed.
+///  - MutBorrowed: exactly one mutable alias — source is completely locked;
+///    no reads, writes, or new borrows until the mutable borrow ends.
+///  - Frozen: permanently immutable — reads are !invariant.load, writes
+///    are compile-time errors.  Cannot be moved or mut-borrowed.
 ///  - Moved: ownership transferred — any use is a compile-time error.
 ///  - Invalidated: explicitly killed — any use is a compile-time error.
 enum class OwnershipState {
-    Owned,       ///< Variable owns its value — full read/write access
-    Borrowed,    ///< Variable is borrowed — read-only, cannot resize/move
-    Moved,       ///< Ownership transferred out — use is a compile error
-    Invalidated  ///< Explicitly killed — use is a compile error
+    Owned,        ///< Variable owns its value — full read/write access
+    Borrowed,     ///< Has ≥1 immutable borrows — readable but not writable
+    MutBorrowed,  ///< Has one mutable alias — source is completely locked
+    Frozen,       ///< Permanently immutable — all loads are invariant
+    Moved,        ///< Ownership transferred out — use is a compile error
+    Invalidated   ///< Explicitly killed — use is a compile error
+};
+
+/// Per-variable borrow state tracked by the ownership system.
+/// Replaces the separate StringSet approach with precise count-based tracking.
+struct VarBorrowState {
+    int  immutBorrowCount = 0;  ///< Number of active immutable borrows
+    bool mutBorrowed      = false; ///< True if there is one active mutable borrow
+    bool moved            = false;
+    bool invalidated      = false;
+    bool frozen           = false;
+
+    bool isDead()     const { return moved || invalidated; }
+    /// Source can be read when not mutably borrowed and not dead.
+    bool isReadable() const { return !isDead() && !mutBorrowed; }
+    /// Source can be written only when no borrows exist, not frozen, not dead.
+    bool isWritable() const {
+        return !isDead() && !mutBorrowed && immutBorrowCount == 0 && !frozen;
+    }
+    /// Derive the canonical OwnershipState (for compatibility with callers
+    /// that still consume OwnershipState).
+    OwnershipState state() const {
+        if (invalidated)         return OwnershipState::Invalidated;
+        if (moved)               return OwnershipState::Moved;
+        if (frozen)              return OwnershipState::Frozen;
+        if (mutBorrowed)         return OwnershipState::MutBorrowed;
+        if (immutBorrowCount > 0) return OwnershipState::Borrowed;
+        return OwnershipState::Owned;
+    }
+};
+
+/// Per-scope record of the borrow aliases introduced in that scope.
+/// When the scope ends every borrow is released.
+struct BorrowInfo {
+    std::string refVar;    ///< Name of the borrow variable (the alias)
+    std::string srcVar;    ///< Name of the source variable being borrowed
+    bool        isMut;     ///< true for mutable borrow, false for immutable
 };
 
 class CodeGenerator {
@@ -205,10 +274,18 @@ class CodeGenerator {
         sourceFilename_ = filename;
     }
 
+    /// Return accumulated optimization statistics.
+    [[nodiscard]] const OptStats& getOptStats() const noexcept {
+        return optStats_;
+    }
+
   private:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
     std::unique_ptr<llvm::Module> module;
+
+    /// Optimization statistics accumulated during code generation.
+    OptStats optStats_;
 
     llvm::StringMap<llvm::Value*> namedValues;
     std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
@@ -260,6 +337,7 @@ class CodeGenerator {
     bool inOptMaxFunction;
     bool hasOptMaxFunctions;
     llvm::StringSet<> optMaxFunctions;
+    OptMaxConfig currentOptMaxConfig_;
 
     struct ConstBinding {
         bool wasPreviouslyDefined;
@@ -314,6 +392,20 @@ class CodeGenerator {
     llvm::StringSet<> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
     llvm::StringSet<> stringArrayVars_;
+    // arrayVars_: names of variables that hold array values (non-string pointers).
+    // Used to disambiguate pointer-typed allocas: since arrays, structs, and
+    // dicts now use pointer-typed allocas (instead of i64), we need to
+    // distinguish them from string pointers in isStringExpr().
+    llvm::StringSet<> arrayVars_;
+    // Whole-program array type information (mirrors string type system):
+    // arrayReturningFunctions_: functions whose return type is an array type.
+    // funcParamArrayTypes_: maps function name → set of parameter indices that
+    //   receive array arguments (annotated with [] suffix or known from call sites).
+    // These are populated by preAnalyzeArrayTypes() and used to:
+    //   (a) keep arrayVars_ accurate for variables assigned from function calls,
+    //   (b) ensure isStringExpr() returns false for array-typed call results.
+    llvm::StringSet<> arrayReturningFunctions_;
+    std::unordered_map<std::string, std::unordered_set<size_t>> funcParamArrayTypes_;
     // stringLenCache_: maps string variable names to an alloca that caches the
     // current strlen of the variable's value.  Used by str_concat to avoid
     // O(n) strlen calls on growing strings in append loops.
@@ -346,12 +438,17 @@ class CodeGenerator {
     /// (move, invalidate, borrow).  Variables not in this map are implicitly
     /// Owned with full read/write access.
     ///
+    /// Per-variable borrow state.  Only populated for variables that participate
+    /// in the ownership system; variables absent from this map are implicitly
+    /// fully Owned.
+    ///
     /// Transitions:
-    ///   Owned → Borrowed (via borrow expression)
-    ///   Owned → Moved (via move expression)
-    ///   Any → Invalidated (via invalidate statement)
-    ///   Borrowed → Owned (when borrow scope ends)
-    std::unordered_map<std::string, OwnershipState> varOwnership_;
+    ///   Owned → immutBorrowCount++ (via `borrow ref = x`)
+    ///   Owned → mutBorrowed = true (via `borrow mut ref = x`)
+    ///   Any   → moved / invalidated (via move / invalidate)
+    ///   Any   → frozen = true (via `freeze x;`)
+    ///   borrow release: immutBorrowCount-- or mutBorrowed = false (on scope exit)
+    std::unordered_map<std::string, VarBorrowState> varBorrowStates_;
 
     /// Variables that have been explicitly moved or invalidated.
     /// Used to detect use-after-move and use-after-invalidate at compile time.
@@ -361,10 +458,22 @@ class CodeGenerator {
     /// Tracks the reason a variable became dead: "moved" or "invalidated".
     std::unordered_map<std::string, std::string> deadVarReason_;
 
-    /// Variables currently borrowed — these cannot be mutated or moved.
-    /// Populated when a borrow expression creates an alias; cleared when
-    /// the borrowing variable goes out of scope.
-    llvm::StringSet<> borrowedVars_;
+    /// Maps borrow-alias variable names to information about the borrow:
+    ///   borrowMap_["b"] = {"a", false}   // `borrow b = a;`
+    ///   borrowMap_["b"] = {"a", true}    // `borrow mut b = a;`
+    /// Used when a scope pops to release borrows held by aliases going OOS.
+    std::unordered_map<std::string, BorrowInfo> borrowMap_;
+
+    /// Scope-indexed borrow tracking.  Each scope level stores the list of
+    /// BorrowInfo records introduced in that scope.  On scope pop every
+    /// borrow in the scope is released (decrement or clear the source's
+    /// VarBorrowState).
+    std::vector<std::vector<BorrowInfo>> borrowScopeStack_;
+
+    /// Variables frozen via `freeze x;` — immutable for the rest of their
+    /// lifetime.  Loads become !invariant.load; writes are compile errors.
+    /// Kept as a separate set for fast O(1) lookup in generateIdentifier.
+    llvm::StringSet<> frozenVars_;
 
     /// Functions explicitly annotated with @cold by the user.
     /// These are preserved when the post-pipeline cold-stripping pass runs.
@@ -432,6 +541,17 @@ class CodeGenerator {
     /// !range metadata for array length loads: [0, INT64_MAX).
     /// Array lengths are always non-negative (they're sizes).
     llvm::MDNode* arrayLenRangeMD_ = nullptr;
+
+    /// !range metadata for boolean-valued i64 results (0 or 1):
+    /// is_alpha, is_digit, str_eq, str_contains, str_starts_with,
+    /// str_ends_with, array_contains.  Allows CVP/LVI/InstCombine to
+    /// fold comparisons like (is_alpha(c) == 1) → (is_alpha(c) != 0).
+    llvm::MDNode* boolRangeMD_ = nullptr;
+
+    /// !range metadata for char-valued i64 results (0..255):
+    /// char_at.  Allows CVP/LVI to prove non-negativity and drop any
+    /// >255 branches.
+    llvm::MDNode* charRangeMD_ = nullptr;
 
     /// Compile-time known array sizes: maps variable name → LLVM Value*
     /// representing the known element count.  Populated when an array is
@@ -543,6 +663,12 @@ class CodeGenerator {
         const std::unordered_map<std::string, ConstValue>& argEnv,
         int depth = 0) const;
 
+    /// Overload that evaluates a BlockStmt directly (used by comptime blocks).
+    std::optional<ConstValue> tryConstEvalFull(
+        const BlockStmt* body,
+        const std::unordered_map<std::string, ConstValue>& argEnv,
+        int depth = 0) const;
+
     /// Convenience wrappers used by generateBuiltin: fold an expression to a
     /// compile-time integer or string using all currently available information
     /// (const variables, enum constants, binary ops on constants, etc.).
@@ -575,13 +701,16 @@ class CodeGenerator {
     bool currentFuncHintParallelize_ = false;
     bool currentFuncHintNoParallelize_ = false;
     bool currentFuncHintHot_ = false;  ///< Current function has @hot annotation
+    const FunctionDecl* currentFuncDecl_ = nullptr; ///< Currently-generating function declaration
     unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
     bool bodyHasInnerLoop_ = false; ///< Set when a while/for loop is found inside a for-loop body
     bool bodyHasNonPow2Modulo_ = false; ///< Set when a for-loop body has non-power-of-2 modulo
     bool bodyHasNonPow2ModuloValue_ = false; ///< Set when non-pow2 modulo result is used as a VALUE (not just in a comparison). Combined with bodyHasNonPow2Modulo_, suppresses vectorize.enable=false when true — the profitable abs/min/max vectorization outweighs the cost of vector urem.
     bool bodyHasNonPow2ModuloArrayStore_ = false; ///< Set when a non-pow2 modulo result is stored to an array element (arr[i] = expr%K). Disables forced vectorization because urem <N x i64> scalarizes on x86-64, and the extra extract/insert round-trip is slower than scalar ILP from unrolled code.
     bool inIndexAssignValueContext_ = false; ///< True while generating the VALUE expression of an IndexAssignExpr (arr[i] = VALUE). Used to detect modulo operations that produce array-element values, which enables bodyHasNonPow2ModuloArrayStore_ tracking.
-    bool bodyHasBackwardArrayRef_ = false; ///< Set when a for-loop body has a backward array reference (arr[i-K] where K>0). Suppresses parallel_accesses metadata — such loops have loop-carried dependencies that prevent LLVM from promoting arr[i-1] to a register accumulator.
+    bool bodyHasBackwardArrayRef_ = false; ///< Set when a for-loop body has a backward array reference (arr[i-K] where K>0) AND the same array is written to in the same loop body. Only true loop-carried write-read dependencies should suppress parallel_accesses and LICM versioning.
+    llvm::StringSet<> loopWrittenArrays_; ///< Arrays written to (via IndexAssignExpr) in the current for-loop body. Used to refine bodyHasBackwardArrayRef_ detection.
+    llvm::StringSet<> loopBackwardReadArrays_; ///< Arrays read with backward references (arr[i-K]) in the current for-loop body. Combined with loopWrittenArrays_ to detect true loop-carried dependencies.
     std::unordered_set<std::string> loopIterVars_; ///< Names of all active for-loop iterators (populated unconditionally, used to detect backward array refs at any optimization level).
     bool inComparisonContext_ = false; ///< True while generating operands of == != < > <= >= (used to classify urem as "for branch" vs "for value")
     /// Per-alloca exclusive upper bounds from modular arithmetic.
@@ -625,6 +754,11 @@ class CodeGenerator {
     /// stack-allocated (does not escape the current function scope).
     /// Returns true if the array is safe for alloca (no escape).
     bool canStackAllocateArray(const std::string& varName) const;
+
+    /// Returns true if the variable @p varName may escape the current function
+    /// body (used in return, call args, or global store).  Conservative: only
+    /// returns false when we can PROVE there is no escape.
+    bool doesVarEscapeCurrentScope(const std::string& varName) const;
 
     /// Maximum number of array elements for stack allocation (prevents
     /// stack overflow from large arrays — 64 elements × 8 bytes = 512 B).
@@ -671,20 +805,52 @@ class CodeGenerator {
     void generateThrow(ThrowStmt* stmt);
     void generateInvalidate(InvalidateStmt* stmt);
     void generateMoveDecl(MoveDecl* stmt);
+    void generateFreeze(FreezeStmt* stmt);
     void generatePrefetch(PrefetchStmt* stmt);
+    void generateAssume(AssumeStmt* stmt);
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
+    llvm::Value* generateReborrowExpr(ReborrowExpr* expr);
+
+    /// Loop fusion pre-pass: walk a BlockStmt's statement list and merge
+    /// adjacent ForStmt pairs where both/either has loopHints.fuse=true,
+    /// and they share the same start/end bounds.
+    void fuseLoops(BlockStmt* block);
 
     /// Mark a variable as moved: emit lifetime.end + store undef on its alloca,
     /// and record it in deadVars_ for use-after-move detection.
     void markVariableMoved(const std::string& varName);
 
-    /// Mark a variable as borrowed: records it in the ownership lattice so
-    /// that mutations and moves are rejected at compile time.
-    void markVariableBorrowed(const std::string& varName);
+    /// Increment immutable borrow count for srcVar, recording the alias in
+    /// the current borrow scope so it is released on scope exit.
+    void markVariableBorrowed(const std::string& refVar, const std::string& srcVar);
 
-    /// Check if a variable is currently borrowed (read-only).
+    /// Lock srcVar as mutably borrowed, recording the alias in the current
+    /// borrow scope so it is released on scope exit.
+    void markVariableMutBorrowed(const std::string& refVar, const std::string& srcVar);
+
+    /// Mark a variable as frozen: immutable for the rest of its lifetime.
+    /// Emits llvm.invariant.start and marks constValues[name]=true so all
+    /// subsequent loads get !invariant.load and writes are rejected.
+    void markVariableFrozen(const std::string& varName);
+
+    /// Release the borrow held by alias variable refVar against its source.
+    /// Called by endScope when a borrow alias goes out of scope.
+    void releaseBorrow(const std::string& refVar);
+
+    /// Get the mutable borrow state for a variable, creating a default entry if absent.
+    VarBorrowState& getBorrowState(const std::string& varName);
+    const VarBorrowState* getBorrowStateOpt(const std::string& varName) const;
+
+    /// Check if a variable is currently borrowed (immutably, count ≥ 1).
     bool isVariableBorrowed(const std::string& varName) const;
+
+    /// Check if a variable is frozen (permanently immutable).
+    bool isVariableFrozen(const std::string& varName) const;
+
+    /// Validate that varName can be read at this point.
+    /// Errors on: moved, invalidated, or mutably-borrowed-by-someone-else.
+    void checkVariableReadable(const std::string& varName, ASTNode* site);
 
     /// Get the ownership state of a variable.  Returns Owned if not tracked.
     OwnershipState getOwnershipState(const std::string& varName) const;
@@ -769,6 +935,13 @@ class CodeGenerator {
     //   populate stringReturningFunctions_ and funcParamStringTypes_ before
     //   any function body is generated.
     void preAnalyzeStringTypes(Program* program);
+    // preAnalyzeArrayTypes: mirror of preAnalyzeStringTypes for array types.
+    //   Populates arrayReturningFunctions_ and funcParamArrayTypes_ from
+    //   explicit [] annotations and call-site argument types.  Results let
+    //   isStringExpr() correctly return false for variables assigned from
+    //   array-returning function calls, and keep arrayVars_ accurate across
+    //   function boundaries.
+    void preAnalyzeArrayTypes(Program* program);
     // analyzeConstantReturnValues: pre-pass over the full program AST that
     //   identifies zero-parameter, pure functions whose return value is always
     //   the same compile-time constant (string or integer).  Results are stored
@@ -776,6 +949,14 @@ class CodeGenerator {
     //   len(), tryFoldStringConcat(), and const-variable initialization to fold
     //   cross-function calls at compile time.
     void analyzeConstantReturnValues(Program* program);
+    // autoDetectConstEvalFunctions: companion pass to analyzeConstantReturnValues
+    //   that identifies user-defined functions with parameters that are "pure"
+    //   (no I/O, no global mutations, only arithmetic/logical/conditional ops) and
+    //   registers them in constEvalFunctions_.  This enables the existing
+    //   tryConstEval/tryConstEvalFull machinery to fold calls to these functions
+    //   at compile time when all arguments are constants — without requiring an
+    //   explicit @const_eval annotation.
+    void autoDetectConstEvalFunctions(Program* program);
     // isPreAnalysisStringExpr: lightweight AST-only string check used by the
     //   pre-analysis (no access to namedValues; uses stringReturningFunctions_
     //   and paramStringIndices to track string parameters).
