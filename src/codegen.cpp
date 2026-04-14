@@ -660,6 +660,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "char_at",
                                                                 "char_code",
                                                                 "clamp",
+                                                                "copysign",
                                                                 "cos",
                                                                 "exit_program",
                                                                 "exit",
@@ -673,6 +674,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "file_read",
                                                                 "file_write",
                                                                 "floor",
+                                                                "fma",
                                                                 "gcd",
                                                                 "hypot",
                                                                 "index_of",
@@ -695,7 +697,9 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "map_size",
                                                                 "map_values",
                                                                 "max",
+                                                                "max_float",
                                                                 "min",
+                                                                "min_float",
                                                                 "number_to_string",
                                                                 "pop",
                                                                 "pow",
@@ -5663,10 +5667,16 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         if (auto v = intArg(0)) return CV::fromInt(*v);  // round of integer is itself
         return std::nullopt;
     }
-    // ── log2(x) / log(x) integer floor ─────────────────────────────────────
+    // ── log2(x) / log(x) / log10(x) integer floor ─────────────────────────
     if (name == "log" && n == 1) {
         if (auto v = intArg(0)) {
             if (*v > 0) return CV::fromInt(static_cast<int64_t>(std::log(static_cast<double>(*v))));
+        }
+        return std::nullopt;
+    }
+    if (name == "log10" && n == 1) {
+        if (auto v = intArg(0)) {
+            if (*v > 0) return CV::fromInt(static_cast<int64_t>(std::log10(static_cast<double>(*v))));
         }
         return std::nullopt;
     }
@@ -5740,6 +5750,55 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "array_last" && n == 1) {
         if (args[0].kind == CV::Kind::Array && !args[0].arrVal.empty())
             return args[0].arrVal.back();
+        return std::nullopt;
+    }
+    // ── array_min(arr) ─────────────────────────────────────────────────────
+    if (name == "array_min" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            if (args[0].arrVal.empty()) return CV::fromInt(0);
+            int64_t minVal = INT64_MAX;
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind != CV::Kind::Integer) return std::nullopt;
+                if (elem.intVal < minVal) minVal = elem.intVal;
+            }
+            return CV::fromInt(minVal);
+        }
+        return std::nullopt;
+    }
+    // ── array_max(arr) ─────────────────────────────────────────────────────
+    if (name == "array_max" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            if (args[0].arrVal.empty()) return CV::fromInt(0);
+            int64_t maxVal = INT64_MIN;
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind != CV::Kind::Integer) return std::nullopt;
+                if (elem.intVal > maxVal) maxVal = elem.intVal;
+            }
+            return CV::fromInt(maxVal);
+        }
+        return std::nullopt;
+    }
+    // ── array_contains(arr, val) ───────────────────────────────────────────
+    if (name == "array_contains" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind == CV::Kind::Integer && elem.intVal == args[1].intVal)
+                    return CV::fromInt(1);
+            }
+            return CV::fromInt(0);
+        }
+        return std::nullopt;
+    }
+    // ── index_of(arr, val) ────────────────────────────────────────────────
+    if (name == "index_of" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            for (int64_t i = 0; i < static_cast<int64_t>(args[0].arrVal.size()); ++i) {
+                if (args[0].arrVal[static_cast<size_t>(i)].kind == CV::Kind::Integer &&
+                    args[0].arrVal[static_cast<size_t>(i)].intVal == args[1].intVal)
+                    return CV::fromInt(i);
+            }
+            return CV::fromInt(-1);
+        }
         return std::nullopt;
     }
     return std::nullopt;
@@ -6587,6 +6646,8 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
     // to the caller, deterministic output for given inputs).
     static const std::unordered_set<std::string> kPureBuiltins = {
         "abs", "min", "max", "sign", "clamp", "pow", "sqrt", "log2", "log",
+        "log10", "exp", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+        "cbrt", "hypot", "fma", "copysign", "min_float", "max_float",
         "gcd", "lcm", "exp2",
         "is_even", "is_odd", "is_power_of_2", "is_alpha", "is_digit",
         "floor", "ceil", "round",
@@ -6601,6 +6662,7 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         "str_substr", "str_contains", "str_replace", "str_repeat",
         "str_count", "str_pad_left", "str_pad_right",
         "sum", "array_product", "array_last",
+        "array_min", "array_max", "array_contains", "index_of",
     };
 
     // Set of builtin/user names that are impure (I/O, heap side-effects, etc.)

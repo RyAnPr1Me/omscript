@@ -16,12 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `sum([1, 2, 3])` → integer `6`
   - `array_product([2, 3, 4])` → integer `24`
   - `array_last([10, 20, 30])` → integer `30`
-  Each of these has a matching IR-level early-out (before generating the loop/branch structure) and is also handled by `evalConstBuiltin` for cross-function constant propagation through `tryConstEvalFull`.
+  - `array_min([5, 2, 8, 1])` → integer `1`
+  - `array_max([5, 2, 8, 1])` → integer `8`
+  - `array_contains([1, 2, 3], 2)` → integer `1`
+  - `index_of([10, 20, 30], 30)` → integer `2`
+  - `len(range(3, 8))` → integer `5`
+  - `len(range_step(0, 10, 2))` → integer `5`
+  Each has a matching IR-level early-out (before generating loop/branch IR) and is also handled by `evalConstBuiltin` for cross-function constant propagation via `tryConstEvalFull`.
 
-- **Purity analysis coverage** — `str_to_int`, `str_pad_left`, `str_pad_right`, `sum`, `array_product`, and `array_last` are now registered in `kPureBuiltins`, enabling `autoDetectConstEvalFunctions` to classify user functions that call these builtins as pure and eligible for cross-function constant propagation.
+- **Purity analysis coverage** — `str_to_int`, `str_pad_left`, `str_pad_right`, `sum`, `array_product`, `array_last`, `array_min`, `array_max`, `array_contains`, `index_of`, `log10`, `exp`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `cbrt`, `hypot`, `fma`, `copysign`, `min_float`, and `max_float` are now registered in `kPureBuiltins`, enabling `autoDetectConstEvalFunctions` to classify user functions that call these builtins as pure and eligible for cross-function constant propagation.
 
-- **`stdlibFunctions` completeness** — `array_insert`, `array_last`, `array_product`, `str_pad_left`, and `str_pad_right` were missing from the canonical stdlib function set used to validate `@optmax` function bodies. They are now registered, so OPTMAX functions can call these builtins without a false "cannot invoke non-OPTMAX function" error.
+- **`stdlibFunctions` completeness** — `array_insert`, `array_last`, `array_product`, `str_pad_left`, `str_pad_right`, `fma`, `copysign`, `min_float`, and `max_float` were missing from the canonical stdlib function set used to validate `@optmax` function bodies. They are now registered, preventing false "cannot invoke non-OPTMAX function" errors.
 
+- **`!noundef` metadata on `INDEX_OF` and `ARRAY_CONTAINS` loops** — element loads in these two search loops were missing `!noundef` metadata at O1+. Added to be consistent with all other array element loads in the codebase, enabling LLVM's undefined-value elimination passes.
+
+- **`evalConstBuiltin` enriched** — `array_min`, `array_max`, `array_contains`, `index_of`, and `log10` are now evaluated at compile time by the abstract constant evaluator used for inter-procedural constant propagation (`tryConstEvalFull`).
 
 
 ### Added

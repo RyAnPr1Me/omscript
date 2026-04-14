@@ -355,6 +355,38 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                     }
                 }
             }
+            // Constant-fold len(range(a, b)) = max(0, b - a) when both args are constants.
+            if (call->callee == "range" && call->arguments.size() == 2) {
+                if (auto a = tryFoldInt(call->arguments[0].get())) {
+                    if (auto b = tryFoldInt(call->arguments[1].get())) {
+                        int64_t count = *b > *a ? *b - *a : 0;
+                        auto* result = llvm::ConstantInt::get(getDefaultType(), count);
+                        nonNegValues_.insert(result);
+                        optStats_.constFolded++;
+                        return result;
+                    }
+                }
+            }
+            // Constant-fold len(range_step(a, b, s)) = max(0, ceil((b-a)/s)) when all args are constants.
+            if (call->callee == "range_step" && call->arguments.size() == 3) {
+                if (auto a = tryFoldInt(call->arguments[0].get())) {
+                    if (auto b = tryFoldInt(call->arguments[1].get())) {
+                        if (auto s = tryFoldInt(call->arguments[2].get())) {
+                            if (*s != 0) {
+                                int64_t count = 0;
+                                if (*s > 0 && *b > *a)
+                                    count = (*b - *a + *s - 1) / *s;
+                                else if (*s < 0 && *b < *a)
+                                    count = (*a - *b + (-*s) - 1) / (-*s);
+                                auto* result = llvm::ConstantInt::get(getDefaultType(), count);
+                                nonNegValues_.insert(result);
+                                optStats_.constFolded++;
+                                return result;
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Also fold len(array_const_expr) via the unified evaluator.
         if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
@@ -2924,6 +2956,22 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::INDEX_OF) {
         validateArgCount(expr, "index_of", 2);
+        // Constant-fold index_of([c0,...], val) when the array and value are known.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                if (auto vv = tryFoldInt(expr->arguments[1].get())) {
+                    for (int64_t i = 0; i < static_cast<int64_t>(cv->arrVal.size()); ++i) {
+                        if (cv->arrVal[static_cast<size_t>(i)].kind == ConstValue::Kind::Integer &&
+                            cv->arrVal[static_cast<size_t>(i)].intVal == *vv) {
+                            optStats_.constFolded++;
+                            return llvm::ConstantInt::get(getDefaultType(), i);
+                        }
+                    }
+                    optStats_.constFolded++;
+                    return llvm::ConstantInt::get(getDefaultType(), -1, /*isSigned=*/true);
+                }
+            }
+        }
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
@@ -2957,6 +3005,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "indexof.elemptr");
         llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "indexof.elem");
         llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
+                llvm::MDNode::get(*context, {}));
         llvm::Value* match = builder->CreateICmpEQ(elem, valArg, "indexof.match");
         builder->CreateCondBr(match, foundBB, nextBB);
         builder->SetInsertPoint(nextBB);
@@ -2974,6 +3025,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::ARRAY_CONTAINS) {
         validateArgCount(expr, "array_contains", 2);
+        // Constant-fold array_contains([c0,...], val) when array and value are known.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                if (auto vv = tryFoldInt(expr->arguments[1].get())) {
+                    for (const auto& elem : cv->arrVal) {
+                        if (elem.kind == ConstValue::Kind::Integer && elem.intVal == *vv) {
+                            optStats_.constFolded++;
+                            return llvm::ConstantInt::get(getDefaultType(), 1);
+                        }
+                    }
+                    optStats_.constFolded++;
+                    return llvm::ConstantInt::get(getDefaultType(), 0);
+                }
+            }
+        }
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
@@ -3005,6 +3071,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "contains.elemptr");
         llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "contains.elem");
         llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
+                llvm::MDNode::get(*context, {}));
         llvm::Value* match = builder->CreateICmpEQ(elem, valArg, "contains.match");
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "contains.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
@@ -3645,6 +3714,25 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_MIN) {
         validateArgCount(expr, "array_min", 1);
+        // Constant-fold array_min([c0,...]) when the array is a compile-time literal.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                if (cv->arrVal.empty()) {
+                    optStats_.constFolded++;
+                    return llvm::ConstantInt::get(getDefaultType(), 0);
+                }
+                bool allInt = true;
+                int64_t minVal = INT64_MAX;
+                for (const auto& elem : cv->arrVal) {
+                    if (elem.kind != ConstValue::Kind::Integer) { allInt = false; break; }
+                    if (elem.intVal < minVal) minVal = elem.intVal;
+                }
+                if (allInt) {
+                    optStats_.constFolded++;
+                    return llvm::ConstantInt::get(getDefaultType(), minVal);
+                }
+            }
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "amin.arrptr");
         auto* aminLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "amin.len");
@@ -3751,6 +3839,27 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_MAX) {
         validateArgCount(expr, "array_max", 1);
+        // Constant-fold array_max([c0,...]) when the array is a compile-time literal.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                if (cv->arrVal.empty()) {
+                    optStats_.constFolded++;
+                    return llvm::ConstantInt::get(getDefaultType(), 0);
+                }
+                bool allInt = true;
+                int64_t maxVal = INT64_MIN;
+                for (const auto& elem : cv->arrVal) {
+                    if (elem.kind != ConstValue::Kind::Integer) { allInt = false; break; }
+                    if (elem.intVal > maxVal) maxVal = elem.intVal;
+                }
+                if (allInt) {
+                    optStats_.constFolded++;
+                    auto* ci = llvm::ConstantInt::get(getDefaultType(), maxVal);
+                    if (maxVal >= 0) nonNegValues_.insert(ci);
+                    return ci;
+                }
+            }
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "amax.arrptr");
         auto* amaxLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "amax.len");
