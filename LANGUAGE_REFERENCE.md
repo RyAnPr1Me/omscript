@@ -794,22 +794,19 @@ parallel while (cond) {
 
 ### 9.16 Loop Annotations (`@loop(...)`)
 
-Any loop can be preceded by a `@loop(...)` annotation block that fine-tunes compiler hints for that specific loop:
+The `@loop(...)` annotation is placed **between** the loop header's closing `)` and the loop body's opening `{`. It fine-tunes compiler hints for that specific loop:
 
 ```
-@loop(unroll=4)
-for (i in 0...n) { ... }
+for (i in 0...n) @loop(unroll=4) { ... }
 
-@loop(vectorize=true, tile=32)
-for (i in 0...n) { ... }
+for (i in 0...n) @loop(vectorize=true, tile=32) { ... }
 
-@loop(independent=true)
-for (i in 0...n) { a[i] = b[i] + c[i]; }
+for (i in 0...n) @loop(independent=true) { a[i] = b[i] + c[i]; }
 
-@loop(fuse=true)
-for (i in 0...n) { sum1 += a[i]; }
-@loop(fuse=true)
-for (i in 0...n) { sum2 += b[i]; }    // fused with the loop above
+while (cond) @loop(parallel=true) { step(); }
+
+for (i in 0...n) @loop(fuse=true) { sum1 += a[i]; }
+for (i in 0...n) @loop(fuse=true) { sum2 += b[i]; }    // fused with the loop above
 ```
 
 Supported keys:
@@ -840,10 +837,8 @@ Two adjacent `for` loops annotated with `@loop(fuse=true)` that iterate over the
 
 ```
 // Before fusion:
-@loop(fuse=true)
-for (i in 0...n) { a[i] = b[i] * 2; }
-@loop(fuse=true)
-for (i in 0...n) { c[i] = a[i] + 1; }
+for (i in 0...n) @loop(fuse=true) { a[i] = b[i] * 2; }
+for (i in 0...n) @loop(fuse=true) { c[i] = a[i] + 1; }
 
 // After fusion (logically equivalent):
 for (i in 0...n) {
@@ -1221,26 +1216,26 @@ fn transfer(data) {
 
 ### 17.2 borrow
 
-```
-fn process(data) {
-    var view = borrow data
-    // view shares data's storage; data cannot be mutated or moved
-    // while view is live
-}
-```
-
-`borrow` creates a **read-only alias**. The source variable transitions to the Borrowed state: it may still be read but cannot be mutated, moved, or invalidated while the borrow is active. The borrow ends at the end of the enclosing scope.
-
-**Mutable borrow:**
+`borrow` uses a **statement** syntax (not an expression), distinct from ordinary variable declarations:
 
 ```
-var buf = [0, 0, 0]
-var ref = borrow mut buf    // exclusive mutable alias
-ref[0] = 42                 // OK: writing through the mutable borrow
-// buf[0] = 1               // ERROR: buf is MutBorrowed; direct access forbidden
+borrow view = data;           // immutable borrow — 'view' is a read-only alias of 'data'
+borrow mut ref = data;        // mutable borrow — 'ref' is an exclusive mutable alias of 'data'
+borrow typed_ref:int = data;  // typed immutable borrow
 ```
 
-`borrow mut` creates an **exclusive mutable alias**. The source transitions to the MutBorrowed state — no reads or writes to the source are allowed while the mutable borrow is live.
+`borrow` creates a **read-only alias**. The source variable transitions to the Borrowed state: it may still be read but cannot be mutated, moved, or invalidated while the borrow is active. The borrow ends at the end of the enclosing scope. Multiple simultaneous immutable borrows are allowed.
+
+**Mutable borrow (`borrow mut`):**
+
+```
+var buf = [0, 0, 0];
+borrow mut ref = buf;          // exclusive mutable alias
+// ref[0] = 42;               // writing through a mutable borrow is valid
+// buf[0] = 1;                // ERROR: 'buf' is MutBorrowed; direct mutation forbidden
+```
+
+`borrow mut` creates an **exclusive mutable alias**. The source transitions to the MutBorrowed state — no reads or writes to the source, and no new borrows, are allowed while the mutable borrow is live.
 
 The compiler attaches `!alias.scope` and `!noalias` LLVM scoped-noalias metadata to loads through borrowed pointers, enabling alias-analysis-dependent optimizations (vectorization, LICM, load/store reordering) across borrow boundaries.
 
@@ -1267,18 +1262,18 @@ freeze x;
 2. **Ownership level** — marks `x` as Frozen. A Frozen variable is **read-only** for the rest of its lifetime — it may not be mutated, moved, or invalidated after freezing.
 
 **Alias propagation:** When `freeze x` is called:
-- If `x` is a borrow alias of `y` (i.e., `var x = borrow y`), then `y` is also marked Frozen.
-- If `y` is already Frozen and `x = borrow y`, then `x` is automatically considered Frozen when loaded.
+- If `x` is a borrow alias of `y` (i.e., `borrow x = y`), then `y` is also marked Frozen.
+- If `y` is already Frozen and `borrow x = y` is created, then `x` inherits the Frozen state.
 
 This bidirectional propagation ensures that freeze semantics are consistent across all aliases of the same underlying storage.
 
 ```
-var x = compute()
+var x = compute();
 freeze x;
 // x is now guaranteed non-poison, read-only
 // using x as a constant-like value is safe
 
-var ref = borrow x
+borrow ref = x;
 // ref inherits Frozen state — ref is also read-only
 ```
 
@@ -1289,34 +1284,34 @@ var ref = borrow x
 
 ### 17.5 reborrow
 
-`reborrow` creates a new borrow from an existing borrow (borrow chaining), or a **partial borrow** of a sub-element.
+`reborrow` creates a new borrow reference from an existing variable, using `&` to take the address:
 
 ```
-var arr = [1, 2, 3, 4, 5]
-borrow ref = &arr              // full borrow
-reborrow sub = &arr            // re-borrows from the same source
-reborrow mut sub = &arr        // mutable re-borrow (requires arr is not already Borrowed)
+var x = 100;
+borrow r = x;          // borrow (no & needed)
+reborrow r2 = &x;      // reborrow — & is required
+reborrow mut r3 = &x;  // mutable reborrow
 ```
 
 **Partial borrow — array element:**
 ```
-var data = [10, 20, 30]
-reborrow elem = &data[1]       // borrows only element at index 1
-reborrow mut elem = &data[1]   // mutable borrow of element 1
+var data = [10, 20, 30];
+reborrow elem = &data[1];       // borrows only element at index 1
+reborrow mut elem = &data[1];   // mutable borrow of element 1
 ```
 
 **Partial borrow — struct field:**
 ```
 struct Point { x, y }
-var p = Point{x: 3, y: 4}
-reborrow xref = &p.x           // borrows only the 'x' field
-reborrow mut yref = &p.y       // mutable borrow of 'y' field
+var p = Point{x: 3, y: 4};
+reborrow xref = &p.x;           // borrows only the 'x' field
+reborrow mut yref = &p.y;       // mutable borrow of 'y' field
 ```
 
 **Semantics:**
-- A `reborrow` inherits its lifetime from the original borrow — when the originating borrow scope ends, the reborrow is also released.
+- A `reborrow` inherits its lifetime from the enclosing scope — when the scope ends, the reborrow is released and the original variable becomes accessible again.
 - A mutable `reborrow mut` of a sub-element is distinct from a mutable borrow of the whole — you may have a `reborrow mut` of `p.x` and a `reborrow mut` of `p.y` simultaneously because they refer to disjoint memory.
-- The reborrow is registered in the compiler's `borrowMap_` so the borrow checker tracks it correctly.
+- The reborrow is registered in the compiler's borrow map so the borrow checker tracks it correctly.
 - Accessing the source variable directly while a `reborrow mut` sub-element is live is permitted for fields/elements not covered by the reborrow.
 
 ### 17.6 prefetch
@@ -1641,14 +1636,17 @@ All `-f` flags have a `-fno-` counterpart to disable:
 -s / --strip   Strip debug symbols from output
 ```
 
-**Verbose output (`-v` / `--verbose`):** In addition to standard compiler progress, prints an **OptStats** summary after compilation showing how many of each optimization class were applied:
+**Verbose output (`-v` / `--verbose`):** In addition to standard compiler progress, prints an **opt-report** summary after compilation showing how many of each optimization class were applied:
 
 ```
-[OptStats] Constant folds:        42
-[OptStats] Stack allocs (escape): 7
-[OptStats] Loop fusions:          3
-[OptStats] Frozen aliases:        5
-[OptStats] Comptime blocks:       12
+[opt-report] Optimization statistics:
+  const-folded expressions : 127
+  calls inlined            :  22
+  stack allocs (escape)    :   9
+  loops fused              :   4
+  borrows frozen           :   3
+  independent loops        :   7
+  allocator wrappers       :   2
 ```
 
 ### 24.8 Package Manager
@@ -1804,24 +1802,27 @@ When combined with `@loop(vectorize=true)` or inside an OPTMAX block, the vector
 
 ### 25.11 OptStats
 
-When the compiler is run with `-v` / `--verbose`, it prints an **OptStats** summary after compilation listing all optimization counters:
+When the compiler is run with `-v` / `--verbose`, it prints an **opt-report** summary after compilation listing all optimization counters:
 
 | Counter | What it counts |
 |---|---|
-| `Constant folds` | Total AST-level arithmetic, string, and builtin folds |
-| `Comptime blocks` | `comptime {}` blocks fully evaluated at compile time |
-| `Stack allocs (escape)` | Arrays stack-allocated by escape analysis |
-| `Loop fusions` | Pairs of loops merged by `@loop(fuse=true)` |
-| `Frozen aliases` | Variables frozen and their borrow-propagated aliases |
-| `Cross-fn inlines` | Calls replaced with constant via cross-function propagation |
+| `const-folded expressions` | Total AST-level arithmetic, string, and builtin folds |
+| `calls inlined` | Call sites replaced with inlined constants via cross-function propagation |
+| `stack allocs (escape)` | Arrays stack-allocated by escape analysis |
+| `loops fused` | Pairs of loops merged by `@loop(fuse=true)` |
+| `borrows frozen` | Variables frozen by `freeze` + their propagated borrow aliases |
+| `independent loops` | Loops annotated with `@loop(independent=true)` |
+| `allocator wrappers` | User functions annotated with `@allocator` |
 
 Example output:
 ```
-[OptStats] Constant folds:        127
-[OptStats] Comptime blocks:        15
-[OptStats] Stack allocs (escape):   9
-[OptStats] Loop fusions:            4
-[OptStats] Frozen aliases:          3
-[OptStats] Cross-fn inlines:       22
+[opt-report] Optimization statistics:
+  const-folded expressions : 127
+  calls inlined            :  22
+  stack allocs (escape)    :   9
+  loops fused              :   4
+  borrows frozen           :   3
+  independent loops        :   7
+  allocator wrappers       :   2
 ```
 

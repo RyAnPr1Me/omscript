@@ -19,7 +19,7 @@ echo "Building compiler..."
 cd "$(dirname "$0")"
 mkdir -p build
 cd build
-cmake .. > /dev/null 2>&1
+cmake .. -DLLVM_DIR=$(/usr/lib/llvm-18/bin/llvm-config --cmakedir) > /dev/null 2>&1
 make -j$(nproc) > /dev/null 2>&1
 
 if [ $? -ne 0 ]; then
@@ -31,61 +31,116 @@ echo ""
 
 cd ..
 
-# Test each example
-test_program() {
-    local source=$1
-    local expected=$2
-    local name=$(basename $source .om)
-    
-    TOTAL=$((TOTAL + 1))
-    echo -n "Testing $name... "
-    
-    # Compile
-    ./build/omsc $source -o $name > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}✗ Compilation failed${NC}"
-        FAILURES=$((FAILURES + 1))
-        return 1
-    fi
-    
-    # Run (with timeout to prevent benchmark programs from stalling)
-    timeout 60 ./$name
-    local result=$?
-    if [ $result -eq 124 ]; then
-        echo -e "${RED}✗ Timed out after 60s${NC}"
-        FAILURES=$((FAILURES + 1))
-        rm -f $name ${name}.o
-        return 1
-    fi
-    
-    # Clean up
-    rm -f $name ${name}.o
-    
-    # Check result (modulo 256 for exit codes)
-    local expected_mod=$((expected % 256))
-    if [ $result -eq $expected_mod ]; then
-        echo -e "${GREEN}✓ Passed (returned $result)${NC}"
-        return 0
-    else
-        echo -e "${RED}✗ Failed (expected $expected_mod, got $result)${NC}"
-        FAILURES=$((FAILURES + 1))
-        return 1
-    fi
+# ── Parallel .om test infrastructure ──────────────────────────────────────────
+# ptest_program / ptest_compile_fail submit background compile+run jobs.
+# Results are written to per-test temp files.
+# flush_ptests() waits for all pending jobs and prints results in order.
+TMPTEST=$(mktemp -d)
+trap 'rm -rf "$TMPTEST"' EXIT
+_PT_IDX=0
+declare -a _PT_PIDS=()
+declare -a _PT_NAMES=()
+MAX_PARALLEL=$(nproc)
+
+# Throttle: wait for a slot when too many jobs are in flight
+_ptest_throttle() {
+    local active
+    active=$(jobs -rp 2>/dev/null | wc -l)
+    while (( active >= MAX_PARALLEL )); do
+        wait -n 2>/dev/null || break
+        active=$(jobs -rp 2>/dev/null | wc -l)
+    done
 }
 
+ptest_program() {
+    local source=$1
+    local expected=$2
+    local name; name=$(basename "$source" .om)
+    local idx=$_PT_IDX
+    _PT_IDX=$(( _PT_IDX + 1 ))
+    _PT_NAMES[$idx]="$name"
+    TOTAL=$(( TOTAL + 1 ))
+
+    local exe="$TMPTEST/exe_${idx}"
+    local rf="$TMPTEST/r_${idx}"
+    (
+        ./build/omsc "$source" -o "$exe" >/dev/null 2>&1 \
+            || { echo "FAIL compile-failed" > "$rf"; exit 0; }
+        timeout 60 "$exe"
+        local rc=$?
+        rm -f "$exe"
+        local em=$(( expected % 256 ))
+        if   [ "$rc" -eq 124 ]; then echo "FAIL timed-out"            > "$rf"
+        elif [ "$rc" -eq "$em" ]; then echo "PASS $rc"                > "$rf"
+        else                          echo "FAIL wrong-exit $em $rc"  > "$rf"
+        fi
+    ) &
+    _PT_PIDS[$idx]=$!
+    _ptest_throttle
+}
+
+ptest_compile_fail() {
+    local source=$1
+    local name; name=$(basename "$source" .om)
+    local idx=$_PT_IDX
+    _PT_IDX=$(( _PT_IDX + 1 ))
+    _PT_NAMES[$idx]="$name (compile-fail)"
+    TOTAL=$(( TOTAL + 1 ))
+
+    local rf="$TMPTEST/r_${idx}"
+    local tmp_out="$TMPTEST/cf_${idx}"
+    (
+        ./build/omsc "$source" -o "$tmp_out" >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            echo "PASS expected-fail" > "$rf"
+        else
+            rm -f "$tmp_out"
+            echo "FAIL unexpected-success" > "$rf"
+        fi
+    ) &
+    _PT_PIDS[$idx]=$!
+    _ptest_throttle
+}
+
+flush_ptests() {
+    # Wait for every pending job, then print results in submission order.
+    local total_idx=$_PT_IDX
+    for i in $(seq 0 $(( total_idx - 1 ))); do
+        local pid="${_PT_PIDS[$i]:-}"
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+        local name="${_PT_NAMES[$i]:-unknown}"
+        local rf="$TMPTEST/r_${i}"
+        local line="FAIL no-result-file"
+        [ -f "$rf" ] && line=$(cat "$rf")
+        local status="${line%% *}"
+        local detail="${line#* }"
+        if [ "$status" = "PASS" ]; then
+            echo -e "Testing ${name}... ${GREEN}✓ Passed${NC}"
+        else
+            echo -e "Testing ${name}... ${RED}✗ Failed (${detail})${NC}"
+            FAILURES=$(( FAILURES + 1 ))
+        fi
+    done
+    # Reset state for the next flush group
+    _PT_IDX=0
+    _PT_PIDS=()
+    _PT_NAMES=()
+}
+
+# ── Sequential helpers (used for CLI / side-effect tests) ──────────────────────
 test_compile_fail() {
     local source=$1
     local name=$(basename $source .om)
-    
+
     TOTAL=$((TOTAL + 1))
     echo -n "Testing $name (compile fail)... "
-    
+
     ./build/omsc $source -o ${name}_fail > /dev/null 2>&1
     if [ $? -ne 0 ]; then
         echo -e "${GREEN}✓ Failed as expected${NC}"
         return 0
     fi
-    
+
     echo -e "${RED}✗ Unexpected compile success${NC}"
     rm -f ${name}_fail ${name}_fail.o
     FAILURES=$((FAILURES + 1))
@@ -240,155 +295,156 @@ if [ -f /tmp/omscript_clean_target ] || [ -f /tmp/omscript_clean_target.o ]; the
 fi
 echo ""
 
-echo "Running test programs:"
+echo "Running test programs (parallel, $(nproc) workers):"
 echo "--------------------------------------------"
-test_program "examples/factorial.om" 120
-test_program "examples/fibonacci.om" 55
-test_program "examples/arithmetic.om" 240
-test_program "examples/neg_div_test.om" 6
-test_program "examples/neg_pow_test.om" 11
-test_program "examples/neg_shift_test.om" 0
-test_program "examples/test.om" 84
-test_program "examples/optimized_loops.om" 5040
-test_program "examples/descending_range.om" 15
-test_program "examples/advanced.om" 16
-test_program "examples/break_continue.om" 10
-test_program "examples/scoping.om" 5
-test_program "examples/optmax.om" 10
-test_program "examples/postfix.om" 4
-test_program "examples/short_circuit.om" 1
-test_program "examples/div_zero.om" 1
-test_program "examples/mod_zero.om" 1
-test_program "examples/refcount_test.om" 97
-test_program "examples/compound_assign.om" 76
-test_program "examples/block_comments.om" 30
-test_program "examples/do_while.om" 16
-test_program "examples/print_test.om" 0
-test_program "examples/ternary.om" 34
-test_program "examples/bitwise.om" 52
-test_program "examples/prefix_ops.om" 50
-test_program "examples/abs_test.om" 26
-test_program "examples/optimization_stress_test.om" 432
-test_program "examples/inlining_test.om" 52
-test_program "examples/string_test.om" 0
-test_program "examples/array_test.om" 245
-test_program "examples/array_assign_test.om" 286
-test_program "examples/multi_var_test.om" 63
-test_program "examples/str_eq_test.om" 10
-test_program "examples/foreach_test.om" 150
-test_program "examples/foreach_break_test.om" 12
-test_program "examples/string_func_test.om" 178
-test_program "examples/stdlib_test.om" 66
-test_program "examples/stdlib2_test.om" 194
-test_program "examples/new_builtins_test.om" 87
-test_program "examples/math_builtins_test.om" 52
-test_program "examples/trig_math_test.om" 32
-test_program "examples/string_builtins_test.om" 12
-test_program "examples/array_builtins_test.om" 20
-test_program "examples/array_utility_test.om" 18
-test_program "examples/simd_register_test.om" 14
-test_program "examples/register_test.om" 25
-test_program "examples/compound_assign_test.om" 42
-test_program "examples/null_coalesce_test.om" 5
-test_program "examples/production_features_test.om" 14
-test_program "examples/enum_test.om" 9
-test_program "examples/default_params_test.om" 8
-test_program "examples/array_copy_test.om" 21
-test_program "examples/float_test.om" 5
-test_program "examples/string_var_test.om" 0
-test_program "examples/string_join_count_test.om" 41
-test_program "examples/string_interp_test.om" 87
-test_program "examples/multicase_interp_test.om" 110
-test_program "examples/string_param_test.om" 0
-test_program "examples/print_return_test.om" 0
-test_program "examples/optmax_div_zero.om" 1
-test_program "examples/forward_ref_test.om" 24
-test_program "examples/stdlib_float_test.om" 29
-test_program "examples/file_io_test.om" 8
-test_program "examples/map_test.om" 18
-test_program "examples/range_test.om" 21
-test_program "examples/float_edge_cases.om" 14
-test_program "examples/switch_test.om" 60
-test_program "examples/switch_break_test.om" 159
-test_program "examples/continue_in_switch.om" 4
-test_program "examples/continue_in_switch_loop.om" 27
-test_program "examples/typeof_assert_test.om" 1
-test_program "examples/bool_test.om" 73
-test_program "examples/bitwise_assign_test.om" 55
-test_program "examples/array_compound_test.om" 164
-test_program "examples/print_char_return_test.om" 1
-test_program "examples/hex_oct_bin_test.om" 543
-test_program "examples/bytes_literal_test.om" 56
-test_program "examples/array_incdec_test.om" 162
-test_program "examples/hex_escape_test.om" 0
-test_program "examples/underscore_num_test.om" 178
-test_program "examples/array_return_test.om" 110
-test_program "examples/power_operator_test.om" 366
-test_program "examples/str_concat_test.om" 22
-test_program "examples/str_int_concat_test.om" 6
-test_program "examples/memory_stress_test.om" 36
-test_program "examples/constant_folding.om" 243
-test_program "examples/ultimate_optimization.om" 184
-test_program "examples/lambda_pipe_spread_test.om" 0
-test_program "examples/array_higher_order_test.om" 0
-test_program "examples/swap_oob.om" 134
-test_program "examples/char_at_oob.om" 134
-test_program "examples/overflow_wrap_test.om" 42
-test_program "examples/benchmark_loops_math.om" 192
-test_program "examples/try_catch_test.om" 88
-test_program "examples/throw_in_called_fn_test.om" 147
-test_program "examples/len_string_test.om" 8
-test_program "examples/float_string_concat_test.om" 10
-test_program "examples/typeof_full_test.om" 12
-test_program "examples/string_index_test.om" 13
-test_program "examples/string_foreach_test.om" 9
-test_program "examples/to_int_to_float_string_test.om" 12
-test_program "examples/string_index_assign_test.om" 11
-test_program "examples/pow_float_test.om" 11
-test_program "examples/str_replace_all_test.om" 10
-test_program "examples/to_char_test.om" 12
-test_program "examples/string_comparison_test.om" 15
-test_program "examples/string_multiply_test.om" 9
-test_program "examples/string_array_test.om" 20
-test_program "examples/array_fill_negative_test.om" 3
-test_program "examples/struct_test.om" 0
-test_program "examples/import_test.om" 0
-test_program "examples/generic_test.om" 0
-test_program "examples/thread_test.om" 0
-test_program "examples/string_fold_test.om" 0
-test_program "examples/circular_import_test.om" 0
-test_program "examples/hint_inline.om" 0
-test_program "examples/hint_cold_hot.om" 0
-test_program "examples/hint_pure_static.om" 0
-test_program "examples/hint_prefetch.om" 0
-test_program "examples/prefetch_use_site.om" 0
-test_program "examples/freeze_test.om" 42
-test_program "examples/borrow_mut_test.om" 7
-test_program "examples/ownership_scope_test.om" 55
-test_program "examples/hint_flatten.om" 0
-test_program "examples/hint_vectorize.om" 0
-test_program "examples/unsigned_types.om" 0
-test_program "examples/precision_builtins.om" 0
-test_program "examples/lambda_test.om" 10
-test_program "examples/try_catch.om" 25
-test_program "examples/type_annotation_test.om" 6
-test_program "examples/lcm_test.om" 0
-test_compile_fail "examples/const_fail.om"
-test_compile_fail "examples/break_outside_loop.om"
-test_compile_fail "examples/continue_outside_loop.om"
-test_compile_fail "examples/continue_in_switch_no_loop.om"
-test_compile_fail "examples/switch_float_case.om"
-test_compile_fail "examples/undefined_var.om"
-test_compile_fail "examples/int_overflow.om"
-test_compile_fail "examples/no_main.om"
-test_compile_fail "examples/dup_func.om"
-test_compile_fail "examples/dup_param.om"
-test_compile_fail "examples/dup_case.om"
-test_compile_fail "examples/missing_semicolon.om"
-test_compile_fail "examples/invalid_hex.om"
-test_compile_fail "examples/invalid_binary.om"
-test_compile_fail "examples/invalid_octal.om"
-test_compile_fail "examples/unknown_annotation.om"
+ptest_program "examples/factorial.om" 120
+ptest_program "examples/fibonacci.om" 55
+ptest_program "examples/arithmetic.om" 240
+ptest_program "examples/neg_div_test.om" 6
+ptest_program "examples/neg_pow_test.om" 11
+ptest_program "examples/neg_shift_test.om" 0
+ptest_program "examples/test.om" 84
+ptest_program "examples/optimized_loops.om" 5040
+ptest_program "examples/descending_range.om" 15
+ptest_program "examples/advanced.om" 16
+ptest_program "examples/break_continue.om" 10
+ptest_program "examples/scoping.om" 5
+ptest_program "examples/optmax.om" 10
+ptest_program "examples/postfix.om" 4
+ptest_program "examples/short_circuit.om" 1
+ptest_program "examples/div_zero.om" 1
+ptest_program "examples/mod_zero.om" 1
+ptest_program "examples/refcount_test.om" 97
+ptest_program "examples/compound_assign.om" 76
+ptest_program "examples/block_comments.om" 30
+ptest_program "examples/do_while.om" 16
+ptest_program "examples/print_test.om" 0
+ptest_program "examples/ternary.om" 34
+ptest_program "examples/bitwise.om" 52
+ptest_program "examples/prefix_ops.om" 50
+ptest_program "examples/abs_test.om" 26
+ptest_program "examples/optimization_stress_test.om" 432
+ptest_program "examples/inlining_test.om" 52
+ptest_program "examples/string_test.om" 0
+ptest_program "examples/array_test.om" 245
+ptest_program "examples/array_assign_test.om" 286
+ptest_program "examples/multi_var_test.om" 63
+ptest_program "examples/str_eq_test.om" 10
+ptest_program "examples/foreach_test.om" 150
+ptest_program "examples/foreach_break_test.om" 12
+ptest_program "examples/string_func_test.om" 178
+ptest_program "examples/stdlib_test.om" 66
+ptest_program "examples/stdlib2_test.om" 194
+ptest_program "examples/new_builtins_test.om" 87
+ptest_program "examples/math_builtins_test.om" 52
+ptest_program "examples/trig_math_test.om" 32
+ptest_program "examples/string_builtins_test.om" 12
+ptest_program "examples/array_builtins_test.om" 20
+ptest_program "examples/array_utility_test.om" 18
+ptest_program "examples/simd_register_test.om" 14
+ptest_program "examples/register_test.om" 25
+ptest_program "examples/compound_assign_test.om" 42
+ptest_program "examples/null_coalesce_test.om" 5
+ptest_program "examples/production_features_test.om" 14
+ptest_program "examples/enum_test.om" 9
+ptest_program "examples/default_params_test.om" 8
+ptest_program "examples/array_copy_test.om" 21
+ptest_program "examples/float_test.om" 5
+ptest_program "examples/string_var_test.om" 0
+ptest_program "examples/string_join_count_test.om" 41
+ptest_program "examples/string_interp_test.om" 87
+ptest_program "examples/multicase_interp_test.om" 110
+ptest_program "examples/string_param_test.om" 0
+ptest_program "examples/print_return_test.om" 0
+ptest_program "examples/optmax_div_zero.om" 1
+ptest_program "examples/forward_ref_test.om" 24
+ptest_program "examples/stdlib_float_test.om" 29
+ptest_program "examples/file_io_test.om" 8
+ptest_program "examples/map_test.om" 18
+ptest_program "examples/range_test.om" 21
+ptest_program "examples/float_edge_cases.om" 14
+ptest_program "examples/switch_test.om" 60
+ptest_program "examples/switch_break_test.om" 159
+ptest_program "examples/continue_in_switch.om" 4
+ptest_program "examples/continue_in_switch_loop.om" 27
+ptest_program "examples/typeof_assert_test.om" 1
+ptest_program "examples/bool_test.om" 73
+ptest_program "examples/bitwise_assign_test.om" 55
+ptest_program "examples/array_compound_test.om" 164
+ptest_program "examples/print_char_return_test.om" 1
+ptest_program "examples/hex_oct_bin_test.om" 543
+ptest_program "examples/bytes_literal_test.om" 56
+ptest_program "examples/array_incdec_test.om" 162
+ptest_program "examples/hex_escape_test.om" 0
+ptest_program "examples/underscore_num_test.om" 178
+ptest_program "examples/array_return_test.om" 110
+ptest_program "examples/power_operator_test.om" 366
+ptest_program "examples/str_concat_test.om" 22
+ptest_program "examples/str_int_concat_test.om" 6
+ptest_program "examples/memory_stress_test.om" 36
+ptest_program "examples/constant_folding.om" 243
+ptest_program "examples/ultimate_optimization.om" 184
+ptest_program "examples/lambda_pipe_spread_test.om" 0
+ptest_program "examples/array_higher_order_test.om" 0
+ptest_program "examples/swap_oob.om" 134
+ptest_program "examples/char_at_oob.om" 134
+ptest_program "examples/overflow_wrap_test.om" 42
+ptest_program "examples/benchmark_loops_math.om" 192
+ptest_program "examples/try_catch_test.om" 88
+ptest_program "examples/throw_in_called_fn_test.om" 147
+ptest_program "examples/len_string_test.om" 8
+ptest_program "examples/float_string_concat_test.om" 10
+ptest_program "examples/typeof_full_test.om" 12
+ptest_program "examples/string_index_test.om" 13
+ptest_program "examples/string_foreach_test.om" 9
+ptest_program "examples/to_int_to_float_string_test.om" 12
+ptest_program "examples/string_index_assign_test.om" 11
+ptest_program "examples/pow_float_test.om" 11
+ptest_program "examples/str_replace_all_test.om" 10
+ptest_program "examples/to_char_test.om" 12
+ptest_program "examples/string_comparison_test.om" 15
+ptest_program "examples/string_multiply_test.om" 9
+ptest_program "examples/string_array_test.om" 20
+ptest_program "examples/array_fill_negative_test.om" 3
+ptest_program "examples/struct_test.om" 0
+ptest_program "examples/import_test.om" 0
+ptest_program "examples/generic_test.om" 0
+ptest_program "examples/thread_test.om" 0
+ptest_program "examples/string_fold_test.om" 0
+ptest_program "examples/circular_import_test.om" 0
+ptest_program "examples/hint_inline.om" 0
+ptest_program "examples/hint_cold_hot.om" 0
+ptest_program "examples/hint_pure_static.om" 0
+ptest_program "examples/hint_prefetch.om" 0
+ptest_program "examples/prefetch_use_site.om" 0
+ptest_program "examples/freeze_test.om" 42
+ptest_program "examples/borrow_mut_test.om" 7
+ptest_program "examples/ownership_scope_test.om" 55
+ptest_program "examples/hint_flatten.om" 0
+ptest_program "examples/hint_vectorize.om" 0
+ptest_program "examples/unsigned_types.om" 0
+ptest_program "examples/precision_builtins.om" 0
+ptest_program "examples/lambda_test.om" 10
+ptest_program "examples/try_catch.om" 25
+ptest_program "examples/type_annotation_test.om" 6
+ptest_program "examples/lcm_test.om" 0
+ptest_compile_fail "examples/const_fail.om"
+ptest_compile_fail "examples/break_outside_loop.om"
+ptest_compile_fail "examples/continue_outside_loop.om"
+ptest_compile_fail "examples/continue_in_switch_no_loop.om"
+ptest_compile_fail "examples/switch_float_case.om"
+ptest_compile_fail "examples/undefined_var.om"
+ptest_compile_fail "examples/int_overflow.om"
+ptest_compile_fail "examples/no_main.om"
+ptest_compile_fail "examples/dup_func.om"
+ptest_compile_fail "examples/dup_param.om"
+ptest_compile_fail "examples/dup_case.om"
+ptest_compile_fail "examples/missing_semicolon.om"
+ptest_compile_fail "examples/invalid_hex.om"
+ptest_compile_fail "examples/invalid_binary.om"
+ptest_compile_fail "examples/invalid_octal.om"
+ptest_compile_fail "examples/unknown_annotation.om"
+flush_ptests
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "missing-semicolon-msg" "Expected ';'" 1 ./build/omsc examples/missing_semicolon.om -o /tmp/test_semicolon
@@ -674,62 +730,70 @@ test_cli_output "pkg-remove-quiet" "" 0 ./build/omsc -q pkg remove strings
 # Clean up
 rm -rf om_packages
 
-# Optimization correctness tests
-test_program "examples/runtime_div_opt_test.om" 5
-test_program "examples/loop_ucmp_test.om" 5
-test_program "examples/dict_literal_test.om" 18
-test_program "examples/preprocessor_test.om" 12
-test_program "examples/dict_chaining_test.om" 16
-test_program "examples/ifelse_select_test.om" 37
-test_program "examples/const_float_fold_test.om" 7
-test_program "examples/inverse_op_test.om" 59
-test_program "examples/musttail_test.om" 175
-test_program "examples/string_interning_test.om" 15
-test_program "examples/constfold_builtins_test.om" 15
-test_program "examples/cttz_loop_test.om" 6
+# Optimization correctness tests + syntactic features + new features (parallel)
+echo ""
+echo "Running optimization and feature tests (parallel, $(nproc) workers):"
+echo "--------------------------------------------"
+ptest_program "examples/runtime_div_opt_test.om" 5
+ptest_program "examples/loop_ucmp_test.om" 5
+ptest_program "examples/dict_literal_test.om" 18
+ptest_program "examples/preprocessor_test.om" 12
+ptest_program "examples/dict_chaining_test.om" 16
+ptest_program "examples/ifelse_select_test.om" 37
+ptest_program "examples/const_float_fold_test.om" 7
+ptest_program "examples/inverse_op_test.om" 59
+ptest_program "examples/musttail_test.om" 175
+ptest_program "examples/string_interning_test.om" 15
+ptest_program "examples/constfold_builtins_test.om" 15
+ptest_program "examples/cttz_loop_test.om" 6
 
 # Syntactic features tests
-test_program "examples/unless_test.om" 31
-test_program "examples/until_test.om" 16
-test_program "examples/loop_keyword_test.om" 25
-test_program "examples/repeat_test.om" 65
-test_program "examples/defer_test.om" 31
-test_program "examples/guard_test.om" 170
-test_program "examples/when_test.om" 65
-test_program "examples/forever_test.om" 103
-test_program "examples/foreach_keyword_test.om" 33
-test_program "examples/do_until_test.om" 217
-test_program "examples/elif_test.om" 165
-test_program "examples/swap_test.om" 108
-test_program "examples/times_test.om" 162
-test_program "examples/destructure_test.om" 13130
-test_program "examples/indexed_foreach_test.om" 1652
-test_program "examples/repeat_until_test.om" 297
-test_program "examples/step_downto_test.om" 112
-test_program "examples/with_test.om" 188
-test_program "examples/loop_counted_test.om" 63
-test_program "examples/expr_fn_swap_test.om" 529
-test_program "examples/assume_unreachable_expect_test.om" 125
-test_program "examples/array_string_builtins_test.om" 178
-test_program "examples/method_call_test.om" 129
+ptest_program "examples/unless_test.om" 31
+ptest_program "examples/until_test.om" 16
+ptest_program "examples/loop_keyword_test.om" 25
+ptest_program "examples/repeat_test.om" 65
+ptest_program "examples/defer_test.om" 31
+ptest_program "examples/guard_test.om" 170
+ptest_program "examples/when_test.om" 65
+ptest_program "examples/forever_test.om" 103
+ptest_program "examples/foreach_keyword_test.om" 33
+ptest_program "examples/do_until_test.om" 217
+ptest_program "examples/elif_test.om" 165
+ptest_program "examples/swap_test.om" 108
+ptest_program "examples/times_test.om" 162
+ptest_program "examples/destructure_test.om" 13130
+ptest_program "examples/indexed_foreach_test.om" 1652
+ptest_program "examples/repeat_until_test.om" 297
+ptest_program "examples/step_downto_test.om" 112
+ptest_program "examples/with_test.om" 188
+ptest_program "examples/loop_counted_test.om" 63
+ptest_program "examples/expr_fn_swap_test.om" 529
+ptest_program "examples/assume_unreachable_expect_test.om" 125
+ptest_program "examples/array_string_builtins_test.om" 178
+ptest_program "examples/method_call_test.om" 129
 
 # New syntax and optimization features
-test_program "examples/scientific_notation_test.om" 7
-test_program "examples/scope_resolution_test.om" 11
-test_program "examples/slice_syntax_test.om" 11
-test_program "examples/in_operator_test.om" 5
-test_program "examples/logical_assign_test.om" 8
-test_program "examples/elvis_operator_test.om" 5
-test_program "examples/chained_comparison_test.om" 7
-test_program "examples/large_int_literal_test.om" 7
-test_program "examples/comptime_test.om" 172
-test_program "examples/parallel_loop_test.om" 70
-test_program "examples/independent_loop_test.om" 72
-test_program "examples/loop_fuse_test.om" 35
-test_program "examples/escape_analysis_test.om" 150
-test_program "examples/freeze_correctness_test.om" 42
-test_program "examples/reborrow_test.om" 100
-test_program "examples/allocator_annotation_test.om" 40
+ptest_program "examples/scientific_notation_test.om" 7
+ptest_program "examples/scope_resolution_test.om" 11
+ptest_program "examples/slice_syntax_test.om" 11
+ptest_program "examples/in_operator_test.om" 5
+ptest_program "examples/logical_assign_test.om" 8
+ptest_program "examples/elvis_operator_test.om" 5
+ptest_program "examples/chained_comparison_test.om" 7
+ptest_program "examples/large_int_literal_test.om" 7
+ptest_program "examples/comptime_test.om" 172
+ptest_program "examples/parallel_loop_test.om" 70
+ptest_program "examples/independent_loop_test.om" 72
+ptest_program "examples/loop_fuse_test.om" 35
+ptest_program "examples/escape_analysis_test.om" 150
+ptest_program "examples/freeze_correctness_test.om" 42
+ptest_program "examples/reborrow_test.om" 100
+ptest_program "examples/allocator_annotation_test.om" 40
+ptest_program "examples/borrow_mut_syntax_test.om" 42
+ptest_program "examples/comptime_chain_test.om" 45
+ptest_program "examples/loop_annotation_unroll_test.om" 120
+ptest_program "examples/loop_annotation_vectorize_test.om" 36
+flush_ptests
 
 echo ""
 echo "============================================"
