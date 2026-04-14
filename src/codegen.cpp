@@ -5714,7 +5714,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     }
     // ── sum(arr) ───────────────────────────────────────────────────────────
     if (name == "sum" && n == 1) {
-        if (n == 1 && args[0].kind == CV::Kind::Array) {
+        if (args[0].kind == CV::Kind::Array) {
             int64_t total = 0;
             for (const auto& elem : args[0].arrVal) {
                 if (elem.kind != CV::Kind::Integer) return std::nullopt;
@@ -5726,7 +5726,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     }
     // ── array_product(arr) ─────────────────────────────────────────────────
     if (name == "array_product" && n == 1) {
-        if (n == 1 && args[0].kind == CV::Kind::Array) {
+        if (args[0].kind == CV::Kind::Array) {
             int64_t product = 1;
             for (const auto& elem : args[0].arrVal) {
                 if (elem.kind != CV::Kind::Integer) return std::nullopt;
@@ -5738,7 +5738,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     }
     // ── array_last(arr) ────────────────────────────────────────────────────
     if (name == "array_last" && n == 1) {
-        if (n == 1 && args[0].kind == CV::Kind::Array && !args[0].arrVal.empty())
+        if (args[0].kind == CV::Kind::Array && !args[0].arrVal.empty())
             return args[0].arrVal.back();
         return std::nullopt;
     }
