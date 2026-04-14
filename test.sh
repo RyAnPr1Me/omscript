@@ -278,7 +278,7 @@ fn bench_math(@prefetch n:int) -> int {
 }
 
 // ── 1. float_math ────────────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @static @nounwind
 fn bench_floatmath(@prefetch n:int) -> int {
     var acc:double = 1.0;
     for (i:int in 1...n) {
@@ -291,7 +291,7 @@ fn bench_floatmath(@prefetch n:int) -> int {
 }
 
 // ── 2. array_push ────────────────────────────────────────────
-@hot
+@hot @static @nounwind
 fn bench_push(@prefetch n:int) -> int {
     var arr:int[] = [];
     prefetch arr;
@@ -305,7 +305,7 @@ fn bench_push(@prefetch n:int) -> int {
 }
 
 // ── 3. array_hof ─────────────────────────────────────────────
-@hot @flatten @pure  @vectorize @nounwind @const_eval
+@hot @flatten @pure  @vectorize @nounwind @const_eval @static
 fn bench_hof(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
     prefetch arr;
@@ -337,7 +337,7 @@ fn bench_strcat(@prefetch n:int) -> int {
 }
 
 // ── 5. string_ops ────────────────────────────────────────────
-@hot @flatten @static
+@hot @flatten @static @nounwind
 fn bench_strops(@prefetch n:int) -> int {
     var haystack:str = str_repeat("abcdefghij", 100);
     var count:int = 0;
@@ -366,7 +366,7 @@ fn bench_struct(@prefetch n:int) -> int {
 }
 
 // ── 7. switch_branch ─────────────────────────────────────────
-@hot @static @nounwind 
+@hot @flatten @unroll @static @nounwind 
 fn bench_branch(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -382,7 +382,7 @@ fn bench_branch(@prefetch n:int) -> int {
 }
 
 // ── 8. if_else_chain ─────────────────────────────────────────
-@hot @inline @static @pure
+@hot @inline @static @pure @nounwind
 fn classify(x:int) -> int {
     if (x < 10)    { return 1; }
     if (x < 100)   { return 2; }
@@ -391,7 +391,7 @@ fn classify(x:int) -> int {
     if (x < 100000){ return 5; }
     return 6;
 }
-@hot @flatten @vectorize @static
+@hot @flatten @vectorize @unroll @static @nounwind
 fn bench_ifelse(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -401,7 +401,7 @@ fn bench_ifelse(@prefetch n:int) -> int {
 }
 
 // ── 9. while_loop ────────────────────────────────────────────
-@hot @flatten @vectorize @static
+@hot @flatten @vectorize @unroll @static @nounwind
 fn bench_while(@prefetch n:int) -> int {
     var i:int = 0;
     var acc:int = 0;
@@ -414,7 +414,7 @@ fn bench_while(@prefetch n:int) -> int {
 }
 
 // ── 10. recursion_fib ────────────────────────────────────────
-@hot @pure @static 
+@hot @pure @static @nounwind
 fn fib(n:int) -> int {
     if (n <= 1) { return n; }
     return fib(n - 1) + fib(n - 2);
@@ -425,7 +425,7 @@ fn bench_recurse(n:int) -> int {
 }
 
 // ── 11. nested_loops ─────────────────────────────────────────
-@hot @flatten @pure @unroll @vectorize
+@hot @flatten @pure @unroll @vectorize @static @nounwind
 fn bench_nested(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
@@ -439,7 +439,7 @@ fn bench_nested(@prefetch n:int) -> int {
 }
 
 // ── 12. array_indexing ───────────────────────────────────────
-@hot @flatten @unroll @static
+@hot @flatten @unroll @static @nounwind
 fn bench_arrindex(@prefetch n:int) -> int {
     const sz:int = 10000;
     var arr:int[] = array_fill(sz, 0);
@@ -458,13 +458,13 @@ fn bench_arrindex(@prefetch n:int) -> int {
 }
 
 // ── 13. function_calls ───────────────────────────────────────
-@hot @inline @static @nounwind
+@hot @inline @static @nounwind @pure
 fn add_one(x:int) -> int { return x + 1; }
-@hot @inline @static @nounwind
+@hot @inline @static @nounwind @pure
 fn add_two(x:int) -> int { return add_one(add_one(x)); }
-@hot @inline @static @nounwind
+@hot @inline @static @nounwind @pure
 fn add_four(x:int) -> int { return add_two(add_two(x)); }
-@hot @flatten @static @nounwind
+@hot @flatten @vectorize @unroll @static @nounwind
 fn bench_calls(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
@@ -523,7 +523,7 @@ fn bench_poly(@prefetch n:int) -> int {
 }
 
 // ── 17. reduction ────────────────────────────────────────────
-@hot @flatten @vectorize @static
+@hot @flatten @vectorize @unroll @pure @static @nounwind
 fn bench_reduction(@prefetch n:int) -> int {
     var sum:int = 0;
     var sum2:int = 0;
@@ -535,7 +535,7 @@ fn bench_reduction(@prefetch n:int) -> int {
 }
 
 // ── 18. combined ─────────────────────────────────────────────
-@hot @vectorize @flatten @static
+@hot @vectorize @flatten @unroll @static @nounwind
 fn bench_combined(n:int) -> int {
     var total:int = 0;
     var acc:int = 0;
@@ -593,7 +593,7 @@ fn bench_combined(n:int) -> int {
 }
 
 // ── 19. matrix_multiply ──────────────────────────────────────
-@hot @flatten @unroll @vectorize
+@hot @flatten @unroll @vectorize @static @nounwind
 fn bench_matmul(n:int) -> int {
     var a:int[] = array_fill(n * n, 0);
     var b:int[] = array_fill(n * n, 0);
@@ -624,7 +624,7 @@ fn bench_matmul(n:int) -> int {
 }
 
 // ── 20. sieve ────────────────────────────────────────────────
-@hot @flatten
+@hot @flatten @unroll @static @nounwind
 fn bench_sieve(n:int) -> int {
     var is_prime:int[] = array_fill(n, 1);
     is_prime[0] = 0;
@@ -649,7 +649,7 @@ fn bench_sieve(n:int) -> int {
 }
 
 // ── 21. prefix_sum ───────────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @vectorize @static @nounwind
 fn bench_prefix_sum(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
     for (i:int in 0...n) {
@@ -664,7 +664,7 @@ fn bench_prefix_sum(@prefetch n:int) -> int {
 }
 
 // ── 22. hash_compute ─────────────────────────────────────────
-@hot @flatten @unroll @pure
+@hot @flatten @unroll @pure @static @nounwind
 fn bench_hash(@prefetch n:int) -> int {
     var hash:int = 5381;
     for (i:int in 0...n) {
@@ -681,7 +681,7 @@ fn bench_hash(@prefetch n:int) -> int {
 // same clock cycle.  The outer for-loop is unrolled 2× by the compiler
 // (outerUnrollCount=2), giving 4 independent counter chains while keeping
 // register pressure within x86-64's 15 GP register budget (no spills).
-@hot @noinline
+@hot @noinline @static @nounwind
 fn bench_collatz(@prefetch n:int) -> int {
     var total:int = 0;
     var total2:int = 0;
@@ -703,7 +703,7 @@ fn bench_collatz(@prefetch n:int) -> int {
 }
 
 // ── 24. binary_search ────────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @static @nounwind
 fn bench_bsearch(@prefetch n:int) -> int {
     const sz:int = 100000;
     var arr:int[] = array_fill(sz, 0);
@@ -732,7 +732,7 @@ fn bench_bsearch(@prefetch n:int) -> int {
 }
 
 // ── 25. dot_product ──────────────────────────────────────────
-@hot @flatten @vectorize @unroll
+@hot @flatten @vectorize @unroll @pure @static @nounwind
 fn bench_dot(@prefetch n:int) -> int {
     var a:int[] = array_fill(n, 0);
     var b:int[] = array_fill(n, 0);
@@ -750,7 +750,7 @@ fn bench_dot(@prefetch n:int) -> int {
 }
 
 // ── 26. fibonacci_iter ───────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @pure @static @nounwind
 fn bench_fib_iter(@prefetch n:int) -> int {
     var a:int = 0;
     var b:int = 1;
@@ -763,7 +763,7 @@ fn bench_fib_iter(@prefetch n:int) -> int {
 }
 
 // ── 27. histogram ────────────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @static @nounwind
 fn bench_histogram(@prefetch n:int) -> int {
     var bins:int[] = array_fill(256, 0);
     for (i:int in 0...n) {
@@ -779,7 +779,7 @@ fn bench_histogram(@prefetch n:int) -> int {
 }
 
 // ── 28. accumulator_chain ────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @pure @static @nounwind
 fn bench_accum(@prefetch n:int) -> int {
     var a:int = 1;
     var b:int = 2;
@@ -795,7 +795,7 @@ fn bench_accum(@prefetch n:int) -> int {
 }
 
 // ── 29. modular_exp ──────────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @pure @static @nounwind
 fn bench_modexp(@prefetch n:int) -> int {
     var result:int = 1;
     var base:int = 3;
@@ -813,7 +813,7 @@ fn bench_modexp(@prefetch n:int) -> int {
 // constants (3,5,7,10,12,100), modulo by powers of 2, and
 // mixed shift-add patterns that the e-graph rewrites to cheaper
 // shift+add/sub sequences.
-@hot @flatten @unroll
+@hot @flatten @unroll @pure @vectorize @static @nounwind
 fn bench_strength(@prefetch n:int) -> int {
     var acc:int = 0;
     for (i:int in 1...n) {
@@ -837,7 +837,7 @@ fn bench_strength(@prefetch n:int) -> int {
 // Tests superoptimizer idiom recognition: min, max, absolute value,
 // conditional negation, and power-of-2 test patterns.
 // Patterns are written inline to match the C version exactly.
-@hot @flatten @unroll
+@hot @flatten @unroll @pure @static @nounwind
 fn bench_idioms(@prefetch n:int) -> int {
     var acc:int = 0;
     for (i:int in 1...n) {
@@ -865,7 +865,7 @@ fn bench_idioms(@prefetch n:int) -> int {
 // Tests HGOE FMA generation: floating-point multiply-add chains
 // of the form a*b+c and a*b+c*d that the hardware graph optimizer
 // converts to fused multiply-add instructions.
-@hot @flatten @unroll
+@hot @flatten @unroll @static @nounwind
 fn bench_fma(@prefetch n:int) -> int {
     var a:double = 1.0;
     var b:double = 0.9999999;
@@ -887,7 +887,7 @@ fn bench_fma(@prefetch n:int) -> int {
 // pattern inside a loop starting from 1.  The compiler should
 // prove that i-1 >= 0 because the loop starts at 1, and that
 // i-1 < len(arr) because i < len(arr).
-@hot @flatten @unroll
+@hot @flatten @unroll @static @nounwind
 fn bench_negoffset(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
     for (i:int in 0...n) {
@@ -908,7 +908,7 @@ fn bench_negoffset(@prefetch n:int) -> int {
 // size + bounded loop access.  The compiler should track that
 // the array has exactly 1024 elements and elide bounds checks
 // when the loop bound <= 1024.
-@hot @flatten @unroll
+@hot @flatten @unroll @vectorize @static @nounwind
 fn bench_constarray(@prefetch n:int) -> int {
     var data:int[] = array_fill(1024, 0);
     for (i:int in 0...1024) {
@@ -927,7 +927,7 @@ fn bench_constarray(@prefetch n:int) -> int {
 // Tests superoptimizer conditional increment/decrement detection.
 // Patterns: if(cond) x++; else x; → x + zext(cond)
 // These arise from conditional counter updates in tight loops.
-@hot @flatten @unroll
+@hot @flatten @unroll @pure @vectorize @static @nounwind
 fn bench_condarith(@prefetch n:int) -> int {
     var acc:int = 0;
     for (i:int in 1...n) {
@@ -952,7 +952,7 @@ fn bench_condarith(@prefetch n:int) -> int {
 // head and tail are provably non-negative, bounded to [0, CAP-1].
 // (tail + 1) % CAP exercises srem→urem for a non-constant-divisor
 // path when CAP is a runtime-tracked positive value.
-@hot @flatten @unroll
+@hot @flatten @unroll @static @nounwind
 fn bench_ringbuf(@prefetch n:int) -> int {
     const CAP:int = 509;
     var buf:int[] = array_fill(CAP, 0);
@@ -1001,7 +1001,7 @@ fn bench_slidingwin(@prefetch n:int) -> int {
 // Integer exponentiation x**2, x**3, x**4, x**5 in a tight loop.
 // Tests NSW-mul path: when base is non-negative, each squaring/cube
 // uses nsw multiply. Even exponents always produce non-negative results.
-@hot @flatten @unroll
+@hot @flatten @unroll @pure @static @nounwind
 fn bench_expchain(@prefetch n:int) -> int {
     var acc:int = 0;
     for (i:int in 1...n) {
@@ -1039,7 +1039,7 @@ fn bench_foreach(@prefetch n:int) -> int {
 // Repeated lcm() and gcd() calls in a tight loop.
 // lcm is provably non-negative (nonNeg tracking via abs of inputs),
 // so the compiler can use NUW/NSW on further arithmetic with the result.
-@hot @flatten @unroll
+@hot @flatten @unroll @pure @static @nounwind
 fn bench_lcmgcd(@prefetch n:int) -> int {
     var acc:int = 0;
     for (i:int in 1...n) {
@@ -1058,7 +1058,7 @@ fn bench_lcmgcd(@prefetch n:int) -> int {
 // The pattern: if (cond) { acc += 1; } is lowered as
 // acc += zext(cond) by the superoptimizer rather than a branch.
 // Also tests: acc += (a < b) ? 1 : 0 style comparisons.
-@hot @flatten @unroll
+@hot @flatten @unroll @pure @vectorize @static @nounwind
 fn bench_zext(@prefetch n:int) -> int {
     var acc:int = 0;
     for (i:int in 1...n) {
