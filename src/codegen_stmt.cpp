@@ -292,18 +292,12 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         allocaUpperBound_[alloca] = bit->second;
                 }
             }
-            // Track constant integer values for `const` variables so that
-            // downstream div/mod can substitute the constant directly and
-            // use the fast urem/udiv path instead of the dynamic-divisor path.
-            if (stmt->isConst) {
-                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
-                    constIntFolds_[stmt->name] = ci->getSExtValue();
-            }
-            // Also track comptime {} initializers for non-const vars: since
-            // comptime blocks always produce compile-time constants, treat them
-            // like const-integer for folding purposes even if not declared `const`.
-            if (!stmt->isConst && stmt->initializer &&
-                stmt->initializer->type == ASTNodeType::COMPTIME_EXPR) {
+            // Track constant integer values for `const` variables and
+            // comptime {} initializers (always compile-time constants even
+            // if declared `var`) for downstream div/mod folding.
+            bool isComptimeInit = stmt->initializer &&
+                                  stmt->initializer->type == ASTNodeType::COMPTIME_EXPR;
+            if (stmt->isConst || isComptimeInit) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
                     constIntFolds_[stmt->name] = ci->getSExtValue();
             }
@@ -313,23 +307,17 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(initValue))
                 constFloatFolds_[stmt->name] = cf->getValueAPF().convertToDouble();
         }
-        // Track const string values for compile-time string builtin folding.
-        // When a const variable is initialized with a compile-time constant
-        // string expression, record the string content so that len(var),
-        // str_starts_with(var, ...) etc. can be folded at compile time.
-        // Handles: string literals, const-var identifiers, concat trees, and
-        // calls to zero-parameter pure constant-string functions.
-        if (stmt->isConst && stmt->initializer) {
-            std::string foldedStr;
-            if (tryFoldStringConcat(stmt->initializer.get(), foldedStr))
-                constStringFolds_[stmt->name] = std::move(foldedStr);
-        }
-        // comptime string initializers are also always constant strings.
-        if (!stmt->isConst && stmt->initializer &&
-            stmt->initializer->type == ASTNodeType::COMPTIME_EXPR) {
-            std::string foldedStr;
-            if (tryFoldStringConcat(stmt->initializer.get(), foldedStr))
-                constStringFolds_[stmt->name] = std::move(foldedStr);
+        // Track const / comptime string initializers for compile-time string
+        // builtin folding: len(var), str_starts_with(var, ...) etc.
+        // Handles literals, const-var identifiers, concat trees, and calls to
+        // zero-parameter pure constant-string functions.
+        if (stmt->initializer) {
+            bool isComptimeInit2 = stmt->initializer->type == ASTNodeType::COMPTIME_EXPR;
+            if (stmt->isConst || isComptimeInit2) {
+                std::string foldedStr;
+                if (tryFoldStringConcat(stmt->initializer.get(), foldedStr))
+                    constStringFolds_[stmt->name] = std::move(foldedStr);
+            }
         }
         // Propagate integer constant from a zero-param constant-returning fn:
         // `const n = get_n()` where get_n() is in constIntReturnFunctions_

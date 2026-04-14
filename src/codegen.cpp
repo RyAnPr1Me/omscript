@@ -6621,12 +6621,9 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         case ASTNodeType::COMPTIME_EXPR:
             // A comptime {} block is always a compile-time constant — always pure.
             return true;
-        case ASTNodeType::POSTFIX_EXPR: {
+        case ASTNodeType::POSTFIX_EXPR:
             // ++/-- are mutations — not pure for const-eval.
-            auto* pe = static_cast<const PostfixExpr*>(expr);
-            (void)pe;
             return false;
-        }
         case ASTNodeType::PREFIX_EXPR: {
             auto* pre = static_cast<const PrefixExpr*>(expr);
             if (pre->op == "!" || pre->op == "-" || pre->op == "+")
