@@ -834,6 +834,13 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    if (match(TokenType::PIPELINE)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parsePipelineStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
     if (match(TokenType::VAR)) {
         auto decl = parseVarDecl(false);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
@@ -1813,6 +1820,61 @@ std::unique_ptr<Statement> Parser::parseWithStmt() {
     stmts.push_back(std::move(body));
 
     return std::make_unique<BlockStmt>(std::move(stmts));
+}
+
+// pipeline (i in start...end) { stage name { ... } ... }
+// pipeline (i in start...end...step) { ... }
+// pipeline { stage name { ... } ... }   — no explicit range; stages share any enclosing loop var
+std::unique_ptr<Statement> Parser::parsePipelineStmt() {
+    std::string iterVar;
+    std::string iterType;
+    std::unique_ptr<Expression> startExpr;
+    std::unique_ptr<Expression> endExpr;
+    std::unique_ptr<Expression> stepExpr;
+
+    // Optional range: pipeline (i in start...end) or pipeline (i in start...end...step)
+    if (match(TokenType::LPAREN)) {
+        const Token varTok = consume(TokenType::IDENTIFIER, "Expected iterator variable after '(' in pipeline");
+        iterVar = varTok.lexeme;
+        if (match(TokenType::COLON)) {
+            iterType = parseTypeAnnotation();
+        }
+        consume(TokenType::IN, "Expected 'in' after pipeline iterator variable");
+        startExpr = parseExpression();
+        if (!match(TokenType::RANGE) && !match(TokenType::DOT_DOT)) {
+            error("Expected '...' after pipeline start expression");
+        }
+        endExpr = parseExpression();
+        if (match(TokenType::RANGE)) {
+            stepExpr = parseExpression();
+        }
+        consume(TokenType::RPAREN, "Expected ')' after pipeline range");
+    }
+
+    consume(TokenType::LBRACE, "Expected '{' after pipeline header");
+
+    std::vector<StageDecl> stages;
+    while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+        if (!match(TokenType::STAGE)) {
+            error("Expected 'stage' inside pipeline block");
+        }
+        const Token stageName = consume(TokenType::IDENTIFIER, "Expected stage name after 'stage'");
+        auto stageBody = parseBlock();
+        stages.emplace_back(stageName.lexeme, std::move(stageBody));
+    }
+    consume(TokenType::RBRACE, "Expected '}' to close pipeline block");
+
+    if (stages.empty()) {
+        error("pipeline block must contain at least one stage");
+    }
+
+    // If no range was provided, generate a dummy single-iteration range
+    // so the AST is always well-formed.  The codegen will detect startExpr==nullptr
+    // and emit only the stage bodies directly (no surrounding loop).
+    return std::make_unique<PipelineStmt>(
+        std::move(iterVar), std::move(iterType),
+        std::move(startExpr), std::move(endExpr), std::move(stepExpr),
+        std::move(stages));
 }
 
 // var [a, b, c] = expr;  or  const [a, b, c] = expr;

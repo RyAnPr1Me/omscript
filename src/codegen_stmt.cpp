@@ -3581,4 +3581,133 @@ void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
     }
 }
 
+// generatePipeline: desugar a pipeline { stage ... } block into a for-loop
+// that executes all stages sequentially per iteration.
+//
+// The generated structure:
+//
+//   entry:
+//     %iter = alloca i64
+//     store start, %iter
+//     br loop_cond
+//   loop_cond:
+//     %i = load %iter
+//     %cond = icmp slt %i, end
+//     br cond, loop_body, loop_exit
+//   loop_body:
+//     ; stage 0 body
+//     ; stage 1 body
+//     ; stage 2 body
+//     %next = add %i, step
+//     store %next, %iter
+//     br loop_cond   ← back-edge carries llvm.loop.parallel_accesses metadata
+//   loop_exit:
+//
+// If no range was specified (start == nullptr), the stages are emitted once
+// as a plain block — useful for one-shot Load/Compute/Store sequences.
+//
+// The back-edge branch receives llvm.loop metadata including:
+//   - llvm.loop.vectorize.enable
+//   - llvm.loop.parallel_accesses (all pointer operands mentioned in stages)
+// so the backend can schedule instructions from different stages in parallel
+// and the auto-vectorizer can generate SIMD code across stages.
+void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    if (!function) {
+        codegenError("pipeline statement outside of function", stmt);
+    }
+
+    // No-range form: just emit stage bodies in order inside a new scope.
+    if (!stmt->start) {
+        const ScopeGuard scope(*this);
+        for (auto& stage : stmt->stages) {
+            // Each stage executes in its own scope so stage-local variables
+            // don't conflict, but variables declared before the pipeline are
+            // visible in all stages.
+            const ScopeGuard stageScope(*this);
+            generateBlock(stage.body.get());
+        }
+        return;
+    }
+
+    // Range form: pipeline (i in start...end[...step]) { stage ... }
+    const ScopeGuard scope(*this);
+
+    llvm::Type* iterTy = stmt->iterType.empty()
+                             ? getDefaultType()
+                             : resolveAnnotatedType(stmt->iterType);
+
+    llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iterVar, iterTy);
+    bindVariable(stmt->iterVar, iterAlloca);
+
+    llvm::Value* startVal = generateExpression(stmt->start.get());
+    startVal = convertTo(startVal, iterTy);
+    builder->CreateStore(startVal, iterAlloca);
+
+    llvm::Value* endVal = generateExpression(stmt->end.get());
+    endVal = convertTo(endVal, iterTy);
+
+    llvm::Value* stepVal;
+    if (stmt->step) {
+        stepVal = generateExpression(stmt->step.get());
+        stepVal = convertTo(stepVal, iterTy);
+    } else {
+        stepVal = llvm::ConstantInt::get(iterTy, 1);
+    }
+
+    // Empty range: no-op
+    if (auto* sc = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+        if (auto* ec = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+            if (sc->getSExtValue() == ec->getSExtValue()) return;
+        }
+    }
+
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "pipeline.cond", function);
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "pipeline.body", function);
+    llvm::BasicBlock* exitBB = llvm::BasicBlock::Create(*context, "pipeline.exit", function);
+
+    auto savedArrayLenCache = std::move(loopArrayLenCache_);
+    loopArrayLenCache_.clear();
+    loopStack.push_back({exitBB, condBB});
+
+    builder->CreateBr(condBB);
+
+    // Condition block
+    builder->SetInsertPoint(condBB);
+    llvm::Value* iVal = builder->CreateAlignedLoad(iterTy, iterAlloca, llvm::MaybeAlign(8), stmt->iterVar + ".cur");
+
+    bool ascending = true;
+    if (auto* sc = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+        if (auto* ec = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+            ascending = sc->getSExtValue() < ec->getSExtValue();
+        }
+    }
+    llvm::Value* cond = ascending
+        ? builder->CreateICmpSLT(iVal, endVal, "pipeline.cond.check")
+        : builder->CreateICmpSGT(iVal, endVal, "pipeline.cond.check");
+
+    builder->CreateCondBr(cond, bodyBB, exitBB);
+
+    // Body block: execute all stages in sequence
+    builder->SetInsertPoint(bodyBB);
+    for (auto& stage : stmt->stages) {
+        const ScopeGuard stageScope(*this);
+        generateBlock(stage.body.get());
+    }
+
+    // Advance iterator
+    llvm::Value* iCur = builder->CreateAlignedLoad(iterTy, iterAlloca, llvm::MaybeAlign(8), stmt->iterVar + ".step");
+    llvm::Value* iNext = builder->CreateAdd(iCur, stepVal, stmt->iterVar + ".next");
+    builder->CreateStore(iNext, iterAlloca);
+
+    // Back-edge with loop metadata (vectorize + mustprogress)
+    llvm::BranchInst* backEdge = llvm::cast<llvm::BranchInst>(builder->CreateBr(condBB));
+    attachLoopMetadata(backEdge);
+
+    loopStack.pop_back();
+    loopArrayLenCache_ = std::move(savedArrayLenCache);
+
+    builder->SetInsertPoint(exitBB);
+}
+
 } // namespace omscript

@@ -3885,6 +3885,11 @@ void CodeGenerator::generate(Program* program) {
     // are already classified and can be recognized as pure callees.
     autoDetectConstEvalFunctions(program);
 
+    // Effect inference: determine which user functions have I/O, memory
+    // reads/writes, or observable mutation.  Must run after autoDetectConstEvalFunctions
+    // so that the constEvalFunctions_ set is already populated (those are pure).
+    inferFunctionEffects(program);
+
     // E-Graph Equality Saturation: apply algebraic simplification, constant
     // folding, strength reduction, and other rewrites at the AST level using
     // an e-graph.  This discovers globally optimal expression representations
@@ -4435,6 +4440,32 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->setOnlyReadsMemory();
         function->setDoesNotThrow();
         function->setWillReturn();
+    }
+    // Auto-apply LLVM memory-effect attributes based on inferred effects.
+    // Only applied when @pure is NOT already set (which sets readonly explicitly).
+    if (!func->hintPure) {
+        auto fxIt = functionEffects_.find(func->name);
+        if (fxIt != functionEffects_.end()) {
+            const FunctionEffects& fx = fxIt->second;
+            if (fx.isReadNone()) {
+                // No memory access, no I/O: readnone + nosync + willreturn
+                function->setDoesNotAccessMemory();
+                function->setNoSync();
+                if (!isSelfRecursive) {
+                    function->setWillReturn();
+                    function->addFnAttr(llvm::Attribute::Speculatable);
+                }
+            } else if (fx.isReadOnly()) {
+                // Reads memory but does not write or do I/O: readonly + nosync
+                function->setOnlyReadsMemory();
+                function->setNoSync();
+                if (!isSelfRecursive)
+                    function->setWillReturn();
+            } else if (fx.isNoSync()) {
+                // Has writes but no I/O: nosync
+                function->setNoSync();
+            }
+        }
     }
     if (func->hintNoReturn) {
         function->addFnAttr(llvm::Attribute::NoReturn);
@@ -5022,6 +5053,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         // Defer outside a block: just execute the body immediately
         // (normal defer semantics are handled in generateBlock)
         generateStatement(static_cast<DeferStmt*>(stmt)->body.get());
+        break;
+    case ASTNodeType::PIPELINE_STMT:
+        generatePipeline(static_cast<PipelineStmt*>(stmt));
         break;
     default:
         codegenError("Unknown statement type", stmt);
@@ -7066,6 +7100,340 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         }
     }
 }
+
+// inferFunctionEffects: lightweight AST-level side-effect analysis.
+//
+// For every user function in the program, computes a FunctionEffects summary:
+//   readsMemory  — function loads from an array element, string subscript,
+//                  struct field, or calls a read-only builtin with pointer args.
+//   writesMemory — function writes to an array element (arr[i] = ...), struct
+//                  field, or calls a mutating builtin (push/pop/sort/reverse…).
+//   hasIO        — function calls any I/O builtin (print/input/file_*/sleep…).
+//   hasMutation  — function calls a mutating builtin or performs a compound
+//                  assignment on a parameter-derived value.
+//
+// The analysis is a conservative fixed-point over the call graph: a function
+// inherits the effects of every callee.  Mutual recursion is handled by
+// initialising all unknown functions as "no effects" and iterating to a
+// fixed point; a self-recursive call conservatively marks writesMemory.
+//
+// Results are used in function codegen to:
+//   1. Automatically add LLVM readonly/readnone/nosync attributes.
+//   2. Emit a compiler warning when @pure is used on a function whose body
+//      contains detectable I/O or mutation.
+void CodeGenerator::inferFunctionEffects(Program* program) {
+    if (!program) return;
+
+    // Builtins known to perform I/O or have synchronization side effects.
+    static const std::unordered_set<std::string> kIOBuiltins = {
+        "print", "println", "write", "print_char",
+        "input", "input_line",
+        "file_read", "file_write", "file_append", "file_exists",
+        "thread_create", "thread_join",
+        "mutex_lock", "mutex_unlock", "mutex_new", "mutex_destroy",
+        "sleep", "exit", "exit_program",
+        "assert",
+    };
+
+    // Builtins that write/mutate heap memory observable to the caller.
+    static const std::unordered_set<std::string> kMutatingBuiltins = {
+        "push", "pop", "sort", "reverse", "swap",
+        "array_remove", "array_insert",
+        "map_set", "map_remove",
+        "str_replace",  // returns new string — not truly mutating, but conservative
+    };
+
+    // Builtins that only read memory (return value depends on array/string content).
+    static const std::unordered_set<std::string> kReadBuiltins = {
+        "len", "str_len", "sum", "array_min", "array_max", "array_product",
+        "array_last", "array_contains", "index_of", "array_find", "array_count",
+        "array_any", "array_every", "array_reduce", "array_map", "array_filter",
+        "map_get", "map_has", "map_keys", "map_values", "map_size",
+        "str_contains", "str_index_of", "str_find", "str_starts_with",
+        "str_ends_with", "str_count", "str_upper", "str_lower", "str_trim",
+        "str_reverse", "str_substr", "str_chars", "str_join", "str_repeat",
+        "str_pad_left", "str_pad_right", "char_at",
+        "typeof", "to_int", "to_float", "to_string",
+    };
+
+    // Build function index.
+    std::unordered_map<std::string, const FunctionDecl*> allFuncs;
+    for (const auto& f : program->functions)
+        allFuncs[f->name] = f.get();
+
+    // Helper: classify one expression's effects into a FunctionEffects.
+    // Forward-declared as std::function so it can recurse.
+    std::function<FunctionEffects(const Expression*, const std::string&)> exprEffects;
+    std::function<FunctionEffects(const Statement*,   const std::string&)> stmtEffects;
+
+    exprEffects = [&](const Expression* expr, const std::string& selfName) -> FunctionEffects {
+        FunctionEffects fx;
+        if (!expr) return fx;
+        switch (expr->type) {
+        case ASTNodeType::INDEX_EXPR:
+            fx.readsMemory = true;
+            break;
+        case ASTNodeType::INDEX_ASSIGN_EXPR:
+            fx.writesMemory = true;
+            fx.hasMutation  = true;
+            break;
+        case ASTNodeType::FIELD_ACCESS_EXPR:
+            fx.readsMemory = true;
+            break;
+        case ASTNodeType::FIELD_ASSIGN_EXPR:
+            fx.writesMemory = true;
+            fx.hasMutation  = true;
+            break;
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<const CallExpr*>(expr);
+            if (kIOBuiltins.count(call->callee)) {
+                fx.hasIO = true;
+            } else if (kMutatingBuiltins.count(call->callee)) {
+                fx.writesMemory = true;
+                fx.hasMutation  = true;
+            } else if (kReadBuiltins.count(call->callee)) {
+                fx.readsMemory = true;
+            } else if (call->callee == selfName) {
+                // Self-recursive call: conservatively mark memory access
+                fx.readsMemory  = true;
+                fx.writesMemory = true;
+            } else {
+                // Callee effects propagated from functionEffects_ (fixed-point)
+                auto it = functionEffects_.find(call->callee);
+                if (it != functionEffects_.end()) {
+                    fx.readsMemory  = fx.readsMemory  || it->second.readsMemory;
+                    fx.writesMemory = fx.writesMemory || it->second.writesMemory;
+                    fx.hasIO        = fx.hasIO        || it->second.hasIO;
+                    fx.hasMutation  = fx.hasMutation  || it->second.hasMutation;
+                }
+            }
+            for (const auto& arg : call->arguments) {
+                auto a = exprEffects(arg.get(), selfName);
+                fx.readsMemory  = fx.readsMemory  || a.readsMemory;
+                fx.writesMemory = fx.writesMemory || a.writesMemory;
+                fx.hasIO        = fx.hasIO        || a.hasIO;
+                fx.hasMutation  = fx.hasMutation  || a.hasMutation;
+            }
+            break;
+        }
+        case ASTNodeType::BINARY_EXPR: {
+            auto* b = static_cast<const BinaryExpr*>(expr);
+            auto l = exprEffects(b->left.get(), selfName);
+            auto r = exprEffects(b->right.get(), selfName);
+            fx.readsMemory  = l.readsMemory  || r.readsMemory;
+            fx.writesMemory = l.writesMemory || r.writesMemory;
+            fx.hasIO        = l.hasIO        || r.hasIO;
+            fx.hasMutation  = l.hasMutation  || r.hasMutation;
+            break;
+        }
+        case ASTNodeType::ASSIGN_EXPR: {
+            auto* a = static_cast<const AssignExpr*>(expr);
+            auto v = exprEffects(a->value.get(), selfName);
+            // Compound assignment to a variable is a mutation.
+            fx.writesMemory = true;
+            fx.hasMutation  = true;
+            fx.readsMemory  = v.readsMemory;
+            fx.hasIO        = v.hasIO;
+            break;
+        }
+        case ASTNodeType::UNARY_EXPR: {
+            auto* u = static_cast<const UnaryExpr*>(expr);
+            fx = exprEffects(u->operand.get(), selfName);
+            break;
+        }
+        case ASTNodeType::POSTFIX_EXPR:
+        case ASTNodeType::PREFIX_EXPR:
+            // ++/-- are mutations
+            fx.writesMemory = true;
+            fx.hasMutation  = true;
+            break;
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* t = static_cast<const TernaryExpr*>(expr);
+            auto c = exprEffects(t->condition.get(), selfName);
+            auto th = exprEffects(t->thenExpr.get(), selfName);
+            auto el = exprEffects(t->elseExpr.get(), selfName);
+            fx.readsMemory  = c.readsMemory  || th.readsMemory  || el.readsMemory;
+            fx.writesMemory = c.writesMemory || th.writesMemory || el.writesMemory;
+            fx.hasIO        = c.hasIO        || th.hasIO        || el.hasIO;
+            fx.hasMutation  = c.hasMutation  || th.hasMutation  || el.hasMutation;
+            break;
+        }
+        case ASTNodeType::ARRAY_EXPR: {
+            auto* arr = static_cast<const ArrayExpr*>(expr);
+            for (const auto& el : arr->elements) {
+                auto e = exprEffects(el.get(), selfName);
+                fx.readsMemory  = fx.readsMemory  || e.readsMemory;
+                fx.writesMemory = fx.writesMemory || e.writesMemory;
+                fx.hasIO        = fx.hasIO        || e.hasIO;
+                fx.hasMutation  = fx.hasMutation  || e.hasMutation;
+            }
+            break;
+        }
+        default:
+            // Literals, identifiers, move/borrow/freeze — no effects.
+            break;
+        }
+        return fx;
+    };
+
+    stmtEffects = [&](const Statement* stmt, const std::string& selfName) -> FunctionEffects {
+        FunctionEffects fx;
+        if (!stmt) return fx;
+
+        auto merge = [&](const FunctionEffects& other) {
+            fx.readsMemory  = fx.readsMemory  || other.readsMemory;
+            fx.writesMemory = fx.writesMemory || other.writesMemory;
+            fx.hasIO        = fx.hasIO        || other.hasIO;
+            fx.hasMutation  = fx.hasMutation  || other.hasMutation;
+        };
+
+        switch (stmt->type) {
+        case ASTNodeType::EXPR_STMT:
+            merge(exprEffects(static_cast<const ExprStmt*>(stmt)->expression.get(), selfName));
+            break;
+        case ASTNodeType::VAR_DECL: {
+            auto* vd = static_cast<const VarDecl*>(stmt);
+            if (vd->initializer) merge(exprEffects(vd->initializer.get(), selfName));
+            break;
+        }
+        case ASTNodeType::MOVE_DECL: {
+            auto* md = static_cast<const MoveDecl*>(stmt);
+            if (md->initializer) merge(exprEffects(md->initializer.get(), selfName));
+            break;
+        }
+        case ASTNodeType::RETURN_STMT: {
+            auto* ret = static_cast<const ReturnStmt*>(stmt);
+            if (ret->value) merge(exprEffects(ret->value.get(), selfName));
+            break;
+        }
+        case ASTNodeType::BLOCK: {
+            for (const auto& s : static_cast<const BlockStmt*>(stmt)->statements)
+                merge(stmtEffects(s.get(), selfName));
+            break;
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifs = static_cast<const IfStmt*>(stmt);
+            merge(exprEffects(ifs->condition.get(), selfName));
+            merge(stmtEffects(ifs->thenBranch.get(), selfName));
+            merge(stmtEffects(ifs->elseBranch.get(), selfName));
+            break;
+        }
+        case ASTNodeType::WHILE_STMT: {
+            auto* ws = static_cast<const WhileStmt*>(stmt);
+            merge(exprEffects(ws->condition.get(), selfName));
+            merge(stmtEffects(ws->body.get(), selfName));
+            break;
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            auto* dw = static_cast<const DoWhileStmt*>(stmt);
+            merge(stmtEffects(dw->body.get(), selfName));
+            merge(exprEffects(dw->condition.get(), selfName));
+            break;
+        }
+        case ASTNodeType::FOR_STMT: {
+            auto* fs = static_cast<const ForStmt*>(stmt);
+            if (fs->start) merge(exprEffects(fs->start.get(), selfName));
+            if (fs->end)   merge(exprEffects(fs->end.get(), selfName));
+            if (fs->step)  merge(exprEffects(fs->step.get(), selfName));
+            merge(stmtEffects(fs->body.get(), selfName));
+            break;
+        }
+        case ASTNodeType::FOR_EACH_STMT: {
+            auto* fe = static_cast<const ForEachStmt*>(stmt);
+            merge(exprEffects(fe->collection.get(), selfName));
+            merge(stmtEffects(fe->body.get(), selfName));
+            // Iterating an array reads it.
+            fx.readsMemory = true;
+            break;
+        }
+        case ASTNodeType::SWITCH_STMT: {
+            auto* sw = static_cast<const SwitchStmt*>(stmt);
+            merge(exprEffects(sw->condition.get(), selfName));
+            for (const auto& c : sw->cases) {
+                if (c.value) merge(exprEffects(c.value.get(), selfName));
+                for (const auto& s : c.body) merge(stmtEffects(s.get(), selfName));
+            }
+            break;
+        }
+        case ASTNodeType::TRY_CATCH_STMT: {
+            auto* tc = static_cast<const TryCatchStmt*>(stmt);
+            merge(stmtEffects(tc->tryBlock.get(), selfName));
+            merge(stmtEffects(tc->catchBlock.get(), selfName));
+            break;
+        }
+        case ASTNodeType::THROW_STMT: {
+            auto* th = static_cast<const ThrowStmt*>(stmt);
+            if (th->value) merge(exprEffects(th->value.get(), selfName));
+            fx.hasIO = true; // throw is an observable effect
+            break;
+        }
+        case ASTNodeType::PIPELINE_STMT: {
+            auto* pl = static_cast<const PipelineStmt*>(stmt);
+            if (pl->start) merge(exprEffects(pl->start.get(), selfName));
+            if (pl->end)   merge(exprEffects(pl->end.get(), selfName));
+            if (pl->step)  merge(exprEffects(pl->step.get(), selfName));
+            for (const auto& stage : pl->stages)
+                merge(stmtEffects(stage.body.get(), selfName));
+            break;
+        }
+        case ASTNodeType::DEFER_STMT:
+            merge(stmtEffects(static_cast<const DeferStmt*>(stmt)->body.get(), selfName));
+            break;
+        default:
+            break;
+        }
+        return fx;
+    };
+
+    // Fixed-point iteration over the call graph.
+    // Initialise all user functions with empty effects; iterate until stable.
+    for (const auto& f : program->functions)
+        functionEffects_[f->name] = FunctionEffects{};
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& f : program->functions) {
+            if (!f->body) continue;
+            FunctionEffects computed;
+            for (const auto& s : f->body->statements) {
+                auto fx = stmtEffects(s.get(), f->name);
+                computed.readsMemory  = computed.readsMemory  || fx.readsMemory;
+                computed.writesMemory = computed.writesMemory || fx.writesMemory;
+                computed.hasIO        = computed.hasIO        || fx.hasIO;
+                computed.hasMutation  = computed.hasMutation  || fx.hasMutation;
+            }
+            FunctionEffects& prev = functionEffects_[f->name];
+            if (computed.readsMemory  != prev.readsMemory  ||
+                computed.writesMemory != prev.writesMemory ||
+                computed.hasIO        != prev.hasIO        ||
+                computed.hasMutation  != prev.hasMutation) {
+                prev = computed;
+                changed = true;
+            }
+        }
+    }
+
+    // Warn if @pure is applied to a function that has detectable side effects.
+    for (const auto& f : program->functions) {
+        if (!f->hintPure) continue;
+        auto it = functionEffects_.find(f->name);
+        if (it == functionEffects_.end()) continue;
+        const FunctionEffects& fx = it->second;
+        if (fx.hasIO) {
+            std::cerr << "[warning] @pure function '" << f->name
+                      << "' performs I/O — @pure annotation may be incorrect\n";
+        } else if (fx.writesMemory || fx.hasMutation) {
+            std::cerr << "[warning] @pure function '" << f->name
+                      << "' mutates memory — @pure annotation may be incorrect\n";
+        }
+    }
+}
+
+
+} // namespace omscript
+
+namespace omscript {
 // maintaining a pool of interned global string constants.  When the
 // same string content is used in multiple places, this returns a
 // pointer to the single canonical global, enabling:
