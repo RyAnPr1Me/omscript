@@ -2178,6 +2178,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "lower.buf");
         llvm::cast<llvm::CallInst>(buf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, 1));
+        builder->CreateCall(getOrDeclareStrcpy(), {buf, strPtr});
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* preheader = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "lower.loop", function);
