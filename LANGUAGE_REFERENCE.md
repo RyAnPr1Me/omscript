@@ -16,12 +16,39 @@
 5. [Types and Values](#5-types-and-values)
 6. [Variables and Constants](#6-variables-and-constants)
 7. [Functions](#7-functions)
+    - 7.1 Basic Syntax
+    - 7.2 Type-Annotated Parameters and Return Type
+    - 7.3 Expression-Body Functions
+    - 7.4 Default Parameter Values
+    - 7.5 Generic (Type-Parameterized) Functions
+    - 7.6 Function Annotations
+    - 7.7 Parameter Annotation: @prefetch
+    - 7.8 Tail Calls
+    - 7.9 Allocator Annotation (@allocator)
+    - 7.10 Method Call Syntax
 8. [Control Flow](#8-control-flow)
 9. [Loops](#9-loops)
 10. [Expressions and Operators](#10-expressions-and-operators)
+    - 10.1 Arithmetic
+    - 10.2 Comparison (including chained comparisons)
+    - 10.3 Logical
+    - 10.4 Bitwise
+    - 10.5 Null Coalescing (`??`)
+    - 10.5.1 Elvis Operator (`?:`)
+    - 10.5.2 `in` Operator
+    - 10.6 Ternary
+    - 10.7 Pipe Forward
+    - 10.8 Range
+    - 10.9 Spread
+    - 10.10 Increment / Decrement
+    - 10.11 Address / Reference
+    - 10.12 Operator Precedence
+    - 10.13 Type-Namespace Method Dispatch
 11. [Arrays](#11-arrays)
 12. [Strings](#12-strings)
 13. [Dictionaries / Maps](#13-dictionaries--maps)
+    - 13.0 Dict Literals
+    - 13.1 Map Built-ins
 14. [Structs](#14-structs)
 15. [Enums](#15-enums)
 16. [Error Handling](#16-error-handling)
@@ -35,11 +62,13 @@
     - 17.6 prefetch
     - 17.7 No-Aliasing Guarantee
 18. [OPTMAX Blocks](#18-optmax-blocks)
+    - 18.1 `@optmax(...)` Function Annotation
 19. [Built-in Functions](#19-built-in-functions)
 20. [Concurrency](#20-concurrency)
 21. [File I/O](#21-file-io)
 22. [Lambda Expressions](#22-lambda-expressions)
 23. [Import System](#23-import-system)
+    - 23.1 Import Aliases
 24. [Compiler CLI Reference](#24-compiler-cli-reference)
 25. [Advanced Optimization Features](#25-advanced-optimization-features)
     - 25.1 E-Graph Equality Saturation
@@ -136,11 +165,22 @@ when      guard     defer     swap      parallel  comptime
 1_000_000   // underscores as separators
 ```
 
+Unsigned 64-bit values whose bit pattern exceeds `INT64_MAX` are accepted and stored as signed `i64` (two's complement):
+```
+0x9e3779b185ebca87   // negative as signed i64; bit pattern preserved
+0xffffffffffffffff   // == -1 as signed i64
+0x8000000000000000   // == INT64_MIN (-9223372036854775808)
+```
+
 **Float literals:**
 ```
 3.14
 2.0
 1_000.5
+1e2        // 100.0 (scientific notation)
+1.5E-3     // 0.0015
+2E3        // 2000.0
+1.5e+2     // 150.0
 ```
 
 **String literals:**
@@ -166,6 +206,14 @@ line two
 **Boolean literals:** `true`, `false`
 
 **Null literal:** `null`
+
+**Bytes literals:** A hex byte-array literal creates an array of integer byte values at parse time:
+```
+var data = 0x"DEADBEEF";    // [0xDE, 0xAD, 0xBE, 0xEF]  (4 integers)
+var b2   = 0x"01 02 03";    // [1, 2, 3] — spaces between byte pairs are allowed
+var b3   = 0x"ff00ff";      // [255, 0, 255]  — lowercase hex also works
+```
+The literal is desugared to an array literal at parse time; `len(data) == 4`.
 
 ### 3.4 Identifiers
 
@@ -318,6 +366,8 @@ var x = 42                // mutable, no annotation
 var x:int = 42            // mutable, annotated
 var arr = [1, 2, 3]       // array
 var d = map_new()         // dictionary
+var a = 1, b = 2, c = 3   // multiple variables in one declaration
+const x = 10, y = 20      // also works with const
 ```
 
 **Array destructuring** — assigns elements of an array to individual variables in one declaration:
@@ -379,6 +429,8 @@ obj.field = value
 x += 1     x -= 1     x *= 2     x /= 2     x %= 3
 x &= mask  x |= flag  x ^= bits  x <<= 2    x >>= 2
 x **= 2    x ??= default_val
+x &&= rhs  // x = x && rhs  (logical AND assignment)
+x ||= rhs  // x = x || rhs  (logical OR assignment)
 ```
 
 ---
@@ -482,7 +534,9 @@ At function return the compiler automatically emits cache-eviction prefetch hint
 
 ### 7.8 Tail Calls
 
-Self-recursive calls in tail position are automatically converted to jumps (guaranteed tail call elimination).
+Self-recursive calls in tail position are automatically converted to `musttail` jumps — a **guaranteed** tail call elimination (TCO), not merely a hint. The `musttail` calling convention requires the callee's signature to exactly match the caller's. When this condition is met, LLVM is obligated to emit a jump (not a call), ensuring **O(1) stack usage** regardless of recursion depth.
+
+Applies only to **self-recursive** calls (a function calling itself) where all parameter types match the current function's signature.
 
 ### 7.9 Allocator Annotation (`@allocator`)
 
@@ -507,6 +561,29 @@ fn my_calloc(nmemb, size) {
 Optional `count=M` specifies that the total allocation size is `param[N] * param[M]` bytes (analogous to `calloc`).
 
 **Effect:** LLVM's `DeadArgumentElimination`, `InlinerPass`, and escape analysis can now reason about the allocation size and provenance, enabling allocation elimination when the result is proven dead.
+
+### 7.10 Method Call Syntax
+
+Any call of the form `receiver.method(args...)` is desugared at parse time to `method(receiver, args...)`. This works for all user-defined functions and all built-in functions, making it easy to write object-oriented style code:
+
+```
+var arr = [3, 1, 2];
+arr.sort();                // sort(arr)
+var n = arr.len();         // len(arr)
+var m = arr.array_max();   // array_max(arr)
+
+var s = "Hello World";
+var u = s.str_upper();     // str_upper(s) → "HELLO WORLD"
+var l = s.len();           // len(s) → 11
+
+struct Vec2 { x, y }
+fn dot(u, v) { return u.x * v.x + u.y * v.y; }
+var a = Vec2 { x: 3, y: 4 };
+var b = Vec2 { x: 1, y: 2 };
+var d = a.dot(b);          // dot(a, b) → 11
+```
+
+The desugaring is purely syntactic — there is no runtime dispatch or vtable lookup.
 
 ---
 
@@ -632,12 +709,20 @@ while (condition) {
 }
 ```
 
-### 9.2 do...while
+### 9.2 do...while / do...until
 
 ```
 do {
     // ...
 } while (condition);
+```
+
+`do...until` is also supported — stops when the condition becomes **true** (desugars to `do { ... } while (!condition)`):
+
+```
+do {
+    i += 1;
+} until (i >= limit);   // equivalent to: do { i += 1; } while (!(i >= limit))
 ```
 
 ### 9.3 until
@@ -873,6 +958,13 @@ a ** b             // exponentiation (a to the power of b)
 a == b    a != b    a < b    a <= b    a > b    a >= b
 ```
 
+**Chained comparisons:** A chain of `<`, `<=`, `>`, or `>=` operators is automatically desugared to a conjunction. Middle operands that are identifiers or literals are evaluated only once:
+
+```
+1 < x < 10           // (1 < x) && (x < 10)
+1 <= a <= b <= 100   // (1 <= a) && (a <= b) && (b <= 100)
+```
+
 ### 10.3 Logical
 
 ```
@@ -895,6 +987,25 @@ a >> n    // right shift
 ```
 a ?? b    // if a != null/0, yields a; otherwise yields b
 x ??= default_val  // compound null-coalescing assignment
+```
+
+### 10.5.1 Elvis Operator
+
+The `?:` operator is a shorthand null-coalescing/ternary. If the left operand is truthy, it returns the left operand itself; otherwise it returns the right operand:
+
+```
+x ?: default_val   // if x is truthy, yields x; else yields default_val
+```
+
+For identifiers and literals this desugars to `x ? x : default_val`. For complex expressions it desugars to `x ?? default_val`.
+
+### 10.5.2 `in` Operator
+
+The `in` operator tests whether a value exists in an array (desugars to `array_contains(arr, val)`). It has comparison-level precedence:
+
+```
+if (x in arr) { ... }         // 1 if arr contains x
+val = (42 in collection);     // expression context
 ```
 
 ### 10.6 Ternary
@@ -946,13 +1057,85 @@ x++    x--    ++x    --x
 7. `&`
 8. `^`
 9. `|`
-10. `==`, `!=`, `<`, `<=`, `>`, `>=`
+10. `==`, `!=`, `<`, `<=`, `>`, `>=`, `in` — comparisons also support chaining (`a < b < c`)
 11. `&&`
 12. `||`
-13. `??`
+13. `??`, `?:`
 14. `? :` (ternary)
-15. Assignment (`=`, `+=`, etc.)
+15. Assignment (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `??=`, `&&=`, `||=`)
 16. `|>` (pipe forward)
+
+### 10.13 Type-Namespace Method Dispatch
+
+The `::` operator supports calling built-in operations using a type name as a namespace. This is purely syntactic sugar — it desugars to the corresponding function call or operator at parse time.
+
+**Integer namespace** (`int`, `i64`, `i32`, `i16`, `i8`, `u64`, `u32`, `u16`, `u8`, `uint`):
+```
+int::abs(x)         // abs(x)
+int::min(a, b)      // min(a, b)
+int::max(a, b)      // max(a, b)
+int::sign(x)        // sign(x)
+int::clamp(x,lo,hi) // clamp(x, lo, hi)
+int::mod(a, b)      // a % b
+int::is_even(x)     // is_even(x)
+int::is_odd(x)      // is_odd(x)
+int::to_float(x)    // to_float(x)
+int::bitand(a, b)   // a & b
+int::bitor(a, b)    // a | b
+int::bitxor(a, b)   // a ^ b
+int::shl(a, n)      // a << n
+int::shr(a, n)      // a >> n
+int::pow(a, b)      // pow(a, b)
+int::gcd(a, b)      // gcd(a, b)
+int::lcm(a, b)      // lcm(a, b)
+```
+
+**Float namespace** (`float`, `f64`, `f32`, `double`):
+```
+float::sqrt(x)      // sqrt(x)
+float::floor(x)     // floor(x)
+float::ceil(x)      // ceil(x)
+float::round(x)     // round(x)
+float::abs(x)       // abs(x)
+float::sin(x)       // sin(x)
+float::cos(x)       // cos(x)
+float::to_int(x)    // to_int(x)
+float::min(a, b)    // min_float(a, b)
+float::max(a, b)    // max_float(a, b)
+```
+
+**String namespace** (`string`, `str`):
+```
+string::len(s)              // len(s)
+string::contains(s, sub)    // str_contains(s, sub)
+string::replace(s, old, new) // str_replace(s, old, new)
+string::str_upper(s)        // str_upper(s)
+string::str_lower(s)        // str_lower(s)
+string::trim(s)             // str_trim(s)
+string::split(s, delim)     // str_split(s, delim)
+string::to_int(s)           // str_to_int(s)
+string::to_float(s)         // str_to_float(s)
+```
+
+**Array namespace** (`array`, `arr`):
+```
+array::len(a)           // len(a)
+array::push(a, v)       // push(a, v)
+array::pop(a)           // pop(a)
+array::sort(a)          // sort(a)
+array::reverse(a)       // reverse(a)
+array::sum(a)           // sum(a)
+array::min(a)           // array_min(a)
+array::max(a)           // array_max(a)
+```
+
+**Bool namespace** (`bool`):
+```
+bool::and(a, b)   // a && b
+bool::or(a, b)    // a || b
+bool::not(x)      // !x
+bool::xor(a, b)   // a ^ b
+```
 
 ---
 
@@ -966,12 +1149,21 @@ var empty = []
 var typed:int[] = [10, 20, 30]
 ```
 
-### 11.2 Indexing
+### 11.2 Indexing and Slicing
 
 ```
 arr[0]          // read (bounds-checked at O0/O1)
 arr[i] = val    // write
 s[i]            // string subscript: returns the integer character code at index i
+s[i] = code     // string byte assignment: writes a single byte (integer) at index i
+                //   only valid on heap-allocated strings (str_concat, str_upper, etc.)
+                //   literal strings are read-only
+```
+
+**Slice syntax** — extracts a sub-array using `start:end` notation (end is exclusive):
+```
+arr[1:4]    // sub-array [arr[1], arr[2], arr[3]] — desugars to array_slice(arr, 1, 4)
+arr[:4]     // from index 0 to 3 — desugars to array_slice(arr, 0, 4)
 ```
 
 Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and when the compiler can statically prove safety.
@@ -1059,6 +1251,18 @@ Strings are heap-allocated and NUL-terminated. String indexing and concatenation
 
 Dictionaries (maps) are hash maps mapping string keys to integer/pointer values.
 
+### 13.0 Dict Literals
+
+Dict literals create a map inline without calling `map_new()`:
+
+```
+var d = {"key1": 100, "key2": 200}
+var e = {}                              // empty dict
+var counts = {"a": 1, "b": 2, "c": 3}
+```
+
+Dict literals are expressions and can be used anywhere a dict value is expected. They are equivalent to calling `map_new()` followed by a series of `map_set()` calls.
+
 ### 13.1 Map Built-ins
 
 | Function | Description |
@@ -1096,7 +1300,8 @@ struct Buffer {
     noalias ptr: int,        // pointer does not alias other fields
     immut size: int,         // immutable after construction
     align(16) data: float,   // alignment requirement
-    range(0, 100) percent: int  // value range hint
+    range(0, 100) percent: int,  // value range hint
+    move payload: int        // field carries move semantics
 }
 ```
 
@@ -1139,16 +1344,37 @@ Operator overload functions are automatically inlined.
 
 ```
 enum Color {
-    Red,
-    Green,
-    Blue,
-    Custom = 42
+    RED,
+    GREEN = 10,
+    BLUE
 }
 
-var c = Color.Red
+var c = Color::RED   // scope resolution (preferred)
+var g = Color::GREEN // 10
 ```
 
 Enum members without explicit values are auto-numbered from 0 (or from the previous explicit value + 1).
+
+**Access forms:**
+- `EnumName::MEMBER` — scope-resolution syntax (preferred)
+- `EnumName_MEMBER` — underscore-separated flat name (also valid; generated internally)
+
+> **Note:** `Color.Red` (dot-access syntax) is **not** valid — dot notation applies to struct field access on variable instances, not to enum type names. Use `Color::RED` or `Color_RED`.
+
+Enum values are integer constants and can be used in any arithmetic or switch expression:
+
+```
+enum Status { OK = 0, ERROR = 1, PENDING = 2 }
+
+var s = Status::ERROR;
+if (s == Status::ERROR) { println("error"); }
+
+switch (s) {
+    case 0: { println("ok"); break; }
+    case 1: { println("error"); break; }
+    default: { println("pending"); }
+}
+```
 
 ---
 
@@ -1380,6 +1606,43 @@ OPTMAX!:
 
 `OPTMAX=:` opens the block; `OPTMAX!:` closes it. Nesting is not allowed.
 
+### 18.1 `@optmax(...)` Function Annotation
+
+As an alternative to `OPTMAX=: ... OPTMAX!:` blocks, the `@optmax(...)` annotation applies OPTMAX semantics to a single function with fine-grained control over individual optimization knobs:
+
+```
+@optmax(
+    safety = off,              // off | relaxed | on  (bounds check behavior)
+    fast_math = true,          // enable LLVM fast-math flags
+    report = false,            // print per-function opt report to stdout
+    loop = {
+        unroll = 4,            // loop unroll factor
+        vectorize = true,      // force vectorization
+        tile = 32,             // loop tiling block size
+        parallel = true        // assert iteration independence
+    },
+    memory = {
+        prefetch = true,       // auto-insert prefetch hints
+        noalias = true,        // mark all params noalias
+        stack = true           // prefer stack allocation
+    },
+    assume = ["n > 0", "n < 1000"],   // assertions injected at function entry
+    specialize = ["hot_path"]          // specialization hints
+)
+fn dot(a:float[], b:float[], n:int) -> float {
+    var sum:float = 0.0;
+    for (i:int in 0...n) { sum += a[i] * b[i]; }
+    return sum;
+}
+```
+
+Bare `@optmax` (without parentheses) applies OPTMAX semantics with default settings:
+
+```
+@optmax
+fn fast_fn(arr:int[], n:int) -> int { ... }
+```
+
 ---
 
 ## 19. Built-in Functions
@@ -1388,13 +1651,15 @@ OPTMAX!:
 
 | Function | Description |
 |---|---|
-| `print(...)` | Print values without newline |
-| `println(...)` | Print values with newline |
-| `write(s)` | Write string to stdout |
-| `print_char(c)` | Print a single character code |
-| `input()` | Read a word from stdin |
+| `print(val)` | Print value followed by a newline |
+| `println(val)` | Print value followed by a newline (identical behavior to `print`) |
+| `write(val)` | Print value **without** a trailing newline |
+| `print_char(c)` | Print a single character by ASCII/Unicode code |
+| `input()` | Read a whitespace-delimited word from stdin |
 | `input_line()` | Read a full line from stdin |
 | `exit(code)` / `exit_program(code)` | Exit with given code |
+
+> **Note:** Both `print()` and `println()` always append a newline. Use `write()` when you need output without a trailing newline.
 
 ### 19.2 Math
 
@@ -1554,6 +1819,17 @@ import "path/to/module";   // .om extension added automatically
 - Circular imports are detected and silently skipped
 - Paths are resolved relative to the importing file's directory
 - Imports merge all functions, structs, and enums from the imported file
+
+### 23.1 Import Aliases
+
+An imported module can be given a namespace alias using `as`:
+
+```
+import "utils" as utils;        // functions accessible as utils::funcname()
+import "math/fast" as fast;     // fast::dot(), fast::norm(), etc.
+```
+
+With an alias, the imported symbols are accessed via `::` scope resolution. Without an alias, all symbols are imported into the current scope directly.
 
 ---
 
