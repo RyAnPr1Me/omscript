@@ -535,7 +535,7 @@ fn bench_reduction(@prefetch n:int) -> int {
 }
 
 // ── 18. combined ─────────────────────────────────────────────
-@hot @vectorize @flatten @static @
+@hot @vectorize @flatten @static
 fn bench_combined(n:int) -> int {
     var total:int = 0;
     var acc:int = 0;
