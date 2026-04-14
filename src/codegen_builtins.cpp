@@ -387,6 +387,25 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                     }
                 }
             }
+            // Fold len(str_chars(s)) = len(s): str_chars returns an array with
+            // one element per character, so its length equals the string length.
+            // Avoids allocating the char array when only the length is needed.
+            if (call->callee == "str_chars" && call->arguments.size() == 1) {
+                // Generate the string length directly via strlen.
+                llvm::Value* strArg = generateExpression(call->arguments[0].get());
+                llvm::Value* strPtr = strArg->getType()->isPointerTy()
+                    ? strArg
+                    : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "len.chars.ptr");
+                llvm::Value* rawLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "len.chars.strlen");
+                auto* result = rawLen->getType() == getDefaultType()
+                    ? rawLen
+                    : builder->CreateZExtOrTrunc(rawLen, getDefaultType(), "len.chars.sz");
+                nonNegValues_.insert(result);
+                if (optimizationLevel >= OptimizationLevel::O1)
+                    llvm::cast<llvm::Instruction>(rawLen)->setMetadata(
+                        llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                return result;
+            }
         }
         // Also fold len(array_const_expr) via the unified evaluator.
         if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
@@ -394,6 +413,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 auto* result = llvm::ConstantInt::get(
                     getDefaultType(), static_cast<int64_t>(cv->arrVal.size()));
                 nonNegValues_.insert(result);
+                optStats_.constFolded++;
                 return result;
             }
         }
@@ -887,6 +907,40 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 if (allInt) {
                     optStats_.constFolded++;
                     return llvm::ConstantInt::get(getDefaultType(), total);
+                }
+            }
+        }
+        // Constant-fold sum(array_fill(n, v)) → n * v when both n and v are constant.
+        if (auto* call = dynamic_cast<CallExpr*>(expr->arguments[0].get())) {
+            if (call->callee == "array_fill" && call->arguments.size() == 2) {
+                if (auto n = tryFoldInt(call->arguments[0].get())) {
+                    if (auto v = tryFoldInt(call->arguments[1].get())) {
+                        if (*n >= 0) {
+                            optStats_.constFolded++;
+                            auto* ci = llvm::ConstantInt::get(getDefaultType(), (*n) * (*v));
+                            return ci;
+                        }
+                    }
+                }
+            }
+            // Constant-fold sum(range(a, b)) → arithmetic series (b-a)*(a+b-1)/2.
+            // range(a, b) produces [a, a+1, ..., b-1]; sum = (b-a)*(a+b-1)/2.
+            // One of (b-a) and (a+b-1) is always even, so integer division is exact.
+            if (call->callee == "range" && call->arguments.size() == 2) {
+                if (auto a = tryFoldInt(call->arguments[0].get())) {
+                    if (auto b = tryFoldInt(call->arguments[1].get())) {
+                        int64_t count = *b > *a ? *b - *a : 0;
+                        int64_t series;
+                        if (count == 0) {
+                            series = 0;
+                        } else if (count % 2 == 0) {
+                            series = (count / 2) * (*a + *b - 1);
+                        } else {
+                            series = count * ((*a + *b - 1) / 2);
+                        }
+                        optStats_.constFolded++;
+                        return llvm::ConstantInt::get(getDefaultType(), series);
+                    }
                 }
             }
         }
@@ -4104,6 +4158,22 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_FIND) {
         validateArgCount(expr, "array_find", 2);
+        // Constant-fold array_find([c0,...], val) when array and value are known.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                if (auto vv = tryFoldInt(expr->arguments[1].get())) {
+                    for (int64_t i = 0; i < static_cast<int64_t>(cv->arrVal.size()); ++i) {
+                        const auto& elem = cv->arrVal[static_cast<size_t>(i)];
+                        if (elem.kind == ConstValue::Kind::Integer && elem.intVal == *vv) {
+                            optStats_.constFolded++;
+                            return llvm::ConstantInt::get(getDefaultType(), i);
+                        }
+                    }
+                    optStats_.constFolded++;
+                    return llvm::ConstantInt::get(getDefaultType(), -1, true);
+                }
+            }
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* target = generateExpression(expr->arguments[1].get());
         target = toDefaultType(target);

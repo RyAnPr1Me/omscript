@@ -5801,6 +5801,101 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         }
         return std::nullopt;
     }
+    // ── array_find(arr, val) (alias for index_of — returns 0-based index or -1) ──
+    if (name == "array_find" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            for (int64_t i = 0; i < static_cast<int64_t>(args[0].arrVal.size()); ++i) {
+                if (args[0].arrVal[static_cast<size_t>(i)].kind == CV::Kind::Integer &&
+                    args[0].arrVal[static_cast<size_t>(i)].intVal == args[1].intVal)
+                    return CV::fromInt(i);
+            }
+            return CV::fromInt(-1);
+        }
+        return std::nullopt;
+    }
+    // ── startswith / endswith (OmScript aliases for str_starts_with / str_ends_with) ─
+    if (name == "startswith" && n == 2) {
+        auto s = strArg(0), prefix = strArg(1);
+        if (s && prefix) {
+            bool result = s->size() >= prefix->size() &&
+                          s->compare(0, prefix->size(), *prefix) == 0;
+            return CV::fromInt(result ? 1 : 0);
+        }
+        return std::nullopt;
+    }
+    if (name == "endswith" && n == 2) {
+        auto s = strArg(0), suffix = strArg(1);
+        if (s && suffix) {
+            bool result = s->size() >= suffix->size() &&
+                          s->compare(s->size() - suffix->size(), suffix->size(), *suffix) == 0;
+            return CV::fromInt(result ? 1 : 0);
+        }
+        return std::nullopt;
+    }
+    // ── array_fill(n, val) → array with n copies of val ────────────────────
+    if (name == "array_fill" && n == 2) {
+        if (args[0].kind == CV::Kind::Integer) {
+            int64_t count = args[0].intVal;
+            if (count < 0) count = 0;
+            if (count > 65536) return std::nullopt;  // guard against huge allocations
+            std::vector<CV> arr(static_cast<size_t>(count), args[1]);
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    // ── array_concat(arr1, arr2) ───────────────────────────────────────────
+    if (name == "array_concat" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Array) {
+            std::vector<CV> result = args[0].arrVal;
+            result.insert(result.end(), args[1].arrVal.begin(), args[1].arrVal.end());
+            return CV::fromArr(std::move(result));
+        }
+        return std::nullopt;
+    }
+    // ── array_slice(arr, start, end) ───────────────────────────────────────
+    if (name == "array_slice" && n == 3) {
+        if (args[0].kind == CV::Kind::Array &&
+            args[1].kind == CV::Kind::Integer &&
+            args[2].kind == CV::Kind::Integer) {
+            int64_t sz = static_cast<int64_t>(args[0].arrVal.size());
+            int64_t st = std::max(int64_t(0), std::min(args[1].intVal, sz));
+            int64_t en = std::max(st, std::min(args[2].intVal, sz));
+            std::vector<CV> slice(
+                args[0].arrVal.begin() + st,
+                args[0].arrVal.begin() + en);
+            return CV::fromArr(std::move(slice));
+        }
+        return std::nullopt;
+    }
+    // ── typeof(x) ─────────────────────────────────────────────────────────
+    if (name == "typeof" && n == 1) {
+        if (args[0].kind == CV::Kind::Integer) return CV::fromInt(1);   // integer
+        if (args[0].kind == CV::Kind::String)  return CV::fromInt(3);   // string
+        return CV::fromInt(1);  // arrays encoded as i64 at runtime → type 1
+    }
+    // ── str_chars(s) → array of char codes ────────────────────────────────
+    if (name == "str_chars" && n == 1) {
+        if (auto s = strArg(0)) {
+            std::vector<CV> arr;
+            arr.reserve(s->size());
+            for (unsigned char c : *s)
+                arr.push_back(CV::fromInt(static_cast<int64_t>(c)));
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    // ── sum(arr) / array_product(arr) via constant array ──────────────────
+    if (name == "sum" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            int64_t total = 0;
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind != CV::Kind::Integer) return std::nullopt;
+                total += elem.intVal;
+            }
+            return CV::fromInt(total);
+        }
+        return std::nullopt;
+    }
     return std::nullopt;
 }
 // using all statically-known information (constIntFolds_, constStringFolds_,
@@ -6661,8 +6756,11 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         "str_upper", "str_lower", "str_trim", "str_reverse",
         "str_substr", "str_contains", "str_replace", "str_repeat",
         "str_count", "str_pad_left", "str_pad_right",
+        "str_chars", "str_join",
         "sum", "array_product", "array_last",
-        "array_min", "array_max", "array_contains", "index_of",
+        "array_min", "array_max", "array_contains", "index_of", "array_find",
+        "array_fill", "array_concat", "array_slice", "array_copy",
+        "range", "range_step",
     };
 
     // Set of builtin/user names that are impure (I/O, heap side-effects, etc.)

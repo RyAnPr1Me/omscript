@@ -14,23 +14,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `str_pad_left("hi", 5, " ")` → interned string `"   hi"`
   - `str_pad_right("hi", 5, " ")` → interned string `"hi   "`
   - `sum([1, 2, 3])` → integer `6`
+  - `sum(array_fill(5, 3))` → integer `15` (= 5×3), avoids allocation entirely
+  - `sum(range(1, 6))` → integer `15` (arithmetic series formula), avoids allocation
   - `array_product([2, 3, 4])` → integer `24`
   - `array_last([10, 20, 30])` → integer `30`
   - `array_min([5, 2, 8, 1])` → integer `1`
   - `array_max([5, 2, 8, 1])` → integer `8`
   - `array_contains([1, 2, 3], 2)` → integer `1`
+  - `array_find([10, 20, 30], 20)` → integer `1`
   - `index_of([10, 20, 30], 30)` → integer `2`
   - `len(range(3, 8))` → integer `5`
   - `len(range_step(0, 10, 2))` → integer `5`
+  - `len(str_chars(s))` → `strlen(s)` (avoids allocating the char array)
+  - `len(array_concat([1,2], [3,4,5]))` → integer `5` via evalConstBuiltin chain
+  - `len(array_slice([1,2,3,4,5], 1, 4))` → integer `3` via evalConstBuiltin chain
   Each has a matching IR-level early-out (before generating loop/branch IR) and is also handled by `evalConstBuiltin` for cross-function constant propagation via `tryConstEvalFull`.
 
-- **Purity analysis coverage** — `str_to_int`, `str_pad_left`, `str_pad_right`, `sum`, `array_product`, `array_last`, `array_min`, `array_max`, `array_contains`, `index_of`, `log10`, `exp`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `cbrt`, `hypot`, `fma`, `copysign`, `min_float`, and `max_float` are now registered in `kPureBuiltins`, enabling `autoDetectConstEvalFunctions` to classify user functions that call these builtins as pure and eligible for cross-function constant propagation.
+- **Purity analysis coverage** — `str_to_int`, `str_pad_left`, `str_pad_right`, `sum`, `array_product`, `array_last`, `array_min`, `array_max`, `array_contains`, `index_of`, `array_find`, `array_fill`, `array_concat`, `array_slice`, `array_copy`, `str_chars`, `str_join`, `range`, `range_step`, `log10`, `exp`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `cbrt`, `hypot`, `fma`, `copysign`, `min_float`, and `max_float` are now registered in `kPureBuiltins`, enabling `autoDetectConstEvalFunctions` to classify user functions that call these builtins as pure and eligible for cross-function constant propagation.
 
 - **`stdlibFunctions` completeness** — `array_insert`, `array_last`, `array_product`, `str_pad_left`, `str_pad_right`, `fma`, `copysign`, `min_float`, and `max_float` were missing from the canonical stdlib function set used to validate `@optmax` function bodies. They are now registered, preventing false "cannot invoke non-OPTMAX function" errors.
 
 - **`!noundef` metadata on `INDEX_OF` and `ARRAY_CONTAINS` loops** — element loads in these two search loops were missing `!noundef` metadata at O1+. Added to be consistent with all other array element loads in the codebase, enabling LLVM's undefined-value elimination passes.
 
-- **`evalConstBuiltin` enriched** — `array_min`, `array_max`, `array_contains`, `index_of`, and `log10` are now evaluated at compile time by the abstract constant evaluator used for inter-procedural constant propagation (`tryConstEvalFull`).
+- **`evalConstBuiltin` enriched** — `array_min`, `array_max`, `array_contains`, `index_of`, `array_find`, `array_fill`, `array_concat`, `array_slice`, `typeof`, `str_chars`, `startswith`/`endswith` aliases, `log10`, and `sum` (via constant array) are now evaluated at compile time by the abstract constant evaluator used for inter-procedural constant propagation (`tryConstEvalFull`). This enables chains like `array_find(array_concat([1,2],[3,4]), 3)` → `2` at compile time.
 
 
 ### Added
