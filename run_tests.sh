@@ -127,6 +127,36 @@ flush_ptests() {
     _PT_NAMES=()
 }
 
+# ptest_cli_output — parallel variant of test_cli_output.
+# Usage: ptest_cli_output "name" "expected_substr" expected_exit cmd [args...]
+# Submits a background job; call flush_ptests to collect results.
+ptest_cli_output() {
+    local name=$1
+    local expected=$2
+    local expected_exit=$3
+    shift 3
+    local idx=$_PT_IDX
+    _PT_IDX=$(( _PT_IDX + 1 ))
+    _PT_NAMES[$idx]="$name"
+    TOTAL=$(( TOTAL + 1 ))
+
+    local rf="$TMPTEST/r_${idx}"
+    (
+        local output
+        output=$("$@" 2>&1)
+        local rc=$?
+        if [ "$rc" -ne "$expected_exit" ]; then
+            echo "FAIL expected-exit-${expected_exit}-got-${rc}" > "$rf"
+        elif [ -n "$expected" ] && ! echo "$output" | grep -qF -- "$expected"; then
+            echo "FAIL missing-expected-output" > "$rf"
+        else
+            echo "PASS ok" > "$rf"
+        fi
+    ) &
+    _PT_PIDS[$idx]=$!
+    _ptest_throttle
+}
+
 # ── Sequential helpers (used for CLI / side-effect tests) ──────────────────────
 test_compile_fail() {
     local source=$1
@@ -460,32 +490,31 @@ test_cli_output "invalid-octal-msg" "Expected octal digit after" 1 ./build/omsc 
 
 echo ""
 echo "============================================"
-echo "Optimization Tests"
+echo "Optimization Tests (parallel)"
 echo "============================================"
 echo ""
 
-# Test optimization level flags
-test_cli_output "opt-O0-compile" "compiled" 0 ./build/omsc -O0 examples/exit_zero.om -o /tmp/test_o0
-rm -f /tmp/test_o0 /tmp/test_o0.o
-test_cli_output "opt-O1-compile" "compiled" 0 ./build/omsc -O1 examples/exit_zero.om -o /tmp/test_o1
-rm -f /tmp/test_o1 /tmp/test_o1.o
-test_cli_output "opt-O3-compile" "compiled" 0 ./build/omsc -O3 examples/exit_zero.om -o /tmp/test_o3
-rm -f /tmp/test_o3 /tmp/test_o3.o
-test_cli_output "opt-Ofast-compile" "compiled" 0 ./build/omsc -Ofast examples/exit_zero.om -o /tmp/test_ofast
-rm -f /tmp/test_ofast /tmp/test_ofast.o
-test_cli_output "opt-O0-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -O0 examples/exit_zero.om
-test_cli_output "opt-O3-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -O3 examples/exit_zero.om
-test_cli_output "opt-Ofast-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -Ofast examples/exit_zero.om
+# Test optimization level flags (parallel — each job gets a unique tmp exe)
+ptest_cli_output "opt-O0-compile" "compiled" 0 ./build/omsc -O0 examples/exit_zero.om -o "$TMPTEST/t_o0"
+ptest_cli_output "opt-O1-compile" "compiled" 0 ./build/omsc -O1 examples/exit_zero.om -o "$TMPTEST/t_o1"
+ptest_cli_output "opt-O3-compile" "compiled" 0 ./build/omsc -O3 examples/exit_zero.om -o "$TMPTEST/t_o3"
+ptest_cli_output "opt-Ofast-compile" "compiled" 0 ./build/omsc -Ofast examples/exit_zero.om -o "$TMPTEST/t_ofast"
+ptest_cli_output "opt-O0-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -O0 examples/exit_zero.om
+ptest_cli_output "opt-O3-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -O3 examples/exit_zero.om
+ptest_cli_output "opt-Ofast-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -Ofast examples/exit_zero.om
+ptest_cli_output "opt-help-shows-flags" "-O0" 0 ./build/omsc --help
+flush_ptests
+
+# run subcommand tests must be sequential: omsc run spawns a child process
+# that can receive SIGHUP when executed inside a background subshell.
 test_cli_output "opt-O0-run" "compiled" 0 ./build/omsc run -O0 examples/exit_zero.om
 test_cli_output "opt-Ofast-run" "compiled" 0 ./build/omsc run -Ofast examples/exit_zero.om
-test_cli_output "opt-help-shows-flags" "-O0" 0 ./build/omsc --help
 
 TOTAL=$((TOTAL + 1))
 echo -n "Testing with O3 optimization... "
-./build/omsc examples/benchmark.om -o benchmark_o3 > /dev/null 2>&1
+./build/omsc examples/benchmark.om -o "$TMPTEST/benchmark_o3" > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-    ./benchmark_o3 > /dev/null 2>&1
-    rm -f benchmark_o3 benchmark_o3.o
+    "$TMPTEST/benchmark_o3" > /dev/null 2>&1
     echo -e "${GREEN}✓ O3 compilation successful${NC}"
 else
     echo -e "${RED}✗ O3 compilation failed${NC}"
@@ -494,93 +523,82 @@ fi
 
 echo ""
 echo "============================================"
-echo "Target & Feature Flag Tests"
+echo "Target & Feature Flag Tests (parallel)"
 echo "============================================"
 echo ""
 
-# Test -march and -mtune flags
-test_cli_output "march-native" "compiled" 0 ./build/omsc -march=native examples/exit_zero.om -o /tmp/test_march_native
-rm -f /tmp/test_march_native /tmp/test_march_native.o
-test_cli_output "march-x86-64" "compiled" 0 ./build/omsc -march=x86-64 examples/exit_zero.om -o /tmp/test_march_x86
-rm -f /tmp/test_march_x86 /tmp/test_march_x86.o
-test_cli_output "mtune-generic" "compiled" 0 ./build/omsc -mtune=generic examples/exit_zero.om -o /tmp/test_mtune_gen
-rm -f /tmp/test_mtune_gen /tmp/test_mtune_gen.o
-test_cli_output "march-mtune-combined" "compiled" 0 ./build/omsc -march=x86-64 -mtune=generic examples/exit_zero.om -o /tmp/test_march_mtune
-rm -f /tmp/test_march_mtune /tmp/test_march_mtune.o
+# Test -march and -mtune flags (parallel)
+ptest_cli_output "march-native" "compiled" 0 ./build/omsc -march=native examples/exit_zero.om -o "$TMPTEST/t_march_native"
+ptest_cli_output "march-x86-64" "compiled" 0 ./build/omsc -march=x86-64 examples/exit_zero.om -o "$TMPTEST/t_march_x86"
+ptest_cli_output "mtune-generic" "compiled" 0 ./build/omsc -mtune=generic examples/exit_zero.om -o "$TMPTEST/t_mtune_gen"
+ptest_cli_output "march-mtune-combined" "compiled" 0 ./build/omsc -march=x86-64 -mtune=generic examples/exit_zero.om -o "$TMPTEST/t_march_mtune"
 
-# Test feature toggle flags
-test_cli_output "fno-pic" "compiled" 0 ./build/omsc -fno-pic examples/exit_zero.om -o /tmp/test_nopic
-rm -f /tmp/test_nopic /tmp/test_nopic.o
-test_cli_output "fpic" "compiled" 0 ./build/omsc -fpic examples/exit_zero.om -o /tmp/test_pic
-rm -f /tmp/test_pic /tmp/test_pic.o
-test_cli_output "ffast-math" "compiled" 0 ./build/omsc -ffast-math examples/exit_zero.om -o /tmp/test_fastmath
-rm -f /tmp/test_fastmath /tmp/test_fastmath.o
-test_cli_output "fno-fast-math" "compiled" 0 ./build/omsc -fno-fast-math examples/exit_zero.om -o /tmp/test_nofastmath
-rm -f /tmp/test_nofastmath /tmp/test_nofastmath.o
-test_cli_output "fno-optmax" "compiled" 0 ./build/omsc -fno-optmax examples/optmax.om -o /tmp/test_nooptmax
-rm -f /tmp/test_nooptmax /tmp/test_nooptmax.o
-test_cli_output "foptmax" "compiled" 0 ./build/omsc -foptmax examples/optmax.om -o /tmp/test_optmax
-rm -f /tmp/test_optmax /tmp/test_optmax.o
-test_cli_output "flto" "compiled" 0 ./build/omsc -flto examples/exit_zero.om -o /tmp/test_lto
-rm -f /tmp/test_lto /tmp/test_lto.o /tmp/test_lto.bc
-test_cli_output "fno-lto" "compiled" 0 ./build/omsc -fno-lto examples/exit_zero.om -o /tmp/test_nolto
-rm -f /tmp/test_nolto /tmp/test_nolto.o /tmp/test_nolto.bc
-test_cli_output "fstack-protector" "compiled" 0 ./build/omsc -fstack-protector examples/exit_zero.om -o /tmp/test_sp
-rm -f /tmp/test_sp /tmp/test_sp.o
-test_cli_output "fno-stack-protector" "compiled" 0 ./build/omsc -fno-stack-protector examples/exit_zero.om -o /tmp/test_nosp
-rm -f /tmp/test_nosp /tmp/test_nosp.o
-test_cli_output "strip-long" "compiled" 0 ./build/omsc --strip examples/exit_zero.om -o /tmp/test_strip
-rm -f /tmp/test_strip /tmp/test_strip.o
-test_cli_output "strip-short" "compiled" 0 ./build/omsc -s examples/exit_zero.om -o /tmp/test_strip_s
-rm -f /tmp/test_strip_s /tmp/test_strip_s.o
+# Test feature toggle flags (parallel)
+ptest_cli_output "fno-pic" "compiled" 0 ./build/omsc -fno-pic examples/exit_zero.om -o "$TMPTEST/t_nopic"
+ptest_cli_output "fpic" "compiled" 0 ./build/omsc -fpic examples/exit_zero.om -o "$TMPTEST/t_pic"
+ptest_cli_output "ffast-math" "compiled" 0 ./build/omsc -ffast-math examples/exit_zero.om -o "$TMPTEST/t_fastmath"
+ptest_cli_output "fno-fast-math" "compiled" 0 ./build/omsc -fno-fast-math examples/exit_zero.om -o "$TMPTEST/t_nofastmath"
+ptest_cli_output "fno-optmax" "compiled" 0 ./build/omsc -fno-optmax examples/optmax.om -o "$TMPTEST/t_nooptmax"
+ptest_cli_output "foptmax" "compiled" 0 ./build/omsc -foptmax examples/optmax.om -o "$TMPTEST/t_optmax"
+ptest_cli_output "flto" "compiled" 0 ./build/omsc -flto examples/exit_zero.om -o "$TMPTEST/t_lto"
+ptest_cli_output "fno-lto" "compiled" 0 ./build/omsc -fno-lto examples/exit_zero.om -o "$TMPTEST/t_nolto"
+ptest_cli_output "fstack-protector" "compiled" 0 ./build/omsc -fstack-protector examples/exit_zero.om -o "$TMPTEST/t_sp"
+ptest_cli_output "fno-stack-protector" "compiled" 0 ./build/omsc -fno-stack-protector examples/exit_zero.om -o "$TMPTEST/t_nosp"
+ptest_cli_output "strip-long" "compiled" 0 ./build/omsc --strip examples/exit_zero.om -o "$TMPTEST/t_strip"
+ptest_cli_output "strip-short" "compiled" 0 ./build/omsc -s examples/exit_zero.om -o "$TMPTEST/t_strip_s"
 
-# Test combined flags with run
+# run with combined flags must be sequential (same SIGHUP reason as above)
 test_cli_output "run-combined-flags" "compiled" 0 ./build/omsc run -O3 -march=x86-64 -ffast-math examples/exit_zero.om
 
-# Test help output includes new flags
-test_cli_output "help-shows-march" "-march=" 0 ./build/omsc --help
-test_cli_output "help-shows-mtune" "-mtune=" 0 ./build/omsc --help
-test_cli_output "help-shows-flto" "-flto" 0 ./build/omsc --help
-test_cli_output "help-shows-fpic" "-fpic" 0 ./build/omsc --help
-test_cli_output "help-shows-ffast-math" "-ffast-math" 0 ./build/omsc --help
-test_cli_output "help-shows-foptmax" "-foptmax" 0 ./build/omsc --help
-test_cli_output "help-shows-static" "-static" 0 ./build/omsc --help
-test_cli_output "help-shows-strip" "--strip" 0 ./build/omsc --help
-test_cli_output "help-shows-fstack-protector" "-fstack-protector" 0 ./build/omsc --help
+# Test help output includes new flags (parallel)
+ptest_cli_output "help-shows-march" "-march=" 0 ./build/omsc --help
+ptest_cli_output "help-shows-mtune" "-mtune=" 0 ./build/omsc --help
+ptest_cli_output "help-shows-flto" "-flto" 0 ./build/omsc --help
+ptest_cli_output "help-shows-fpic" "-fpic" 0 ./build/omsc --help
+ptest_cli_output "help-shows-ffast-math" "-ffast-math" 0 ./build/omsc --help
+ptest_cli_output "help-shows-foptmax" "-foptmax" 0 ./build/omsc --help
+ptest_cli_output "help-shows-static" "-static" 0 ./build/omsc --help
+ptest_cli_output "help-shows-strip" "--strip" 0 ./build/omsc --help
+ptest_cli_output "help-shows-fstack-protector" "-fstack-protector" 0 ./build/omsc --help
+flush_ptests
 
 echo ""
 echo "============================================"
-echo "New CLI Feature Tests"
+echo "New CLI Feature Tests (parallel)"
 echo "============================================"
 echo ""
 
 # check command
-test_cli_output "check-valid" "OK" 0 ./build/omsc check examples/factorial.om
-test_cli_output "check-syntax-error" "Expected ';'" 1 ./build/omsc check examples/missing_semicolon.om
-test_cli_output "check-flag" "OK" 0 ./build/omsc --check examples/exit_zero.om
+ptest_cli_output "check-valid" "OK" 0 ./build/omsc check examples/factorial.om
+ptest_cli_output "check-syntax-error" "Expected ';'" 1 ./build/omsc check examples/missing_semicolon.om
+ptest_cli_output "check-flag" "OK" 0 ./build/omsc --check examples/exit_zero.om
 
 # --quiet flag
-test_cli_output "quiet-check" "" 0 ./build/omsc -q check examples/factorial.om
-test_cli_output "quiet-long" "" 0 ./build/omsc --quiet check examples/factorial.om
+ptest_cli_output "quiet-check" "" 0 ./build/omsc -q check examples/factorial.om
+ptest_cli_output "quiet-long" "" 0 ./build/omsc --quiet check examples/factorial.om
 
 # --time flag
-test_cli_output "time-check" "Timing:" 0 ./build/omsc check examples/factorial.om --time
-test_cli_output "time-lex" "Timing:" 0 ./build/omsc lex examples/exit_zero.om --time
-test_cli_output "time-parse" "Timing:" 0 ./build/omsc parse examples/exit_zero.om --time
-test_cli_output "time-compile" "Timing:" 0 ./build/omsc --time examples/exit_zero.om -o /tmp/omsc_time_test
-rm -f /tmp/omsc_time_test /tmp/omsc_time_test.o
+ptest_cli_output "time-check" "Timing:" 0 ./build/omsc check examples/factorial.om --time
+ptest_cli_output "time-lex" "Timing:" 0 ./build/omsc lex examples/exit_zero.om --time
+ptest_cli_output "time-parse" "Timing:" 0 ./build/omsc parse examples/exit_zero.om --time
+ptest_cli_output "time-compile" "Timing:" 0 ./build/omsc --time examples/exit_zero.om -o "$TMPTEST/t_time"
 
 # --dump-ast flag
-test_cli_output "dump-ast" "FunctionDecl" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
-test_cli_output "dump-ast-shows-return" "ReturnStmt" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
-test_cli_output "dump-ast-shows-block" "Block" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
+ptest_cli_output "dump-ast" "FunctionDecl" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
+ptest_cli_output "dump-ast-shows-return" "ReturnStmt" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
+ptest_cli_output "dump-ast-shows-block" "Block" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
 
 # --dump-tokens alias
-test_cli_output "dump-tokens-alias" "FN" 0 ./build/omsc --dump-tokens examples/test.om
+ptest_cli_output "dump-tokens-alias" "FN" 0 ./build/omsc --dump-tokens examples/test.om
 
-# --dry-run flag
-test_cli_output "dry-run-compile" "Dry run" 0 ./build/omsc --dry-run examples/factorial.om
-test_cli_output "dry-run-no-output-file" "" 0 ./build/omsc --dry-run examples/exit_zero.om
+# --dry-run flag (output checks — parallel)
+ptest_cli_output "dry-run-compile" "Dry run" 0 ./build/omsc --dry-run examples/factorial.om
+ptest_cli_output "dry-run-no-output-file" "" 0 ./build/omsc --dry-run examples/exit_zero.om
+ptest_cli_output "dry-run-invalid" "Unknown variable" 1 ./build/omsc --dry-run examples/undefined_var.om
+ptest_cli_output "dry-run-emit-ir" "Dry run" 0 ./build/omsc --dry-run emit-ir examples/exit_zero.om
+flush_ptests
+
+# dry-run file-existence check must run after flush (sequential, file-system side-effect)
 TOTAL=$((TOTAL + 1))
 echo -n "Testing dry-run-no-binary-created... "
 ./build/omsc --dry-run examples/exit_zero.om > /dev/null 2>&1
@@ -591,32 +609,32 @@ else
     rm -f a.out
     FAILURES=$((FAILURES + 1))
 fi
-test_cli_output "dry-run-invalid" "Unknown variable" 1 ./build/omsc --dry-run examples/undefined_var.om
-test_cli_output "dry-run-emit-ir" "Dry run" 0 ./build/omsc --dry-run emit-ir examples/exit_zero.om
 
-# --emit-obj flag
-test_cli_output "emit-obj" "Object file written" 0 ./build/omsc --emit-obj examples/exit_zero.om -o /tmp/omsc_obj_test.o
+# --emit-obj flag (output check parallel, file-existence check sequential)
+ptest_cli_output "emit-obj" "Object file written" 0 ./build/omsc --emit-obj examples/exit_zero.om -o "$TMPTEST/omsc_obj_test.o"
+ptest_cli_output "emit-obj-default-name" "exit_zero.o" 0 ./build/omsc --emit-obj examples/exit_zero.om
+flush_ptests
+
 TOTAL=$((TOTAL + 1))
 echo -n "Testing emit-obj-file-exists... "
-if [ -f /tmp/omsc_obj_test.o ]; then
+# Re-run to get the file into a predictable location for the existence check
+./build/omsc --emit-obj examples/exit_zero.om -o "$TMPTEST/omsc_obj_check.o" > /dev/null 2>&1
+if [ -f "$TMPTEST/omsc_obj_check.o" ]; then
     echo -e "${GREEN}✓ Passed${NC}"
 else
     echo -e "${RED}✗ Failed (object file should exist)${NC}"
     FAILURES=$((FAILURES + 1))
 fi
-rm -f /tmp/omsc_obj_test.o
-test_cli_output "emit-obj-default-name" "exit_zero.o" 0 ./build/omsc --emit-obj examples/exit_zero.om
 rm -f exit_zero.o
 
-# help output includes new features
-test_cli_output "help-shows-check" "check" 0 ./build/omsc --help
-test_cli_output "help-shows-time" "--time" 0 ./build/omsc --help
-test_cli_output "help-shows-emit-obj" "--emit-obj" 0 ./build/omsc --help
-test_cli_output "help-shows-dry-run" "--dry-run" 0 ./build/omsc --help
-test_cli_output "help-shows-quiet" "--quiet" 0 ./build/omsc --help
-
-# Version shows full semver
-test_cli_output "version-full-semver" "OmScript Compiler v" 0 ./build/omsc --version
+# help / version (parallel)
+ptest_cli_output "help-shows-check" "check" 0 ./build/omsc --help
+ptest_cli_output "help-shows-time" "--time" 0 ./build/omsc --help
+ptest_cli_output "help-shows-emit-obj" "--emit-obj" 0 ./build/omsc --help
+ptest_cli_output "help-shows-dry-run" "--dry-run" 0 ./build/omsc --help
+ptest_cli_output "help-shows-quiet" "--quiet" 0 ./build/omsc --help
+ptest_cli_output "version-full-semver" "OmScript Compiler v" 0 ./build/omsc --version
+flush_ptests
 
 echo ""
 echo "============================================"

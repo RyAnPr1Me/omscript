@@ -365,7 +365,7 @@ register var x:int = 0    // hint to force variable into CPU register
 
 Instructs the compiler to promote the variable to an SSA register via LLVM's `mem2reg` pass. Only works for types that fit in a register (integers, floats, bools).
 
-### 6.4 Assignment
+### 6.5 Assignment
 
 ```
 x = 10
@@ -373,7 +373,7 @@ arr[i] = value
 obj.field = value
 ```
 
-### 6.5 Compound Assignment
+### 6.6 Compound Assignment
 
 ```
 x += 1     x -= 1     x *= 2     x /= 2     x %= 3
@@ -1636,7 +1636,7 @@ All `-f` flags have a `-fno-` counterpart to disable:
 -s / --strip   Strip debug symbols from output
 ```
 
-**Verbose output (`-v` / `--verbose`):** In addition to standard compiler progress, prints an **opt-report** summary after compilation showing how many of each optimization class were applied:
+**Verbose output (`-V` / `--verbose`):** In addition to standard compiler progress, prints an **opt-report** summary after compilation showing how many of each optimization class were applied:
 
 ```
 [opt-report] Optimization statistics:
@@ -1802,7 +1802,7 @@ When combined with `@loop(vectorize=true)` or inside an OPTMAX block, the vector
 
 ### 25.11 OptStats
 
-When the compiler is run with `-v` / `--verbose`, it prints an **opt-report** summary after compilation listing all optimization counters:
+When the compiler is run with `-V` / `--verbose`, it prints an **opt-report** summary after compilation listing all optimization counters:
 
 | Counter | What it counts |
 |---|---|
