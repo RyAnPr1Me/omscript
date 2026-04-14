@@ -1776,9 +1776,7 @@ llvm::Function* CodeGenerator::getOrDeclareQsort() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
                                        {ptrTy, getDefaultType(), getDefaultType(), ptrTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "qsort", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
+    llvm::Function* fn = declareExternalFn("qsort", ty);
     return fn;
 }
 
@@ -1822,6 +1820,11 @@ llvm::Function* CodeGenerator::getOrDeclareTimeFunc() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(inaccessiblemem: read): time() reads the OS clock (inaccessible
+    // to the LLVM optimizer) and optionally writes through its pointer arg
+    // (always null in OmScript), so treat as read-only inaccessible memory.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context,
+        llvm::MemoryEffects::inaccessibleMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
 }
 
@@ -1841,9 +1844,7 @@ llvm::Function* CodeGenerator::getOrDeclareStrchr() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context)}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strchr", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
+    llvm::Function* fn = declareExternalFn("strchr", ty);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
     // memory(argmem: read): strchr only reads through its pointer arg.

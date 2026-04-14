@@ -75,7 +75,9 @@ enum class BuiltinId : uint8_t {
     // Array utility builtins
     ARRAY_PRODUCT, ARRAY_LAST, ARRAY_INSERT,
     // String padding builtins
-    STR_PAD_LEFT, STR_PAD_RIGHT
+    STR_PAD_LEFT, STR_PAD_RIGHT,
+    // Character classification predicates
+    IS_UPPER, IS_LOWER, IS_SPACE, IS_ALNUM
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -107,6 +109,10 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"to_char", BuiltinId::TO_CHAR},
     {"is_alpha", BuiltinId::IS_ALPHA},
     {"is_digit", BuiltinId::IS_DIGIT},
+    {"is_upper", BuiltinId::IS_UPPER},
+    {"is_lower", BuiltinId::IS_LOWER},
+    {"is_space", BuiltinId::IS_SPACE},
+    {"is_alnum", BuiltinId::IS_ALNUM},
     {"typeof", BuiltinId::TYPEOF},
     {"assert", BuiltinId::ASSERT},
     {"str_len", BuiltinId::STR_LEN},
@@ -1217,6 +1223,81 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateSub(x, c0, "sub.0"), c9, "isdigit");
         auto* result = builder->CreateZExt(isDigit, getDefaultType(), "digitval");
         // is_digit always returns 0 or 1.
+        nonNegValues_.insert(result);
+        return result;
+    }
+
+    if (bid == BuiltinId::IS_UPPER) {
+        validateArgCount(expr, "is_upper", 1);
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        x = toDefaultType(x);
+        // (x - 'A') <=u 25  covers exactly 'A'..'Z'
+        auto* cA = llvm::ConstantInt::get(getDefaultType(), 65);  // 'A'
+        auto* c25 = llvm::ConstantInt::get(getDefaultType(), 25); // 'Z'-'A'
+        llvm::Value* isUpper = builder->CreateICmpULE(
+            builder->CreateSub(x, cA, "sub.A"), c25, "isupper");
+        auto* result = builder->CreateZExt(isUpper, getDefaultType(), "upperval");
+        nonNegValues_.insert(result);
+        return result;
+    }
+
+    if (bid == BuiltinId::IS_LOWER) {
+        validateArgCount(expr, "is_lower", 1);
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        x = toDefaultType(x);
+        // (x - 'a') <=u 25  covers exactly 'a'..'z'
+        auto* ca = llvm::ConstantInt::get(getDefaultType(), 97);  // 'a'
+        auto* c25 = llvm::ConstantInt::get(getDefaultType(), 25); // 'z'-'a'
+        llvm::Value* isLower = builder->CreateICmpULE(
+            builder->CreateSub(x, ca, "sub.a"), c25, "islower");
+        auto* result = builder->CreateZExt(isLower, getDefaultType(), "lowerval");
+        nonNegValues_.insert(result);
+        return result;
+    }
+
+    if (bid == BuiltinId::IS_SPACE) {
+        validateArgCount(expr, "is_space", 1);
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        x = toDefaultType(x);
+        // C whitespace: ' '(32), '\t'(9), '\n'(10), '\v'(11), '\f'(12), '\r'(13)
+        // Split into two range checks:
+        //   (x - 9) <=u 4   covers 9,10,11,12,13
+        //   x == 32          covers ' '
+        auto* c9 = llvm::ConstantInt::get(getDefaultType(), 9);   // '\t'
+        auto* c4 = llvm::ConstantInt::get(getDefaultType(), 4);   // '\r'-'\t'
+        auto* c32 = llvm::ConstantInt::get(getDefaultType(), 32); // ' '
+        llvm::Value* isCtrl = builder->CreateICmpULE(
+            builder->CreateSub(x, c9, "sub.9"), c4, "isctrl");
+        llvm::Value* isSpc = builder->CreateICmpEQ(x, c32, "isspc");
+        llvm::Value* isSpace = builder->CreateOr(isCtrl, isSpc, "isspace");
+        auto* result = builder->CreateZExt(isSpace, getDefaultType(), "spaceval");
+        nonNegValues_.insert(result);
+        return result;
+    }
+
+    if (bid == BuiltinId::IS_ALNUM) {
+        validateArgCount(expr, "is_alnum", 1);
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        x = toDefaultType(x);
+        // Alphanumeric: letter (A-Z or a-z) or digit (0-9).
+        // Three range checks combined with OR:
+        //   (x - 'A') <=u 25  uppercase
+        //   (x - 'a') <=u 25  lowercase
+        //   (x - '0') <=u 9   digit
+        auto* cA = llvm::ConstantInt::get(getDefaultType(), 65);  // 'A'
+        auto* ca = llvm::ConstantInt::get(getDefaultType(), 97);  // 'a'
+        auto* c0 = llvm::ConstantInt::get(getDefaultType(), 48);  // '0'
+        auto* c25 = llvm::ConstantInt::get(getDefaultType(), 25); // 'Z'-'A'
+        auto* c9  = llvm::ConstantInt::get(getDefaultType(), 9);  // '9'-'0'
+        llvm::Value* upper = builder->CreateICmpULE(
+            builder->CreateSub(x, cA, "sub.A"), c25, "isupper2");
+        llvm::Value* lower = builder->CreateICmpULE(
+            builder->CreateSub(x, ca, "sub.a"), c25, "islower2");
+        llvm::Value* digit = builder->CreateICmpULE(
+            builder->CreateSub(x, c0, "sub.0"), c9,  "isdigit2");
+        llvm::Value* isAlnum = builder->CreateOr(
+            builder->CreateOr(upper, lower, "isalpha2"), digit, "isalnum");
+        auto* result = builder->CreateZExt(isAlnum, getDefaultType(), "alnumval");
         nonNegValues_.insert(result);
         return result;
     }

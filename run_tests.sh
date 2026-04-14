@@ -369,6 +369,7 @@ ptest_program "examples/new_builtins_test.om" 87
 ptest_program "examples/math_builtins_test.om" 52
 ptest_program "examples/trig_math_test.om" 32
 ptest_program "examples/string_builtins_test.om" 12
+ptest_program "examples/char_predicates_test.om" 27
 ptest_program "examples/array_builtins_test.om" 20
 ptest_program "examples/array_utility_test.om" 18
 ptest_program "examples/simd_register_test.om" 14
