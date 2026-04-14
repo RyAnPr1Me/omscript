@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <llvm/Support/ErrorHandling.h>
 #include <stdexcept>
 
 namespace omscript {
@@ -68,7 +69,7 @@ Token Parser::consume(TokenType type, const std::string& message) {
         return advance();
     }
     error(message);
-    throw std::logic_error("unreachable parser consume() path");
+    llvm_unreachable("error() always throws");
 }
 
 [[gnu::cold]] void Parser::error(const std::string& message) {

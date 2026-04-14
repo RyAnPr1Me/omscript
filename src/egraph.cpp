@@ -18,9 +18,9 @@
 
 #include "egraph.h"
 #include <algorithm>
-#include <cassert>
 #include <cmath>
 #include <limits>
+#include <llvm/Support/ErrorHandling.h>
 #include <queue>
 #include <stack>
 
@@ -247,7 +247,8 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 [[gnu::hot]] ClassId EGraph::find(ClassId id) {
-    assert(id < parent_.size() && "ClassId out of range");
+    if (id >= parent_.size())
+        llvm::report_fatal_error("EGraph::find: ClassId out of range");
     // Path compression
     while (parent_[id] != id) {
         parent_[id] = parent_[parent_[id]]; // path halving
@@ -759,7 +760,8 @@ ENode EGraph::extract(ClassId root, const CostModel& model) {
 
 const EClass& EGraph::getClass(ClassId id) const {
     id = const_cast<EGraph*>(this)->find(id);
-    assert(id < classes_.size());
+    if (id >= classes_.size())
+        llvm::report_fatal_error("EGraph::getClass: ClassId out of range after find");
     return classes_[id];
 }
 

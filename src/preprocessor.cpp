@@ -1,9 +1,9 @@
 #include "preprocessor.h"
+#include "diagnostic.h"
 #include "version.h"
 #include <algorithm>
 #include <cctype>
 #include <sstream>
-#include <stdexcept>
 
 // Detect OS and architecture at compile time for __OS__ / __ARCH__
 #if defined(_WIN32) || defined(_WIN64)
@@ -93,8 +93,10 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
     const std::string r = trimLeft(rest);
     size_t i = 0;
     if (i >= r.size() || !isIdentStart(r[i])) {
-        throw std::runtime_error("Line " + std::to_string(lineNo) +
-                                  ": #define: expected macro name");
+        throw omscript::DiagnosticError(omscript::Diagnostic{
+            omscript::DiagnosticSeverity::Error,
+            {filename_, lineNo, 0},
+            "#define: expected macro name"});
     }
     while (i < r.size() && isIdentChar(r[i])) i++;
     const std::string name = r.substr(0, i);
@@ -516,10 +518,16 @@ std::string Preprocessor::process(const std::string& source) {
         }
         if (kw == "elif") {
             if (condStack.size() <= 1)
-                throw std::runtime_error(filename_ + ":" + std::to_string(lineNo) + ": #elif without #if");
+                throw omscript::DiagnosticError(omscript::Diagnostic{
+                    omscript::DiagnosticSeverity::Error,
+                    {filename_, lineNo, 0},
+                    "#elif without #if"});
             CondEntry& top = condStack.back();
             if (top.done)
-                throw std::runtime_error(filename_ + ":" + std::to_string(lineNo) + ": #elif after #else");
+                throw omscript::DiagnosticError(omscript::Diagnostic{
+                    omscript::DiagnosticSeverity::Error,
+                    {filename_, lineNo, 0},
+                    "#elif after #else"});
             if (!top.seenTrue && condStack[condStack.size()-2].active) {
                 bool cond = (evalExpr(arg, lineNo) != 0);
                 top.active = cond;
@@ -531,10 +539,16 @@ std::string Preprocessor::process(const std::string& source) {
         }
         if (kw == "else") {
             if (condStack.size() <= 1)
-                throw std::runtime_error(filename_ + ":" + std::to_string(lineNo) + ": #else without #if");
+                throw omscript::DiagnosticError(omscript::Diagnostic{
+                    omscript::DiagnosticSeverity::Error,
+                    {filename_, lineNo, 0},
+                    "#else without #if"});
             CondEntry& top = condStack.back();
             if (top.done)
-                throw std::runtime_error(filename_ + ":" + std::to_string(lineNo) + ": duplicate #else");
+                throw omscript::DiagnosticError(omscript::Diagnostic{
+                    omscript::DiagnosticSeverity::Error,
+                    {filename_, lineNo, 0},
+                    "duplicate #else"});
             top.done = true;
             if (!top.seenTrue && condStack[condStack.size()-2].active) {
                 top.active = true;
@@ -546,7 +560,10 @@ std::string Preprocessor::process(const std::string& source) {
         }
         if (kw == "endif") {
             if (condStack.size() <= 1)
-                throw std::runtime_error(filename_ + ":" + std::to_string(lineNo) + ": #endif without #if");
+                throw omscript::DiagnosticError(omscript::Diagnostic{
+                    omscript::DiagnosticSeverity::Error,
+                    {filename_, lineNo, 0},
+                    "#endif without #if"});
             condStack.pop_back();
             output += '\n'; continue;
         }
@@ -564,8 +581,10 @@ std::string Preprocessor::process(const std::string& source) {
             output += '\n'; continue;
         }
         if (kw == "error") {
-            throw std::runtime_error(filename_ + ":" + std::to_string(lineNo) +
-                                      ": #error " + arg);
+            throw omscript::DiagnosticError(omscript::Diagnostic{
+                omscript::DiagnosticSeverity::Error,
+                {filename_, lineNo, 0},
+                "#error " + arg});
         }
         if (kw == "warning") {
             warnings_.push_back(filename_ + ":" + std::to_string(lineNo) +
@@ -591,8 +610,10 @@ std::string Preprocessor::process(const std::string& source) {
                 std::string msg = msgPart.empty()
                     ? "compile-time assertion failed: " + exprPart
                     : msgPart;
-                throw std::runtime_error(filename_ + ":" + std::to_string(lineNo) +
-                                          ": #assert failed: " + msg);
+                throw omscript::DiagnosticError(omscript::Diagnostic{
+                    omscript::DiagnosticSeverity::Error,
+                    {filename_, lineNo, 0},
+                    "#assert failed: " + msg});
             }
             output += '\n'; continue;
         }
@@ -601,9 +622,11 @@ std::string Preprocessor::process(const std::string& source) {
             if (reqVer.size() >= 2 && reqVer.front() == '"' && reqVer.back() == '"')
                 reqVer = reqVer.substr(1, reqVer.size() - 2);
             if (cmpVersion(OMSC_VERSION, reqVer) < 0) {
-                throw std::runtime_error(filename_ + ":" + std::to_string(lineNo) +
-                                          ": #require: compiler version " OMSC_VERSION
-                                          " is older than required " + reqVer);
+                throw omscript::DiagnosticError(omscript::Diagnostic{
+                    omscript::DiagnosticSeverity::Error,
+                    {filename_, lineNo, 0},
+                    "#require: compiler version " OMSC_VERSION
+                    " is older than required " + reqVer});
             }
             output += '\n'; continue;
         }
@@ -625,7 +648,10 @@ std::string Preprocessor::process(const std::string& source) {
     }
 
     if (condStack.size() > 1) {
-        throw std::runtime_error(filename_ + ": unterminated #if / #ifdef block");
+        throw omscript::DiagnosticError(omscript::Diagnostic{
+            omscript::DiagnosticSeverity::Error,
+            {filename_, 0, 0},
+            "unterminated #if / #ifdef block"});
     }
 
     return output;
