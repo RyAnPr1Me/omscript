@@ -1,5 +1,7 @@
 #include "codegen.h"
 #include "diagnostic.h"
+#include <algorithm>
+#include <functional>
 #include <iostream>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Config/llvm-config.h>
@@ -3607,30 +3609,148 @@ void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
 // as a plain block — useful for one-shot Load/Compute/Store sequences.
 //
 // The back-edge branch receives llvm.loop metadata including:
-//   - llvm.loop.vectorize.enable
-//   - llvm.loop.parallel_accesses (all pointer operands mentioned in stages)
-// so the backend can schedule instructions from different stages in parallel
-// and the auto-vectorizer can generate SIMD code across stages.
+// ─────────────────────────────────────────────────────────────────────────────
+// generatePipeline — Software-Prefetched Sequential Pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A pipeline is a sequential, staged loop that the compiler transforms into
+// a *software-prefetched streaming loop*: every array read in every stage is
+// prefetched PREFETCH_DIST iterations ahead, keeping CPU load/store units
+// and memory buses fully occupied while the current iteration executes.
+//
+// Execution model (strictly sequential — no threads, no concurrency):
+//
+//   iteration k:
+//     ① emit llvm.prefetch for a[k+D] for every array base found in stages
+//     ② execute stage 0 body  (e.g. load)
+//     ③ execute stage 1 body  (e.g. compute)
+//     ④ execute stage 2 body  (e.g. store)
+//     ⑤ advance iterator
+//     ⑥ back-edge ← tagged with llvm.loop metadata:
+//          llvm.loop.mustprogress
+//          llvm.loop.vectorize.enable  (allow auto-vectorizer)
+//          llvm.loop.interleave.count  = nstages (hint to interleave HW units)
+//          llvm.loop.pipeline.initiationinterval = 1
+//
+// The prefetch distance D = 2 × nstages × |step|, or at least 8 iterations
+// (one typical cache line worth of i64 elements), whichever is larger.
+//
+// Without a range header the stages run once as a straight-line block with
+// no loop overhead — useful for one-shot Load→Compute→Store bursts.
+//
+// Array-base discovery scans the AST subtree of every stage body looking for
+// IndexExpr nodes whose base is a plain IdentifierExpr (arr[i]).  All unique
+// names are collected; prefetches are emitted for each at the top of every
+// iteration.  This is conservative (an identifier that resolves to a string
+// or dict will have its prefetch silently suppressed because the inttoptr
+// conversion produces a ptr that LLVM optimises away), but never wrong.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Helper: collect all unique array-identifier bases from a statement subtree.
+static void collectArrayBases(const Statement* s, std::vector<std::string>& out) {
+    if (!s) return;
+    std::function<void(const Expression*)> scanExpr = [&](const Expression* e) {
+        if (!e) return;
+        if (e->type == ASTNodeType::INDEX_EXPR) {
+            const auto* ie = static_cast<const IndexExpr*>(e);
+            if (ie->array && ie->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const std::string& name =
+                    static_cast<const IdentifierExpr*>(ie->array.get())->name;
+                if (std::find(out.begin(), out.end(), name) == out.end())
+                    out.push_back(name);
+            }
+            scanExpr(ie->array.get());
+            scanExpr(ie->index.get());
+            return;
+        }
+        // Recurse into binary/unary/call/ternary/assign nodes.
+        if (e->type == ASTNodeType::BINARY_EXPR) {
+            const auto* b = static_cast<const BinaryExpr*>(e);
+            scanExpr(b->left.get()); scanExpr(b->right.get());
+        } else if (e->type == ASTNodeType::UNARY_EXPR) {
+            scanExpr(static_cast<const UnaryExpr*>(e)->operand.get());
+        } else if (e->type == ASTNodeType::CALL_EXPR) {
+            for (const auto& a : static_cast<const CallExpr*>(e)->arguments)
+                scanExpr(a.get());
+        } else if (e->type == ASTNodeType::TERNARY_EXPR) {
+            const auto* t = static_cast<const TernaryExpr*>(e);
+            scanExpr(t->condition.get()); scanExpr(t->thenExpr.get()); scanExpr(t->elseExpr.get());
+        } else if (e->type == ASTNodeType::ASSIGN_EXPR) {
+            scanExpr(static_cast<const AssignExpr*>(e)->value.get());
+        } else if (e->type == ASTNodeType::ARRAY_EXPR) {
+            for (const auto& el : static_cast<const ArrayExpr*>(e)->elements)
+                scanExpr(el.get());
+        }
+    };
+
+    std::function<void(const Statement*)> scanStmt = [&](const Statement* s) {
+        if (!s) return;
+        switch (s->type) {
+        case ASTNodeType::EXPR_STMT:
+            scanExpr(static_cast<const ExprStmt*>(s)->expression.get()); break;
+        case ASTNodeType::VAR_DECL:
+            scanExpr(static_cast<const VarDecl*>(s)->initializer.get()); break;
+        case ASTNodeType::MOVE_DECL:
+            scanExpr(static_cast<const MoveDecl*>(s)->initializer.get()); break;
+        case ASTNodeType::RETURN_STMT:
+            scanExpr(static_cast<const ReturnStmt*>(s)->value.get()); break;
+        case ASTNodeType::BLOCK:
+            for (const auto& sub : static_cast<const BlockStmt*>(s)->statements)
+                scanStmt(sub.get());
+            break;
+        case ASTNodeType::IF_STMT: {
+            const auto* ifs = static_cast<const IfStmt*>(s);
+            scanExpr(ifs->condition.get());
+            scanStmt(ifs->thenBranch.get());
+            scanStmt(ifs->elseBranch.get());
+            break;
+        }
+        case ASTNodeType::WHILE_STMT: {
+            const auto* ws = static_cast<const WhileStmt*>(s);
+            scanExpr(ws->condition.get());
+            scanStmt(ws->body.get());
+            break;
+        }
+        case ASTNodeType::FOR_STMT: {
+            const auto* fs = static_cast<const ForStmt*>(s);
+            scanExpr(fs->start.get()); scanExpr(fs->end.get());
+            scanExpr(fs->step.get()); scanStmt(fs->body.get());
+            break;
+        }
+        default: break;
+        }
+    };
+
+    scanStmt(s);
+}
+
 void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
         codegenError("pipeline statement outside of function", stmt);
     }
 
-    // No-range form: just emit stage bodies in order inside a new scope.
+    // ── No-range form ────────────────────────────────────────────────────────
+    // Without an iteration range the pipeline degenerates to a straight-line
+    // sequence of stage bodies executed exactly once.  Useful for one-shot
+    // Load→Compute→Store patterns where the caller manages iteration.
     if (!stmt->start) {
         const ScopeGuard scope(*this);
         for (auto& stage : stmt->stages) {
-            // Each stage executes in its own scope so stage-local variables
-            // don't conflict, but variables declared before the pipeline are
-            // visible in all stages.
             const ScopeGuard stageScope(*this);
             generateBlock(stage.body.get());
         }
         return;
     }
 
-    // Range form: pipeline (i in start...end[...step]) { stage ... }
+    // ── Collect array bases across all stages for prefetch insertion ─────────
+    std::vector<std::string> prefetchBases;
+    for (const auto& stage : stmt->stages)
+        collectArrayBases(stage.body.get(), prefetchBases);
+
+    const int nstages = static_cast<int>(stmt->stages.size());
+
+    // ── Range form ───────────────────────────────────────────────────────────
     const ScopeGuard scope(*this);
 
     llvm::Type* iterTy = stmt->iterType.empty()
@@ -3639,6 +3759,7 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
 
     llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iterVar, iterTy);
     bindVariable(stmt->iterVar, iterAlloca);
+    loopIterVars_.insert(stmt->iterVar);
 
     llvm::Value* startVal = generateExpression(stmt->start.get());
     startVal = convertTo(startVal, iterTy);
@@ -3647,20 +3768,33 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
     llvm::Value* endVal = generateExpression(stmt->end.get());
     endVal = convertTo(endVal, iterTy);
 
+    // Compute step.
     llvm::Value* stepVal;
+    int64_t stepConst = 1;
     if (stmt->step) {
         stepVal = generateExpression(stmt->step.get());
         stepVal = convertTo(stepVal, iterTy);
+        if (auto* sc = llvm::dyn_cast<llvm::ConstantInt>(stepVal))
+            stepConst = sc->getSExtValue();
     } else {
-        stepVal = llvm::ConstantInt::get(iterTy, 1);
+        // Default step: +1 for ascending, -1 for descending.
+        bool ascending = true;
+        if (auto* sc = llvm::dyn_cast<llvm::ConstantInt>(startVal))
+            if (auto* ec = llvm::dyn_cast<llvm::ConstantInt>(endVal))
+                ascending = sc->getSExtValue() < ec->getSExtValue();
+        stepConst = ascending ? 1 : -1;
+        stepVal   = llvm::ConstantInt::get(iterTy,
+                        static_cast<uint64_t>(stepConst), /*isSigned=*/true);
     }
 
-    // Empty range: no-op
-    if (auto* sc = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
-        if (auto* ec = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+    // Empty range: no-op.
+    if (auto* sc = llvm::dyn_cast<llvm::ConstantInt>(startVal))
+        if (auto* ec = llvm::dyn_cast<llvm::ConstantInt>(endVal))
             if (sc->getSExtValue() == ec->getSExtValue()) return;
-        }
-    }
+
+    // Prefetch distance: at least 8 elements (one 64-byte cache line of i64)
+    // and at least 2×nstages×|step| to cover all in-flight stages.
+    const int64_t prefetchDist = std::max<int64_t>(8, 2LL * nstages * std::abs(stepConst));
 
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "pipeline.cond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "pipeline.body", function);
@@ -3672,40 +3806,141 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
 
     builder->CreateBr(condBB);
 
-    // Condition block
+    // ── Condition block ──────────────────────────────────────────────────────
     builder->SetInsertPoint(condBB);
-    llvm::Value* iVal = builder->CreateAlignedLoad(iterTy, iterAlloca, llvm::MaybeAlign(8), stmt->iterVar + ".cur");
-
-    bool ascending = true;
-    if (auto* sc = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
-        if (auto* ec = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
-            ascending = sc->getSExtValue() < ec->getSExtValue();
-        }
-    }
-    llvm::Value* cond = ascending
-        ? builder->CreateICmpSLT(iVal, endVal, "pipeline.cond.check")
-        : builder->CreateICmpSGT(iVal, endVal, "pipeline.cond.check");
-
+    llvm::Value* iCond = builder->CreateAlignedLoad(
+        iterTy, iterAlloca, llvm::MaybeAlign(8), stmt->iterVar + ".cond");
+    llvm::Value* cond = stepConst >= 0
+        ? builder->CreateICmpSLT(iCond, endVal, "pipeline.cond.check")
+        : builder->CreateICmpSGT(iCond, endVal, "pipeline.cond.check");
     builder->CreateCondBr(cond, bodyBB, exitBB);
 
-    // Body block: execute all stages in sequence
+    // ── Body block ───────────────────────────────────────────────────────────
     builder->SetInsertPoint(bodyBB);
+
+    // ① Prefetch next-iteration array elements for every array base found in
+    //   the stage bodies.  The prefetch address is base[i + prefetchDist],
+    //   using the same GEP logic as generateIndex (layout: [len, e0, e1, ...]).
+    //   We do NOT bounds-check the prefetch address — an out-of-range prefetch
+    //   is a no-op on all modern ISAs and costs nothing if the address is
+    //   outside the allocated region.  Bounds checking would introduce a branch
+    //   that hurts the very performance we are trying to improve.
+    if (optimizationLevel >= OptimizationLevel::O1 && !prefetchBases.empty()) {
+        llvm::Value* iBody = builder->CreateAlignedLoad(
+            iterTy, iterAlloca, llvm::MaybeAlign(8), stmt->iterVar + ".pf.i");
+        llvm::Value* pfDist  = llvm::ConstantInt::get(iterTy,
+            static_cast<uint64_t>(prefetchDist), /*isSigned=*/true);
+        llvm::Value* pfIndex = builder->CreateAdd(iBody, pfDist,
+            stmt->iterVar + ".pf.idx", /*HasNUW=*/false, /*HasNSW=*/true);
+
+        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
+            module.get(), llvm::Intrinsic::prefetch,
+            {llvm::PointerType::getUnqual(*context)});
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+
+        for (const auto& baseName : prefetchBases) {
+            auto it = namedValues.find(baseName);
+            if (it == namedValues.end()) continue;
+
+            // Load the array pointer from its alloca.
+            llvm::Value* rawPtr = builder->CreateAlignedLoad(
+                iterTy, it->second, llvm::MaybeAlign(8), baseName + ".pf.raw");
+            // i64 → ptr (OmScript stores pointers as i64).
+            llvm::Value* basePtr =
+                rawPtr->getType()->isPointerTy()
+                    ? rawPtr
+                    : builder->CreateIntToPtr(rawPtr, ptrTy, baseName + ".pf.ptr");
+
+            // Skip past the length header slot (GEP base + 1).
+            llvm::Value* dataPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), basePtr,
+                llvm::ConstantInt::get(getDefaultType(), 1),
+                baseName + ".pf.data");
+
+            // Prefetch element at [i + prefetchDist].
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), dataPtr, pfIndex, baseName + ".pf.elemptr");
+
+            // Read prefetch, locality=3 (high: data will be reused across stages),
+            // data cache.
+            auto* pfCall = builder->CreateCall(prefetchFn, {
+                elemPtr,
+                builder->getInt32(0),   // read
+                builder->getInt32(3),   // temporal locality: keep in all cache levels
+                builder->getInt32(1)    // data cache
+            });
+            pfCall->setMetadata("omscript.pipeline_prefetch",
+                llvm::MDNode::get(*context, {}));
+        }
+    }
+
+    // ② Execute stage bodies sequentially — each stage in its own scope so
+    //   stage-local variable declarations don't bleed across stages, but
+    //   variables from outer scopes (including previous stages' named bindings
+    //   at function scope) are fully visible.
     for (auto& stage : stmt->stages) {
         const ScopeGuard stageScope(*this);
         generateBlock(stage.body.get());
     }
 
-    // Advance iterator
-    llvm::Value* iCur = builder->CreateAlignedLoad(iterTy, iterAlloca, llvm::MaybeAlign(8), stmt->iterVar + ".step");
-    llvm::Value* iNext = builder->CreateAdd(iCur, stepVal, stmt->iterVar + ".next");
+    // ③ Advance iterator.
+    llvm::Value* iStep = builder->CreateAlignedLoad(
+        iterTy, iterAlloca, llvm::MaybeAlign(8), stmt->iterVar + ".step.cur");
+    llvm::Value* iNext = builder->CreateAdd(iStep, stepVal,
+        stmt->iterVar + ".next", /*HasNUW=*/false, /*HasNSW=*/true);
     builder->CreateStore(iNext, iterAlloca);
 
-    // Back-edge with loop metadata (vectorize + mustprogress)
-    llvm::BranchInst* backEdge = llvm::cast<llvm::BranchInst>(builder->CreateBr(condBB));
-    attachLoopMetadata(backEdge);
+    // ④ Back-edge: attach loop metadata that communicates pipeline structure
+    //   to LLVM's loop transforms and backend.
+    //
+    //   llvm.loop.mustprogress          — loop always makes progress (no infinite loops)
+    //   llvm.loop.vectorize.enable      — allow auto-vectorizer to vectorize
+    //   llvm.loop.interleave.count(N)   — hint to interleave N copies (= nstages)
+    //                                      so functional units from different stages
+    //                                      can execute in parallel in the OOO CPU
+    //   llvm.loop.pipeline.initiationinterval = 1
+    //                                    — software pipelining II=1: start a new
+    //                                      iteration every cycle (ideal throughput)
+    {
+        llvm::BranchInst* backEdge =
+            llvm::cast<llvm::BranchInst>(builder->CreateBr(condBB));
+
+        llvm::MDBuilder mdb(*context);
+        llvm::SmallVector<llvm::Metadata*, 8> mds;
+        mds.push_back(nullptr); // self-reference placeholder
+
+        // mustprogress
+        mds.push_back(llvm::MDNode::get(*context,
+            {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+
+        // vectorize.enable = true
+        mds.push_back(llvm::MDNode::get(*context, {
+            llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+            mdb.createConstant(llvm::ConstantInt::getTrue(*context))
+        }));
+
+        // interleave.count = nstages (min 2)
+        mds.push_back(llvm::MDNode::get(*context, {
+            llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+            mdb.createConstant(llvm::ConstantInt::get(
+                llvm::Type::getInt32Ty(*context), std::max(2, nstages)))
+        }));
+
+        // pipeline.initiationinterval = 1
+        mds.push_back(llvm::MDNode::get(*context, {
+            llvm::MDString::get(*context, "llvm.loop.pipeline.initiationinterval"),
+            mdb.createConstant(llvm::ConstantInt::get(
+                llvm::Type::getInt32Ty(*context), 1))
+        }));
+
+        llvm::MDNode* loopMD = llvm::MDNode::get(*context, mds);
+        loopMD->replaceOperandWith(0, loopMD); // fix self-reference
+        backEdge->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
+    }
 
     loopStack.pop_back();
     loopArrayLenCache_ = std::move(savedArrayLenCache);
+    loopIterVars_.erase(stmt->iterVar);
 
     builder->SetInsertPoint(exitBB);
 }
