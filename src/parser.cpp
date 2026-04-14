@@ -180,6 +180,8 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintConstEval = false;
             bool isOptMaxFromAnnotation = false;
             OptMaxConfig optMaxCfgFromAnnotation;
+            int allocatorSizeParam = -1;
+            int allocatorCountParam = -1;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -223,6 +225,23 @@ std::unique_ptr<Program> Parser::parse() {
                     hintNoUnwind = true;
                 } else if (ann.lexeme == "const_eval") {
                     hintConstEval = true;
+                } else if (ann.lexeme == "allocator") {
+                    // @allocator(size=N) or @allocator(size=N, count=M)
+                    consume(TokenType::LPAREN, "Expected '(' after @allocator");
+                    while (!check(TokenType::RPAREN) && !isAtEnd()) {
+                        const Token paramKey = consume(TokenType::IDENTIFIER, "Expected param name in @allocator");
+                        consume(TokenType::ASSIGN, "Expected '=' in @allocator");
+                        const Token paramVal = advance();
+                        int idx = 0;
+                        try { idx = std::stoi(paramVal.lexeme); } catch(...) {}
+                        if (paramKey.lexeme == "size") {
+                            allocatorSizeParam = idx;
+                        } else if (paramKey.lexeme == "count") {
+                            allocatorCountParam = idx;
+                        }
+                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' after @allocator params");
                 } else if (ann.lexeme == "optmax") {
                     isOptMaxFromAnnotation = true;
                     if (check(TokenType::LPAREN)) {
@@ -230,7 +249,7 @@ std::unique_ptr<Program> Parser::parse() {
                     }
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @allocator (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
@@ -253,6 +272,8 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintOptNone = hintOptNone;
             func->hintNoUnwind = hintNoUnwind;
             func->hintConstEval = hintConstEval;
+            func->allocatorSizeParam = allocatorSizeParam;
+            func->allocatorCountParam = allocatorCountParam;
             if (isOptMaxFromAnnotation) {
                 func->isOptMax = true;
                 func->optMaxConfig = optMaxCfgFromAnnotation;
@@ -1030,6 +1051,39 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         borrowExpr->line = kw.line;
         borrowExpr->column = kw.column;
         auto stmt = std::make_unique<VarDecl>(name.lexeme, std::move(borrowExpr), false, typeName);
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::REBORROW)) {
+        // `reborrow ref = &src;`         — reborrow existing borrow
+        // `reborrow mut ref = &src;`     — mutable reborrow
+        // `reborrow ref = &src.field;`   — partial borrow of struct field
+        // `reborrow ref = &src[idx];`    — partial borrow of array element
+        const Token kw = tokens[current - 1];
+        bool isMut = false;
+        if (match(TokenType::MUT)) {
+            isMut = true;
+        }
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in reborrow declaration");
+        consume(TokenType::ASSIGN, "Expected '=' in reborrow declaration");
+        // Expect &expr
+        consume(TokenType::AMPERSAND, "Expected '&' before source expression in reborrow");
+        auto src = parsePrimary();
+        std::string fieldName;
+        std::unique_ptr<Expression> indexExpr;
+        if (match(TokenType::DOT)) {
+            const Token fld = consume(TokenType::IDENTIFIER, "Expected field name after '.' in reborrow");
+            fieldName = fld.lexeme;
+        } else if (match(TokenType::LBRACKET)) {
+            indexExpr = parseExpression();
+            consume(TokenType::RBRACKET, "Expected ']' after index in reborrow");
+        }
+        consume(TokenType::SEMICOLON, "Expected ';' after reborrow declaration");
+        auto reborrowExpr = std::make_unique<ReborrowExpr>(std::move(src), isMut, std::move(fieldName), std::move(indexExpr));
+        reborrowExpr->line = kw.line;
+        reborrowExpr->column = kw.column;
+        auto stmt = std::make_unique<VarDecl>(name.lexeme, std::move(reborrowExpr), false, "");
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
@@ -3287,15 +3341,21 @@ LoopConfig Parser::parseLoopAnnotation() {
                 const Token v = advance();
                 try { cfg.unrollCount = std::stoi(v.lexeme); } catch(...) {}
             } else if (key.lexeme == "vectorize") {
-                const Token v = consume(TokenType::IDENTIFIER, "Expected bool for vectorize");
-                cfg.vectorize = (v.lexeme == "true");
-                cfg.noVectorize = (v.lexeme == "false");
+                const Token v = advance(); // true/false may be keywords
+                cfg.vectorize = (v.lexeme == "true" || v.type == TokenType::TRUE);
+                cfg.noVectorize = (v.lexeme == "false" || v.type == TokenType::FALSE);
             } else if (key.lexeme == "tile") {
                 const Token v = advance();
                 try { cfg.tileSize = std::stoi(v.lexeme); } catch(...) {}
             } else if (key.lexeme == "parallel") {
-                const Token v = consume(TokenType::IDENTIFIER, "Expected bool for parallel");
-                cfg.parallel = (v.lexeme == "true");
+                const Token v = advance();
+                cfg.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);
+            } else if (key.lexeme == "independent") {
+                const Token v = advance();
+                cfg.independent = (v.lexeme == "true" || v.type == TokenType::TRUE);
+            } else if (key.lexeme == "fuse") {
+                const Token v = advance();
+                cfg.fuse = (v.lexeme == "true" || v.type == TokenType::TRUE);
             }
         } while (match(TokenType::COMMA));
     }

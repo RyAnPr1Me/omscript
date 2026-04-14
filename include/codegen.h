@@ -12,6 +12,7 @@
 
 #include "ast.h"
 #include "diagnostic.h"
+#include <iostream>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/ADT/StringSet.h>
@@ -44,6 +45,29 @@ enum class OptimizationLevel {
     O1, // Basic optimization
     O2, // Moderate optimization
     O3  // Aggressive optimization
+};
+
+/// Counters tracking which optimizations fired during compilation.
+/// Printed when verbose mode is on or @optmax(report=true) is set.
+struct OptStats {
+    unsigned constFolded      = 0; ///< Expressions folded to compile-time constants
+    unsigned callsInlined     = 0; ///< Call sites inlined
+    unsigned escapeStackAllocs = 0; ///< Array/struct allocations moved to stack (escape analysis)
+    unsigned loopsFused       = 0; ///< Loop pairs fused by the @fuse pre-pass
+    unsigned borrowsFrozen    = 0; ///< Variables frozen (freeze + alias propagation)
+    unsigned independentLoops = 0; ///< Loops annotated with @independent
+    unsigned allocatorFuncs   = 0; ///< User functions annotated as @allocator
+
+    void print() const {
+        std::cout << "\n[opt-report] Optimization statistics:\n"
+                  << "  const-folded expressions : " << constFolded << "\n"
+                  << "  calls inlined            : " << callsInlined << "\n"
+                  << "  stack allocs (escape)    : " << escapeStackAllocs << "\n"
+                  << "  loops fused              : " << loopsFused << "\n"
+                  << "  borrows frozen           : " << borrowsFrozen << "\n"
+                  << "  independent loops        : " << independentLoops << "\n"
+                  << "  allocator wrappers       : " << allocatorFuncs << "\n";
+    }
 };
 
 /// Ownership lattice states for compile-time memory safety.
@@ -250,10 +274,18 @@ class CodeGenerator {
         sourceFilename_ = filename;
     }
 
+    /// Return accumulated optimization statistics.
+    [[nodiscard]] const OptStats& getOptStats() const noexcept {
+        return optStats_;
+    }
+
   private:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
     std::unique_ptr<llvm::Module> module;
+
+    /// Optimization statistics accumulated during code generation.
+    OptStats optStats_;
 
     llvm::StringMap<llvm::Value*> namedValues;
     std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
@@ -669,6 +701,7 @@ class CodeGenerator {
     bool currentFuncHintParallelize_ = false;
     bool currentFuncHintNoParallelize_ = false;
     bool currentFuncHintHot_ = false;  ///< Current function has @hot annotation
+    const FunctionDecl* currentFuncDecl_ = nullptr; ///< Currently-generating function declaration
     unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
     bool bodyHasInnerLoop_ = false; ///< Set when a while/for loop is found inside a for-loop body
     bool bodyHasNonPow2Modulo_ = false; ///< Set when a for-loop body has non-power-of-2 modulo
@@ -722,6 +755,11 @@ class CodeGenerator {
     /// Returns true if the array is safe for alloca (no escape).
     bool canStackAllocateArray(const std::string& varName) const;
 
+    /// Returns true if the variable @p varName may escape the current function
+    /// body (used in return, call args, or global store).  Conservative: only
+    /// returns false when we can PROVE there is no escape.
+    bool doesVarEscapeCurrentScope(const std::string& varName) const;
+
     /// Maximum number of array elements for stack allocation (prevents
     /// stack overflow from large arrays — 64 elements × 8 bytes = 512 B).
     static constexpr size_t kMaxStackArrayElements = 64;
@@ -772,6 +810,12 @@ class CodeGenerator {
     void generateAssume(AssumeStmt* stmt);
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
+    llvm::Value* generateReborrowExpr(ReborrowExpr* expr);
+
+    /// Loop fusion pre-pass: walk a BlockStmt's statement list and merge
+    /// adjacent ForStmt pairs where both/either has loopHints.fuse=true,
+    /// and they share the same start/end bounds.
+    void fuseLoops(BlockStmt* block);
 
     /// Mark a variable as moved: emit lifetime.end + store undef on its alloca,
     /// and record it in deadVars_ for use-after-move detection.

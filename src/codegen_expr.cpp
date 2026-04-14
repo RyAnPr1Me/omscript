@@ -473,6 +473,7 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
             auto* ci = llvm::ConstantInt::get(getDefaultType(), foldIt->second);
             if (foldIt->second >= 0)
                 nonNegValues_.insert(ci);
+            optStats_.constFolded++;
             return ci;
         }
     }

@@ -64,7 +64,8 @@ enum class ASTNodeType {
     DEFER_STMT,
     SCOPE_RESOLUTION_EXPR,
     ASSUME_STMT,
-    COMPTIME_EXPR  // comptime { ... } — compile-time evaluated block expression
+    COMPTIME_EXPR,  // comptime { ... } — compile-time evaluated block expression
+    REBORROW_EXPR   // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
 };
 
 class ASTNode {
@@ -277,6 +278,8 @@ struct LoopConfig {
     bool noVectorize  = false;
     int  tileSize     = 0;    // 0 = no tiling
     bool parallel     = false;
+    bool independent  = false; ///< @independent — no cross-iteration dependencies (alias-free)
+    bool fuse         = false; ///< @fuse — merge with adjacent compatible loop
 };
 
 struct MemoryConfig {
@@ -577,6 +580,14 @@ class FunctionDecl : public ASTNode {
     bool hintConstEval = false;   ///< @const_eval — evaluate at compile time when all args are constants
     OptMaxConfig optMaxConfig;    ///< OPTMAX v2 configuration (enabled when @optmax(...) annotation is used)
 
+    /// @allocator(size=N) or @allocator(size=N, count=M) annotation.
+    /// Marks this function as an allocator wrapper: LLVM will add the
+    /// `allocsize` attribute so alias analysis can track allocation sizes.
+    ///   allocatorSizeParam >= 0: 0-based index of the "size" parameter
+    ///   allocatorCountParam >= 0: 0-based index of the "count" parameter (-1 = none)
+    int allocatorSizeParam  = -1; ///< -1 = not an allocator wrapper
+    int allocatorCountParam = -1; ///< -1 = no count parameter
+
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {
     }
@@ -643,6 +654,25 @@ class BorrowExpr : public Expression {
 
     explicit BorrowExpr(std::unique_ptr<Expression> src, bool mut = false)
         : Expression(ASTNodeType::BORROW_EXPR), source(std::move(src)), isMut(mut) {}
+};
+
+/// `reborrow ref = &src;` — create a new borrow reference from an existing borrow.
+/// `reborrow ref = &src.field;` — partial borrow of a struct field.
+/// `reborrow ref = &src[idx];` — partial borrow of an array element.
+class ReborrowExpr : public Expression {
+  public:
+    std::unique_ptr<Expression> source;  ///< The source expression (identifier, field access, index)
+    bool isMut = false;                  ///< true for mutable reborrow
+    std::string fieldName;               ///< Non-empty if partial borrow of a field
+    std::unique_ptr<Expression> indexExpr; ///< Non-null if partial borrow of an array element
+
+    /// Pending source variable name (set during codegen, mirrors BorrowExpr).
+    mutable std::string pendingSrcVar;
+
+    explicit ReborrowExpr(std::unique_ptr<Expression> src, bool mut = false,
+                          std::string field = "", std::unique_ptr<Expression> idx = nullptr)
+        : Expression(ASTNodeType::REBORROW_EXPR), source(std::move(src)), isMut(mut),
+          fieldName(std::move(field)), indexExpr(std::move(idx)) {}
 };
 
 /// Dict literal: `{"key": val, ...}` — zero-cost map construction.

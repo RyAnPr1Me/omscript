@@ -724,6 +724,12 @@ test_program "examples/chained_comparison_test.om" 7
 test_program "examples/large_int_literal_test.om" 7
 test_program "examples/comptime_test.om" 172
 test_program "examples/parallel_loop_test.om" 70
+test_program "examples/independent_loop_test.om" 72
+test_program "examples/loop_fuse_test.om" 35
+test_program "examples/escape_analysis_test.om" 150
+test_program "examples/freeze_correctness_test.om" 42
+test_program "examples/reborrow_test.om" 100
+test_program "examples/allocator_annotation_test.om" 40
 
 echo ""
 echo "============================================"

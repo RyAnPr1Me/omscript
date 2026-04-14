@@ -3901,6 +3901,10 @@ void CodeGenerator::generate(Program* program) {
 
     // Generate all function bodies
     for (auto& func : program->functions) {
+        // Loop fusion pre-pass: merge adjacent @fuse-annotated loops
+        if (func->body) {
+            fuseLoops(func->body.get());
+        }
         generateFunction(func.get());
     }
 
@@ -4187,6 +4191,11 @@ void CodeGenerator::generate(Program* program) {
         }
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "Module verification failed: " + errorStr});
+    }
+
+    // Print optimization statistics when verbose mode is enabled.
+    if (verbose_) {
+        optStats_.print();
     }
 }
 
@@ -4475,6 +4484,26 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoUnwind);
     }
 
+    // @allocator(size=N) / @allocator(size=N, count=M): mark as allocator wrapper.
+    // Adds allocsize, noalias return (only for pointer returns), WillReturn,
+    // and NoUnwind so LLVM's alias analysis can track allocation sizes.
+    if (func->allocatorSizeParam >= 0) {
+        const unsigned sizeIdx  = static_cast<unsigned>(func->allocatorSizeParam);
+        if (func->allocatorCountParam >= 0) {
+            const unsigned countIdx = static_cast<unsigned>(func->allocatorCountParam);
+            function->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, sizeIdx, countIdx));
+        } else {
+            function->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, sizeIdx, std::nullopt));
+        }
+        // noalias is only valid on pointer return types.
+        if (function->getReturnType()->isPointerTy()) {
+            function->addRetAttr(llvm::Attribute::NoAlias);
+        }
+        function->addFnAttr(llvm::Attribute::WillReturn);
+        function->addFnAttr(llvm::Attribute::NoUnwind);
+        optStats_.allocatorFuncs++;
+    }
+
     // OmScript uses a flag-based error model (not C++ exceptions / DWARF
     // unwind), so all user-defined functions are inherently nounwind.  Adding
     // this unconditionally (at O2+) lets LLVM:
@@ -4620,6 +4649,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // These are stored and applied to every loop emitted within this function.
     currentFuncHintUnroll_ = func->hintUnroll;
     currentFuncHintNoUnroll_ = func->hintNoUnroll;
+    currentFuncDecl_ = func;
 
     // @vectorize / @novectorize: per-function loop vectorization control.
     // These are stored and applied to every loop emitted within this function.
@@ -4952,6 +4982,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateMoveExpr(static_cast<MoveExpr*>(expr));
     case ASTNodeType::BORROW_EXPR:
         return generateBorrowExpr(static_cast<BorrowExpr*>(expr));
+    case ASTNodeType::REBORROW_EXPR:
+        return generateReborrowExpr(static_cast<ReborrowExpr*>(expr));
     case ASTNodeType::DICT_EXPR:
         return generateDict(static_cast<DictExpr*>(expr));
     case ASTNodeType::SCOPE_RESOLUTION_EXPR:
@@ -6766,6 +6798,208 @@ void CodeGenerator::generateAssume(AssumeStmt* stmt) {
             builder->CreateBr(afterBB);
         }
         builder->SetInsertPoint(afterBB);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Escape analysis for stack allocation
+// ---------------------------------------------------------------------------
+// Check whether a local array variable escapes the current function scope.
+// Returns true if the array is safe for stack allocation (no escape).
+// Conservative: we only return true when we can PROVE it doesn't escape.
+// ---------------------------------------------------------------------------
+
+/// Scan an expression tree for any use of varName that would cause escape:
+///  - passed as an argument to a function call
+///  - used as the object of a return statement (detected at statement level)
+static bool exprUsesVar(Expression* expr, const std::string& varName) {
+    if (!expr) return false;
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+        return static_cast<IdentifierExpr*>(expr)->name == varName;
+    }
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<CallExpr*>(expr);
+        for (auto& arg : call->arguments) {
+            if (exprUsesVar(arg.get(), varName)) return true;
+        }
+        return false; // callee name is a string, not an expression
+    }
+    if (expr->type == ASTNodeType::BINARY_EXPR) {
+        auto* bin = static_cast<BinaryExpr*>(expr);
+        return exprUsesVar(bin->left.get(), varName) ||
+               exprUsesVar(bin->right.get(), varName);
+    }
+    if (expr->type == ASTNodeType::UNARY_EXPR) {
+        return exprUsesVar(static_cast<UnaryExpr*>(expr)->operand.get(), varName);
+    }
+    if (expr->type == ASTNodeType::INDEX_EXPR) {
+        auto* idx = static_cast<IndexExpr*>(expr);
+        return exprUsesVar(idx->array.get(), varName) ||
+               exprUsesVar(idx->index.get(), varName);
+    }
+    if (expr->type == ASTNodeType::ASSIGN_EXPR) {
+        auto* asgn = static_cast<AssignExpr*>(expr);
+        return exprUsesVar(asgn->value.get(), varName);
+    }
+    return false;
+}
+
+/// Returns true if varName escapes in any statement in the block (from stmtIdx onwards).
+static bool varEscapesInBlock(const BlockStmt* block, const std::string& varName,
+                               size_t startIdx) {
+    for (size_t i = startIdx; i < block->statements.size(); ++i) {
+        const Statement* s = block->statements[i].get();
+        // Return: escapes if returned
+        if (auto* ret = dynamic_cast<const ReturnStmt*>(s)) {
+            if (ret->value && exprUsesVar(ret->value.get(), varName)) return true;
+        }
+        // VarDecl initializer: could be assigned to another variable and passed
+        if (auto* vd = dynamic_cast<const VarDecl*>(s)) {
+            if (vd->initializer && exprUsesVar(vd->initializer.get(), varName)) return true;
+        }
+        // ExprStmt: call args
+        if (auto* es = dynamic_cast<const ExprStmt*>(s)) {
+            if (exprUsesVar(es->expression.get(), varName)) {
+                // Check if it's a call expression with varName as arg
+                if (es->expression->type == ASTNodeType::CALL_EXPR) {
+                    auto* call = static_cast<CallExpr*>(es->expression.get());
+                    for (auto& arg : call->arguments) {
+                        if (exprUsesVar(arg.get(), varName)) return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool CodeGenerator::doesVarEscapeCurrentScope(const std::string& varName) const {
+    if (!currentFuncDecl_ || !currentFuncDecl_->body) return true; // conservative
+    // Find the VarDecl statement index for this variable.
+    const BlockStmt* body = currentFuncDecl_->body.get();
+    for (size_t i = 0; i < body->statements.size(); ++i) {
+        const auto* vd = dynamic_cast<const VarDecl*>(body->statements[i].get());
+        if (vd && vd->name == varName) {
+            return varEscapesInBlock(body, varName, i + 1);
+        }
+    }
+    // Not at top-level: assume it might escape.
+    return true;
+}
+
+
+
+/// Compare two expressions for equality (only handles literals and identifiers).
+static bool exprEqual(const Expression* a, const Expression* b) {
+    if (!a || !b) return false;
+    if (a->type != b->type) return false;
+    if (a->type == ASTNodeType::LITERAL_EXPR) {
+        const auto* la = static_cast<const LiteralExpr*>(a);
+        const auto* lb = static_cast<const LiteralExpr*>(b);
+        if (la->literalType != lb->literalType) return false;
+        if (la->literalType == LiteralExpr::LiteralType::INTEGER)
+            return la->intValue == lb->intValue;
+        if (la->literalType == LiteralExpr::LiteralType::STRING)
+            return la->stringValue == lb->stringValue;
+        return la->floatValue == lb->floatValue;
+    }
+    if (a->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const auto* ia = static_cast<const IdentifierExpr*>(a);
+        const auto* ib = static_cast<const IdentifierExpr*>(b);
+        return ia->name == ib->name;
+    }
+    return false;
+}
+
+void CodeGenerator::fuseLoops(BlockStmt* block) {
+    // Recursively apply to nested blocks first.
+    for (auto& stmt : block->statements) {
+        if (auto* blk = dynamic_cast<BlockStmt*>(stmt.get())) {
+            fuseLoops(blk);
+        } else if (auto* fr = dynamic_cast<ForStmt*>(stmt.get())) {
+            if (fr->body) {
+                if (auto* innerBlk = dynamic_cast<BlockStmt*>(fr->body.get())) {
+                    fuseLoops(innerBlk);
+                }
+            }
+        }
+    }
+
+    // Single-pass fusion: walk statement list looking for adjacent ForStmt pairs.
+    auto& stmts = block->statements;
+    size_t i = 0;
+    while (i + 1 < stmts.size()) {
+        auto* first  = dynamic_cast<ForStmt*>(stmts[i].get());
+        auto* second = dynamic_cast<ForStmt*>(stmts[i + 1].get());
+
+        if (!first || !second) {
+            ++i;
+            continue;
+        }
+        // At least one must have @fuse.
+        if (!first->loopHints.fuse && !second->loopHints.fuse) {
+            ++i;
+            continue;
+        }
+        // Must have identical start and end bounds.
+        if (!exprEqual(first->start.get(), second->start.get()) ||
+            !exprEqual(first->end.get(),   second->end.get())) {
+            ++i;
+            continue;
+        }
+
+        // Merge: build a combined body.
+        // The second iterator is aliased to the first via a VarDecl.
+        std::vector<std::unique_ptr<Statement>> combined;
+
+        // Only add the alias if the second loop uses a different iterator name.
+        if (second->iteratorVar != first->iteratorVar) {
+            auto aliasIdent = std::make_unique<IdentifierExpr>(first->iteratorVar);
+            aliasIdent->line = first->line;
+            auto aliasDecl = std::make_unique<VarDecl>(
+                second->iteratorVar, std::move(aliasIdent), false, "");
+            aliasDecl->line = first->line;
+            combined.push_back(std::move(aliasDecl));
+        }
+
+        // Append first body's statements.
+        if (auto* firstBlk = dynamic_cast<BlockStmt*>(first->body.get())) {
+            for (auto& s : firstBlk->statements)
+                combined.push_back(std::move(s));
+        } else if (first->body) {
+            combined.push_back(std::move(first->body));
+        }
+
+        // Append second body's statements.
+        if (auto* secondBlk = dynamic_cast<BlockStmt*>(second->body.get())) {
+            for (auto& s : secondBlk->statements)
+                combined.push_back(std::move(s));
+        } else if (second->body) {
+            combined.push_back(std::move(second->body));
+        }
+
+        auto fusedBody = std::make_unique<BlockStmt>(std::move(combined));
+
+        // Build the fused ForStmt.
+        LoopConfig fusedHints = first->loopHints;
+        fusedHints.fuse = false; // already fused
+        auto fused = std::make_unique<ForStmt>(
+            first->iteratorVar,
+            std::move(first->start),
+            std::move(first->end),
+            std::move(first->step),
+            std::move(fusedBody),
+            first->iteratorType);
+        fused->loopHints = fusedHints;
+        fused->line = first->line;
+        fused->column = first->column;
+
+        // Replace first with fused, erase second.
+        stmts[i] = std::move(fused);
+        stmts.erase(stmts.begin() + static_cast<ptrdiff_t>(i + 1));
+
+        optStats_.loopsFused++;
+        // Don't advance i — try to fuse again with the next statement.
     }
 }
 

@@ -1,0 +1,7 @@
+// Test reborrow: create a new borrow reference from an existing variable.
+fn main() {
+    var x = 100;
+    borrow r = &x;
+    reborrow r2 = &x;
+    return r2;
+}

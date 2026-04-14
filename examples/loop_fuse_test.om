@@ -1,0 +1,21 @@
+// Test @loop(fuse=true) — merges two adjacent loops with the same bounds.
+fn main() {
+    var a = [0, 0, 0, 0, 0];
+    var b = [0, 0, 0, 0, 0];
+
+    for (i in 0...5) @loop(fuse=true) {
+        a[i] = i + 1;
+    }
+
+    for (j in 0...5) @loop(fuse=true) {
+        b[j] = j * 2;
+    }
+
+    // After fusion: a = [1,2,3,4,5], b = [0,2,4,6,8]
+    // sum_a = 15, sum_b = 20, total = 35
+    var total = 0;
+    for (k in 0...5) {
+        total = total + a[k] + b[k];
+    }
+    return total;
+}

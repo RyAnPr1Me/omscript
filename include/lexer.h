@@ -74,6 +74,7 @@ enum class TokenType {
     WITH,
     PARALLEL,  // parallel — marks a loop for auto-parallelization
     COMPTIME,  // comptime — compile-time evaluation block
+    REBORROW,  // reborrow — create a new borrow reference from existing borrow
 
     // Operators
     PLUS,

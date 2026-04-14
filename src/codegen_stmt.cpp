@@ -60,23 +60,38 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
             initValue = vec;
         } else {
-            // Check if this is a const array literal eligible for stack allocation.
-            // Const arrays cannot escape via reassignment; if the array is small
-            // and has no spread elements, we hint generateArray to use alloca.
+            // Check if this array literal is eligible for stack allocation.
+            // Two cases:
+            //   1. const arrays (existing logic, N ≤ 64)
+            //   2. Non-const arrays with all-integer-literal elements, N ≤ 16,
+            //      that don't escape the function scope (escape analysis).
             bool useStackAlloc = false;
-            if (stmt->isConst &&
-                stmt->initializer->type == ASTNodeType::ARRAY_EXPR &&
+            if (stmt->initializer->type == ASTNodeType::ARRAY_EXPR &&
                 optimizationLevel >= OptimizationLevel::O1) {
                 auto* arrExpr = static_cast<ArrayExpr*>(stmt->initializer.get());
                 bool hasSpreadElem = false;
+                bool allIntLiterals = true;
                 for (const auto& elem : arrExpr->elements) {
                     if (elem->type == ASTNodeType::SPREAD_EXPR) {
                         hasSpreadElem = true;
                         break;
                     }
+                    if (elem->type != ASTNodeType::LITERAL_EXPR ||
+                        static_cast<LiteralExpr*>(elem.get())->literalType !=
+                            LiteralExpr::LiteralType::INTEGER) {
+                        allIntLiterals = false;
+                    }
                 }
-                if (!hasSpreadElem && arrExpr->elements.size() <= kMaxStackArrayElements) {
-                    useStackAlloc = true;
+                const size_t n = arrExpr->elements.size();
+                if (!hasSpreadElem) {
+                    if (stmt->isConst && n <= kMaxStackArrayElements) {
+                        useStackAlloc = true;
+                    } else if (!stmt->isConst && allIntLiterals && n <= 16 &&
+                               !doesVarEscapeCurrentScope(stmt->name)) {
+                        useStackAlloc = true;
+                    }
+                }
+                if (useStackAlloc) {
                     pendingArrayStackAlloc_ = true;
                 }
             }
@@ -84,6 +99,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             if (useStackAlloc) {
                 pendingArrayStackAlloc_ = false;
                 stackAllocatedArrays_.insert(stmt->name);
+                optStats_.escapeStackAllocs++;
             }
         }
 
@@ -220,6 +236,19 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 markVariableBorrowed(stmt->name, bw->pendingSrcVar);
             }
             bw->pendingSrcVar.clear(); // consumed
+        }
+    }
+
+    // If the initializer was a reborrow expression, register the alias mapping.
+    if (stmt->initializer && stmt->initializer->type == ASTNodeType::REBORROW_EXPR) {
+        auto* rb = static_cast<ReborrowExpr*>(stmt->initializer.get());
+        if (!rb->pendingSrcVar.empty()) {
+            if (rb->isMut) {
+                markVariableMutBorrowed(stmt->name, rb->pendingSrcVar);
+            } else {
+                markVariableBorrowed(stmt->name, rb->pendingSrcVar);
+            }
+            rb->pendingSrcVar.clear(); // consumed
         }
     }
 
@@ -911,7 +940,22 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 
     auto savedLenCacheW = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
+
+    // @independent for while loops: pre-create access group before body.
+    llvm::MDNode* whileIndependentAccessGroup = nullptr;
+    llvm::MDNode* savedWhileAccessGroup = currentLoopAccessGroup_;
+    if (stmt->loopHints.independent) {
+        whileIndependentAccessGroup = llvm::MDNode::getDistinct(*context, {});
+        currentLoopAccessGroup_ = whileIndependentAccessGroup;
+        optStats_.independentLoops++;
+    }
+
     generateStatement(stmt->body.get());
+
+    if (stmt->loopHints.independent) {
+        currentLoopAccessGroup_ = savedWhileAccessGroup;
+    }
+
     loopArrayLenCache_ = std::move(savedLenCacheW);
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
@@ -1008,7 +1052,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         }
 
         // Apply per-loop @loop hints for WhileStmt
-        const LoopConfig& whileLoopHints = (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize || stmt->loopHints.parallel)
+        const LoopConfig& whileLoopHints = (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize || stmt->loopHints.parallel || stmt->loopHints.independent || stmt->loopHints.fuse)
             ? stmt->loopHints
             : currentOptMaxConfig_.loop;
         if (whileLoopHints.unrollCount > 0) {
@@ -1035,6 +1079,12 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
                            accessGroup2}));
+        }
+        // @independent for while loops
+        if (stmt->loopHints.independent && whileIndependentAccessGroup) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           whileIndependentAccessGroup}));
         }
 
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -1525,7 +1575,25 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // get fresh values.  Save outer cache for nested loop restore.
     auto savedLenCache = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
+
+    // @independent: pre-create access group so all loads/stores in the
+    // body receive !llvm.access.group metadata, enabling LLVM to eliminate
+    // loop-carried dependency assumptions entirely.
+    llvm::MDNode* independentAccessGroup = nullptr;
+    llvm::MDNode* savedAccessGroup = currentLoopAccessGroup_;
+    if (stmt->loopHints.independent) {
+        independentAccessGroup = llvm::MDNode::getDistinct(*context, {});
+        currentLoopAccessGroup_ = independentAccessGroup;
+        optStats_.independentLoops++;
+    }
+
     generateStatement(stmt->body.get());
+
+    // Restore the outer loop's access group (or null).
+    if (stmt->loopHints.independent) {
+        currentLoopAccessGroup_ = savedAccessGroup;
+    }
+
     loopArrayLenCache_ = std::move(savedLenCache);
     loopStack.pop_back();
 
@@ -2035,7 +2103,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
 
         // Apply per-loop @loop hints (override/augment function-level) for ForStmt
-        const LoopConfig& loopHintsCfg = (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize || stmt->loopHints.parallel)
+        const LoopConfig& loopHintsCfg = (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize || stmt->loopHints.parallel || stmt->loopHints.independent || stmt->loopHints.fuse)
             ? stmt->loopHints
             : currentOptMaxConfig_.loop;
         if (loopHintsCfg.unrollCount > 0) {
@@ -2062,6 +2130,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
                            accessGroup2}));
+        }
+        // @independent: emit parallel_accesses with the pre-created access group.
+        // The access group was already attached to all loads/stores in the body.
+        if (loopHintsCfg.independent && independentAccessGroup) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           independentAccessGroup}));
         }
 
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -3089,6 +3164,88 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
     return val;
 }
 
+llvm::Value* CodeGenerator::generateReborrowExpr(ReborrowExpr* expr) {
+    // Find source variable name from the source expression
+    std::string srcName;
+    if (auto* srcId = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
+        srcName = srcId->name;
+    }
+
+    if (!srcName.empty()) {
+        // Check borrow validity — source must be readable/writable
+        auto* bs = getBorrowStateOpt(srcName);
+        if (bs) {
+            if (bs->moved || bs->invalidated) {
+                codegenError("Cannot reborrow dead variable '" + srcName + "'", expr);
+            }
+            if (expr->isMut && bs->mutBorrowed) {
+                codegenError("Cannot create mutable reborrow of '" + srcName +
+                             "' — it already has an active mutable borrow", expr);
+            }
+            if (expr->isMut && bs->immutBorrowCount > 0) {
+                codegenError("Cannot create mutable reborrow of '" + srcName +
+                             "' — it already has active immutable borrows", expr);
+            }
+            if (expr->isMut && bs->frozen) {
+                codegenError("Cannot create mutable reborrow of frozen variable '" + srcName + "'", expr);
+            }
+        }
+
+        // Resolve the original source (chase borrow chain once)
+        std::string realSrc = srcName;
+        auto bmit = borrowMap_.find(srcName);
+        if (bmit != borrowMap_.end()) {
+            realSrc = bmit->second.srcVar;
+        }
+        expr->pendingSrcVar = realSrc;
+    }
+
+    // Generate the value — for partial borrows compute a GEP pointer
+    llvm::Value* val = generateExpression(expr->source.get());
+
+    // Partial borrow: field access → use GEP on struct
+    if (!expr->fieldName.empty()) {
+        if (auto* srcId = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
+            auto stit = structVars_.find(srcId->name);
+            if (stit != structVars_.end()) {
+                const std::string& stType = stit->second;
+                auto fit = structDefs_.find(stType);
+                if (fit != structDefs_.end()) {
+                    const auto& fields = fit->second;
+                    for (size_t fi = 0; fi < fields.size(); ++fi) {
+                        if (fields[fi] == expr->fieldName) {
+                            auto it2 = namedValues.find(srcId->name);
+                            if (it2 != namedValues.end()) {
+                                auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(it2->second);
+                                if (srcAlloca) {
+                                    llvm::StructType* sty = llvm::dyn_cast<llvm::StructType>(
+                                        srcAlloca->getAllocatedType());
+                                    if (sty) {
+                                        val = builder->CreateStructGEP(sty, srcAlloca,
+                                                                       static_cast<unsigned>(fi),
+                                                                       "reborrow.field");
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } else if (expr->indexExpr) {
+        // Partial borrow: array element → GEP to element slot
+        llvm::Value* arrPtr = generateExpression(expr->source.get());
+        llvm::Value* idx = generateExpression(expr->indexExpr.get());
+        // Arrays: [len, e0, e1, ...]  — element i is at slot i+1
+        llvm::Value* elemIdx = builder->CreateAdd(
+            idx, llvm::ConstantInt::get(getDefaultType(), 1), "reborrow.idx");
+        val = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "reborrow.elem");
+    }
+
+    return val;
+}
+
 void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
     llvm::Value* alloca = nullptr;
     std::string varName;
@@ -3388,13 +3545,41 @@ void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
 
     // Mark the variable as frozen in the ownership lattice
     markVariableFrozen(name);
+    optStats_.borrowsFrozen++;
 
-    // Emit llvm.invariant.start to tell LLVM the memory backing this variable
-    // will not change from this point forward.  This enables the optimizer to
-    // eliminate all subsequent loads (LICM, GVN, CSE).
+    // ── Alias propagation: freeze x; also freezes the borrow source of x ──
+    // If x is a borrow alias (borrowMap_["x"].srcVar == "y"), freeze y too.
+    {
+        auto bmit = borrowMap_.find(name);
+        if (bmit != borrowMap_.end()) {
+            const std::string& srcVar = bmit->second.srcVar;
+            if (!isVariableFrozen(srcVar)) {
+                markVariableFrozen(srcVar);
+            }
+        }
+    }
+    // Also freeze all aliases that point to this variable.
+    for (auto& kv : borrowMap_) {
+        if (kv.second.srcVar == name && !isVariableFrozen(kv.first)) {
+            markVariableFrozen(kv.first);
+        }
+    }
+
+    // ── Emit LLVM freeze instruction ──────────────────────────────────────
+    // Load the current value, freeze it (ensures non-poison), store it back.
+    // This is the IR-level guarantee that the value is well-defined.
     llvm::Value* alloca = it->second;
     if (auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca)) {
         llvm::Type* elemTy = allocaInst->getAllocatedType();
+        if (elemTy->isIntegerTy() || elemTy->isFloatingPointTy()) {
+            llvm::Value* loadedVal = builder->CreateAlignedLoad(
+                elemTy, allocaInst, llvm::MaybeAlign(8), (name + ".freeze.load").c_str());
+            llvm::Value* frozenVal = builder->CreateFreeze(loadedVal, (name + ".frozen").c_str());
+            builder->CreateAlignedStore(frozenVal, allocaInst, llvm::MaybeAlign(8));
+        }
+
+        // Emit llvm.invariant.start to tell LLVM the memory backing this variable
+        // will not change from this point forward.
         const uint64_t sz = module->getDataLayout().getTypeAllocSize(elemTy);
         auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
 #if LLVM_VERSION_MAJOR >= 19
