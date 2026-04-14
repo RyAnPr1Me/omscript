@@ -338,6 +338,9 @@ class CodeGenerator {
     bool hasOptMaxFunctions;
     llvm::StringSet<> optMaxFunctions;
     OptMaxConfig currentOptMaxConfig_;
+    /// Maps LLVM function name → its @optmax config, for use by the
+    /// post-generation pass in optimizeOptMaxFunctions().
+    std::unordered_map<std::string, OptMaxConfig> optMaxFunctionConfigs_;
 
     struct ConstBinding {
         bool wasPreviouslyDefined;

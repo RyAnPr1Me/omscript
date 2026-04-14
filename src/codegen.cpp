@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
@@ -3583,6 +3584,7 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
+    optMaxFunctionConfigs_.clear();
     irInstructionCount_ = 0;
     fileNoAlias_ = program->fileNoAlias;
 
@@ -4219,6 +4221,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         if (currentOptMaxConfig_.safety == SafetyLevel::Off) {
             currentOptMaxConfig_.fastMath = true;
         }
+        // Store the resolved config for optimizeOptMaxFunctions() to consume later.
+        optMaxFunctionConfigs_[func->name] = currentOptMaxConfig_;
         optimizeOptMaxBlock(func->body.get());
     }
 
@@ -4691,10 +4695,21 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // needed.  The save/restore is still correct — savedFMF captures the
     // existing fast flags and restores them identically.
     llvm::FastMathFlags savedFMF = builder->getFastMathFlags();
-    if (inOptMaxFunction && !useFastMath_) { // skip if globally fast (already set)
+    if (inOptMaxFunction && !useFastMath_ && currentOptMaxConfig_.fastMath) {
+        // fast_math=true (or safety=off, which implies it): enable all fast-math
+        // optimizations — FMA fusion, reassociation, reciprocal approximations,
+        // relaxed NaN/Inf semantics, and no-signed-zeros.
         llvm::FastMathFlags FMF;
         FMF.setFast();
         builder->setFastMathFlags(FMF);
+        // Also set function-level string attributes so LTO and the back-end
+        // can see the fast-math contract without inspecting every instruction.
+        function->addFnAttr("unsafe-fp-math", "true");
+        function->addFnAttr("no-nans-fp-math", "true");
+        function->addFnAttr("no-infs-fp-math", "true");
+        function->addFnAttr("no-signed-zeros-fp-math", "true");
+        function->addFnAttr("approx-func-fp-math", "true");
+        function->addFnAttr("no-trapping-math", "true");
     }
 
     // Create entry basic block
@@ -4774,6 +4789,81 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
 
         ++argIt;
+    }
+
+    // @optmax assumes=[...]: emit llvm.assume intrinsics for each assertion
+    // in the config.  Assumptions help LLVM prove range/sign/non-null facts
+    // that the programmer guarantees but the compiler cannot derive.
+    // Supported patterns: "var > N", "var >= N", "var != N", "var == N",
+    // "var < N", "var <= N" where var is a parameter name and N is an integer.
+    if (inOptMaxFunction && !currentOptMaxConfig_.assumes.empty()) {
+        llvm::Function* assumeIntr = llvm::Intrinsic::getDeclaration(
+            module.get(), llvm::Intrinsic::assume);
+        for (const auto& assumeStr : currentOptMaxConfig_.assumes) {
+            // Tokenise: split on whitespace into [var, op, literal]
+            std::istringstream ss(assumeStr);
+            std::string varName, op, litStr;
+            if (!(ss >> varName >> op >> litStr)) continue;
+            int64_t litVal = 0;
+            try { litVal = std::stoll(litStr); } catch (...) { continue; }
+            // Look up the variable in namedValues (covers all parameters just stored).
+            auto nv = namedValues.find(varName);
+            if (nv == namedValues.end()) continue;
+            auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(nv->second);
+            if (!alloca) continue;
+            llvm::Value* loaded = builder->CreateLoad(
+                alloca->getAllocatedType(), alloca, varName + ".assume.load");
+            // Cast to i64 for comparison (handles both int and float params).
+            llvm::Value* cmpVal = loaded;
+            if (cmpVal->getType()->isDoubleTy())
+                cmpVal = builder->CreateFPToSI(cmpVal, getDefaultType(), varName + ".assume.fptoi");
+            else if (cmpVal->getType() != getDefaultType())
+                cmpVal = builder->CreateSExtOrBitCast(cmpVal, getDefaultType(), varName + ".assume.cast");
+            llvm::Value* lit = llvm::ConstantInt::get(getDefaultType(), litVal, /*isSigned=*/true);
+            llvm::Value* cond = nullptr;
+            if      (op == ">")  cond = builder->CreateICmpSGT(cmpVal, lit, varName + ".assume.cond");
+            else if (op == ">=") cond = builder->CreateICmpSGE(cmpVal, lit, varName + ".assume.cond");
+            else if (op == "<")  cond = builder->CreateICmpSLT(cmpVal, lit, varName + ".assume.cond");
+            else if (op == "<=") cond = builder->CreateICmpSLE(cmpVal, lit, varName + ".assume.cond");
+            else if (op == "!=") cond = builder->CreateICmpNE (cmpVal, lit, varName + ".assume.cond");
+            else if (op == "==") cond = builder->CreateICmpEQ (cmpVal, lit, varName + ".assume.cond");
+            if (cond) {
+                builder->CreateCall(assumeIntr, {cond});
+                nonNegValues_.insert(cmpVal);  // help downstream range analysis
+            }
+        }
+    }
+
+    // @optmax memory.prefetch=true: auto-prefetch all pointer-type parameters
+    // at function entry.  This hints the CPU to load the pointed-to data into
+    // the L1/L2 cache before the first access, hiding memory latency for
+    // array-heavy numeric functions.
+    if (inOptMaxFunction && currentOptMaxConfig_.memory.prefetch) {
+        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::prefetch,
+            {llvm::PointerType::getUnqual(*context)});
+        for (size_t i = 0; i < func->parameters.size(); ++i) {
+            const auto& param = func->parameters[i];
+            if (prefetchedParams_.count(param.name)) continue;  // already prefetched
+            auto it = namedValues.find(param.name);
+            if (it == namedValues.end()) continue;
+            auto* al = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+            if (!al) continue;
+            llvm::Value* val = builder->CreateLoad(al->getAllocatedType(), al,
+                                                   param.name + ".autopf.load");
+            // Treat as a pointer (i64 → ptr cast) and prefetch the target memory.
+            llvm::Value* ptr = val->getType()->isPointerTy()
+                ? val
+                : builder->CreateIntToPtr(val, llvm::PointerType::getUnqual(*context),
+                                          param.name + ".autopf.ptr");
+            builder->CreateCall(prefetchFn, {
+                ptr,
+                builder->getInt32(0),  // read prefetch
+                builder->getInt32(3),  // high temporal locality — keep in all levels
+                builder->getInt32(1)   // data cache
+            });
+            prefetchedParams_.insert(param.name);
+        }
     }
 
     // Generate function body

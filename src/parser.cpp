@@ -3273,11 +3273,14 @@ OptMaxConfig Parser::parseOptMaxConfig() {
                 else if (val.lexeme == "relaxed") cfg.safety = SafetyLevel::Relaxed;
                 else cfg.safety = SafetyLevel::On;
             } else if (key.lexeme == "fast_math") {
-                const Token val = consume(TokenType::IDENTIFIER, "Expected value for fast_math");
-                cfg.fastMath = (val.lexeme == "true");
+                const Token val = advance();
+                cfg.fastMath = (val.lexeme == "true" || val.type == TokenType::TRUE);
+            } else if (key.lexeme == "aggressive_vec") {
+                const Token val = advance();
+                cfg.aggressiveVec = (val.lexeme == "true" || val.type == TokenType::TRUE);
             } else if (key.lexeme == "report") {
-                const Token val = consume(TokenType::IDENTIFIER, "Expected value for report");
-                cfg.report = (val.lexeme == "true");
+                const Token val = advance();
+                cfg.report = (val.lexeme == "true" || val.type == TokenType::TRUE);
             } else if (key.lexeme == "loop") {
                 consume(TokenType::LBRACE, "Expected '{' for loop config");
                 while (!check(TokenType::RBRACE) && !isAtEnd()) {
@@ -3287,14 +3290,14 @@ OptMaxConfig Parser::parseOptMaxConfig() {
                         const Token v = advance();
                         try { cfg.loop.unrollCount = std::stoi(v.lexeme); } catch(...) {}
                     } else if (lk.lexeme == "vectorize") {
-                        const Token v = consume(TokenType::IDENTIFIER, "Expected bool for vectorize");
-                        cfg.loop.vectorize = (v.lexeme == "true");
+                        const Token v = advance();
+                        cfg.loop.vectorize = (v.lexeme == "true" || v.type == TokenType::TRUE);
                     } else if (lk.lexeme == "tile") {
                         const Token v = advance();
                         try { cfg.loop.tileSize = std::stoi(v.lexeme); } catch(...) {}
                     } else if (lk.lexeme == "parallel") {
-                        const Token v = consume(TokenType::IDENTIFIER, "Expected bool for parallel");
-                        cfg.loop.parallel = (v.lexeme == "true");
+                        const Token v = advance();
+                        cfg.loop.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);
                     }
                     if (!check(TokenType::RBRACE)) match(TokenType::COMMA);
                 }
@@ -3304,10 +3307,10 @@ OptMaxConfig Parser::parseOptMaxConfig() {
                 while (!check(TokenType::RBRACE) && !isAtEnd()) {
                     const Token mk = consume(TokenType::IDENTIFIER, "Expected memory config key");
                     consume(TokenType::ASSIGN, "Expected '=' in memory config");
-                    const Token mv = consume(TokenType::IDENTIFIER, "Expected bool for memory config");
-                    if (mk.lexeme == "prefetch") cfg.memory.prefetch = (mv.lexeme == "true");
-                    else if (mk.lexeme == "noalias") cfg.memory.noalias = (mv.lexeme == "true");
-                    else if (mk.lexeme == "stack") cfg.memory.preferStack = (mv.lexeme == "true");
+                    const Token mv = advance();
+                    if (mk.lexeme == "prefetch") cfg.memory.prefetch = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
+                    else if (mk.lexeme == "noalias") cfg.memory.noalias = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
+                    else if (mk.lexeme == "stack") cfg.memory.preferStack = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
                     if (!check(TokenType::RBRACE)) match(TokenType::COMMA);
                 }
                 consume(TokenType::RBRACE, "Expected '}' after memory config");

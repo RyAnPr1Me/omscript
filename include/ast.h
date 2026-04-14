@@ -283,8 +283,15 @@ struct LoopConfig {
 };
 
 struct MemoryConfig {
+    /// Prefer stack allocation for small local arrays instead of heap.
+    /// Reserved for future implementation; currently ignored.
     bool preferStack  = false;
+    /// Emit llvm.prefetch hints for all pointer-type parameters at function
+    /// entry.  Active: auto-prefetch emitted in generateFunction().
     bool prefetch     = false;
+    /// All pointer parameters are already noalias in OPTMAX functions (language
+    /// invariant).  Setting this to true adds an additional per-pair
+    /// alias-scope annotation pass (future work beyond the base noalias).
     bool noalias      = false;
 };
 

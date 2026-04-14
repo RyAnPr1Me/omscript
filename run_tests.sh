@@ -66,7 +66,7 @@ ptest_program() {
     (
         ./build/omsc "$source" -o "$exe" >/dev/null 2>&1 \
             || { echo "FAIL compile-failed" > "$rf"; exit 0; }
-        timeout 60 "$exe"
+        timeout 60 "$exe" 2>/dev/null
         local rc=$?
         rm -f "$exe"
         local em=$(( expected % 256 ))
@@ -74,7 +74,7 @@ ptest_program() {
         elif [ "$rc" -eq "$em" ]; then echo "PASS $rc"                > "$rf"
         else                          echo "FAIL wrong-exit $em $rc"  > "$rf"
         fi
-    ) &
+    ) 2>/dev/null &
     _PT_PIDS[$idx]=$!
     _ptest_throttle
 }
