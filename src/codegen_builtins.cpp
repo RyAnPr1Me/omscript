@@ -1,6 +1,7 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 
@@ -719,6 +720,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SQRT) {
         validateArgCount(expr, "sqrt", 1);
+        // Constant-fold sqrt(n) for compile-time integer arguments.
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            if (*v >= 0)
+                return llvm::ConstantInt::get(getDefaultType(),
+                    static_cast<int64_t>(std::sqrt(static_cast<double>(*v))));
+        }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Use the llvm.sqrt intrinsic which maps directly to hardware sqrtsd/sqrtss
         // instructions on x86, producing results in a single cycle on modern CPUs.
@@ -1670,19 +1677,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::FLOOR) {
         validateArgCount(expr, "floor", 1);
+        // Integer input: floor is identity.
+        if (auto v = tryFoldInt(expr->arguments[0].get()))
+            return llvm::ConstantInt::get(getDefaultType(), *v);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
-        // Use llvm.floor intrinsic for native hardware rounding
         llvm::Function* floorIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::floor, {getFloatType()});
         llvm::Value* result = builder->CreateCall(floorIntrinsic, {fval}, "floor.result");
-        if (inputIsDouble)
-            return result;
+        if (inputIsDouble) return result;
         return builder->CreateFPToSI(result, getDefaultType(), "floor.int");
     }
 
     if (bid == BuiltinId::CEIL) {
         validateArgCount(expr, "ceil", 1);
+        // Integer input: ceil is identity.
+        if (auto v = tryFoldInt(expr->arguments[0].get()))
+            return llvm::ConstantInt::get(getDefaultType(), *v);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
@@ -1696,6 +1707,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::ROUND) {
         validateArgCount(expr, "round", 1);
+        // Integer input: round is identity.
+        if (auto v = tryFoldInt(expr->arguments[0].get()))
+            return llvm::ConstantInt::get(getDefaultType(), *v);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
@@ -5413,6 +5427,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::EXP2) {
         validateArgCount(expr, "exp2", 1);
+        // Constant-fold exp2(n) for small non-negative integer args (returns 2^n).
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            if (*v >= 0 && *v < 63)
+                return llvm::ConstantInt::get(getDefaultType(), int64_t(1) << static_cast<int>(*v));
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         llvm::Function* exp2Fn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::exp2, {getFloatType()});

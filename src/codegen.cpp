@@ -5606,10 +5606,43 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         }
         return std::nullopt;
     }
+    // ── sqrt(x) for integer args ────────────────────────────────────────────
+    if (name == "sqrt" && n == 1) {
+        if (auto v = intArg(0)) {
+            if (*v >= 0) return CV::fromInt(static_cast<int64_t>(std::sqrt(static_cast<double>(*v))));
+        }
+        return std::nullopt;
+    }
+    // ── floor(x), ceil(x), round(x) for integer args ───────────────────────
+    if (name == "floor" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(*v);  // floor of integer is itself
+        return std::nullopt;
+    }
+    if (name == "ceil" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(*v);  // ceil of integer is itself
+        return std::nullopt;
+    }
+    if (name == "round" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(*v);  // round of integer is itself
+        return std::nullopt;
+    }
+    // ── log2(x) / log(x) integer floor ─────────────────────────────────────
+    if (name == "log" && n == 1) {
+        if (auto v = intArg(0)) {
+            if (*v > 0) return CV::fromInt(static_cast<int64_t>(std::log(static_cast<double>(*v))));
+        }
+        return std::nullopt;
+    }
+    // ── exp2(n) for small non-negative integer exponents ───────────────────
+    if (name == "exp2" && n == 1) {
+        if (auto v = intArg(0)) {
+            if (*v >= 0 && *v < 63)
+                return CV::fromInt(int64_t(1) << static_cast<int>(*v));
+        }
+        return std::nullopt;
+    }
     return std::nullopt;
 }
-
-// tryFoldExprToConst: evaluate any expression to a compile-time ConstValue
 // using all statically-known information (constIntFolds_, constStringFolds_,
 // constIntReturnFunctions_, constStringReturnFunctions_, enumConstants_).
 // This is the "call-site evaluator" — it knows about constants in the CURRENT
@@ -5793,6 +5826,12 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         if (eit != enumConstants_.end())
             return ConstValue::fromInt(static_cast<int64_t>(eit->second));
         return std::nullopt;
+    }
+    case ASTNodeType::COMPTIME_EXPR: {
+        // A comptime {} block is always a compile-time constant — evaluate it.
+        auto* ct = static_cast<ComptimeExpr*>(expr);
+        static const std::unordered_map<std::string, ConstValue> emptyEnv;
+        return tryConstEvalFull(ct->body.get(), emptyEnv);
     }
     default: return std::nullopt;
     }
@@ -6036,6 +6075,13 @@ CodeGenerator::tryConstEvalFull(
             if (eit != enumConstants_.end())
                 return ConstValue::fromInt(static_cast<int64_t>(eit->second));
             return std::nullopt;
+        }
+
+        // ── Nested comptime block ────────────────────────────────────────
+        case ASTNodeType::COMPTIME_EXPR: {
+            auto* ct = static_cast<ComptimeExpr*>(e);
+            std::unordered_map<std::string, ConstValue> nestedEnv;
+            return tryConstEvalFull(ct->body.get(), nestedEnv, depth + 1);
         }
 
         // ── Function calls ───────────────────────────────────────────────
@@ -6433,11 +6479,20 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
     // Set of builtins known to be pure (no I/O, no heap mutation observable
     // to the caller, deterministic output for given inputs).
     static const std::unordered_set<std::string> kPureBuiltins = {
-        "abs", "min", "max", "sign", "clamp", "pow", "sqrt", "log2", "gcd",
-        "is_even", "is_odd", "floor", "ceil", "round",
-        "to_int", "to_float", "to_string", "str_len", "len", "typeof",
-        "char_at", "str_eq", "str_find", "startswith", "endswith",
-        "str_upper", "str_lower", "str_trim",
+        "abs", "min", "max", "sign", "clamp", "pow", "sqrt", "log2", "log",
+        "gcd", "lcm", "exp2",
+        "is_even", "is_odd", "is_power_of_2", "is_alpha", "is_digit",
+        "floor", "ceil", "round",
+        "popcount", "clz", "ctz", "bswap", "bitreverse",
+        "rotate_left", "rotate_right", "saturating_add", "saturating_sub",
+        "to_int", "to_float", "to_string", "number_to_string",
+        "string_to_number", "char_code", "to_char",
+        "str_len", "len", "typeof",
+        "char_at", "str_eq", "str_find", "str_index_of",
+        "str_starts_with", "str_ends_with", "startswith", "endswith",
+        "str_upper", "str_lower", "str_trim", "str_reverse",
+        "str_substr", "str_contains", "str_replace", "str_repeat",
+        "str_count",
     };
 
     // Set of builtin/user names that are impure (I/O, heap side-effects, etc.)
@@ -6525,6 +6580,21 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
             auto* bw = static_cast<const BorrowExpr*>(expr);
             return isExprPure(bw->source.get());
         }
+        case ASTNodeType::COMPTIME_EXPR:
+            // A comptime {} block is always a compile-time constant — always pure.
+            return true;
+        case ASTNodeType::POSTFIX_EXPR: {
+            // ++/-- are mutations — not pure for const-eval.
+            auto* pe = static_cast<const PostfixExpr*>(expr);
+            (void)pe;
+            return false;
+        }
+        case ASTNodeType::PREFIX_EXPR: {
+            auto* pre = static_cast<const PrefixExpr*>(expr);
+            if (pre->op == "!" || pre->op == "-" || pre->op == "+")
+                return isExprPure(pre->operand.get());
+            return false;  // ++/-- are mutations
+        }
         default:
             // IndexExpr, AssignExpr, ArrayLiteral, etc. — conservative: not pure
             // for const-eval purposes (may allocate or mutate).
@@ -6584,6 +6654,21 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         case ASTNodeType::INVALIDATE_STMT:
             // invalidate frees memory — conservative: not pure.
             return false;
+        case ASTNodeType::BREAK_STMT:
+        case ASTNodeType::CONTINUE_STMT:
+            return true;
+        case ASTNodeType::SWITCH_STMT: {
+            auto* sw = static_cast<const SwitchStmt*>(stmt);
+            if (!isExprPure(sw->condition.get())) return false;
+            for (const auto& c : sw->cases) {
+                if (c.value && !isExprPure(c.value.get())) return false;
+                for (const auto& v : c.values)
+                    if (!isExprPure(v.get())) return false;
+                for (const auto& s : c.body)
+                    if (!isStmtPure(s.get())) return false;
+            }
+            return true;
+        }
         default:
             return false;
         }

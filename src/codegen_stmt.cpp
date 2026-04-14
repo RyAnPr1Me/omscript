@@ -270,6 +270,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
                     constIntFolds_[stmt->name] = ci->getSExtValue();
             }
+            // Also track comptime {} initializers for non-const vars: since
+            // comptime blocks always produce compile-time constants, treat them
+            // like const-integer for folding purposes even if not declared `const`.
+            if (!stmt->isConst && stmt->initializer &&
+                stmt->initializer->type == ASTNodeType::COMPTIME_EXPR) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
+                    constIntFolds_[stmt->name] = ci->getSExtValue();
+            }
         }
         // Track const float values for compile-time float expression folding.
         if (stmt->isConst && initValue->getType()->isDoubleTy()) {
@@ -283,6 +291,13 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         // Handles: string literals, const-var identifiers, concat trees, and
         // calls to zero-parameter pure constant-string functions.
         if (stmt->isConst && stmt->initializer) {
+            std::string foldedStr;
+            if (tryFoldStringConcat(stmt->initializer.get(), foldedStr))
+                constStringFolds_[stmt->name] = std::move(foldedStr);
+        }
+        // comptime string initializers are also always constant strings.
+        if (!stmt->isConst && stmt->initializer &&
+            stmt->initializer->type == ASTNodeType::COMPTIME_EXPR) {
             std::string foldedStr;
             if (tryFoldStringConcat(stmt->initializer.get(), foldedStr))
                 constStringFolds_[stmt->name] = std::move(foldedStr);
