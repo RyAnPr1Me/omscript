@@ -1289,8 +1289,6 @@ llvm::Function* CodeGenerator::getOrDeclareStrlen() {
     llvm::Function* fn = declareExternalFn("strlen", ty);
     // memory(argmem: read): strlen only reads through its pointer arg.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
-    fn->addFnAttr(llvm::Attribute::NoFree);   // never frees memory
-    fn->addFnAttr(llvm::Attribute::NoSync);   // no synchronization
     OMSC_ADD_NOCAPTURE(fn, 0);                      // does not capture its pointer arg
     fn->addParamAttr(0, llvm::Attribute::ReadOnly); // only reads through the pointer
     fn->addParamAttr(0, llvm::Attribute::NonNull);  // never called with null
@@ -1397,8 +1395,6 @@ llvm::Function* CodeGenerator::getOrDeclareStrcmp() {
     llvm::Function* fn = declareExternalFn("strcmp", ty);
     // memory(argmem: read): strcmp only reads through its pointer args.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1416,8 +1412,6 @@ llvm::Function* CodeGenerator::getOrDeclareStrncmp() {
     auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy, sizeTy}, false);
     llvm::Function* fn = declareExternalFn("strncmp", ty);
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1435,8 +1429,6 @@ llvm::Function* CodeGenerator::getOrDeclareMemcmp() {
     auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy, sizeTy}, false);
     llvm::Function* fn = declareExternalFn("memcmp", ty);
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1482,9 +1474,11 @@ llvm::Function* CodeGenerator::getOrDeclareFputs() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fputs", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);  // stream pointer is not captured
     return fn;
 }
 
@@ -1515,6 +1509,7 @@ llvm::Function* CodeGenerator::getOrDeclareScanf() {
         llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::PointerType::getUnqual(*context)}, true);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "scanf", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1573,8 +1568,6 @@ llvm::Function* CodeGenerator::getOrDeclareMemchr() {
     llvm::Function* fn = declareExternalFn("memchr", ty);
     // memory(argmem: read): memchr only reads through its pointer arg.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1611,8 +1604,6 @@ llvm::Function* CodeGenerator::getOrDeclareStrstr() {
     llvm::Function* fn = declareExternalFn("strstr", ty);
     // memory(argmem: read): strstr only reads through its pointer args.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1630,8 +1621,6 @@ llvm::Function* CodeGenerator::getOrDeclareMemcpy() {
     llvm::Function* fn = declareExternalFn("memcpy", ty);
     // memory(argmem: readwrite): memcpy only accesses memory through its pointer args.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly()));
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::Returned); // memcpy returns the destination pointer
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
@@ -1649,8 +1638,6 @@ llvm::Function* CodeGenerator::getOrDeclareMemmove() {
     llvm::Function* fn = declareExternalFn("memmove", ty);
     // memory(argmem: readwrite): memmove only accesses memory through its pointer args.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly()));
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::Returned); // memmove returns the destination pointer
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
@@ -1972,6 +1959,7 @@ llvm::Function* CodeGenerator::getOrDeclareFwrite() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fwrite", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1988,6 +1976,7 @@ llvm::Function* CodeGenerator::getOrDeclareFflush() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fflush", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
 }
@@ -2000,6 +1989,7 @@ llvm::Function* CodeGenerator::getOrDeclareFgets() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fgets", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(2, llvm::Attribute::NonNull);
@@ -2016,6 +2006,8 @@ llvm::Function* CodeGenerator::getOrDeclareFopen() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fopen", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NoAlias);  // fopen returns a new FILE* (or null)
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -2046,6 +2038,7 @@ llvm::Function* CodeGenerator::getOrDeclareFread() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fread", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(3, llvm::Attribute::NonNull);
@@ -2062,6 +2055,7 @@ llvm::Function* CodeGenerator::getOrDeclareFseek() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fseek", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -2075,6 +2069,7 @@ llvm::Function* CodeGenerator::getOrDeclareFtell() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "ftell", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -2089,6 +2084,8 @@ llvm::Function* CodeGenerator::getOrDeclareAccess() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "access", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -2106,7 +2103,13 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadCreate() {
     // int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     //                    void *(*start_routine)(void*), void *arg)
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, ptrTy, ptrTy, ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_create", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_create", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);  // thread ID output pointer
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 1);  // attributes (usually null)
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclarePthreadJoin() {
@@ -2115,7 +2118,11 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadJoin() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     // int pthread_join(pthread_t thread, void **retval)
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {getDefaultType(), ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_join", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_join", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 1);  // retval output pointer
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclarePthreadMutexInit() {
@@ -2170,7 +2177,6 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexDestroy() {
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     return fn;
-}
 }
 
 // ---------------------------------------------------------------------------
