@@ -5457,6 +5457,8 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         if (i < n && args[i].kind == CV::Kind::Integer) return args[i].intVal;
         return std::nullopt;
     };
+    // strArg returns a pointer into args[i].strVal — valid for the duration of
+    // this call since `args` is a const-ref to the caller's vector.
     auto strArg = [&](size_t i) -> const std::string* {
         if (i < n && args[i].kind == CV::Kind::String) return &args[i].strVal;
         return nullptr;
@@ -6576,6 +6578,7 @@ CodeGenerator::tryConstEvalFull(
             }
             if (bin->op == "**") {
                 if (b < 0) return (a == 1) ? std::optional<ConstValue>(ConstValue::fromInt(1)) : std::nullopt;
+                if (b > 63) return std::nullopt; // avoid pathologically large exponents
                 int64_t r = 1, base = a, rem = b;
                 while (rem > 0) { if (rem & 1) r *= base; base *= base; rem >>= 1; }
                 return ConstValue::fromInt(r);
