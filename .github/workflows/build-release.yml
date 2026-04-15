@@ -118,8 +118,8 @@ jobs:
             "-DOMSC_VERSION=$NEW_VERSION"
           cmake --build build --parallel $(nproc)
           
-          # Run tests
-          ctest --test-dir build --output-on-failure
+          # Run integration tests using the newly built compiler
+          bash run_tests.sh
           
           # Commit version update and push tag
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
