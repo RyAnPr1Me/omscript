@@ -1877,11 +1877,43 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
 
 bool CTEngine::evalPipelineStmt(CTFrame& frame, const Statement* s) {
     auto* ps = static_cast<const PipelineStmt*>(s);
+    const int nStages = static_cast<int>(ps->stages.size());
 
-    // One-shot form (no count): execute all stages once.
+    // Helper: execute non-final stages with failure semantics, then always
+    // run the last stage.  Returns true if pipeline should continue iterating.
+    auto runStagesWithFailure = [&]() -> bool {
+        if (nStages <= 1) {
+            // Single stage — just run it.
+            if (!executeBody(frame, ps->stages[0].body.get())) return false;
+            return true;
+        }
+
+        bool stageFailed = false;
+
+        // Execute non-final stages; on failure, skip remaining middle stages.
+        for (int si = 0; si < nStages - 1; ++si) {
+            if (!evalStmt(frame, ps->stages[si].body.get())) {
+                stageFailed = true;
+                break;
+            }
+            if (frame.hasReturned || frame.didBreak) {
+                stageFailed = true;
+                break;
+            }
+        }
+
+        // Last stage always runs ("finally").
+        if (!evalStmt(frame, ps->stages[nStages - 1].body.get()))
+            return false;
+
+        // If a middle stage failed, signal cancellation to the caller.
+        if (stageFailed) return false;
+        return true;
+    };
+
+    // One-shot form (no count): execute stages once with failure semantics.
     if (!ps->count) {
-        for (auto& stage : ps->stages)
-            if (!executeBody(frame, stage.body.get())) return false;
+        runStagesWithFailure();
         return true;
     }
 
@@ -1909,17 +1941,41 @@ bool CTEngine::evalPipelineStmt(CTFrame& frame, const Statement* s) {
 void CTEngine::executeTile(CTFrame& frame,
                             const std::vector<const Statement*>& stageStmts,
                             int64_t baseIdx, int64_t n) {
+    const int nStages = static_cast<int>(stageStmts.size());
+
     // Execute each lane in the tile sequentially.
     for (int lane = 0; lane < kSIMDLaneWidth; ++lane) {
         int64_t i = baseIdx + lane;
         if (i >= n) break;  // mask inactive lanes
         // Set the pipeline iterator.
         frame.locals["__pipeline_i"] = CTValue::fromI64(i);
-        // Execute each stage body.
-        for (auto* stageBody : stageStmts) {
-            if (!evalStmt(frame, stageBody)) return;
+
+        if (nStages <= 1) {
+            // Single stage — just run it.
+            if (!evalStmt(frame, stageStmts[0])) return;
             if (frame.hasReturned || frame.didBreak || frame.didContinue) return;
+        } else {
+            // Execute non-final stages; on failure skip to last stage.
+            bool stageFailed = false;
+            for (int si = 0; si < nStages - 1; ++si) {
+                if (!evalStmt(frame, stageStmts[si])) {
+                    stageFailed = true;
+                    break;
+                }
+                if (frame.hasReturned || frame.didBreak || frame.didContinue) {
+                    stageFailed = true;
+                    break;
+                }
+            }
+
+            // Last stage always runs ("finally").
+            if (!evalStmt(frame, stageStmts[nStages - 1])) return;
+            if (frame.hasReturned || frame.didBreak || frame.didContinue) return;
+
+            // If a middle stage failed, cancel the pipeline (no more lanes).
+            if (stageFailed) return;
         }
+
         frame.didContinue = false;
     }
 }

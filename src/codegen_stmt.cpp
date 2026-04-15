@@ -3749,14 +3749,137 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
         codegenError("pipeline statement outside of function", stmt);
     }
 
+    // ── Pipeline failure semantics ───────────────────────────────────────────
+    // • Stages execute strictly in order.
+    // • If any non-final stage sets __om_error_flag (throw / runtime error),
+    //   the pipeline captures the failure, skips the remaining middle stages,
+    //   and jumps directly to the LAST stage which always runs ("finally").
+    // • After the last stage, a counted pipeline exits the loop immediately
+    //   (no further iterations).
+    //
+    // Error detection reuses the existing __om_error_flag global so that
+    // `throw` inside a stage is caught without needing setjmp/longjmp.
+
+    const int nStages = static_cast<int>(stmt->stages.size());
+
+    // Helper: get-or-create the global error flag.
+    auto getErrFlag = [&]() -> llvm::GlobalVariable* {
+        llvm::GlobalVariable* ef = module->getGlobalVariable("__om_error_flag", true);
+        if (!ef) {
+            ef = new llvm::GlobalVariable(*module, getDefaultType(), false,
+                                          llvm::GlobalValue::InternalLinkage,
+                                          llvm::ConstantInt::get(getDefaultType(), 0),
+                                          "__om_error_flag");
+        }
+        return ef;
+    };
+
     // ── One-shot form ────────────────────────────────────────────────────────
-    // No count expression → emit stages once as a straight-line block.
+    // No count expression → emit stages once with failure semantics.
     if (!stmt->count) {
         const ScopeGuard scope(*this);
-        for (auto& stage : stmt->stages) {
+
+        if (nStages <= 1) {
+            // Single stage — no failure skip needed, just run it.
             const ScopeGuard stageScope(*this);
-            generateBlock(stage.body.get());
+            generateBlock(stmt->stages[0].body.get());
+            return;
         }
+
+        // Allocate local failed flag (i1).
+        llvm::AllocaInst* failedFlag =
+            createEntryBlockAlloca(function, "__pipeline_failed",
+                                   llvm::Type::getInt1Ty(*context));
+        builder->CreateStore(llvm::ConstantInt::getFalse(*context), failedFlag);
+
+        // Create the "finally" block for the last stage and the merge block.
+        // The catchBB intercepts throws from non-final stages.
+        llvm::BasicBlock* catchBB =
+            llvm::BasicBlock::Create(*context, "pipeline.catch", function);
+        llvm::BasicBlock* finallyBB =
+            llvm::BasicBlock::Create(*context, "pipeline.finally", function);
+        llvm::BasicBlock* endBB =
+            llvm::BasicBlock::Create(*context, "pipeline.oneshot.end", function);
+
+        llvm::GlobalVariable* errFlag = getErrFlag();
+
+        // Push our catch block so that `throw` inside non-final stages
+        // branches here rather than to any outer try/catch handler.
+        tryCatchStack_.push_back(catchBB);
+
+        // Execute non-final stages with error checks.
+        for (int si = 0; si < nStages - 1; ++si) {
+            if (builder->GetInsertBlock()->getTerminator()) break;
+
+            {
+                const ScopeGuard stageScope(*this);
+                generateBlock(stmt->stages[si].body.get());
+            }
+
+            // After each non-final stage, check __om_error_flag (for errors
+            // propagated via callee return, not via direct throw).
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                llvm::Value* ef = builder->CreateLoad(getDefaultType(), errFlag,
+                                                       "pipeline.chk");
+                llvm::Value* failed = builder->CreateICmpNE(
+                    ef, llvm::ConstantInt::get(getDefaultType(), 0),
+                    "pipeline.failed");
+
+                llvm::BasicBlock* nextBB = llvm::BasicBlock::Create(
+                    *context, "pipeline.stage." + std::to_string(si + 1), function);
+
+                auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+                builder->CreateCondBr(failed, catchBB, nextBB, w);
+
+                builder->SetInsertPoint(nextBB);
+            }
+        }
+
+        tryCatchStack_.pop_back();
+
+        // Fall through to finally from the last successful non-final stage.
+        if (!builder->GetInsertBlock()->getTerminator())
+            builder->CreateBr(finallyBB);
+
+        // ── Catch: a throw or error was detected ─────────────────────────────
+        // Record the failure, clear the error flag so the finally stage can
+        // run normally, then fall through to finally.
+        builder->SetInsertPoint(catchBB);
+        builder->CreateStore(llvm::ConstantInt::getTrue(*context), failedFlag);
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
+        builder->CreateBr(finallyBB);
+
+        // ── Finally: last stage always runs ──────────────────────────────────
+        builder->SetInsertPoint(finallyBB);
+        {
+            const ScopeGuard stageScope(*this);
+            generateBlock(stmt->stages[nStages - 1].body.get());
+        }
+
+        // After finally: re-raise the error so any outer try/catch sees it.
+        if (!builder->GetInsertBlock()->getTerminator()) {
+            llvm::Value* didFail = builder->CreateLoad(
+                llvm::Type::getInt1Ty(*context), failedFlag,
+                "pipeline.reraise.chk");
+            llvm::BasicBlock* reraiseBB = llvm::BasicBlock::Create(
+                *context, "pipeline.reraise", function);
+            auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+            builder->CreateCondBr(didFail, reraiseBB, endBB, w);
+
+            builder->SetInsertPoint(reraiseBB);
+            // Re-set the error flag so outer try/catch can detect it.
+            builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 1),
+                                 errFlag);
+            // If there's an outer try/catch, branch there; otherwise just
+            // fall through to endBB (the error flag stays set for the caller).
+            if (!tryCatchStack_.empty()) {
+                builder->CreateBr(tryCatchStack_.back());
+            } else {
+                builder->CreateBr(endBB);
+            }
+        }
+
+        builder->SetInsertPoint(endBB);
         return;
     }
 
@@ -3854,10 +3977,104 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
         }
     }
 
-    // ② Execute stage bodies sequentially.
-    for (auto& stage : stmt->stages) {
+    // ② Execute stage bodies sequentially with failure semantics.
+    //
+    // For multi-stage pipelines the last stage is the "finally" stage that
+    // always runs.  If any non-final stage triggers an error (__om_error_flag),
+    // the pipeline captures the failure, skips remaining middle stages, runs
+    // the finally stage, and then exits the loop (no further iterations).
+
+    if (nStages <= 1) {
+        // Single stage — no failure skip needed.
         const ScopeGuard stageScope(*this);
-        generateBlock(stage.body.get());
+        generateBlock(stmt->stages[0].body.get());
+    } else {
+        llvm::GlobalVariable* errFlag = getErrFlag();
+
+        // Allocate local failed flag (i1, init false at each iteration).
+        llvm::AllocaInst* failedFlag =
+            createEntryBlockAlloca(function, "__pipeline_failed",
+                                   llvm::Type::getInt1Ty(*context));
+        builder->CreateStore(llvm::ConstantInt::getFalse(*context), failedFlag);
+
+        llvm::BasicBlock* catchBB =
+            llvm::BasicBlock::Create(*context, "pipeline.catch", function);
+        llvm::BasicBlock* finallyBB =
+            llvm::BasicBlock::Create(*context, "pipeline.finally", function);
+        llvm::BasicBlock* postFinallyBB =
+            llvm::BasicBlock::Create(*context, "pipeline.post_finally", function);
+
+        // Push our catch block so `throw` inside non-final stages branches
+        // here rather than to any outer try/catch.
+        tryCatchStack_.push_back(catchBB);
+
+        // Execute non-final stages with error checks.
+        for (int si = 0; si < nStages - 1; ++si) {
+            if (builder->GetInsertBlock()->getTerminator()) break;
+
+            {
+                const ScopeGuard stageScope(*this);
+                generateBlock(stmt->stages[si].body.get());
+            }
+
+            // Check for errors propagated via callee return (flag-based).
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                llvm::Value* ef = builder->CreateLoad(getDefaultType(), errFlag,
+                                                       "pipeline.chk");
+                llvm::Value* failed = builder->CreateICmpNE(
+                    ef, llvm::ConstantInt::get(getDefaultType(), 0),
+                    "pipeline.failed");
+
+                llvm::BasicBlock* nextBB = llvm::BasicBlock::Create(
+                    *context, "pipeline.stage." + std::to_string(si + 1),
+                    function);
+
+                auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+                builder->CreateCondBr(failed, catchBB, nextBB, w);
+
+                builder->SetInsertPoint(nextBB);
+            }
+        }
+
+        tryCatchStack_.pop_back();
+
+        // Fall through to finally from the last successful non-final stage.
+        if (!builder->GetInsertBlock()->getTerminator())
+            builder->CreateBr(finallyBB);
+
+        // ── Catch: a throw or error was detected ────────────────────────────
+        builder->SetInsertPoint(catchBB);
+        builder->CreateStore(llvm::ConstantInt::getTrue(*context), failedFlag);
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
+        builder->CreateBr(finallyBB);
+
+        // ── Finally: last stage always runs ──────────────────────────────────
+        builder->SetInsertPoint(finallyBB);
+        {
+            const ScopeGuard stageScope(*this);
+            generateBlock(stmt->stages[nStages - 1].body.get());
+        }
+        if (!builder->GetInsertBlock()->getTerminator())
+            builder->CreateBr(postFinallyBB);
+
+        // ── Post-finally: if failed, re-raise and exit loop ─────────────────
+        builder->SetInsertPoint(postFinallyBB);
+        llvm::Value* didFail = builder->CreateLoad(
+            llvm::Type::getInt1Ty(*context), failedFlag, "pipeline.didfail");
+
+        llvm::BasicBlock* reraiseBB = llvm::BasicBlock::Create(
+            *context, "pipeline.reraise", function);
+        llvm::BasicBlock* incrBB = llvm::BasicBlock::Create(
+            *context, "pipeline.incr", function);
+        auto* wf = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(didFail, reraiseBB, incrBB, wf);
+
+        // Re-raise: set the error flag and exit the pipeline loop.
+        builder->SetInsertPoint(reraiseBB);
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 1), errFlag);
+        builder->CreateBr(exitBB);
+
+        builder->SetInsertPoint(incrBB);
     }
 
     // ③ __pipeline_i++
