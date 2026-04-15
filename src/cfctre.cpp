@@ -199,6 +199,15 @@ void CTHeap::store(CTArrayHandle h, int64_t idx, CTValue val) {
     arr.data[static_cast<size_t>(idx)] = std::move(val);
 }
 
+bool CTHeap::push(CTArrayHandle h, CTValue val) {
+    auto it = arrays_.find(h);
+    if (it == arrays_.end()) return false;
+    CTArray& arr = it->second;
+    arr.data.push_back(std::move(val));
+    ++arr.len;
+    return true;
+}
+
 uint64_t CTHeap::length(CTArrayHandle h) const {
     auto it = arrays_.find(h);
     return it != arrays_.end() ? it->second.len : 0;
@@ -649,8 +658,8 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
     }
     if (op == "**") {
         if (b < 0) return (a == 1) ? CTValue::fromI64(1) : CTValue::uninit();
-        int64_t r = 1, base = a;
-        for (int64_t i = 0; i < b && i < 63; ++i) r *= base;
+        int64_t r = 1, base = a, rem = b;
+        while (rem > 0) { if (rem & 1) r *= base; base *= base; rem >>= 1; }
         return CTValue::fromI64(r);
     }
     if (op == "==") return CTValue::fromI64(a == b ? 1 : 0);
@@ -669,6 +678,12 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
     if (op == "&=") return CTValue::fromI64(a & b);
     if (op == "|=") return CTValue::fromI64(a | b);
     if (op == "^=") return CTValue::fromI64(a ^ b);
+    if (op == "<<=" && b >= 0 && b < 64) return CTValue::fromU64(ua << static_cast<unsigned>(b));
+    if (op == ">>=" && b >= 0 && b < 64) return CTValue::fromI64(a >> static_cast<int>(b));
+    if (op == ">>>=") {
+        int sh = static_cast<int>(b & 63);
+        return CTValue::fromU64(ua >> sh);
+    }
 
     return CTValue::uninit();
 }
@@ -795,6 +810,33 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     // ── abs ──────────────────────────────────────────────────────────────
     if (name == "abs" && n == 1) {
         if (auto v = intArg(0)) return CTValue::fromI64(*v < 0 ? -*v : *v);
+        return std::nullopt;
+    }
+
+    // ── push(arr, val) → mutates array, returns 0 (void) ────────────────
+    if (name == "push" && n == 2) {
+        CTArrayHandle h = arrArg(0);
+        if (h != CT_NULL_HANDLE && args[1].isKnown()) {
+            heap_.push(h, args[1]);
+            return CTValue::fromI64(0);
+        }
+        return std::nullopt;
+    }
+
+    // ── pop(arr) → removes & returns last element ───────────────────────
+    if (name == "pop" && n == 1) {
+        CTArrayHandle h = arrArg(0);
+        if (h != CT_NULL_HANDLE) {
+            uint64_t len = heap_.length(h);
+            if (len == 0) return std::nullopt;
+            CTValue last = heap_.load(h, static_cast<int64_t>(len - 1));
+            CTArray* arr = heap_.getMut(h);
+            if (arr && arr->len > 0) {
+                arr->data.pop_back();
+                --arr->len;
+            }
+            return last;
+        }
         return std::nullopt;
     }
 

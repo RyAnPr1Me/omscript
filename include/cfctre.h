@@ -137,6 +137,9 @@ public:
     /// Store `val` at element index `idx` (no-op if out-of-bounds).
     void store(CTArrayHandle h, int64_t idx, CTValue val);
 
+    /// Append `val` to the end of array `h`.  Returns false if handle invalid.
+    bool push(CTArrayHandle h, CTValue val);
+
     /// Return the logical length of array `h` (0 if not found).
     uint64_t length(CTArrayHandle h) const;
 

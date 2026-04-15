@@ -1755,6 +1755,16 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "INVALID";
     case omscript::TokenType::AT:
         return "AT";
+    case omscript::TokenType::PIPELINE:
+        return "PIPELINE";
+    case omscript::TokenType::STAGE:
+        return "STAGE";
+    case omscript::TokenType::COMPTIME:
+        return "COMPTIME";
+    case omscript::TokenType::PARALLEL:
+        return "PARALLEL";
+    case omscript::TokenType::REBORROW:
+        return "REBORROW";
     }
     return "UNKNOWN";
 }

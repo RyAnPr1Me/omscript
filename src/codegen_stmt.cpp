@@ -11,6 +11,7 @@
 #include <llvm/Support/KnownBits.h>
 #include <set>
 #include <stdexcept>
+#include <unordered_set>
 
 #if LLVM_VERSION_MAJOR >= 19
 #define OMSC_GET_INTRINSIC_STMT llvm::Intrinsic::getOrInsertDeclaration
@@ -3614,6 +3615,7 @@ void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
 // Used by generatePipeline to know which arrays to auto-prefetch.
 static void collectArrayBases(const Statement* s, std::vector<std::string>& out) {
     if (!s) return;
+    std::unordered_set<std::string> seen(out.begin(), out.end());
     std::function<void(const Expression*)> scanExpr = [&](const Expression* e) {
         if (!e) return;
         if (e->type == ASTNodeType::INDEX_EXPR) {
@@ -3621,7 +3623,7 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
             if (ie->array && ie->array->type == ASTNodeType::IDENTIFIER_EXPR) {
                 const std::string& name =
                     static_cast<const IdentifierExpr*>(ie->array.get())->name;
-                if (std::find(out.begin(), out.end(), name) == out.end())
+                if (seen.insert(name).second)
                     out.push_back(name);
             }
             scanExpr(ie->array.get());
@@ -3641,9 +3643,19 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
             scanExpr(t->condition.get()); scanExpr(t->thenExpr.get()); scanExpr(t->elseExpr.get());
         } else if (e->type == ASTNodeType::ASSIGN_EXPR) {
             scanExpr(static_cast<const AssignExpr*>(e)->value.get());
+        } else if (e->type == ASTNodeType::INDEX_ASSIGN_EXPR) {
+            const auto* ia = static_cast<const IndexAssignExpr*>(e);
+            scanExpr(ia->array.get()); scanExpr(ia->index.get()); scanExpr(ia->value.get());
         } else if (e->type == ASTNodeType::ARRAY_EXPR) {
             for (const auto& el : static_cast<const ArrayExpr*>(e)->elements)
                 scanExpr(el.get());
+        } else if (e->type == ASTNodeType::PIPE_EXPR) {
+            const auto* pe = static_cast<const PipeExpr*>(e);
+            scanExpr(pe->left.get());
+        } else if (e->type == ASTNodeType::POSTFIX_EXPR) {
+            scanExpr(static_cast<const PostfixExpr*>(e)->operand.get());
+        } else if (e->type == ASTNodeType::PREFIX_EXPR) {
+            scanExpr(static_cast<const PrefixExpr*>(e)->operand.get());
         }
     };
     std::function<void(const Statement*)> scanStmt = [&](const Statement* s) {

@@ -6043,18 +6043,6 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         }
         return std::nullopt;
     }
-    // ── sum(arr) / array_product(arr) via constant array ──────────────────
-    if (name == "sum" && n == 1) {
-        if (args[0].kind == CV::Kind::Array) {
-            int64_t total = 0;
-            for (const auto& elem : args[0].arrVal) {
-                if (elem.kind != CV::Kind::Integer) return std::nullopt;
-                total += elem.intVal;
-            }
-            return CV::fromInt(total);
-        }
-        return std::nullopt;
-    }
     // ── Integer type cast builtins ─────────────────────────────────────────
     // u64(x), i64(x), int(x), uint(x) — identity; all OmScript integers are i64.
     // u32(x), i32(x) — truncate to 32 bits (zero/sign extend back to i64).
@@ -6164,6 +6152,12 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
             if (!rv || rv->kind != ConstValue::Kind::Integer) return std::nullopt;
             return ConstValue::fromInt(rv->intVal != 0 ? 1 : 0);
         }
+        // Null-coalescing (??)
+        if (bin->op == "??") {
+            auto lv = tryFoldExprToConst(bin->left.get(), depth + 1);
+            if (lv && lv->kind == ConstValue::Kind::Integer && lv->intVal != 0) return lv;
+            return tryFoldExprToConst(bin->right.get(), depth + 1);
+        }
         auto lv = tryFoldExprToConst(bin->left.get(), depth + 1);
         auto rv = tryFoldExprToConst(bin->right.get(), depth + 1);
         if (!lv || !rv) return std::nullopt;
@@ -6193,6 +6187,10 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         if (bin->op == "^")  return ConstValue::fromInt(a ^ b);
         if (bin->op == "<<" && b >= 0 && b < 64) return ConstValue::fromInt(a << b);
         if (bin->op == ">>" && b >= 0 && b < 64) return ConstValue::fromInt(a >> b);
+        if (bin->op == ">>>") {
+            int sh = static_cast<int>(b & 63);
+            return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) >> sh));
+        }
         if (bin->op == "**") {
             if (b < 0) return (a == 1) ? std::optional<ConstValue>(ConstValue::fromInt(1)) : std::nullopt;
             int64_t r = 1; int64_t cur = a; int64_t rem = b;
@@ -6272,6 +6270,22 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         auto* ct = static_cast<ComptimeExpr*>(expr);
         static const std::unordered_map<std::string, ConstValue> emptyEnv;
         return tryConstEvalFull(ct->body.get(), emptyEnv);
+    }
+    case ASTNodeType::PIPE_EXPR: {
+        auto* pipe = static_cast<PipeExpr*>(expr);
+        auto lv = tryFoldExprToConst(pipe->left.get(), depth + 1);
+        if (!lv) return std::nullopt;
+        std::vector<ConstValue> args = {std::move(*lv)};
+        if (auto bv = evalConstBuiltin(pipe->functionName, args))
+            return bv;
+        auto declIt = functionDecls_.find(pipe->functionName);
+        if (declIt != functionDecls_.end() && declIt->second->body &&
+            declIt->second->parameters.size() == 1) {
+            std::unordered_map<std::string, ConstValue> callEnv;
+            callEnv[declIt->second->parameters[0].name] = args[0];
+            return tryConstEvalFull(declIt->second, callEnv, depth + 1);
+        }
+        return std::nullopt;
     }
     default: return std::nullopt;
     }
@@ -6387,6 +6401,12 @@ CodeGenerator::tryConstEvalFull(
                 if (!rv || rv->kind != ConstValue::Kind::Integer) return std::nullopt;
                 return ConstValue::fromInt(rv->intVal != 0 ? 1 : 0);
             }
+            // Null-coalescing (??)
+            if (bin->op == "??") {
+                auto lv = evalE(bin->left.get());
+                if (lv && lv->kind == ConstValue::Kind::Integer && lv->intVal != 0) return lv;
+                return evalE(bin->right.get());
+            }
             auto lv = evalE(bin->left.get());
             auto rv = evalE(bin->right.get());
             if (!lv || !rv) return std::nullopt;
@@ -6414,10 +6434,14 @@ CodeGenerator::tryConstEvalFull(
             if (bin->op == "^")  return ConstValue::fromInt(a ^ b);
             if (bin->op == "<<" && b >= 0 && b < 64) return ConstValue::fromInt(a << b);
             if (bin->op == ">>" && b >= 0 && b < 64) return ConstValue::fromInt(a >> b);
+            if (bin->op == ">>>") {
+                int sh = static_cast<int>(b & 63);
+                return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) >> sh));
+            }
             if (bin->op == "**") {
                 if (b < 0) return (a == 1) ? std::optional<ConstValue>(ConstValue::fromInt(1)) : std::nullopt;
-                int64_t r = 1;
-                for (int64_t i = 0; i < b && i < 64; ++i) r *= a;
+                int64_t r = 1, base = a, rem = b;
+                while (rem > 0) { if (rem & 1) r *= base; base *= base; rem >>= 1; }
                 return ConstValue::fromInt(r);
             }
             if (bin->op == "==") return ConstValue::fromInt(int64_t(a == b));
@@ -6574,6 +6598,25 @@ CodeGenerator::tryConstEvalFull(
             return std::nullopt;
         }
 
+        // ── Pipe expression: x |> f → f(x) ──────────────────────────────
+        case ASTNodeType::PIPE_EXPR: {
+            auto* pipe = static_cast<PipeExpr*>(e);
+            auto lv = evalE(pipe->left.get());
+            if (!lv) return std::nullopt;
+            // Desugar to f(x)
+            std::vector<ConstValue> args = {std::move(*lv)};
+            if (auto bv = evalConstBuiltin(pipe->functionName, args))
+                return bv;
+            auto declIt = functionDecls_.find(pipe->functionName);
+            if (declIt != functionDecls_.end() && declIt->second->body &&
+                declIt->second->parameters.size() == 1) {
+                std::unordered_map<std::string, ConstValue> callEnv;
+                callEnv[declIt->second->parameters[0].name] = args[0];
+                return tryConstEvalFull(declIt->second, callEnv, depth + 1);
+            }
+            return std::nullopt;
+        }
+
         default: return std::nullopt;
         }
     };
@@ -6601,6 +6644,19 @@ CodeGenerator::tryConstEvalFull(
                 env[decl->name] = *v;
             } else {
                 env[decl->name] = ConstValue::fromInt(0);
+            }
+            return true;
+        }
+
+        // ── MoveDecl: treat like VarDecl ─────────────────────────────────
+        case ASTNodeType::MOVE_DECL: {
+            auto* md = static_cast<MoveDecl*>(s);
+            if (md->initializer) {
+                auto v = evalE(md->initializer.get());
+                if (!v) return false;
+                env[md->name] = *v;
+            } else {
+                env[md->name] = ConstValue::fromInt(0);
             }
             return true;
         }
@@ -6815,6 +6871,13 @@ CodeGenerator::tryConstEvalFull(
                         scopeGuard.emplace_back(decl->name, it->second);
                     else
                         scopeGuard.emplace_back(decl->name, std::nullopt);
+                } else if (stmt->type == ASTNodeType::MOVE_DECL) {
+                    auto* md = static_cast<MoveDecl*>(stmt.get());
+                    auto it = env.find(md->name);
+                    if (it != env.end())
+                        scopeGuard.emplace_back(md->name, it->second);
+                    else
+                        scopeGuard.emplace_back(md->name, std::nullopt);
                 }
                 if (!evalS(stmt.get())) {
                     // Restore scope on failure
@@ -6838,7 +6901,14 @@ CodeGenerator::tryConstEvalFull(
         }
 
         default:
-            // try/catch, prefetch, assert, I/O, etc. — not safe to fold.
+            // Prefetch, assume, freeze, invalidate, defer — safe no-ops at CT.
+            if (s->type == ASTNodeType::PREFETCH_STMT ||
+                s->type == ASTNodeType::ASSUME_STMT ||
+                s->type == ASTNodeType::FREEZE_STMT ||
+                s->type == ASTNodeType::INVALIDATE_STMT ||
+                s->type == ASTNodeType::DEFER_STMT)
+                return true;
+            // try/catch, I/O, etc. — not safe to fold.
             return false;
         }
     };
