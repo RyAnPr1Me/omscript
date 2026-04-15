@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CF-CTRE (Cross-Function Compile-Time Reasoning Engine)** — new compiler phase inserted between AST pre-analysis and LLVM IR generation.  CF-CTRE is a deterministic SSA-semantics interpreter embedded in the compiler that executes pure functions across function-call boundaries at compile time, memoises results, and preserves pipeline SIMD tile semantics.  Key capabilities:
+  - **Cross-function evaluation** — `comptime { chain(encode(x)) }` descends into all transitively-called pure functions, not just builtins.
+  - **Memoisation** — each unique `(function, args)` combination is evaluated at most once; subsequent identical calls reuse the cached result (O(1) lookup).
+  - **Array results** — pure functions that return arrays are fully evaluated; the result is emitted as a `private unnamed_addr constant [N+1 × i64]` global (no heap allocation at runtime).
+  - **Pipeline SIMD tile semantics** — loops are processed as tiles of 8 × `u64` lanes; partial final tiles are masked; one tile always executes even if `n < 8` (matching the hardware SIMD target model).
+  - **Fixed-point purity analysis** — whole-program analysis detects pure functions without requiring explicit `@pure` annotations; handles mutual recursion conservatively.
+  - **Specialization** — calls with all-constant arguments produce specialised results cached by argument hash.
+  - **Depth + budget guards** — depth limit 128 frames, instruction budget 10 000 000 per compilation unit; both violations silently fall back to runtime.
+  - **Back-propagation** — zero-arg pure function results are back-propagated into the legacy `constIntReturnFunctions_` / `constStringReturnFunctions_` tables for full compatibility with all existing fold helpers.
+  - **`@const_eval` override** — forces a function eligible for CF-CTRE regardless of the purity analysis.
+  - **`--verbose` stats** — prints `[cfctre] Pass complete: N functions registered, M pure, K calls memoised, A arrays allocated`.
+  See §28 of the Language Reference for the full specification.
+
 - **Integer type-cast syntax** — `u64(x)`, `u32(x)`, `u16(x)`, `u8(x)`, `i64(x)`, `i32(x)`, `i16(x)`, `i8(x)`, `bool(x)` are now recognized as function-call-style type coercions. They work both in normal compiled code and inside `comptime` blocks:
   - `u64(x)`, `i64(x)`, `int(x)`, `uint(x)` — identity (all OmScript integers are `i64`)
   - `u32(x)` — mask to lower 32 bits (`x & 0xFFFFFFFF`)

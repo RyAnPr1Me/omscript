@@ -131,6 +131,20 @@ Source (.om files)
     │         - Loop fusion (@loop(fuse=true))
     │         - Escape analysis (stack allocation of non-escaping arrays)
     │
+    ├─ 4.5 CF-CTRE — Cross-Function Compile-Time Reasoning Engine
+    │       (cfctre.h + cfctre.cpp, called from runCFCTRE() in codegen.cpp)
+    │       Runs at O1+ after all AST pre-analysis, before IR emission.
+    │       Deterministic SSA-semantics AST interpreter with:
+    │         - CTValue: tagged union (i64/u64/f64/bool/string/array handle)
+    │         - CTHeap: handle-based compile-time heap (no raw pointers)
+    │         - CTFrame: per-call locals + return/break/continue signals
+    │         - Memoisation: map<(fn,args_hash) → CTValue>, O(1) lookup
+    │         - Fixed-point purity analysis over the whole call graph
+    │         - Pipeline SIMD tile execution (kSIMDLaneWidth=8 lanes)
+    │         - Depth guard (128 frames) + instruction budget (10M ops)
+    │         - Back-propagation into legacy constInt/constString tables
+    │       See Language Reference §28 for full specification.
+    │
     ├─ 5. Code Generator (codegen.cpp + codegen_expr.cpp +
     │                      codegen_stmt.cpp + codegen_builtins.cpp)
     │       Walks the AST and emits LLVM IR. Key responsibilities:
@@ -179,6 +193,8 @@ Source (.om files)
 
 5. **`noalias` on all pointer params** — The ownership system proves no aliasing at the language level, so every function parameter receives `noalias + nonnull + dereferenceable(8)`.
 
+6. **CF-CTRE is non-fatal** — The CF-CTRE engine always returns `std::optional<CTValue>`.  A `nullopt` result means "I couldn't evaluate this; fall back to runtime".  CF-CTRE never causes a compile error on its own.
+
 ---
 
 ## 3. Source File Reference
@@ -199,7 +215,8 @@ Source (.om files)
 ### Code Generation
 | File | Purpose |
 |------|---------|
-| `src/codegen.cpp` / `include/codegen.h` | Main code generator class. Contains: map/dict runtime, string interning (`internString_`), ownership tracking (`ownershipMap_`, `frozenVars_`, `borrowMap_`), TBAA setup (`setupTBAA()`), `tryConstEvalFull`, `tryFoldExprToConst`, `evalConstBuiltin`, `emitComptimeArray`. Also: `nonNegValues_`, `loopArrayLenCache_`, `arrayReturningFunctions_`. |
+| `src/codegen.cpp` / `include/codegen.h` | Main code generator class. Contains: map/dict runtime, string interning (`internString_`), ownership tracking (`ownershipMap_`, `frozenVars_`, `borrowMap_`), TBAA setup (`setupTBAA()`), `tryConstEvalFull`, `tryFoldExprToConst`, `evalConstBuiltin`, `emitComptimeArray`. Also: `nonNegValues_`, `loopArrayLenCache_`, `arrayReturningFunctions_`. Hosts `ctEngine_` (unique_ptr<CTEngine>), `runCFCTRE()`, and bridge helpers `ctValueToConstValue`/`constValueToCTValue`. |
+| `include/cfctre.h` / `src/cfctre.cpp` | CF-CTRE (Cross-Function Compile-Time Reasoning Engine). Core types: `CTValue` (tagged union), `CTHeap` (handle-based deterministic heap), `CTFrame` (per-call locals + signals), `CTMemoKey`, `CTGraph`, `CTEngine`. `runPass()` registers all functions + enums, runs fixed-point purity analysis, pre-evaluates zero-arg pure functions, builds call graph. `executeFunction()` evaluates any pure function with CT-known args. `evalComptimeBlock()` evaluates `comptime {}` blocks. Both methods return `optional<CTValue>` — `nullopt` means "fall back to runtime". |
 | `src/codegen_expr.cpp` | Expression code generation: `generateExpression`, `generateBinaryOp`, `generateComparisonOp`. Bounds checks with TBAA and `!noundef` metadata. |
 | `src/codegen_stmt.cpp` | Statement code generation: all loop forms (`while`, `for`, `foreach`, `loop`, `repeat`, `times`, `forever`, `parallel`), `try`/`catch`, `defer`, `with`, `swap`, `pipeline`, `prefetch`. |
 | `src/codegen_builtins.cpp` | All builtin function implementations. Contains `builtinLookup` table mapping name → `BuiltinId` enum, and `generateBuiltin` switch with one case per builtin. Also the integer type-cast dispatch for `u8`/`i8`/`u16`/`i16`/`u32`/`i32`/`u64`/`i64`/`bool`. |

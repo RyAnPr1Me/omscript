@@ -110,6 +110,19 @@
     - 27.10 Compile-Time Folding: Complete Rules
     - 27.11 Interaction with the Type System
     - 27.12 Complete Examples
+28. [CF-CTRE — Cross-Function Compile-Time Reasoning Engine](#28-cf-ctre--cross-function-compile-time-reasoning-engine)
+    - 28.1 Purpose and Position in Pipeline
+    - 28.2 Core Object Model
+    - 28.3 Function Eligibility Rules
+    - 28.4 Execution Model
+    - 28.5 Instruction Semantics
+    - 28.6 Cross-Function Call Rules
+    - 28.7 Pipeline Semantics and SIMD Tile Execution
+    - 28.8 Specialization Engine
+    - 28.9 Output and Integration Contract
+    - 28.10 Performance Characteristics
+    - 28.11 Programmer-Visible Effects
+    - 28.12 Worked Examples
 
 ---
 
@@ -136,6 +149,7 @@ Source (.om)
   → Lexer             (tokenization)
   → Parser            (AST construction)
   → AST Pre-passes    (comptime eval, loop fusion, constant propagation)
+  → CF-CTRE           (cross-function compile-time reasoning engine, O1+)
   → Code Generator    (LLVM IR generation, escape analysis, freeze/reborrow)
   → E-Graph           (equality saturation, algebraic identities, O2+)
   → Superoptimizer    (idiom recognition, branch-to-select, O2+)
@@ -150,6 +164,7 @@ Source (.om)
 |---|---|---|
 | `comptime {}` evaluation | Always | Evaluates constant blocks, substitutes result as literal |
 | Cross-function const propagation | O1+ | Inlines pure zero-arg function results as constants |
+| **CF-CTRE** | O1+ | Interprocedural compile-time interpreter; evaluates pure functions across call boundaries, memoises results, provides pipeline SIMD tile semantics |
 | Loop fusion | `@loop(fuse=true)` | Merges adjacent same-range loops into one |
 | Escape analysis | O1+ | Stack-allocates non-escaping small arrays |
 | Constant folding | Always | Folds arithmetic, builtins, string ops with literal args |
@@ -3082,4 +3097,754 @@ const WHITE = comptime { pack_rgb(255, 255, 255); }; // 0xFFFFFF
 ---
 
 *End of OmScript Language Reference — Version 4.1.1*
+
+---
+
+## 28. CF-CTRE — Cross-Function Compile-Time Reasoning Engine
+
+> **Available since:** v4.1.1  
+> **Trigger:** O1+ (automatic), `@pure`, `@const_eval`  
+> **Source:** `include/cfctre.h`, `src/cfctre.cpp`
+
+CF-CTRE is OmScript's **deterministic SSA-semantics compile-time interpreter**.  It sits between the AST pre-analysis passes and LLVM IR generation and executes pure functions **across function-call boundaries** at compile time.  Results are memoised, pipeline structure is preserved, and SIMD lane semantics are respected.
+
+---
+
+### 28.1 Purpose and Position in Pipeline
+
+#### 28.1.1 Goals
+
+CF-CTRE solves a fundamental limitation of classical constant folding: it is stopped by function calls.  Classical folding can evaluate `abs(min(3, 7))` but not:
+
+```omscript
+fn encode(x:int) -> int { return x * 6364136223846793005 + 1442695040888963407; }
+fn chain(x:int)  -> int { return encode(encode(encode(x))); }
+
+const K = comptime { chain(42); }   // ← CF-CTRE evaluates all three calls
+```
+
+Classical folding would refuse this because `encode` is a user function.  CF-CTRE descends into `encode`, executes it three times (with memoisation so the second and third calls reuse the first result), and substitutes `K` with the fully computed constant — **zero runtime code emitted**.
+
+#### 28.1.2 Placement
+
+```
+Frontend → SSA Builder → CF-CTRE → OPTMAX → LLVM IR → Backend
+```
+
+More precisely, within the compiler's `generateProgram()` function:
+
+```
+preAnalyzeStringTypes()
+preAnalyzeArrayTypes()
+analyzeConstantReturnValues()      ← zero-arg pure function results
+autoDetectConstEvalFunctions()     ← purity detection
+inferFunctionEffects()             ← side-effect classification
+runCFCTRE()                        ← ← ← CF-CTRE PHASE ← ← ←
+generateFunction() × N             ← LLVM IR emission
+runOptimizationPasses()
+```
+
+CF-CTRE runs **after** all AST analysis so it has the maximum available constant information, and **before** LLVM IR emission so its results are visible to the code generator.
+
+---
+
+### 28.2 Core Object Model
+
+CF-CTRE defines five core value/memory types:
+
+#### 28.2.1 `CTValue` — Compile-Time Value
+
+A tagged union representing any scalar or compound value that CF-CTRE can compute:
+
+| Kind | Underlying C++ type | Description |
+|---|---|---|
+| `CONCRETE_U64` | `uint64_t` | Unsigned 64-bit integer |
+| `CONCRETE_I64` | `int64_t` | Signed 64-bit integer (default OmScript integer) |
+| `CONCRETE_F64` | `double` | IEEE-754 double-precision float |
+| `CONCRETE_BOOL` | `bool` | Boolean (true / false) |
+| `CONCRETE_STRING` | `std::string` | Compile-time string value |
+| `CONCRETE_ARRAY` | `CTArrayHandle` (uint64) | Opaque handle into CTHeap |
+| `UNINITIALIZED` | — | Sentinel (not yet computed) |
+
+Key constructors:
+
+```cpp
+CTValue::fromI64(int64_t)        // integer (most common)
+CTValue::fromU64(uint64_t)       // unsigned integer
+CTValue::fromF64(double)         // float
+CTValue::fromBool(bool)          // boolean
+CTValue::fromString(std::string) // string
+CTValue::fromArray(CTArrayHandle)// array handle
+CTValue::uninit()                // UNINITIALIZED sentinel
+```
+
+Key accessors:
+
+```cpp
+bool isInt()     → true for U64, I64, or BOOL
+bool isString()  → true for STRING
+bool isArray()   → true for ARRAY
+int64_t asI64()  → coerces U64/BOOL/F64 to signed int64
+std::string asStr()
+CTArrayHandle asArr()
+```
+
+`memoHash()` computes a stable 64-bit hash of the value for use as memoisation keys.  For arrays, it hashes element-by-element through CTHeap.
+
+#### 28.2.2 `CTHeap` — Deterministic Compile-Time Memory
+
+CF-CTRE's memory model uses a **handle-based heap** — no raw pointers exist at compile time.
+
+```
+struct CTHeap {
+    map<CTArrayHandle, CTArray> arrays_
+    uint64_t next_handle_
+}
+
+struct CTArray {
+    uint64_t len
+    vector<CTValue> data
+}
+```
+
+Rules:
+- `alloc(n)` → allocates a new array of `n` UNINITIALIZED elements and returns its handle.
+- `store(handle, index, value)` → mutates `heap[handle][index]` in place.
+- `load(handle, index)` → returns the current value at that index.
+- `length(handle)` → returns `n` (the length stored at the header).
+- Handles are monotonically increasing 64-bit integers (deterministic — no ASLR, no raw pointers).
+- Arrays are mutable from within CF-CTRE execution (unlike LLVM global constants).
+- The heap is per-`CTEngine` instance; it is destroyed when the compilation unit finishes.
+
+#### 28.2.3 `CTFrame` — Function Execution Context
+
+Each active function invocation owns a `CTFrame`:
+
+```
+struct CTFrame {
+    FunctionDecl* fn          // AST function being executed
+    map<string, CTValue> locals  // variable bindings for this call
+    CTHeap* heap              // pointer to shared CTHeap
+    CTValue returnValue       // set when a return is executed
+    bool didReturn            // signals early return
+    bool didBreak             // signals break from loop
+    bool doContinue           // signals continue in loop
+    CTValue lastBareExpr      // implicit return value (last expression stmt)
+}
+```
+
+Locals shadow outer scopes correctly: entering a `{` block pushes a copy of the current locals; exiting the block restores the outer copy.  This matches OmScript's block-scoping rules exactly.
+
+#### 28.2.4 `CTGraph` — Interprocedural Call Graph
+
+CF-CTRE builds a lightweight call graph from the AST:
+
+```
+struct CTCallEdge { string caller; string callee; }
+struct CTGraph    { set<string> nodes; vector<CTCallEdge> edges; }
+```
+
+The call graph is used for:
+- Topological ordering during pre-evaluation (leaf functions first).
+- Detecting recursive cycles (prevents infinite expansion).
+- Specialization: clustering call sites by constant-argument shape.
+
+#### 28.2.5 `CTEngine` — Main Engine
+
+`CTEngine` is the single public class.  One instance exists per `CodeGenerator`, allocated in `runCFCTRE()`:
+
+```cpp
+class CTEngine {
+public:
+    void registerGlobalConst(const string& name, CTValue v);
+    void registerEnumConst(const string& name, int64_t v);
+    void runPass(Program* program);        // whole-program analysis
+    bool isPure(const string& fnName) const;
+    optional<CTValue> executeFunction(const string& name, vector<CTValue> args);
+    optional<CTValue> evalComptimeBlock(BlockStmt* body);
+    CTHeap& heap();
+    vector<CTValue> extractArray(CTArrayHandle h) const;
+    struct Stats { ... };
+    const Stats& stats() const;
+};
+```
+
+---
+
+### 28.3 Function Eligibility Rules
+
+A function is eligible for CF-CTRE execution if **all** of the following hold:
+
+#### 28.3.1 Required Conditions
+
+| Condition | How checked |
+|---|---|
+| Annotated `@pure` **or** auto-detected as pure | Fixed-point purity analysis (see §28.3.2) |
+| All call-site arguments are CT-known | Each arg reduces to a `CTValue` (not `UNINITIALIZED`) |
+| No external I/O | No `print`, `println`, `input_line`, file operations in body |
+| No non-deterministic operations | No `rand()`, `time()`, `srand()` |
+| No unsafe pointer escape | No raw pointer arithmetic, no FFI calls |
+| Recursion depth ≤ 128 | `kMaxDepth` limit |
+| Total instruction budget not exceeded | `kMaxInstructions` = 10 000 000 per compilation unit |
+
+#### 28.3.2 `@const_eval` Override
+
+Annotating a function `@const_eval` **forces** eligibility regardless of the purity analysis result.  Use this when you know a function is safe to execute at compile time but the static analysis would otherwise conservatively reject it.
+
+```omscript
+@const_eval
+fn my_hash(s:string) -> int {
+    var h:int = 0xcbf29ce484222325;
+    for (i:int in 0...len(s)) {
+        h ^= s[i];
+        h *= 0x100000001b3;
+    }
+    return h;
+}
+
+const HASH_OF_HELLO = comptime { my_hash("hello"); }
+```
+
+#### 28.3.3 Purity Analysis — Fixed-Point Algorithm
+
+CF-CTRE uses a whole-program fixed-point analysis to detect pure functions without explicit annotations:
+
+```
+Phase 1: Seed — mark all @pure and @const_eval functions as pure.
+Phase 2: Iterate until stable:
+    For each unmarked function F:
+        If body contains only pure operations → mark F pure
+Phase 3: Pure operations in a function body:
+    - Arithmetic / logical / bitwise / shift / comparison expressions
+    - Calls to other pure functions (already in the pure set)
+    - Array read / write (no external I/O)
+    - String operations (pure builtins only)
+    - if / else / switch / for / foreach / while / do-while
+    - Variable declarations and assignments
+    - Type casts
+    NOT pure:
+    - print / println / input_line
+    - file open / read / write / close / append
+    - rand() / srand() / time()
+    - try / catch (potential runtime error with exit side-effect)
+    - Calls to unknown or impure functions
+```
+
+Mutual recursion is handled conservatively: if A calls B and B calls A and neither is marked pure by the end of the fixed-point loop, both remain impure.
+
+---
+
+### 28.4 Execution Model
+
+#### 28.4.1 Entry Points
+
+CF-CTRE is triggered from two places in the code generator:
+
+1. **`comptime {}` blocks** — when the code generator encounters a `ComptimeExpr` node, it calls `ctEngine_->evalComptimeBlock(body)` before falling back to the legacy `tryConstEvalFull`.
+
+2. **Call-site constant folding** — when all arguments to a call are compile-time constants and the callee is `isPure()`, the code generator calls `ctEngine_->executeFunction(callee, ctArgs)` before falling back to `tryConstEvalFull`.
+
+Both paths produce a `CTValue` that is then converted to LLVM IR constants.
+
+#### 28.4.2 `evalComptimeBlock` Algorithm
+
+```
+evalComptimeBlock(block):
+    frame = new CTFrame(nullptr)   // top-level: no enclosing function
+    frame.heap = &engine.heap_
+    for each stmt in block.statements:
+        evalStmt(frame, stmt)
+        if frame.didReturn:
+            return frame.returnValue
+    return frame.lastBareExpr     // implicit return
+```
+
+The **implicit return** rule: the last *bare expression statement* (an `ExprStmt` whose expression is not a call with side effects) becomes the block's return value even without an explicit `return`.  This matches OmScript block-expression semantics.
+
+#### 28.4.3 `executeFunction` Algorithm
+
+```
+executeFunction(fnName, args):
+    1. Build memo key: hash(fnName, hash(args[0]), hash(args[1]), ...)
+    2. If key in memo_cache_: return memo_cache_[key]
+    3. If depth_ >= kMaxDepth: return nullopt   (depth guard)
+    4. Look up FunctionDecl* for fnName
+    5. frame = new CTFrame(fn)
+       frame.heap = &engine.heap_
+    6. Bind args to parameter names in frame.locals
+    7. depth_++
+    8. for each stmt in fn.body.statements:
+           evalStmt(frame, stmt)
+           if frame.didReturn: break
+    9. depth_--
+    10. result = frame.returnValue (or lastBareExpr if no explicit return)
+    11. memo_cache_[key] = result
+    12. return result
+```
+
+#### 28.4.4 Depth and Fuel Guards
+
+| Guard | Value | Behaviour on violation |
+|---|---|---|
+| `kMaxDepth` | 128 | Returns `nullopt` (falls back to runtime) |
+| `kMaxInstructions` | 10 000 000 | Returns `nullopt` (falls back to runtime) |
+| Heap size | unlimited (system RAM) | No hard limit; controlled by `kMaxInstructions` |
+
+When CF-CTRE returns `nullopt`, the code generator silently falls back to the legacy constant evaluator or emits a normal runtime call.  CF-CTRE never causes a compile error by failing to evaluate.
+
+---
+
+### 28.5 Instruction Semantics
+
+CF-CTRE evaluates OmScript AST nodes rather than a separate SSA IR (it is an *AST-level interpreter with SSA-like semantics*).
+
+#### 28.5.1 Arithmetic Operations
+
+All arithmetic wraps at 64 bits (two's-complement):
+
+| OmScript op | CF-CTRE behaviour |
+|---|---|
+| `a + b` | `int64_t(a) + int64_t(b)` with 64-bit wraparound |
+| `a - b` | `int64_t(a) - int64_t(b)` with 64-bit wraparound |
+| `a * b` | `int64_t(a) * int64_t(b)` with 64-bit wraparound |
+| `a / b` | Signed integer division; `b == 0` → returns `nullopt` |
+| `a % b` | Signed remainder; `b == 0` → returns `nullopt` |
+| `-a` | Unary negate |
+| `a ^ b` | Bitwise XOR |
+| `a & b` | Bitwise AND |
+| `a \| b` | Bitwise OR |
+| `~a` | Bitwise NOT |
+| `a << b` | Left shift (64-bit) |
+| `a >> b` | Arithmetic right shift (64-bit) |
+
+**Float operations** (`CONCRETE_F64`): `+`, `-`, `*`, `/` with IEEE-754 `double` semantics.  Integer and float values are automatically coerced when mixed (int → double).
+
+**String concatenation** (`+` on two strings): immediate string concatenation.
+
+#### 28.5.2 Comparison and Logical Operations
+
+| OmScript op | CF-CTRE result |
+|---|---|
+| `a == b` | `CTValue::fromBool(a == b)` |
+| `a != b` | `CTValue::fromBool(a != b)` |
+| `a < b` | `CTValue::fromBool(a < b)` (signed) |
+| `a <= b` | `CTValue::fromBool(a <= b)` |
+| `a > b` | `CTValue::fromBool(a > b)` |
+| `a >= b` | `CTValue::fromBool(a >= b)` |
+| `a && b` | Short-circuit AND (b not evaluated if a is false) |
+| `a \|\| b` | Short-circuit OR (b not evaluated if a is true) |
+| `!a` | Logical NOT |
+
+#### 28.5.3 Memory Operations
+
+**Array allocation:**
+```omscript
+var arr:int[] = array_fill(n, value)
+```
+CF-CTRE:
+1. Evaluates `n` → must be a non-negative `CTValue` integer.
+2. `handle = heap_.alloc(n)` — allocates `n` slots initialized to `value`.
+3. `frame.locals["arr"] = CTValue::fromArray(handle)`.
+
+**Array element load:**
+```omscript
+x = arr[i]
+```
+CF-CTRE:
+1. Evaluates `arr` → must be `CONCRETE_ARRAY`.
+2. Evaluates `i` → must be `CONCRETE_I64` or `CONCRETE_U64`.
+3. Bounds-checks: if `i < 0 || i >= heap_.length(handle)` → returns `nullopt`.
+4. Returns `heap_.load(handle, i)`.
+
+**Array element store:**
+```omscript
+arr[i] = x
+```
+CF-CTRE:
+1. Resolves `arr` to its `CTArrayHandle` from `frame.locals`.
+2. Evaluates `i` and `x`.
+3. Bounds-checks.
+4. `heap_.store(handle, i, x)`.
+
+**Array length:**
+```omscript
+len(arr)
+```
+Returns `CTValue::fromI64(heap_.length(handle))`.
+
+**String indexing:**
+```omscript
+s[i]
+```
+Returns the character code (integer) at position `i`.  Bounds-checked.
+
+#### 28.5.4 Control Flow
+
+**`if` / `else`:**
+```
+eval condition → must be CTValue (bool or int ≠ 0)
+if truthy: execute then-branch
+else:      execute else-branch (if present)
+```
+
+**`for` range loop:**
+```omscript
+for (i:int in start...end) { body }
+```
+CF-CTRE:
+1. Evaluates `start` and `end`.
+2. Iterates `i = start, start+1, ..., end-1` (exclusive upper bound; `0...3` → 0,1,2).
+3. Uses inclusive upper bound for `...=` (0...=3 → 0,1,2,3).
+4. Even if `end <= start` (zero iterations): enters the loop construct but executes zero body iterations.  The loop variable `i` is bound for each iteration.
+5. `break` sets `frame.didBreak = true` and stops iteration.
+6. `continue` sets `frame.doContinue = true`, advances to next iteration.
+
+**`foreach` / `for` collection:**
+```omscript
+foreach (v in arr) { body }
+```
+Iterates each element of a CT-known array.
+
+**`while` / `do-while` / `until`:**
+Condition re-evaluated each iteration.  Body executes while condition is truthy.  Protected by the instruction budget (`kMaxInstructions`).
+
+**`switch`:**
+```
+eval discriminant
+for each case:
+    if case.isDefault: remember as fallback
+    else: eval case values; if any matches discriminant, execute body, break
+if no match found and default exists: execute default body
+```
+
+**`return`:**
+Sets `frame.returnValue = value` and `frame.didReturn = true`.  Any enclosing loop terminates.
+
+**`break` / `continue`:**
+Set the corresponding signal flag on the frame.  Loops check these flags after each body execution.
+
+---
+
+### 28.6 Cross-Function Call Rules
+
+#### 28.6.1 Call Resolution
+
+When CF-CTRE encounters a function call expression:
+
+```
+call f(a, b):
+    ctArgs = [eval(a), eval(b)]
+    if any ctArg is UNINITIALIZED → cannot evaluate → return nullopt
+    if isPure(f) and all ctArgs are CT-known:
+        return executeFunction(f, ctArgs)     ← INLINE EXECUTION
+    else:
+        return nullopt                         ← runtime call
+```
+
+#### 28.6.2 Inline Execution
+
+CF-CTRE does **not** perform textual inlining (AST substitution).  Instead it:
+1. Allocates a fresh `CTFrame` for `f`.
+2. Binds `ctArgs` to `f`'s parameter names in the new frame.
+3. Executes `f`'s body statement-by-statement.
+4. Returns the computed `CTValue`.
+
+This means the original AST of `f` is unchanged; only the *result* is folded.
+
+#### 28.6.3 Memoisation
+
+Before executing any function call, CF-CTRE checks the memo cache:
+
+```
+key = (fnName, hash(arg0), hash(arg1), ...)
+if key in memo_cache_: return memo_cache_[key]
+```
+
+After successful execution, the result is stored:
+```
+memo_cache_[key] = result
+```
+
+For array results, the CTHeap snapshot is included in the memo value — the entire heap state produced by the function is preserved.  Subsequent calls with the same arguments reuse the pre-computed array handle.
+
+**Memo key construction** is deterministic and argument-order-sensitive:
+```
+key = fnName XOR rotl(hash(arg0), 17) XOR rotl(hash(arg1), 31) XOR ...
+```
+
+#### 28.6.4 Recursion
+
+Recursive functions are supported up to `kMaxDepth = 128` frames.  The depth counter is incremented on entry and decremented on exit.  A function that would exceed the limit returns `nullopt` instead (the call site falls through to a runtime call).
+
+Mutually recursive functions that are provably pure (e.g. each only calls the other with strictly decreasing arguments — a Fibonacci pair) will be correctly evaluated as long as the recursion terminates within the depth limit.
+
+---
+
+### 28.7 Pipeline Semantics and SIMD Tile Execution
+
+CF-CTRE has special handling for OmScript's `pipeline` statement (see §26) to preserve software-pipeline structure and honour the SIMD vector model.
+
+#### 28.7.1 SIMD Vector Model
+
+```
+kSIMDLaneWidth = 8   // u64 lanes per tile
+```
+
+CF-CTRE treats each loop body as operating on a **vector tile of 8 elements**.  For a range `0...n`:
+
+- Number of full tiles: `n / 8`
+- Remainder tile width: `n % 8` (may be 0..7)
+- If `n < 8`: exactly **one tile** is executed with `n` active lanes and `8 - n` masked (zero-padded) lanes.
+
+This matches the hardware SIMD execution model that the OmScript pipeline statement targets (256-bit AVX2 vectors of 8 × i32, or 4 × i64).
+
+#### 28.7.2 Pipeline Stage Execution
+
+For a `pipeline N { stage A { ... } stage B { ... } }` construct:
+
+```
+for each iteration i in 0...N:
+    execute stage A (with __pipeline_i = i)
+    execute stage B (with __pipeline_i = i)
+```
+
+Stage state (local variables) persists **across stage boundaries** within a single iteration.  This models the software-pipeline's register-passing semantics: a value computed in stage A is visible in stage B for the same iteration.
+
+#### 28.7.3 Tile Execution API
+
+Internally, CF-CTRE exposes:
+
+```
+execute_tile(base, width, mask):
+    for lane in 0...width:
+        if mask[lane]:
+            execute body with iterator = base + lane
+        else:
+            execute body with iterator = 0 (zero-padded)
+```
+
+Even a partial final tile always executes one tile.
+
+#### 28.7.4 Invariant
+
+CF-CTRE **never drops pipeline structure** unless explicitly permitted.  If a pipeline body contains an impure operation that prevents full CT evaluation, CF-CTRE returns `nullopt` for that pipeline and the code generator emits it as a normal runtime loop.
+
+---
+
+### 28.8 Specialization Engine
+
+When a function is called with **all-constant literal arguments**, CF-CTRE can record a *specialization*:
+
+```
+f("hello")  →  specialized_f__hello result cached
+```
+
+Rules:
+1. Specialization keys are (function name, stable arg hash).
+2. Results are memoised — repeated calls to `f("hello")` anywhere in the program share the same cached result.
+3. Specialization is transparent to the programmer; it is purely a compiler optimization.
+4. The original function is unmodified in the IR.
+
+The specialization cache is the same as the memo cache; no separate data structure is needed.
+
+---
+
+### 28.9 Output and Integration Contract
+
+#### 28.9.1 What CF-CTRE Produces
+
+After `runPass()`:
+
+| Output | Description |
+|---|---|
+| `isPure(fn)` → `bool` | Fast O(1) per-function purity query |
+| `executeFunction(fn, args)` → `optional<CTValue>` | On-demand memoised CT evaluation |
+| `evalComptimeBlock(block)` → `optional<CTValue>` | Block-level CT evaluation |
+| Back-propagated constants | New entries in `constIntReturnFunctions_` / `constStringReturnFunctions_` |
+
+#### 28.9.2 Back-Propagation into Legacy Fold Tables
+
+After `runPass()`, `runCFCTRE()` iterates all zero-arg pure functions and queries CF-CTRE for their pre-evaluated results.  Any integer or string results are inserted into the legacy `constIntReturnFunctions_` / `constStringReturnFunctions_` maps, making them visible to `tryFoldExprToConst` and `tryConstEvalFull` without those functions needing to know about CF-CTRE.
+
+#### 28.9.3 Integration Contract
+
+| CF-CTRE **will** do | CF-CTRE **will not** do |
+|---|---|
+| Evaluate pure functions deterministically | Emit machine code |
+| Return constant `CTValue` or `nullopt` | Run OS processes |
+| Preserve pipeline metadata | Perform nondeterministic operations |
+| Memoise results across call sites | Drop pipeline structure without fallback |
+| Back-propagate to legacy tables | Modify the AST (read-only) |
+| Build a call graph | Produce diagnostic errors on evaluation failure |
+
+When CF-CTRE cannot evaluate something, it always returns `nullopt` and the compiler continues normally.
+
+---
+
+### 28.10 Performance Characteristics
+
+| Property | Value |
+|---|---|
+| Time complexity | O(number of CT-executed instructions) |
+| Memo cache | Hash map; O(1) amortized lookup and insert |
+| Depth limit | 128 frames |
+| Instruction budget | 10 000 000 instructions per compilation unit |
+| Heap overhead | ~64 bytes per allocated array element (CTValue) |
+| Call graph build | O(nodes + edges) |
+| Purity fixed-point | Converges in O(functions × depth of call graph) iterations |
+
+For typical programs (hundreds of functions, most with ≤ 10 calls each), the CF-CTRE phase completes in microseconds.  For programs with deeply computed constant tables (e.g. `comptime { build_lut(256); }`) it may take milliseconds but still never emits runtime code for the evaluated portion.
+
+Verbose output (enabled by `-v` or `--verbose`) shows CF-CTRE statistics at the end of the phase:
+
+```
+[cfctre] Pass complete: 47 functions registered, 12 pure,
+         3 calls memoised, 2 arrays allocated
+```
+
+---
+
+### 28.11 Programmer-Visible Effects
+
+#### 28.11.1 When CF-CTRE Fires
+
+CF-CTRE evaluation is triggered when:
+
+1. **`comptime { expr }` block** — always tried first.  If CF-CTRE can evaluate it, the result replaces the block; otherwise `tryConstEvalFull` is tried; if both fail, a compile error is issued.
+
+2. **Call to a pure function with all-constant arguments** — tried silently at any call site in the program.  If CF-CTRE evaluates it, the call is replaced with the constant.  If not, normal code is generated.
+
+3. **Zero-argument pure functions** — pre-evaluated during `runPass()` and stored as constants.  Any reference to a zero-arg pure function result is already folded before code generation begins.
+
+#### 28.11.2 `-O0` Behaviour
+
+At `-O0`, CF-CTRE is **disabled** (the entire phase is skipped).  All `comptime {}` blocks still fall through to `tryConstEvalFull` (which handles simple arithmetic and string folding).  This preserves predictable non-optimized code generation.
+
+#### 28.11.3 Error Handling
+
+CF-CTRE never aborts compilation.  All evaluation failures silently produce `nullopt`.  The only way CF-CTRE causes a compile error is indirectly: if a `comptime {}` block fails **both** CF-CTRE and `tryConstEvalFull`, the code generator emits the error `"comptime block could not be evaluated at compile time"` — not CF-CTRE itself.
+
+#### 28.11.4 Diagnostic Output
+
+When `--verbose` / `-v` is passed:
+
+```
+[cfctre] Pass complete: 47 functions registered, 12 pure,
+         3 calls memoised, 2 arrays allocated
+```
+
+Fields:
+- `functions registered` — functions seen during `runPass()`.
+- `pure` — functions confirmed pure by the analysis.
+- `calls memoised` — call sites whose result was cached (includes pre-evaluation of zero-arg functions).
+- `arrays allocated` — CT heap arrays created (may be freed after use).
+
+---
+
+### 28.12 Worked Examples
+
+#### 28.12.1 Simple Cross-Function Evaluation
+
+```omscript
+@pure
+fn square(x:int) -> int { return x * x; }
+
+@pure
+fn sum_of_squares(a:int, b:int) -> int {
+    return square(a) + square(b);
+}
+
+// CF-CTRE evaluates sum_of_squares(3, 4) by:
+//   1. executeFunction("square", [3]) → 9  (memoised)
+//   2. executeFunction("square", [4]) → 16 (new)
+//   3. 9 + 16 → 25
+const RESULT = comptime { sum_of_squares(3, 4); }
+// RESULT = 25, zero runtime code
+```
+
+#### 28.12.2 Array Build at Compile Time
+
+```omscript
+@pure
+fn make_powers_of_two(n:int) -> int[] {
+    var out:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        out[i] = 1 << i;
+    }
+    return out;
+}
+
+// CF-CTRE fully evaluates make_powers_of_two(8):
+//   Allocates CTHeap array of 8 elements
+//   Stores 1, 2, 4, 8, 16, 32, 64, 128
+//   Returns handle → converted to LLVM global constant [9 × i64] { 8, 1, 2, 4, 8, 16, 32, 64, 128 }
+var POW2:int[] = comptime { make_powers_of_two(8); }
+// POW2 is a compile-time global constant — no heap allocation at runtime
+```
+
+#### 28.12.3 Memoisation with Repeated Calls
+
+```omscript
+@pure
+fn fib(n:int) -> int {
+    if (n <= 1) { return n; }
+    return fib(n-1) + fib(n-2);
+}
+
+// Without memoisation: 2^30 recursive calls for fib(30)
+// With CF-CTRE memoisation: each (fib, n) computed once and cached
+const F30 = comptime { fib(30); }   // evaluates in O(n) memoised calls
+const F29 = comptime { fib(29); }   // cached — instant
+```
+
+#### 28.12.4 Pipeline Constant Pre-Computation
+
+```omscript
+@pure
+fn build_sbox(n:int) -> int[] {
+    var s:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        // AES-like S-box step (simplified for illustration)
+        s[i] = (i * 0x1F + 0x63) & 0xFF;
+    }
+    return s;
+}
+
+// S-box computed entirely at compile time — embedded as a global constant
+const SBOX:int[] = comptime { build_sbox(256); }
+
+// Pipeline using the compile-time S-box
+pipeline 8 {
+    stage substitute {
+        // All references to SBOX are reads from a .rodata global — no heap
+        var byte:int = input[__pipeline_i];
+        output[__pipeline_i] = SBOX[byte];
+    }
+}
+```
+
+#### 28.12.5 Specialization
+
+```omscript
+@pure
+fn hash_string(s:string, seed:int) -> int {
+    var h:int = seed;
+    for (i:int in 0...len(s)) {
+        h ^= s[i];
+        h *= 0x100000001b3;
+    }
+    return h;
+}
+
+// All three calls are evaluated at compile time by CF-CTRE.
+// The specialization cache contains:
+//   ("hash_string", hash("hello"), hash(0xcbf29ce484222325)) → <result1>
+//   ("hash_string", hash("world"), hash(0xcbf29ce484222325)) → <result2>
+//   ("hash_string", hash("hello"), hash(42))                 → <result3>
+const H1 = comptime { hash_string("hello", 0xcbf29ce484222325); }
+const H2 = comptime { hash_string("world", 0xcbf29ce484222325); }
+const H3 = comptime { hash_string("hello", 42); }
+```
+
+---
 

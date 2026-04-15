@@ -24,6 +24,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Ownership System**: `move`, `invalidate`, `borrow`, `borrow mut`, `freeze`, and `reborrow` keywords for compile-time lifetime tracking and LLVM optimization hints
 - **`comptime {}` Blocks**: Expressions evaluated entirely at compile time — result folded into a constant at the call site
 - **Array-Returning `comptime` Blocks**: `comptime` can call user functions that return arrays; the result is emitted as a `private unnamed_addr constant` global — zero runtime allocation, zero function call
+- **CF-CTRE (Cross-Function Compile-Time Reasoning Engine)**: new compiler phase (v4.1.1+) that executes pure functions across function-call boundaries at compile time with memoisation, pipeline SIMD tile semantics (8-lane tiles), and fixed-point purity analysis — see §28 of the Language Reference
 - **Integer Type-Cast Syntax**: `u8(x)`, `u16(x)`, `u32(x)`, `u64(x)`, `i8(x)`, `i16(x)`, `i32(x)`, `i64(x)`, `bool(x)` — function-call-style type coercions that fold at compile time inside `comptime` blocks
 - **`parallel` Loops**: `parallel for`/`while`/`foreach` emits loop parallelization metadata for auto-vectorization and parallel execution
 - **Enum Declarations**: Named integer constants with auto-increment
@@ -42,6 +43,7 @@ OmScript runs a **three-layer optimizer** on top of LLVM's standard passes:
 ### Layer 0 — AST-Level Pre-Passes (O1+)
 Run before LLVM codegen on the parsed AST:
 - **Cross-function constant propagation** — zero-argument pure functions whose return value is always a compile-time constant are identified via fixed-point analysis and inlined as constants at every call site
+- **CF-CTRE** — deterministic compile-time interpreter that executes pure functions across call boundaries, memoises results by `(fn, args_hash)`, and back-propagates results into the constant fold tables; enables `comptime { deep_call_chain(42) }` to evaluate entire function graphs at compile time
 - **`comptime {}` evaluation** — compile-time blocks are fully executed by the interpreter at compile time; results replace the expression with a literal constant
 - **`@fuse` loop fusion** — adjacent `for` loops over identical ranges are merged into a single loop body, reducing loop overhead and improving cache locality
 - **`@independent` access groups** — emits `llvm.access.group` + `llvm.loop.parallel_accesses` to suppress loop-carried alias analysis conservatism
