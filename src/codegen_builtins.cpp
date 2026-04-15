@@ -345,6 +345,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 nonNegValues_.insert(result);
                 return result;
             }
+            // Fold len() on const arrays: `const arr = [1,2,3]; len(arr)` → 3.
+            if (cv && cv->kind == ConstValue::Kind::Array) {
+                auto* result = llvm::ConstantInt::get(
+                    getDefaultType(), static_cast<int64_t>(cv->arrVal.size()));
+                nonNegValues_.insert(result);
+                return result;
+            }
         }
 
         // Constant-fold len(array_fill(N, val)): when N is a compile-time

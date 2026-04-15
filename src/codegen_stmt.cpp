@@ -322,6 +322,16 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     constStringFolds_[stmt->name] = std::move(foldedStr);
             }
         }
+        // Track const / comptime array initializers for compile-time array
+        // indexing: `const arr = [1,2,3]; var x = arr[1];` folds to 2.
+        if (stmt->initializer) {
+            bool isComptimeInit3 = stmt->initializer->type == ASTNodeType::COMPTIME_EXPR;
+            if (stmt->isConst || isComptimeInit3) {
+                auto foldedArr = tryFoldExprToConst(stmt->initializer.get());
+                if (foldedArr && foldedArr->kind == ConstValue::Kind::Array)
+                    constArrayFolds_[stmt->name] = std::move(foldedArr->arrVal);
+            }
+        }
         // Propagate integer constant from a zero-param constant-returning fn:
         // `const n = get_n()` where get_n() is in constIntReturnFunctions_
         // should record n as a compile-time constant integer.

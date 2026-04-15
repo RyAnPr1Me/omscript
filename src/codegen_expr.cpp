@@ -11,6 +11,7 @@
 #  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
 #endif
 #include <iostream>
+#include <llvm/ADT/Twine.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Intrinsics.h>
@@ -138,9 +139,9 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
             if (cacheIt != loopArrayLenCache_.end()) {
                 lenVal = cacheIt->second;
             } else {
-                std::string lenName = std::string(prefix) + ".len.elim";
                 auto* lenLoadElim = builder->CreateAlignedLoad(
-                    getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
+                    getDefaultType(), basePtr, llvm::MaybeAlign(8),
+                    llvm::Twine(prefix) + ".len.elim");
                 lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                 lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                 lenVal = lenLoadElim;
@@ -162,9 +163,8 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
 
             // Fallback: emit llvm.assume(endBound <= len) for CVP
             if (optimizationLevel >= OptimizationLevel::O2) {
-                std::string cmpName = std::string(prefix) + ".endlelen";
                 llvm::Value* endLELen = builder->CreateICmpSLE(
-                    endBound, lenVal, cmpName.c_str());
+                    endBound, lenVal, llvm::Twine(prefix) + ".endlelen");
                 llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
                     module.get(), llvm::Intrinsic::assume, {});
                 builder->CreateCall(assumeFn, {endLELen});
@@ -194,9 +194,9 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                         if (arithCacheIt != loopArrayLenCache_.end()) {
                             arithLenVal = arithCacheIt->second;
                         } else {
-                            std::string arithLenName = std::string(prefix) + ".len.arith";
                             auto* arithLenLoad = builder->CreateAlignedLoad(
-                                getDefaultType(), basePtr, llvm::MaybeAlign(8), arithLenName.c_str());
+                                getDefaultType(), basePtr, llvm::MaybeAlign(8),
+                                llvm::Twine(prefix) + ".len.arith");
                             arithLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                             arithLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                             arithLenVal = arithLenLoad;
@@ -216,10 +216,10 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                             llvm::Value* adjustedEnd = builder->CreateAdd(
                                 endIt->second,
                                 llvm::ConstantInt::get(getDefaultType(), effectiveOffset),
-                                std::string(prefix) + ".adjend");
+                                llvm::Twine(prefix) + ".adjend");
                             llvm::Value* cmp = builder->CreateICmpSLE(
                                 adjustedEnd, arithLenVal,
-                                std::string(prefix) + ".arith.safe");
+                                llvm::Twine(prefix) + ".arith.safe");
                             llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
                                 module.get(), llvm::Intrinsic::assume, {});
                             builder->CreateCall(assumeFn, {cmp});
@@ -242,9 +242,9 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                                 if (negCacheIt != loopArrayLenCache_.end()) {
                                     negLenVal = negCacheIt->second;
                                 } else {
-                                    std::string negLenName = std::string(prefix) + ".len.arith.neg";
                                     auto* negLenLoad = builder->CreateAlignedLoad(
-                                        getDefaultType(), basePtr, llvm::MaybeAlign(8), negLenName.c_str());
+                                        getDefaultType(), basePtr, llvm::MaybeAlign(8),
+                                        llvm::Twine(prefix) + ".len.arith.neg");
                                     negLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                                     negLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                                     negLenVal = negLenLoad;
@@ -254,21 +254,21 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                                 llvm::Value* adjustedStart = builder->CreateSub(
                                     startIt->second,
                                     llvm::ConstantInt::get(getDefaultType(), absOffset),
-                                    std::string(prefix) + ".adjstart");
+                                    llvm::Twine(prefix) + ".adjstart");
                                 llvm::Value* geZero = builder->CreateICmpSGE(
                                     adjustedStart,
                                     llvm::ConstantInt::get(getDefaultType(), 0),
-                                    std::string(prefix) + ".negoff.ge0");
+                                    llvm::Twine(prefix) + ".negoff.ge0");
                                 llvm::Value* adjustedEnd = builder->CreateSub(
                                     endIt->second,
                                     llvm::ConstantInt::get(getDefaultType(), absOffset),
-                                    std::string(prefix) + ".adjend.neg");
+                                    llvm::Twine(prefix) + ".adjend.neg");
                                 llvm::Value* leLen = builder->CreateICmpSLE(
                                     adjustedEnd, negLenVal,
-                                    std::string(prefix) + ".negoff.safe");
+                                    llvm::Twine(prefix) + ".negoff.safe");
                                 llvm::Value* bothSafe = builder->CreateAnd(
                                     geZero, leLen,
-                                    std::string(prefix) + ".negoff.both");
+                                    llvm::Twine(prefix) + ".negoff.both");
                                 llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
                                     module.get(), llvm::Intrinsic::assume, {});
                                 builder->CreateCall(assumeFn, {bothSafe});
@@ -289,15 +289,15 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
                                      bool isBorrowed,
                                      const char* prefix) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    std::string okName = std::string(prefix) + ".ok";
-    std::string failName = std::string(prefix) + ".fail";
-    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, okName.c_str(), function);
-    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, failName.c_str(), function);
+    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(
+        *context, llvm::Twine(prefix) + ".ok", function);
+    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(
+        *context, llvm::Twine(prefix) + ".fail", function);
 
     llvm::Value* lenVal;
     if (isStr) {
-        std::string strlenName = std::string(prefix) + ".strlen";
-        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, strlenName.c_str());
+        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr},
+                                     llvm::Twine(prefix) + ".strlen");
     } else {
         // Loop-scope array length cache: when we're inside a loop and have
         // already loaded the length of this array, reuse the SSA value
@@ -312,9 +312,9 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
         if (cacheIt != loopArrayLenCache_.end()) {
             lenVal = cacheIt->second;
         } else {
-            std::string lenName = std::string(prefix) + ".len";
             auto* lenLoad = builder->CreateAlignedLoad(
-                getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
+                getDefaultType(), basePtr, llvm::MaybeAlign(8),
+                llvm::Twine(prefix) + ".len");
             lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             if (isBorrowed) {
@@ -333,8 +333,8 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
 
     // Single unsigned compare: (unsigned)idx < len checks both non-negativity
     // and upper bound simultaneously.
-    std::string validName = std::string(prefix) + ".valid";
-    llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, validName.c_str());
+    llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal,
+                                                  llvm::Twine(prefix) + ".valid");
 
     // Bounds checks almost never fail — mark the success path hot.
     llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
@@ -344,9 +344,9 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
     builder->SetInsertPoint(failBB);
     llvm::Value* errMsg =
         isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n",
-                                            std::string(prefix) + "_str_oob_msg")
+                                            llvm::Twine(prefix) + "_str_oob_msg")
               : builder->CreateGlobalString("Runtime error: array index out of bounds\n",
-                                            std::string(prefix) + "_arr_oob_msg");
+                                            llvm::Twine(prefix) + "_arr_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
     builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();

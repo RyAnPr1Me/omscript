@@ -635,6 +635,11 @@ class CodeGenerator {
                                                  { return {Kind::Array, 0, {}, std::move(a)}; }
     };
 
+    /// Constant array values for `const` or comptime array variables whose
+    /// elements are all compile-time constants.  Enables folding array indexing:
+    /// `const arr = [10, 20, 30]; var x = arr[1];` folds to 20.
+    llvm::StringMap<std::vector<ConstValue>> constArrayFolds_;
+
     /// tryFoldExprToConst: attempt to reduce any expression to a compile-time
     /// constant using all currently available compile-time information:
     ///   - integer / string / array literals

@@ -6238,6 +6238,8 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         if (iit != constIntFolds_.end()) return ConstValue::fromInt(iit->second);
         auto sit = constStringFolds_.find(id->name);
         if (sit != constStringFolds_.end()) return ConstValue::fromStr(sit->second);
+        auto ait = constArrayFolds_.find(id->name);
+        if (ait != constArrayFolds_.end()) return ConstValue::fromArr(ait->second);
         auto eit = enumConstants_.find(id->name);
         if (eit != enumConstants_.end())
             return ConstValue::fromInt(static_cast<int64_t>(eit->second));
