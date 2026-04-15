@@ -3609,44 +3609,9 @@ void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
 // as a plain block — useful for one-shot Load/Compute/Store sequences.
 //
 // The back-edge branch receives llvm.loop metadata including:
-// ─────────────────────────────────────────────────────────────────────────────
-// generatePipeline — Software-Prefetched Sequential Pipeline
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// A pipeline is a sequential, staged loop that the compiler transforms into
-// a *software-prefetched streaming loop*: every array read in every stage is
-// prefetched PREFETCH_DIST iterations ahead, keeping CPU load/store units
-// and memory buses fully occupied while the current iteration executes.
-//
-// Execution model (strictly sequential — no threads, no concurrency):
-//
-//   iteration k:
-//     ① emit llvm.prefetch for a[k+D] for every array base found in stages
-//     ② execute stage 0 body  (e.g. load)
-//     ③ execute stage 1 body  (e.g. compute)
-//     ④ execute stage 2 body  (e.g. store)
-//     ⑤ advance iterator
-//     ⑥ back-edge ← tagged with llvm.loop metadata:
-//          llvm.loop.mustprogress
-//          llvm.loop.vectorize.enable  (allow auto-vectorizer)
-//          llvm.loop.interleave.count  = nstages (hint to interleave HW units)
-//          llvm.loop.pipeline.initiationinterval = 1
-//
-// The prefetch distance D = 2 × nstages × |step|, or at least 8 iterations
-// (one typical cache line worth of i64 elements), whichever is larger.
-//
-// Without a range header the stages run once as a straight-line block with
-// no loop overhead — useful for one-shot Load→Compute→Store bursts.
-//
-// Array-base discovery scans the AST subtree of every stage body looking for
-// IndexExpr nodes whose base is a plain IdentifierExpr (arr[i]).  All unique
-// names are collected; prefetches are emitted for each at the top of every
-// iteration.  This is conservative (an identifier that resolves to a string
-// or dict will have its prefetch silently suppressed because the inttoptr
-// conversion produces a ptr that LLVM optimises away), but never wrong.
-// ─────────────────────────────────────────────────────────────────────────────
 
 // Helper: collect all unique array-identifier bases from a statement subtree.
+// Used by generatePipeline to know which arrays to auto-prefetch.
 static void collectArrayBases(const Statement* s, std::vector<std::string>& out) {
     if (!s) return;
     std::function<void(const Expression*)> scanExpr = [&](const Expression* e) {
@@ -3663,7 +3628,6 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
             scanExpr(ie->index.get());
             return;
         }
-        // Recurse into binary/unary/call/ternary/assign nodes.
         if (e->type == ASTNodeType::BINARY_EXPR) {
             const auto* b = static_cast<const BinaryExpr*>(e);
             scanExpr(b->left.get()); scanExpr(b->right.get());
@@ -3682,7 +3646,6 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
                 scanExpr(el.get());
         }
     };
-
     std::function<void(const Statement*)> scanStmt = [&](const Statement* s) {
         if (!s) return;
         switch (s->type) {
@@ -3720,21 +3683,53 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
         default: break;
         }
     };
-
     scanStmt(s);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// generatePipeline — Software-Prefetched Sequential Pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Syntax:
+//   pipeline N { stage name { ... } ... }    — execute stages N times
+//   pipeline   { stage name { ... } ... }    — execute stages once (one-shot)
+//
+// A pipeline is a sequential, staged loop that the compiler transforms into
+// a *software-prefetched streaming loop*: every array read in every stage is
+// prefetched PREFETCH_DIST iterations ahead, keeping CPU load/store units
+// and memory buses fully occupied while the current iteration executes.
+//
+// The hidden iterator variable is named __pipeline_i and runs from 0 to N.
+// Stage bodies may reference it freely to index arrays.
+//
+// Execution model (strictly sequential — no threads, no concurrency):
+//
+//   iteration k:
+//     ① emit llvm.prefetch for a[k+D] for every array base found in stages
+//     ② execute stage 0 body  (e.g. load)
+//     ③ execute stage 1 body  (e.g. compute)
+//     ④ execute stage 2 body  (e.g. store)
+//     ⑤ advance __pipeline_i
+//     ⑥ back-edge ← tagged with llvm.loop metadata:
+//          llvm.loop.mustprogress
+//          llvm.loop.vectorize.enable
+//          llvm.loop.interleave.count = nstages
+//          llvm.loop.pipeline.initiationinterval = 1
+//
+// Prefetch distance D = max(8, 2 × nstages).
+// ─────────────────────────────────────────────────────────────────────────────
+
 void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
+    static constexpr const char* kPipelineIter = "__pipeline_i";
+
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
         codegenError("pipeline statement outside of function", stmt);
     }
 
-    // ── No-range form ────────────────────────────────────────────────────────
-    // Without an iteration range the pipeline degenerates to a straight-line
-    // sequence of stage bodies executed exactly once.  Useful for one-shot
-    // Load→Compute→Store patterns where the caller manages iteration.
-    if (!stmt->start) {
+    // ── One-shot form ────────────────────────────────────────────────────────
+    // No count expression → emit stages once as a straight-line block.
+    if (!stmt->count) {
         const ScopeGuard scope(*this);
         for (auto& stage : stmt->stages) {
             const ScopeGuard stageScope(*this);
@@ -3749,52 +3744,28 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
         collectArrayBases(stage.body.get(), prefetchBases);
 
     const int nstages = static_cast<int>(stmt->stages.size());
+    const int64_t prefetchDist = std::max<int64_t>(8, 2LL * nstages);
 
-    // ── Range form ───────────────────────────────────────────────────────────
+    // ── Count-based form ─────────────────────────────────────────────────────
     const ScopeGuard scope(*this);
 
-    llvm::Type* iterTy = stmt->iterType.empty()
-                             ? getDefaultType()
-                             : resolveAnnotatedType(stmt->iterType);
+    llvm::Type* iterTy = getDefaultType(); // i64
 
-    llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iterVar, iterTy);
-    bindVariable(stmt->iterVar, iterAlloca);
-    loopIterVars_.insert(stmt->iterVar);
+    // Evaluate count once before the loop.
+    llvm::Value* countVal = generateExpression(stmt->count.get());
+    countVal = convertTo(countVal, iterTy);
 
-    llvm::Value* startVal = generateExpression(stmt->start.get());
-    startVal = convertTo(startVal, iterTy);
-    builder->CreateStore(startVal, iterAlloca);
-
-    llvm::Value* endVal = generateExpression(stmt->end.get());
-    endVal = convertTo(endVal, iterTy);
-
-    // Compute step.
-    llvm::Value* stepVal;
-    int64_t stepConst = 1;
-    if (stmt->step) {
-        stepVal = generateExpression(stmt->step.get());
-        stepVal = convertTo(stepVal, iterTy);
-        if (auto* sc = llvm::dyn_cast<llvm::ConstantInt>(stepVal))
-            stepConst = sc->getSExtValue();
-    } else {
-        // Default step: +1 for ascending, -1 for descending.
-        bool ascending = true;
-        if (auto* sc = llvm::dyn_cast<llvm::ConstantInt>(startVal))
-            if (auto* ec = llvm::dyn_cast<llvm::ConstantInt>(endVal))
-                ascending = sc->getSExtValue() < ec->getSExtValue();
-        stepConst = ascending ? 1 : -1;
-        stepVal   = llvm::ConstantInt::get(iterTy,
-                        static_cast<uint64_t>(stepConst), /*isSigned=*/true);
+    // Zero-count: no-op.
+    if (auto* cv = llvm::dyn_cast<llvm::ConstantInt>(countVal)) {
+        if (cv->getSExtValue() <= 0) return;
     }
 
-    // Empty range: no-op.
-    if (auto* sc = llvm::dyn_cast<llvm::ConstantInt>(startVal))
-        if (auto* ec = llvm::dyn_cast<llvm::ConstantInt>(endVal))
-            if (sc->getSExtValue() == ec->getSExtValue()) return;
-
-    // Prefetch distance: at least 8 elements (one 64-byte cache line of i64)
-    // and at least 2×nstages×|step| to cover all in-flight stages.
-    const int64_t prefetchDist = std::max<int64_t>(8, 2LL * nstages * std::abs(stepConst));
+    // Hidden iterator alloca: __pipeline_i = 0
+    llvm::AllocaInst* iterAlloca =
+        createEntryBlockAlloca(function, kPipelineIter, iterTy);
+    bindVariable(kPipelineIter, iterAlloca);
+    loopIterVars_.insert(kPipelineIter);
+    builder->CreateStore(llvm::ConstantInt::get(iterTy, 0), iterAlloca);
 
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "pipeline.cond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "pipeline.body", function);
@@ -3806,32 +3777,24 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
 
     builder->CreateBr(condBB);
 
-    // ── Condition block ──────────────────────────────────────────────────────
+    // ── Condition: __pipeline_i < count ─────────────────────────────────────
     builder->SetInsertPoint(condBB);
     llvm::Value* iCond = builder->CreateAlignedLoad(
-        iterTy, iterAlloca, llvm::MaybeAlign(8), stmt->iterVar + ".cond");
-    llvm::Value* cond = stepConst >= 0
-        ? builder->CreateICmpSLT(iCond, endVal, "pipeline.cond.check")
-        : builder->CreateICmpSGT(iCond, endVal, "pipeline.cond.check");
+        iterTy, iterAlloca, llvm::MaybeAlign(8), "__pipeline_i.cond");
+    llvm::Value* cond = builder->CreateICmpSLT(iCond, countVal, "pipeline.cond.check");
     builder->CreateCondBr(cond, bodyBB, exitBB);
 
-    // ── Body block ───────────────────────────────────────────────────────────
+    // ── Body ─────────────────────────────────────────────────────────────────
     builder->SetInsertPoint(bodyBB);
 
-    // ① Prefetch next-iteration array elements for every array base found in
-    //   the stage bodies.  The prefetch address is base[i + prefetchDist],
-    //   using the same GEP logic as generateIndex (layout: [len, e0, e1, ...]).
-    //   We do NOT bounds-check the prefetch address — an out-of-range prefetch
-    //   is a no-op on all modern ISAs and costs nothing if the address is
-    //   outside the allocated region.  Bounds checking would introduce a branch
-    //   that hurts the very performance we are trying to improve.
+    // ① Prefetch array elements D iterations ahead.
     if (optimizationLevel >= OptimizationLevel::O1 && !prefetchBases.empty()) {
         llvm::Value* iBody = builder->CreateAlignedLoad(
-            iterTy, iterAlloca, llvm::MaybeAlign(8), stmt->iterVar + ".pf.i");
+            iterTy, iterAlloca, llvm::MaybeAlign(8), "__pipeline_i.pf");
         llvm::Value* pfDist  = llvm::ConstantInt::get(iterTy,
             static_cast<uint64_t>(prefetchDist), /*isSigned=*/true);
         llvm::Value* pfIndex = builder->CreateAdd(iBody, pfDist,
-            stmt->iterVar + ".pf.idx", /*HasNUW=*/false, /*HasNSW=*/true);
+            "__pipeline_i.pf.idx", /*HasNUW=*/false, /*HasNSW=*/true);
 
         llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
             module.get(), llvm::Intrinsic::prefetch,
@@ -3842,31 +3805,26 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
             auto it = namedValues.find(baseName);
             if (it == namedValues.end()) continue;
 
-            // Load the array pointer from its alloca.
             llvm::Value* rawPtr = builder->CreateAlignedLoad(
                 iterTy, it->second, llvm::MaybeAlign(8), baseName + ".pf.raw");
-            // i64 → ptr (OmScript stores pointers as i64).
             llvm::Value* basePtr =
                 rawPtr->getType()->isPointerTy()
                     ? rawPtr
                     : builder->CreateIntToPtr(rawPtr, ptrTy, baseName + ".pf.ptr");
 
-            // Skip past the length header slot (GEP base + 1).
+            // Skip length header (GEP + 1)
             llvm::Value* dataPtr = builder->CreateInBoundsGEP(
                 getDefaultType(), basePtr,
                 llvm::ConstantInt::get(getDefaultType(), 1),
                 baseName + ".pf.data");
 
-            // Prefetch element at [i + prefetchDist].
             llvm::Value* elemPtr = builder->CreateInBoundsGEP(
                 getDefaultType(), dataPtr, pfIndex, baseName + ".pf.elemptr");
 
-            // Read prefetch, locality=3 (high: data will be reused across stages),
-            // data cache.
             auto* pfCall = builder->CreateCall(prefetchFn, {
                 elemPtr,
                 builder->getInt32(0),   // read
-                builder->getInt32(3),   // temporal locality: keep in all cache levels
+                builder->getInt32(3),   // high temporal locality
                 builder->getInt32(1)    // data cache
             });
             pfCall->setMetadata("omscript.pipeline_prefetch",
@@ -3874,59 +3832,43 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
         }
     }
 
-    // ② Execute stage bodies sequentially — each stage in its own scope so
-    //   stage-local variable declarations don't bleed across stages, but
-    //   variables from outer scopes (including previous stages' named bindings
-    //   at function scope) are fully visible.
+    // ② Execute stage bodies sequentially.
     for (auto& stage : stmt->stages) {
         const ScopeGuard stageScope(*this);
         generateBlock(stage.body.get());
     }
 
-    // ③ Advance iterator.
+    // ③ __pipeline_i++
     llvm::Value* iStep = builder->CreateAlignedLoad(
-        iterTy, iterAlloca, llvm::MaybeAlign(8), stmt->iterVar + ".step.cur");
-    llvm::Value* iNext = builder->CreateAdd(iStep, stepVal,
-        stmt->iterVar + ".next", /*HasNUW=*/false, /*HasNSW=*/true);
+        iterTy, iterAlloca, llvm::MaybeAlign(8), "__pipeline_i.step");
+    llvm::Value* iNext = builder->CreateAdd(
+        iStep, llvm::ConstantInt::get(iterTy, 1),
+        "__pipeline_i.next", /*HasNUW=*/true, /*HasNSW=*/true);
     builder->CreateStore(iNext, iterAlloca);
 
-    // ④ Back-edge: attach loop metadata that communicates pipeline structure
-    //   to LLVM's loop transforms and backend.
-    //
-    //   llvm.loop.mustprogress          — loop always makes progress (no infinite loops)
-    //   llvm.loop.vectorize.enable      — allow auto-vectorizer to vectorize
-    //   llvm.loop.interleave.count(N)   — hint to interleave N copies (= nstages)
-    //                                      so functional units from different stages
-    //                                      can execute in parallel in the OOO CPU
-    //   llvm.loop.pipeline.initiationinterval = 1
-    //                                    — software pipelining II=1: start a new
-    //                                      iteration every cycle (ideal throughput)
+    // ④ Back-edge with pipeline loop metadata.
     {
         llvm::BranchInst* backEdge =
             llvm::cast<llvm::BranchInst>(builder->CreateBr(condBB));
 
         llvm::MDBuilder mdb(*context);
         llvm::SmallVector<llvm::Metadata*, 8> mds;
-        mds.push_back(nullptr); // self-reference placeholder
+        mds.push_back(nullptr);
 
-        // mustprogress
         mds.push_back(llvm::MDNode::get(*context,
             {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
 
-        // vectorize.enable = true
         mds.push_back(llvm::MDNode::get(*context, {
             llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
             mdb.createConstant(llvm::ConstantInt::getTrue(*context))
         }));
 
-        // interleave.count = nstages (min 2)
         mds.push_back(llvm::MDNode::get(*context, {
             llvm::MDString::get(*context, "llvm.loop.interleave.count"),
             mdb.createConstant(llvm::ConstantInt::get(
                 llvm::Type::getInt32Ty(*context), std::max(2, nstages)))
         }));
 
-        // pipeline.initiationinterval = 1
         mds.push_back(llvm::MDNode::get(*context, {
             llvm::MDString::get(*context, "llvm.loop.pipeline.initiationinterval"),
             mdb.createConstant(llvm::ConstantInt::get(
@@ -3934,13 +3876,13 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
         }));
 
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, mds);
-        loopMD->replaceOperandWith(0, loopMD); // fix self-reference
+        loopMD->replaceOperandWith(0, loopMD);
         backEdge->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
     }
 
     loopStack.pop_back();
     loopArrayLenCache_ = std::move(savedArrayLenCache);
-    loopIterVars_.erase(stmt->iterVar);
+    loopIterVars_.erase(kPipelineIter);
 
     builder->SetInsertPoint(exitBB);
 }

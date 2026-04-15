@@ -7369,9 +7369,7 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
         }
         case ASTNodeType::PIPELINE_STMT: {
             auto* pl = static_cast<const PipelineStmt*>(stmt);
-            if (pl->start) merge(exprEffects(pl->start.get(), selfName));
-            if (pl->end)   merge(exprEffects(pl->end.get(), selfName));
-            if (pl->step)  merge(exprEffects(pl->step.get(), selfName));
+            if (pl->count) merge(exprEffects(pl->count.get(), selfName));
             for (const auto& stage : pl->stages)
                 merge(stmtEffects(stage.body.get(), selfName));
             break;

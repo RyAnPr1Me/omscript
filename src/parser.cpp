@@ -1826,29 +1826,29 @@ std::unique_ptr<Statement> Parser::parseWithStmt() {
 // pipeline (i in start...end...step) { ... }
 // pipeline { stage name { ... } ... }   — no explicit range; stages share any enclosing loop var
 std::unique_ptr<Statement> Parser::parsePipelineStmt() {
-    std::string iterVar;
-    std::string iterType;
-    std::unique_ptr<Expression> startExpr;
-    std::unique_ptr<Expression> endExpr;
-    std::unique_ptr<Expression> stepExpr;
+    // Syntax (two forms):
+    //
+    //   pipeline N { stage name { ... } ... }
+    //     — Run stages N times.  N is any expression.  The compiler generates
+    //       a software-prefetched loop [0, N) with hidden iterator
+    //       __pipeline_i.  Array reads detected in stage bodies are
+    //       automatically prefetched D iterations ahead.
+    //
+    //   pipeline { stage name { ... } ... }
+    //     — One-shot form: stages execute exactly once as a straight-line
+    //       block.  Useful for Load→Compute→Store bursts where the caller
+    //       manages iteration.
+    //
+    // Notes:
+    //   • 'stage' names are labels only — they impose no scoping on variables
+    //     declared outside the pipeline block.
+    //   • Break/continue inside a stage work identically to inside a for-loop.
 
-    // Optional range: pipeline (i in start...end) or pipeline (i in start...end...step)
-    if (match(TokenType::LPAREN)) {
-        const Token varTok = consume(TokenType::IDENTIFIER, "Expected iterator variable after '(' in pipeline");
-        iterVar = varTok.lexeme;
-        if (match(TokenType::COLON)) {
-            iterType = parseTypeAnnotation();
-        }
-        consume(TokenType::IN, "Expected 'in' after pipeline iterator variable");
-        startExpr = parseExpression();
-        if (!match(TokenType::RANGE) && !match(TokenType::DOT_DOT)) {
-            error("Expected '...' after pipeline start expression");
-        }
-        endExpr = parseExpression();
-        if (match(TokenType::RANGE)) {
-            stepExpr = parseExpression();
-        }
-        consume(TokenType::RPAREN, "Expected ')' after pipeline range");
+    std::unique_ptr<Expression> countExpr;
+
+    // Optional count expression — present when next token is NOT '{'
+    if (!check(TokenType::LBRACE)) {
+        countExpr = parseExpression();
     }
 
     consume(TokenType::LBRACE, "Expected '{' after pipeline header");
@@ -1868,13 +1868,7 @@ std::unique_ptr<Statement> Parser::parsePipelineStmt() {
         error("pipeline block must contain at least one stage");
     }
 
-    // If no range was provided, generate a dummy single-iteration range
-    // so the AST is always well-formed.  The codegen will detect startExpr==nullptr
-    // and emit only the stage bodies directly (no surrounding loop).
-    return std::make_unique<PipelineStmt>(
-        std::move(iterVar), std::move(iterType),
-        std::move(startExpr), std::move(endExpr), std::move(stepExpr),
-        std::move(stages));
+    return std::make_unique<PipelineStmt>(std::move(countExpr), std::move(stages));
 }
 
 // var [a, b, c] = expr;  or  const [a, b, c] = expr;

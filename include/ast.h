@@ -817,29 +817,24 @@ struct StageDecl {
         : name(std::move(n)), body(std::move(b)) {}
 };
 
-/// `pipeline (iterVar in start...end) { stage name { ... } ... }`
+/// `pipeline N { stage name { ... } ... }`
 ///
-/// Desugared by codegen into a for-loop over [start, end) where the stages
-/// execute sequentially per iteration.  The compiler annotates the generated
-/// loop with software-pipeline metadata so LLVM's instruction scheduler and
-/// auto-vectorizer can exploit inter-stage parallelism.
+/// Executes all stages sequentially N times.  N is an arbitrary expression
+/// evaluated once before the first iteration.  If N is omitted the stages run
+/// exactly once (one-shot form).
+///
+/// The compiler generates a software-prefetched loop over [0, N) with a
+/// hidden iterator variable `__pipeline_i`.  The loop back-edge carries
+/// interleave, vectorize, and pipeline.initiationinterval metadata so the
+/// hardware instruction scheduler can overlap stage execution.
 class PipelineStmt : public Statement {
   public:
-    std::string iterVar;                     ///< Loop variable name (e.g. "i")
-    std::string iterType;                    ///< Optional type annotation (e.g. "int")
-    std::unique_ptr<Expression> start;       ///< Range start expression
-    std::unique_ptr<Expression> end;         ///< Range end expression (exclusive)
-    std::unique_ptr<Expression> step;        ///< Optional step (nullptr = 1)
-    std::vector<StageDecl> stages;           ///< Ordered list of stages
+    std::unique_ptr<Expression> count;   ///< Number of executions; nullptr = run once
+    std::vector<StageDecl> stages;       ///< Ordered list of stages
 
-    PipelineStmt(std::string iv, std::string it,
-                 std::unique_ptr<Expression> s, std::unique_ptr<Expression> e,
-                 std::unique_ptr<Expression> step_,
-                 std::vector<StageDecl> stgs)
+    PipelineStmt(std::unique_ptr<Expression> cnt, std::vector<StageDecl> stgs)
         : Statement(ASTNodeType::PIPELINE_STMT),
-          iterVar(std::move(iv)), iterType(std::move(it)),
-          start(std::move(s)), end(std::move(e)), step(std::move(step_)),
-          stages(std::move(stgs)) {}
+          count(std::move(cnt)), stages(std::move(stgs)) {}
 };
 
 } // namespace omscript
