@@ -1,6 +1,6 @@
 # OmScript Language Reference
 
-> **Version:** 4.0.0
+> **Version:** 4.1.1
 > **Compiler:** `omsc` — OmScript Compiler
 > **Backend:** LLVM 18+ · Ahead-of-Time Compilation
 > **License:** See repository root
@@ -14,6 +14,13 @@
 3. [Lexical Structure](#3-lexical-structure)
 4. [Preprocessor](#4-preprocessor)
 5. [Types and Values](#5-types-and-values)
+    - 5.1 Type Annotations
+    - 5.2 Scalar Types
+    - 5.3 Array Types
+    - 5.4 Dictionary Type
+    - 5.5 SIMD Vector Types
+    - 5.6 Reference Types
+    - 5.7 Integer Type-Cast Syntax
 6. [Variables and Constants](#6-variables-and-constants)
 7. [Functions](#7-functions)
     - 7.1 Basic Syntax
@@ -44,6 +51,7 @@
     - 10.11 Address / Reference
     - 10.12 Operator Precedence
     - 10.13 Type-Namespace Method Dispatch
+    - 10.14 Integer Type-Cast Dispatch
 11. [Arrays](#11-arrays)
 12. [Strings](#12-strings)
 13. [Dictionaries / Maps](#13-dictionaries--maps)
@@ -82,12 +90,39 @@
     - 25.9 SROA (Struct/Array → Scalars)
     - 25.10 Reduction Recognition
     - 25.11 OptStats
+    - 25.12 Compile-Time Array Evaluation
 26. [Pipeline — Software-Prefetched Sequential Processing](#26-pipeline--software-prefetched-sequential-processing)
     - 26.1 Syntax
     - 26.2 The `__pipeline_i` iterator
     - 26.3 One-shot form
     - 26.4 Compiler guarantees
     - 26.5 When to use `pipeline` vs `times` / `for`
+27. [Integer Type-Cast Reference](#27-integer-type-cast-reference)
+    - 27.1 Overview Table
+    - 27.2 Identity Casts: u64, i64, int, uint
+    - 27.3 u32(x) — Unsigned 32-Bit Mask
+    - 27.4 i32(x) — Signed 32-Bit Truncate
+    - 27.5 u16(x) — Unsigned 16-Bit Mask
+    - 27.6 i16(x) — Signed 16-Bit Truncate
+    - 27.7 u8(x) — Unsigned 8-Bit Mask
+    - 27.8 i8(x) — Signed 8-Bit Truncate
+    - 27.9 bool(x) — Boolean Normalization
+    - 27.10 Compile-Time Folding: Complete Rules
+    - 27.11 Interaction with the Type System
+    - 27.12 Complete Examples
+28. [CF-CTRE — Cross-Function Compile-Time Reasoning Engine](#28-cf-ctre--cross-function-compile-time-reasoning-engine)
+    - 28.1 Purpose and Position in Pipeline
+    - 28.2 Core Object Model
+    - 28.3 Function Eligibility Rules
+    - 28.4 Execution Model
+    - 28.5 Instruction Semantics
+    - 28.6 Cross-Function Call Rules
+    - 28.7 Pipeline Semantics and SIMD Tile Execution
+    - 28.8 Specialization Engine
+    - 28.9 Output and Integration Contract
+    - 28.10 Performance Characteristics
+    - 28.11 Programmer-Visible Effects
+    - 28.12 Worked Examples
 
 ---
 
@@ -114,6 +149,7 @@ Source (.om)
   → Lexer             (tokenization)
   → Parser            (AST construction)
   → AST Pre-passes    (comptime eval, loop fusion, constant propagation)
+  → CF-CTRE           (cross-function compile-time reasoning engine, O1+)
   → Code Generator    (LLVM IR generation, escape analysis, freeze/reborrow)
   → E-Graph           (equality saturation, algebraic identities, O2+)
   → Superoptimizer    (idiom recognition, branch-to-select, O2+)
@@ -128,6 +164,7 @@ Source (.om)
 |---|---|---|
 | `comptime {}` evaluation | Always | Evaluates constant blocks, substitutes result as literal |
 | Cross-function const propagation | O1+ | Inlines pure zero-arg function results as constants |
+| **CF-CTRE** | O1+ | Interprocedural compile-time interpreter; evaluates pure functions across call boundaries, memoises results, provides pipeline SIMD tile semantics |
 | Loop fusion | `@loop(fuse=true)` | Merges adjacent same-range loops into one |
 | Escape analysis | O1+ | Stack-allocates non-escaping small arrays |
 | Constant folding | Always | Folds arithmetic, builtins, string ops with literal args |
@@ -324,6 +361,8 @@ var s:string = "hello"
 | `bool` | Boolean (1-bit) | `i1` |
 | `string` | String (heap-allocated, NUL-terminated) | `ptr` |
 
+> **Important:** All integer types in OmScript (`int`, `i64`, `u64`, `i32`, `u32`, etc.) share the **same underlying LLVM representation: `i64`**. The width annotations affect how the compiler treats arithmetic results when you apply an explicit type-cast builtin — they do not change storage width. This is covered in detail in §5.7 and §27.
+
 ### 5.3 Array Types
 
 ```
@@ -361,6 +400,59 @@ var x:&i32     // reference to i32 (same underlying storage)
 
 Reference types share the same LLVM representation as their base type; the annotation affects alias analysis.
 
+### 5.7 Integer Type-Cast Syntax
+
+OmScript provides **function-call-style type coercions** that truncate or sign-extend integer values to a target bit width. These look like function calls but are recognized specially by the compiler and generate zero-overhead bitwise operations in LLVM IR.
+
+| Syntax | Runtime Behavior | LLVM IR Emitted | Identity? |
+|---|---|---|---|
+| `u64(x)` | No-op — identity | none (value passes through) | ✓ |
+| `i64(x)` | No-op — identity | none | ✓ |
+| `int(x)` | No-op — identity | none | ✓ |
+| `uint(x)` | No-op — identity | none | ✓ |
+| `u32(x)` | Mask to lower 32 bits | `and i64 %x, 4294967295` | — |
+| `i32(x)` | Truncate to 32 bits, sign-extend back to 64 | `trunc i64 → i32`, `sext i32 → i64` | — |
+| `u16(x)` | Mask to lower 16 bits | `and i64 %x, 65535` | — |
+| `i16(x)` | Truncate to 16 bits, sign-extend back to 64 | `trunc i64 → i16`, `sext i16 → i64` | — |
+| `u8(x)` | Mask to lower 8 bits | `and i64 %x, 255` | — |
+| `i8(x)` | Truncate to 8 bits, sign-extend back to 64 | `trunc i64 → i8`, `sext i8 → i64` | — |
+| `bool(x)` | Normalize to 0 or 1 | `icmp ne i64 %x, 0`, `zext i1 → i64` | — |
+
+**Compile-time folding:** All nine forms are recognized by `evalConstBuiltin` inside `comptime {}` blocks and wherever constant folding applies. For example, `u8(300)` folds to `44` at compile time (300 & 0xFF = 44).
+
+**Key use case — string byte extraction:** When working with string bytes inside OPTMAX or comptime functions, you frequently need to treat a character code as an unsigned byte before packing it into a wider integer. The `u64(s[i])` pattern is the idiomatic way to do this:
+
+```omscript
+// Pack 8 bytes of a string into a single u64, little-endian
+fn pack8(s:string, base:int) -> u64 {
+    var x:u64 = 0;
+    x |= u64(s[base + 0]) << 0;
+    x |= u64(s[base + 1]) << 8;
+    x |= u64(s[base + 2]) << 16;
+    x |= u64(s[base + 3]) << 24;
+    x |= u64(s[base + 4]) << 32;
+    x |= u64(s[base + 5]) << 40;
+    x |= u64(s[base + 6]) << 48;
+    x |= u64(s[base + 7]) << 56;
+    return x;
+}
+```
+
+Without `u64(s[i])`, the character code would be sign-extended from `i8` to `i64`, potentially setting upper bits. The `u64()` identity cast documents the intent clearly and prevents future sign-extension bugs.
+
+**Signed wrapping example:**
+```omscript
+var x:int = 300;
+var a = u8(x);    // 44   (300 & 0xFF)
+var b = i8(x);    // 44   (300 trunc to i8 = 0x2C = 44 — positive, so same)
+var c = u8(200);  // 200
+var d = i8(200);  // -56  (200 trunc to i8 = 0xC8 = -56 in two's complement)
+var e = bool(0);  // 0
+var f = bool(99); // 1
+```
+
+See §27 for the complete type-cast reference with all edge cases documented.
+
 ---
 
 ## 6. Variables and Constants
@@ -397,21 +489,180 @@ Constants must be initialized at declaration and cannot be reassigned. The compi
 
 ### 6.3 Compile-Time Blocks (`comptime`)
 
-A `comptime {}` block is executed **entirely at compile time** by the constant evaluator. The result must be a constant integer or string value, which is then substituted at the call site as a literal — no runtime code is emitted.
+A `comptime {}` block is executed **entirely at compile time** by the constant evaluator. The result — which may be a constant integer, string value, or **array** — is then substituted at the call site as a literal constant or global constant. No runtime code is emitted for the block itself.
 
-```
-var a = comptime { return 6 * 7; };          // a = 42, compile-time constant
+#### 6.3.1 Basic Usage
+
+```omscript
+var a = comptime { return 6 * 7; };           // a = 42
 var b = comptime { var n = 5; return n * n; }; // b = 25
-const c = comptime { return min(10, 20); };  // c = 10
+const c = comptime { return min(10, 20); };    // c = 10
 ```
 
-**Rules:**
-- The body must be a sequence of `var` declarations and a final `return <expr>` where all values are statically known.
-- Builtin math functions (`abs`, `min`, `max`, `pow`, `sqrt`, `floor`, `ceil`, `round`, `exp2`, `log`, `clamp`, `sign`, `lcm`, `gcd`, `is_even`, `is_odd`, `is_power_of_2`, `popcount`, `clz`, `ctz`, `bswap`, `bitreverse`, `rotate_left`, `rotate_right`, `saturating_add`, `saturating_sub`) are recognized as pure and evaluated at compile time when arguments are constant.
-- A `comptime {}` result participates in the downstream constant-folding chain the same way a `const` declaration does — subsequent uses of the variable may also be folded.
-- A `var` initialized with `comptime {}` is treated like a `const` for the purpose of compile-time propagation even though it remains technically reassignable.
+#### 6.3.2 Implicit Return (v4.1.1+)
 
-**When a `comptime` block cannot be folded** (because the body references non-constant values), the compiler emits a hard error at compile time. This makes `comptime` a guarantee, not a hint.
+The **last bare expression statement** in a `comptime` block is automatically the return value — no `return` keyword is required. Both forms are equivalent:
+
+```omscript
+// With explicit return (always worked):
+var x = comptime { return 6 * 7; };
+
+// With implicit return (new in v4.1.1):
+var x = comptime { 6 * 7; };
+
+// More complex example — implicit return of last expression:
+var y = comptime {
+    var n = 5;
+    n * n;           // ← implicit return value; no 'return' needed
+};
+// y = 25
+```
+
+An explicit `return` in the middle of a `comptime` block still works and exits the block early. The implicit-return rule only applies to the last statement when no explicit `return` is present.
+
+#### 6.3.3 Builtin Functions in comptime
+
+Many built-in functions are recognized as **pure** and evaluated at compile time when their arguments are constant. The full list of comptime-foldable builtins:
+
+**Math builtins (comptime-foldable):**
+`abs`, `min`, `max`, `pow`, `sqrt`, `floor`, `ceil`, `round`, `exp2`, `log2`, `sign`, `clamp`, `lcm`, `gcd`, `is_even`, `is_odd`, `is_power_of_2`, `saturating_add`, `saturating_sub`
+
+**Bit manipulation (comptime-foldable):**
+`popcount`, `clz`, `ctz`, `bswap`, `bitreverse`, `rotate_left`, `rotate_right`
+
+**String builtins (comptime-foldable):**
+`len` / `str_len`, `str_eq`, `str_concat`, `str_upper`, `str_lower`, `str_contains`, `str_index_of`, `str_replace`, `str_trim`, `str_starts_with`, `str_ends_with`, `str_repeat`, `str_reverse`, `str_count`, `str_pad_left`, `str_pad_right`, `str_to_int`, `to_char`, `is_alpha`, `is_digit`
+
+**Array builtins (comptime-foldable):**
+`len` (on `array_fill`, `range`, `range_step`, `array_concat`, `str_chars`), `sum`, `array_product`, `array_last`, `array_min`, `array_max`, `array_contains`, `array_find`, `index_of`
+
+**Integer type-cast builtins (comptime-foldable, v4.1.1+):**
+`u64`, `i64`, `int`, `uint`, `u32`, `i32`, `u16`, `i16`, `u8`, `i8`, `bool`
+
+```omscript
+const HASH_BITS = comptime { popcount(0xDEADBEEF); };  // 24
+const KEY_LEN   = comptime { str_len("hello");        };  // 5
+const MASK      = comptime { u32(0xFFFFFFFF);         };  // 4294967295
+const FLAG      = comptime { bool(42);                };  // 1
+```
+
+#### 6.3.4 Array-Returning User Functions (v4.1.1+)
+
+`comptime` blocks can now call **user-defined functions that return arrays**. The entire function body is evaluated at compile time by the constant evaluator. The result is emitted as a `private unnamed_addr constant [N+1 x i64]` global in LLVM IR — using OmScript's standard `[length, elem0, elem1, ...]` array layout — and the variable at the call site becomes a pointer to that global. **No runtime allocation occurs, no function is called at runtime.**
+
+This is the most powerful feature of `comptime` blocks and enables zero-cost compile-time table generation:
+
+```omscript
+// Build a lookup table at compile time
+fn make_sin_table(n:int) -> float[] {
+    var out:float[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        // Approximate sin with integer math for comptime compatibility
+        out[i] = i;  // placeholder — real use would be pure integer math
+    }
+    return out;
+}
+
+var SIN_TABLE:float[] = comptime { make_sin_table(256); };
+// SIN_TABLE is a compile-time global constant — zero runtime overhead
+```
+
+**The `str_to_u64_fast` pattern** — the canonical example of comptime array generation. This function converts a string into an array of 64-bit words (little-endian, 8 bytes per word), using `u64(s[i])` to zero-extend each byte before bitwise ORing it into position:
+
+```omscript
+fn str_to_u64_fast(s:string) -> u64[] {
+    var n:int = len(s);
+    var blocks:int = (n + 7) >> 3;
+    var out:u64[] = array_fill(blocks, 0);
+    for (i:int in 0...blocks) {
+        var base:int = i << 3;
+        var x:u64 = 0;
+        if (base + 0 < n) { x |= u64(s[base + 0]) << 0;  }
+        if (base + 1 < n) { x |= u64(s[base + 1]) << 8;  }
+        if (base + 2 < n) { x |= u64(s[base + 2]) << 16; }
+        if (base + 3 < n) { x |= u64(s[base + 3]) << 24; }
+        if (base + 4 < n) { x |= u64(s[base + 4]) << 32; }
+        if (base + 5 < n) { x |= u64(s[base + 5]) << 40; }
+        if (base + 6 < n) { x |= u64(s[base + 6]) << 48; }
+        if (base + 7 < n) { x |= u64(s[base + 7]) << 56; }
+        out[i] = x;
+    }
+    return out;
+}
+
+// The entire function body is evaluated at compile time.
+// The string "hello" has 5 bytes → 1 block.
+// Emitted as: @M = private unnamed_addr constant [2 x i64] [i64 1, i64 0x6F6C6C6568]
+var M:u64[] = comptime { str_to_u64_fast("hello"); };
+```
+
+The generated global has layout `[N+1 x i64]` where the first element is the array length (`N`) and the remaining `N` elements are the array values. This is OmScript's standard array representation (same as heap arrays, but in read-only static memory).
+
+**Registration in `arrayReturningFunctions_`:** When the compiler encounters a user function called inside a `comptime` block that returns an array, it registers the function in the internal `arrayReturningFunctions_` set. This ensures that downstream type-inference and alias analysis know the variable has array type, even though no runtime `malloc` was performed.
+
+#### 6.3.5 comptime Evaluation Rules
+
+A `comptime` block is **guaranteed to evaluate at compile time**. If the body references any non-constant value, the compiler emits a **hard error** — it never silently falls back to runtime evaluation.
+
+**Allowed inside comptime:**
+- `var` declarations with constant initializers
+- Arithmetic expressions with constant operands
+- Any comptime-foldable builtin function (see §6.3.3)
+- String operations on string literals
+- Array operations on constant arrays
+- User-defined pure functions whose bodies can themselves be fully evaluated
+- Integer type-cast builtins: `u8(x)`, `u16(x)`, etc.
+- `if`/`else` with constant conditions
+- `for (i in 0...N)` loops with constant bounds
+- `array_fill`, `range`, `array_concat` with constant arguments
+
+**Not allowed inside comptime:**
+- Reading non-constant variables from outer scope
+- I/O operations (`print`, `input`, etc.)
+- File operations (`file_read`, etc.)
+- Threading operations
+- Random number generation (`random()`)
+- Any function with observable side effects
+
+**Example — comptime block with control flow:**
+```omscript
+const LOOKUP:int[] = comptime {
+    var table:int[] = array_fill(16, 0);
+    for (i:int in 0...16) {
+        table[i] = i * i;   // squares: 0, 1, 4, 9, 16, ...
+    }
+    table;   // implicit return
+};
+// LOOKUP == [0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225]
+```
+
+#### 6.3.6 comptime vs const
+
+| Feature | `const x = expr` | `var x = comptime { ... }` |
+|---|---|---|
+| Guaranteed compile-time | Only if `expr` is a literal or fold-able | Always (error if not possible) |
+| Can contain loops | No | Yes |
+| Can call pure functions | No | Yes |
+| Can return arrays | No | Yes (v4.1.1+) |
+| Reassignable | No | Yes (technically) |
+| Propagates downstream | Yes | Yes (treated as const for folding) |
+
+A `var` initialized from a `comptime` block participates in downstream constant folding just like a `const` — even though it is technically reassignable, the compiler knows its initial value is a compile-time constant and will fold arithmetic on it.
+
+#### 6.3.7 Downstream Constant Propagation
+
+The result of a `comptime` block participates in the full constant-folding chain. Subsequent operations on a `comptime`-initialized variable may also be folded:
+
+```omscript
+var BLOCK_SIZE:int = comptime { 1 << 6; };    // 64
+var HALF:int = BLOCK_SIZE / 2;                // also folded: 32
+var MASK:int = BLOCK_SIZE - 1;                // also folded: 63
+var LOG2:int = log2(BLOCK_SIZE);              // also folded: 6
+```
+
+All four variables become compile-time constants — no division, subtraction, or `log2` call occurs at runtime.
+
+
 
 ### 6.4 Register Variables
 
@@ -1143,6 +1394,85 @@ bool::not(x)      // !x
 bool::xor(a, b)   // a ^ b
 ```
 
+### 10.14 Integer Type-Cast Dispatch
+
+The integer type-cast syntax (`u8(x)`, `i32(x)`, etc.) looks like a function call but is handled specially by the compiler via a dedicated dispatch path in `generateCall` / `generateBuiltin`. This section documents the precise semantics of each cast, the LLVM IR emitted, and when compile-time folding applies.
+
+**How the dispatch works:**
+1. The lexer recognizes `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `int`, `uint`, `bool` as keyword-like identifiers.
+2. When the parser sees one of these identifiers followed by `(`, it marks the CALL_EXPR with `isCastBuiltin = true`.
+3. During codegen, `generateCall` checks for `isCastBuiltin` and routes to the type-cast handler rather than the normal user-function lookup.
+4. The type-cast handler emits the appropriate LLVM bitwise/trunc/sext sequence.
+5. Inside a `comptime` block or during `evalConstBuiltin`, the handler folds the result immediately to a constant integer.
+
+**Detailed semantics per cast:**
+
+```omscript
+// Identity casts — value is passed through unchanged
+var a = u64(x);    // x as-is; documents "treat as unsigned 64-bit"
+var b = i64(x);    // x as-is
+var c = int(x);    // x as-is
+var d = uint(x);   // x as-is
+
+// Zero-extension (masking) casts — clear upper bits
+var e = u32(x);    // x & 0x00000000FFFFFFFF
+var f = u16(x);    // x & 0x000000000000FFFF
+var g = u8(x);     // x & 0x00000000000000FF
+
+// Sign-extension (truncate + sext) casts — preserve signed value
+var h = i32(x);    // ((x << 32) >> 32) — i.e., trunc to i32 then sext
+var i_ = i16(x);   // trunc to i16 then sext to i64
+var j = i8(x);     // trunc to i8 then sext to i64
+
+// Boolean normalization
+var k = bool(x);   // (x != 0) ? 1 : 0
+```
+
+**Concrete examples with literal folding:**
+```omscript
+// All of these fold at compile time:
+const A = u8(300);       // 44   (300 & 0xFF)
+const B = i8(200);       // -56  (200 → 0xC8 trunc→i8 = -56 sext→i64)
+const C = u16(70000);    // 4464 (70000 & 0xFFFF)
+const D = i16(40000);    // -25536 (40000 → 0x9C40 trunc→i16 = -25536)
+const E = u32(-1);       // 4294967295
+const F = i32(0x1_0000_0001); // 1  (low 32 bits = 1, positive → sext = 1)
+const G = bool(0);       // 0
+const H = bool(-99);     // 1
+const I = bool(1);       // 1
+```
+
+**Inside comptime blocks:**
+```omscript
+// The type-cast builtins work inside comptime and fold the entire expression:
+var BYTE_MASK:u64 = comptime { u64(0xFF); };      // 255
+var WORD_MASK:u64 = comptime { u64(0xFFFF); };    // 65535
+var NORMALIZED:int = comptime { bool(42); };       // 1
+
+// Used in a loop inside comptime:
+fn build_byte_table(n:int) -> u8[] {
+    var t:u8[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        t[i] = u8(i * 17);   // comptime-folds: u8(0), u8(17), u8(34), ...
+    }
+    return t;
+}
+var BYTE_TABLE:u8[] = comptime { build_byte_table(16); };
+```
+
+**Interaction with bitwise operations:**
+```omscript
+// Classic byte-packing idiom using u64() for zero-extension:
+fn pack_bytes(a:int, b:int, c:int, d:int) -> u64 {
+    return u64(a) | (u64(b) << 8) | (u64(c) << 16) | (u64(d) << 24);
+}
+
+// Without u64(), the shift might produce unexpected results if the value
+// has high bits set (e.g., from a previous operation):
+//   bad: a | (b << 8)  — if a = 0x1FF, upper bit bleeds into byte 2
+//   good: u8(a) | (u8(b) << 8)  — guarantees each byte is exactly 8 bits
+```
+
 ---
 
 ## 11. Arrays
@@ -1669,69 +1999,89 @@ fn fast_fn(arr:int[], n:int) -> int { ... }
 
 ### 19.2 Math
 
-| Function | Description |
-|---|---|
-| `abs(x)` | Absolute value |
-| `pow(x, y)` | x to the power y |
-| `sqrt(x)` | Square root |
-| `cbrt(x)` | Cube root |
-| `exp(x)` | e^x |
-| `exp2(x)` | 2^x |
-| `log(x)` | Natural logarithm |
-| `log2(x)` | Base-2 logarithm |
-| `log10(x)` | Base-10 logarithm |
-| `floor(x)` | Floor |
-| `ceil(x)` | Ceiling |
-| `round(x)` | Round to nearest integer |
-| `sin(x)` | Sine |
-| `cos(x)` | Cosine |
-| `tan(x)` | Tangent |
-| `asin(x)` | Arc sine |
-| `acos(x)` | Arc cosine |
-| `atan(x)` | Arc tangent |
-| `atan2(y, x)` | Two-argument arc tangent |
-| `hypot(x, y)` | sqrt(x² + y²) |
-| `min(a, b)` | Minimum of two values |
-| `max(a, b)` | Maximum of two values |
-| `min_float(a, b)` | Floating-point minimum (NaN-aware) |
-| `max_float(a, b)` | Floating-point maximum (NaN-aware) |
-| `sign(x)` | Sign: -1, 0, or 1 |
-| `clamp(x, lo, hi)` | Clamp x to [lo, hi] |
-| `gcd(a, b)` | Greatest common divisor |
-| `lcm(a, b)` | Least common multiple |
-| `is_even(x)` | 1 if even, 0 otherwise |
-| `is_odd(x)` | 1 if odd, 0 otherwise |
-| `is_power_of_2(x)` | 1 if x is a power of 2 |
-| `fma(a, b, c)` | Fused multiply-add: a*b+c |
-| `copysign(x, y)` | Magnitude of x with sign of y |
-| `random()` | Random float in [0.0, 1.0) |
+| Function | Description | Compile-Time Folds? |
+|---|---|---|
+| `abs(x)` | Absolute value | ✓ with literal arg |
+| `pow(x, y)` | x to the power y (integer exponentiation) | ✓ with literal args |
+| `sqrt(x)` | Integer square root | ✓ with literal arg |
+| `cbrt(x)` | Cube root (float result) | — |
+| `exp(x)` | e^x (float result) | — |
+| `exp2(x)` | 2^x | ✓ with literal arg |
+| `log(x)` | Natural logarithm (float result) | — |
+| `log2(x)` | Base-2 logarithm | ✓ with literal arg |
+| `log10(x)` | Base-10 logarithm (float result) | — |
+| `floor(x)` | Floor | ✓ with literal arg |
+| `ceil(x)` | Ceiling | ✓ with literal arg |
+| `round(x)` | Round to nearest integer | ✓ with literal arg |
+| `sin(x)` | Sine (float result) | — |
+| `cos(x)` | Cosine (float result) | — |
+| `tan(x)` | Tangent (float result) | — |
+| `asin(x)` | Arc sine (float result) | — |
+| `acos(x)` | Arc cosine (float result) | — |
+| `atan(x)` | Arc tangent (float result) | — |
+| `atan2(y, x)` | Two-argument arc tangent (float result) | — |
+| `hypot(x, y)` | sqrt(x² + y²) (float result) | — |
+| `min(a, b)` | Minimum of two values | ✓ with literal args |
+| `max(a, b)` | Maximum of two values | ✓ with literal args |
+| `min_float(a, b)` | Floating-point minimum (NaN-aware) | — |
+| `max_float(a, b)` | Floating-point maximum (NaN-aware) | — |
+| `sign(x)` | Sign: -1, 0, or 1 | ✓ with literal arg |
+| `clamp(x, lo, hi)` | Clamp x to [lo, hi] | ✓ with literal args |
+| `gcd(a, b)` | Greatest common divisor | ✓ with literal args |
+| `lcm(a, b)` | Least common multiple | ✓ with literal args |
+| `is_even(x)` | 1 if even, 0 otherwise | ✓ with literal arg |
+| `is_odd(x)` | 1 if odd, 0 otherwise | ✓ with literal arg |
+| `is_power_of_2(x)` | 1 if x is a power of 2, 0 otherwise | ✓ with literal arg |
+| `fma(a, b, c)` | Fused multiply-add: a*b+c | — |
+| `copysign(x, y)` | Magnitude of x with sign of y | — |
+| `random()` | Random float in [0.0, 1.0) | — (side-effectful) |
 
 ### 19.3 Arithmetic with Explicit Overflow/Precision Mode
 
-| Function | Description |
-|---|---|
-| `fast_add(a, b)` | Addition with `nsw` (no signed wrap) flag |
-| `fast_sub(a, b)` | Subtraction with `nsw` flag |
-| `fast_mul(a, b)` | Multiplication with `nsw` flag |
-| `fast_div(a, b)` | Division (exact, no remainder) |
-| `precise_add(a, b)` | Addition without unsafe flags |
-| `precise_sub(a, b)` | Subtraction without unsafe flags |
-| `precise_mul(a, b)` | Multiplication without unsafe flags |
-| `precise_div(a, b)` | Division without unsafe flags |
-| `saturating_add(a, b)` | LLVM saturating addition |
-| `saturating_sub(a, b)` | LLVM saturating subtraction |
+| Function | Description | Compile-Time Folds? |
+|---|---|---|
+| `fast_add(a, b)` | Addition with `nsw` (no signed wrap) flag | — |
+| `fast_sub(a, b)` | Subtraction with `nsw` flag | — |
+| `fast_mul(a, b)` | Multiplication with `nsw` flag | — |
+| `fast_div(a, b)` | Division (exact, no remainder) | — |
+| `precise_add(a, b)` | Addition without unsafe flags | — |
+| `precise_sub(a, b)` | Subtraction without unsafe flags | — |
+| `precise_mul(a, b)` | Multiplication without unsafe flags | — |
+| `precise_div(a, b)` | Division without unsafe flags | — |
+| `saturating_add(a, b)` | Saturating addition (clamps at INT64_MAX) | ✓ with literal args |
+| `saturating_sub(a, b)` | Saturating subtraction (clamps at INT64_MIN) | ✓ with literal args |
+
+The `fast_*` variants emit the `nsw` (no signed wrap) flag on the LLVM instruction, which tells LLVM that signed overflow is undefined behavior — enabling stronger optimizations like loop-carried IV rewriting. Use these only when you have proven no overflow can occur.
+
+The `precise_*` variants explicitly omit any wrap/exact flags, giving conservative semantics that match C's two's-complement integer arithmetic.
+
+The `saturating_*` variants map to LLVM's `llvm.sadd.sat.i64` / `llvm.ssub.sat.i64` intrinsics and fold at compile time with literal arguments:
+```omscript
+const MAX_PLUS_1 = saturating_add(9223372036854775807, 1);  // 9223372036854775807 (no overflow)
+const MIN_MINUS_1 = saturating_sub(-9223372036854775808, 1); // -9223372036854775808 (no underflow)
+```
 
 ### 19.4 Bit Manipulation
 
-| Function | Description |
-|---|---|
-| `popcount(x)` | Count set bits |
-| `clz(x)` | Count leading zeros |
-| `ctz(x)` | Count trailing zeros |
-| `bitreverse(x)` | Reverse bit order |
-| `bswap(x)` | Byte-swap (endianness swap) |
-| `rotate_left(x, n)` | Rotate bits left by n |
-| `rotate_right(x, n)` | Rotate bits right by n |
+| Function | Description | Compile-Time Folds? |
+|---|---|---|
+| `popcount(x)` | Count set bits (maps to POPCNT instruction on x86) | ✓ with literal arg |
+| `clz(x)` | Count leading zeros (maps to LZCNT/BSR) | ✓ with literal arg |
+| `ctz(x)` | Count trailing zeros (maps to TZCNT/BSF) | ✓ with literal arg |
+| `bitreverse(x)` | Reverse all bit positions | ✓ with literal arg |
+| `bswap(x)` | Byte-swap / endianness swap | ✓ with literal arg |
+| `rotate_left(x, n)` | Rotate bits left by n positions | ✓ with literal args |
+| `rotate_right(x, n)` | Rotate bits right by n positions | ✓ with literal args |
+
+```omscript
+// All compile-time folds:
+const BITS  = popcount(0xFF00FF00);  // 16
+const LEAD  = clz(0x0001000000000000); // 15
+const TRAIL = ctz(0x0010);           // 4
+const REV   = bitreverse(0x0F0F0F0F); // 0xF0F0F0F000000000 (as u64)
+const SWAP  = bswap(0x0102030405060708); // 0x0807060504030201
+const ROT   = rotate_left(1, 3);     // 8
+```
 
 ### 19.5 Type Utilities
 
@@ -1743,6 +2093,35 @@ fn fast_fn(arr:int[], n:int) -> int { ... }
 | `to_float(x)` | Convert to float |
 | `to_string(x)` | Convert number to string |
 | `assert(cond)` | Runtime assertion (aborts on failure) |
+
+### 19.5.1 Integer Type-Cast Functions
+
+These are **function-call-style type coercions**, not ordinary functions. They are dispatched by the compiler to dedicated IR-generation code and fold at compile time inside `comptime` blocks. See §5.7 and §10.14 for the full rationale; §27 for the complete reference.
+
+| Syntax | Behavior | Compile-Time Folds? |
+|---|---|---|
+| `u64(x)` | Identity — no-op | ✓ |
+| `i64(x)` | Identity — no-op | ✓ |
+| `int(x)` | Identity — no-op | ✓ |
+| `uint(x)` | Identity — no-op | ✓ |
+| `u32(x)` | `x & 0xFFFFFFFF` — mask to lower 32 bits | ✓ |
+| `i32(x)` | Truncate to 32 bits + sign-extend to 64 | ✓ |
+| `u16(x)` | `x & 0xFFFF` — mask to lower 16 bits | ✓ |
+| `i16(x)` | Truncate to 16 bits + sign-extend to 64 | ✓ |
+| `u8(x)` | `x & 0xFF` — mask to lower 8 bits | ✓ |
+| `i8(x)` | Truncate to 8 bits + sign-extend to 64 | ✓ |
+| `bool(x)` | `(x != 0) ? 1 : 0` | ✓ |
+
+```omscript
+var a = u8(300);     // 44
+var b = i8(200);     // -56
+var c = bool(0);     // 0
+var d = bool(42);    // 1
+var e = u32(-1);     // 4294967295
+var f = i32(-1);     // -1 (sign-preserved)
+```
+
+
 
 ### 19.6 Time / System
 
@@ -2108,8 +2487,151 @@ Example output:
   allocator wrappers       :   2
 ```
 
+### 25.12 Compile-Time Array Evaluation
+
+OmScript's `comptime` system (§6.3) can evaluate user-defined functions that return arrays entirely at compile time, emitting the results as read-only global constants. This section documents the exact mechanism, the generated IR, and all the patterns that enable it.
+
+#### 25.12.1 Global Layout: `[N+1 x i64]`
+
+All OmScript arrays — both heap-allocated at runtime and compile-time constants — use the same memory layout:
+
+```
+[length, elem0, elem1, elem2, ...]
+```
+
+The first `i64` word is the **length** of the array. The remaining `N` words are the elements. This means:
+- `arr[0]` is stored at `base + 8` (offset 1 × 8 bytes)
+- `arr[i]` is stored at `base + 8*(i+1)`
+- `len(arr)` reads `*(base + 0)`
+
+For a compile-time array of 3 elements `[10, 20, 30]`, the global is:
+```llvm
+@arr = private unnamed_addr constant [4 x i64] [i64 3, i64 10, i64 20, i64 30]
+```
+
+For an empty array `[]`:
+```llvm
+@arr = private unnamed_addr constant [1 x i64] [i64 0]
+```
+
+#### 25.12.2 The `emitComptimeArray` Helper
+
+`emitComptimeArray` is the internal codegen function responsible for creating `[N+1 x i64] private unnamed_addr constant` globals. It is called from two places:
+1. **COMPTIME_EXPR emitter** — when a `comptime { }` block's evaluated result is an array.
+2. **Call-site constant folder** — when a pure user function is called with all-constant arguments and returns an array.
+
+The function:
+1. Allocates an `llvm::ArrayType` of size `N+1` (i64 elements).
+2. Populates element 0 with the length `N` as a constant `i64`.
+3. Populates elements 1..N with the computed array values as constant `i64`s.
+4. Creates a `GlobalVariable` with `private` linkage, `unnamed_addr`, and `constant` storage class.
+5. Returns a `bitcast` of the global pointer to `i64*`, matching OmScript's array-pointer type.
+
+The generated variable is also stored in the compiler's internal constant table so that subsequent `len()` calls on it fold immediately to the literal length without reading from the global.
+
+#### 25.12.3 Constant Folding Chains for Arrays
+
+Many array builtins participate in a **folding chain** — when their argument is itself a constant array, the result is also a constant:
+
+| Builtin call | Folds when | Result |
+|---|---|---|
+| `len(array_fill(N, v))` | `N` is a literal integer | Literal `N` |
+| `len(range(a, b))` | `a`, `b` are literals | Literal `b - a` |
+| `len(range_step(a, b, s))` | all literal | Literal `(b-a)/s` |
+| `len(str_chars(s))` | `s` is a string literal | Literal `strlen(s)` |
+| `len(array_concat(a, b))` | both `a`, `b` are constant arrays | Literal `len(a)+len(b)` |
+| `sum([1,2,3])` | all elements are literals | Literal sum |
+| `sum(array_fill(n, v))` | `n`, `v` are literals | Literal `n*v` |
+| `sum(range(a, b))` | `a`, `b` are literals | Literal `(a+b-1)*(b-a)/2` |
+| `array_min([...])` | all elements are literals | Literal minimum |
+| `array_max([...])` | all elements are literals | Literal maximum |
+| `array_product([...])` | all elements are literals | Literal product |
+| `array_last([...])` | all elements are literals | Literal last element |
+| `array_contains([...], v)` | all elements and `v` are literals | Literal 0 or 1 |
+| `array_find([...], v)` | all elements and `v` are literals | Literal index or -1 |
+| `index_of([...], v)` | all elements and `v` are literals | Literal index or -1 |
+
+These chains compose: `sum(range(1, 101))` folds to `5050` without allocating an array or computing a loop.
+
+#### 25.12.4 The `str_to_u64_fast` Pattern in Detail
+
+The canonical use case for comptime array evaluation is encoding a string as an array of 64-bit words at compile time for use in fast hashing, pattern matching, or SIMD comparisons.
+
+**How the compiler evaluates `str_to_u64_fast("hello")`:**
+
+1. The `comptime` evaluator sees a call to a user function with a string-literal argument.
+2. It looks up `str_to_u64_fast` in the function table and finds it is a pure function (no side effects).
+3. It registers `str_to_u64_fast` in `arrayReturningFunctions_` since its return type is `u64[]`.
+4. It executes the function body step by step:
+   - `len("hello")` → 5 (constant-folds immediately)
+   - `(5 + 7) >> 3` → 1 (one 8-byte block covers 5 bytes)
+   - `array_fill(1, 0)` → constant array `[0]`
+   - Loop `i in 0...1`: `base = 0`, then processes bytes at indices 0–4
+   - `u64(s[0])` → `u64('h')` → `u64(104)` → 104
+   - `104 << 0` → 104; `u64(s[1]) << 8` → `101 << 8` = 25856; etc.
+   - Final `x` = `0x6F6C6C6568` (little-endian encoding of "hello\0\0\0")
+5. `emitComptimeArray` is called with `[1, 0x6F6C6C6568]`.
+6. The global `@M = private unnamed_addr constant [2 x i64] [i64 1, i64 478560413544]` is emitted.
+7. The variable `M` is bound to this global; `len(M)` folds to `1`.
+
+**Full function listing with annotation:**
+```omscript
+fn str_to_u64_fast(s:string) -> u64[] {
+    var n:int = len(s);                    // comptime: 5
+    var blocks:int = (n + 7) >> 3;        // comptime: 1
+    var out:u64[] = array_fill(blocks, 0); // comptime: [0]
+    for (i:int in 0...blocks) {            // runs once: i=0
+        var base:int = i << 3;             // comptime: 0
+        var x:u64 = 0;
+        // Each condition is checked at compile time:
+        if (base + 0 < n) { x |= u64(s[base + 0]) << 0;  }  // 'h'=104
+        if (base + 1 < n) { x |= u64(s[base + 1]) << 8;  }  // 'e'=101
+        if (base + 2 < n) { x |= u64(s[base + 2]) << 16; }  // 'l'=108
+        if (base + 3 < n) { x |= u64(s[base + 3]) << 24; }  // 'l'=108
+        if (base + 4 < n) { x |= u64(s[base + 4]) << 32; }  // 'o'=111
+        if (base + 5 < n) { /* 5 < 5: skip */ }
+        if (base + 6 < n) { /* skip */ }
+        if (base + 7 < n) { /* skip */ }
+        out[i] = x;    // out[0] = 0x6F6C6C6568 = 478560413544
+    }
+    return out;
+}
+
+var M:u64[] = comptime { str_to_u64_fast("hello"); };
+// Emitted IR: @M = private unnamed_addr constant [2 x i64] [i64 1, i64 478560413544]
+// len(M) == 1, M[0] == 478560413544 == 0x6F6C6C6568
+
+// Usage: fast substring check at runtime
+fn contains_hello(s:string) -> bool {
+    if (len(s) < 5) { return false; }
+    var word = u64(s[0]) | (u64(s[1]) << 8) | (u64(s[2]) << 16) |
+               (u64(s[3]) << 24) | (u64(s[4]) << 32);
+    return (word & 0xFFFFFFFFFF) == M[0];
+}
+```
+
+#### 25.12.5 Requirements for Comptime Array Functions
+
+For a user function to be evaluatable inside `comptime`:
+1. **All arguments must be compile-time constants** (literals, `const` variables, or results of other comptime expressions).
+2. **The function must be pure** — it must not call any I/O, system, or threading builtins.
+3. **All control flow must be statically deterministic** — `if` conditions must evaluate to known values; loop bounds must be known constants.
+4. **No pointer aliasing to external state** — the function must not read from global mutable variables.
+5. **Recursion is supported** — as long as it terminates in a bounded number of steps (the evaluator has a depth limit of 10,000 steps).
+
+Functions that call other user functions are supported as long as those callee functions also satisfy these requirements.
+
+#### 25.12.6 `arrayReturningFunctions_` Registration
+
+When the compiler encounters a function being called in a comptime context and determines that function returns an array, it registers the function name in the `arrayReturningFunctions_` set (a `std::unordered_set<std::string>` inside `CodeGenerator`). This registration serves several purposes:
+
+1. **Type inference** — subsequent uses of the variable at call sites are typed as array, not integer. This affects which LLVM getelementptr offsets are generated for element access.
+2. **len() folding** — if the comptime result is a known-size array, `len()` calls on the variable can fold to the constant length immediately.
+3. **Downstream comptime propagation** — if the array variable is passed to another pure function in another comptime block, the evaluator knows to treat it as a constant array, not a runtime pointer.
 
 ---
+
+
 
 ## 26. Pipeline — Software-Prefetched Sequential Processing
 
@@ -2225,3 +2747,1104 @@ for (i in 0...n) {
 > separated from where the read values are used.  The compiler can then hide
 > memory latency by prefetching the next iteration's data while the current
 > iteration's compute stages run.
+
+---
+
+## 27. Integer Type-Cast Reference
+
+This appendix provides a complete, unambiguous reference for all 9 integer type-cast functions introduced in OmScript 4.1.1. These are function-call-style coercions handled specially by the compiler — they are not user-callable functions in the normal sense, and they produce no runtime overhead for identity casts. See §5.7 and §10.14 for the conceptual introduction.
+
+### 27.1 Overview Table
+
+| Cast | Width | Behavior | LLVM IR | Identity? | Comptime Folds? |
+|---|---|---|---|---|---|
+| `u64(x)` | 64-bit unsigned | Pass-through | (none) | ✓ | ✓ |
+| `i64(x)` | 64-bit signed | Pass-through | (none) | ✓ | ✓ |
+| `int(x)` | 64-bit signed | Pass-through | (none) | ✓ | ✓ |
+| `uint(x)` | 64-bit unsigned | Pass-through | (none) | ✓ | ✓ |
+| `u32(x)` | 32-bit unsigned | Zero-extend (mask) | `and i64 %x, 4294967295` | — | ✓ |
+| `i32(x)` | 32-bit signed | Truncate + sign-extend | `trunc`, `sext` | — | ✓ |
+| `u16(x)` | 16-bit unsigned | Zero-extend (mask) | `and i64 %x, 65535` | — | ✓ |
+| `i16(x)` | 16-bit signed | Truncate + sign-extend | `trunc`, `sext` | — | ✓ |
+| `u8(x)` | 8-bit unsigned | Zero-extend (mask) | `and i64 %x, 255` | — | ✓ |
+| `i8(x)` | 8-bit signed | Truncate + sign-extend | `trunc`, `sext` | — | ✓ |
+| `bool(x)` | 1-bit | Normalize 0/1 | `icmp ne`, `zext` | — | ✓ |
+
+### 27.2 Identity Casts: `u64`, `i64`, `int`, `uint`
+
+These four casts are complete no-ops at runtime. The value is passed through unchanged. They exist to:
+- **Document intent** in code that mixes signed and unsigned interpretations
+- **Suppress type-mismatch warnings** from future type-stricter analysis tools
+- **Enable zero-cost `u64(s[i])` patterns** where the programmer needs to assert "treat this byte as unsigned before shifting"
+
+```omscript
+var x:int = 42;
+var a = u64(x);    // same as x; type annotation documents "unsigned 64-bit"
+var b = i64(x);    // same as x
+var c = int(x);    // same as x
+var d = uint(x);   // same as x
+
+// Comptime:
+const K:u64 = comptime { u64(100); };    // 100
+const M:int = comptime { int(0xFF);  };  // 255
+```
+
+**LLVM IR generated:** none (the value is used directly).
+
+### 27.3 `u32(x)` — Unsigned 32-Bit Mask
+
+Masks the input to the lower 32 bits, zero-extending the upper 32 bits.
+
+**Formula:** `x & 0xFFFFFFFF`
+
+**LLVM IR:** `%result = and i64 %x, 4294967295`
+
+```omscript
+u32(0)                    // 0
+u32(4294967295)           // 4294967295 (0xFFFFFFFF)
+u32(4294967296)           // 0           (2^32 wraps to 0)
+u32(4294967297)           // 1
+u32(-1)                   // 4294967295  (0xFFFFFFFFFFFFFFFF & 0xFFFFFFFF)
+u32(-2147483648)          // 2147483648  (0x80000000)
+u32(0x1_2345_6789)        // 0x23456789 (591751049)
+```
+
+**Comptime:**
+```omscript
+const A = u32(0x1_FFFF_FFFF);  // 4294967295
+const B = u32(-1);             // 4294967295
+const C = u32(1_000_000_000_000); // 3567587328 (1e12 & 0xFFFFFFFF)
+```
+
+### 27.4 `i32(x)` — Signed 32-Bit Truncate
+
+Truncates to 32 bits and sign-extends the result back to 64 bits. This preserves the two's-complement signed value if it fits in `[-2^31, 2^31-1]`.
+
+**Formula:** `sext(trunc(x, i32), i64)`
+
+**LLVM IR:** `%t = trunc i64 %x to i32; %result = sext i32 %t to i64`
+
+```omscript
+i32(0)                  // 0
+i32(2147483647)         // 2147483647   (INT32_MAX — unchanged)
+i32(2147483648)         // -2147483648  (INT32_MAX+1 wraps to INT32_MIN)
+i32(-2147483648)        // -2147483648  (INT32_MIN — unchanged)
+i32(-2147483649)        // 2147483647   (INT32_MIN-1 wraps to INT32_MAX)
+i32(-1)                 // -1
+i32(0xFFFFFFFF)         // -1           (0xFFFFFFFF = 4294967295 trunc to i32 = -1)
+i32(0x80000000)         // -2147483648
+```
+
+**Use case:** Ensuring that arithmetic produces the same result as 32-bit C `int` operations. For example, when implementing a hash function specified in terms of 32-bit integer arithmetic:
+```omscript
+fn fnv1a_32(data:u8[]) -> u32 {
+    var h:u32 = u32(2166136261);
+    for (b in data) {
+        h = i32(h ^ u8(b));       // XOR byte, treat result as signed 32-bit
+        h = i32(h * 16777619);    // FNV prime multiplication, 32-bit wrapped
+    }
+    return u32(h);
+}
+```
+
+### 27.5 `u16(x)` — Unsigned 16-Bit Mask
+
+Masks the input to the lower 16 bits.
+
+**Formula:** `x & 0xFFFF`
+
+**LLVM IR:** `%result = and i64 %x, 65535`
+
+```omscript
+u16(0)          // 0
+u16(65535)      // 65535 (0xFFFF)
+u16(65536)      // 0
+u16(-1)         // 65535
+u16(0xABCD)     // 43981
+u16(0x1ABCD)    // 43981 (upper bits discarded)
+```
+
+### 27.6 `i16(x)` — Signed 16-Bit Truncate
+
+Truncates to 16 bits and sign-extends back to 64 bits.
+
+**Formula:** `sext(trunc(x, i16), i64)`
+
+```omscript
+i16(32767)     // 32767   (INT16_MAX)
+i16(32768)     // -32768  (INT16_MAX+1 → INT16_MIN)
+i16(-32768)    // -32768
+i16(-1)        // -1
+i16(0xFFFF)    // -1
+i16(0x8000)    // -32768
+```
+
+### 27.7 `u8(x)` — Unsigned 8-Bit Mask
+
+Masks the input to the lower 8 bits. **This is the most frequently used cast**, especially for treating string bytes as unsigned values before packing them into wider integers.
+
+**Formula:** `x & 0xFF`
+
+**LLVM IR:** `%result = and i64 %x, 255`
+
+```omscript
+u8(0)       // 0
+u8(127)     // 127
+u8(128)     // 128
+u8(255)     // 255
+u8(256)     // 0
+u8(-1)      // 255   (0xFF)
+u8(-128)    // 128   (0x80)
+u8('A')     // 65
+u8(300)     // 44    (300 & 0xFF = 0x2C)
+```
+
+**Classic usage — zero-extend string bytes for bitwise operations:**
+```omscript
+// Reading bytes from a string for hashing or pattern matching:
+fn hash_string(s:string) -> u64 {
+    var h:u64 = 14695981039346656037;  // FNV offset basis
+    var n = len(s);
+    for (i:int in 0...n) {
+        h ^= u64(s[i]);          // u64() zero-extends the byte
+        h *= 1099511628211;      // FNV prime
+    }
+    return h;
+}
+
+// Without u64(s[i]), the byte would be sign-extended for values ≥ 128,
+// which would corrupt the upper 56 bits of h during XOR.
+```
+
+**Comptime folding:**
+```omscript
+const BYTE_300 = u8(300);    // 44
+const BYTE_NEG = u8(-1);     // 255
+const BYTE_FF  = u8(0xFF00); // 0
+
+// In a loop inside comptime — generates a lookup table:
+fn byte_parity_table() -> int[] {
+    var t:int[] = array_fill(256, 0);
+    for (i:int in 0...256) {
+        var x = i;
+        x ^= x >> 4; x ^= x >> 2; x ^= x >> 1;
+        t[i] = u8(x) & 1;
+    }
+    return t;
+}
+const PARITY:int[] = comptime { byte_parity_table(); };
+```
+
+### 27.8 `i8(x)` — Signed 8-Bit Truncate
+
+Truncates to 8 bits and sign-extends back to 64 bits.
+
+**Formula:** `sext(trunc(x, i8), i64)`
+
+```omscript
+i8(127)     // 127   (INT8_MAX)
+i8(128)     // -128  (INT8_MAX+1 → INT8_MIN)
+i8(255)     // -1
+i8(-128)    // -128
+i8(-1)      // -1
+i8(0)       // 0
+i8(200)     // -56   (200 = 0xC8; 0xC8 as signed i8 = -56)
+```
+
+**Use case:** Implementing algorithms that process signed bytes (e.g., audio samples, temperature deltas):
+```omscript
+fn apply_signed_delta(data:int[], deltas:int[], n:int) -> int[] {
+    var out:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        out[i] = data[i] + i8(deltas[i]);  // treat delta as signed 8-bit
+    }
+    return out;
+}
+```
+
+### 27.9 `bool(x)` — Boolean Normalization
+
+Normalizes any integer to exactly 0 or 1. Equivalent to `(x != 0) ? 1 : 0`.
+
+**Formula:** `(x != 0) ? 1 : 0`
+
+**LLVM IR:** `%cmp = icmp ne i64 %x, 0; %result = zext i1 %cmp to i64`
+
+```omscript
+bool(0)          // 0
+bool(1)          // 1
+bool(-1)         // 1
+bool(42)         // 1
+bool(0x80000000) // 1
+bool(0)          // 0
+
+// Useful for converting comparison results to explicit 0/1 integers:
+var flag = bool(x > threshold);    // 0 or 1, not an LLVM i1
+var count_nonzero = bool(a) + bool(b) + bool(c);  // sum of booleans
+```
+
+**Comptime:**
+```omscript
+const FLAGS:int[] = comptime {
+    var t:int[] = array_fill(8, 0);
+    for (i:int in 0...8) {
+        t[i] = bool(i % 3);   // 0,1,1,0,1,1,0,1
+    }
+    t;
+};
+```
+
+### 27.10 Compile-Time Folding: Complete Rules
+
+The following rules govern when a type-cast expression is folded at compile time:
+
+1. **Literal argument:** Any call like `u8(255)`, `i32(-1)`, `bool(0)` with a literal integer argument is **always folded** by the constant evaluator, regardless of context.
+
+2. **Inside `comptime {}` blocks:** All 9 casts are recognized by `evalConstBuiltin` and fold immediately when the argument is a known constant (which inside `comptime`, all variables are).
+
+3. **After `const` declaration:** When the argument is a `const` variable, downstream uses may also fold:
+   ```omscript
+   const N = 300;
+   const B = u8(N);    // folds to 44
+   ```
+
+4. **After `comptime` declaration:** Variables initialized from `comptime` blocks are treated as constants for downstream folding purposes.
+
+5. **In `OPTMAX` blocks:** The OPTMAX evaluator applies the same constant folding rules as `comptime`.
+
+6. **Chaining:** Type-cast calls can be chained, and each step folds:
+   ```omscript
+   const X = i32(u8(1000) + 200);  // u8(1000)=232, +200=432, i32(432)=432
+   ```
+
+### 27.11 Interaction with the Type System
+
+Since all OmScript integers share the same LLVM type (`i64`), the type-cast functions do not change the storage type of a variable. They are purely **value-transforming operations** that create a new `i64` value with different bits.
+
+This means:
+- `var x:u32 = u32(y)` — the annotation `:u32` is informational only; the underlying value is still `i64`, but the `u32()` cast ensures the upper 32 bits are zero.
+- `var x:i8 = i8(y)` — the annotation `:i8` is informational; the actual value is `i64` with bits 8–63 set to the sign of bit 7.
+- Arithmetic on a `u8`-cast value is still 64-bit arithmetic — you must re-apply `u8()` after arithmetic to clamp back to 8 bits if needed.
+
+```omscript
+var a:u8 = u8(200);    // a = 200
+var b:u8 = u8(200);    // b = 200
+var c = a + b;         // c = 400 (64-bit addition — NOT 144!)
+var d:u8 = u8(a + b);  // d = 144 (400 & 0xFF = 0x90 = 144)
+```
+
+This is intentional — it matches C's behavior where arithmetic on narrow integers is promoted to `int`.
+
+### 27.12 Complete Examples
+
+**Example 1: Building a Bloom Filter Bitmask at Compile Time**
+```omscript
+fn build_bloom_mask(keys:string[]) -> u64[] {
+    var mask:u64[] = array_fill(4, 0);  // 256-bit bloom filter (4 × 64-bit words)
+    for (k in keys) {
+        var h:u64 = 14695981039346656037;
+        for (i:int in 0...len(k)) {
+            h ^= u64(k[i]);
+            h *= 1099511628211;
+        }
+        var bucket = u64(h >> 58);           // bits 63-58 select word (0-3)
+        var bit    = u64(1) << u64(h & 63); // bit within word
+        mask[u8(bucket) >> 6] |= bit;       // u8() ensures 0-3 index
+    }
+    return mask;
+}
+
+const BLOOM:u64[] = comptime { build_bloom_mask(["foo", "bar", "baz"]); };
+```
+
+**Example 2: CRC-8 Table Generation at Compile Time**
+```omscript
+fn make_crc8_table() -> u8[] {
+    var t:u8[] = array_fill(256, 0);
+    for (i:int in 0...256) {
+        var crc:int = i;
+        for (j:int in 0...8) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0x8C;
+            } else {
+                crc >>= 1;
+            }
+        }
+        t[i] = u8(crc);   // clamp to 8-bit result
+    }
+    return t;
+}
+
+const CRC8_TABLE:u8[] = comptime { make_crc8_table(); };
+// 256-entry lookup table, fully computed at compile time
+// Emitted as: @CRC8_TABLE = private unnamed_addr constant [257 x i64] [i64 256, ...]
+```
+
+**Example 3: Using All Type Casts in a Single Expression**
+```omscript
+fn pack_rgb(r:int, g:int, b:int) -> u32 {
+    // Clamp each channel to 8 bits and pack into a 32-bit RGB value
+    return u32(u8(r)) | (u32(u8(g)) << 8) | (u32(u8(b)) << 16);
+}
+
+// At compile time:
+const RED   = comptime { pack_rgb(255, 0, 0); };   // 0x0000FF
+const GREEN = comptime { pack_rgb(0, 255, 0); };   // 0x00FF00
+const BLUE  = comptime { pack_rgb(0, 0, 255); };   // 0xFF0000
+const WHITE = comptime { pack_rgb(255, 255, 255); }; // 0xFFFFFF
+```
+
+---
+
+*End of OmScript Language Reference — Version 4.1.1*
+
+---
+
+## 28. CF-CTRE — Cross-Function Compile-Time Reasoning Engine
+
+> **Available since:** v4.1.1  
+> **Trigger:** O1+ (automatic), `@pure`, `@const_eval`  
+> **Source:** `include/cfctre.h`, `src/cfctre.cpp`
+
+CF-CTRE is OmScript's **deterministic SSA-semantics compile-time interpreter**.  It sits between the AST pre-analysis passes and LLVM IR generation and executes pure functions **across function-call boundaries** at compile time.  Results are memoised, pipeline structure is preserved, and SIMD lane semantics are respected.
+
+---
+
+### 28.1 Purpose and Position in Pipeline
+
+#### 28.1.1 Goals
+
+CF-CTRE solves a fundamental limitation of classical constant folding: it is stopped by function calls.  Classical folding can evaluate `abs(min(3, 7))` but not:
+
+```omscript
+fn encode(x:int) -> int { return x * 6364136223846793005 + 1442695040888963407; }
+fn chain(x:int)  -> int { return encode(encode(encode(x))); }
+
+const K = comptime { chain(42); }   // ← CF-CTRE evaluates all three calls
+```
+
+Classical folding would refuse this because `encode` is a user function.  CF-CTRE descends into `encode`, executes it three times (with memoisation so the second and third calls reuse the first result), and substitutes `K` with the fully computed constant — **zero runtime code emitted**.
+
+#### 28.1.2 Placement
+
+```
+Frontend → SSA Builder → CF-CTRE → OPTMAX → LLVM IR → Backend
+```
+
+More precisely, within the compiler's `generateProgram()` function:
+
+```
+preAnalyzeStringTypes()
+preAnalyzeArrayTypes()
+analyzeConstantReturnValues()      ← zero-arg pure function results
+autoDetectConstEvalFunctions()     ← purity detection
+inferFunctionEffects()             ← side-effect classification
+runCFCTRE()                        ← ← ← CF-CTRE PHASE ← ← ←
+generateFunction() × N             ← LLVM IR emission
+runOptimizationPasses()
+```
+
+CF-CTRE runs **after** all AST analysis so it has the maximum available constant information, and **before** LLVM IR emission so its results are visible to the code generator.
+
+---
+
+### 28.2 Core Object Model
+
+CF-CTRE defines five core value/memory types:
+
+#### 28.2.1 `CTValue` — Compile-Time Value
+
+A tagged union representing any scalar or compound value that CF-CTRE can compute:
+
+| Kind | Underlying C++ type | Description |
+|---|---|---|
+| `CONCRETE_U64` | `uint64_t` | Unsigned 64-bit integer |
+| `CONCRETE_I64` | `int64_t` | Signed 64-bit integer (default OmScript integer) |
+| `CONCRETE_F64` | `double` | IEEE-754 double-precision float |
+| `CONCRETE_BOOL` | `bool` | Boolean (true / false) |
+| `CONCRETE_STRING` | `std::string` | Compile-time string value |
+| `CONCRETE_ARRAY` | `CTArrayHandle` (uint64) | Opaque handle into CTHeap |
+| `UNINITIALIZED` | — | Sentinel (not yet computed) |
+
+Key constructors:
+
+```cpp
+CTValue::fromI64(int64_t)        // integer (most common)
+CTValue::fromU64(uint64_t)       // unsigned integer
+CTValue::fromF64(double)         // float
+CTValue::fromBool(bool)          // boolean
+CTValue::fromString(std::string) // string
+CTValue::fromArray(CTArrayHandle)// array handle
+CTValue::uninit()                // UNINITIALIZED sentinel
+```
+
+Key accessors:
+
+```cpp
+bool isInt()     → true for U64, I64, or BOOL
+bool isString()  → true for STRING
+bool isArray()   → true for ARRAY
+int64_t asI64()  → coerces U64/BOOL/F64 to signed int64
+std::string asStr()
+CTArrayHandle asArr()
+```
+
+`memoHash()` computes a stable 64-bit hash of the value for use as memoisation keys.  For arrays, it hashes element-by-element through CTHeap.
+
+#### 28.2.2 `CTHeap` — Deterministic Compile-Time Memory
+
+CF-CTRE's memory model uses a **handle-based heap** — no raw pointers exist at compile time.
+
+```
+struct CTHeap {
+    map<CTArrayHandle, CTArray> arrays_
+    uint64_t next_handle_
+}
+
+struct CTArray {
+    uint64_t len
+    vector<CTValue> data
+}
+```
+
+Rules:
+- `alloc(n)` → allocates a new array of `n` UNINITIALIZED elements and returns its handle.
+- `store(handle, index, value)` → mutates `heap[handle][index]` in place.
+- `load(handle, index)` → returns the current value at that index.
+- `length(handle)` → returns `n` (the length stored at the header).
+- Handles are monotonically increasing 64-bit integers (deterministic — no ASLR, no raw pointers).
+- Arrays are mutable from within CF-CTRE execution (unlike LLVM global constants).
+- The heap is per-`CTEngine` instance; it is destroyed when the compilation unit finishes.
+
+#### 28.2.3 `CTFrame` — Function Execution Context
+
+Each active function invocation owns a `CTFrame`:
+
+```
+struct CTFrame {
+    FunctionDecl* fn          // AST function being executed
+    map<string, CTValue> locals  // variable bindings for this call
+    CTHeap* heap              // pointer to shared CTHeap
+    CTValue returnValue       // set when a return is executed
+    bool didReturn            // signals early return
+    bool didBreak             // signals break from loop
+    bool doContinue           // signals continue in loop
+    CTValue lastBareExpr      // implicit return value (last expression stmt)
+}
+```
+
+Locals shadow outer scopes correctly: entering a `{` block pushes a copy of the current locals; exiting the block restores the outer copy.  This matches OmScript's block-scoping rules exactly.
+
+#### 28.2.4 `CTGraph` — Interprocedural Call Graph
+
+CF-CTRE builds a lightweight call graph from the AST:
+
+```
+struct CTCallEdge { string caller; string callee; }
+struct CTGraph    { set<string> nodes; vector<CTCallEdge> edges; }
+```
+
+The call graph is used for:
+- Topological ordering during pre-evaluation (leaf functions first).
+- Detecting recursive cycles (prevents infinite expansion).
+- Specialization: clustering call sites by constant-argument shape.
+
+#### 28.2.5 `CTEngine` — Main Engine
+
+`CTEngine` is the single public class.  One instance exists per `CodeGenerator`, allocated in `runCFCTRE()`:
+
+```cpp
+class CTEngine {
+public:
+    void registerGlobalConst(const string& name, CTValue v);
+    void registerEnumConst(const string& name, int64_t v);
+    void runPass(Program* program);        // whole-program analysis
+    bool isPure(const string& fnName) const;
+    optional<CTValue> executeFunction(const string& name, vector<CTValue> args);
+    optional<CTValue> evalComptimeBlock(BlockStmt* body);
+    CTHeap& heap();
+    vector<CTValue> extractArray(CTArrayHandle h) const;
+    struct Stats { ... };
+    const Stats& stats() const;
+};
+```
+
+---
+
+### 28.3 Function Eligibility Rules
+
+A function is eligible for CF-CTRE execution if **all** of the following hold:
+
+#### 28.3.1 Required Conditions
+
+| Condition | How checked |
+|---|---|
+| Annotated `@pure` **or** auto-detected as pure | Fixed-point purity analysis (see §28.3.2) |
+| All call-site arguments are CT-known | Each arg reduces to a `CTValue` (not `UNINITIALIZED`) |
+| No external I/O | No `print`, `println`, `input_line`, file operations in body |
+| No non-deterministic operations | No `rand()`, `time()`, `srand()` |
+| No unsafe pointer escape | No raw pointer arithmetic, no FFI calls |
+| Recursion depth ≤ 128 | `kMaxDepth` limit |
+| Total instruction budget not exceeded | `kMaxInstructions` = 10 000 000 per compilation unit |
+
+#### 28.3.2 `@const_eval` Override
+
+Annotating a function `@const_eval` **forces** eligibility regardless of the purity analysis result.  Use this when you know a function is safe to execute at compile time but the static analysis would otherwise conservatively reject it.
+
+```omscript
+@const_eval
+fn my_hash(s:string) -> int {
+    var h:int = 0xcbf29ce484222325;
+    for (i:int in 0...len(s)) {
+        h ^= s[i];
+        h *= 0x100000001b3;
+    }
+    return h;
+}
+
+const HASH_OF_HELLO = comptime { my_hash("hello"); }
+```
+
+#### 28.3.3 Purity Analysis — Fixed-Point Algorithm
+
+CF-CTRE uses a whole-program fixed-point analysis to detect pure functions without explicit annotations:
+
+```
+Phase 1: Seed — mark all @pure and @const_eval functions as pure.
+Phase 2: Iterate until stable:
+    For each unmarked function F:
+        If body contains only pure operations → mark F pure
+Phase 3: Pure operations in a function body:
+    - Arithmetic / logical / bitwise / shift / comparison expressions
+    - Calls to other pure functions (already in the pure set)
+    - Array read / write (no external I/O)
+    - String operations (pure builtins only)
+    - if / else / switch / for / foreach / while / do-while
+    - Variable declarations and assignments
+    - Type casts
+    NOT pure:
+    - print / println / input_line
+    - file open / read / write / close / append
+    - rand() / srand() / time()
+    - try / catch (potential runtime error with exit side-effect)
+    - Calls to unknown or impure functions
+```
+
+Mutual recursion is handled conservatively: if A calls B and B calls A and neither is marked pure by the end of the fixed-point loop, both remain impure.
+
+---
+
+### 28.4 Execution Model
+
+#### 28.4.1 Entry Points
+
+CF-CTRE is triggered from two places in the code generator:
+
+1. **`comptime {}` blocks** — when the code generator encounters a `ComptimeExpr` node, it calls `ctEngine_->evalComptimeBlock(body)` before falling back to the legacy `tryConstEvalFull`.
+
+2. **Call-site constant folding** — when all arguments to a call are compile-time constants and the callee is `isPure()`, the code generator calls `ctEngine_->executeFunction(callee, ctArgs)` before falling back to `tryConstEvalFull`.
+
+Both paths produce a `CTValue` that is then converted to LLVM IR constants.
+
+#### 28.4.2 `evalComptimeBlock` Algorithm
+
+```
+evalComptimeBlock(block):
+    frame = new CTFrame(nullptr)   // top-level: no enclosing function
+    frame.heap = &engine.heap_
+    for each stmt in block.statements:
+        evalStmt(frame, stmt)
+        if frame.didReturn:
+            return frame.returnValue
+    return frame.lastBareExpr     // implicit return
+```
+
+The **implicit return** rule: the last *bare expression statement* (an `ExprStmt` whose expression is not a call with side effects) becomes the block's return value even without an explicit `return`.  This matches OmScript block-expression semantics.
+
+#### 28.4.3 `executeFunction` Algorithm
+
+```
+executeFunction(fnName, args):
+    1. Build memo key: hash(fnName, hash(args[0]), hash(args[1]), ...)
+    2. If key in memo_cache_: return memo_cache_[key]
+    3. If depth_ >= kMaxDepth: return nullopt   (depth guard)
+    4. Look up FunctionDecl* for fnName
+    5. frame = new CTFrame(fn)
+       frame.heap = &engine.heap_
+    6. Bind args to parameter names in frame.locals
+    7. depth_++
+    8. for each stmt in fn.body.statements:
+           evalStmt(frame, stmt)
+           if frame.didReturn: break
+    9. depth_--
+    10. result = frame.returnValue (or lastBareExpr if no explicit return)
+    11. memo_cache_[key] = result
+    12. return result
+```
+
+#### 28.4.4 Depth and Fuel Guards
+
+| Guard | Value | Behaviour on violation |
+|---|---|---|
+| `kMaxDepth` | 128 | Returns `nullopt` (falls back to runtime) |
+| `kMaxInstructions` | 10 000 000 | Returns `nullopt` (falls back to runtime) |
+| Heap size | unlimited (system RAM) | No hard limit; controlled by `kMaxInstructions` |
+
+When CF-CTRE returns `nullopt`, the code generator silently falls back to the legacy constant evaluator or emits a normal runtime call.  CF-CTRE never causes a compile error by failing to evaluate.
+
+---
+
+### 28.5 Instruction Semantics
+
+CF-CTRE evaluates OmScript AST nodes rather than a separate SSA IR (it is an *AST-level interpreter with SSA-like semantics*).
+
+#### 28.5.1 Arithmetic Operations
+
+All arithmetic wraps at 64 bits (two's-complement):
+
+| OmScript op | CF-CTRE behaviour |
+|---|---|
+| `a + b` | `int64_t(a) + int64_t(b)` with 64-bit wraparound |
+| `a - b` | `int64_t(a) - int64_t(b)` with 64-bit wraparound |
+| `a * b` | `int64_t(a) * int64_t(b)` with 64-bit wraparound |
+| `a / b` | Signed integer division; `b == 0` → returns `nullopt` |
+| `a % b` | Signed remainder; `b == 0` → returns `nullopt` |
+| `-a` | Unary negate |
+| `a ^ b` | Bitwise XOR |
+| `a & b` | Bitwise AND |
+| `a \| b` | Bitwise OR |
+| `~a` | Bitwise NOT |
+| `a << b` | Left shift (64-bit) |
+| `a >> b` | Arithmetic right shift (64-bit) |
+
+**Float operations** (`CONCRETE_F64`): `+`, `-`, `*`, `/` with IEEE-754 `double` semantics.  Integer and float values are automatically coerced when mixed (int → double).
+
+**String concatenation** (`+` on two strings): immediate string concatenation.
+
+#### 28.5.2 Comparison and Logical Operations
+
+| OmScript op | CF-CTRE result |
+|---|---|
+| `a == b` | `CTValue::fromBool(a == b)` |
+| `a != b` | `CTValue::fromBool(a != b)` |
+| `a < b` | `CTValue::fromBool(a < b)` (signed) |
+| `a <= b` | `CTValue::fromBool(a <= b)` |
+| `a > b` | `CTValue::fromBool(a > b)` |
+| `a >= b` | `CTValue::fromBool(a >= b)` |
+| `a && b` | Short-circuit AND (b not evaluated if a is false) |
+| `a \|\| b` | Short-circuit OR (b not evaluated if a is true) |
+| `!a` | Logical NOT |
+
+#### 28.5.3 Memory Operations
+
+**Array allocation:**
+```omscript
+var arr:int[] = array_fill(n, value)
+```
+CF-CTRE:
+1. Evaluates `n` → must be a non-negative `CTValue` integer.
+2. `handle = heap_.alloc(n)` — allocates `n` slots initialized to `value`.
+3. `frame.locals["arr"] = CTValue::fromArray(handle)`.
+
+**Array element load:**
+```omscript
+x = arr[i]
+```
+CF-CTRE:
+1. Evaluates `arr` → must be `CONCRETE_ARRAY`.
+2. Evaluates `i` → must be `CONCRETE_I64` or `CONCRETE_U64`.
+3. Bounds-checks: if `i < 0 || i >= heap_.length(handle)` → returns `nullopt`.
+4. Returns `heap_.load(handle, i)`.
+
+**Array element store:**
+```omscript
+arr[i] = x
+```
+CF-CTRE:
+1. Resolves `arr` to its `CTArrayHandle` from `frame.locals`.
+2. Evaluates `i` and `x`.
+3. Bounds-checks.
+4. `heap_.store(handle, i, x)`.
+
+**Array length:**
+```omscript
+len(arr)
+```
+Returns `CTValue::fromI64(heap_.length(handle))`.
+
+**String indexing:**
+```omscript
+s[i]
+```
+Returns the character code (integer) at position `i`.  Bounds-checked.
+
+#### 28.5.4 Control Flow
+
+**`if` / `else`:**
+```
+eval condition → must be CTValue (bool or int ≠ 0)
+if truthy: execute then-branch
+else:      execute else-branch (if present)
+```
+
+**`for` range loop:**
+```omscript
+for (i:int in start...end) { body }
+```
+CF-CTRE:
+1. Evaluates `start` and `end`.
+2. Iterates `i = start, start+1, ..., end-1` (exclusive upper bound; `0...3` → 0,1,2).
+3. Uses inclusive upper bound for `...=` (0...=3 → 0,1,2,3).
+4. Even if `end <= start` (zero iterations): enters the loop construct but executes zero body iterations.  The loop variable `i` is bound for each iteration.
+5. `break` sets `frame.didBreak = true` and stops iteration.
+6. `continue` sets `frame.doContinue = true`, advances to next iteration.
+
+**`foreach` / `for` collection:**
+```omscript
+foreach (v in arr) { body }
+```
+Iterates each element of a CT-known array.
+
+**`while` / `do-while` / `until`:**
+Condition re-evaluated each iteration.  Body executes while condition is truthy.  Protected by the instruction budget (`kMaxInstructions`).
+
+**`switch`:**
+```
+eval discriminant
+for each case:
+    if case.isDefault: remember as fallback
+    else: eval case values; if any matches discriminant, execute body, break
+if no match found and default exists: execute default body
+```
+
+**`return`:**
+Sets `frame.returnValue = value` and `frame.didReturn = true`.  Any enclosing loop terminates.
+
+**`break` / `continue`:**
+Set the corresponding signal flag on the frame.  Loops check these flags after each body execution.
+
+---
+
+### 28.6 Cross-Function Call Rules
+
+#### 28.6.1 Call Resolution
+
+When CF-CTRE encounters a function call expression:
+
+```
+call f(a, b):
+    ctArgs = [eval(a), eval(b)]
+    if any ctArg is UNINITIALIZED → cannot evaluate → return nullopt
+    if isPure(f) and all ctArgs are CT-known:
+        return executeFunction(f, ctArgs)     ← INLINE EXECUTION
+    else:
+        return nullopt                         ← runtime call
+```
+
+#### 28.6.2 Inline Execution
+
+CF-CTRE does **not** perform textual inlining (AST substitution).  Instead it:
+1. Allocates a fresh `CTFrame` for `f`.
+2. Binds `ctArgs` to `f`'s parameter names in the new frame.
+3. Executes `f`'s body statement-by-statement.
+4. Returns the computed `CTValue`.
+
+This means the original AST of `f` is unchanged; only the *result* is folded.
+
+#### 28.6.3 Memoisation
+
+Before executing any function call, CF-CTRE checks the memo cache:
+
+```
+key = (fnName, hash(arg0), hash(arg1), ...)
+if key in memo_cache_: return memo_cache_[key]
+```
+
+After successful execution, the result is stored:
+```
+memo_cache_[key] = result
+```
+
+For array results, the CTHeap snapshot is included in the memo value — the entire heap state produced by the function is preserved.  Subsequent calls with the same arguments reuse the pre-computed array handle.
+
+**Memo key construction** is deterministic and argument-order-sensitive:
+```
+key = fnName XOR rotl(hash(arg0), 17) XOR rotl(hash(arg1), 31) XOR ...
+```
+
+#### 28.6.4 Recursion
+
+Recursive functions are supported up to `kMaxDepth = 128` frames.  The depth counter is incremented on entry and decremented on exit.  A function that would exceed the limit returns `nullopt` instead (the call site falls through to a runtime call).
+
+Mutually recursive functions that are provably pure (e.g. each only calls the other with strictly decreasing arguments — a Fibonacci pair) will be correctly evaluated as long as the recursion terminates within the depth limit.
+
+---
+
+### 28.7 Pipeline Semantics and SIMD Tile Execution
+
+CF-CTRE has special handling for OmScript's `pipeline` statement (see §26) to preserve software-pipeline structure and honour the SIMD vector model.
+
+#### 28.7.1 SIMD Vector Model
+
+```
+kSIMDLaneWidth = 8   // u64 lanes per tile
+```
+
+CF-CTRE treats each loop body as operating on a **vector tile of 8 elements**.  For a range `0...n`:
+
+- Number of full tiles: `n / 8`
+- Remainder tile width: `n % 8` (may be 0..7)
+- If `n < 8`: exactly **one tile** is executed with `n` active lanes and `8 - n` masked (zero-padded) lanes.
+
+This matches the hardware SIMD execution model that the OmScript pipeline statement targets (256-bit AVX2 vectors of 8 × i32, or 4 × i64).
+
+#### 28.7.2 Pipeline Stage Execution
+
+For a `pipeline N { stage A { ... } stage B { ... } }` construct:
+
+```
+for each iteration i in 0...N:
+    execute stage A (with __pipeline_i = i)
+    execute stage B (with __pipeline_i = i)
+```
+
+Stage state (local variables) persists **across stage boundaries** within a single iteration.  This models the software-pipeline's register-passing semantics: a value computed in stage A is visible in stage B for the same iteration.
+
+#### 28.7.3 Tile Execution API
+
+Internally, CF-CTRE exposes:
+
+```
+execute_tile(base, width, mask):
+    for lane in 0...width:
+        if mask[lane]:
+            execute body with iterator = base + lane
+        else:
+            execute body with iterator = 0 (zero-padded)
+```
+
+Even a partial final tile always executes one tile.
+
+#### 28.7.4 Invariant
+
+CF-CTRE **never drops pipeline structure** unless explicitly permitted.  If a pipeline body contains an impure operation that prevents full CT evaluation, CF-CTRE returns `nullopt` for that pipeline and the code generator emits it as a normal runtime loop.
+
+---
+
+### 28.8 Specialization Engine
+
+When a function is called with **all-constant literal arguments**, CF-CTRE can record a *specialization*:
+
+```
+f("hello")  →  specialized_f__hello result cached
+```
+
+Rules:
+1. Specialization keys are (function name, stable arg hash).
+2. Results are memoised — repeated calls to `f("hello")` anywhere in the program share the same cached result.
+3. Specialization is transparent to the programmer; it is purely a compiler optimization.
+4. The original function is unmodified in the IR.
+
+The specialization cache is the same as the memo cache; no separate data structure is needed.
+
+---
+
+### 28.9 Output and Integration Contract
+
+#### 28.9.1 What CF-CTRE Produces
+
+After `runPass()`:
+
+| Output | Description |
+|---|---|
+| `isPure(fn)` → `bool` | Fast O(1) per-function purity query |
+| `executeFunction(fn, args)` → `optional<CTValue>` | On-demand memoised CT evaluation |
+| `evalComptimeBlock(block)` → `optional<CTValue>` | Block-level CT evaluation |
+| Back-propagated constants | New entries in `constIntReturnFunctions_` / `constStringReturnFunctions_` |
+
+#### 28.9.2 Back-Propagation into Legacy Fold Tables
+
+After `runPass()`, `runCFCTRE()` iterates all zero-arg pure functions and queries CF-CTRE for their pre-evaluated results.  Any integer or string results are inserted into the legacy `constIntReturnFunctions_` / `constStringReturnFunctions_` maps, making them visible to `tryFoldExprToConst` and `tryConstEvalFull` without those functions needing to know about CF-CTRE.
+
+#### 28.9.3 Integration Contract
+
+| CF-CTRE **will** do | CF-CTRE **will not** do |
+|---|---|
+| Evaluate pure functions deterministically | Emit machine code |
+| Return constant `CTValue` or `nullopt` | Run OS processes |
+| Preserve pipeline metadata | Perform nondeterministic operations |
+| Memoise results across call sites | Drop pipeline structure without fallback |
+| Back-propagate to legacy tables | Modify the AST (read-only) |
+| Build a call graph | Produce diagnostic errors on evaluation failure |
+
+When CF-CTRE cannot evaluate something, it always returns `nullopt` and the compiler continues normally.
+
+---
+
+### 28.10 Performance Characteristics
+
+| Property | Value |
+|---|---|
+| Time complexity | O(number of CT-executed instructions) |
+| Memo cache | Hash map; O(1) amortized lookup and insert |
+| Depth limit | 128 frames |
+| Instruction budget | 10 000 000 instructions per compilation unit |
+| Heap overhead | ~64 bytes per allocated array element (CTValue) |
+| Call graph build | O(nodes + edges) |
+| Purity fixed-point | Converges in O(functions × depth of call graph) iterations |
+
+For typical programs (hundreds of functions, most with ≤ 10 calls each), the CF-CTRE phase completes in microseconds.  For programs with deeply computed constant tables (e.g. `comptime { build_lut(256); }`) it may take milliseconds but still never emits runtime code for the evaluated portion.
+
+Verbose output (enabled by `-v` or `--verbose`) shows CF-CTRE statistics at the end of the phase:
+
+```
+[cfctre] Pass complete: 47 functions registered, 12 pure,
+         3 calls memoised, 2 arrays allocated
+```
+
+---
+
+### 28.11 Programmer-Visible Effects
+
+#### 28.11.1 When CF-CTRE Fires
+
+CF-CTRE evaluation is triggered when:
+
+1. **`comptime { expr }` block** — always tried first.  If CF-CTRE can evaluate it, the result replaces the block; otherwise `tryConstEvalFull` is tried; if both fail, a compile error is issued.
+
+2. **Call to a pure function with all-constant arguments** — tried silently at any call site in the program.  If CF-CTRE evaluates it, the call is replaced with the constant.  If not, normal code is generated.
+
+3. **Zero-argument pure functions** — pre-evaluated during `runPass()` and stored as constants.  Any reference to a zero-arg pure function result is already folded before code generation begins.
+
+#### 28.11.2 `-O0` Behaviour
+
+At `-O0`, CF-CTRE is **disabled** (the entire phase is skipped).  All `comptime {}` blocks still fall through to `tryConstEvalFull` (which handles simple arithmetic and string folding).  This preserves predictable non-optimized code generation.
+
+#### 28.11.3 Error Handling
+
+CF-CTRE never aborts compilation.  All evaluation failures silently produce `nullopt`.  The only way CF-CTRE causes a compile error is indirectly: if a `comptime {}` block fails **both** CF-CTRE and `tryConstEvalFull`, the code generator emits the error `"comptime block could not be evaluated at compile time"` — not CF-CTRE itself.
+
+#### 28.11.4 Diagnostic Output
+
+When `--verbose` / `-v` is passed:
+
+```
+[cfctre] Pass complete: 47 functions registered, 12 pure,
+         3 calls memoised, 2 arrays allocated
+```
+
+Fields:
+- `functions registered` — functions seen during `runPass()`.
+- `pure` — functions confirmed pure by the analysis.
+- `calls memoised` — call sites whose result was cached (includes pre-evaluation of zero-arg functions).
+- `arrays allocated` — CT heap arrays created (may be freed after use).
+
+---
+
+### 28.12 Worked Examples
+
+#### 28.12.1 Simple Cross-Function Evaluation
+
+```omscript
+@pure
+fn square(x:int) -> int { return x * x; }
+
+@pure
+fn sum_of_squares(a:int, b:int) -> int {
+    return square(a) + square(b);
+}
+
+// CF-CTRE evaluates sum_of_squares(3, 4) by:
+//   1. executeFunction("square", [3]) → 9  (memoised)
+//   2. executeFunction("square", [4]) → 16 (new)
+//   3. 9 + 16 → 25
+const RESULT = comptime { sum_of_squares(3, 4); }
+// RESULT = 25, zero runtime code
+```
+
+#### 28.12.2 Array Build at Compile Time
+
+```omscript
+@pure
+fn make_powers_of_two(n:int) -> int[] {
+    var out:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        out[i] = 1 << i;
+    }
+    return out;
+}
+
+// CF-CTRE fully evaluates make_powers_of_two(8):
+//   Allocates CTHeap array of 8 elements
+//   Stores 1, 2, 4, 8, 16, 32, 64, 128
+//   Returns handle → converted to LLVM global constant [9 × i64] { 8, 1, 2, 4, 8, 16, 32, 64, 128 }
+var POW2:int[] = comptime { make_powers_of_two(8); }
+// POW2 is a compile-time global constant — no heap allocation at runtime
+```
+
+#### 28.12.3 Memoisation with Repeated Calls
+
+```omscript
+@pure
+fn fib(n:int) -> int {
+    if (n <= 1) { return n; }
+    return fib(n-1) + fib(n-2);
+}
+
+// Without memoisation: 2^30 recursive calls for fib(30)
+// With CF-CTRE memoisation: each (fib, n) computed once and cached
+const F30 = comptime { fib(30); }   // evaluates in O(n) memoised calls
+const F29 = comptime { fib(29); }   // cached — instant
+```
+
+#### 28.12.4 Pipeline Constant Pre-Computation
+
+```omscript
+@pure
+fn build_sbox(n:int) -> int[] {
+    var s:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        // AES-like S-box step (simplified for illustration)
+        s[i] = (i * 0x1F + 0x63) & 0xFF;
+    }
+    return s;
+}
+
+// S-box computed entirely at compile time — embedded as a global constant
+const SBOX:int[] = comptime { build_sbox(256); }
+
+// Pipeline using the compile-time S-box
+pipeline 8 {
+    stage substitute {
+        // All references to SBOX are reads from a .rodata global — no heap
+        var byte:int = input[__pipeline_i];
+        output[__pipeline_i] = SBOX[byte];
+    }
+}
+```
+
+#### 28.12.5 Specialization
+
+```omscript
+@pure
+fn hash_string(s:string, seed:int) -> int {
+    var h:int = seed;
+    for (i:int in 0...len(s)) {
+        h ^= s[i];
+        h *= 0x100000001b3;
+    }
+    return h;
+}
+
+// All three calls are evaluated at compile time by CF-CTRE.
+// The specialization cache contains:
+//   ("hash_string", hash("hello"), hash(0xcbf29ce484222325)) → <result1>
+//   ("hash_string", hash("world"), hash(0xcbf29ce484222325)) → <result2>
+//   ("hash_string", hash("hello"), hash(42))                 → <result3>
+const H1 = comptime { hash_string("hello", 0xcbf29ce484222325); }
+const H2 = comptime { hash_string("world", 0xcbf29ce484222325); }
+const H3 = comptime { hash_string("hello", 42); }
+```
+
+---
+

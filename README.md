@@ -2,7 +2,7 @@
 
 A low-level, C-like programming language with dynamic typing and **automatic reference counting memory management**. Features a **heavily optimized AOT compiler** using LLVM, a **lightweight adaptive JIT runtime** that recompiles hot functions with aggressive optimizations, and a **three-layer optimization engine** (equality-saturation E-graph, superoptimizer, and hardware-graph-driven instruction scheduler) that produces near-optimal native machine code for each target CPU.
 
-**Current version: 4.1.0**
+**Current version: 4.1.1**
 
 ## Key Features
 
@@ -23,6 +23,9 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Error Handling**: `try`/`catch`/`throw` for structured error handling
 - **Ownership System**: `move`, `invalidate`, `borrow`, `borrow mut`, `freeze`, and `reborrow` keywords for compile-time lifetime tracking and LLVM optimization hints
 - **`comptime {}` Blocks**: Expressions evaluated entirely at compile time — result folded into a constant at the call site
+- **Array-Returning `comptime` Blocks**: `comptime` can call user functions that return arrays; the result is emitted as a `private unnamed_addr constant` global — zero runtime allocation, zero function call
+- **CF-CTRE (Cross-Function Compile-Time Reasoning Engine)**: new compiler phase (v4.1.1+) that executes pure functions across function-call boundaries at compile time with memoisation, pipeline SIMD tile semantics (8-lane tiles), and fixed-point purity analysis — see §28 of the Language Reference
+- **Integer Type-Cast Syntax**: `u8(x)`, `u16(x)`, `u32(x)`, `u64(x)`, `i8(x)`, `i16(x)`, `i32(x)`, `i64(x)`, `bool(x)` — function-call-style type coercions that fold at compile time inside `comptime` blocks
 - **`parallel` Loops**: `parallel for`/`while`/`foreach` emits loop parallelization metadata for auto-vectorization and parallel execution
 - **Enum Declarations**: Named integer constants with auto-increment
 - **Default Parameters**: Optional function parameters with default values
@@ -40,6 +43,7 @@ OmScript runs a **three-layer optimizer** on top of LLVM's standard passes:
 ### Layer 0 — AST-Level Pre-Passes (O1+)
 Run before LLVM codegen on the parsed AST:
 - **Cross-function constant propagation** — zero-argument pure functions whose return value is always a compile-time constant are identified via fixed-point analysis and inlined as constants at every call site
+- **CF-CTRE** — deterministic compile-time interpreter that executes pure functions across call boundaries, memoises results by `(fn, args_hash)`, and back-propagates results into the constant fold tables; enables `comptime { deep_call_chain(42) }` to evaluate entire function graphs at compile time
 - **`comptime {}` evaluation** — compile-time blocks are fully executed by the interpreter at compile time; results replace the expression with a literal constant
 - **`@fuse` loop fusion** — adjacent `for` loops over identical ranges are merged into a single loop body, reducing loop overhead and improving cache locality
 - **`@independent` access groups** — emits `llvm.access.group` + `llvm.loop.parallel_accesses` to suppress loop-carried alias analysis conservatism
@@ -309,18 +313,24 @@ OPTMAX!:
 ```
 
 ### Expressions
-| Category | Operators |
-|----------|-----------|
+| Category | Operators / Syntax |
+|----------|--------------------|
 | Arithmetic | `+` `-` `*` `/` `%` `**` (exponentiation) |
 | Comparison | `==` `!=` `<` `<=` `>` `>=` |
+| Chained comparison | `1 < x < 10` → `(1 < x) && (x < 10)` |
 | Logical | `&&` `\|\|` `!` |
 | Bitwise | `&` `\|` `^` `~` `<<` `>>` |
 | Ternary | `cond ? a : b` |
 | Null coalescing | `value ?? fallback` |
-| Assignment | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` |
+| Elvis | `value ?: fallback` |
+| Assignment | `=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` `**=` `??=` `&&=` `\|\|=` |
 | Increment/Decrement | `++x` `--x` (prefix) `x++` `x--` (postfix) |
 | Pipe | `expr \|> fn` |
 | Lambda | `\|x\| expr` |
+| `in` operator | `x in arr` → `array_contains(arr, x)` |
+| Spread | `[1, ...arr, 2]` |
+| Type-cast | `u8(x)` `u16(x)` `u32(x)` `u64(x)` `i8(x)` `i16(x)` `i32(x)` `i64(x)` `bool(x)` |
+| Compile-time | `comptime { expr; }` |
 
 ### Comments
 ```omscript
@@ -330,97 +340,143 @@ OPTMAX!:
 var x = 10; /* inline */
 ```
 
-## Built-in Functions (121 total)
+## Built-in Functions (140+ total)
 
 ### Math
-| Function | Description |
-|----------|-------------|
-| `abs(x)` | Absolute value |
-| `ceil(x)` | Ceiling (float → int) |
-| `floor(x)` | Floor (float → int) |
-| `round(x)` | Round to nearest integer |
-| `sqrt(x)` | Integer square root |
-| `pow(b, e)` | Integer exponentiation |
-| `log2(x)` | Integer log base 2 |
-| `log(x)` | Natural logarithm (float) |
-| `log10(x)` | Base-10 logarithm (float) |
-| `exp(x)` | Exponential e^x (float) |
-| `sin(x)` | Sine (float) |
-| `cos(x)` | Cosine (float) |
-| `tan(x)` | Tangent (float) |
-| `asin(x)` | Arc sine (float) |
-| `acos(x)` | Arc cosine (float) |
-| `atan(x)` | Arc tangent (float) |
-| `atan2(y, x)` | Two-argument arc tangent (float) |
-| `cbrt(x)` | Cube root (float) |
-| `hypot(x, y)` | Hypotenuse sqrt(x²+y²) (float) |
-| `gcd(a, b)` | Greatest common divisor |
-| `min(a, b)` | Minimum of two values |
-| `max(a, b)` | Maximum of two values |
-| `clamp(x, lo, hi)` | Clamp x to [lo, hi] |
-| `sign(x)` | Sign: -1, 0, or 1 |
-| `sum(arr)` | Sum of array elements |
+| Function | Description | Compile-Time Folds |
+|----------|-------------|--------------------|
+| `abs(x)` | Absolute value | ✓ literal |
+| `ceil(x)` | Ceiling (float → int) | ✓ literal |
+| `floor(x)` | Floor (float → int) | ✓ literal |
+| `round(x)` | Round to nearest integer | ✓ literal |
+| `sqrt(x)` | Integer square root | ✓ literal |
+| `pow(b, e)` | Integer exponentiation | ✓ literals |
+| `log2(x)` | Integer log base 2 | ✓ literal |
+| `log(x)` | Natural logarithm (float) | — |
+| `log10(x)` | Base-10 logarithm (float) | — |
+| `exp(x)` | Exponential e^x (float) | — |
+| `exp2(x)` | 2^x | ✓ literal |
+| `sin(x)` | Sine (float) | — |
+| `cos(x)` | Cosine (float) | — |
+| `tan(x)` | Tangent (float) | — |
+| `asin(x)` | Arc sine (float) | — |
+| `acos(x)` | Arc cosine (float) | — |
+| `atan(x)` | Arc tangent (float) | — |
+| `atan2(y, x)` | Two-argument arc tangent (float) | — |
+| `cbrt(x)` | Cube root (float) | — |
+| `hypot(x, y)` | Hypotenuse sqrt(x²+y²) (float) | — |
+| `gcd(a, b)` | Greatest common divisor | ✓ literals |
+| `lcm(a, b)` | Least common multiple | ✓ literals |
+| `min(a, b)` | Minimum of two values | ✓ literals |
+| `max(a, b)` | Maximum of two values | ✓ literals |
+| `min_float(a, b)` | Floating-point minimum (NaN-aware) | — |
+| `max_float(a, b)` | Floating-point maximum (NaN-aware) | — |
+| `clamp(x, lo, hi)` | Clamp x to [lo, hi] | ✓ literals |
+| `sign(x)` | Sign: -1, 0, or 1 | ✓ literal |
+| `is_even(n)` | 1 if even, 0 otherwise | ✓ literal |
+| `is_odd(n)` | 1 if odd, 0 otherwise | ✓ literal |
+| `is_power_of_2(n)` | 1 if power of 2, 0 otherwise | ✓ literal |
+| `fma(a, b, c)` | Fused multiply-add (a×b+c) | — |
+| `copysign(x, y)` | Magnitude of x with sign of y | — |
+| `saturating_add(a, b)` | Saturating addition (clamps at INT64_MAX) | ✓ literals |
+| `saturating_sub(a, b)` | Saturating subtraction (clamps at INT64_MIN) | ✓ literals |
+| `sum(arr)` | Sum of array elements | ✓ constant array |
+| `fast_add/sub/mul/div(a,b)` | Arithmetic with `nsw` flag | — |
+| `precise_add/sub/mul/div(a,b)` | Arithmetic without unsafe flags | — |
+
+### Bit Manipulation
+| Function | Description | Compile-Time Folds |
+|----------|-------------|--------------------|
+| `popcount(x)` | Count set bits (POPCNT) | ✓ literal |
+| `clz(x)` | Count leading zeros (LZCNT) | ✓ literal |
+| `ctz(x)` | Count trailing zeros (TZCNT) | ✓ literal |
+| `bitreverse(x)` | Reverse bit order | ✓ literal |
+| `bswap(x)` | Byte-swap (endianness) | ✓ literal |
+| `rotate_left(x, n)` | Rotate left by n | ✓ literals |
+| `rotate_right(x, n)` | Rotate right by n | ✓ literals |
+
+### Integer Type-Casts (v4.1.1)
+| Function | Description | Compile-Time Folds |
+|----------|-------------|--------------------|
+| `u64(x)` / `i64(x)` / `int(x)` / `uint(x)` | Identity (no-op) | ✓ |
+| `u32(x)` | Mask to 32 bits (`x & 0xFFFFFFFF`) | ✓ |
+| `i32(x)` | Truncate + sign-extend to 32 bits | ✓ |
+| `u16(x)` | Mask to 16 bits (`x & 0xFFFF`) | ✓ |
+| `i16(x)` | Truncate + sign-extend to 16 bits | ✓ |
+| `u8(x)` | Mask to 8 bits (`x & 0xFF`) | ✓ |
+| `i8(x)` | Truncate + sign-extend to 8 bits | ✓ |
+| `bool(x)` | Normalize to 0 or 1 | ✓ |
 
 ### Array
-| Function | Description |
-|----------|-------------|
-| `len(arr)` | Array length |
-| `push(arr, v)` | Append element |
-| `pop(arr)` | Remove and return last element |
-| `sort(arr)` | Sort in-place |
-| `reverse(arr)` | Reverse in-place |
-| `swap(arr, i, j)` | Swap two elements |
-| `index_of(arr, v)` | First index of value, or -1 |
-| `array_contains(arr, v)` | True if value is in array |
-| `array_min(arr)` | Minimum element of array |
-| `array_max(arr)` | Maximum element of array |
-| `array_find(arr, v)` | Index of first match, or -1 |
-| `array_any(arr, fn)` | True if any element matches predicate |
-| `array_every(arr, fn)` | True if all elements match predicate |
-| `array_count(arr, fn)` | Count elements matching predicate |
-| `array_map(arr, fn)` | Map function over elements |
-| `array_filter(arr, fn)` | Filter by predicate |
-| `array_reduce(arr, fn, init)` | Left-fold with initial value |
-| `array_slice(arr, start, end)` | Slice subarray |
-| `array_concat(a, b)` | Concatenate two arrays |
-| `array_copy(arr)` | Shallow copy |
-| `array_fill(n, v)` | Create array of n copies of v |
-| `array_remove(arr, i)` | Remove element at index |
-| `range(n)` | Array `[0, 1, ..., n-1]` |
-| `range_step(start, end, step)` | Array with step |
+| Function | Description | Compile-Time Folds |
+|----------|-------------|--------------------|
+| `len(arr)` | Array length | ✓ for `array_fill`, `range`, `range_step`, `array_concat`, `str_chars` |
+| `push(arr, v)` | Append element | — |
+| `pop(arr)` | Remove and return last element | — |
+| `sort(arr)` | Sort in-place | — |
+| `reverse(arr)` | Reverse in-place | — |
+| `swap(arr, i, j)` | Swap two elements (bounds-checked) | — |
+| `index_of(arr, v)` | First index of value, or -1 | ✓ constant array |
+| `array_contains(arr, v)` | 1 if value is in array, 0 otherwise | ✓ constant array |
+| `array_min(arr)` | Minimum element | ✓ constant array |
+| `array_max(arr)` | Maximum element | ✓ constant array |
+| `array_find(arr, fn)` | Index of first match, or -1 | ✓ constant array |
+| `array_any(arr, fn)` | 1 if any element matches predicate | — |
+| `array_every(arr, fn)` | 1 if all elements match predicate | — |
+| `array_count(arr, fn)` | Count elements matching predicate | — |
+| `array_map(arr, fn)` | Map function over elements | — |
+| `array_filter(arr, fn)` | Filter by predicate | — |
+| `array_reduce(arr, fn, init)` | Left-fold with initial value | — |
+| `array_slice(arr, start, end)` | Sub-array [start, end) | — |
+| `array_concat(a, b)` | Concatenate two arrays | ✓ `len()` constant-folds |
+| `array_copy(arr)` | Shallow copy | — |
+| `array_fill(n, v)` | Create array of n copies of v | ✓ `len()` constant-folds |
+| `array_remove(arr, i)` | Remove element at index | — |
+| `array_insert(arr, i, v)` | Insert v at index i | — |
+| `array_product(arr)` | Product of all elements | ✓ constant array |
+| `array_last(arr)` | Last element | ✓ constant array |
+| `range(start, end)` | Array `[start..end-1]` | ✓ `len()` constant-folds |
+| `range_step(start, end, step)` | Array with step | ✓ `len()` constant-folds |
+| `sum(arr)` | Sum of all elements | ✓ constant array, `array_fill`, `range` |
 
 ### String
-| Function | Description |
-|----------|-------------|
-| `str_len(s)` | String length |
-| `str_concat(a, b)` | Concatenate |
-| `str_substr(s, start, len)` | Substring |
-| `str_upper(s)` / `str_lower(s)` | Case conversion |
-| `str_trim(s)` | Strip leading/trailing whitespace |
-| `str_replace(s, old, new)` | Replace all occurrences |
-| `str_contains(s, sub)` | Substring test |
-| `str_starts_with(s, pre)` / `str_ends_with(s, suf)` | Prefix/suffix test |
-| `str_index_of(s, sub)` / `str_find(s, sub)` | Find position |
-| `str_split(s, delim)` | Split into array |
-| `str_join(arr, delim)` | Join array of strings with delimiter |
-| `str_count(s, sub)` | Count non-overlapping occurrences |
-| `str_chars(s)` | Array of character codes |
-| `str_repeat(s, n)` | Repeat n times |
-| `str_reverse(s)` | Reverse string |
-| `str_eq(a, b)` | String equality |
-| `str_to_int(s)` / `str_to_float(s)` | Parse string to number |
-| `to_string(x)` / `number_to_string(x)` / `string_to_number(s)` | Conversions |
-| `char_at(s, i)` | Character code at index |
-| `char_code(c)` | Character code of first char |
-| `to_char(n)` | Integer to single-char string |
+| Function | Description | Compile-Time Folds |
+|----------|-------------|--------------------|
+| `str_len(s)` / `len(s)` | String length | ✓ string literal |
+| `str_concat(a, b)` | Concatenate two strings | ✓ string literals |
+| `str_substr(s, start, len)` | Substring | — |
+| `str_upper(s)` / `str_lower(s)` | Case conversion | ✓ string literal |
+| `str_trim(s)` | Strip leading/trailing whitespace | ✓ string literal |
+| `str_replace(s, old, new)` | Replace all occurrences | ✓ string literals |
+| `str_contains(s, sub)` | Substring test | ✓ string literals |
+| `str_starts_with(s, pre)` / `str_ends_with(s, suf)` | Prefix/suffix test | ✓ string literals |
+| `str_index_of(s, sub)` | First index of substring (-1 if not found) | ✓ string literals |
+| `str_find(s, code)` | First index of character code | — |
+| `str_split(s, delim)` | Split into array | — |
+| `str_join(arr, delim)` | Join array of strings with delimiter | — |
+| `str_count(s, sub)` | Count non-overlapping occurrences | ✓ string literals |
+| `str_chars(s)` | Array of character codes (integers) | ✓ `len()` constant-folds |
+| `str_repeat(s, n)` | Repeat n times | ✓ string literal + literal n |
+| `str_reverse(s)` | Reverse string | ✓ string literal |
+| `str_eq(a, b)` | String equality (1/0) | ✓ string literals |
+| `str_to_int(s)` / `str_to_float(s)` | Parse string to number | ✓ string literal |
+| `str_pad_left(s, n, ch)` | Left-pad to width n | ✓ string literal |
+| `str_pad_right(s, n, ch)` | Right-pad to width n | ✓ string literal |
+| `to_string(x)` / `number_to_string(x)` | Number to string | — |
+| `string_to_number(s)` / `to_int(x)` / `to_float(x)` | Conversions | — |
+| `char_at(s, i)` | Character code at index (bounds-checked) | — |
+| `char_code(c)` | Code point of first char | — |
+| `to_char(n)` | Integer to single-character string | ✓ literal |
+| `is_alpha(n)` | 1 if alphabetic, 0 otherwise | ✓ literal |
+| `is_digit(n)` | 1 if decimal digit, 0 otherwise | ✓ literal |
 
 ### Map
 | Function | Description |
 |----------|-------------|
 | `map_new()` | Create empty map |
 | `map_set(m, key, val)` | Insert/update key |
-| `map_get(m, key)` | Get value (null if absent) |
-| `map_has(m, key)` | Test for key |
+| `map_get(m, key)` / `map_get(m, key, default)` | Get value (null or default if absent) |
+| `map_has(m, key)` | 1 if key exists, 0 otherwise |
 | `map_remove(m, key)` | Remove key |
 | `map_size(m)` | Number of entries |
 | `map_keys(m)` | Array of keys |
@@ -430,15 +486,16 @@ var x = 10; /* inline */
 | Function | Description |
 |----------|-------------|
 | `print(x)` | Print value with newline |
-| `println(x)` | Print value with newline (alias) |
-| `print_char(n)` | Print character with given code |
-| `input()` | Read integer from stdin |
-| `input_line()` | Read line string from stdin |
-| `write(path, text)` | Write text to file |
+| `println(x)` | Print value with newline (alias for `print`) |
+| `write(val)` | Print value WITHOUT trailing newline |
+| `print_char(n)` | Print character with given ASCII code |
+| `input()` | Read whitespace-delimited word from stdin |
+| `input_line()` | Read full line from stdin |
+| `exit(code)` / `exit_program(code)` | Exit with code |
 | `file_read(path)` | Read entire file as string |
-| `file_write(path, text)` | Write text to file |
+| `file_write(path, text)` | Write text to file (overwrite) |
 | `file_append(path, text)` | Append text to file |
-| `file_exists(path)` | Test file existence |
+| `file_exists(path)` | 1 if file exists, 0 otherwise |
 
 ### Threading
 | Function | Description |
@@ -450,18 +507,19 @@ var x = 10; /* inline */
 | `mutex_unlock(m)` | Release mutex |
 | `mutex_destroy(m)` | Free mutex |
 
-### Type / System
+### Type / System / Optimizer Hints
 | Function | Description |
 |----------|-------------|
-| `typeof(x)` | Return type name string |
+| `typeof(x)` | Type tag: 1=integer, 2=float, 3=string |
 | `to_int(x)` / `to_float(x)` | Type conversion |
-| `is_even(n)` / `is_odd(n)` | Parity test |
-| `is_alpha(n)` / `is_digit(n)` | Character classification |
-| `assert(cond)` | Abort if false |
+| `assert(cond)` | Abort if false (runtime assertion) |
 | `exit_program(code)` | Exit with code |
-| `random()` | Random integer |
+| `random()` | Random float in [0, 1) |
 | `sleep(ms)` | Sleep milliseconds |
-| `time()` | Current Unix time |
+| `time()` | Current Unix timestamp (seconds) |
+| `assume(cond)` | LLVM `llvm.assume` optimizer hint |
+| `unreachable()` | Mark as unreachable (UB if executed) |
+| `expect(val, expected)` | Branch prediction hint |
 
 ## Building
 
@@ -595,6 +653,81 @@ fn fib(n) {
     return b;
 }
 fn main() { return fib(30); }
+```
+
+### Integer Type-Cast Syntax (v4.1.1)
+
+OmScript 4.1.1 introduces function-call-style type coercions. These look like function calls but are zero-overhead bitwise operations compiled directly to LLVM IR — and they fold entirely at compile time inside `comptime` blocks.
+
+```omscript
+fn main() {
+    var x:int = 300;
+
+    // Masking casts (zero-extend upper bits)
+    var a = u8(x);    // 44  (300 & 0xFF)
+    var b = u16(x);   // 300 (fits in 16 bits)
+    var c = u32(x);   // 300 (fits in 32 bits)
+    var d = u64(x);   // 300 (identity — no-op)
+
+    // Sign-extension casts (truncate then sign-extend)
+    var e = i8(200);  // -56  (200 wraps to -56 as signed 8-bit)
+    var f = i16(40000); // -25536 (wraps as signed 16-bit)
+    var g = i32(x);   // 300  (fits — unchanged)
+
+    // Boolean normalization
+    var h = bool(0);  // 0
+    var i_ = bool(x); // 1
+
+    println(a);  // 44
+    println(e);  // -56
+    println(h);  // 0
+    return 0;
+}
+```
+
+### Compile-Time Array Generation (v4.1.1)
+
+`comptime` blocks can now call user-defined functions that return arrays. The result is a compile-time constant with zero runtime overhead:
+
+```omscript
+// This function packs a string into 64-bit words, little-endian
+fn str_to_u64_fast(s:string) -> u64[] {
+    var n:int = len(s);
+    var blocks:int = (n + 7) >> 3;
+    var out:u64[] = array_fill(blocks, 0);
+    for (i:int in 0...blocks) {
+        var base:int = i << 3;
+        var x:u64 = 0;
+        if (base + 0 < n) { x |= u64(s[base + 0]) << 0;  }
+        if (base + 1 < n) { x |= u64(s[base + 1]) << 8;  }
+        if (base + 2 < n) { x |= u64(s[base + 2]) << 16; }
+        if (base + 3 < n) { x |= u64(s[base + 3]) << 24; }
+        if (base + 4 < n) { x |= u64(s[base + 4]) << 32; }
+        if (base + 5 < n) { x |= u64(s[base + 5]) << 40; }
+        if (base + 6 < n) { x |= u64(s[base + 6]) << 48; }
+        if (base + 7 < n) { x |= u64(s[base + 7]) << 56; }
+        out[i] = x;
+    }
+    return out;
+}
+
+// The ENTIRE function body is evaluated at compile time.
+// No runtime allocation, no function call — just a global constant.
+var M:u64[] = comptime { str_to_u64_fast("hello"); };
+// Emits: @M = private unnamed_addr constant [2 x i64] [i64 1, i64 478560413544]
+
+fn main() {
+    println(len(M));   // 1  (compile-time constant)
+    println(M[0]);     // 478560413544 (== 0x6F6C6C6568 == "hello" little-endian)
+    return 0;
+}
+```
+
+Comptime blocks also support implicit return (no `return` keyword required):
+```omscript
+var BLOCK = comptime { 1 << 6; };    // 64 — implicit return of last expression
+var MASK  = comptime { BLOCK - 1; }; // 63
+var LOG2  = comptime { log2(BLOCK); }; // 6
 ```
 
 ### Struct Usage

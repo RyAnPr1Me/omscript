@@ -5,6 +5,61 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.1] - 2026-04-15
+
+### Added
+
+- **CF-CTRE (Cross-Function Compile-Time Reasoning Engine)** — new compiler phase inserted between AST pre-analysis and LLVM IR generation.  CF-CTRE is a deterministic SSA-semantics interpreter embedded in the compiler that executes pure functions across function-call boundaries at compile time, memoises results, and preserves pipeline SIMD tile semantics.  Key capabilities:
+  - **Cross-function evaluation** — `comptime { chain(encode(x)) }` descends into all transitively-called pure functions, not just builtins.
+  - **Memoisation** — each unique `(function, args)` combination is evaluated at most once; subsequent identical calls reuse the cached result (O(1) lookup).
+  - **Array results** — pure functions that return arrays are fully evaluated; the result is emitted as a `private unnamed_addr constant [N+1 × i64]` global (no heap allocation at runtime).
+  - **Pipeline SIMD tile semantics** — loops are processed as tiles of 8 × `u64` lanes; partial final tiles are masked; one tile always executes even if `n < 8` (matching the hardware SIMD target model).
+  - **Fixed-point purity analysis** — whole-program analysis detects pure functions without requiring explicit `@pure` annotations; handles mutual recursion conservatively.
+  - **Specialization** — calls with all-constant arguments produce specialised results cached by argument hash.
+  - **Depth + budget guards** — depth limit 128 frames, instruction budget 10 000 000 per compilation unit; both violations silently fall back to runtime.
+  - **Back-propagation** — zero-arg pure function results are back-propagated into the legacy `constIntReturnFunctions_` / `constStringReturnFunctions_` tables for full compatibility with all existing fold helpers.
+  - **`@const_eval` override** — forces a function eligible for CF-CTRE regardless of the purity analysis.
+  - **`--verbose` stats** — prints `[cfctre] Pass complete: N functions registered, M pure, K calls memoised, A arrays allocated`.
+  See §28 of the Language Reference for the full specification.
+
+- **Integer type-cast syntax** — `u64(x)`, `u32(x)`, `u16(x)`, `u8(x)`, `i64(x)`, `i32(x)`, `i16(x)`, `i8(x)`, `bool(x)` are now recognized as function-call-style type coercions. They work both in normal compiled code and inside `comptime` blocks:
+  - `u64(x)`, `i64(x)`, `int(x)`, `uint(x)` — identity (all OmScript integers are `i64`)
+  - `u32(x)` — mask to lower 32 bits (`x & 0xFFFFFFFF`)
+  - `i32(x)` — `trunc` + `sext` to 32 bits (preserves signed value in range)
+  - `u16(x)` — mask to lower 16 bits (`x & 0xFFFF`)
+  - `i16(x)` — `trunc` + `sext` to 16 bits
+  - `u8(x)` — mask to lower 8 bits (`x & 0xFF`)
+  - `i8(x)` — `trunc` + `sext` to 8 bits
+  - `bool(x)` — normalize to 0 or 1 (`x != 0 ? 1 : 0`)
+  All variants fold at compile time in `comptime` blocks via `evalConstBuiltin`.
+
+- **`comptime {}` — array-returning user functions** — `comptime` blocks can now call user-defined functions that return arrays. The entire function body is evaluated at compile time by the constant evaluator; the result is emitted as a `private unnamed_addr constant [N+1 × i64]` global with OmScript's `[length, elem0, …]` array layout. No runtime allocation, no function call:
+  ```omscript
+  fn str_to_u64_fast(s:string) -> u64[] {
+      var n:int = len(s);
+      var blocks:int = (n + 7) >> 3;
+      var out:u64[] = array_fill(blocks, 0);
+      for (i:int in 0...blocks) {
+          var base:int = i << 3;
+          var x:u64 = 0;
+          if (base + 0 < n) { x |= u64(s[base + 0]) << 0;  }
+          // ... (full 8 byte lanes)
+          out[i] = x;
+      }
+      return out;
+  }
+  // Fully evaluated at compile time — zero runtime overhead:
+  var M:u64[] = comptime { str_to_u64_fast("hello"); };
+  ```
+
+- **`comptime {}` — implicit return** — The last bare expression statement in a `comptime` block is now the implicit return value, so `comptime { expr; }` works without an explicit `return` keyword. An explicit `return` still works. This matches block-expression semantics in other modern languages.
+
+- **`emitComptimeArray` helper** — new internal codegen helper that allocates `[N+1 × i64] private unnamed_addr constant` globals with OmScript's array layout and returns the base pointer as `i64`. Used by both the COMPTIME_EXPR emitter and the call-site constant folder for array-returning pure functions.
+
+- **Array results in call-site constant folding** — pure user functions that return arrays are now fully folded at their call sites (not just inside `comptime` blocks). When the compiler detects that all arguments to a pure function are compile-time constants and the function body can be fully evaluated, array results are emitted as global constants. The callee is registered in `arrayReturningFunctions_` so downstream analysis correctly tracks the variable as array-typed.
+
+---
+
 ## [4.1.0] - 2026-04-14
 
 ### Changed (compiler optimization improvements)

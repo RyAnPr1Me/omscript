@@ -1,0 +1,37 @@
+// Test: comptime {} blocks that produce arrays from user-defined functions.
+// str_to_u64_fast packs the bytes of a string into an array of u64 values
+// (8 bytes per element, little-endian).  Because the input is a compile-time
+// constant string, the entire computation is evaluated at compile time and
+// the result is embedded as a global constant — zero runtime overhead.
+
+fn str_to_u64_fast(s:string) -> u64[] {
+    var n:int = len(s);
+    var blocks:int = (n + 7) >> 3;
+    var out:u64[] = array_fill(blocks, 0);
+
+    for (i:int in 0...blocks) {
+        var base:int = i << 3;
+        var x:u64 = 0;
+
+        if (base + 0 < n) { x |= u64(s[base + 0]) << 0;  }
+        if (base + 1 < n) { x |= u64(s[base + 1]) << 8;  }
+        if (base + 2 < n) { x |= u64(s[base + 2]) << 16; }
+        if (base + 3 < n) { x |= u64(s[base + 3]) << 24; }
+        if (base + 4 < n) { x |= u64(s[base + 4]) << 32; }
+        if (base + 5 < n) { x |= u64(s[base + 5]) << 40; }
+        if (base + 6 < n) { x |= u64(s[base + 6]) << 48; }
+        if (base + 7 < n) { x |= u64(s[base + 7]) << 56; }
+
+        out[i] = x;
+    }
+
+    return out;
+}
+
+fn main() {
+    // "hello" = 5 bytes → 1 block.
+    // little-endian u64: 0x6F6C6C6568 = 478560413032
+    // Low byte = 0x68 = 104 = 'h' (used as exit-code fingerprint)
+    var M:u64[] = comptime { str_to_u64_fast("hello"); };
+    return M[0];  // exit code = M[0] & 0xFF = 0x68 = 104
+}
