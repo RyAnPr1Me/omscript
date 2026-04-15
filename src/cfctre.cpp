@@ -640,7 +640,7 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
     // Integer arithmetic.
     if (!lhs.isInt() || !rhs.isInt()) return CTValue::uninit();
     int64_t  a = lhs.asI64(), b = rhs.asI64();
-    uint64_t ua = lhs.asU64(), ub = rhs.asU64();
+    uint64_t ua = lhs.asU64();
 
     if (op == "+")  return CTValue::fromI64(a + b);
     if (op == "-")  return CTValue::fromI64(a - b);
@@ -790,7 +790,15 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (i < n && args[i].isArray()) return args[i].asArr();
         return CT_NULL_HANDLE;
     };
-    auto arrElements = [&](CTArrayHandle h) -> std::vector<CTValue> {
+    // arrData returns a direct const pointer to the heap array's element
+    // vector, avoiding a full copy.  Returns nullptr if the handle is invalid.
+    auto arrData = [&](CTArrayHandle h) -> const std::vector<CTValue>* {
+        const CTArray* arr = heap_.get(h);
+        return arr ? &arr->data : nullptr;
+    };
+    // arrCopy returns a mutable copy — only use when elements will be mutated
+    // (sort, reverse, insert, remove).
+    auto arrCopy = [&](CTArrayHandle h) -> std::vector<CTValue> {
         return extractArray(h);
     };
 
@@ -1239,7 +1247,12 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "range_step" && n == 3) {
         auto start = intArg(0), end = intArg(1), step = intArg(2);
         if (!start || !end || !step || *step == 0) return std::nullopt;
+        // Estimate element count for reserve.
+        int64_t estLen = (*step > 0 && *end > *start) ? ((*end - *start + *step - 1) / *step) :
+                         (*step < 0 && *end < *start) ? ((*start - *end + (-*step) - 1) / (-*step)) : 0;
+        if (estLen > 65536) estLen = 65536;
         std::vector<int64_t> vals;
+        if (estLen > 0) vals.reserve(static_cast<size_t>(estLen));
         for (int64_t cur = *start;
              (*step > 0 ? cur < *end : cur > *end) && vals.size() < 65536;
              cur += *step)
@@ -1253,12 +1266,13 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "array_concat" && n == 2) {
         CTArrayHandle ha = arrArg(0), hb = arrArg(1);
         if (ha == CT_NULL_HANDLE || hb == CT_NULL_HANDLE) return std::nullopt;
-        auto ea = arrElements(ha), eb = arrElements(hb);
-        CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(ea.size() + eb.size()));
+        const auto* ea = arrData(ha); const auto* eb = arrData(hb);
+        if (!ea || !eb) return std::nullopt;
+        CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(ea->size() + eb->size()));
         ++stats_.arraysAllocated;
         int64_t idx = 0;
-        for (auto& v : ea) heap_.store(h, idx++, v);
-        for (auto& v : eb) heap_.store(h, idx++, v);
+        for (const auto& v : *ea) heap_.store(h, idx++, v);
+        for (const auto& v : *eb) heap_.store(h, idx++, v);
         return CTValue::fromArray(h);
     }
     if (name == "array_slice" && n == 3) {
@@ -1282,8 +1296,10 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if ((name == "sum") && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
         int64_t total = 0;
-        for (auto& v : arrElements(h)) {
+        for (const auto& v : *elems) {
             if (!v.isInt()) return std::nullopt;
             total += v.asI64();
         }
@@ -1292,8 +1308,10 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "array_product" && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
         int64_t product = 1;
-        for (auto& v : arrElements(h)) {
+        for (const auto& v : *elems) {
             if (!v.isInt()) return std::nullopt;
             product *= v.asI64();
         }
@@ -1302,19 +1320,19 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "array_min" && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
-        auto elems = arrElements(h);
-        if (elems.empty()) return CTValue::fromI64(0);
+        const auto* elems = arrData(h);
+        if (!elems || elems->empty()) return CTValue::fromI64(0);
         int64_t minv = INT64_MAX;
-        for (auto& v : elems) { if (!v.isInt()) return std::nullopt; if (v.asI64() < minv) minv = v.asI64(); }
+        for (const auto& v : *elems) { if (!v.isInt()) return std::nullopt; if (v.asI64() < minv) minv = v.asI64(); }
         return CTValue::fromI64(minv);
     }
     if (name == "array_max" && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
-        auto elems = arrElements(h);
-        if (elems.empty()) return CTValue::fromI64(0);
+        const auto* elems = arrData(h);
+        if (!elems || elems->empty()) return CTValue::fromI64(0);
         int64_t maxv = INT64_MIN;
-        for (auto& v : elems) { if (!v.isInt()) return std::nullopt; if (v.asI64() > maxv) maxv = v.asI64(); }
+        for (const auto& v : *elems) { if (!v.isInt()) return std::nullopt; if (v.asI64() > maxv) maxv = v.asI64(); }
         return CTValue::fromI64(maxv);
     }
     if (name == "array_last" && n == 1) {
@@ -1328,7 +1346,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE || !args[1].isInt()) return std::nullopt;
         int64_t needle = args[1].asI64();
-        for (auto& v : arrElements(h))
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        for (const auto& v : *elems)
             if (v.isInt() && v.asI64() == needle) return CTValue::fromI64(1);
         return CTValue::fromI64(0);
     }
@@ -1336,9 +1356,10 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE || !args[1].isInt()) return std::nullopt;
         int64_t needle = args[1].asI64();
-        auto elems = arrElements(h);
-        for (size_t i = 0; i < elems.size(); ++i)
-            if (elems[i].isInt() && elems[i].asI64() == needle)
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        for (size_t i = 0; i < elems->size(); ++i)
+            if ((*elems)[i].isInt() && (*elems)[i].asI64() == needle)
                 return CTValue::fromI64(static_cast<int64_t>(i));
         return CTValue::fromI64(-1);
     }
@@ -1392,7 +1413,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "reverse" && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
-        auto elems = arrElements(h);
+        auto elems = arrCopy(h);
         std::reverse(elems.begin(), elems.end());
         CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
         ++stats_.arraysAllocated;
@@ -1403,7 +1424,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "sort" && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
-        auto elems = arrElements(h);
+        auto elems = arrCopy(h);
         // Sort only integer arrays at compile time.
         for (auto& e : elems) if (!e.isInt()) return std::nullopt;
         std::sort(elems.begin(), elems.end(), [](const CTValue& a, const CTValue& b) {
@@ -1419,7 +1440,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         CTArrayHandle h = arrArg(0);
         auto idx = intArg(1);
         if (h == CT_NULL_HANDLE || !idx) return std::nullopt;
-        auto elems = arrElements(h);
+        auto elems = arrCopy(h);
         int64_t i = *idx;
         if (i < 0 || i >= static_cast<int64_t>(elems.size())) return std::nullopt;
         elems.erase(elems.begin() + i);
@@ -1433,7 +1454,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         CTArrayHandle h = arrArg(0);
         auto idx = intArg(1);
         if (h == CT_NULL_HANDLE || !idx || !args[2].isKnown()) return std::nullopt;
-        auto elems = arrElements(h);
+        auto elems = arrCopy(h);
         int64_t i = *idx;
         if (i < 0 || i > static_cast<int64_t>(elems.size())) return std::nullopt;
         elems.insert(elems.begin() + i, args[2]);
@@ -1446,14 +1467,18 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "array_any" && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
-        for (auto& v : arrElements(h))
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        for (const auto& v : *elems)
             if (v.isInt() && v.asI64() != 0) return CTValue::fromI64(1);
         return CTValue::fromI64(0);
     }
     if (name == "array_every" && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
-        for (auto& v : arrElements(h)) {
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        for (const auto& v : *elems) {
             if (!v.isInt()) return std::nullopt;
             if (v.asI64() == 0) return CTValue::fromI64(0);
         }
@@ -1463,7 +1488,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE || !args[1].isInt()) return std::nullopt;
         int64_t needle = args[1].asI64(), count = 0;
-        for (auto& v : arrElements(h))
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        for (const auto& v : *elems)
             if (v.isInt() && v.asI64() == needle) ++count;
         return CTValue::fromI64(count);
     }
@@ -1489,12 +1516,13 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         CTArrayHandle h = arrArg(0);
         auto sep = strArg(1);
         if (h == CT_NULL_HANDLE || !sep) return std::nullopt;
-        auto elems = arrElements(h);
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
         std::string result;
-        for (size_t i = 0; i < elems.size(); ++i) {
-            if (!elems[i].isString()) return std::nullopt;
+        for (size_t i = 0; i < elems->size(); ++i) {
+            if (!(*elems)[i].isString()) return std::nullopt;
             if (i > 0) result += *sep;
-            result += elems[i].asStr();
+            result += (*elems)[i].asStr();
         }
         return CTValue::fromString(std::move(result));
     }
@@ -1629,8 +1657,10 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
                 frame.didContinue = false;
             }
         } else if (coll.isArray()) {
+            // Snapshot the elements: the loop body may mutate the heap, so we
+            // need our own stable copy of the array data to iterate over.
             auto elems = extractArray(coll.asArr());
-            for (auto& elem : elems) {
+            for (const auto& elem : elems) {
                 if (++fuel_ > kMaxInstructions) return false;
                 frame.locals[fes->iteratorVar] = elem;
                 if (!evalStmt(frame, fes->body.get())) return false;
