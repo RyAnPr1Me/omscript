@@ -150,7 +150,7 @@ std::unique_ptr<Program> Parser::parse() {
             // Check for file-level @noalias directive (appears before any function
             // keyword and is not followed by 'fn').
             if (check(TokenType::AT) && !fileNoAlias) {
-                size_t savedPos = current;
+                const size_t savedPos = current;
                 // Peek ahead: if it's @noalias followed by a newline/struct/enum
                 // (not 'fn'), treat it as a file-level directive.
                 advance(); // consume '@'
@@ -812,7 +812,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
-    if (check(TokenType::SWAP) && !(current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LPAREN)) {
+    if (check(TokenType::SWAP) && (current + 1 >= tokens.size() || tokens[current + 1].type != TokenType::LPAREN)) {
         advance(); // consume SWAP
         const Token kw = tokens[current - 1];
         auto stmt = parseSwapStmt();
@@ -1256,8 +1256,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
         // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
         static int forIdxCounter = 0;
-        int id = forIdxCounter++;
-        std::string arrTmp = "__for_arr_" + std::to_string(id);
+        const int id = forIdxCounter++;
+        const std::string arrTmp = "__for_arr_" + std::to_string(id);
 
         std::vector<std::unique_ptr<Statement>> outerStmts;
 
@@ -1507,7 +1507,7 @@ std::unique_ptr<Statement> Parser::parseLoopStmt() {
     }
 
     // Counted form: loop N { ... } or loop (N) { ... }
-    bool hasParen = match(TokenType::LPAREN);
+    const bool hasParen = match(TokenType::LPAREN);
     auto count = parseExpression();
     if (hasParen) {
         consume(TokenType::RPAREN, "Expected ')' after loop count");
@@ -1516,7 +1516,7 @@ std::unique_ptr<Statement> Parser::parseLoopStmt() {
 
     // Desugar to: for (__loop_N in 0...count) { body }
     static int loopCounter = 0;
-    std::string iterVar = "__loop_" + std::to_string(loopCounter++);
+    const std::string iterVar = "__loop_" + std::to_string(loopCounter++);
     auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
     return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
 }
@@ -1543,7 +1543,7 @@ std::unique_ptr<Statement> Parser::parseRepeatStmt() {
     }
 
     // Counted form: repeat N { ... } or repeat (N) { ... }
-    bool hasParen = match(TokenType::LPAREN);
+    const bool hasParen = match(TokenType::LPAREN);
     auto count = parseExpression();
     if (hasParen) {
         consume(TokenType::RPAREN, "Expected ')' after repeat count");
@@ -1553,7 +1553,7 @@ std::unique_ptr<Statement> Parser::parseRepeatStmt() {
 
     // Desugar to: for (__repeat_N in 0...count) { body }
     static int repeatCounter = 0;
-    std::string iterVar = "__repeat_" + std::to_string(repeatCounter++);
+    const std::string iterVar = "__repeat_" + std::to_string(repeatCounter++);
     auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
     return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
 }
@@ -1644,7 +1644,7 @@ std::unique_ptr<Statement> Parser::parseForeverStmt() {
 //       body } }
 std::unique_ptr<Statement> Parser::parseForEachStmt() {
     // Allow optional parens: foreach item in arr or foreach (item in arr)
-    bool hasParen = match(TokenType::LPAREN);
+    const bool hasParen = match(TokenType::LPAREN);
     const Token firstName = consume(TokenType::IDENTIFIER, "Expected iterator variable after 'foreach'");
 
     // Check for indexed variant: foreach (idx, item in collection)
@@ -1660,8 +1660,8 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
 
         // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
         static int foreachIdxCounter = 0;
-        int id = foreachIdxCounter++;
-        std::string arrTmp = "__foreach_arr_" + std::to_string(id);
+        const int id = foreachIdxCounter++;
+        const std::string arrTmp = "__foreach_arr_" + std::to_string(id);
 
         std::vector<std::unique_ptr<Statement>> outerStmts;
 
@@ -1754,7 +1754,7 @@ std::unique_ptr<Statement> Parser::parseSwapStmt() {
     }
 
     static int swapCounter = 0;
-    std::string tmpName = "__swap_" + std::to_string(swapCounter++);
+    const std::string tmpName = "__swap_" + std::to_string(swapCounter++);
 
     std::vector<std::unique_ptr<Statement>> stmts;
 
@@ -1779,7 +1779,7 @@ std::unique_ptr<Statement> Parser::parseSwapStmt() {
 // Desugars to: for (__times_i in 0...N) { ... }
 std::unique_ptr<Statement> Parser::parseTimesStmt() {
     // Allow optional parens: times N { ... } or times (N) { ... }
-    bool hasParen = match(TokenType::LPAREN);
+    const bool hasParen = match(TokenType::LPAREN);
     auto count = parseExpression();
     if (hasParen) {
         consume(TokenType::RPAREN, "Expected ')' after times count");
@@ -1789,7 +1789,7 @@ std::unique_ptr<Statement> Parser::parseTimesStmt() {
 
     // Desugar to: for (__times_N in 0...count) { body }
     static int timesCounter = 0;
-    std::string iterVar = "__times_" + std::to_string(timesCounter++);
+    const std::string iterVar = "__times_" + std::to_string(timesCounter++);
     auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
     return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
 }
@@ -1913,7 +1913,7 @@ std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isCo
 
     // Desugar to a block of individual assignments
     static int destructureCounter = 0;
-    std::string tmpName = "__destructure_" + std::to_string(destructureCounter++);
+    const std::string tmpName = "__destructure_" + std::to_string(destructureCounter++);
 
     std::vector<std::unique_ptr<Statement>> stmts;
 
@@ -2013,7 +2013,7 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
 
             // Parse the operator body as a function.
             // Synthesize a function name: __op_StructName_opname
-            std::string funcName = "__op_" + nameToken.lexeme + "_" + opStr;
+            const std::string funcName = "__op_" + nameToken.lexeme + "_" + opStr;
             // Create parameters: self (implicit) + explicit param
             std::vector<Parameter> params;
             params.emplace_back("self", nameToken.lexeme);
@@ -3047,7 +3047,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                                     "Expected ')' after '" + tname + "::" + mname + "' arguments");
 
                             const char   kp  = kind[0];       // 'B', 'U', or 'C'
-                            std::string  val = kind.substr(2); // op / function name
+                            const std::string  val = kind.substr(2); // op / function name
 
                             if (kp == 'B') {
                                 if (args.size() != 2)

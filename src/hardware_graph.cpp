@@ -231,7 +231,7 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     // Phase 1: Create a node for each instruction.
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            OpClass cls = classifyOp(&inst);
+            const OpClass cls = classifyOp(&inst);
             addNode(cls, &inst);
         }
     }
@@ -320,8 +320,8 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
         const llvm::Value* baseB = underlyingAlloc(ptrB);
         if (baseA != baseB) {
             // Distinct allocas or distinct function args never alias.
-            bool allocA = llvm::isa<llvm::AllocaInst>(baseA) || llvm::isa<llvm::Argument>(baseA);
-            bool allocB = llvm::isa<llvm::AllocaInst>(baseB) || llvm::isa<llvm::Argument>(baseB);
+            const bool allocA = llvm::isa<llvm::AllocaInst>(baseA) || llvm::isa<llvm::Argument>(baseA);
+            const bool allocB = llvm::isa<llvm::AllocaInst>(baseB) || llvm::isa<llvm::Argument>(baseB);
             if (allocA && allocB) return false;
         }
 
@@ -442,7 +442,7 @@ OpClass HardwareCostModel::classifyInstruction(const llvm::Instruction* inst) co
 double HardwareCostModel::instructionCost(const llvm::Instruction* inst) const {
     if (!inst) return 0.0;
 
-    OpClass cls = classifyOp(inst);
+    const OpClass cls = classifyOp(inst);
 
     // Use direct latency lookup based on operation class for more accurate
     // costs than the hardware graph node (which has a single average latency).
@@ -524,7 +524,7 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
 
     // Simple cycle-accurate simulation: assign each node to the earliest
     // cycle where all dependencies are satisfied and a port is available.
-    size_t n = pg.nodeCount();
+    const size_t n = pg.nodeCount();
     std::vector<unsigned> scheduledCycle(n, 0);
     std::vector<unsigned> inDeg(n, 0);
 
@@ -1037,7 +1037,7 @@ static std::string normalizeCpuName(const std::string& name) {
 std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     if (cpuName.empty()) return std::nullopt;
 
-    std::string normalized = normalizeCpuName(cpuName);
+    const std::string normalized = normalizeCpuName(cpuName);
 
     // x86-64 microarchitectures
     if (normalized == "skylake" || normalized == "skylakeserver" ||
@@ -1455,17 +1455,15 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     case llvm::Instruction::BitCast:
     case llvm::Instruction::IntToPtr:
     case llvm::Instruction::PtrToInt:
-        return 0; // free — handled by register rename on modern CPUs
-
     // ── PHI ─────────────────────────────────────────────────────────────────
     case llvm::Instruction::PHI:
-        return 0; // resolved at the predecessor edge, not at the node itself
+        return 0; // free — zero-latency (register rename / resolved at predecessor edge)
 
     // ── Calls / intrinsics ───────────────────────────────────────────────────
     case llvm::Instruction::Call: {
         const auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(inst);
         if (!ii) return kUnknownCallLatency;
-        llvm::Intrinsic::ID id = ii->getIntrinsicID();
+        const llvm::Intrinsic::ID id = ii->getIntrinsicID();
         switch (id) {
         case llvm::Intrinsic::fma:
         case llvm::Intrinsic::fmuladd:  return profile.latFMA;
@@ -1501,7 +1499,7 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     // (The profile is the primary source, but the graph provides validation.)
     (void)hw; // Graph structure used for validation in debug builds
 
-    size_t n = pg.nodeCount();
+    const size_t n = pg.nodeCount();
 
     // Annotate program nodes with hardware latencies.
     for (unsigned i = 0; i < n; ++i) {
@@ -3277,9 +3275,9 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
             const llvm::Value* baseA = underlyingBase(ptrA);
             const llvm::Value* baseB = underlyingBase(ptrB);
             if (baseA != baseB) {
-                bool allocA = llvm::isa<llvm::AllocaInst>(baseA) ||
+                const bool allocA = llvm::isa<llvm::AllocaInst>(baseA) ||
                               llvm::isa<llvm::Argument>(baseA);
-                bool allocB = llvm::isa<llvm::AllocaInst>(baseB) ||
+                const bool allocB = llvm::isa<llvm::AllocaInst>(baseB) ||
                               llvm::isa<llvm::Argument>(baseB);
                 if (allocA && allocB) return false;
             }

@@ -204,8 +204,8 @@ struct CTMemoKey {
 
 struct CTMemoKeyHash {
     std::size_t operator()(const CTMemoKey& k) const noexcept {
-        std::size_t h1 = std::hash<std::string>{}(k.fnName);
-        std::size_t h2 = std::hash<std::string>{}(k.argsHash);
+        const std::size_t h1 = std::hash<std::string>{}(k.fnName);
+        const std::size_t h2 = std::hash<std::string>{}(k.argsHash);
         return h1 ^ (h2 * 0x9e3779b185ebca87ULL);
     }
 };
@@ -349,9 +349,9 @@ private:
                         int64_t baseIdx, int64_t n);
     bool    executeBody(CTFrame& frame, const BlockStmt* body);
 
-    CTValue evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs);
-    CTValue evalUnaryOp(const std::string& op, CTValue val);
-    CTValue evalTypeCast(const std::string& name, CTValue val);
+    CTValue evalBinaryOp(const std::string& op, const CTValue& lhs, const CTValue& rhs);
+    CTValue evalUnaryOp(const std::string& op, const CTValue& val);
+    CTValue evalTypeCast(const std::string& name, const CTValue& val);
     CTValue evalCall(CTFrame& callerFrame,
                      const std::string& fnName,
                      const std::vector<CTValue>& args);

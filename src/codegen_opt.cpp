@@ -349,7 +349,7 @@ void CodeGenerator::runOptimizationPasses() {
 
     if (optimizationLevel == OptimizationLevel::O0) {
         if (verbose_) {
-            std::cout << "    Optimization level O0: skipping all passes" << std::endl;
+            std::cout << "    Optimization level O0: skipping all passes" << '\n';
         }
         return;
     }
@@ -392,14 +392,14 @@ void CodeGenerator::runOptimizationPasses() {
         const char* levelStr =
             (optimizationLevel == OptimizationLevel::O1) ? "O1" :
             (optimizationLevel == OptimizationLevel::O3) ? "O3" : "O2";
-        std::cout << "    Optimization level: " << levelStr << std::endl;
+        std::cout << "    Optimization level: " << levelStr << '\n';
         std::cout << "    Pipeline options:"
                   << " vectorize=" << (atLeastO2 && enableVectorize_ ? "on" : "off")
                   << ", unroll=" << (atLeastO2 && enableUnrollLoops_ ? "on" : "off")
                   << ", loop-optimize=" << (enableLoopOptimize_ ? "on" : "off")
-                  << std::endl;
-        if (!pgoGenPath_.empty()) std::cout << "    PGO instrumentation: " << pgoGenPath_ << std::endl;
-        if (!pgoUsePath_.empty()) std::cout << "    PGO profile-use: " << pgoUsePath_ << std::endl;
+                  << '\n';
+        if (!pgoGenPath_.empty()) std::cout << "    PGO instrumentation: " << pgoGenPath_ << '\n';
+        if (!pgoUsePath_.empty()) std::cout << "    PGO profile-use: " << pgoUsePath_ << '\n';
     }
     // Enable cross-function optimizations at O2 and above:
     // MergeFunctions deduplicates identical function bodies, shrinking
@@ -591,7 +591,7 @@ void CodeGenerator::runOptimizationPasses() {
 #ifdef POLLY_LIB_PATH
     if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         if (verbose_) {
-            std::cout << "    Loading Polly polyhedral loop optimizer plugin..." << std::endl;
+            std::cout << "    Loading Polly polyhedral loop optimizer plugin..." << '\n';
         }
         auto pollyPlugin = llvm::PassPlugin::Load(POLLY_LIB_PATH);
         if (pollyPlugin) {
@@ -628,7 +628,7 @@ void CodeGenerator::runOptimizationPasses() {
             if (verbose_) {
                 std::cout << "    Polly plugin loaded successfully"
                           << (enableParallelize_ ? " (parallel mode)" : "")
-                          << std::endl;
+                          << '\n';
             }
         } else {
             // Polly not available in this environment — not actionable by the
@@ -1267,7 +1267,7 @@ void CodeGenerator::runOptimizationPasses() {
         // linker.  This avoids double-optimizing the bitcode — once here and
         // again during the link-time optimization pass in the linker.
         if (verbose_) {
-            std::cout << "    Building LTO pre-link default pipeline..." << std::endl;
+            std::cout << "    Building LTO pre-link default pipeline..." << '\n';
         }
         MPM = PB.buildLTOPreLinkDefaultPipeline(newPMLevel);
     } else {
@@ -1275,7 +1275,7 @@ void CodeGenerator::runOptimizationPasses() {
             const char* levelStr =
                 (optimizationLevel == OptimizationLevel::O1) ? "O1" :
                 (optimizationLevel == OptimizationLevel::O3) ? "O3" : "O2";
-            std::cout << "    Building per-module default pipeline at " << levelStr << "..." << std::endl;
+            std::cout << "    Building per-module default pipeline at " << levelStr << "..." << '\n';
         }
         MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
     }
@@ -1288,7 +1288,7 @@ void CodeGenerator::runOptimizationPasses() {
     // may not run GlobalOpt on every module.
     if (optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) {
-            std::cout << "    Adding GlobalOpt + GlobalDCE passes..." << std::endl;
+            std::cout << "    Adding GlobalOpt + GlobalDCE passes..." << '\n';
         }
         MPM.addPass(llvm::GlobalOptPass());
         MPM.addPass(llvm::GlobalDCEPass());
@@ -1297,7 +1297,7 @@ void CodeGenerator::runOptimizationPasses() {
         MPM.addPass(llvm::StripDeadPrototypesPass());
     }
     if (verbose_) {
-        std::cout << "    Running LLVM module pass pipeline..." << std::endl;
+        std::cout << "    Running LLVM module pass pipeline..." << '\n';
     }
     // Pre-pipeline srem→urem conversion: run BEFORE the LLVM pipeline so the
     // loop vectorizer (which runs as part of the pipeline) sees urem instead
@@ -1317,7 +1317,7 @@ void CodeGenerator::runOptimizationPasses() {
         }
         if (verbose_ && moduloExpanded > 0) {
             std::cout << "    Pre-pipeline modulo strength reduction: "
-                      << moduloExpanded << " urem instructions expanded" << std::endl;
+                      << moduloExpanded << " urem instructions expanded" << '\n';
         }
     }
     // Pre-pipeline HGOE loop annotation: set target-optimal unroll count,
@@ -1338,7 +1338,7 @@ void CodeGenerator::runOptimizationPasses() {
     // accurate annotations for loops that escape LLVM's unroller.
     MPM.run(*module, MAM);
     if (verbose_) {
-        std::cout << "    LLVM pass pipeline complete" << std::endl;
+        std::cout << "    LLVM pass pipeline complete" << '\n';
     }
 
     // Strip `cold` and `minsize` attributes from user-defined functions.
@@ -1424,7 +1424,7 @@ void CodeGenerator::runOptimizationPasses() {
             inlinedFuncs.push_back(&F);
         }
         if (verbose_) {
-            std::cout << "    Bounded recursive inlining complete" << std::endl;
+            std::cout << "    Bounded recursive inlining complete" << '\n';
         }
         // Post-recursive-inlining cleanup: only run on functions that were
         // actually inlined, not all functions in the module.
@@ -1541,7 +1541,7 @@ void CodeGenerator::runOptimizationPasses() {
 
         if (verbose_ && totalSpecialized > 0) {
             std::cout << "    Function specialization: " << totalSpecialized
-                      << " call sites specialized" << std::endl;
+                      << " call sites specialized" << '\n';
         }
 
         // Run a cleanup pass on specialized functions
@@ -1580,7 +1580,7 @@ void CodeGenerator::runOptimizationPasses() {
             std::cout << "    Running superoptimizer (level " << superoptLevel_
                       << ": idiom recognition, algebraic simplification"
                       << (superoptLevel_ >= 2 ? ", synthesis, branch-opt" : "")
-                      << ")..." << std::endl;
+                      << ")..." << '\n';
         }
         superopt::SuperoptimizerConfig superConfig;
         // Configure based on superopt level:
@@ -1605,7 +1605,7 @@ void CodeGenerator::runOptimizationPasses() {
                       << superStats.synthReplacements << " synthesis replacements, "
                       << superStats.branchesSimplified << " branches simplified, "
                       << superStats.deadCodeEliminated << " dead instructions eliminated"
-                      << " (" << totalSuperOpts << " total optimizations)" << std::endl;
+                      << " (" << totalSuperOpts << " total optimizations)" << '\n';
         }
 
         // Post-superoptimizer cleanup: the superoptimizer creates algebraically
@@ -1628,7 +1628,7 @@ void CodeGenerator::runOptimizationPasses() {
             postSuperFPM.doFinalization();
         }
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSuperopt_) {
-        std::cout << "    Superoptimizer disabled (-fno-superopt)" << std::endl;
+        std::cout << "    Superoptimizer disabled (-fno-superopt)" << '\n';
     }
 
     // Post-pipeline srem→urem and sdiv→udiv conversion.  The pre-pipeline
@@ -1667,7 +1667,7 @@ void CodeGenerator::runOptimizationPasses() {
         }
         if (verbose_ && postConvCount > 0) {
             std::cout << "    Post-pipeline signed→unsigned: "
-                      << postConvCount << " conversions" << std::endl;
+                      << postConvCount << " conversions" << '\n';
         }
     }
 
@@ -1682,7 +1682,7 @@ void CodeGenerator::runOptimizationPasses() {
             std::cout << "    Running Hardware Graph Optimization Engine";
             if (!marchCpu_.empty()) std::cout << " (march=" << marchCpu_ << ")";
             if (!mtuneCpu_.empty()) std::cout << " (mtune=" << mtuneCpu_ << ")";
-            std::cout << "..." << std::endl;
+            std::cout << "..." << '\n';
         }
         hgoe::HGOEConfig hgoeConfig;
         hgoeConfig.marchCpu = marchCpu_;
@@ -1696,9 +1696,9 @@ void CodeGenerator::runOptimizationPasses() {
             if (hgoeStats.activated) {
                 std::cout << "    HGOE complete: arch=" << hgoeStats.resolvedArch
                           << ", " << hgoeStats.functionsOptimized << " functions optimized"
-                          << std::endl;
+                          << '\n';
             } else {
-                std::cout << "    HGOE not activated (no explicit -march/-mtune)" << std::endl;
+                std::cout << "    HGOE not activated (no explicit -march/-mtune)" << '\n';
             }
         }
     }
@@ -1726,7 +1726,7 @@ void CodeGenerator::runOptimizationPasses() {
         }
         if (verbose_ && postHGOECount > 0) {
             std::cout << "    Post-HGOE signed→unsigned: "
-                      << postHGOECount << " conversions" << std::endl;
+                      << postHGOECount << " conversions" << '\n';
         }
     }
 
@@ -1842,7 +1842,7 @@ void CodeGenerator::runOptimizationPasses() {
         if (verbose_ && prefetchesRemoved > 0) {
             std::cout << "    Post-optimization prefetch cleanup: "
                       << prefetchesRemoved << " redundant prefetch(es) removed"
-                      << std::endl;
+                      << '\n';
         }
 
         // Final aggressive cleanup after prefetch removal and all post-pipeline

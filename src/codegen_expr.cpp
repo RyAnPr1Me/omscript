@@ -185,8 +185,8 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                 auto endIt = loopIterEndBound_.find(iterIdent->name);
                 if (endIt != loopIterEndBound_.end()
                     && offsetLit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                    int64_t offset = offsetLit->intValue;
-                    int64_t effectiveOffset = (idxBinary->op == "-") ? -offset : offset;
+                    const int64_t offset = offsetLit->intValue;
+                    const int64_t effectiveOffset = (idxBinary->op == "-") ? -offset : offset;
 
                     // ── Positive offset: arr[i + C] ─────────────────
                     if (effectiveOffset >= 0) {
@@ -229,7 +229,7 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
 
                     // ── Negative offset: arr[i - K] ─────────────────
                     if (effectiveOffset < 0) {
-                        int64_t absOffset = -effectiveOffset;
+                        const int64_t absOffset = -effectiveOffset;
                         auto startIt = loopIterStartBound_.find(iterIdent->name);
                         if (startIt != loopIterStartBound_.end()) {
                             auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startIt->second);
@@ -1614,7 +1614,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (expr->op == "+" || expr->op == "-") {
         if (auto* ciRight = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             if (auto* binLeft = llvm::dyn_cast<llvm::BinaryOperator>(left)) {
-                bool isAddSub = (binLeft->getOpcode() == llvm::Instruction::Add &&
+                const bool isAddSub = (binLeft->getOpcode() == llvm::Instruction::Add &&
                                  expr->op == "-") ||
                                 (binLeft->getOpcode() == llvm::Instruction::Sub &&
                                  expr->op == "+");
@@ -1679,9 +1679,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // via range metadata or nuw flags but not in our tracking set.
         bool kbNSWNUW = false;
         if (!canNSWNUW && !canNSW) {
-            llvm::KnownBits lhsKB = llvm::computeKnownBits(
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(
                 left, module->getDataLayout());
-            llvm::KnownBits rhsKB = llvm::computeKnownBits(
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(
                 right, module->getDataLayout());
             if (lhsKB.isNonNegative() && rhsKB.isNonNegative())
                 kbNSWNUW = true;
@@ -1722,9 +1722,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // KnownBits fallback: detect non-negativity through PHI/value-range.
         bool kbNSW = false;
         if (!bothNonNeg && !constNSW && !inOptMaxFunction) {
-            llvm::KnownBits lhsKB = llvm::computeKnownBits(
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(
                 left, module->getDataLayout());
-            llvm::KnownBits rhsKB = llvm::computeKnownBits(
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(
                 right, module->getDataLayout());
             kbNSW = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
@@ -3355,9 +3355,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // when L_a + L_b >= 65.  This is the common case for loop-counter ×
         // small-stride patterns like arr[i*4], arr[i*8], etc.
         {
-            llvm::KnownBits lhsKB = llvm::computeKnownBits(
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(
                 left, module->getDataLayout());
-            llvm::KnownBits rhsKB = llvm::computeKnownBits(
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(
                 right, module->getDataLayout());
             unsigned lhsLZ = lhsKB.countMinLeadingZeros();
             unsigned rhsLZ = rhsKB.countMinLeadingZeros();
@@ -3402,7 +3402,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (s > 0) {
                     bool leftNonNeg = nonNegValues_.count(left) > 0;
                     if (!leftNonNeg) {
-                        llvm::KnownBits KB = llvm::computeKnownBits(
+                        const llvm::KnownBits KB = llvm::computeKnownBits(
                             left, module->getDataLayout());
                         leftNonNeg = KB.isNonNegative();
                     }
@@ -3457,7 +3457,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     // using codegen-level tracking or LLVM's KnownBits analysis.
                     bool leftNonNeg = nonNegValues_.count(left) > 0;
                     if (!leftNonNeg) {
-                        llvm::KnownBits KB = llvm::computeKnownBits(
+                        const llvm::KnownBits KB = llvm::computeKnownBits(
                             left, module->getDataLayout());
                         leftNonNeg = KB.isNonNegative();
                     }
@@ -3549,14 +3549,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         {
             bool leftNonNeg = nonNegValues_.count(left) > 0;
             if (!leftNonNeg) {
-                llvm::KnownBits KB = llvm::computeKnownBits(left, module->getDataLayout());
+                const llvm::KnownBits KB = llvm::computeKnownBits(left, module->getDataLayout());
                 leftNonNeg = KB.isNonNegative();
             }
             // Short-circuit: only check the right operand if left is non-negative.
             if (leftNonNeg) {
                 bool rightNonNeg = nonNegValues_.count(right) > 0;
                 if (!rightNonNeg) {
-                    llvm::KnownBits KB = llvm::computeKnownBits(right, module->getDataLayout());
+                    const llvm::KnownBits KB = llvm::computeKnownBits(right, module->getDataLayout());
                     rightNonNeg = KB.isNonNegative();
                 }
                 if (rightNonNeg) {
@@ -3594,8 +3594,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         // KnownBits fallback for values not in nonNegValues_ (e.g., PHI nodes).
         if (!bothNonNeg) {
-            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
-            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
         llvm::Value* cmp = bothNonNeg
@@ -3613,8 +3613,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
         }
         if (!bothNonNeg) {
-            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
-            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
         llvm::Value* cmp = bothNonNeg
@@ -3632,8 +3632,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
         }
         if (!bothNonNeg) {
-            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
-            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
         llvm::Value* cmp = bothNonNeg
@@ -3651,8 +3651,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
         }
         if (!bothNonNeg) {
-            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
-            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
         llvm::Value* cmp = bothNonNeg
@@ -3733,13 +3733,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 // to absorb the shift without overflow, set nuw (and nsw if
                 // also non-negative).  E.g., loop counter i with 33 leading
                 // zeros shifted left by 3 → 30 leading zeros, still fits.
-                llvm::KnownBits lhsKB = llvm::computeKnownBits(
+                const llvm::KnownBits lhsKB = llvm::computeKnownBits(
                     left, module->getDataLayout());
                 unsigned lz = lhsKB.countMinLeadingZeros();
                 if (lz > static_cast<unsigned>(sv)) {
                     // (lz - sv) leading zeros remain → no unsigned overflow.
                     // If the base is also non-negative, no signed overflow.
-                    bool baseNonNeg = lhsKB.isNonNegative();
+                    const bool baseNonNeg = lhsKB.isNonNegative();
                     auto* result = builder->CreateShl(left, right, "shltmp",
                                                        /*HasNUW=*/true, /*HasNSW=*/baseNonNeg);
                     if (baseNonNeg)
@@ -4418,7 +4418,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
             arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "incdec.arrptr");
 
         // Bounds check — elided when canElideBoundsCheck proves safety.
-        bool boundsCheckElidedID = canElideBoundsCheck(
+        const bool boundsCheckElidedID = canElideBoundsCheck(
             indexExpr->array.get(), indexExpr->index.get(),
             arrPtr, /*isStr=*/false, "incdec");
 
@@ -4586,9 +4586,9 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             llvm::Value* a = generateExpression(condLeft);
             llvm::Value* b = generateExpression(condRight);
             a = toDefaultType(a); b = toDefaultType(b);
-            bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
-            bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
-            llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umin : llvm::Intrinsic::smin;
+            const bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            const bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            const llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umin : llvm::Intrinsic::smin;
             auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
             auto* result = builder->CreateCall(fn, {a, b}, "tern.min");
             if (aNonNeg && bNonNeg) nonNegValues_.insert(result);
@@ -4600,9 +4600,9 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             llvm::Value* a = generateExpression(condLeft);
             llvm::Value* b = generateExpression(condRight);
             a = toDefaultType(a); b = toDefaultType(b);
-            bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
-            bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
-            llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umin : llvm::Intrinsic::smin;
+            const bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            const bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            const llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umin : llvm::Intrinsic::smin;
             auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
             auto* result = builder->CreateCall(fn, {a, b}, "tern.min");
             if (aNonNeg && bNonNeg) nonNegValues_.insert(result);
@@ -4615,9 +4615,9 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             llvm::Value* a = generateExpression(condLeft);
             llvm::Value* b = generateExpression(condRight);
             a = toDefaultType(a); b = toDefaultType(b);
-            bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
-            bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
-            llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umax : llvm::Intrinsic::smax;
+            const bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            const bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            const llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umax : llvm::Intrinsic::smax;
             auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
             auto* result = builder->CreateCall(fn, {a, b}, "tern.max");
             if (aNonNeg || bNonNeg) nonNegValues_.insert(result);
@@ -4629,9 +4629,9 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             llvm::Value* a = generateExpression(condLeft);
             llvm::Value* b = generateExpression(condRight);
             a = toDefaultType(a); b = toDefaultType(b);
-            bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
-            bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
-            llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umax : llvm::Intrinsic::smax;
+            const bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            const bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            const llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umax : llvm::Intrinsic::smax;
             auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
             auto* result = builder->CreateCall(fn, {a, b}, "tern.max");
             if (aNonNeg || bNonNeg) nonNegValues_.insert(result);
