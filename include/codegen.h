@@ -693,6 +693,12 @@ class CodeGenerator {
     static std::optional<ConstValue> evalConstBuiltin(
         const std::string& name, const std::vector<ConstValue>& args);
 
+    /// Emit a compile-time constant integer array as a private global with
+    /// OmScript's `[length, elem0, …, elemN-1]` layout and return the base
+    /// pointer as an i64 (OmScript's uniform array representation).
+    /// Used by the comptime block emitter and the call-site constant folder.
+    llvm::Value* emitComptimeArray(const std::vector<ConstValue>& elems);
+
     /// Variables with SIMD vector types for operator dispatch.
     llvm::StringSet<> simdVars_;
 

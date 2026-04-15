@@ -5144,7 +5144,10 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
                     llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
                     llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
         }
-        codegenError("comptime block returned an unsupported type (only int/string supported)", expr);
+        if (result->kind == ConstValue::Kind::Array) {
+            return emitComptimeArray(result->arrVal);
+        }
+        codegenError("comptime block returned an unsupported type (only int/string/array supported)", expr);
     }
     default:
         codegenError("Unknown expression type", expr);
@@ -6021,6 +6024,32 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         }
         return std::nullopt;
     }
+    // ── Integer type cast builtins ─────────────────────────────────────────
+    // u64(x), i64(x), int(x), uint(x) — identity; all OmScript integers are i64.
+    // u32(x), i32(x) — truncate to 32 bits (zero/sign extend back to i64).
+    // u16(x), i16(x) — truncate to 16 bits.
+    // u8(x),  i8(x)  — truncate to 8 bits.
+    // bool(x)        — normalise to 0 or 1.
+    // These match the runtime behaviour so comptime and runtime agree.
+    if (n == 1 && args[0].kind == CV::Kind::Integer) {
+        const int64_t v = args[0].intVal;
+        if (name == "u64" || name == "i64" || name == "int" || name == "uint")
+            return CV::fromInt(v);
+        if (name == "u32")
+            return CV::fromInt(static_cast<int64_t>(static_cast<uint32_t>(v)));
+        if (name == "i32")
+            return CV::fromInt(static_cast<int64_t>(static_cast<int32_t>(v)));
+        if (name == "u16")
+            return CV::fromInt(static_cast<int64_t>(static_cast<uint16_t>(v)));
+        if (name == "i16")
+            return CV::fromInt(static_cast<int64_t>(static_cast<int16_t>(v)));
+        if (name == "u8")
+            return CV::fromInt(static_cast<int64_t>(static_cast<uint8_t>(v)));
+        if (name == "i8")
+            return CV::fromInt(static_cast<int64_t>(static_cast<int8_t>(v)));
+        if (name == "bool")
+            return CV::fromInt(v != 0 ? 1 : 0);
+    }
     return std::nullopt;
 }
 // using all statically-known information (constIntFolds_, constStringFolds_,
@@ -6260,6 +6289,10 @@ CodeGenerator::tryConstEvalFull(
 
     std::unordered_map<std::string, ConstValue> env(argEnv);
     std::optional<ConstValue> retVal;
+    // Last bare expression value — used to implicitly return the result of a
+    // final expression statement when there is no explicit `return` keyword.
+    // This enables `comptime { str_to_u64_fast("hello"); }` without `return`.
+    std::optional<ConstValue> lastBareExprVal;
     // Signals set by break/continue statements, cleared by loop handlers.
     bool breakSeen    = false;
     bool continueSeen = false;
@@ -6577,7 +6610,10 @@ CodeGenerator::tryConstEvalFull(
             // Any other expr (x++, f(), etc.): evaluate for side effects.
             // If the expression is not foldable (e.g. it calls a function with
             // I/O or other side effects) evalE returns nullopt → give up.
+            // Also record the result as the implicit return candidate so that
+            // `comptime { expr; }` without an explicit `return` still works.
             auto v = evalE(es->expression.get());
+            if (v) lastBareExprVal = *v;
             return v.has_value();
         }
 
@@ -6780,6 +6816,9 @@ CodeGenerator::tryConstEvalFull(
         if (!evalS(stmt.get())) return std::nullopt;
         if (retVal) return retVal;
     }
+    // No explicit `return` — use the last bare expression value if available.
+    // This enables `comptime { expr; }` as an implicit-return expression block.
+    if (!retVal && lastBareExprVal) return lastBareExprVal;
     return retVal;
 }
 
@@ -7472,6 +7511,31 @@ llvm::GlobalVariable* CodeGenerator::internString(const std::string& content) {
 
     internedStrings_[content] = gv;
     return gv;
+}
+
+llvm::Value* CodeGenerator::emitComptimeArray(const std::vector<ConstValue>& elems) {
+    // Build [N+1 x i64] constant with OmScript's array layout:
+    //   slot 0  = N (the length)
+    //   slot 1…N = element values
+    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+    size_t N = elems.size();
+    std::vector<llvm::Constant*> vals;
+    vals.reserve(N + 1);
+    vals.push_back(llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(N)));
+    for (const auto& elem : elems) {
+        // Only integer elements are supported in comptime arrays for now;
+        // non-integer elements are clamped to 0 rather than failing hard.
+        int64_t v = (elem.kind == ConstValue::Kind::Integer) ? elem.intVal : 0;
+        vals.push_back(llvm::ConstantInt::get(i64Ty, v));
+    }
+    auto* arrTy = llvm::ArrayType::get(i64Ty, N + 1);
+    auto* arrConst = llvm::ConstantArray::get(arrTy, vals);
+    auto* gv = new llvm::GlobalVariable(
+        *module, arrTy, /*isConstant=*/true,
+        llvm::GlobalValue::PrivateLinkage, arrConst, ".comptime.arr");
+    gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    gv->setAlignment(llvm::Align(8));
+    return builder->CreatePtrToInt(gv, i64Ty, "comptime.arr");
 }
 
 void CodeGenerator::generateAssume(AssumeStmt* stmt) {

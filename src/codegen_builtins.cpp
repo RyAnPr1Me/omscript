@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <unordered_set>
 
 // Apply maximum compiler optimizations to this hot path.
 // Builtin codegen covers array operations, string handling, and math builtins
@@ -6397,10 +6398,59 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                 llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
                                 llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
                     }
-                    // Array or other compound type — not representable as a
-                    // compile-time LLVM constant; fall through to normal call.
+                    // Array result: emit as a private global constant and
+                    // return the base pointer as i64.  Marks the callee as
+                    // array-returning so downstream analysis tracks it correctly.
+                    if (result->kind == ConstValue::Kind::Array) {
+                        arrayReturningFunctions_.insert(expr->callee);
+                        return emitComptimeArray(result->arrVal);
+                    }
                 }
             }
+        }
+    }
+
+    // ── Integer type cast syntax: u64(x), u32(x), etc. ───────────────────────
+    // These look like function calls in the AST but are actually type coercions.
+    // All OmScript integers are i64; the casts apply the appropriate truncation
+    // or masking so that the value semantics match the declared bit width.
+    {
+        static const std::unordered_set<std::string> kIntTypeCasts{
+            "u64", "i64", "int", "uint",
+            "u32", "i32", "u16", "i16", "u8", "i8", "bool"
+        };
+        if (kIntTypeCasts.count(expr->callee) && expr->arguments.size() == 1) {
+            llvm::Value* arg = generateExpression(expr->arguments[0].get());
+            arg = toDefaultType(arg);
+            const std::string& cn = expr->callee;
+            if (cn == "u32") {
+                arg = builder->CreateAnd(arg,
+                    llvm::ConstantInt::get(getDefaultType(), 0xFFFFFFFFLL));
+            } else if (cn == "u16") {
+                arg = builder->CreateAnd(arg,
+                    llvm::ConstantInt::get(getDefaultType(), 0xFFFFLL));
+            } else if (cn == "u8") {
+                arg = builder->CreateAnd(arg,
+                    llvm::ConstantInt::get(getDefaultType(), 0xFFLL));
+            } else if (cn == "i32") {
+                auto* trunc = builder->CreateTrunc(arg,
+                    llvm::Type::getInt32Ty(*context), "i32.trunc");
+                arg = builder->CreateSExt(trunc, getDefaultType(), "i32.sext");
+            } else if (cn == "i16") {
+                auto* trunc = builder->CreateTrunc(arg,
+                    llvm::Type::getInt16Ty(*context), "i16.trunc");
+                arg = builder->CreateSExt(trunc, getDefaultType(), "i16.sext");
+            } else if (cn == "i8") {
+                auto* trunc = builder->CreateTrunc(arg,
+                    llvm::Type::getInt8Ty(*context), "i8.trunc");
+                arg = builder->CreateSExt(trunc, getDefaultType(), "i8.sext");
+            } else if (cn == "bool") {
+                auto* cmp = builder->CreateICmpNE(arg,
+                    llvm::ConstantInt::get(getDefaultType(), 0), "bool.cmp");
+                arg = builder->CreateZExt(cmp, getDefaultType(), "bool.zext");
+            }
+            // u64 / i64 / int / uint: identity — no transformation needed.
+            return arg;
         }
     }
 
