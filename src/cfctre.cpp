@@ -20,6 +20,7 @@
 #include <cctype>
 #include <cmath>
 #include <climits>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <sstream>
@@ -127,29 +128,54 @@ bool CTValue::isTruthy() const noexcept {
     return asBool();
 }
 
-std::string CTValue::memoHash() const {
+// Append a compact, deterministic representation to `out` for memoisation.
+// Uses a stack buffer + snprintf to avoid std::ostringstream overhead for
+// the common scalar cases (integers, floats, booleans).
+void CTValue::appendMemoHash(std::string& out) const {
+    char buf[32];                           // enough for "X:" + 20-digit int64
     switch (kind) {
-    case CTValueKind::CONCRETE_I64:
-        return "I:" + std::to_string(scalar.i64);
-    case CTValueKind::CONCRETE_U64:
-        return "U:" + std::to_string(scalar.u64);
+    case CTValueKind::CONCRETE_I64: {
+        int n = std::snprintf(buf, sizeof(buf), "I:%lld",
+                              static_cast<long long>(scalar.i64));
+        out.append(buf, static_cast<size_t>(n));
+        return;
+    }
+    case CTValueKind::CONCRETE_U64: {
+        int n = std::snprintf(buf, sizeof(buf), "U:%llu",
+                              static_cast<unsigned long long>(scalar.u64));
+        out.append(buf, static_cast<size_t>(n));
+        return;
+    }
     case CTValueKind::CONCRETE_F64: {
-        std::ostringstream oss;
-        oss.precision(17);
-        oss << "F:" << scalar.f64;
-        return oss.str();
+        int n = std::snprintf(buf, sizeof(buf), "F:%.17g", scalar.f64);
+        out.append(buf, static_cast<size_t>(n));
+        return;
     }
     case CTValueKind::CONCRETE_BOOL:
-        return scalar.b ? "B:1" : "B:0";
+        out.append(scalar.b ? "B:1" : "B:0", 3);
+        return;
     case CTValueKind::CONCRETE_STRING:
-        return "S:" + str;
-    case CTValueKind::CONCRETE_ARRAY:
-        // Arrays are mutable; use the handle as a unique identity.
-        return "A:" + std::to_string(arr);
-    case CTValueKind::UNINITIALIZED:
-        return "?";
+        out.append("S:", 2);
+        out.append(str);
+        return;
+    case CTValueKind::CONCRETE_ARRAY: {
+        int n = std::snprintf(buf, sizeof(buf), "A:%llu",
+                              static_cast<unsigned long long>(arr));
+        out.append(buf, static_cast<size_t>(n));
+        return;
     }
-    return "?";
+    case CTValueKind::UNINITIALIZED:
+        out.push_back('?');
+        return;
+    }
+    out.push_back('?');
+}
+
+std::string CTValue::memoHash() const {
+    std::string result;
+    result.reserve(24);                     // typical: "I:-1234567890" fits in SSO
+    appendMemoHash(result);
+    return result;
 }
 
 bool CTValue::operator==(const CTValue& o) const noexcept {
@@ -197,6 +223,15 @@ void CTHeap::store(CTArrayHandle h, int64_t idx, CTValue val) {
     CTArray& arr = it->second;
     if (idx < 0 || static_cast<uint64_t>(idx) >= arr.len) return;
     arr.data[static_cast<size_t>(idx)] = std::move(val);
+}
+
+bool CTHeap::push(CTArrayHandle h, CTValue val) {
+    auto it = arrays_.find(h);
+    if (it == arrays_.end()) return false;
+    CTArray& arr = it->second;
+    arr.data.push_back(std::move(val));
+    ++arr.len;
+    return true;
 }
 
 uint64_t CTHeap::length(CTArrayHandle h) const {
@@ -300,9 +335,14 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
     if (currentDepth_ >= kMaxDepth)  return std::nullopt;
 
     // Build memoisation key.
+    // Use appendMemoHash to avoid per-argument temporary strings.
     CTMemoKey key;
     key.fnName = fn->name;
-    for (const auto& a : args) key.argsHash += a.memoHash() + "|";
+    key.argsHash.reserve(args.size() * 24);   // typical arg hash ≤ ~22 chars
+    for (const auto& a : args) {
+        a.appendMemoHash(key.argsHash);
+        key.argsHash.push_back('|');
+    }
 
     // Cache hit?
     auto hit = memoCache_.find(key);
@@ -631,7 +671,7 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
     // Integer arithmetic.
     if (!lhs.isInt() || !rhs.isInt()) return CTValue::uninit();
     int64_t  a = lhs.asI64(), b = rhs.asI64();
-    uint64_t ua = lhs.asU64(), ub = rhs.asU64();
+    uint64_t ua = lhs.asU64();
 
     if (op == "+")  return CTValue::fromI64(a + b);
     if (op == "-")  return CTValue::fromI64(a - b);
@@ -649,8 +689,8 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
     }
     if (op == "**") {
         if (b < 0) return (a == 1) ? CTValue::fromI64(1) : CTValue::uninit();
-        int64_t r = 1, base = a;
-        for (int64_t i = 0; i < b && i < 63; ++i) r *= base;
+        int64_t r = 1, base = a, rem = b;
+        while (rem > 0) { if (rem & 1) r *= base; base *= base; rem >>= 1; }
         return CTValue::fromI64(r);
     }
     if (op == "==") return CTValue::fromI64(a == b ? 1 : 0);
@@ -669,6 +709,12 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
     if (op == "&=") return CTValue::fromI64(a & b);
     if (op == "|=") return CTValue::fromI64(a | b);
     if (op == "^=") return CTValue::fromI64(a ^ b);
+    if (op == "<<=" && b >= 0 && b < 64) return CTValue::fromU64(ua << static_cast<unsigned>(b));
+    if (op == ">>=" && b >= 0 && b < 64) return CTValue::fromI64(a >> static_cast<int>(b));
+    if (op == ">>>=") {
+        int sh = static_cast<int>(b & 63);
+        return CTValue::fromU64(ua >> sh);
+    }
 
     return CTValue::uninit();
 }
@@ -760,6 +806,36 @@ CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
 // Helper lambdas (defined at function scope to access args cleanly).
 std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
                                                const std::vector<CTValue>& args) {
+    // ── Fast reject: skip the entire if-chain for unknown names ──────────
+    static const std::unordered_set<std::string> kKnownBuiltins = {
+        "len","str_len","abs","push","pop","min","max","sign","clamp","pow",
+        "sqrt","gcd","lcm","log","log2","log10","exp2","is_even","is_odd","floor","ceil",
+        "round","to_char","is_alpha","is_digit","to_string","number_to_string",
+        "to_int","string_to_number","str_to_int","char_code","str_find",
+        "str_index_of","str_contains","str_starts_with","startswith",
+        "str_ends_with","endswith","str_substr","str_upper","str_lower",
+        "str_repeat","str_trim","str_reverse","str_count","str_replace",
+        "str_pad_left","str_pad_right","str_eq","str_concat","char_at",
+        "is_power_of_2","popcount","clz","ctz","bitreverse","bswap",
+        "rotate_left","rotate_right","saturating_add","saturating_sub",
+        "str_chars","typeof","array_fill","range","range_step","array_concat",
+        "array_slice","array_copy","sum","array_product","array_min",
+        "array_max","array_last","array_contains","index_of","array_find",
+        "is_upper","is_lower","is_space","is_alnum",
+        "fast_add","fast_sub","fast_mul","fast_div",
+        "precise_add","precise_sub","precise_mul","precise_div",
+        "sin","cos","tan","asin","acos","atan","atan2","exp","cbrt","hypot",
+        "fma","copysign","min_float","max_float",
+        "reverse","sort","array_remove","array_insert",
+        "array_any","array_every","array_count",
+        "str_split","str_join",
+        // Type casts are handled by evalTypeCast, not here, but include for
+        // completeness if they reach evalBuiltin via the fallback path:
+        "u64","i64","int","uint","u32","i32","u16","i16","u8","i8","bool"
+    };
+    if (kKnownBuiltins.find(name) == kKnownBuiltins.end())
+        return std::nullopt;
+
     const size_t n = args.size();
 
     // Helpers.
@@ -767,15 +843,24 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (i < n && args[i].isInt()) return args[i].asI64();
         return std::nullopt;
     };
-    auto strArg = [&](size_t i) -> std::optional<std::string> {
-        if (i < n && args[i].isString()) return args[i].asStr();
-        return std::nullopt;
+    // strArg returns a pointer to the arg's string, avoiding a copy.
+    auto strArg = [&](size_t i) -> const std::string* {
+        if (i < n && args[i].isString()) return &args[i].asStr();
+        return nullptr;
     };
     auto arrArg = [&](size_t i) -> CTArrayHandle {
         if (i < n && args[i].isArray()) return args[i].asArr();
         return CT_NULL_HANDLE;
     };
-    auto arrElements = [&](CTArrayHandle h) -> std::vector<CTValue> {
+    // arrData returns a direct const pointer to the heap array's element
+    // vector, avoiding a full copy.  Returns nullptr if the handle is invalid.
+    auto arrData = [&](CTArrayHandle h) -> const std::vector<CTValue>* {
+        const CTArray* arr = heap_.get(h);
+        return arr ? &arr->data : nullptr;
+    };
+    // arrCopy returns a mutable copy — only use when elements will be mutated
+    // (sort, reverse, insert, remove).
+    auto arrCopy = [&](CTArrayHandle h) -> std::vector<CTValue> {
         return extractArray(h);
     };
 
@@ -795,6 +880,33 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     // ── abs ──────────────────────────────────────────────────────────────
     if (name == "abs" && n == 1) {
         if (auto v = intArg(0)) return CTValue::fromI64(*v < 0 ? -*v : *v);
+        return std::nullopt;
+    }
+
+    // ── push(arr, val) → mutates array, returns 0 (void) ────────────────
+    if (name == "push" && n == 2) {
+        CTArrayHandle h = arrArg(0);
+        if (h != CT_NULL_HANDLE && args[1].isKnown()) {
+            heap_.push(h, args[1]);
+            return CTValue::fromI64(0);
+        }
+        return std::nullopt;
+    }
+
+    // ── pop(arr) → removes & returns last element ───────────────────────
+    if (name == "pop" && n == 1) {
+        CTArrayHandle h = arrArg(0);
+        if (h != CT_NULL_HANDLE) {
+            uint64_t len = heap_.length(h);
+            if (len == 0) return std::nullopt;
+            CTValue last = heap_.load(h, static_cast<int64_t>(len - 1));
+            CTArray* arr = heap_.getMut(h);
+            if (arr && arr->len > 0) {
+                arr->data.pop_back();
+                --arr->len;
+            }
+            return last;
+        }
         return std::nullopt;
     }
 
@@ -998,11 +1110,11 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         return std::nullopt;
     }
     if ((name == "is_alpha") && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64(std::isalpha(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isalpha(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if ((name == "is_digit") && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64(std::isdigit(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isdigit(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if ((name == "to_string" || name == "number_to_string") && n == 1) {
@@ -1197,7 +1309,12 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "range_step" && n == 3) {
         auto start = intArg(0), end = intArg(1), step = intArg(2);
         if (!start || !end || !step || *step == 0) return std::nullopt;
+        // Estimate element count for reserve.
+        int64_t estLen = (*step > 0 && *end > *start) ? ((*end - *start + *step - 1) / *step) :
+                         (*step < 0 && *end < *start) ? ((*start - *end + (-*step) - 1) / (-*step)) : 0;
+        if (estLen > 65536) estLen = 65536;
         std::vector<int64_t> vals;
+        if (estLen > 0) vals.reserve(static_cast<size_t>(estLen));
         for (int64_t cur = *start;
              (*step > 0 ? cur < *end : cur > *end) && vals.size() < 65536;
              cur += *step)
@@ -1211,12 +1328,13 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "array_concat" && n == 2) {
         CTArrayHandle ha = arrArg(0), hb = arrArg(1);
         if (ha == CT_NULL_HANDLE || hb == CT_NULL_HANDLE) return std::nullopt;
-        auto ea = arrElements(ha), eb = arrElements(hb);
-        CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(ea.size() + eb.size()));
+        const auto* ea = arrData(ha); const auto* eb = arrData(hb);
+        if (!ea || !eb) return std::nullopt;
+        CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(ea->size() + eb->size()));
         ++stats_.arraysAllocated;
         int64_t idx = 0;
-        for (auto& v : ea) heap_.store(h, idx++, v);
-        for (auto& v : eb) heap_.store(h, idx++, v);
+        for (const auto& v : *ea) heap_.store(h, idx++, v);
+        for (const auto& v : *eb) heap_.store(h, idx++, v);
         return CTValue::fromArray(h);
     }
     if (name == "array_slice" && n == 3) {
@@ -1240,8 +1358,10 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if ((name == "sum") && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
         int64_t total = 0;
-        for (auto& v : arrElements(h)) {
+        for (const auto& v : *elems) {
             if (!v.isInt()) return std::nullopt;
             total += v.asI64();
         }
@@ -1250,8 +1370,10 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "array_product" && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
         int64_t product = 1;
-        for (auto& v : arrElements(h)) {
+        for (const auto& v : *elems) {
             if (!v.isInt()) return std::nullopt;
             product *= v.asI64();
         }
@@ -1260,19 +1382,19 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "array_min" && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
-        auto elems = arrElements(h);
-        if (elems.empty()) return CTValue::fromI64(0);
+        const auto* elems = arrData(h);
+        if (!elems || elems->empty()) return CTValue::fromI64(0);
         int64_t minv = INT64_MAX;
-        for (auto& v : elems) { if (!v.isInt()) return std::nullopt; if (v.asI64() < minv) minv = v.asI64(); }
+        for (const auto& v : *elems) { if (!v.isInt()) return std::nullopt; if (v.asI64() < minv) minv = v.asI64(); }
         return CTValue::fromI64(minv);
     }
     if (name == "array_max" && n == 1) {
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE) return std::nullopt;
-        auto elems = arrElements(h);
-        if (elems.empty()) return CTValue::fromI64(0);
+        const auto* elems = arrData(h);
+        if (!elems || elems->empty()) return CTValue::fromI64(0);
         int64_t maxv = INT64_MIN;
-        for (auto& v : elems) { if (!v.isInt()) return std::nullopt; if (v.asI64() > maxv) maxv = v.asI64(); }
+        for (const auto& v : *elems) { if (!v.isInt()) return std::nullopt; if (v.asI64() > maxv) maxv = v.asI64(); }
         return CTValue::fromI64(maxv);
     }
     if (name == "array_last" && n == 1) {
@@ -1286,7 +1408,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE || !args[1].isInt()) return std::nullopt;
         int64_t needle = args[1].asI64();
-        for (auto& v : arrElements(h))
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        for (const auto& v : *elems)
             if (v.isInt() && v.asI64() == needle) return CTValue::fromI64(1);
         return CTValue::fromI64(0);
     }
@@ -1294,11 +1418,177 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         CTArrayHandle h = arrArg(0);
         if (h == CT_NULL_HANDLE || !args[1].isInt()) return std::nullopt;
         int64_t needle = args[1].asI64();
-        auto elems = arrElements(h);
-        for (size_t i = 0; i < elems.size(); ++i)
-            if (elems[i].isInt() && elems[i].asI64() == needle)
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        for (size_t i = 0; i < elems->size(); ++i)
+            if ((*elems)[i].isInt() && (*elems)[i].asI64() == needle)
                 return CTValue::fromI64(static_cast<int64_t>(i));
         return CTValue::fromI64(-1);
+    }
+
+    // ── Character classification predicates ──────────────────────────────
+    // C <cctype> functions require the argument to be in [0, UCHAR_MAX] or EOF.
+    // OmScript passes character code points as int64_t; out-of-range → false.
+    if (name == "is_upper" && n == 1) {
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isupper(static_cast<unsigned char>(*v))) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_lower" && n == 1) {
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::islower(static_cast<unsigned char>(*v))) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_space" && n == 1) {
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isspace(static_cast<unsigned char>(*v))) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_alnum" && n == 1) {
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isalnum(static_cast<unsigned char>(*v))) ? 1 : 0);
+        return std::nullopt;
+    }
+
+    // ── Unchecked integer arithmetic (fast_* and precise_*) ─────────────
+    // At compile time these are identical to normal arithmetic.
+    if (name == "fast_add" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a + *b); return std::nullopt; }
+    if (name == "fast_sub" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a - *b); return std::nullopt; }
+    if (name == "fast_mul" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a * *b); return std::nullopt; }
+    if (name == "fast_div" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b && *b != 0) return CTValue::fromI64(*a / *b); return std::nullopt; }
+    if (name == "precise_add" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a + *b); return std::nullopt; }
+    if (name == "precise_sub" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a - *b); return std::nullopt; }
+    if (name == "precise_mul" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a * *b); return std::nullopt; }
+    if (name == "precise_div" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b && *b != 0) return CTValue::fromI64(*a / *b); return std::nullopt; }
+
+    // ── Trigonometric / math (integer floor for integer args) ────────────
+    if (name == "sin" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::sin(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "cos" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::cos(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "tan" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::tan(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "asin" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::asin(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "acos" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::acos(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "atan" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::atan(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "atan2" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(static_cast<int64_t>(std::atan2(static_cast<double>(*a), static_cast<double>(*b)))); return std::nullopt; }
+    if (name == "exp" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::exp(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "cbrt" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::cbrt(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "hypot" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(static_cast<int64_t>(std::hypot(static_cast<double>(*a), static_cast<double>(*b)))); return std::nullopt; }
+    if (name == "fma" && n == 3) { auto a = intArg(0), b = intArg(1), c = intArg(2); if (a && b && c) return CTValue::fromI64(*a * *b + *c); return std::nullopt; }
+    if (name == "copysign" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) { int64_t mag = *a < 0 ? -*a : *a; return CTValue::fromI64(*b >= 0 ? mag : -mag); } return std::nullopt; }
+    if (name == "min_float" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(std::min(*a, *b)); return std::nullopt; }
+    if (name == "max_float" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(std::max(*a, *b)); return std::nullopt; }
+
+    // ── Array: reverse, sort, remove, insert ────────────────────────────
+    if (name == "reverse" && n == 1) {
+        CTArrayHandle h = arrArg(0);
+        if (h == CT_NULL_HANDLE) return std::nullopt;
+        auto elems = arrCopy(h);
+        std::reverse(elems.begin(), elems.end());
+        CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
+        ++stats_.arraysAllocated;
+        for (size_t i = 0; i < elems.size(); ++i)
+            heap_.store(nh, static_cast<int64_t>(i), std::move(elems[i]));
+        return CTValue::fromArray(nh);
+    }
+    if (name == "sort" && n == 1) {
+        CTArrayHandle h = arrArg(0);
+        if (h == CT_NULL_HANDLE) return std::nullopt;
+        auto elems = arrCopy(h);
+        // Sort only integer arrays at compile time.
+        for (auto& e : elems) if (!e.isInt()) return std::nullopt;
+        std::sort(elems.begin(), elems.end(), [](const CTValue& a, const CTValue& b) {
+            return a.asI64() < b.asI64();
+        });
+        CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
+        ++stats_.arraysAllocated;
+        for (size_t i = 0; i < elems.size(); ++i)
+            heap_.store(nh, static_cast<int64_t>(i), std::move(elems[i]));
+        return CTValue::fromArray(nh);
+    }
+    if (name == "array_remove" && n == 2) {
+        CTArrayHandle h = arrArg(0);
+        auto idx = intArg(1);
+        if (h == CT_NULL_HANDLE || !idx) return std::nullopt;
+        auto elems = arrCopy(h);
+        int64_t i = *idx;
+        if (i < 0 || i >= static_cast<int64_t>(elems.size())) return std::nullopt;
+        elems.erase(elems.begin() + i);
+        CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
+        ++stats_.arraysAllocated;
+        for (size_t j = 0; j < elems.size(); ++j)
+            heap_.store(nh, static_cast<int64_t>(j), std::move(elems[j]));
+        return CTValue::fromArray(nh);
+    }
+    if (name == "array_insert" && n == 3) {
+        CTArrayHandle h = arrArg(0);
+        auto idx = intArg(1);
+        if (h == CT_NULL_HANDLE || !idx || !args[2].isKnown()) return std::nullopt;
+        auto elems = arrCopy(h);
+        int64_t i = *idx;
+        if (i < 0 || i > static_cast<int64_t>(elems.size())) return std::nullopt;
+        elems.insert(elems.begin() + i, args[2]);
+        CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
+        ++stats_.arraysAllocated;
+        for (size_t j = 0; j < elems.size(); ++j)
+            heap_.store(nh, static_cast<int64_t>(j), std::move(elems[j]));
+        return CTValue::fromArray(nh);
+    }
+    if (name == "array_any" && n == 1) {
+        CTArrayHandle h = arrArg(0);
+        if (h == CT_NULL_HANDLE) return std::nullopt;
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        for (const auto& v : *elems)
+            if (v.isInt() && v.asI64() != 0) return CTValue::fromI64(1);
+        return CTValue::fromI64(0);
+    }
+    if (name == "array_every" && n == 1) {
+        CTArrayHandle h = arrArg(0);
+        if (h == CT_NULL_HANDLE) return std::nullopt;
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        for (const auto& v : *elems) {
+            if (!v.isInt()) return std::nullopt;
+            if (v.asI64() == 0) return CTValue::fromI64(0);
+        }
+        return CTValue::fromI64(1);
+    }
+    if (name == "array_count" && n == 2) {
+        CTArrayHandle h = arrArg(0);
+        if (h == CT_NULL_HANDLE || !args[1].isInt()) return std::nullopt;
+        int64_t needle = args[1].asI64(), count = 0;
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        for (const auto& v : *elems)
+            if (v.isInt() && v.asI64() == needle) ++count;
+        return CTValue::fromI64(count);
+    }
+
+    // ── String: str_split, str_join ─────────────────────────────────────
+    if (name == "str_split" && n == 2) {
+        auto s = strArg(0), delim = strArg(1);
+        if (!s || !delim || delim->empty()) return std::nullopt;
+        std::vector<std::string> parts;
+        size_t pos = 0, prev = 0;
+        while ((pos = s->find(*delim, prev)) != std::string::npos) {
+            parts.push_back(s->substr(prev, pos - prev));
+            prev = pos + delim->size();
+        }
+        parts.push_back(s->substr(prev));
+        CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(parts.size()));
+        ++stats_.arraysAllocated;
+        for (size_t i = 0; i < parts.size(); ++i)
+            heap_.store(h, static_cast<int64_t>(i), CTValue::fromString(std::move(parts[i])));
+        return CTValue::fromArray(h);
+    }
+    if (name == "str_join" && n == 2) {
+        CTArrayHandle h = arrArg(0);
+        auto sep = strArg(1);
+        if (h == CT_NULL_HANDLE || !sep) return std::nullopt;
+        const auto* elems = arrData(h);
+        if (!elems) return std::nullopt;
+        std::string result;
+        for (size_t i = 0; i < elems->size(); ++i) {
+            if (!(*elems)[i].isString()) return std::nullopt;
+            if (i > 0) result += *sep;
+            result += (*elems)[i].asStr();
+        }
+        return CTValue::fromString(std::move(result));
     }
 
     // Integer type-cast aliases (also handled by evalTypeCast).
@@ -1431,8 +1721,10 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
                 frame.didContinue = false;
             }
         } else if (coll.isArray()) {
+            // Snapshot the elements: the loop body may mutate the heap, so we
+            // need our own stable copy of the array data to iterate over.
             auto elems = extractArray(coll.asArr());
-            for (auto& elem : elems) {
+            for (const auto& elem : elems) {
                 if (++fuel_ > kMaxInstructions) return false;
                 frame.locals[fes->iteratorVar] = elem;
                 if (!evalStmt(frame, fes->body.get())) return false;
@@ -1585,11 +1877,43 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
 
 bool CTEngine::evalPipelineStmt(CTFrame& frame, const Statement* s) {
     auto* ps = static_cast<const PipelineStmt*>(s);
+    const int nStages = static_cast<int>(ps->stages.size());
 
-    // One-shot form (no count): execute all stages once.
+    // Helper: execute non-final stages with failure semantics, then always
+    // run the last stage.  Returns true if pipeline should continue iterating.
+    auto runStagesWithFailure = [&]() -> bool {
+        if (nStages <= 1) {
+            // Single stage — just run it.
+            if (!executeBody(frame, ps->stages[0].body.get())) return false;
+            return true;
+        }
+
+        bool stageFailed = false;
+
+        // Execute non-final stages; on failure, skip remaining middle stages.
+        for (int si = 0; si < nStages - 1; ++si) {
+            if (!evalStmt(frame, ps->stages[si].body.get())) {
+                stageFailed = true;
+                break;
+            }
+            if (frame.hasReturned || frame.didBreak) {
+                stageFailed = true;
+                break;
+            }
+        }
+
+        // Last stage always runs ("finally").
+        if (!evalStmt(frame, ps->stages[nStages - 1].body.get()))
+            return false;
+
+        // If a middle stage failed, signal cancellation to the caller.
+        if (stageFailed) return false;
+        return true;
+    };
+
+    // One-shot form (no count): execute stages once with failure semantics.
     if (!ps->count) {
-        for (auto& stage : ps->stages)
-            if (!executeBody(frame, stage.body.get())) return false;
+        runStagesWithFailure();
         return true;
     }
 
@@ -1617,17 +1941,41 @@ bool CTEngine::evalPipelineStmt(CTFrame& frame, const Statement* s) {
 void CTEngine::executeTile(CTFrame& frame,
                             const std::vector<const Statement*>& stageStmts,
                             int64_t baseIdx, int64_t n) {
+    const int nStages = static_cast<int>(stageStmts.size());
+
     // Execute each lane in the tile sequentially.
     for (int lane = 0; lane < kSIMDLaneWidth; ++lane) {
         int64_t i = baseIdx + lane;
         if (i >= n) break;  // mask inactive lanes
         // Set the pipeline iterator.
         frame.locals["__pipeline_i"] = CTValue::fromI64(i);
-        // Execute each stage body.
-        for (auto* stageBody : stageStmts) {
-            if (!evalStmt(frame, stageBody)) return;
+
+        if (nStages <= 1) {
+            // Single stage — just run it.
+            if (!evalStmt(frame, stageStmts[0])) return;
             if (frame.hasReturned || frame.didBreak || frame.didContinue) return;
+        } else {
+            // Execute non-final stages; on failure skip to last stage.
+            bool stageFailed = false;
+            for (int si = 0; si < nStages - 1; ++si) {
+                if (!evalStmt(frame, stageStmts[si])) {
+                    stageFailed = true;
+                    break;
+                }
+                if (frame.hasReturned || frame.didBreak || frame.didContinue) {
+                    stageFailed = true;
+                    break;
+                }
+            }
+
+            // Last stage always runs ("finally").
+            if (!evalStmt(frame, stageStmts[nStages - 1])) return;
+            if (frame.hasReturned || frame.didBreak || frame.didContinue) return;
+
+            // If a middle stage failed, cancel the pipeline (no more lanes).
+            if (stageFailed) return;
         }
+
         frame.didContinue = false;
     }
 }

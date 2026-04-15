@@ -345,6 +345,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 nonNegValues_.insert(result);
                 return result;
             }
+            // Fold len() on const arrays: `const arr = [1,2,3]; len(arr)` → 3.
+            if (cv && cv->kind == ConstValue::Kind::Array) {
+                auto* result = llvm::ConstantInt::get(
+                    getDefaultType(), static_cast<int64_t>(cv->arrVal.size()));
+                nonNegValues_.insert(result);
+                return result;
+            }
         }
 
         // Constant-fold len(array_fill(N, val)): when N is a compile-time
@@ -443,6 +450,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                       ? arg
                                       : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "len.sptr");
             llvm::Value* rawLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "len.strlen");
+            // !range [0, INT64_MAX): strlen always returns non-negative.
+            if (optimizationLevel >= OptimizationLevel::O1)
+                llvm::cast<llvm::Instruction>(rawLen)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // strlen returns size_t (i64 on 64-bit); ensure we return the default type.
             auto* result = rawLen->getType() == getDefaultType()
                        ? rawLen
@@ -744,6 +755,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 new llvm::GlobalVariable(*module, ptrTy, false, llvm::GlobalValue::ExternalLinkage, nullptr, "stdin");
         }
         llvm::Value* stdinVal = builder->CreateLoad(ptrTy, stdinVar, "inputln.stdin");
+        // stdin is always non-null on POSIX systems — communicating this to
+        // the optimizer lets it remove redundant null checks downstream.
+        llvm::cast<llvm::LoadInst>(stdinVal)->setMetadata(
+            llvm::LLVMContext::MD_nonnull, llvm::MDNode::get(*context, {}));
         // Call fgets(buf, 1024, stdin)
         llvm::Value* intSize = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1024);
         llvm::Value* fgetsRet = builder->CreateCall(getOrDeclareFgets(), {buf, intSize, stdinVal}, "inputln.fgets");
@@ -2525,9 +2540,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Compute result size and allocate
         // ---------------------------------------------------------------
         // resultLen = strLen + totalCount * (newLen - oldLen)
-        llvm::Value* lenDiff   = builder->CreateSub(newLen, oldLen, "replace.lendiff");
-        llvm::Value* extraLen  = builder->CreateMul(totalCount, lenDiff, "replace.extralen");
-        llvm::Value* resultLen = builder->CreateAdd(strLen, extraLen, "replace.resultlen");
+        // lenDiff is signed (newLen may be < oldLen), but the final resultLen
+        // is always non-negative because totalCount * lenDiff only shrinks by
+        // at most strLen.  nsw on the mul/add lets SCEV prove this.
+        llvm::Value* lenDiff   = builder->CreateSub(newLen, oldLen, "replace.lendiff", /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* extraLen  = builder->CreateMul(totalCount, lenDiff, "replace.extralen", /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* resultLen = builder->CreateAdd(strLen, extraLen, "replace.resultlen", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* resultSize= builder->CreateAdd(resultLen, one, "replace.resultsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* resultBuf = builder->CreateCall(getOrDeclareMalloc(), {resultSize}, "replace.resultbuf");
         llvm::cast<llvm::CallInst>(resultBuf)->addRetAttr(
@@ -4936,6 +4954,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::MDNode::get(*context, {}));
         llvm::Value* celemPtr = builder->CreateIntToPtr(celemInt, ptrTy, "join.celemptr");
         llvm::Value* celemLen = builder->CreateCall(getOrDeclareStrlen(), {celemPtr}, "join.celemlen");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(celemLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* elemDst = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, afterDelim, "join.elemdst");
         builder->CreateCall(getOrDeclareMemcpy(), {elemDst, celemPtr, celemLen});
         llvm::Value* afterElem = builder->CreateAdd(afterDelim, celemLen, "join.afterelem", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -5080,6 +5101,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(nullBB);
         llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "fread.empty");
+        llvm::cast<llvm::CallInst>(emptyBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf);
         llvm::Value* emptyResult = emptyBuf;
         builder->CreateBr(mergeBB);
@@ -5093,13 +5116,37 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
              llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 2)});
         // size = ftell(fp)
         llvm::Value* fileSize = builder->CreateCall(getOrDeclareFtell(), {fp}, "fread.size");
+
+        // ftell returns -1 on error (e.g. non-seekable stream).  Guard against
+        // passing a negative value to malloc which would wrap to a huge size.
+        llvm::Value* ftellFailed = builder->CreateICmpSLT(fileSize,
+            llvm::ConstantInt::get(getDefaultType(), 0), "fread.ftellbad");
+        llvm::BasicBlock* ftellOkBB = llvm::BasicBlock::Create(*context, "fread.ftellok", parentFn);
+        llvm::BasicBlock* ftellBadBB = llvm::BasicBlock::Create(*context, "fread.ftellbad", parentFn);
+        // ftell failure is extremely rare.
+        auto* ftellW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(ftellFailed, ftellBadBB, ftellOkBB, ftellW);
+
+        // ftell error path: close file, return empty string
+        builder->SetInsertPoint(ftellBadBB);
+        builder->CreateCall(getOrDeclareFclose(), {fp});
+        llvm::Value* ftellEmptyBuf = builder->CreateCall(getOrDeclareMalloc(),
+            {llvm::ConstantInt::get(getDefaultType(), 1)}, "fread.ftempty");
+        llvm::cast<llvm::CallInst>(ftellEmptyBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ftellEmptyBuf);
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* ftellBadEndBB = builder->GetInsertBlock();
+
+        // ftell OK path: proceed with read
+        builder->SetInsertPoint(ftellOkBB);
         // fseek(fp, 0, SEEK_SET=0)
         builder->CreateCall(getOrDeclareFseek(),
             {fp, llvm::ConstantInt::get(getDefaultType(), 0),
              llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)});
         // buf = malloc(size + 1)
         llvm::Value* bufSize = builder->CreateAdd(fileSize,
-            llvm::ConstantInt::get(getDefaultType(), 1), "fread.bufsize");
+            llvm::ConstantInt::get(getDefaultType(), 1), "fread.bufsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "fread.buf");
         // fread(buf, 1, size, fp)
         builder->CreateCall(getOrDeclareFread(),
@@ -5115,8 +5162,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Merge
         builder->SetInsertPoint(mergeBB);
-        llvm::PHINode* phi = builder->CreatePHI(ptrTy, 2, "fread.result");
+        llvm::PHINode* phi = builder->CreatePHI(ptrTy, 3, "fread.result");
         phi->addIncoming(emptyResult, nullEndBB);
+        phi->addIncoming(ftellEmptyBuf, ftellBadEndBB);
         phi->addIncoming(okResult, okEndBB);
         stringReturningFunctions_.insert("file_read");
         return phi;
@@ -5153,6 +5201,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {contentPtr}, "fwrite.len");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(slen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         builder->CreateCall(getOrDeclareFwrite(),
             {contentPtr, llvm::ConstantInt::get(getDefaultType(), 1), slen, fp});
         builder->CreateCall(getOrDeclareFclose(), {fp});
@@ -5196,6 +5247,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {contentPtr}, "fappend.len");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(slen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         builder->CreateCall(getOrDeclareFwrite(),
             {contentPtr, llvm::ConstantInt::get(getDefaultType(), 1), slen, fp});
         builder->CreateCall(getOrDeclareFclose(), {fp});
@@ -5501,6 +5555,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (isFloat) {
             llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
             llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "numtostr.buf");
+            llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                llvm::Attribute::getWithDereferenceableBytes(*context, 32));
             llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_float_fmt", true);
             if (!fmtStr)
                 fmtStr = builder->CreateGlobalString("%g", "tostr_float_fmt");
@@ -5510,6 +5566,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "numtostr.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 21));
         llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_fmt", true);
         if (!fmtStr)
             fmtStr = builder->CreateGlobalString("%lld", "tostr_fmt");
@@ -5610,6 +5668,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         static constexpr int64_t kMutexAllocSize = 64;
         llvm::Value* size = llvm::ConstantInt::get(getDefaultType(), kMutexAllocSize);
         llvm::Value* mutex = builder->CreateCall(getOrDeclareMalloc(), {size}, "mutex.ptr");
+        llvm::cast<llvm::CallInst>(mutex)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, kMutexAllocSize));
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* nullAttr = llvm::ConstantPointerNull::get(ptrTy);
         builder->CreateCall(getOrDeclarePthreadMutexInit(), {mutex, nullAttr});
@@ -5807,7 +5867,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Handle gcd == 0 (when both inputs are 0): lcm(0, 0) = 0
         llvm::Value* gcdIsZero = builder->CreateICmpEQ(gcdVal, zero, "lcm.gcd.iszero");
         llvm::Value* divResult = builder->CreateUDiv(aAbs, gcdVal, "lcm.div");
-        llvm::Value* lcmResult = builder->CreateMul(divResult, bAbs, "lcm.mul");
+        llvm::Value* lcmResult = builder->CreateMul(divResult, bAbs, "lcm.mul", /*HasNUW=*/true, /*HasNSW=*/true);
         auto* lcmFinal = builder->CreateSelect(gcdIsZero, zero, lcmResult, "lcm.result");
         nonNegValues_.insert(lcmFinal);  // lcm is always non-negative (uses abs of inputs)
         return lcmFinal;
@@ -6268,6 +6328,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // slen = strlen(str)
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strpad.slen");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(slen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
 
         // Clamp width to [0, i64_max] — negative width means no padding
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);

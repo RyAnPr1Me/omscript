@@ -781,6 +781,7 @@ ptest_program "examples/elif_test.om" 165
 ptest_program "examples/swap_test.om" 108
 ptest_program "examples/times_test.om" 162
 ptest_program "examples/pipeline_test.om" 131
+ptest_program "examples/pipeline_cancel_test.om" 46
 ptest_program "examples/destructure_test.om" 13130
 ptest_program "examples/indexed_foreach_test.om" 1652
 ptest_program "examples/repeat_until_test.om" 297

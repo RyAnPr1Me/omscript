@@ -635,21 +635,23 @@ class CodeGenerator {
                                                  { return {Kind::Array, 0, {}, std::move(a)}; }
     };
 
+    /// Constant array values for `const` or comptime array variables whose
+    /// elements are all compile-time constants.  Enables folding array indexing:
+    /// `const arr = [10, 20, 30]; var x = arr[1];` folds to 20.
+    llvm::StringMap<std::vector<ConstValue>> constArrayFolds_;
+
     /// tryFoldExprToConst: attempt to reduce any expression to a compile-time
     /// constant using all currently available compile-time information:
     ///   - integer / string / array literals
     ///   - identifiers tracked in constIntFolds_ or constStringFolds_
-    ///   - enum constants
+    ///   - enum constants and scope-resolution expressions
     ///   - zero-arg calls to functions in constIntReturnFunctions_ /
     ///     constStringReturnFunctions_
     ///   - recursive evaluation of multi-arg user functions via tryConstEvalFull
     ///   - arithmetic / concat / array indexing on any of the above
-    ///   - builtins: sign, clamp, pow, abs, min, max, gcd, lcm, is_even, is_odd,
-    ///               str_len, str_eq, str_concat, to_char, is_alpha, is_digit,
-    ///               to_string, to_int, char_code, str_find, log2, is_power_of_2,
-    ///               popcount, clz, ctz, bswap, bitreverse, rotate_left/right,
-    ///               saturating_add/sub, str_repeat, str_substr, str_starts_with,
-    ///               str_ends_with, str_contains, str_upper, str_lower
+    ///   - pipe expressions (x |> f → f(x))
+    ///   - comptime {} blocks
+    ///   - all builtins supported by evalConstBuiltin (~80 pure functions)
     /// Returns nullopt for any expression that requires runtime information.
     std::optional<ConstValue> tryFoldExprToConst(Expression* expr,
                                                  int depth = 0) const;
@@ -691,6 +693,26 @@ class CodeGenerator {
     /// impure, or the argument types/count are wrong.  Used by both
     /// tryFoldExprToConst and tryConstEvalFull so the fold logic is defined
     /// in exactly one place.
+    ///
+    /// Supported builtins (~80):
+    ///   Math: abs, min, max, sign, clamp, pow, sqrt, gcd, lcm, log2, exp2
+    ///   Bitwise: popcount, clz, ctz, bitreverse, bswap, rotate_left/right
+    ///   Saturating: saturating_add, saturating_sub
+    ///   Char: is_alpha, is_digit, is_upper, is_lower, is_space, is_alnum,
+    ///         is_even, is_odd, to_char, char_code
+    ///   String: len, str_len, str_eq, str_concat, str_find, str_substr,
+    ///           str_upper, str_lower, str_contains, str_index_of, str_replace,
+    ///           str_trim, str_starts_with, str_ends_with, str_repeat,
+    ///           str_reverse, str_count, str_pad_left, str_pad_right,
+    ///           str_to_int, to_string, to_int, number_to_string, string_to_number
+    ///   Array: array_fill, array_concat, array_slice, array_contains, index_of,
+    ///          array_min, array_max, array_last, array_product, sum, reverse,
+    ///          sort, array_remove, array_insert, array_any, array_every,
+    ///          array_count
+    ///   Float math: sin, cos, tan, asin, acos, atan, atan2, cbrt, hypot,
+    ///               fma, copysign, min_float, max_float
+    ///   Fast/precise: fast_add/sub/mul/div, precise_add/sub/mul/div
+    ///   Casts: u64, i64, int, uint, u32, i32, u16, i16, u8, i8, bool
     static std::optional<ConstValue> evalConstBuiltin(
         const std::string& name, const std::vector<ConstValue>& args);
 

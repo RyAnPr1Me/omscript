@@ -104,6 +104,10 @@ struct CTValue {
     /// Produce a deterministic string key for memoisation.
     std::string memoHash() const;
 
+    /// Append the memo hash to an existing string (avoids temporary allocation
+    /// when building composite memo keys).
+    void appendMemoHash(std::string& out) const;
+
     bool operator==(const CTValue& o) const noexcept;
     bool operator!=(const CTValue& o) const noexcept { return !(*this == o); }
 };
@@ -137,6 +141,9 @@ public:
     /// Store `val` at element index `idx` (no-op if out-of-bounds).
     void store(CTArrayHandle h, int64_t idx, CTValue val);
 
+    /// Append `val` to the end of array `h`.  Returns false if handle invalid.
+    bool push(CTArrayHandle h, CTValue val);
+
     /// Return the logical length of array `h` (0 if not found).
     uint64_t length(CTArrayHandle h) const;
 
@@ -154,6 +161,8 @@ public:
     uint64_t nextHandle() const noexcept { return nextHandle_; }
 
 private:
+    /// `std::map` (not unordered_map) guarantees deterministic iteration order
+    /// over handles, which matters for snapshot/serialisation of heap state.
     std::map<CTArrayHandle, CTArray> arrays_;
     uint64_t nextHandle_{1};
 };
@@ -266,6 +275,31 @@ public:
         const std::unordered_map<std::string, CTValue>& env = {});
 
     // ── Builtin evaluator (exposed for bridge with existing ConstValue) ───
+    /// Evaluate a named built-in function with fully-resolved arguments.
+    /// Returns std::nullopt for unknown builtins, I/O functions, or when
+    /// argument types don't match expected signatures.
+    ///
+    /// Supported categories (~100 builtins):
+    ///   • Math: abs, min, max, sign, clamp, pow, sqrt, gcd, lcm, log2, exp2
+    ///   • Bitwise: popcount, clz, ctz, bitreverse, bswap, rotate_left/right
+    ///   • Saturating: saturating_add, saturating_sub
+    ///   • Character: is_alpha, is_digit, is_upper, is_lower, is_space, is_alnum,
+    ///                is_even, is_odd, to_char, char_code
+    ///   • String: len, str_len, str_eq, str_concat, str_find, str_substr,
+    ///             str_upper, str_lower, str_contains, str_index_of, str_replace,
+    ///             str_trim, str_starts_with, str_ends_with, str_repeat,
+    ///             str_reverse, str_count, str_pad_left, str_pad_right,
+    ///             str_chars, str_to_int, str_split, str_join,
+    ///             to_string, number_to_string, string_to_number
+    ///   • Array: push, pop, array_fill, array_concat, array_slice, array_copy,
+    ///            array_contains, index_of, array_find, array_min, array_max,
+    ///            array_last, array_product, sum, range, range_step,
+    ///            reverse, sort, array_remove, array_insert,
+    ///            array_any, array_every, array_count
+    ///   • Float math: sin, cos, tan, asin, acos, atan, atan2, exp, cbrt,
+    ///                  hypot, fma, copysign, min_float, max_float
+    ///   • Fast/precise arithmetic: fast_add/sub/mul/div, precise_add/sub/mul/div
+    ///   • Type casts: u64, i64, int, uint, u32, i32, u16, i16, u8, i8, bool
     std::optional<CTValue> evalBuiltin(
         const std::string&          name,
         const std::vector<CTValue>& args);

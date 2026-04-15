@@ -823,6 +823,15 @@ struct StageDecl {
 /// evaluated once before the first iteration.  If N is omitted the stages run
 /// exactly once (one-shot form).
 ///
+/// **Failure semantics:**
+///   • Stages execute strictly in declaration order.
+///   • If any non-final stage fails (triggers `throw` or a runtime error that
+///     sets `__om_error_flag`), the pipeline **cancels**: remaining middle
+///     stages are skipped and the pipeline exits the loop after the current
+///     iteration.
+///   • The **last stage always runs** regardless of whether an earlier stage
+///     failed — it acts as a "finally" / cleanup block.
+///
 /// The compiler generates a software-prefetched loop over [0, N) with a
 /// hidden iterator variable `__pipeline_i`.  The loop back-edge carries
 /// interleave, vectorize, and pipeline.initiationinterval metadata so the

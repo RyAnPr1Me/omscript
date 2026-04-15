@@ -1474,9 +1474,11 @@ llvm::Function* CodeGenerator::getOrDeclareFputs() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fputs", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);  // stream pointer is not captured
     return fn;
 }
 
@@ -1507,6 +1509,7 @@ llvm::Function* CodeGenerator::getOrDeclareScanf() {
         llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::PointerType::getUnqual(*context)}, true);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "scanf", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1956,6 +1959,7 @@ llvm::Function* CodeGenerator::getOrDeclareFwrite() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fwrite", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1972,6 +1976,7 @@ llvm::Function* CodeGenerator::getOrDeclareFflush() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fflush", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
 }
@@ -1984,6 +1989,7 @@ llvm::Function* CodeGenerator::getOrDeclareFgets() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fgets", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(2, llvm::Attribute::NonNull);
@@ -2000,6 +2006,8 @@ llvm::Function* CodeGenerator::getOrDeclareFopen() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fopen", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NoAlias);  // fopen returns a new FILE* (or null)
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -2030,6 +2038,7 @@ llvm::Function* CodeGenerator::getOrDeclareFread() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fread", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(3, llvm::Attribute::NonNull);
@@ -2046,6 +2055,7 @@ llvm::Function* CodeGenerator::getOrDeclareFseek() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fseek", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -2059,6 +2069,7 @@ llvm::Function* CodeGenerator::getOrDeclareFtell() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "ftell", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -2073,6 +2084,8 @@ llvm::Function* CodeGenerator::getOrDeclareAccess() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "access", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -2090,7 +2103,13 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadCreate() {
     // int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     //                    void *(*start_routine)(void*), void *arg)
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, ptrTy, ptrTy, ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_create", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_create", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);  // thread ID output pointer
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 1);  // attributes (usually null)
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclarePthreadJoin() {
@@ -2099,7 +2118,11 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadJoin() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     // int pthread_join(pthread_t thread, void **retval)
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {getDefaultType(), ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_join", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_join", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 1);  // retval output pointer
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclarePthreadMutexInit() {
@@ -2108,7 +2131,13 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexInit() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     // int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_init", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_init", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclarePthreadMutexLock() {
@@ -2116,7 +2145,12 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexLock() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_lock", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_lock", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclarePthreadMutexUnlock() {
@@ -2124,7 +2158,12 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexUnlock() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_unlock", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_unlock", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclarePthreadMutexDestroy() {
@@ -2132,7 +2171,12 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexDestroy() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_destroy", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_destroy", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
 }
 
 // ---------------------------------------------------------------------------
@@ -5424,14 +5468,44 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     const std::vector<CodeGenerator::ConstValue>& args)
 {
     using CV = CodeGenerator::ConstValue;
+
+    // ── Fast reject: skip entire if-chain for unknown builtin names ──────
+    static const std::unordered_set<std::string> kKnownBuiltins = {
+        "len","str_len","abs","min","max","sign","clamp","pow","sqrt","gcd",
+        "lcm","log","log2","log10","exp2","is_even","is_odd","floor","ceil","round",
+        "to_char","is_alpha","is_digit","to_string","number_to_string",
+        "to_int","string_to_number","str_to_int","char_code","str_find",
+        "str_index_of","str_contains","str_starts_with","startswith",
+        "str_ends_with","endswith","str_substr","str_upper","str_lower",
+        "str_repeat","str_trim","str_reverse","str_count","str_replace",
+        "str_pad_left","str_pad_right","str_eq","str_concat","char_at",
+        "is_power_of_2","popcount","clz","ctz","bitreverse","bswap",
+        "rotate_left","rotate_right","saturating_add","saturating_sub",
+        "str_chars","typeof","array_fill","array_concat","array_slice",
+        "array_contains","index_of","array_find","array_min","array_max",
+        "array_last","array_product","sum",
+        "is_upper","is_lower","is_space","is_alnum",
+        "fast_add","fast_sub","fast_mul","fast_div",
+        "precise_add","precise_sub","precise_mul","precise_div",
+        "sin","cos","tan","asin","acos","atan","atan2","cbrt","hypot",
+        "fma","copysign","min_float","max_float",
+        "reverse","sort","array_remove","array_insert",
+        "array_any","array_every","array_count",
+        "u64","i64","int","uint","u32","i32","u16","i16","u8","i8","bool"
+    };
+    if (kKnownBuiltins.find(name) == kKnownBuiltins.end())
+        return std::nullopt;
+
     const size_t n = args.size();
     auto intArg = [&](size_t i) -> std::optional<int64_t> {
         if (i < n && args[i].kind == CV::Kind::Integer) return args[i].intVal;
         return std::nullopt;
     };
-    auto strArg = [&](size_t i) -> std::optional<std::string> {
-        if (i < n && args[i].kind == CV::Kind::String) return args[i].strVal;
-        return std::nullopt;
+    // strArg returns a pointer into args[i].strVal — valid for the duration of
+    // this call since `args` is a const-ref to the caller's vector.
+    auto strArg = [&](size_t i) -> const std::string* {
+        if (i < n && args[i].kind == CV::Kind::String) return &args[i].strVal;
+        return nullptr;
     };
 
     // ── len(x) ─────────────────────────────────────────────────────────────
@@ -5547,11 +5621,11 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     }
     // ── is_alpha / is_digit ────────────────────────────────────────────────
     if (name == "is_alpha" && n == 1) {
-        if (auto v = intArg(0)) return CV::fromInt(std::isalpha(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isalpha(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_digit" && n == 1) {
-        if (auto v = intArg(0)) return CV::fromInt(std::isdigit(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isdigit(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     // ── to_string / number_to_string ───────────────────────────────────────
@@ -6005,7 +6079,9 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     // ── array_concat(arr1, arr2) ───────────────────────────────────────────
     if (name == "array_concat" && n == 2) {
         if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Array) {
-            std::vector<CV> result = args[0].arrVal;
+            std::vector<CV> result;
+            result.reserve(args[0].arrVal.size() + args[1].arrVal.size());
+            result.insert(result.end(), args[0].arrVal.begin(), args[0].arrVal.end());
             result.insert(result.end(), args[1].arrVal.begin(), args[1].arrVal.end());
             return CV::fromArr(std::move(result));
         }
@@ -6043,18 +6119,116 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         }
         return std::nullopt;
     }
-    // ── sum(arr) / array_product(arr) via constant array ──────────────────
-    if (name == "sum" && n == 1) {
+    // ── Character classification predicates ─────────────────────────────
+    // C <cctype> functions require the argument to be in [0, UCHAR_MAX] or EOF.
+    // OmScript passes character code points as int64_t; out-of-range → false.
+    if (name == "is_upper" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isupper(static_cast<unsigned char>(*v))) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_lower" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::islower(static_cast<unsigned char>(*v))) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_space" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isspace(static_cast<unsigned char>(*v))) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_alnum" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isalnum(static_cast<unsigned char>(*v))) ? 1 : 0);
+        return std::nullopt;
+    }
+    // ── Unchecked integer arithmetic (fast_* / precise_*) ────────────────
+    if (name == "fast_add" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a + *b); return std::nullopt; }
+    if (name == "fast_sub" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a - *b); return std::nullopt; }
+    if (name == "fast_mul" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a * *b); return std::nullopt; }
+    if (name == "fast_div" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b && *b != 0) return CV::fromInt(*a / *b); return std::nullopt; }
+    if (name == "precise_add" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a + *b); return std::nullopt; }
+    if (name == "precise_sub" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a - *b); return std::nullopt; }
+    if (name == "precise_mul" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a * *b); return std::nullopt; }
+    if (name == "precise_div" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b && *b != 0) return CV::fromInt(*a / *b); return std::nullopt; }
+    // ── Trigonometric / math (integer floor) ─────────────────────────────
+    if (name == "sin" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::sin(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "cos" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::cos(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "tan" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::tan(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "asin" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::asin(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "acos" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::acos(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "atan" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::atan(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "atan2" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(static_cast<int64_t>(std::atan2(static_cast<double>(*a), static_cast<double>(*b)))); return std::nullopt; }
+    if (name == "cbrt" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::cbrt(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "hypot" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(static_cast<int64_t>(std::hypot(static_cast<double>(*a), static_cast<double>(*b)))); return std::nullopt; }
+    if (name == "fma" && n == 3) { auto a = intArg(0), b = intArg(1), c = intArg(2); if (a && b && c) return CV::fromInt(*a * *b + *c); return std::nullopt; }
+    if (name == "copysign" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) { int64_t mag = *a < 0 ? -*a : *a; return CV::fromInt(*b >= 0 ? mag : -mag); } return std::nullopt; }
+    if (name == "min_float" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(std::min(*a, *b)); return std::nullopt; }
+    if (name == "max_float" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(std::max(*a, *b)); return std::nullopt; }
+    // ── Array: reverse, sort, remove, insert ─────────────────────────────
+    if (name == "reverse" && n == 1) {
         if (args[0].kind == CV::Kind::Array) {
-            int64_t total = 0;
-            for (const auto& elem : args[0].arrVal) {
-                if (elem.kind != CV::Kind::Integer) return std::nullopt;
-                total += elem.intVal;
-            }
-            return CV::fromInt(total);
+            auto arr = args[0].arrVal;
+            std::reverse(arr.begin(), arr.end());
+            return CV::fromArr(std::move(arr));
         }
         return std::nullopt;
     }
+    if (name == "sort" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            auto arr = args[0].arrVal;
+            for (auto& e : arr) if (e.kind != CV::Kind::Integer) return std::nullopt;
+            std::sort(arr.begin(), arr.end(), [](const CV& a, const CV& b) { return a.intVal < b.intVal; });
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    if (name == "array_remove" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            auto arr = args[0].arrVal;
+            int64_t idx = args[1].intVal;
+            if (idx < 0 || idx >= static_cast<int64_t>(arr.size())) return std::nullopt;
+            arr.erase(arr.begin() + idx);
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    if (name == "array_insert" && n == 3) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            auto arr = args[0].arrVal;
+            int64_t idx = args[1].intVal;
+            if (idx < 0 || idx > static_cast<int64_t>(arr.size())) return std::nullopt;
+            arr.insert(arr.begin() + idx, args[2]);
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    if (name == "array_any" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            for (auto& e : args[0].arrVal)
+                if (e.kind == CV::Kind::Integer && e.intVal != 0) return CV::fromInt(1);
+            return CV::fromInt(0);
+        }
+        return std::nullopt;
+    }
+    if (name == "array_every" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            for (auto& e : args[0].arrVal) {
+                if (e.kind != CV::Kind::Integer) return std::nullopt;
+                if (e.intVal == 0) return CV::fromInt(0);
+            }
+            return CV::fromInt(1);
+        }
+        return std::nullopt;
+    }
+    if (name == "array_count" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            int64_t count = 0;
+            for (auto& e : args[0].arrVal)
+                if (e.kind == CV::Kind::Integer && e.intVal == args[1].intVal) ++count;
+            return CV::fromInt(count);
+        }
+        return std::nullopt;
+    }
+    // ── String: str_split (returns array of strings), str_join ───────────
+    // str_split not easily representable in ConstValue (array of strings)
+    // str_join requires array of strings — skip for ConstValue evaluator.
     // ── Integer type cast builtins ─────────────────────────────────────────
     // u64(x), i64(x), int(x), uint(x) — identity; all OmScript integers are i64.
     // u32(x), i32(x) — truncate to 32 bits (zero/sign extend back to i64).
@@ -6112,6 +6286,8 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         if (iit != constIntFolds_.end()) return ConstValue::fromInt(iit->second);
         auto sit = constStringFolds_.find(id->name);
         if (sit != constStringFolds_.end()) return ConstValue::fromStr(sit->second);
+        auto ait = constArrayFolds_.find(id->name);
+        if (ait != constArrayFolds_.end()) return ConstValue::fromArr(ait->second);
         auto eit = enumConstants_.find(id->name);
         if (eit != enumConstants_.end())
             return ConstValue::fromInt(static_cast<int64_t>(eit->second));
@@ -6164,6 +6340,12 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
             if (!rv || rv->kind != ConstValue::Kind::Integer) return std::nullopt;
             return ConstValue::fromInt(rv->intVal != 0 ? 1 : 0);
         }
+        // Null-coalescing (??)
+        if (bin->op == "??") {
+            auto lv = tryFoldExprToConst(bin->left.get(), depth + 1);
+            if (lv && lv->kind == ConstValue::Kind::Integer && lv->intVal != 0) return lv;
+            return tryFoldExprToConst(bin->right.get(), depth + 1);
+        }
         auto lv = tryFoldExprToConst(bin->left.get(), depth + 1);
         auto rv = tryFoldExprToConst(bin->right.get(), depth + 1);
         if (!lv || !rv) return std::nullopt;
@@ -6193,6 +6375,10 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         if (bin->op == "^")  return ConstValue::fromInt(a ^ b);
         if (bin->op == "<<" && b >= 0 && b < 64) return ConstValue::fromInt(a << b);
         if (bin->op == ">>" && b >= 0 && b < 64) return ConstValue::fromInt(a >> b);
+        if (bin->op == ">>>") {
+            int sh = static_cast<int>(b & 63);
+            return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) >> sh));
+        }
         if (bin->op == "**") {
             if (b < 0) return (a == 1) ? std::optional<ConstValue>(ConstValue::fromInt(1)) : std::nullopt;
             int64_t r = 1; int64_t cur = a; int64_t rem = b;
@@ -6272,6 +6458,22 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         auto* ct = static_cast<ComptimeExpr*>(expr);
         static const std::unordered_map<std::string, ConstValue> emptyEnv;
         return tryConstEvalFull(ct->body.get(), emptyEnv);
+    }
+    case ASTNodeType::PIPE_EXPR: {
+        auto* pipe = static_cast<PipeExpr*>(expr);
+        auto lv = tryFoldExprToConst(pipe->left.get(), depth + 1);
+        if (!lv) return std::nullopt;
+        std::vector<ConstValue> args = {std::move(*lv)};
+        if (auto bv = evalConstBuiltin(pipe->functionName, args))
+            return bv;
+        auto declIt = functionDecls_.find(pipe->functionName);
+        if (declIt != functionDecls_.end() && declIt->second->body &&
+            declIt->second->parameters.size() == 1) {
+            std::unordered_map<std::string, ConstValue> callEnv;
+            callEnv[declIt->second->parameters[0].name] = args[0];
+            return tryConstEvalFull(declIt->second, callEnv, depth + 1);
+        }
+        return std::nullopt;
     }
     default: return std::nullopt;
     }
@@ -6387,6 +6589,12 @@ CodeGenerator::tryConstEvalFull(
                 if (!rv || rv->kind != ConstValue::Kind::Integer) return std::nullopt;
                 return ConstValue::fromInt(rv->intVal != 0 ? 1 : 0);
             }
+            // Null-coalescing (??)
+            if (bin->op == "??") {
+                auto lv = evalE(bin->left.get());
+                if (lv && lv->kind == ConstValue::Kind::Integer && lv->intVal != 0) return lv;
+                return evalE(bin->right.get());
+            }
             auto lv = evalE(bin->left.get());
             auto rv = evalE(bin->right.get());
             if (!lv || !rv) return std::nullopt;
@@ -6414,10 +6622,15 @@ CodeGenerator::tryConstEvalFull(
             if (bin->op == "^")  return ConstValue::fromInt(a ^ b);
             if (bin->op == "<<" && b >= 0 && b < 64) return ConstValue::fromInt(a << b);
             if (bin->op == ">>" && b >= 0 && b < 64) return ConstValue::fromInt(a >> b);
+            if (bin->op == ">>>") {
+                int sh = static_cast<int>(b & 63);
+                return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) >> sh));
+            }
             if (bin->op == "**") {
                 if (b < 0) return (a == 1) ? std::optional<ConstValue>(ConstValue::fromInt(1)) : std::nullopt;
-                int64_t r = 1;
-                for (int64_t i = 0; i < b && i < 64; ++i) r *= a;
+                if (b > 63) return std::nullopt; // cap to prevent signed overflow in squaring loop
+                int64_t r = 1, base = a, rem = b;
+                while (rem > 0) { if (rem & 1) r *= base; base *= base; rem >>= 1; }
                 return ConstValue::fromInt(r);
             }
             if (bin->op == "==") return ConstValue::fromInt(int64_t(a == b));
@@ -6574,6 +6787,25 @@ CodeGenerator::tryConstEvalFull(
             return std::nullopt;
         }
 
+        // ── Pipe expression: x |> f → f(x) ──────────────────────────────
+        case ASTNodeType::PIPE_EXPR: {
+            auto* pipe = static_cast<PipeExpr*>(e);
+            auto lv = evalE(pipe->left.get());
+            if (!lv) return std::nullopt;
+            // Desugar to f(x)
+            std::vector<ConstValue> args = {std::move(*lv)};
+            if (auto bv = evalConstBuiltin(pipe->functionName, args))
+                return bv;
+            auto declIt = functionDecls_.find(pipe->functionName);
+            if (declIt != functionDecls_.end() && declIt->second->body &&
+                declIt->second->parameters.size() == 1) {
+                std::unordered_map<std::string, ConstValue> callEnv;
+                callEnv[declIt->second->parameters[0].name] = args[0];
+                return tryConstEvalFull(declIt->second, callEnv, depth + 1);
+            }
+            return std::nullopt;
+        }
+
         default: return std::nullopt;
         }
     };
@@ -6601,6 +6833,19 @@ CodeGenerator::tryConstEvalFull(
                 env[decl->name] = *v;
             } else {
                 env[decl->name] = ConstValue::fromInt(0);
+            }
+            return true;
+        }
+
+        // ── MoveDecl: treat like VarDecl ─────────────────────────────────
+        case ASTNodeType::MOVE_DECL: {
+            auto* md = static_cast<MoveDecl*>(s);
+            if (md->initializer) {
+                auto v = evalE(md->initializer.get());
+                if (!v) return false;
+                env[md->name] = *v;
+            } else {
+                env[md->name] = ConstValue::fromInt(0);
             }
             return true;
         }
@@ -6815,6 +7060,13 @@ CodeGenerator::tryConstEvalFull(
                         scopeGuard.emplace_back(decl->name, it->second);
                     else
                         scopeGuard.emplace_back(decl->name, std::nullopt);
+                } else if (stmt->type == ASTNodeType::MOVE_DECL) {
+                    auto* md = static_cast<MoveDecl*>(stmt.get());
+                    auto it = env.find(md->name);
+                    if (it != env.end())
+                        scopeGuard.emplace_back(md->name, it->second);
+                    else
+                        scopeGuard.emplace_back(md->name, std::nullopt);
                 }
                 if (!evalS(stmt.get())) {
                     // Restore scope on failure
@@ -6838,7 +7090,14 @@ CodeGenerator::tryConstEvalFull(
         }
 
         default:
-            // try/catch, prefetch, assert, I/O, etc. — not safe to fold.
+            // Prefetch, assume, freeze, invalidate, defer — safe no-ops at CT.
+            if (s->type == ASTNodeType::PREFETCH_STMT ||
+                s->type == ASTNodeType::ASSUME_STMT ||
+                s->type == ASTNodeType::FREEZE_STMT ||
+                s->type == ASTNodeType::INVALIDATE_STMT ||
+                s->type == ASTNodeType::DEFER_STMT)
+                return true;
+            // try/catch, I/O, etc. — not safe to fold.
             return false;
         }
     };
