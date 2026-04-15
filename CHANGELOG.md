@@ -5,6 +5,48 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.1] - 2026-04-15
+
+### Added
+
+- **Integer type-cast syntax** — `u64(x)`, `u32(x)`, `u16(x)`, `u8(x)`, `i64(x)`, `i32(x)`, `i16(x)`, `i8(x)`, `bool(x)` are now recognized as function-call-style type coercions. They work both in normal compiled code and inside `comptime` blocks:
+  - `u64(x)`, `i64(x)`, `int(x)`, `uint(x)` — identity (all OmScript integers are `i64`)
+  - `u32(x)` — mask to lower 32 bits (`x & 0xFFFFFFFF`)
+  - `i32(x)` — `trunc` + `sext` to 32 bits (preserves signed value in range)
+  - `u16(x)` — mask to lower 16 bits (`x & 0xFFFF`)
+  - `i16(x)` — `trunc` + `sext` to 16 bits
+  - `u8(x)` — mask to lower 8 bits (`x & 0xFF`)
+  - `i8(x)` — `trunc` + `sext` to 8 bits
+  - `bool(x)` — normalize to 0 or 1 (`x != 0 ? 1 : 0`)
+  All variants fold at compile time in `comptime` blocks via `evalConstBuiltin`.
+
+- **`comptime {}` — array-returning user functions** — `comptime` blocks can now call user-defined functions that return arrays. The entire function body is evaluated at compile time by the constant evaluator; the result is emitted as a `private unnamed_addr constant [N+1 × i64]` global with OmScript's `[length, elem0, …]` array layout. No runtime allocation, no function call:
+  ```omscript
+  fn str_to_u64_fast(s:string) -> u64[] {
+      var n:int = len(s);
+      var blocks:int = (n + 7) >> 3;
+      var out:u64[] = array_fill(blocks, 0);
+      for (i:int in 0...blocks) {
+          var base:int = i << 3;
+          var x:u64 = 0;
+          if (base + 0 < n) { x |= u64(s[base + 0]) << 0;  }
+          // ... (full 8 byte lanes)
+          out[i] = x;
+      }
+      return out;
+  }
+  // Fully evaluated at compile time — zero runtime overhead:
+  var M:u64[] = comptime { str_to_u64_fast("hello"); };
+  ```
+
+- **`comptime {}` — implicit return** — The last bare expression statement in a `comptime` block is now the implicit return value, so `comptime { expr; }` works without an explicit `return` keyword. An explicit `return` still works. This matches block-expression semantics in other modern languages.
+
+- **`emitComptimeArray` helper** — new internal codegen helper that allocates `[N+1 × i64] private unnamed_addr constant` globals with OmScript's array layout and returns the base pointer as `i64`. Used by both the COMPTIME_EXPR emitter and the call-site constant folder for array-returning pure functions.
+
+- **Array results in call-site constant folding** — pure user functions that return arrays are now fully folded at their call sites (not just inside `comptime` blocks). When the compiler detects that all arguments to a pure function are compile-time constants and the function body can be fully evaluated, array results are emitted as global constants. The callee is registered in `arrayReturningFunctions_` so downstream analysis correctly tracks the variable as array-typed.
+
+---
+
 ## [4.1.0] - 2026-04-14
 
 ### Changed (compiler optimization improvements)
