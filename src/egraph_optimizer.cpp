@@ -51,8 +51,8 @@ static ClassId astToEGraph(EGraph& graph, const Expression* expr) {
 
     case ASTNodeType::BINARY_EXPR: {
         auto* bin = static_cast<const BinaryExpr*>(expr);
-        ClassId lhs = astToEGraph(graph, bin->left.get());
-        ClassId rhs = astToEGraph(graph, bin->right.get());
+        const ClassId lhs = astToEGraph(graph, bin->left.get());
+        const ClassId rhs = astToEGraph(graph, bin->right.get());
 
         // Map OmScript binary operators to e-graph Ops
         Op op = Op::Nop;
@@ -85,7 +85,7 @@ static ClassId astToEGraph(EGraph& graph, const Expression* expr) {
 
     case ASTNodeType::UNARY_EXPR: {
         auto* un = static_cast<const UnaryExpr*>(expr);
-        ClassId operand = astToEGraph(graph, un->operand.get());
+        const ClassId operand = astToEGraph(graph, un->operand.get());
 
         Op op = Op::Nop;
         if      (un->op == "-") op = Op::Neg;
@@ -100,9 +100,9 @@ static ClassId astToEGraph(EGraph& graph, const Expression* expr) {
 
     case ASTNodeType::TERNARY_EXPR: {
         auto* tern = static_cast<const TernaryExpr*>(expr);
-        ClassId cond = astToEGraph(graph, tern->condition.get());
-        ClassId thenE = astToEGraph(graph, tern->thenExpr.get());
-        ClassId elseE = astToEGraph(graph, tern->elseExpr.get());
+        const ClassId cond = astToEGraph(graph, tern->condition.get());
+        const ClassId thenE = astToEGraph(graph, tern->thenExpr.get());
+        const ClassId elseE = astToEGraph(graph, tern->elseExpr.get());
 
         ENode node(Op::Ternary);
         node.children = {cond, thenE, elseE};
@@ -211,7 +211,7 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
 
     case Op::Var: {
         // Strip internal prefixes
-        std::string name = node.name;
+        const std::string name = node.name;
         if (name.substr(0, 6) == "__str_") {
             return std::make_unique<LiteralExpr>(name.substr(6));
         }
@@ -273,7 +273,7 @@ std::unique_ptr<Expression> optimizeExpression(const Expression* expr) {
     config.enableConstantFolding = true;
 
     EGraph graph(config);
-    ClassId root = astToEGraph(graph, expr);
+    const ClassId root = astToEGraph(graph, expr);
 
     // Run equality saturation with all rules.
     // The rule set is constant across the lifetime of the process, so we build
@@ -283,7 +283,7 @@ std::unique_ptr<Expression> optimizeExpression(const Expression* expr) {
     graph.saturate(kAllRules);
 
     // Extract the optimal expression
-    CostModel model;
+    const CostModel model;
     std::unordered_map<ClassId, ENode> cache;
     return eNodeToAST(graph, root, model, cache);
 }
@@ -398,8 +398,8 @@ static std::unique_ptr<Expression> tryOptimize(std::unique_ptr<Expression> expr)
             return expr;
         // Preserve source location from the original expression so that error
         // messages from the codegen still include line/column information.
-        int origLine = expr->line;
-        int origColumn = expr->column;
+        const int origLine = expr->line;
+        const int origColumn = expr->column;
         auto optimized = optimizeExpression(expr.get());
         if (optimized) {
             if (optimized->line == 0) {
@@ -481,7 +481,7 @@ static void optimizeStatement(Statement* stmt) {
     }
     case ASTNodeType::INVALIDATE_STMT:
         // Nothing to optimize for invalidate statements.
-        break;
+        [[fallthrough]];
     default:
         break;
     }

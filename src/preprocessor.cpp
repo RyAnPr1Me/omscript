@@ -109,7 +109,7 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
         while (i < r.size() && r[i] != ')') {
             while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
             if (r[i] == ')') break;
-            size_t pstart = i;
+            const size_t pstart = i;
             while (i < r.size() && isIdentChar(r[i])) i++;
             if (i > pstart) def.params.push_back(r.substr(pstart, i - pstart));
             while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
@@ -137,7 +137,7 @@ std::vector<std::string> Preprocessor::collectArgs(const std::string& text,
     bool inStr = false;
     char strChar = 0;
     while (pos < text.size() && depth > 0) {
-        char c = text[pos++];
+        const char c = text[pos++];
         if (inStr) {
             cur += c;
             if (c == '\\' && pos < text.size()) { cur += text[pos++]; continue; }
@@ -195,15 +195,15 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
     size_t i = 0;
 
     while (i < text.size()) {
-        char c = text[i];
+        const char c = text[i];
 
         // String literal: copy verbatim
         if (c == '"' || c == '\'') {
-            char q = c;
+            const char q = c;
             result += c;
             i++;
             while (i < text.size()) {
-                char sc = text[i++];
+                const char sc = text[i++];
                 result += sc;
                 if (sc == '\\' && i < text.size()) { result += text[i++]; continue; }
                 if (sc == q) break;
@@ -231,12 +231,12 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
 
         // Identifier: check for macro
         if (isIdentStart(c)) {
-            size_t start = i;
+            const size_t start = i;
             while (i < text.size() && isIdentChar(text[i])) i++;
-            std::string ident = text.substr(start, i - start);
+            const std::string ident = text.substr(start, i - start);
 
             auto it = macros_.find(ident);
-            bool isSpecial = (ident == "__FILE__" || ident == "__LINE__" || ident == "__COUNTER__");
+            const bool isSpecial = (ident == "__FILE__" || ident == "__LINE__" || ident == "__COUNTER__");
 
             if (isSpecial || (it != macros_.end() && !it->second.isFunctionLike)) {
                 result += expandSimple(ident, lineNo, depth);
@@ -261,9 +261,9 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
                         size_t ei = 0;
                         while (ei < expanded.size()) {
                             if (isIdentStart(expanded[ei])) {
-                                size_t es = ei;
+                                const size_t es = ei;
                                 while (ei < expanded.size() && isIdentChar(expanded[ei])) ei++;
-                                std::string tok = expanded.substr(es, ei - es);
+                                const std::string tok = expanded.substr(es, ei - es);
                                 newExp += (tok == param) ? arg : tok;
                             } else {
                                 newExp += expanded[ei++];
@@ -334,24 +334,24 @@ long long ExprEval::parsePrimary() {
     }
 
     if (std::isdigit(static_cast<unsigned char>(src[pos]))) {
-        size_t start = pos;
+        const size_t start = pos;
         while (pos < src.size() && std::isdigit(static_cast<unsigned char>(src[pos]))) pos++;
         return std::stoll(src.substr(start, pos - start));
     }
 
     if (isIdStart(src[pos])) {
-        size_t start = pos;
+        const size_t start = pos;
         while (pos < src.size() && isIdChar(src[pos])) pos++;
-        std::string ident = src.substr(start, pos - start);
+        const std::string ident = src.substr(start, pos - start);
 
         if (ident == "defined") {
             skip();
-            bool paren = (pos < src.size() && src[pos] == '(');
+            const bool paren = (pos < src.size() && src[pos] == '(');
             if (paren) pos++;
             skip();
-            size_t ns = pos;
+            const size_t ns = pos;
             while (pos < src.size() && isIdChar(src[pos])) pos++;
-            std::string name = src.substr(ns, pos - ns);
+            const std::string name = src.substr(ns, pos - ns);
             if (paren) { skip(); if (pos < src.size() && src[pos] == ')') pos++; }
             return macros.count(name) ? 1 : 0;
         }
@@ -380,8 +380,8 @@ long long ExprEval::parseMul() {
         skip();
         if (pos >= src.size()) break;
         if (src[pos] == '*') { pos++; v *= parseUnary(); }
-        else if (src[pos] == '/') { pos++; long long r = parseUnary(); v = r ? v / r : 0; }
-        else if (src[pos] == '%') { pos++; long long r = parseUnary(); v = r ? v % r : 0; }
+        else if (src[pos] == '/') { pos++; const long long r = parseUnary(); v = r ? v / r : 0; }
+        else if (src[pos] == '%') { pos++; const long long r = parseUnary(); v = r ? v % r : 0; }
         else break;
     }
     return v;
@@ -418,7 +418,7 @@ long long ExprEval::parseAnd() {
     while (true) {
         skip();
         if (pos + 1 < src.size() && src[pos]=='&' && src[pos+1]=='&') {
-            pos += 2; long long r = parseCmp(); v = (v && r);
+            pos += 2; const long long r = parseCmp(); v = (v && r);
         } else break;
     }
     return v;
@@ -428,7 +428,7 @@ long long ExprEval::parseOr() {
     while (true) {
         skip();
         if (pos + 1 < src.size() && src[pos]=='|' && src[pos+1]=='|') {
-            pos += 2; long long r = parseAnd(); v = (v || r);
+            pos += 2; const long long r = parseAnd(); v = (v || r);
         } else break;
     }
     return v;
@@ -437,7 +437,7 @@ long long ExprEval::parseOr() {
 } // anonymous namespace
 
 long long Preprocessor::evalExpr(const std::string& expr, int lineNo) const {
-    std::string expanded = substituteMacros(trim(expr), lineNo, 0);
+    const std::string expanded = substituteMacros(trim(expr), lineNo, 0);
     ExprEval ev(expanded, lineNo, this, macros_);
     return ev.parse();
 }
@@ -496,13 +496,13 @@ std::string Preprocessor::process(const std::string& source) {
             continue;
         }
 
-        size_t dpos = stripped.find('#');
+        const size_t dpos = stripped.find('#');
         std::string rest = trimLeft(stripped.substr(dpos + 1));
 
         size_t kend = 0;
         while (kend < rest.size() && std::isalpha(static_cast<unsigned char>(rest[kend]))) kend++;
-        std::string kw = rest.substr(0, kend);
-        std::string arg = trim(rest.substr(kend));
+        const std::string kw = rest.substr(0, kend);
+        const std::string arg = trim(rest.substr(kend));
 
         if (kw == "ifdef" || kw == "ifndef") {
             const std::string name = trim(arg);
@@ -512,7 +512,7 @@ std::string Preprocessor::process(const std::string& source) {
             output += '\n'; continue;
         }
         if (kw == "if") {
-            bool cond = isActive() && (evalExpr(arg, lineNo) != 0);
+            const bool cond = isActive() && (evalExpr(arg, lineNo) != 0);
             condStack.push_back({cond, cond, false});
             output += '\n'; continue;
         }
@@ -529,7 +529,7 @@ std::string Preprocessor::process(const std::string& source) {
                     {filename_, lineNo, 0},
                     "#elif after #else"});
             if (!top.seenTrue && condStack[condStack.size()-2].active) {
-                bool cond = (evalExpr(arg, lineNo) != 0);
+                const bool cond = (evalExpr(arg, lineNo) != 0);
                 top.active = cond;
                 top.seenTrue = cond;
             } else {
@@ -599,15 +599,15 @@ std::string Preprocessor::process(const std::string& source) {
         if (kw == "assert") {
             std::string exprPart = arg;
             std::string msgPart;
-            size_t qpos = arg.find('"');
+            const size_t qpos = arg.find('"');
             if (qpos != std::string::npos) {
                 exprPart = trim(arg.substr(0, qpos));
-                size_t qend = arg.rfind('"');
+                const size_t qend = arg.rfind('"');
                 if (qend > qpos)
                     msgPart = arg.substr(qpos + 1, qend - qpos - 1);
             }
             if (evalExpr(exprPart, lineNo) == 0) {
-                std::string msg = msgPart.empty()
+                const std::string msg = msgPart.empty()
                     ? "compile-time assertion failed: " + exprPart
                     : msgPart;
                 throw omscript::DiagnosticError(omscript::Diagnostic{

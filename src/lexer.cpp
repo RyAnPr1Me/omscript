@@ -285,12 +285,8 @@ Token Lexer::scanNumber() {
     if (!isAtEnd() && (peek() == 'e' || peek() == 'E')) {
         // Only treat as exponent if followed by a digit or +/- then digit.
         const char next1 = peek(1);
-        bool hasExp = false;
-        if (isDigit(next1)) {
-            hasExp = true;
-        } else if ((next1 == '+' || next1 == '-') && isDigit(peek(2))) {
-            hasExp = true;
-        }
+        const bool hasExp = isDigit(next1) ||
+                            ((next1 == '+' || next1 == '-') && isDigit(peek(2)));
         if (hasExp) {
             isFloat = true;
             num += advance(); // consume 'e'/'E'

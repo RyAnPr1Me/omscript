@@ -135,19 +135,19 @@ void CTValue::appendMemoHash(std::string& out) const {
     char buf[32];                           // enough for "X:" + 20-digit int64
     switch (kind) {
     case CTValueKind::CONCRETE_I64: {
-        int n = std::snprintf(buf, sizeof(buf), "I:%lld",
+        const int n = std::snprintf(buf, sizeof(buf), "I:%lld",
                               static_cast<long long>(scalar.i64));
         out.append(buf, static_cast<size_t>(n));
         return;
     }
     case CTValueKind::CONCRETE_U64: {
-        int n = std::snprintf(buf, sizeof(buf), "U:%llu",
+        const int n = std::snprintf(buf, sizeof(buf), "U:%llu",
                               static_cast<unsigned long long>(scalar.u64));
         out.append(buf, static_cast<size_t>(n));
         return;
     }
     case CTValueKind::CONCRETE_F64: {
-        int n = std::snprintf(buf, sizeof(buf), "F:%.17g", scalar.f64);
+        const int n = std::snprintf(buf, sizeof(buf), "F:%.17g", scalar.f64);
         out.append(buf, static_cast<size_t>(n));
         return;
     }
@@ -159,7 +159,7 @@ void CTValue::appendMemoHash(std::string& out) const {
         out.append(str);
         return;
     case CTValueKind::CONCRETE_ARRAY: {
-        int n = std::snprintf(buf, sizeof(buf), "A:%llu",
+        const int n = std::snprintf(buf, sizeof(buf), "A:%llu",
                               static_cast<unsigned long long>(arr));
         out.append(buf, static_cast<size_t>(n));
         return;
@@ -302,7 +302,7 @@ uint64_t CTEngine::arrayLength(CTArrayHandle h) const {
 CTArrayHandle CTEngine::snapshotArray(CTArrayHandle src) {
     const CTArray* orig = heap_.get(src);
     if (!orig) return CT_NULL_HANDLE;
-    CTArrayHandle dst = heap_.alloc(orig->len);
+    const CTArrayHandle dst = heap_.alloc(orig->len);
     CTArray* copy = heap_.getMut(dst);
     copy->data = orig->data;
     return dst;
@@ -368,7 +368,7 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
     // Execute.
     ++currentDepth_;
     fuel_ = 0;
-    bool ok = executeBody(frame, fn->body.get());
+    const bool ok = executeBody(frame, fn->body.get());
     --currentDepth_;
 
     if (!ok && !frame.hasReturned && !frame.hasLastBare) return std::nullopt;
@@ -410,7 +410,7 @@ std::optional<CTValue> CTEngine::evalComptimeBlock(
 
     ++currentDepth_;
     fuel_ = 0;
-    bool ok = executeBody(frame, body);
+    const bool ok = executeBody(frame, body);
     --currentDepth_;
 
     if (frame.hasReturned)  return frame.returnValue;
@@ -471,37 +471,37 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         auto* bin = static_cast<const BinaryExpr*>(e);
         // Short-circuit logical ops first.
         if (bin->op == "&&") {
-            CTValue lv = evalExpr(frame, bin->left.get());
+            const CTValue lv = evalExpr(frame, bin->left.get());
             if (!lv.isKnown()) return CTValue::uninit();
             if (!lv.isTruthy()) return CTValue::fromI64(0);
-            CTValue rv = evalExpr(frame, bin->right.get());
+            const CTValue rv = evalExpr(frame, bin->right.get());
             if (!rv.isKnown()) return CTValue::uninit();
             return CTValue::fromI64(rv.isTruthy() ? 1 : 0);
         }
         if (bin->op == "||") {
-            CTValue lv = evalExpr(frame, bin->left.get());
+            const CTValue lv = evalExpr(frame, bin->left.get());
             if (!lv.isKnown()) return CTValue::uninit();
             if (lv.isTruthy()) return CTValue::fromI64(1);
-            CTValue rv = evalExpr(frame, bin->right.get());
+            const CTValue rv = evalExpr(frame, bin->right.get());
             if (!rv.isKnown()) return CTValue::uninit();
             return CTValue::fromI64(rv.isTruthy() ? 1 : 0);
         }
         // Null-coalescing (??)
         if (bin->op == "??") {
-            CTValue lv = evalExpr(frame, bin->left.get());
+            const CTValue lv = evalExpr(frame, bin->left.get());
             if (lv.isKnown() && lv.isTruthy()) return lv;
             return evalExpr(frame, bin->right.get());
         }
         CTValue lv = evalExpr(frame, bin->left.get());
         CTValue rv = evalExpr(frame, bin->right.get());
-        return evalBinaryOp(bin->op, std::move(lv), std::move(rv));
+        return evalBinaryOp(bin->op, lv, rv);
     }
 
     // ── Unary expression ─────────────────────────────────────────────────
     case ASTNodeType::UNARY_EXPR: {
         auto* un = static_cast<const UnaryExpr*>(e);
         CTValue val = evalExpr(frame, un->operand.get());
-        return evalUnaryOp(un->op, std::move(val));
+        return evalUnaryOp(un->op, val);
     }
 
     // ── Postfix ++ / -- ──────────────────────────────────────────────────
@@ -512,7 +512,7 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         auto  it  = frame.locals.find(id->name);
         if (it == frame.locals.end() || !it->second.isInt()) return CTValue::uninit();
         CTValue old = it->second;
-        int64_t delta = (pfx->op == "++") ? 1 : -1;
+        const int64_t delta = (pfx->op == "++") ? 1 : -1;
         it->second = CTValue::fromI64(it->second.asI64() + delta);
         return old;  // postfix returns old value
     }
@@ -525,7 +525,7 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         auto* id  = static_cast<const IdentifierExpr*>(pfx->operand.get());
         auto  it  = frame.locals.find(id->name);
         if (it == frame.locals.end() || !it->second.isInt()) return CTValue::uninit();
-        int64_t delta = (pfx->op == "++") ? 1 : -1;
+        const int64_t delta = (pfx->op == "++") ? 1 : -1;
         it->second = CTValue::fromI64(it->second.asI64() + delta);
         return it->second;  // prefix returns new value
     }
@@ -533,7 +533,7 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     // ── Ternary ──────────────────────────────────────────────────────────
     case ASTNodeType::TERNARY_EXPR: {
         auto* tern = static_cast<const TernaryExpr*>(e);
-        CTValue cond = evalExpr(frame, tern->condition.get());
+        const CTValue cond = evalExpr(frame, tern->condition.get());
         if (!cond.isKnown()) return CTValue::uninit();
         return cond.isTruthy() ? evalExpr(frame, tern->thenExpr.get())
                                 : evalExpr(frame, tern->elseExpr.get());
@@ -542,8 +542,8 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     // ── Array literal → allocate on CTHeap ──────────────────────────────
     case ASTNodeType::ARRAY_EXPR: {
         auto* ae = static_cast<const ArrayExpr*>(e);
-        uint64_t n = static_cast<uint64_t>(ae->elements.size());
-        CTArrayHandle h = heap_.alloc(n);
+        const uint64_t n = static_cast<uint64_t>(ae->elements.size());
+        const CTArrayHandle h = heap_.alloc(n);
         ++stats_.arraysAllocated;
         for (size_t i = 0; i < ae->elements.size(); ++i) {
             CTValue v = evalExpr(frame, ae->elements[i].get());
@@ -556,10 +556,10 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     // ── Array / string subscript (read) ──────────────────────────────────
     case ASTNodeType::INDEX_EXPR: {
         auto* idx  = static_cast<const IndexExpr*>(e);
-        CTValue arr = evalExpr(frame, idx->array.get());
-        CTValue idxv= evalExpr(frame, idx->index.get());
+        const CTValue arr = evalExpr(frame, idx->array.get());
+        const CTValue idxv= evalExpr(frame, idx->index.get());
         if (!arr.isKnown() || !idxv.isKnown() || !idxv.isInt()) return CTValue::uninit();
-        int64_t i = idxv.asI64();
+        const int64_t i = idxv.asI64();
         if (arr.isArray()) {
             return heap_.load(arr.asArr(), i);
         }
@@ -574,7 +574,7 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     // ── Enum / scope resolution ───────────────────────────────────────────
     case ASTNodeType::SCOPE_RESOLUTION_EXPR: {
         auto* sr  = static_cast<const ScopeResolutionExpr*>(e);
-        std::string flat = sr->scopeName + "_" + sr->memberName;
+        const std::string flat = sr->scopeName + "_" + sr->memberName;
         auto eit = enumConsts_.find(flat);
         if (eit != enumConsts_.end()) return CTValue::fromI64(eit->second);
         return CTValue::uninit();
@@ -599,8 +599,8 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     // ── Index assignment as expression (arr[i] = val) ────────────────────
     case ASTNodeType::INDEX_ASSIGN_EXPR: {
         auto* ia = static_cast<const IndexAssignExpr*>(e);
-        CTValue arrVal = evalExpr(frame, ia->array.get());
-        CTValue idxVal = evalExpr(frame, ia->index.get());
+        const CTValue arrVal = evalExpr(frame, ia->array.get());
+        const CTValue idxVal = evalExpr(frame, ia->index.get());
         CTValue newVal = evalExpr(frame, ia->value.get());
         if (!arrVal.isKnown() || !idxVal.isKnown() || !newVal.isKnown()) return CTValue::uninit();
         if (!arrVal.isArray() || !idxVal.isInt()) return CTValue::uninit();
@@ -624,7 +624,7 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     // ── Pipe expression: x |> f ───────────────────────────────────────────
     case ASTNodeType::PIPE_EXPR: {
         auto* pipe = static_cast<const PipeExpr*>(e);
-        CTValue lv = evalExpr(frame, pipe->left.get());
+        const CTValue lv = evalExpr(frame, pipe->left.get());
         if (!lv.isKnown()) return CTValue::uninit();
         return evalCall(frame, pipe->functionName, {lv});
     }
@@ -638,7 +638,7 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
 // evalBinaryOp
 // ═══════════════════════════════════════════════════════════════════════════
 
-CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) {
+CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const CTValue& rhs) {
     if (!lhs.isKnown() || !rhs.isKnown()) return CTValue::uninit();
 
     // String concatenation.
@@ -654,7 +654,7 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
 
     // Float arithmetic.
     if (lhs.isFloat() || rhs.isFloat()) {
-        double a = lhs.asF64(), b = rhs.asF64();
+        const double a = lhs.asF64(), b = rhs.asF64();
         if (op == "+")  return CTValue::fromF64(a + b);
         if (op == "-")  return CTValue::fromF64(a - b);
         if (op == "*")  return CTValue::fromF64(a * b);
@@ -670,8 +670,8 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
 
     // Integer arithmetic.
     if (!lhs.isInt() || !rhs.isInt()) return CTValue::uninit();
-    int64_t  a = lhs.asI64(), b = rhs.asI64();
-    uint64_t ua = lhs.asU64();
+    const int64_t  a = lhs.asI64(), b = rhs.asI64();
+    const uint64_t ua = lhs.asU64();
 
     if (op == "+")  return CTValue::fromI64(a + b);
     if (op == "-")  return CTValue::fromI64(a - b);
@@ -684,7 +684,7 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
     if (op == "<<" && b >= 0 && b < 64) return CTValue::fromU64(ua << static_cast<unsigned>(b));
     if (op == ">>" && b >= 0 && b < 64) return CTValue::fromI64(a >> static_cast<int>(b));
     if (op == ">>>") {
-        int sh = static_cast<int>(b & 63);
+        const int sh = static_cast<int>(b & 63);
         return CTValue::fromU64(ua >> sh);
     }
     if (op == "**") {
@@ -712,7 +712,7 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
     if (op == "<<=" && b >= 0 && b < 64) return CTValue::fromU64(ua << static_cast<unsigned>(b));
     if (op == ">>=" && b >= 0 && b < 64) return CTValue::fromI64(a >> static_cast<int>(b));
     if (op == ">>>=") {
-        int sh = static_cast<int>(b & 63);
+        const int sh = static_cast<int>(b & 63);
         return CTValue::fromU64(ua >> sh);
     }
 
@@ -723,7 +723,7 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs) 
 // evalUnaryOp
 // ═══════════════════════════════════════════════════════════════════════════
 
-CTValue CTEngine::evalUnaryOp(const std::string& op, CTValue val) {
+CTValue CTEngine::evalUnaryOp(const std::string& op, const CTValue& val) {
     if (!val.isKnown()) return CTValue::uninit();
     if (val.isFloat()) {
         if (op == "-")  return CTValue::fromF64(-val.asF64());
@@ -746,10 +746,10 @@ CTValue CTEngine::evalUnaryOp(const std::string& op, CTValue val) {
 // evalTypeCast — integer type-cast builtins
 // ═══════════════════════════════════════════════════════════════════════════
 
-CTValue CTEngine::evalTypeCast(const std::string& name, CTValue val) {
+CTValue CTEngine::evalTypeCast(const std::string& name, const CTValue& val) {
     if (!val.isKnown()) return CTValue::uninit();
     if (val.isInt()) {
-        int64_t v = val.asI64();
+        const int64_t v = val.asI64();
         if (name == "u64" || name == "i64" || name == "int" || name == "uint")
             return CTValue::fromI64(v);
         if (name == "u32")
@@ -867,7 +867,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     // ── len ──────────────────────────────────────────────────────────────
     if (name == "len" && n == 1) {
         if (auto s = strArg(0)) return CTValue::fromI64(static_cast<int64_t>(s->size()));
-        CTArrayHandle h = arrArg(0);
+        const CTArrayHandle h = arrArg(0);
         if (h != CT_NULL_HANDLE)
             return CTValue::fromI64(static_cast<int64_t>(heap_.length(h)));
         return std::nullopt;
@@ -885,7 +885,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // ── push(arr, val) → mutates array, returns 0 (void) ────────────────
     if (name == "push" && n == 2) {
-        CTArrayHandle h = arrArg(0);
+        const CTArrayHandle h = arrArg(0);
         if (h != CT_NULL_HANDLE && args[1].isKnown()) {
             heap_.push(h, args[1]);
             return CTValue::fromI64(0);
@@ -895,9 +895,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // ── pop(arr) → removes & returns last element ───────────────────────
     if (name == "pop" && n == 1) {
-        CTArrayHandle h = arrArg(0);
+        const CTArrayHandle h = arrArg(0);
         if (h != CT_NULL_HANDLE) {
-            uint64_t len = heap_.length(h);
+            const uint64_t len = heap_.length(h);
             if (len == 0) return std::nullopt;
             CTValue last = heap_.load(h, static_cast<int64_t>(len - 1));
             CTArray* arr = heap_.getMut(h);
@@ -991,7 +991,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (a && b) {
             uint64_t ua = static_cast<uint64_t>(std::abs(*a));
             uint64_t ub = static_cast<uint64_t>(std::abs(*b));
-            while (ub) { uint64_t t = ub; ub = ua % ub; ua = t; }
+            while (ub) { const uint64_t t = ub; ub = ua % ub; ua = t; }
             return CTValue::fromI64(static_cast<int64_t>(ua));
         }
         return std::nullopt;
@@ -1003,7 +1003,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
             uint64_t ub = static_cast<uint64_t>(std::abs(*b));
             if (ua == 0 || ub == 0) return CTValue::fromI64(0);
             uint64_t g = ua, tb = ub;
-            while (tb) { uint64_t t = tb; tb = g % tb; g = t; }
+            while (tb) { const uint64_t t = tb; tb = g % tb; g = t; }
             return CTValue::fromI64(static_cast<int64_t>(ua / g * ub));
         }
         return std::nullopt;
@@ -1054,7 +1054,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         auto v = intArg(0), k = intArg(1);
         if (v && k) {
             uint64_t x = static_cast<uint64_t>(*v);
-            int sh = static_cast<int>(*k) & 63;
+            const int sh = static_cast<int>(*k) & 63;
             return CTValue::fromI64(static_cast<int64_t>((x << sh) | (x >> (64 - sh))));
         }
         return std::nullopt;
@@ -1063,7 +1063,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         auto v = intArg(0), k = intArg(1);
         if (v && k) {
             uint64_t x = static_cast<uint64_t>(*v);
-            int sh = static_cast<int>(*k) & 63;
+            const int sh = static_cast<int>(*k) & 63;
             return CTValue::fromI64(static_cast<int64_t>((x >> sh) | (x << (64 - sh))));
         }
         return std::nullopt;
@@ -1123,7 +1123,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
     if ((name == "to_int" || name == "string_to_number" || name == "str_to_int") && n == 1) {
         if (auto s = strArg(0)) {
-            try { return CTValue::fromI64(static_cast<int64_t>(std::stoll(*s))); } catch (...) {}
+            try { return CTValue::fromI64(static_cast<int64_t>(std::stoll(*s))); } catch (...) {} // NOLINT(bugprone-empty-catch)
         }
         return std::nullopt;
     }

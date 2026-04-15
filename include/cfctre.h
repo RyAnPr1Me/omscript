@@ -349,9 +349,9 @@ private:
                         int64_t baseIdx, int64_t n);
     bool    executeBody(CTFrame& frame, const BlockStmt* body);
 
-    CTValue evalBinaryOp(const std::string& op, CTValue lhs, CTValue rhs);
-    CTValue evalUnaryOp(const std::string& op, CTValue val);
-    CTValue evalTypeCast(const std::string& name, CTValue val);
+    CTValue evalBinaryOp(const std::string& op, const CTValue& lhs, const CTValue& rhs);
+    CTValue evalUnaryOp(const std::string& op, const CTValue& val);
+    CTValue evalTypeCast(const std::string& name, const CTValue& val);
     CTValue evalCall(CTFrame& callerFrame,
                      const std::string& fnName,
                      const std::vector<CTValue>& args);
