@@ -5424,14 +5424,42 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     const std::vector<CodeGenerator::ConstValue>& args)
 {
     using CV = CodeGenerator::ConstValue;
+
+    // ── Fast reject: skip entire if-chain for unknown builtin names ──────
+    static const std::unordered_set<std::string> kKnownBuiltins = {
+        "len","str_len","abs","min","max","sign","clamp","pow","sqrt","gcd",
+        "lcm","log2","exp2","is_even","is_odd","floor","ceil","round",
+        "to_char","is_alpha","is_digit","to_string","number_to_string",
+        "to_int","string_to_number","str_to_int","char_code","str_find",
+        "str_index_of","str_contains","str_starts_with","startswith",
+        "str_ends_with","endswith","str_substr","str_upper","str_lower",
+        "str_repeat","str_trim","str_reverse","str_count","str_replace",
+        "str_pad_left","str_pad_right","str_eq","str_concat","char_at",
+        "is_power_of_2","popcount","clz","ctz","bitreverse","bswap",
+        "rotate_left","rotate_right","saturating_add","saturating_sub",
+        "str_chars","typeof","array_fill","array_concat","array_slice",
+        "array_contains","index_of","array_find","array_min","array_max",
+        "array_last","array_product","sum",
+        "is_upper","is_lower","is_space","is_alnum",
+        "fast_add","fast_sub","fast_mul","fast_div",
+        "precise_add","precise_sub","precise_mul","precise_div",
+        "sin","cos","tan","asin","acos","atan","atan2","cbrt","hypot",
+        "fma","copysign","min_float","max_float",
+        "reverse","sort","array_remove","array_insert",
+        "array_any","array_every","array_count",
+        "u64","i64","int","uint","u32","i32","u16","i16","u8","i8","bool"
+    };
+    if (kKnownBuiltins.find(name) == kKnownBuiltins.end())
+        return std::nullopt;
+
     const size_t n = args.size();
     auto intArg = [&](size_t i) -> std::optional<int64_t> {
         if (i < n && args[i].kind == CV::Kind::Integer) return args[i].intVal;
         return std::nullopt;
     };
-    auto strArg = [&](size_t i) -> std::optional<std::string> {
-        if (i < n && args[i].kind == CV::Kind::String) return args[i].strVal;
-        return std::nullopt;
+    auto strArg = [&](size_t i) -> const std::string* {
+        if (i < n && args[i].kind == CV::Kind::String) return &args[i].strVal;
+        return nullptr;
     };
 
     // ── len(x) ─────────────────────────────────────────────────────────────

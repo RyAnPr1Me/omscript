@@ -775,6 +775,36 @@ CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
 // Helper lambdas (defined at function scope to access args cleanly).
 std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
                                                const std::vector<CTValue>& args) {
+    // ── Fast reject: skip the entire if-chain for unknown names ──────────
+    static const std::unordered_set<std::string> kKnownBuiltins = {
+        "len","str_len","abs","push","pop","min","max","sign","clamp","pow",
+        "sqrt","gcd","lcm","log2","exp2","is_even","is_odd","floor","ceil",
+        "round","to_char","is_alpha","is_digit","to_string","number_to_string",
+        "to_int","string_to_number","str_to_int","char_code","str_find",
+        "str_index_of","str_contains","str_starts_with","startswith",
+        "str_ends_with","endswith","str_substr","str_upper","str_lower",
+        "str_repeat","str_trim","str_reverse","str_count","str_replace",
+        "str_pad_left","str_pad_right","str_eq","str_concat","char_at",
+        "is_power_of_2","popcount","clz","ctz","bitreverse","bswap",
+        "rotate_left","rotate_right","saturating_add","saturating_sub",
+        "str_chars","typeof","array_fill","range","range_step","array_concat",
+        "array_slice","array_copy","sum","array_product","array_min",
+        "array_max","array_last","array_contains","index_of","array_find",
+        "is_upper","is_lower","is_space","is_alnum",
+        "fast_add","fast_sub","fast_mul","fast_div",
+        "precise_add","precise_sub","precise_mul","precise_div",
+        "sin","cos","tan","asin","acos","atan","atan2","exp","cbrt","hypot",
+        "fma","copysign","min_float","max_float",
+        "reverse","sort","array_remove","array_insert",
+        "array_any","array_every","array_count",
+        "str_split","str_join",
+        // Type casts are handled by evalTypeCast, not here, but include for
+        // completeness if they reach evalBuiltin via the fallback path:
+        "u64","i64","int","uint","u32","i32","u16","i16","u8","i8","bool"
+    };
+    if (kKnownBuiltins.find(name) == kKnownBuiltins.end())
+        return std::nullopt;
+
     const size_t n = args.size();
 
     // Helpers.
@@ -782,9 +812,10 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (i < n && args[i].isInt()) return args[i].asI64();
         return std::nullopt;
     };
-    auto strArg = [&](size_t i) -> std::optional<std::string> {
-        if (i < n && args[i].isString()) return args[i].asStr();
-        return std::nullopt;
+    // strArg returns a pointer to the arg's string, avoiding a copy.
+    auto strArg = [&](size_t i) -> const std::string* {
+        if (i < n && args[i].isString()) return &args[i].asStr();
+        return nullptr;
     };
     auto arrArg = [&](size_t i) -> CTArrayHandle {
         if (i < n && args[i].isArray()) return args[i].asArr();
