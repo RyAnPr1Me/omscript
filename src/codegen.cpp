@@ -6580,7 +6580,7 @@ CodeGenerator::tryConstEvalFull(
             }
             if (bin->op == "**") {
                 if (b < 0) return (a == 1) ? std::optional<ConstValue>(ConstValue::fromInt(1)) : std::nullopt;
-                if (b > 63) return std::nullopt; // avoid pathologically large exponents
+                if (b > 63) return std::nullopt; // i64 can hold at most 2^63-1; cap to prevent UB
                 int64_t r = 1, base = a, rem = b;
                 while (rem > 0) { if (rem & 1) r *= base; base *= base; rem >>= 1; }
                 return ConstValue::fromInt(r);
