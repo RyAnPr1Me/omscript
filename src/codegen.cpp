@@ -6035,9 +6035,8 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     // ── array_concat(arr1, arr2) ───────────────────────────────────────────
     if (name == "array_concat" && n == 2) {
         if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Array) {
-            std::vector<CV> result;
+            std::vector<CV> result = args[0].arrVal;
             result.reserve(args[0].arrVal.size() + args[1].arrVal.size());
-            result = args[0].arrVal;
             result.insert(result.end(), args[1].arrVal.begin(), args[1].arrVal.end());
             return CV::fromArr(std::move(result));
         }
@@ -6582,7 +6581,7 @@ CodeGenerator::tryConstEvalFull(
             }
             if (bin->op == "**") {
                 if (b < 0) return (a == 1) ? std::optional<ConstValue>(ConstValue::fromInt(1)) : std::nullopt;
-                if (b > 63) return std::nullopt; // i64 can hold at most 2^63-1; cap to prevent UB
+                if (b > 63) return std::nullopt; // cap to prevent signed overflow in squaring loop
                 int64_t r = 1, base = a, rem = b;
                 while (rem > 0) { if (rem & 1) r *= base; base *= base; rem >>= 1; }
                 return ConstValue::fromInt(r);
