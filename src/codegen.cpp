@@ -5428,7 +5428,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     // ── Fast reject: skip entire if-chain for unknown builtin names ──────
     static const std::unordered_set<std::string> kKnownBuiltins = {
         "len","str_len","abs","min","max","sign","clamp","pow","sqrt","gcd",
-        "lcm","log2","exp2","is_even","is_odd","floor","ceil","round",
+        "lcm","log","log2","log10","exp2","is_even","is_odd","floor","ceil","round",
         "to_char","is_alpha","is_digit","to_string","number_to_string",
         "to_int","string_to_number","str_to_int","char_code","str_find",
         "str_index_of","str_contains","str_starts_with","startswith",
