@@ -1,0 +1,62 @@
+// Test: pipeline keyword
+// pipeline N { stage name { ... } ... }
+//
+// Count-based form: stages execute N times with a hidden __pipeline_i iterator.
+// One-shot form (no count): stages execute exactly once as a straight-line block.
+
+fn main() {
+    var total = 0;
+
+    // ── 1. Basic count form ───────────────────────────────────────────────
+    // Run a single stage 5 times; __pipeline_i goes 0,1,2,3,4 → sum = 10
+    var sum1 = 0;
+    pipeline 5 {
+        stage accumulate {
+            sum1 = sum1 + __pipeline_i;
+        }
+    }
+    total = total + sum1;   // 10
+
+    // ── 2. Multiple stages ────────────────────────────────────────────────
+    // Three stages run 4 times each.
+    // load: x = __pipeline_i (0,1,2,3)
+    // compute: y = x * 2
+    // store: sum2 += y  → 0+2+4+6 = 12
+    var sum2 = 0;
+    var x = 0;
+    var y = 0;
+    pipeline 4 {
+        stage load    { x = __pipeline_i; }
+        stage compute { y = x * 2; }
+        stage store   { sum2 = sum2 + y; }
+    }
+    total = total + sum2;   // 12
+
+    // ── 3. One-shot form (no count) ───────────────────────────────────────
+    // Each stage runs exactly once; no loop overhead.
+    var a = 1;
+    var b = 0;
+    pipeline {
+        stage double { a = a * 2; }
+        stage add5   { b = a + 5; }
+    }
+    total = total + b;   // a=2, b=7 → +7 → total = 29
+
+    // ── 4. Count from a variable ──────────────────────────────────────────
+    var n = 3;
+    var sum4 = 0;
+    pipeline n {
+        stage body { sum4 = sum4 + 1; }
+    }
+    total = total + sum4;   // 3 → total = 32
+
+    // ── 5. Count zero — body must not execute ─────────────────────────────
+    var marker = 99;
+    pipeline 0 {
+        stage should_not_run { marker = 0; }
+    }
+    total = total + marker;   // 99 → total = 131
+
+    // Expected total: 10 + 12 + 7 + 3 + 99 = 131
+    return total;
+}

@@ -6821,3 +6821,82 @@ TEST(CodegenTest, IncrementPreservesNonNegTracking) {
     EXPECT_TRUE(foundNUWNSW)
         << "After x++ on a non-negative var, subsequent add should also get nuw+nsw";
 }
+
+// ===========================================================================
+// Pipeline statement codegen
+// ===========================================================================
+
+TEST(CodegenTest, PipelineBasicCount) {
+    // pipeline 5 { stage body { } } compiles at O0
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { pipeline 5 { stage body { } } }", codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, PipelineOneShot) {
+    // One-shot form (no count) compiles as straight-line block
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var x = 0; pipeline { stage s { x = x + 1; } } return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PipelineMultipleStages) {
+    // Three-stage pipeline; stages execute in declaration order
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var s = 0; pipeline 4 {"
+        "  stage load    { s = s + 1; }"
+        "  stage compute { s = s * 2; }"
+        "  stage store   { s = s - 1; }"
+        "} return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PipelineIteratorAccessible) {
+    // __pipeline_i is accessible inside stage bodies
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var s = 0; pipeline 10 {"
+        "  stage body { s = s + __pipeline_i; }"
+        "} return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PipelineZeroCountNoBody) {
+    // pipeline 0 should produce valid IR (empty loop, immediate exit)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { pipeline 0 { stage s { } } }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PipelineO1LoopMetadata) {
+    // At O1 the back-edge should carry llvm.loop metadata (mustprogress etc.)
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main() { pipeline 8 { stage s { } } }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool hasLoopMD = false;
+    for (auto& BB : *fn) {
+        if (auto* br = llvm::dyn_cast<llvm::BranchInst>(BB.getTerminator())) {
+            if (br->getMetadata(llvm::LLVMContext::MD_loop)) {
+                hasLoopMD = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(hasLoopMD) << "pipeline loop back-edge should carry llvm.loop metadata";
+}
+
+TEST(CodegenTest, PipelineExprCount) {
+    // Count can be a runtime value
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main(n) { pipeline n { stage s { } } }", codegen);
+    ASSERT_NE(mod, nullptr);
+}

@@ -82,6 +82,12 @@
     - 25.9 SROA (Struct/Array → Scalars)
     - 25.10 Reduction Recognition
     - 25.11 OptStats
+26. [Pipeline — Software-Prefetched Sequential Processing](#26-pipeline--software-prefetched-sequential-processing)
+    - 26.1 Syntax
+    - 26.2 The `__pipeline_i` iterator
+    - 26.3 One-shot form
+    - 26.4 Compiler guarantees
+    - 26.5 When to use `pipeline` vs `times` / `for`
 
 ---
 
@@ -2102,3 +2108,120 @@ Example output:
   allocator wrappers       :   2
 ```
 
+
+---
+
+## 26. Pipeline — Software-Prefetched Sequential Processing
+
+A `pipeline` block expresses a sequence of named *stages* that execute
+repeatedly.  Unlike a general-purpose `for` loop, it hides iteration details
+behind a count expression (or elides them entirely for one-shot use) and
+automatically applies software-prefetch and loop-interleaving hints so the
+hardware can overlap stage execution with memory traffic.
+
+### 26.1 Syntax
+
+```
+// Count form — execute stages N times
+pipeline <expr> {
+    stage <name> { <body> }
+    ...
+}
+
+// One-shot form — execute stages once, no loop overhead
+pipeline {
+    stage <name> { <body> }
+    ...
+}
+```
+
+- `<expr>` is any expression evaluated **once** before the first iteration.
+  It may be a literal, a variable, or an arbitrary sub-expression.
+- At least one `stage` must be present.
+- Stage names are labels only; they impose no variable scoping.
+
+**Examples:**
+
+```omscript
+// ① Accumulate __pipeline_i five times (result = 0+1+2+3+4 = 10)
+var sum = 0;
+pipeline 5 {
+    stage add {
+        sum = sum + __pipeline_i;
+    }
+}
+
+// ② Three-stage streaming transform over an array of length n
+pipeline n {
+    stage load    { x = a[__pipeline_i]; }
+    stage compute { y = transform(x);    }
+    stage store   { out[__pipeline_i] = y; }
+}
+
+// ③ Dynamic count from a function call
+pipeline len(data) {
+    stage process { consume(data[__pipeline_i]); }
+}
+```
+
+### 26.2 The `__pipeline_i` iterator
+
+The compiler injects a hidden signed-integer variable named `__pipeline_i`
+that counts from `0` (inclusive) to `<count>` (exclusive).  It is fully
+accessible inside all stage bodies:
+
+```omscript
+pipeline n {
+    stage body {
+        var elem = arr[__pipeline_i];   // index the array with the iterator
+        print(__pipeline_i);            // print iteration number
+    }
+}
+```
+
+`__pipeline_i` behaves like a normal read-only variable inside the stages:
+you may pass it to functions, use it in expressions, and index arrays with it.
+Assigning to `__pipeline_i` is legal but has no effect on the loop counter
+(the compiler updates it separately at the end of each iteration).
+
+### 26.3 One-shot form
+
+When no count is provided the stages execute exactly once as a straight-line
+block — no loop is emitted at all.  This is useful for structured
+Load→Compute→Store bursts where the caller manages iteration:
+
+```omscript
+// Caller loops; pipeline just names the phases clearly
+for (i in 0...n) {
+    pipeline {
+        stage load    { x = raw[i]; }
+        stage compute { y = process(x); }
+        stage store   { out[i] = y; }
+    }
+}
+```
+
+### 26.4 Compiler guarantees
+
+| Property | Details |
+|---|---|
+| **Execution order** | Stages always execute in declaration order, sequentially.  No concurrency. |
+| **Count evaluation** | `<expr>` is evaluated once before any stage runs. |
+| **Zero count** | A count ≤ 0 means the body never executes (same as `times 0`). |
+| **Auto-prefetch** | At `-O1` or above, the compiler identifies every `arr[__pipeline_i]` access and emits `llvm.prefetch` for `arr[__pipeline_i + D]` where `D = max(8, 2 × number_of_stages)`. |
+| **Loop metadata** | The loop back-edge carries `llvm.loop.mustprogress`, `llvm.loop.vectorize.enable`, `llvm.loop.interleave.count(nstages)`, and `llvm.loop.pipeline.initiationinterval=1`. |
+| **Iterator type** | `__pipeline_i` is `i64` (the default integer type). |
+
+### 26.5 When to use `pipeline` vs `times` / `for`
+
+| Construct | Use when |
+|---|---|
+| `times N { ... }` | Body is a single logical unit; no index needed. |
+| `for (i in 0...N) { ... }` | You need explicit index control, custom step, or `break`/`continue`. |
+| `pipeline N { stage load {...} stage compute {...} stage store {...} }` | Body decomposes naturally into distinct phases (load/compute/store) *and* you want the compiler to automatically insert prefetches and interleave hints. |
+| `pipeline { stage ... }` | One-shot structured burst; caller handles the outer loop. |
+
+> **Tip:** `pipeline` is most beneficial when stage bodies contain array reads
+> separated from where the read values are used.  The compiler can then hide
+> memory latency by prefetching the next iteration's data while the current
+> iteration's compute stages run.

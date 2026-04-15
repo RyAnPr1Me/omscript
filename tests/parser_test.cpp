@@ -1706,3 +1706,64 @@ TEST(ParserTest, SimdTypeAnnotation) {
     ASSERT_NE(varDecl, nullptr);
     EXPECT_EQ(varDecl->typeName, "f32x4");
 }
+
+// ---------------------------------------------------------------------------
+// Pipeline statement parsing
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, PipelineStmtWithCount) {
+    // pipeline 5 { stage body { } }
+    auto program = parse("fn main() { pipeline 5 { stage body { } } }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* pl = dynamic_cast<PipelineStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(pl, nullptr);
+    EXPECT_NE(pl->count, nullptr);
+    ASSERT_EQ(pl->stages.size(), 1u);
+    EXPECT_EQ(pl->stages[0].name, "body");
+}
+
+TEST(ParserTest, PipelineStmtOneShot) {
+    // pipeline { stage s { } }  — no count, one-shot
+    auto program = parse("fn main() { pipeline { stage s { } } }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* pl = dynamic_cast<PipelineStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(pl, nullptr);
+    EXPECT_EQ(pl->count, nullptr);
+    ASSERT_EQ(pl->stages.size(), 1u);
+    EXPECT_EQ(pl->stages[0].name, "s");
+}
+
+TEST(ParserTest, PipelineStmtMultipleStages) {
+    auto program = parse(
+        "fn main() { pipeline 10 { stage load { } stage compute { } stage store { } } }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* pl = dynamic_cast<PipelineStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(pl, nullptr);
+    ASSERT_EQ(pl->stages.size(), 3u);
+    EXPECT_EQ(pl->stages[0].name, "load");
+    EXPECT_EQ(pl->stages[1].name, "compute");
+    EXPECT_EQ(pl->stages[2].name, "store");
+}
+
+TEST(ParserTest, PipelineStmtExprCount) {
+    // Count can be any expression, including a variable reference.
+    auto program = parse("fn main() { var n = 8; pipeline n { stage s { } } }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* pl = dynamic_cast<PipelineStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(pl, nullptr);
+    EXPECT_NE(pl->count, nullptr);
+    // count should parse as an identifier expression "n"
+    auto* ident = dynamic_cast<IdentifierExpr*>(pl->count.get());
+    ASSERT_NE(ident, nullptr);
+    EXPECT_EQ(ident->name, "n");
+}
+
+TEST(ParserTest, PipelineStmtCountLiteralIsIntExpr) {
+    auto program = parse("fn main() { pipeline 3 { stage s { } } }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* pl = dynamic_cast<PipelineStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(pl, nullptr);
+    auto* lit = dynamic_cast<LiteralExpr*>(pl->count.get());
+    ASSERT_NE(lit, nullptr);
+    EXPECT_EQ(lit->intValue, 3);
+}
