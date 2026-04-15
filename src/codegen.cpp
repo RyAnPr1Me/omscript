@@ -1792,6 +1792,7 @@ llvm::Function* CodeGenerator::getOrDeclareRand() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     // rand() only accesses global PRNG state (inaccessible to the caller);
     // this lets LLVM reorder it past pure memory operations.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context,
@@ -1807,6 +1808,7 @@ llvm::Function* CodeGenerator::getOrDeclareSrand() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     // srand() only modifies global PRNG state (inaccessible to the caller);
     // it must not be reordered past rand() but can float past local stores.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context,
