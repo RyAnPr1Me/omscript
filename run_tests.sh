@@ -66,7 +66,7 @@ ptest_program() {
     (
         ./build/omsc "$source" -o "$exe" >/dev/null 2>&1 \
             || { echo "FAIL compile-failed" > "$rf"; exit 0; }
-        timeout 60 "$exe"
+        timeout 60 "$exe" 2>/dev/null
         local rc=$?
         rm -f "$exe"
         local em=$(( expected % 256 ))
@@ -74,7 +74,7 @@ ptest_program() {
         elif [ "$rc" -eq "$em" ]; then echo "PASS $rc"                > "$rf"
         else                          echo "FAIL wrong-exit $em $rc"  > "$rf"
         fi
-    ) &
+    ) 2>/dev/null &
     _PT_PIDS[$idx]=$!
     _ptest_throttle
 }
@@ -369,6 +369,7 @@ ptest_program "examples/new_builtins_test.om" 87
 ptest_program "examples/math_builtins_test.om" 52
 ptest_program "examples/trig_math_test.om" 32
 ptest_program "examples/string_builtins_test.om" 12
+ptest_program "examples/char_predicates_test.om" 27
 ptest_program "examples/array_builtins_test.om" 20
 ptest_program "examples/array_utility_test.om" 18
 ptest_program "examples/simd_register_test.om" 14
@@ -779,6 +780,7 @@ ptest_program "examples/do_until_test.om" 217
 ptest_program "examples/elif_test.om" 165
 ptest_program "examples/swap_test.om" 108
 ptest_program "examples/times_test.om" 162
+ptest_program "examples/pipeline_test.om" 131
 ptest_program "examples/destructure_test.om" 13130
 ptest_program "examples/indexed_foreach_test.om" 1652
 ptest_program "examples/repeat_until_test.om" 297

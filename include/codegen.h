@@ -338,6 +338,9 @@ class CodeGenerator {
     bool hasOptMaxFunctions;
     llvm::StringSet<> optMaxFunctions;
     OptMaxConfig currentOptMaxConfig_;
+    /// Maps LLVM function name → its @optmax config, for use by the
+    /// post-generation pass in optimizeOptMaxFunctions().
+    std::unordered_map<std::string, OptMaxConfig> optMaxFunctionConfigs_;
 
     struct ConstBinding {
         bool wasPreviouslyDefined;
@@ -606,6 +609,11 @@ class CodeGenerator {
     /// constant.
     llvm::StringSet<> constEvalFunctions_;
 
+    /// Per-function effect summaries populated by inferFunctionEffects().
+    /// Keyed by function name.  Used to automatically apply LLVM attributes
+    /// (readonly, readnone, nosync, willreturn) and to warn on @pure misuse.
+    std::unordered_map<std::string, FunctionEffects> functionEffects_;
+
     /// Evaluate a @const_eval function at compile time.
     /// Returns std::nullopt if the function body is too complex for the
     /// compile-time interpreter (falls back to runtime codegen).
@@ -808,6 +816,7 @@ class CodeGenerator {
     void generateFreeze(FreezeStmt* stmt);
     void generatePrefetch(PrefetchStmt* stmt);
     void generateAssume(AssumeStmt* stmt);
+    void generatePipeline(PipelineStmt* stmt);
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
     llvm::Value* generateReborrowExpr(ReborrowExpr* expr);
@@ -957,6 +966,15 @@ class CodeGenerator {
     //   at compile time when all arguments are constants — without requiring an
     //   explicit @const_eval annotation.
     void autoDetectConstEvalFunctions(Program* program);
+    // inferFunctionEffects: AST-level pass that computes a FunctionEffects
+    //   summary for every user function.  Results are stored in
+    //   functionEffects_ and used during function codegen to:
+    //     1. Automatically apply LLVM readonly/readnone/nosync/willreturn
+    //        attributes when the body has no detectable effects.
+    //     2. Emit a diagnostic warning when @pure is annotated on a function
+    //        whose inferred effects include I/O or memory mutation.
+    //   Runs at O1+ after analyzeConstantReturnValues.
+    void inferFunctionEffects(Program* program);
     // isPreAnalysisStringExpr: lightweight AST-only string check used by the
     //   pre-analysis (no access to namedValues; uses stringReturningFunctions_
     //   and paramStringIndices to track string parameters).

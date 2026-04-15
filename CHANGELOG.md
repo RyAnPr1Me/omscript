@@ -5,7 +5,60 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.0.0] - 2026-04-14
+## [4.1.0] - 2026-04-14
+
+### Changed (compiler optimization improvements)
+
+- **Struct field load/store IR quality improvements** — `generateFieldAccess` and `generateFieldAssign` now emit higher-quality IR:
+  - All struct field loads now use `CreateAlignedLoad(8)` (previously bare `CreateLoad`). All OmScript structs are `malloc`'d or stack-allocated as `[N x i64]` alloca, so every field pointer is naturally 8-byte aligned; making this explicit in the IR lets LLVM's backend pick optimal load instructions and enables the vectorizer to merge adjacent field loads.
+  - At O1+, all struct field loads now carry `!noundef` metadata, matching the invariant on variable loads and array element loads. OmScript struct fields are always initialized from struct literals before use (the ownership system prevents accessing uninitialized fields), so `!noundef` is a guaranteed property that enables LLVM to speculate, hoist, and CSE field reads.
+  - Struct literal initialization stores now use `CreateAlignedStore(8)` for consistency with the aligned loads.
+
+- **`generateIncDec` IR quality improvements** — the `++`/`--` operators on integer variables now emit higher-quality IR that allows LLVM to perform stronger downstream optimizations:
+  - The load emitted inside `x++`/`x--` is now a proper aligned load (`CreateAlignedLoad`, 8-byte alignment) matching what `generateIdentifier` emits for regular variable reads.
+  - At O1+, the load carries `!noundef` metadata, matching the OmScript invariant that all variables are initialized before use. This enables LLVM to speculate, CSE, and hoist the load more aggressively.
+  - When the variable is tracked as non-negative (in `nonNegValues_`), the load now carries `!range [0, INT64_MAX)` metadata (with tight upper bound if available), making non-negativity visible to every IR-level pass (LVI, CVP, InstCombine, SCEV) — not just through `llvm.assume` intrinsics.
+  - `x++` on a non-negative variable now sets the `nuw` (no unsigned wrap) flag on the increment instruction in addition to the existing `nsw` flag. When `x ∈ [0, INT64_MAX]`, `x + 1 ∈ [1, INT64_MAX]` which is strictly less than UINT64_MAX, so unsigned wrap is impossible. The `nuw` flag enables LLVM's SCEV to compute tighter unsigned ranges and helps the loop unroller propagate non-negativity to unrolled copies.
+  - After `x++` on a non-negative variable, both the alloca and the result value are inserted into `nonNegValues_`, so downstream operations (e.g. `y = x + 1` after `x++`) can also benefit from `nuw+nsw`. After `x--`, the alloca is conservatively removed from `nonNegValues_` (the result may be −1 if `x` was 0).
+
+### Changed (production-readiness / code quality)
+
+- **Version bumped to 4.1.0** — reflects the full set of IR quality, constant-folding, and language improvements added since 4.0.0.
+- **Preprocessor errors use `DiagnosticError`** — all `throw std::runtime_error(...)` in `preprocessor.cpp` have been replaced with `throw DiagnosticError(Diagnostic{...})`, the unified error type used throughout the rest of the compiler. Error messages now include a structured `SourceLocation` (filename + line number) so diagnostic renderers can emit consistent, machine-readable output.
+- **E-graph internal invariant violations use `llvm::report_fatal_error`** — two raw `assert()` calls in `egraph.cpp` have been replaced with `llvm::report_fatal_error(...)`. This ensures that out-of-range ClassId accesses produce a clear, attributed fatal error via LLVM's error-handling infrastructure rather than a silent `SIGABRT` in release builds (where `NDEBUG` disables `assert`).
+- **Unreachable path in `parser.cpp` uses `llvm_unreachable`** — the `throw std::logic_error("unreachable")` after `error()` in `Parser::consume()` has been replaced with `llvm_unreachable(...)`. This uses LLVM's standard mechanism for annotating provably unreachable code: it becomes a no-op in release builds (letting the compiler see the unreachable path) and prints a diagnostic + aborts in debug builds.
+- **Removed unused `<cassert>` include** from `egraph.cpp`.
+
+
+- **Constant folding extended to newer builtins** — the following builtins are now folded at compile time when their arguments are literal constants, eliminating the function call and all associated runtime overhead entirely:
+  - `str_to_int("42")` → integer `42`
+  - `str_pad_left("hi", 5, " ")` → interned string `"   hi"`
+  - `str_pad_right("hi", 5, " ")` → interned string `"hi   "`
+  - `sum([1, 2, 3])` → integer `6`
+  - `sum(array_fill(5, 3))` → integer `15` (= 5×3), avoids allocation entirely
+  - `sum(range(1, 6))` → integer `15` (arithmetic series formula), avoids allocation
+  - `array_product([2, 3, 4])` → integer `24`
+  - `array_last([10, 20, 30])` → integer `30`
+  - `array_min([5, 2, 8, 1])` → integer `1`
+  - `array_max([5, 2, 8, 1])` → integer `8`
+  - `array_contains([1, 2, 3], 2)` → integer `1`
+  - `array_find([10, 20, 30], 20)` → integer `1`
+  - `index_of([10, 20, 30], 30)` → integer `2`
+  - `len(range(3, 8))` → integer `5`
+  - `len(range_step(0, 10, 2))` → integer `5`
+  - `len(str_chars(s))` → `strlen(s)` (avoids allocating the char array)
+  - `len(array_concat([1,2], [3,4,5]))` → integer `5` via evalConstBuiltin chain
+  - `len(array_slice([1,2,3,4,5], 1, 4))` → integer `3` via evalConstBuiltin chain
+  Each has a matching IR-level early-out (before generating loop/branch IR) and is also handled by `evalConstBuiltin` for cross-function constant propagation via `tryConstEvalFull`.
+
+- **Purity analysis coverage** — `str_to_int`, `str_pad_left`, `str_pad_right`, `sum`, `array_product`, `array_last`, `array_min`, `array_max`, `array_contains`, `index_of`, `array_find`, `array_fill`, `array_concat`, `array_slice`, `array_copy`, `str_chars`, `str_join`, `range`, `range_step`, `log10`, `exp`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `cbrt`, `hypot`, `fma`, `copysign`, `min_float`, and `max_float` are now registered in `kPureBuiltins`, enabling `autoDetectConstEvalFunctions` to classify user functions that call these builtins as pure and eligible for cross-function constant propagation.
+
+- **`stdlibFunctions` completeness** — `array_insert`, `array_last`, `array_product`, `str_pad_left`, `str_pad_right`, `fma`, `copysign`, `min_float`, and `max_float` were missing from the canonical stdlib function set used to validate `@optmax` function bodies. They are now registered, preventing false "cannot invoke non-OPTMAX function" errors.
+
+- **`!noundef` metadata on `INDEX_OF` and `ARRAY_CONTAINS` loops** — element loads in these two search loops were missing `!noundef` metadata at O1+. Added to be consistent with all other array element loads in the codebase, enabling LLVM's undefined-value elimination passes.
+
+- **`evalConstBuiltin` enriched** — `array_min`, `array_max`, `array_contains`, `index_of`, `array_find`, `array_fill`, `array_concat`, `array_slice`, `typeof`, `str_chars`, `startswith`/`endswith` aliases, `log10`, and `sum` (via constant array) are now evaluated at compile time by the abstract constant evaluator used for inter-procedural constant propagation (`tryConstEvalFull`). This enables chains like `array_find(array_concat([1,2],[3,4]), 3)` → `2` at compile time.
+
 
 ### Added
 

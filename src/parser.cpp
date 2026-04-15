@@ -3,7 +3,7 @@
 #include "preprocessor.h"
 #include <filesystem>
 #include <fstream>
-#include <iostream>
+#include <llvm/Support/ErrorHandling.h>
 #include <stdexcept>
 
 namespace omscript {
@@ -68,7 +68,7 @@ Token Parser::consume(TokenType type, const std::string& message) {
         return advance();
     }
     error(message);
-    throw std::logic_error("unreachable parser consume() path");
+    llvm_unreachable("error() always throws");
 }
 
 [[gnu::cold]] void Parser::error(const std::string& message) {
@@ -108,7 +108,7 @@ std::unique_ptr<Program> Parser::parse() {
         if (match(TokenType::IMPORT)) {
             try {
                 parseImport(functions, enums, structs);
-            } catch (const std::runtime_error& e) {
+            } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
             }
@@ -131,7 +131,7 @@ std::unique_ptr<Program> Parser::parse() {
         if (match(TokenType::ENUM)) {
             try {
                 enums.push_back(parseEnumDecl());
-            } catch (const std::runtime_error& e) {
+            } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
             }
@@ -140,7 +140,7 @@ std::unique_ptr<Program> Parser::parse() {
         if (match(TokenType::STRUCT)) {
             try {
                 structs.push_back(parseStructDecl());
-            } catch (const std::runtime_error& e) {
+            } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
             }
@@ -281,15 +281,15 @@ std::unique_ptr<Program> Parser::parse() {
             }
             // Warn about conflicting annotations at parse time.
             if (hintOptNone && hintInline) {
-                std::cerr << "warning: '@optnone' and '@inline' are mutually exclusive on function '"
-                          << func->name << "' — '@inline' will be ignored (optnone requires noinline)\n";
+                warnings_.push_back("warning: '@optnone' and '@inline' are mutually exclusive on function '"
+                    + func->name + "' — '@inline' will be ignored (optnone requires noinline)");
             }
             if (hintOptNone && hintHot) {
-                std::cerr << "warning: '@optnone' disables all optimizations on function '"
-                          << func->name << "' — '@hot' annotation will have no effect\n";
+                warnings_.push_back("warning: '@optnone' disables all optimizations on function '"
+                    + func->name + "' — '@hot' annotation will have no effect");
             }
             functions.push_back(std::move(func));
-        } catch (const std::runtime_error& e) {
+        } catch (const std::exception& e) {
             errors_.push_back(e.what());
             synchronize();
         }
@@ -382,7 +382,7 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
         Preprocessor importPP(fullPath);
         source = importPP.process(source);
         for (const auto& w : importPP.warnings()) {
-            std::cerr << w << "\n";
+            warnings_.push_back(w);
         }
     }
     Lexer importLexer(std::move(source));
@@ -395,6 +395,11 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     importParser.importedFiles_ = importedFiles_; // Share import tracking
 
     auto importedProgram = importParser.parse();
+    // Propagate warnings from the imported file back to this parser so they
+    // are all visible to the caller without requiring stderr.
+    for (const auto& w : importParser.warnings()) {
+        warnings_.push_back(w);
+    }
 
     // Merge imported declarations into the current program.
     // When an alias was given, register every imported function in the
@@ -825,6 +830,13 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::WITH)) {
         const Token kw = tokens[current - 1];
         auto stmt = parseWithStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::PIPELINE)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parsePipelineStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
@@ -1808,6 +1820,55 @@ std::unique_ptr<Statement> Parser::parseWithStmt() {
     stmts.push_back(std::move(body));
 
     return std::make_unique<BlockStmt>(std::move(stmts));
+}
+
+// pipeline (i in start...end) { stage name { ... } ... }
+// pipeline (i in start...end...step) { ... }
+// pipeline { stage name { ... } ... }   — no explicit range; stages share any enclosing loop var
+std::unique_ptr<Statement> Parser::parsePipelineStmt() {
+    // Syntax (two forms):
+    //
+    //   pipeline N { stage name { ... } ... }
+    //     — Run stages N times.  N is any expression.  The compiler generates
+    //       a software-prefetched loop [0, N) with hidden iterator
+    //       __pipeline_i.  Array reads detected in stage bodies are
+    //       automatically prefetched D iterations ahead.
+    //
+    //   pipeline { stage name { ... } ... }
+    //     — One-shot form: stages execute exactly once as a straight-line
+    //       block.  Useful for Load→Compute→Store bursts where the caller
+    //       manages iteration.
+    //
+    // Notes:
+    //   • 'stage' names are labels only — they impose no scoping on variables
+    //     declared outside the pipeline block.
+    //   • Break/continue inside a stage work identically to inside a for-loop.
+
+    std::unique_ptr<Expression> countExpr;
+
+    // Optional count expression — present when next token is NOT '{'
+    if (!check(TokenType::LBRACE)) {
+        countExpr = parseExpression();
+    }
+
+    consume(TokenType::LBRACE, "Expected '{' after pipeline header");
+
+    std::vector<StageDecl> stages;
+    while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+        if (!match(TokenType::STAGE)) {
+            error("Expected 'stage' inside pipeline block");
+        }
+        const Token stageName = consume(TokenType::IDENTIFIER, "Expected stage name after 'stage'");
+        auto stageBody = parseBlock();
+        stages.emplace_back(stageName.lexeme, std::move(stageBody));
+    }
+    consume(TokenType::RBRACE, "Expected '}' to close pipeline block");
+
+    if (stages.empty()) {
+        error("pipeline block must contain at least one stage");
+    }
+
+    return std::make_unique<PipelineStmt>(std::move(countExpr), std::move(stages));
 }
 
 // var [a, b, c] = expr;  or  const [a, b, c] = expr;
@@ -3260,36 +3321,42 @@ OptMaxConfig Parser::parseOptMaxConfig() {
     consume(TokenType::LPAREN, "Expected '(' after @optmax");
     if (!check(TokenType::RPAREN)) {
         do {
-            const Token key = consume(TokenType::IDENTIFIER, "Expected key in @optmax config");
+            // Use advance() so keyword tokens (loop=LOOP, parallel=PARALLEL)
+            // are accepted as config keys by their lexeme string.
+            const Token key = advance();
             consume(TokenType::ASSIGN, "Expected '=' after key in @optmax config");
             if (key.lexeme == "safety") {
-                const Token val = consume(TokenType::IDENTIFIER, "Expected value for safety");
+                const Token val = advance();
                 if (val.lexeme == "off") cfg.safety = SafetyLevel::Off;
                 else if (val.lexeme == "relaxed") cfg.safety = SafetyLevel::Relaxed;
                 else cfg.safety = SafetyLevel::On;
             } else if (key.lexeme == "fast_math") {
-                const Token val = consume(TokenType::IDENTIFIER, "Expected value for fast_math");
-                cfg.fastMath = (val.lexeme == "true");
+                const Token val = advance();
+                cfg.fastMath = (val.lexeme == "true" || val.type == TokenType::TRUE);
+            } else if (key.lexeme == "aggressive_vec") {
+                const Token val = advance();
+                cfg.aggressiveVec = (val.lexeme == "true" || val.type == TokenType::TRUE);
             } else if (key.lexeme == "report") {
-                const Token val = consume(TokenType::IDENTIFIER, "Expected value for report");
-                cfg.report = (val.lexeme == "true");
+                const Token val = advance();
+                cfg.report = (val.lexeme == "true" || val.type == TokenType::TRUE);
             } else if (key.lexeme == "loop") {
                 consume(TokenType::LBRACE, "Expected '{' for loop config");
                 while (!check(TokenType::RBRACE) && !isAtEnd()) {
-                    const Token lk = consume(TokenType::IDENTIFIER, "Expected loop config key");
+                    // advance() handles `parallel` which is a keyword token
+                    const Token lk = advance();
                     consume(TokenType::ASSIGN, "Expected '=' in loop config");
                     if (lk.lexeme == "unroll") {
                         const Token v = advance();
                         try { cfg.loop.unrollCount = std::stoi(v.lexeme); } catch(...) {}
                     } else if (lk.lexeme == "vectorize") {
-                        const Token v = consume(TokenType::IDENTIFIER, "Expected bool for vectorize");
-                        cfg.loop.vectorize = (v.lexeme == "true");
+                        const Token v = advance();
+                        cfg.loop.vectorize = (v.lexeme == "true" || v.type == TokenType::TRUE);
                     } else if (lk.lexeme == "tile") {
                         const Token v = advance();
                         try { cfg.loop.tileSize = std::stoi(v.lexeme); } catch(...) {}
                     } else if (lk.lexeme == "parallel") {
-                        const Token v = consume(TokenType::IDENTIFIER, "Expected bool for parallel");
-                        cfg.loop.parallel = (v.lexeme == "true");
+                        const Token v = advance();
+                        cfg.loop.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);
                     }
                     if (!check(TokenType::RBRACE)) match(TokenType::COMMA);
                 }
@@ -3297,12 +3364,12 @@ OptMaxConfig Parser::parseOptMaxConfig() {
             } else if (key.lexeme == "memory") {
                 consume(TokenType::LBRACE, "Expected '{' for memory config");
                 while (!check(TokenType::RBRACE) && !isAtEnd()) {
-                    const Token mk = consume(TokenType::IDENTIFIER, "Expected memory config key");
+                    const Token mk = advance();
                     consume(TokenType::ASSIGN, "Expected '=' in memory config");
-                    const Token mv = consume(TokenType::IDENTIFIER, "Expected bool for memory config");
-                    if (mk.lexeme == "prefetch") cfg.memory.prefetch = (mv.lexeme == "true");
-                    else if (mk.lexeme == "noalias") cfg.memory.noalias = (mv.lexeme == "true");
-                    else if (mk.lexeme == "stack") cfg.memory.preferStack = (mv.lexeme == "true");
+                    const Token mv = advance();
+                    if (mk.lexeme == "prefetch") cfg.memory.prefetch = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
+                    else if (mk.lexeme == "noalias") cfg.memory.noalias = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
+                    else if (mk.lexeme == "stack") cfg.memory.preferStack = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
                     if (!check(TokenType::RBRACE)) match(TokenType::COMMA);
                 }
                 consume(TokenType::RBRACE, "Expected '}' after memory config");

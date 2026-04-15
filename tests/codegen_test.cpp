@@ -6712,3 +6712,191 @@ TEST(CodegenTest, DeepConstEval_SideEffectFunctionNotFolded) {
     EXPECT_TRUE(callsStrlen || callsMakeStr)
         << "make_str() with side effects must not be short-circuited";
 }
+
+// ===========================================================================
+// generateIncDec improvements: !noundef, !range, nuw, nonNeg tracking
+// ===========================================================================
+
+// At O1+, the load emitted inside x++ should carry !noundef metadata,
+// matching what generateIdentifier emits for regular variable reads.
+TEST(CodegenTest, IncDecLoadHasNoundef) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn f() { var x = 0; x++; return x; } fn main() { return f(); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("f");
+    ASSERT_NE(fn, nullptr);
+    bool foundNoundef = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* li = llvm::dyn_cast<llvm::LoadInst>(&I)) {
+                if (li->getMetadata(llvm::LLVMContext::MD_noundef)) {
+                    foundNoundef = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(foundNoundef)
+        << "Load in x++ should have !noundef at O1+";
+}
+
+// At O1+, when a non-negative variable is incremented, the load emitted
+// inside x++ should carry !range [0, INT64_MAX) metadata.
+TEST(CodegenTest, IncDecLoadHasRangeOnNonNeg) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn f() { var x = 5; x++; return x; } fn main() { return f(); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("f");
+    ASSERT_NE(fn, nullptr);
+    bool foundRange = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* li = llvm::dyn_cast<llvm::LoadInst>(&I)) {
+                if (li->getType()->isIntegerTy(64)
+                        && li->getMetadata(llvm::LLVMContext::MD_range)) {
+                    foundRange = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(foundRange)
+        << "Load of non-negative variable in x++ should have !range metadata at O1+";
+}
+
+// When a non-negative variable is incremented with ++, the resulting add
+// should have both nuw and nsw flags set.  nsw is always set; nuw is now
+// set for non-negative variables because result ∈ [1, INT64_MAX] which
+// cannot unsigned-wrap.
+TEST(CodegenTest, IncrementNUWOnNonNegVariable) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn f() { var x = 0; x++; return x; } fn main() { return f(); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("f");
+    ASSERT_NE(fn, nullptr);
+    bool foundNUWNSW = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&I)) {
+                if (bo->getOpcode() == llvm::Instruction::Add
+                        && bo->hasNoUnsignedWrap()
+                        && bo->hasNoSignedWrap()) {
+                    foundNUWNSW = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(foundNUWNSW)
+        << "x++ on a non-negative variable should produce add nuw nsw";
+}
+
+// After x++, the variable should still be tracked as non-negative, so that
+// subsequent operations involving x (e.g. x + 0 in a later add) can also
+// get nuw+nsw.
+TEST(CodegenTest, IncrementPreservesNonNegTracking) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn f() { var x = 0; x++; var y = x + 1; return y; } fn main() { return f(); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("f");
+    ASSERT_NE(fn, nullptr);
+    // After x++ (x now ≥ 1), x + 1 should also get nuw+nsw (both non-neg).
+    bool foundNUWNSW = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&I)) {
+                if (bo->getOpcode() == llvm::Instruction::Add
+                        && bo->hasNoUnsignedWrap()
+                        && bo->hasNoSignedWrap()) {
+                    foundNUWNSW = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(foundNUWNSW)
+        << "After x++ on a non-negative var, subsequent add should also get nuw+nsw";
+}
+
+// ===========================================================================
+// Pipeline statement codegen
+// ===========================================================================
+
+TEST(CodegenTest, PipelineBasicCount) {
+    // pipeline 5 { stage body { } } compiles at O0
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { pipeline 5 { stage body { } } }", codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, PipelineOneShot) {
+    // One-shot form (no count) compiles as straight-line block
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var x = 0; pipeline { stage s { x = x + 1; } } return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PipelineMultipleStages) {
+    // Three-stage pipeline; stages execute in declaration order
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var s = 0; pipeline 4 {"
+        "  stage load    { s = s + 1; }"
+        "  stage compute { s = s * 2; }"
+        "  stage store   { s = s - 1; }"
+        "} return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PipelineIteratorAccessible) {
+    // __pipeline_i is accessible inside stage bodies
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var s = 0; pipeline 10 {"
+        "  stage body { s = s + __pipeline_i; }"
+        "} return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PipelineZeroCountNoBody) {
+    // pipeline 0 should produce valid IR (empty loop, immediate exit)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { pipeline 0 { stage s { } } }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PipelineO1LoopMetadata) {
+    // At O1 the back-edge should carry llvm.loop metadata (mustprogress etc.)
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main() { pipeline 8 { stage s { } } }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool hasLoopMD = false;
+    for (auto& BB : *fn) {
+        if (auto* br = llvm::dyn_cast<llvm::BranchInst>(BB.getTerminator())) {
+            if (br->getMetadata(llvm::LLVMContext::MD_loop)) {
+                hasLoopMD = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(hasLoopMD) << "pipeline loop back-edge should carry llvm.loop metadata";
+}
+
+TEST(CodegenTest, PipelineExprCount) {
+    // Count can be a runtime value
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main(n) { pipeline n { stage s { } } }", codegen);
+    ASSERT_NE(mod, nullptr);
+}

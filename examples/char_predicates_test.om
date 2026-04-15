@@ -1,0 +1,50 @@
+// char_predicates_test.om
+// Tests for the is_upper, is_lower, is_space, and is_alnum character
+// classification builtins.  Each assertion contributes 1 to the total;
+// an unexpected 0 lowers the count, making the expected exit code a
+// direct count of passing checks.
+
+fn main() {
+    var total = 0;
+
+    // ── is_upper ────────────────────────────────────────────────────
+    total = total + is_upper(65);    // 'A' → 1
+    total = total + is_upper(90);    // 'Z' → 1
+    total = total + is_upper(77);    // 'M' → 1
+    total = total + (is_upper(97) == 0);   // 'a' → 0
+    total = total + (is_upper(48) == 0);   // '0' → 0
+    total = total + (is_upper(32) == 0);   // ' ' → 0
+    // total = 6
+
+    // ── is_lower ────────────────────────────────────────────────────
+    total = total + is_lower(97);    // 'a' → 1
+    total = total + is_lower(122);   // 'z' → 1
+    total = total + is_lower(109);   // 'm' → 1
+    total = total + (is_lower(65) == 0);   // 'A' → 0
+    total = total + (is_lower(48) == 0);   // '0' → 0
+    total = total + (is_lower(32) == 0);   // ' ' → 0
+    // total = 12
+
+    // ── is_space ────────────────────────────────────────────────────
+    total = total + is_space(32);    // ' '  → 1
+    total = total + is_space(9);     // '\t' → 1
+    total = total + is_space(10);    // '\n' → 1
+    total = total + is_space(13);    // '\r' → 1
+    total = total + is_space(11);    // '\v' → 1
+    total = total + is_space(12);    // '\f' → 1
+    total = total + (is_space(65) == 0);   // 'A' → 0
+    total = total + (is_space(48) == 0);   // '0' → 0
+    // total = 20
+
+    // ── is_alnum ────────────────────────────────────────────────────
+    total = total + is_alnum(65);    // 'A' → 1
+    total = total + is_alnum(122);   // 'z' → 1
+    total = total + is_alnum(48);    // '0' → 1
+    total = total + is_alnum(57);    // '9' → 1
+    total = total + (is_alnum(32) == 0);   // ' ' → 0
+    total = total + (is_alnum(33) == 0);   // '!' → 0
+    total = total + (is_alnum(64) == 0);   // '@' → 0
+    // total = 27
+
+    return total;
+}

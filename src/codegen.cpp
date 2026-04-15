@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
@@ -642,9 +643,12 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "array_fill",
                                                                 "array_filter",
                                                                 "array_find",
+                                                                "array_insert",
+                                                                "array_last",
                                                                 "array_map",
                                                                 "array_max",
                                                                 "array_min",
+                                                                "array_product",
                                                                 "array_reduce",
                                                                 "array_remove",
                                                                 "array_slice",
@@ -657,6 +661,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "char_at",
                                                                 "char_code",
                                                                 "clamp",
+                                                                "copysign",
                                                                 "cos",
                                                                 "exit_program",
                                                                 "exit",
@@ -670,6 +675,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "file_read",
                                                                 "file_write",
                                                                 "floor",
+                                                                "fma",
                                                                 "gcd",
                                                                 "hypot",
                                                                 "index_of",
@@ -692,7 +698,9 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "map_size",
                                                                 "map_values",
                                                                 "max",
+                                                                "max_float",
                                                                 "min",
+                                                                "min_float",
                                                                 "number_to_string",
                                                                 "pop",
                                                                 "pow",
@@ -725,6 +733,8 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "str_join",
                                                                 "str_len",
                                                                 "str_lower",
+                                                                "str_pad_left",
+                                                                "str_pad_right",
                                                                 "str_repeat",
                                                                 "str_replace",
                                                                 "str_reverse",
@@ -1767,9 +1777,7 @@ llvm::Function* CodeGenerator::getOrDeclareQsort() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
                                        {ptrTy, getDefaultType(), getDefaultType(), ptrTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "qsort", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
+    llvm::Function* fn = declareExternalFn("qsort", ty);
     return fn;
 }
 
@@ -1813,6 +1821,11 @@ llvm::Function* CodeGenerator::getOrDeclareTimeFunc() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(inaccessiblemem: read): time() reads the OS clock (inaccessible
+    // to the LLVM optimizer) and optionally writes through its pointer arg
+    // (always null in OmScript), so treat as read-only inaccessible memory.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context,
+        llvm::MemoryEffects::inaccessibleMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
 }
 
@@ -1832,9 +1845,7 @@ llvm::Function* CodeGenerator::getOrDeclareStrchr() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context)}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strchr", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
+    llvm::Function* fn = declareExternalFn("strchr", ty);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
     // memory(argmem: read): strchr only reads through its pointer arg.
@@ -3573,6 +3584,7 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
+    optMaxFunctionConfigs_.clear();
     irInstructionCount_ = 0;
     fileNoAlias_ = program->fileNoAlias;
 
@@ -3872,6 +3884,11 @@ void CodeGenerator::generate(Program* program) {
     // Runs after analyzeConstantReturnValues so zero-arg const-returning functions
     // are already classified and can be recognized as pure callees.
     autoDetectConstEvalFunctions(program);
+
+    // Effect inference: determine which user functions have I/O, memory
+    // reads/writes, or observable mutation.  Must run after autoDetectConstEvalFunctions
+    // so that the constEvalFunctions_ set is already populated (those are pure).
+    inferFunctionEffects(program);
 
     // E-Graph Equality Saturation: apply algebraic simplification, constant
     // folding, strength reduction, and other rewrites at the AST level using
@@ -4209,6 +4226,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         if (currentOptMaxConfig_.safety == SafetyLevel::Off) {
             currentOptMaxConfig_.fastMath = true;
         }
+        // Store the resolved config for optimizeOptMaxFunctions() to consume later.
+        optMaxFunctionConfigs_[func->name] = currentOptMaxConfig_;
         optimizeOptMaxBlock(func->body.get());
     }
 
@@ -4421,6 +4440,32 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->setOnlyReadsMemory();
         function->setDoesNotThrow();
         function->setWillReturn();
+    }
+    // Auto-apply LLVM memory-effect attributes based on inferred effects.
+    // Only applied when @pure is NOT already set (which sets readonly explicitly).
+    if (!func->hintPure) {
+        auto fxIt = functionEffects_.find(func->name);
+        if (fxIt != functionEffects_.end()) {
+            const FunctionEffects& fx = fxIt->second;
+            if (fx.isReadNone()) {
+                // No memory access, no I/O: readnone + nosync + willreturn
+                function->setDoesNotAccessMemory();
+                function->setNoSync();
+                if (!isSelfRecursive) {
+                    function->setWillReturn();
+                    function->addFnAttr(llvm::Attribute::Speculatable);
+                }
+            } else if (fx.isReadOnly()) {
+                // Reads memory but does not write or do I/O: readonly + nosync
+                function->setOnlyReadsMemory();
+                function->setNoSync();
+                if (!isSelfRecursive)
+                    function->setWillReturn();
+            } else if (fx.isNoSync()) {
+                // Has writes but no I/O: nosync
+                function->setNoSync();
+            }
+        }
     }
     if (func->hintNoReturn) {
         function->addFnAttr(llvm::Attribute::NoReturn);
@@ -4681,10 +4726,21 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // needed.  The save/restore is still correct — savedFMF captures the
     // existing fast flags and restores them identically.
     llvm::FastMathFlags savedFMF = builder->getFastMathFlags();
-    if (inOptMaxFunction && !useFastMath_) { // skip if globally fast (already set)
+    if (inOptMaxFunction && !useFastMath_ && currentOptMaxConfig_.fastMath) {
+        // fast_math=true (or safety=off, which implies it): enable all fast-math
+        // optimizations — FMA fusion, reassociation, reciprocal approximations,
+        // relaxed NaN/Inf semantics, and no-signed-zeros.
         llvm::FastMathFlags FMF;
         FMF.setFast();
         builder->setFastMathFlags(FMF);
+        // Also set function-level string attributes so LTO and the back-end
+        // can see the fast-math contract without inspecting every instruction.
+        function->addFnAttr("unsafe-fp-math", "true");
+        function->addFnAttr("no-nans-fp-math", "true");
+        function->addFnAttr("no-infs-fp-math", "true");
+        function->addFnAttr("no-signed-zeros-fp-math", "true");
+        function->addFnAttr("approx-func-fp-math", "true");
+        function->addFnAttr("no-trapping-math", "true");
     }
 
     // Create entry basic block
@@ -4764,6 +4820,81 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
 
         ++argIt;
+    }
+
+    // @optmax assumes=[...]: emit llvm.assume intrinsics for each assertion
+    // in the config.  Assumptions help LLVM prove range/sign/non-null facts
+    // that the programmer guarantees but the compiler cannot derive.
+    // Supported patterns: "var > N", "var >= N", "var != N", "var == N",
+    // "var < N", "var <= N" where var is a parameter name and N is an integer.
+    if (inOptMaxFunction && !currentOptMaxConfig_.assumes.empty()) {
+        llvm::Function* assumeIntr = llvm::Intrinsic::getDeclaration(
+            module.get(), llvm::Intrinsic::assume);
+        for (const auto& assumeStr : currentOptMaxConfig_.assumes) {
+            // Tokenise: split on whitespace into [var, op, literal]
+            std::istringstream ss(assumeStr);
+            std::string varName, op, litStr;
+            if (!(ss >> varName >> op >> litStr)) continue;
+            int64_t litVal = 0;
+            try { litVal = std::stoll(litStr); } catch (...) { continue; }
+            // Look up the variable in namedValues (covers all parameters just stored).
+            auto nv = namedValues.find(varName);
+            if (nv == namedValues.end()) continue;
+            auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(nv->second);
+            if (!alloca) continue;
+            llvm::Value* loaded = builder->CreateLoad(
+                alloca->getAllocatedType(), alloca, varName + ".assume.load");
+            // Cast to i64 for comparison (handles both int and float params).
+            llvm::Value* cmpVal = loaded;
+            if (cmpVal->getType()->isDoubleTy())
+                cmpVal = builder->CreateFPToSI(cmpVal, getDefaultType(), varName + ".assume.fptoi");
+            else if (cmpVal->getType() != getDefaultType())
+                cmpVal = builder->CreateSExtOrBitCast(cmpVal, getDefaultType(), varName + ".assume.cast");
+            llvm::Value* lit = llvm::ConstantInt::get(getDefaultType(), litVal, /*isSigned=*/true);
+            llvm::Value* cond = nullptr;
+            if      (op == ">")  cond = builder->CreateICmpSGT(cmpVal, lit, varName + ".assume.cond");
+            else if (op == ">=") cond = builder->CreateICmpSGE(cmpVal, lit, varName + ".assume.cond");
+            else if (op == "<")  cond = builder->CreateICmpSLT(cmpVal, lit, varName + ".assume.cond");
+            else if (op == "<=") cond = builder->CreateICmpSLE(cmpVal, lit, varName + ".assume.cond");
+            else if (op == "!=") cond = builder->CreateICmpNE (cmpVal, lit, varName + ".assume.cond");
+            else if (op == "==") cond = builder->CreateICmpEQ (cmpVal, lit, varName + ".assume.cond");
+            if (cond) {
+                builder->CreateCall(assumeIntr, {cond});
+                nonNegValues_.insert(cmpVal);  // help downstream range analysis
+            }
+        }
+    }
+
+    // @optmax memory.prefetch=true: auto-prefetch all pointer-type parameters
+    // at function entry.  This hints the CPU to load the pointed-to data into
+    // the L1/L2 cache before the first access, hiding memory latency for
+    // array-heavy numeric functions.
+    if (inOptMaxFunction && currentOptMaxConfig_.memory.prefetch) {
+        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::prefetch,
+            {llvm::PointerType::getUnqual(*context)});
+        for (size_t i = 0; i < func->parameters.size(); ++i) {
+            const auto& param = func->parameters[i];
+            if (prefetchedParams_.count(param.name)) continue;  // already prefetched
+            auto it = namedValues.find(param.name);
+            if (it == namedValues.end()) continue;
+            auto* al = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+            if (!al) continue;
+            llvm::Value* val = builder->CreateLoad(al->getAllocatedType(), al,
+                                                   param.name + ".autopf.load");
+            // Treat as a pointer (i64 → ptr cast) and prefetch the target memory.
+            llvm::Value* ptr = val->getType()->isPointerTy()
+                ? val
+                : builder->CreateIntToPtr(val, llvm::PointerType::getUnqual(*context),
+                                          param.name + ".autopf.ptr");
+            builder->CreateCall(prefetchFn, {
+                ptr,
+                builder->getInt32(0),  // read prefetch
+                builder->getInt32(3),  // high temporal locality — keep in all levels
+                builder->getInt32(1)   // data cache
+            });
+            prefetchedParams_.insert(param.name);
+        }
     }
 
     // Generate function body
@@ -4922,6 +5053,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         // Defer outside a block: just execute the body immediately
         // (normal defer semantics are handled in generateBlock)
         generateStatement(static_cast<DeferStmt*>(stmt)->body.get());
+        break;
+    case ASTNodeType::PIPELINE_STMT:
+        generatePipeline(static_cast<PipelineStmt*>(stmt));
         break;
     default:
         codegenError("Unknown statement type", stmt);
@@ -5658,10 +5792,16 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         if (auto v = intArg(0)) return CV::fromInt(*v);  // round of integer is itself
         return std::nullopt;
     }
-    // ── log2(x) / log(x) integer floor ─────────────────────────────────────
+    // ── log2(x) / log(x) / log10(x) integer floor ─────────────────────────
     if (name == "log" && n == 1) {
         if (auto v = intArg(0)) {
             if (*v > 0) return CV::fromInt(static_cast<int64_t>(std::log(static_cast<double>(*v))));
+        }
+        return std::nullopt;
+    }
+    if (name == "log10" && n == 1) {
+        if (auto v = intArg(0)) {
+            if (*v > 0) return CV::fromInt(static_cast<int64_t>(std::log10(static_cast<double>(*v))));
         }
         return std::nullopt;
     }
@@ -5670,6 +5810,214 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         if (auto v = intArg(0)) {
             if (*v >= 0 && *v < 63)
                 return CV::fromInt(int64_t(1) << static_cast<int>(*v));
+        }
+        return std::nullopt;
+    }
+    // ── str_to_int(s) ──────────────────────────────────────────────────────
+    if (name == "str_to_int" && n == 1) {
+        if (auto s = strArg(0)) {
+            try { return CV::fromInt(static_cast<int64_t>(std::stoll(*s))); }
+            catch (...) {}
+        }
+        return std::nullopt;
+    }
+    // ── str_pad_left(s, width, fill) ───────────────────────────────────────
+    if (name == "str_pad_left" && n == 3) {
+        auto s = strArg(0); auto w = intArg(1); auto fill = strArg(2);
+        if (s && w && fill && !fill->empty()) {
+            int64_t slen = static_cast<int64_t>(s->size());
+            if (*w <= slen) return CV::fromStr(*s);
+            if (*w > 65536) return std::nullopt; // guard against huge strings
+            std::string r(*w - slen, (*fill)[0]);
+            r += *s;
+            return CV::fromStr(std::move(r));
+        }
+        return std::nullopt;
+    }
+    // ── str_pad_right(s, width, fill) ──────────────────────────────────────
+    if (name == "str_pad_right" && n == 3) {
+        auto s = strArg(0); auto w = intArg(1); auto fill = strArg(2);
+        if (s && w && fill && !fill->empty()) {
+            int64_t slen = static_cast<int64_t>(s->size());
+            if (*w <= slen) return CV::fromStr(*s);
+            if (*w > 65536) return std::nullopt; // guard against huge strings
+            std::string r(*s);
+            r.append(*w - slen, (*fill)[0]);
+            return CV::fromStr(std::move(r));
+        }
+        return std::nullopt;
+    }
+    // ── sum(arr) ───────────────────────────────────────────────────────────
+    if (name == "sum" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            int64_t total = 0;
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind != CV::Kind::Integer) return std::nullopt;
+                total += elem.intVal;
+            }
+            return CV::fromInt(total);
+        }
+        return std::nullopt;
+    }
+    // ── array_product(arr) ─────────────────────────────────────────────────
+    if (name == "array_product" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            int64_t product = 1;
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind != CV::Kind::Integer) return std::nullopt;
+                product *= elem.intVal;
+            }
+            return CV::fromInt(product);
+        }
+        return std::nullopt;
+    }
+    // ── array_last(arr) ────────────────────────────────────────────────────
+    if (name == "array_last" && n == 1) {
+        if (args[0].kind == CV::Kind::Array && !args[0].arrVal.empty())
+            return args[0].arrVal.back();
+        return std::nullopt;
+    }
+    // ── array_min(arr) ─────────────────────────────────────────────────────
+    if (name == "array_min" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            if (args[0].arrVal.empty()) return CV::fromInt(0);
+            int64_t minVal = INT64_MAX;
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind != CV::Kind::Integer) return std::nullopt;
+                if (elem.intVal < minVal) minVal = elem.intVal;
+            }
+            return CV::fromInt(minVal);
+        }
+        return std::nullopt;
+    }
+    // ── array_max(arr) ─────────────────────────────────────────────────────
+    if (name == "array_max" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            if (args[0].arrVal.empty()) return CV::fromInt(0);
+            int64_t maxVal = INT64_MIN;
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind != CV::Kind::Integer) return std::nullopt;
+                if (elem.intVal > maxVal) maxVal = elem.intVal;
+            }
+            return CV::fromInt(maxVal);
+        }
+        return std::nullopt;
+    }
+    // ── array_contains(arr, val) ───────────────────────────────────────────
+    if (name == "array_contains" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind == CV::Kind::Integer && elem.intVal == args[1].intVal)
+                    return CV::fromInt(1);
+            }
+            return CV::fromInt(0);
+        }
+        return std::nullopt;
+    }
+    // ── index_of(arr, val) ────────────────────────────────────────────────
+    if (name == "index_of" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            for (int64_t i = 0; i < static_cast<int64_t>(args[0].arrVal.size()); ++i) {
+                if (args[0].arrVal[static_cast<size_t>(i)].kind == CV::Kind::Integer &&
+                    args[0].arrVal[static_cast<size_t>(i)].intVal == args[1].intVal)
+                    return CV::fromInt(i);
+            }
+            return CV::fromInt(-1);
+        }
+        return std::nullopt;
+    }
+    // ── array_find(arr, val) (alias for index_of — returns 0-based index or -1) ──
+    if (name == "array_find" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            for (int64_t i = 0; i < static_cast<int64_t>(args[0].arrVal.size()); ++i) {
+                if (args[0].arrVal[static_cast<size_t>(i)].kind == CV::Kind::Integer &&
+                    args[0].arrVal[static_cast<size_t>(i)].intVal == args[1].intVal)
+                    return CV::fromInt(i);
+            }
+            return CV::fromInt(-1);
+        }
+        return std::nullopt;
+    }
+    // ── startswith / endswith (OmScript aliases for str_starts_with / str_ends_with) ─
+    if (name == "startswith" && n == 2) {
+        auto s = strArg(0), prefix = strArg(1);
+        if (s && prefix) {
+            bool result = s->size() >= prefix->size() &&
+                          s->compare(0, prefix->size(), *prefix) == 0;
+            return CV::fromInt(result ? 1 : 0);
+        }
+        return std::nullopt;
+    }
+    if (name == "endswith" && n == 2) {
+        auto s = strArg(0), suffix = strArg(1);
+        if (s && suffix) {
+            bool result = s->size() >= suffix->size() &&
+                          s->compare(s->size() - suffix->size(), suffix->size(), *suffix) == 0;
+            return CV::fromInt(result ? 1 : 0);
+        }
+        return std::nullopt;
+    }
+    // ── array_fill(n, val) → array with n copies of val ────────────────────
+    if (name == "array_fill" && n == 2) {
+        if (args[0].kind == CV::Kind::Integer) {
+            int64_t count = args[0].intVal;
+            if (count < 0) count = 0;
+            if (count > 65536) return std::nullopt;  // guard against huge allocations
+            std::vector<CV> arr(static_cast<size_t>(count), args[1]);
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    // ── array_concat(arr1, arr2) ───────────────────────────────────────────
+    if (name == "array_concat" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Array) {
+            std::vector<CV> result = args[0].arrVal;
+            result.insert(result.end(), args[1].arrVal.begin(), args[1].arrVal.end());
+            return CV::fromArr(std::move(result));
+        }
+        return std::nullopt;
+    }
+    // ── array_slice(arr, start, end) ───────────────────────────────────────
+    if (name == "array_slice" && n == 3) {
+        if (args[0].kind == CV::Kind::Array &&
+            args[1].kind == CV::Kind::Integer &&
+            args[2].kind == CV::Kind::Integer) {
+            int64_t sz = static_cast<int64_t>(args[0].arrVal.size());
+            int64_t st = std::max(int64_t(0), std::min(args[1].intVal, sz));
+            int64_t en = std::max(st, std::min(args[2].intVal, sz));
+            std::vector<CV> slice(
+                args[0].arrVal.begin() + st,
+                args[0].arrVal.begin() + en);
+            return CV::fromArr(std::move(slice));
+        }
+        return std::nullopt;
+    }
+    // ── typeof(x) ─────────────────────────────────────────────────────────
+    if (name == "typeof" && n == 1) {
+        if (args[0].kind == CV::Kind::Integer) return CV::fromInt(1);   // integer
+        if (args[0].kind == CV::Kind::String)  return CV::fromInt(3);   // string
+        return CV::fromInt(1);  // arrays encoded as i64 at runtime → type 1
+    }
+    // ── str_chars(s) → array of char codes ────────────────────────────────
+    if (name == "str_chars" && n == 1) {
+        if (auto s = strArg(0)) {
+            std::vector<CV> arr;
+            arr.reserve(s->size());
+            for (unsigned char c : *s)
+                arr.push_back(CV::fromInt(static_cast<int64_t>(c)));
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    // ── sum(arr) / array_product(arr) via constant array ──────────────────
+    if (name == "sum" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            int64_t total = 0;
+            for (const auto& elem : args[0].arrVal) {
+                if (elem.kind != CV::Kind::Integer) return std::nullopt;
+                total += elem.intVal;
+            }
+            return CV::fromInt(total);
         }
         return std::nullopt;
     }
@@ -6518,19 +6866,26 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
     // to the caller, deterministic output for given inputs).
     static const std::unordered_set<std::string> kPureBuiltins = {
         "abs", "min", "max", "sign", "clamp", "pow", "sqrt", "log2", "log",
+        "log10", "exp", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+        "cbrt", "hypot", "fma", "copysign", "min_float", "max_float",
         "gcd", "lcm", "exp2",
         "is_even", "is_odd", "is_power_of_2", "is_alpha", "is_digit",
         "floor", "ceil", "round",
         "popcount", "clz", "ctz", "bswap", "bitreverse",
         "rotate_left", "rotate_right", "saturating_add", "saturating_sub",
         "to_int", "to_float", "to_string", "number_to_string",
-        "string_to_number", "char_code", "to_char",
+        "string_to_number", "str_to_int", "char_code", "to_char",
         "str_len", "len", "typeof",
         "char_at", "str_eq", "str_find", "str_index_of",
         "str_starts_with", "str_ends_with", "startswith", "endswith",
         "str_upper", "str_lower", "str_trim", "str_reverse",
         "str_substr", "str_contains", "str_replace", "str_repeat",
-        "str_count",
+        "str_count", "str_pad_left", "str_pad_right",
+        "str_chars", "str_join",
+        "sum", "array_product", "array_last",
+        "array_min", "array_max", "array_contains", "index_of", "array_find",
+        "array_fill", "array_concat", "array_slice", "array_copy",
+        "range", "range_step",
     };
 
     // Set of builtin/user names that are impure (I/O, heap side-effects, etc.)
@@ -6745,6 +7100,351 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         }
     }
 }
+
+// inferFunctionEffects: lightweight AST-level side-effect analysis.
+//
+// For every user function in the program, computes a FunctionEffects summary:
+//   readsMemory  — function loads from an array element, string subscript,
+//                  struct field, or calls a read-only builtin with pointer args.
+//   writesMemory — function writes to an array element (arr[i] = ...), struct
+//                  field, or calls a mutating builtin (push/pop/sort/reverse…).
+//   hasIO        — function calls any I/O builtin (print/input/file_*/sleep…).
+//   hasMutation  — function calls a mutating builtin or performs a compound
+//                  assignment on a parameter-derived value.
+//
+// The analysis is a conservative fixed-point over the call graph: a function
+// inherits the effects of every callee.  Mutual recursion is handled by
+// initialising all unknown functions as "no effects" and iterating to a
+// fixed point; a self-recursive call conservatively marks writesMemory.
+//
+// Results are used in function codegen to:
+//   1. Automatically add LLVM readonly/readnone/nosync attributes.
+//   2. Emit a compiler warning when @pure is used on a function whose body
+//      contains detectable I/O or mutation.
+void CodeGenerator::inferFunctionEffects(Program* program) {
+    if (!program) return;
+
+    // Builtins known to perform I/O or have synchronization side effects.
+    static const std::unordered_set<std::string> kIOBuiltins = {
+        "print", "println", "write", "print_char",
+        "input", "input_line",
+        "file_read", "file_write", "file_append", "file_exists",
+        "thread_create", "thread_join",
+        "mutex_lock", "mutex_unlock", "mutex_new", "mutex_destroy",
+        "sleep", "exit", "exit_program",
+        "assert",
+    };
+
+    // Builtins that write/mutate heap memory observable to the caller.
+    static const std::unordered_set<std::string> kMutatingBuiltins = {
+        "push", "pop", "sort", "reverse", "swap",
+        "array_remove", "array_insert",
+        "map_set", "map_remove",
+        "str_replace",  // returns new string — not truly mutating, but conservative
+    };
+
+    // Builtins that only read memory (return value depends on array/string content).
+    static const std::unordered_set<std::string> kReadBuiltins = {
+        "len", "str_len", "sum", "array_min", "array_max", "array_product",
+        "array_last", "array_contains", "index_of", "array_find", "array_count",
+        "array_any", "array_every", "array_reduce", "array_map", "array_filter",
+        "map_get", "map_has", "map_keys", "map_values", "map_size",
+        "str_contains", "str_index_of", "str_find", "str_starts_with",
+        "str_ends_with", "str_count", "str_upper", "str_lower", "str_trim",
+        "str_reverse", "str_substr", "str_chars", "str_join", "str_repeat",
+        "str_pad_left", "str_pad_right", "char_at",
+        "typeof", "to_int", "to_float", "to_string",
+    };
+
+    // Build function index.
+    std::unordered_map<std::string, const FunctionDecl*> allFuncs;
+    for (const auto& f : program->functions)
+        allFuncs[f->name] = f.get();
+
+    // Helper: classify one expression's effects into a FunctionEffects.
+    // Forward-declared as std::function so it can recurse.
+    std::function<FunctionEffects(const Expression*, const std::string&)> exprEffects;
+    std::function<FunctionEffects(const Statement*,   const std::string&)> stmtEffects;
+
+    exprEffects = [&](const Expression* expr, const std::string& selfName) -> FunctionEffects {
+        FunctionEffects fx;
+        if (!expr) return fx;
+        switch (expr->type) {
+        case ASTNodeType::INDEX_EXPR:
+            fx.readsMemory = true;
+            break;
+        case ASTNodeType::INDEX_ASSIGN_EXPR:
+            fx.writesMemory = true;
+            fx.hasMutation  = true;
+            break;
+        case ASTNodeType::FIELD_ACCESS_EXPR:
+            fx.readsMemory = true;
+            break;
+        case ASTNodeType::FIELD_ASSIGN_EXPR:
+            fx.writesMemory = true;
+            fx.hasMutation  = true;
+            break;
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<const CallExpr*>(expr);
+            if (kIOBuiltins.count(call->callee)) {
+                fx.hasIO = true;
+            } else if (kMutatingBuiltins.count(call->callee)) {
+                fx.writesMemory = true;
+                fx.hasMutation  = true;
+            } else if (kReadBuiltins.count(call->callee)) {
+                fx.readsMemory = true;
+            } else if (call->callee == selfName) {
+                // Self-recursive call: conservatively mark memory access
+                fx.readsMemory  = true;
+                fx.writesMemory = true;
+            } else {
+                // Callee effects propagated from functionEffects_ (fixed-point)
+                auto it = functionEffects_.find(call->callee);
+                if (it != functionEffects_.end()) {
+                    fx.readsMemory  = fx.readsMemory  || it->second.readsMemory;
+                    fx.writesMemory = fx.writesMemory || it->second.writesMemory;
+                    fx.hasIO        = fx.hasIO        || it->second.hasIO;
+                    fx.hasMutation  = fx.hasMutation  || it->second.hasMutation;
+                }
+            }
+            for (const auto& arg : call->arguments) {
+                auto a = exprEffects(arg.get(), selfName);
+                fx.readsMemory  = fx.readsMemory  || a.readsMemory;
+                fx.writesMemory = fx.writesMemory || a.writesMemory;
+                fx.hasIO        = fx.hasIO        || a.hasIO;
+                fx.hasMutation  = fx.hasMutation  || a.hasMutation;
+            }
+            break;
+        }
+        case ASTNodeType::BINARY_EXPR: {
+            auto* b = static_cast<const BinaryExpr*>(expr);
+            auto l = exprEffects(b->left.get(), selfName);
+            auto r = exprEffects(b->right.get(), selfName);
+            fx.readsMemory  = l.readsMemory  || r.readsMemory;
+            fx.writesMemory = l.writesMemory || r.writesMemory;
+            fx.hasIO        = l.hasIO        || r.hasIO;
+            fx.hasMutation  = l.hasMutation  || r.hasMutation;
+            // Division and modulo by a non-constant (or zero) divisor emit a
+            // runtime div-by-zero check in codegen that calls puts() + exit(1).
+            // Mark hasIO so the function is NOT classified as pure/readnone,
+            // preventing incorrect memory(none)+speculatable+willreturn
+            // attributes that allow the optimizer to miscompile the check.
+            if (b->op == "/" || b->op == "%") {
+                auto* lit = dynamic_cast<const LiteralExpr*>(b->right.get());
+                bool divisorIsNonZeroConst = lit &&
+                    lit->literalType == LiteralExpr::LiteralType::INTEGER &&
+                    lit->intValue != 0;
+                if (!divisorIsNonZeroConst)
+                    fx.hasIO = true;
+            }
+            break;
+        }
+        case ASTNodeType::ASSIGN_EXPR: {
+            auto* a = static_cast<const AssignExpr*>(expr);
+            auto v = exprEffects(a->value.get(), selfName);
+            // Compound assignment to a variable is a mutation.
+            fx.writesMemory = true;
+            fx.hasMutation  = true;
+            fx.readsMemory  = v.readsMemory;
+            fx.hasIO        = v.hasIO;
+            break;
+        }
+        case ASTNodeType::UNARY_EXPR: {
+            auto* u = static_cast<const UnaryExpr*>(expr);
+            fx = exprEffects(u->operand.get(), selfName);
+            break;
+        }
+        case ASTNodeType::POSTFIX_EXPR:
+        case ASTNodeType::PREFIX_EXPR:
+            // ++/-- are mutations
+            fx.writesMemory = true;
+            fx.hasMutation  = true;
+            break;
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* t = static_cast<const TernaryExpr*>(expr);
+            auto c = exprEffects(t->condition.get(), selfName);
+            auto th = exprEffects(t->thenExpr.get(), selfName);
+            auto el = exprEffects(t->elseExpr.get(), selfName);
+            fx.readsMemory  = c.readsMemory  || th.readsMemory  || el.readsMemory;
+            fx.writesMemory = c.writesMemory || th.writesMemory || el.writesMemory;
+            fx.hasIO        = c.hasIO        || th.hasIO        || el.hasIO;
+            fx.hasMutation  = c.hasMutation  || th.hasMutation  || el.hasMutation;
+            break;
+        }
+        case ASTNodeType::ARRAY_EXPR: {
+            auto* arr = static_cast<const ArrayExpr*>(expr);
+            for (const auto& el : arr->elements) {
+                auto e = exprEffects(el.get(), selfName);
+                fx.readsMemory  = fx.readsMemory  || e.readsMemory;
+                fx.writesMemory = fx.writesMemory || e.writesMemory;
+                fx.hasIO        = fx.hasIO        || e.hasIO;
+                fx.hasMutation  = fx.hasMutation  || e.hasMutation;
+            }
+            break;
+        }
+        default:
+            // Literals, identifiers, move/borrow/freeze — no effects.
+            break;
+        }
+        return fx;
+    };
+
+    stmtEffects = [&](const Statement* stmt, const std::string& selfName) -> FunctionEffects {
+        FunctionEffects fx;
+        if (!stmt) return fx;
+
+        auto merge = [&](const FunctionEffects& other) {
+            fx.readsMemory  = fx.readsMemory  || other.readsMemory;
+            fx.writesMemory = fx.writesMemory || other.writesMemory;
+            fx.hasIO        = fx.hasIO        || other.hasIO;
+            fx.hasMutation  = fx.hasMutation  || other.hasMutation;
+        };
+
+        switch (stmt->type) {
+        case ASTNodeType::EXPR_STMT:
+            merge(exprEffects(static_cast<const ExprStmt*>(stmt)->expression.get(), selfName));
+            break;
+        case ASTNodeType::VAR_DECL: {
+            auto* vd = static_cast<const VarDecl*>(stmt);
+            if (vd->initializer) merge(exprEffects(vd->initializer.get(), selfName));
+            break;
+        }
+        case ASTNodeType::MOVE_DECL: {
+            auto* md = static_cast<const MoveDecl*>(stmt);
+            if (md->initializer) merge(exprEffects(md->initializer.get(), selfName));
+            break;
+        }
+        case ASTNodeType::RETURN_STMT: {
+            auto* ret = static_cast<const ReturnStmt*>(stmt);
+            if (ret->value) merge(exprEffects(ret->value.get(), selfName));
+            break;
+        }
+        case ASTNodeType::BLOCK: {
+            for (const auto& s : static_cast<const BlockStmt*>(stmt)->statements)
+                merge(stmtEffects(s.get(), selfName));
+            break;
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifs = static_cast<const IfStmt*>(stmt);
+            merge(exprEffects(ifs->condition.get(), selfName));
+            merge(stmtEffects(ifs->thenBranch.get(), selfName));
+            merge(stmtEffects(ifs->elseBranch.get(), selfName));
+            break;
+        }
+        case ASTNodeType::WHILE_STMT: {
+            auto* ws = static_cast<const WhileStmt*>(stmt);
+            merge(exprEffects(ws->condition.get(), selfName));
+            merge(stmtEffects(ws->body.get(), selfName));
+            break;
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            auto* dw = static_cast<const DoWhileStmt*>(stmt);
+            merge(stmtEffects(dw->body.get(), selfName));
+            merge(exprEffects(dw->condition.get(), selfName));
+            break;
+        }
+        case ASTNodeType::FOR_STMT: {
+            auto* fs = static_cast<const ForStmt*>(stmt);
+            if (fs->start) merge(exprEffects(fs->start.get(), selfName));
+            if (fs->end)   merge(exprEffects(fs->end.get(), selfName));
+            if (fs->step)  merge(exprEffects(fs->step.get(), selfName));
+            merge(stmtEffects(fs->body.get(), selfName));
+            break;
+        }
+        case ASTNodeType::FOR_EACH_STMT: {
+            auto* fe = static_cast<const ForEachStmt*>(stmt);
+            merge(exprEffects(fe->collection.get(), selfName));
+            merge(stmtEffects(fe->body.get(), selfName));
+            // Iterating an array reads it.
+            fx.readsMemory = true;
+            break;
+        }
+        case ASTNodeType::SWITCH_STMT: {
+            auto* sw = static_cast<const SwitchStmt*>(stmt);
+            merge(exprEffects(sw->condition.get(), selfName));
+            for (const auto& c : sw->cases) {
+                if (c.value) merge(exprEffects(c.value.get(), selfName));
+                for (const auto& s : c.body) merge(stmtEffects(s.get(), selfName));
+            }
+            break;
+        }
+        case ASTNodeType::TRY_CATCH_STMT: {
+            auto* tc = static_cast<const TryCatchStmt*>(stmt);
+            merge(stmtEffects(tc->tryBlock.get(), selfName));
+            merge(stmtEffects(tc->catchBlock.get(), selfName));
+            break;
+        }
+        case ASTNodeType::THROW_STMT: {
+            auto* th = static_cast<const ThrowStmt*>(stmt);
+            if (th->value) merge(exprEffects(th->value.get(), selfName));
+            fx.hasIO = true; // throw is an observable effect
+            break;
+        }
+        case ASTNodeType::PIPELINE_STMT: {
+            auto* pl = static_cast<const PipelineStmt*>(stmt);
+            if (pl->count) merge(exprEffects(pl->count.get(), selfName));
+            for (const auto& stage : pl->stages)
+                merge(stmtEffects(stage.body.get(), selfName));
+            break;
+        }
+        case ASTNodeType::DEFER_STMT:
+            merge(stmtEffects(static_cast<const DeferStmt*>(stmt)->body.get(), selfName));
+            break;
+        default:
+            break;
+        }
+        return fx;
+    };
+
+    // Fixed-point iteration over the call graph.
+    // Initialise all user functions with empty effects; iterate until stable.
+    for (const auto& f : program->functions)
+        functionEffects_[f->name] = FunctionEffects{};
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& f : program->functions) {
+            if (!f->body) continue;
+            FunctionEffects computed;
+            for (const auto& s : f->body->statements) {
+                auto fx = stmtEffects(s.get(), f->name);
+                computed.readsMemory  = computed.readsMemory  || fx.readsMemory;
+                computed.writesMemory = computed.writesMemory || fx.writesMemory;
+                computed.hasIO        = computed.hasIO        || fx.hasIO;
+                computed.hasMutation  = computed.hasMutation  || fx.hasMutation;
+            }
+            FunctionEffects& prev = functionEffects_[f->name];
+            if (computed.readsMemory  != prev.readsMemory  ||
+                computed.writesMemory != prev.writesMemory ||
+                computed.hasIO        != prev.hasIO        ||
+                computed.hasMutation  != prev.hasMutation) {
+                prev = computed;
+                changed = true;
+            }
+        }
+    }
+
+    // Warn if @pure is applied to a function that has detectable side effects.
+    for (const auto& f : program->functions) {
+        if (!f->hintPure) continue;
+        auto it = functionEffects_.find(f->name);
+        if (it == functionEffects_.end()) continue;
+        const FunctionEffects& fx = it->second;
+        if (fx.hasIO) {
+            std::cerr << "[warning] @pure function '" << f->name
+                      << "' performs I/O — @pure annotation may be incorrect\n";
+        } else if (fx.writesMemory || fx.hasMutation) {
+            std::cerr << "[warning] @pure function '" << f->name
+                      << "' mutates memory — @pure annotation may be incorrect\n";
+        }
+    }
+}
+
+
+} // namespace omscript
+
+namespace omscript {
 // maintaining a pool of interned global string constants.  When the
 // same string content is used in multiple places, this returns a
 // pointer to the single canonical global, enabling:

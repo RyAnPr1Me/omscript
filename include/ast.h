@@ -65,7 +65,8 @@ enum class ASTNodeType {
     SCOPE_RESOLUTION_EXPR,
     ASSUME_STMT,
     COMPTIME_EXPR,  // comptime { ... } — compile-time evaluated block expression
-    REBORROW_EXPR   // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
+    REBORROW_EXPR,  // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
+    PIPELINE_STMT   // pipeline (i in start...end) { stage name { ... } ... }
 };
 
 class ASTNode {
@@ -283,8 +284,15 @@ struct LoopConfig {
 };
 
 struct MemoryConfig {
+    /// Prefer stack allocation for small local arrays instead of heap.
+    /// Reserved for future implementation; currently ignored.
     bool preferStack  = false;
+    /// Emit llvm.prefetch hints for all pointer-type parameters at function
+    /// entry.  Active: auto-prefetch emitted in generateFunction().
     bool prefetch     = false;
+    /// All pointer parameters are already noalias in OPTMAX functions (language
+    /// invariant).  Setting this to true adds an additional per-pair
+    /// alias-scope annotation pass (future work beyond the base noalias).
     bool noalias      = false;
 };
 
@@ -767,6 +775,66 @@ class ComptimeExpr : public Expression {
 
     explicit ComptimeExpr(std::unique_ptr<BlockStmt> b)
         : Expression(ASTNodeType::COMPTIME_EXPR), body(std::move(b)) {}
+};
+
+// ---------------------------------------------------------------------------
+// Effect system
+// ---------------------------------------------------------------------------
+
+/// Inferred side-effect summary for a user function.
+///
+/// Populated by CodeGenerator::inferFunctionEffects() before any code is
+/// generated.  Drives automatic LLVM attribute inference (readonly, readnone,
+/// nosync, willreturn) and warns when @pure is annotated on a function whose
+/// body contains detectable effects.
+struct FunctionEffects {
+    bool readsMemory  = false; ///< Function reads from heap/params (loads)
+    bool writesMemory = false; ///< Function writes to heap/params (stores, push, pop, sort…)
+    bool hasIO        = false; ///< Function performs I/O (print, file_*, input, sleep…)
+    bool hasMutation  = false; ///< Function mutates a parameter observable outside the callee
+
+    /// True when the function has no detectable effects at all (pure).
+    bool isReadNone() const { return !readsMemory && !writesMemory && !hasIO && !hasMutation; }
+    /// True when the function only reads memory and has no I/O or mutations.
+    bool isReadOnly() const { return readsMemory && !writesMemory && !hasIO && !hasMutation; }
+    /// True when the function is safe to mark nosync (no I/O, no concurrency).
+    bool isNoSync()   const { return !hasIO; }
+    /// True when the function can be inferred as @pure by the compiler.
+    bool inferredPure() const { return isReadNone() || isReadOnly(); }
+};
+
+// ---------------------------------------------------------------------------
+// Pipeline construct
+// ---------------------------------------------------------------------------
+
+/// A single named stage inside a pipeline block.
+/// Contains the stage name and its body statements.
+struct StageDecl {
+    std::string name;
+    std::unique_ptr<BlockStmt> body;
+
+    StageDecl(std::string n, std::unique_ptr<BlockStmt> b)
+        : name(std::move(n)), body(std::move(b)) {}
+};
+
+/// `pipeline N { stage name { ... } ... }`
+///
+/// Executes all stages sequentially N times.  N is an arbitrary expression
+/// evaluated once before the first iteration.  If N is omitted the stages run
+/// exactly once (one-shot form).
+///
+/// The compiler generates a software-prefetched loop over [0, N) with a
+/// hidden iterator variable `__pipeline_i`.  The loop back-edge carries
+/// interleave, vectorize, and pipeline.initiationinterval metadata so the
+/// hardware instruction scheduler can overlap stage execution.
+class PipelineStmt : public Statement {
+  public:
+    std::unique_ptr<Expression> count;   ///< Number of executions; nullptr = run once
+    std::vector<StageDecl> stages;       ///< Ordered list of stages
+
+    PipelineStmt(std::unique_ptr<Expression> cnt, std::vector<StageDecl> stgs)
+        : Statement(ASTNodeType::PIPELINE_STMT),
+          count(std::move(cnt)), stages(std::move(stgs)) {}
 };
 
 } // namespace omscript

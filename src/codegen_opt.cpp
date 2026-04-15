@@ -3,6 +3,7 @@
 #include "hardware_graph.h"
 #include "superoptimizer.h"
 #include <iostream>
+#include <unordered_set>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
@@ -626,8 +627,12 @@ void CodeGenerator::runOptimizationPasses() {
                           << std::endl;
             }
         } else {
-            llvm::errs() << "omsc: warning: failed to load Polly plugin; "
-                            "polyhedral loop optimizations disabled\n";
+            // Polly not available in this environment — not actionable by the
+            // user, so only report it in verbose mode.
+            if (verbose_) {
+                llvm::errs() << "omsc: note: Polly plugin not found; "
+                                "polyhedral loop optimizations disabled\n";
+            }
             llvm::consumeError(pollyPlugin.takeError());
         }
     }
@@ -1455,8 +1460,23 @@ void CodeGenerator::runOptimizationPasses() {
         };
         std::vector<SpecCandidate> candidates;
 
+        // Build a set of (caller, callee) pairs explicitly requested via
+        // @optmax(specialize=[...]).  When the set is non-empty for a given
+        // caller, only those callee names are eligible; all other callees in
+        // that caller are skipped.  Callers that have no specialize list (or
+        // a non-OPTMAX caller) use the default O3-wide heuristic.
+        // key = caller name, value = set of callee names to specialize
+        std::unordered_map<std::string, std::unordered_set<std::string>> specFilter;
+        for (auto& [fnName, cfg] : optMaxFunctionConfigs_) {
+            if (!cfg.specialize.empty()) {
+                specFilter[fnName] = {cfg.specialize.begin(), cfg.specialize.end()};
+            }
+        }
+
         for (auto& F : *module) {
             if (F.isDeclaration()) continue;
+            const std::string callerName = F.getName().str();
+            auto filterIt = specFilter.find(callerName);
             for (auto& BB : F) {
                 for (auto& I : BB) {
                     auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
@@ -1466,7 +1486,10 @@ void CodeGenerator::runOptimizationPasses() {
                     if (callee->hasExactDefinition() == false) continue;
                     if (callee->getInstructionCount() > kMaxFuncSizeForSpec) continue;
                     if (callee == &F) continue;  // skip self-recursion
-
+                    // If this caller has a specialize list, only target listed callees.
+                    if (filterIt != specFilter.end()) {
+                        if (!filterIt->second.count(callee->getName().str())) continue;
+                    }
                     llvm::SmallVector<unsigned, 4> constArgs;
                     for (unsigned i = 0; i < CB->arg_size(); ++i) {
                         if (llvm::isa<llvm::ConstantInt>(CB->getArgOperand(i)) ||
@@ -1905,6 +1928,19 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                 && !func.hasFnAttribute(llvm::Attribute::NoInline)) {
             func.addFnAttr(llvm::Attribute::AlwaysInline);
         }
+
+        // aggressiveVec=true: hint to the back-end to use the widest available
+        // SIMD registers and try harder to vectorize all loops.  We set the
+        // "prefer-vector-width" function attribute (same mechanism as clang's
+        // -mprefer-vector-width=512) and add loop-vectorize metadata later.
+        const std::string nameStr = name.str();
+        auto cfgIt = optMaxFunctionConfigs_.find(nameStr);
+        if (cfgIt != optMaxFunctionConfigs_.end() && cfgIt->second.aggressiveVec) {
+            func.addFnAttr("prefer-vector-width", "512");
+            // min-legal-vector-width=0 lets the vectorizer choose width freely.
+            func.addFnAttr("min-legal-vector-width", "0");
+        }
+
         optMaxFuncs.push_back(&func);
     }
 
@@ -2016,6 +2052,33 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         constexpr int optMaxIterations = 3;
         for (int i = 0; i < optMaxIterations; ++i) {
             if (!fpm.run(*func)) break;
+        }
+
+        // report=true: print a compact per-function optimization summary to
+        // stdout.  This gives the programmer insight into what the compiler
+        // was asked to do and how many instructions the function ended up with
+        // after the aggressive OPTMAX pass stack.
+        const std::string fname = func->getName().str();
+        auto cfgIt2 = optMaxFunctionConfigs_.find(fname);
+        if (cfgIt2 != optMaxFunctionConfigs_.end() && cfgIt2->second.report) {
+            const OptMaxConfig& cfg = cfgIt2->second;
+            std::cout << "[optmax report] " << fname << ": "
+                      << func->getInstructionCount() << " instructions after optimization";
+            if (cfg.fastMath)             std::cout << ", fast_math";
+            if (cfg.aggressiveVec)        std::cout << ", aggressive_vec";
+            if (cfg.safety == SafetyLevel::Off)     std::cout << ", safety=off";
+            else if (cfg.safety == SafetyLevel::Relaxed) std::cout << ", safety=relaxed";
+            if (cfg.memory.noalias)       std::cout << ", memory.noalias";
+            if (cfg.memory.prefetch)      std::cout << ", memory.prefetch";
+            if (!cfg.assumes.empty()) {
+                std::cout << ", assumes=[";
+                for (size_t i = 0; i < cfg.assumes.size(); ++i) {
+                    if (i) std::cout << ", ";
+                    std::cout << "\"" << cfg.assumes[i] << "\"";
+                }
+                std::cout << "]";
+            }
+            std::cout << "\n";
         }
     }
     fpm.doFinalization();
