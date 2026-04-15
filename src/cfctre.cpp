@@ -1110,11 +1110,11 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         return std::nullopt;
     }
     if ((name == "is_alpha") && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64(std::isalpha(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isalpha(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if ((name == "is_digit") && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64(std::isdigit(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isdigit(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if ((name == "to_string" || name == "number_to_string") && n == 1) {
@@ -1427,20 +1427,22 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
 
     // ── Character classification predicates ──────────────────────────────
+    // C <cctype> functions require the argument to be in [0, UCHAR_MAX] or EOF.
+    // OmScript passes character code points as int64_t; out-of-range → false.
     if (name == "is_upper" && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64(std::isupper(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isupper(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_lower" && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64(std::islower(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::islower(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_space" && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64(std::isspace(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isspace(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_alnum" && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64(std::isalnum(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isalnum(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
 

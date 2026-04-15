@@ -5577,11 +5577,11 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     }
     // ── is_alpha / is_digit ────────────────────────────────────────────────
     if (name == "is_alpha" && n == 1) {
-        if (auto v = intArg(0)) return CV::fromInt(std::isalpha(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isalpha(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_digit" && n == 1) {
-        if (auto v = intArg(0)) return CV::fromInt(std::isdigit(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isdigit(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     // ── to_string / number_to_string ───────────────────────────────────────
@@ -6035,8 +6035,9 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     // ── array_concat(arr1, arr2) ───────────────────────────────────────────
     if (name == "array_concat" && n == 2) {
         if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Array) {
-            std::vector<CV> result = args[0].arrVal;
+            std::vector<CV> result;
             result.reserve(args[0].arrVal.size() + args[1].arrVal.size());
+            result.insert(result.end(), args[0].arrVal.begin(), args[0].arrVal.end());
             result.insert(result.end(), args[1].arrVal.begin(), args[1].arrVal.end());
             return CV::fromArr(std::move(result));
         }
@@ -6075,20 +6076,22 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         return std::nullopt;
     }
     // ── Character classification predicates ─────────────────────────────
+    // C <cctype> functions require the argument to be in [0, UCHAR_MAX] or EOF.
+    // OmScript passes character code points as int64_t; out-of-range → false.
     if (name == "is_upper" && n == 1) {
-        if (auto v = intArg(0)) return CV::fromInt(std::isupper(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isupper(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_lower" && n == 1) {
-        if (auto v = intArg(0)) return CV::fromInt(std::islower(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::islower(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_space" && n == 1) {
-        if (auto v = intArg(0)) return CV::fromInt(std::isspace(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isspace(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_alnum" && n == 1) {
-        if (auto v = intArg(0)) return CV::fromInt(std::isalnum(static_cast<int>(*v)) ? 1 : 0);
+        if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isalnum(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     // ── Unchecked integer arithmetic (fast_* / precise_*) ────────────────
