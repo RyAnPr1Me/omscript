@@ -755,6 +755,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 new llvm::GlobalVariable(*module, ptrTy, false, llvm::GlobalValue::ExternalLinkage, nullptr, "stdin");
         }
         llvm::Value* stdinVal = builder->CreateLoad(ptrTy, stdinVar, "inputln.stdin");
+        // stdin is always non-null on POSIX systems — communicating this to
+        // the optimizer lets it remove redundant null checks downstream.
+        llvm::cast<llvm::LoadInst>(stdinVal)->setMetadata(
+            llvm::LLVMContext::MD_nonnull, llvm::MDNode::get(*context, {}));
         // Call fgets(buf, 1024, stdin)
         llvm::Value* intSize = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1024);
         llvm::Value* fgetsRet = builder->CreateCall(getOrDeclareFgets(), {buf, intSize, stdinVal}, "inputln.fgets");
@@ -5097,6 +5101,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(nullBB);
         llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "fread.empty");
+        llvm::cast<llvm::CallInst>(emptyBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf);
         llvm::Value* emptyResult = emptyBuf;
         builder->CreateBr(mergeBB);
@@ -5126,6 +5132,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclareFclose(), {fp});
         llvm::Value* ftellEmptyBuf = builder->CreateCall(getOrDeclareMalloc(),
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "fread.ftempty");
+        llvm::cast<llvm::CallInst>(ftellEmptyBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ftellEmptyBuf);
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* ftellBadEndBB = builder->GetInsertBlock();
@@ -5547,6 +5555,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (isFloat) {
             llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
             llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "numtostr.buf");
+            llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                llvm::Attribute::getWithDereferenceableBytes(*context, 32));
             llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_float_fmt", true);
             if (!fmtStr)
                 fmtStr = builder->CreateGlobalString("%g", "tostr_float_fmt");
@@ -5556,6 +5566,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "numtostr.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 21));
         llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_fmt", true);
         if (!fmtStr)
             fmtStr = builder->CreateGlobalString("%lld", "tostr_fmt");
@@ -5656,6 +5668,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         static constexpr int64_t kMutexAllocSize = 64;
         llvm::Value* size = llvm::ConstantInt::get(getDefaultType(), kMutexAllocSize);
         llvm::Value* mutex = builder->CreateCall(getOrDeclareMalloc(), {size}, "mutex.ptr");
+        llvm::cast<llvm::CallInst>(mutex)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, kMutexAllocSize));
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* nullAttr = llvm::ConstantPointerNull::get(ptrTy);
         builder->CreateCall(getOrDeclarePthreadMutexInit(), {mutex, nullAttr});

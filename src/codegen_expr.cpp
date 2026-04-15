@@ -1139,6 +1139,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 // Convert integer or float to string.
                 llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
                 llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "autostr.buf");
+                llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                    llvm::Attribute::getWithDereferenceableBytes(*context, 32));
                 if (val->getType()->isDoubleTy()) {
                     llvm::GlobalVariable* fmt = module->getGlobalVariable("autostr_float_fmt", true);
                     if (!fmt)
