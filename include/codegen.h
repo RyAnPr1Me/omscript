@@ -11,6 +11,7 @@
 /// functions, debug information, and optimization attributes.
 
 #include "ast.h"
+#include "cfctre.h"
 #include "diagnostic.h"
 #include <iostream>
 #include <llvm/ADT/DenseSet.h>
@@ -1180,6 +1181,24 @@ class CodeGenerator {
     // Optimization methods
     void runOptimizationPasses();
     void optimizeOptMaxFunctions();
+
+    // ── CF-CTRE integration ────────────────────────────────────────────────
+    /// Shared CF-CTRE engine.  Initialised once in generateProgram() before
+    /// any function body is compiled.  Provides cross-function compile-time
+    /// evaluation, memoisation, purity analysis, and pipeline SIMD semantics.
+    std::unique_ptr<CTEngine> ctEngine_;
+
+    /// Run the CF-CTRE pass: register all functions / enum constants / global
+    /// consts, then execute runPass() to pre-evaluate pure functions and
+    /// populate the memoisation cache.  Called from generateProgram().
+    void runCFCTRE(Program* program);
+
+    /// Convert a CTValue produced by ctEngine_ to the CodeGenerator's internal
+    /// ConstValue representation (used for bridging to existing fold helpers).
+    ConstValue ctValueToConstValue(const CTValue& v) const;
+
+    /// Convert a ConstValue to a CTValue and load it into ctEngine_.
+    CTValue constValueToCTValue(const ConstValue& v) const;
 
   public:
     // Per-function optimization for targeted optimization of individual functions

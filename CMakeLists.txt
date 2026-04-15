@@ -65,6 +65,9 @@ set(SRC
     src/parser.cpp
     src/ast.cpp
 
+    # CF-CTRE — Cross-Function Compile-Time Reasoning Engine
+    src/cfctre.cpp
+
     # Codegen pipeline
     src/codegen.cpp
     src/codegen_builtins.cpp

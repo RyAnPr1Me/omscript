@@ -3890,6 +3890,13 @@ void CodeGenerator::generate(Program* program) {
     // so that the constEvalFunctions_ set is already populated (those are pure).
     inferFunctionEffects(program);
 
+    // CF-CTRE (Cross-Function Compile-Time Reasoning Engine): execute pure
+    // functions across call boundaries at compile time.  Populates the
+    // memoisation cache with pre-evaluated results and the pure-function
+    // registry with auto-detected purity.  Placed after all pre-analysis
+    // passes so every available piece of constant information is visible.
+    runCFCTRE(program);
+
     // E-Graph Equality Saturation: apply algebraic simplification, constant
     // folding, strength reduction, and other rewrites at the AST level using
     // an e-graph.  This discovers globally optimal expression representations
@@ -5124,9 +5131,33 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateScopeResolution(static_cast<ScopeResolutionExpr*>(expr));
     case ASTNodeType::COMPTIME_EXPR: {
         // comptime { ... } — evaluate the block at compile time.
-        // Uses the constant evaluator (tryConstEvalFull) with an empty env.
-        // If evaluation fails, emits a compile error.
+        // Primary: use CF-CTRE engine (richer cross-function evaluation + memoisation).
+        // Fallback: existing tryConstEvalFull (maintains backward compatibility).
         auto* ct = static_cast<ComptimeExpr*>(expr);
+
+        // Try CF-CTRE first (available after runCFCTRE has been called).
+        if (ctEngine_) {
+            auto ctResult = ctEngine_->evalComptimeBlock(ct->body.get());
+            if (ctResult) {
+                if (ctResult->isInt()) {
+                    return llvm::ConstantInt::get(getDefaultType(), ctResult->asI64(), /*isSigned=*/true);
+                }
+                if (ctResult->isString()) {
+                    llvm::GlobalVariable* gv = internString(ctResult->asStr());
+                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                        gv->getValueType(), gv,
+                        llvm::ArrayRef<llvm::Constant*>{
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                }
+                if (ctResult->isArray()) {
+                    auto cv = ctValueToConstValue(*ctResult);
+                    return emitComptimeArray(cv.arrVal);
+                }
+            }
+        }
+
+        // Fallback: legacy tryConstEvalFull evaluator.
         static const std::unordered_map<std::string, ConstValue> emptyEnv;
         auto result = tryConstEvalFull(ct->body.get(), emptyEnv);
         if (!result) {
@@ -6880,6 +6911,118 @@ void CodeGenerator::analyzeConstantReturnValues(Program* program) {
             }
             changed = true;
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runCFCTRE: Cross-Function Compile-Time Reasoning Engine pipeline phase.
+//
+// Initialises or resets the CTEngine, registers all program functions and
+// enum/global constants, then runs the full CF-CTRE analysis pass.  After
+// this call:
+//   - ctEngine_->isPure(fnName)        — fast O(1) purity query
+//   - ctEngine_->executeFunction(...)  — memoised CT evaluation
+//   - ctEngine_->evalComptimeBlock(...)— block-level CT evaluation
+//
+// Also propagates CT results back into the CodeGenerator's legacy fold maps
+// (constIntReturnFunctions_, constStringReturnFunctions_) so that the
+// existing tryFoldExprToConst / tryConstEvalFull machinery benefits from
+// CF-CTRE's richer analysis.
+// ─────────────────────────────────────────────────────────────────────────────
+void CodeGenerator::runCFCTRE(Program* program) {
+    if (!program) return;
+
+    // Initialise CTEngine (may be called multiple times for repl/incremental).
+    ctEngine_ = std::make_unique<CTEngine>();
+
+    // Register global integer / string constants gathered by earlier passes.
+    for (auto& [name, val] : constIntFolds_)
+        ctEngine_->registerGlobalConst(name.str(), CTValue::fromI64(val));
+    for (auto& [name, val] : constStringFolds_)
+        ctEngine_->registerGlobalConst(name.str(), CTValue::fromString(val));
+
+    // Register enum constants.
+    for (auto& [name, val] : enumConstants_)
+        ctEngine_->registerEnumConst(name.str(), static_cast<int64_t>(val));
+
+    // Run the main CF-CTRE pass (registers all functions, computes purity,
+    // pre-evaluates zero-arg pure functions, builds the call graph).
+    ctEngine_->runPass(program);
+
+    // Back-propagate CF-CTRE results into the legacy fold tables so the
+    // existing tryFoldExprToConst / tryConstEvalFull helpers remain effective.
+    for (auto& fn : program->functions) {
+        if (!fn->parameters.empty()) continue;
+        if (!ctEngine_->isPure(fn->name)) continue;
+        // Query the memoised zero-arg result.
+        auto result = ctEngine_->executeFunction(fn->name, {});
+        if (!result) continue;
+        if (result->isInt() &&
+            !constIntReturnFunctions_.count(fn->name)) {
+            constIntReturnFunctions_[fn->name] = result->asI64();
+        } else if (result->isString() &&
+                   !constStringReturnFunctions_.count(fn->name)) {
+            constStringReturnFunctions_[fn->name] = result->asStr();
+        }
+    }
+
+    if (verbose_) {
+        const auto& s = ctEngine_->stats();
+        std::cout << "  [cfctre] Pass complete: "
+                  << s.functionsRegistered   << " functions registered, "
+                  << s.pureFunctionsDetected << " pure, "
+                  << s.functionCallsMemoized << " calls memoised, "
+                  << s.arraysAllocated       << " arrays allocated" << std::endl;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ctValueToConstValue / constValueToCTValue — bridge between the two
+// value representations used inside CodeGenerator.
+// ─────────────────────────────────────────────────────────────────────────────
+
+CodeGenerator::ConstValue CodeGenerator::ctValueToConstValue(const CTValue& v) const {
+    switch (v.kind) {
+    case CTValueKind::CONCRETE_I64:
+    case CTValueKind::CONCRETE_U64:
+    case CTValueKind::CONCRETE_BOOL:
+        return ConstValue::fromInt(v.asI64());
+    case CTValueKind::CONCRETE_STRING:
+        return ConstValue::fromStr(v.asStr());
+    case CTValueKind::CONCRETE_ARRAY: {
+        if (!ctEngine_) return ConstValue{};
+        auto elems = ctEngine_->extractArray(v.asArr());
+        std::vector<ConstValue> cvElems;
+        cvElems.reserve(elems.size());
+        for (const auto& e : elems)
+            cvElems.push_back(ctValueToConstValue(e));
+        return ConstValue::fromArr(std::move(cvElems));
+    }
+    default:
+        return ConstValue{};
+    }
+}
+
+CTValue CodeGenerator::constValueToCTValue(const ConstValue& v) const {
+    switch (v.kind) {
+    case ConstValue::Kind::Integer: return CTValue::fromI64(v.intVal);
+    case ConstValue::Kind::String:  return CTValue::fromString(v.strVal);
+    case ConstValue::Kind::Array: {
+        if (!ctEngine_) return CTValue::uninit();
+        CTArrayHandle h = ctEngine_->heap().nextHandle();
+        // Use the non-const heap via ctEngine_ (cast is safe — evaluation already done).
+        // We create a snapshot of the inline array into the CT heap.
+        // Accessing ctEngine_'s heap requires a const_cast here because
+        // CTHeap::alloc/store are non-const operations.
+        CTHeap& hp = const_cast<CTHeap&>(ctEngine_->heap());
+        h = hp.alloc(static_cast<uint64_t>(v.arrVal.size()));
+        for (size_t i = 0; i < v.arrVal.size(); ++i)
+            hp.store(h, static_cast<int64_t>(i),
+                     constValueToCTValue(v.arrVal[i]));
+        return CTValue::fromArray(h);
+    }
+    default:
+        return CTValue::uninit();
     }
 }
 

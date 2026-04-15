@@ -6373,6 +6373,43 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto declIt2 = functionDecls_.find(expr->callee);
         if (declIt2 != functionDecls_.end() && declIt2->second->body &&
             expr->arguments.size() == declIt2->second->parameters.size()) {
+
+            // Try CF-CTRE engine first (richer cross-function evaluation).
+            if (ctEngine_ && ctEngine_->isPure(expr->callee)) {
+                std::vector<CTValue> ctArgs;
+                ctArgs.reserve(expr->arguments.size());
+                bool allConst = true;
+                for (auto& arg : expr->arguments) {
+                    auto cv = tryFoldExprToConst(arg.get());
+                    if (!cv) { allConst = false; break; }
+                    ctArgs.push_back(constValueToCTValue(*cv));
+                }
+                if (allConst) {
+                    auto ctResult = ctEngine_->executeFunction(expr->callee, ctArgs);
+                    if (ctResult) {
+                        if (ctResult->isInt()) {
+                            auto* ci = llvm::ConstantInt::get(getDefaultType(), ctResult->asI64());
+                            if (ctResult->asI64() >= 0) nonNegValues_.insert(ci);
+                            return ci;
+                        }
+                        if (ctResult->isString()) {
+                            llvm::GlobalVariable* gv = internString(ctResult->asStr());
+                            stringReturningFunctions_.insert(expr->callee);
+                            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                                gv->getValueType(), gv,
+                                llvm::ArrayRef<llvm::Constant*>{
+                                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                        }
+                        if (ctResult->isArray()) {
+                            arrayReturningFunctions_.insert(expr->callee);
+                            auto cv = ctValueToConstValue(*ctResult);
+                            return emitComptimeArray(cv.arrVal);
+                        }
+                    }
+                }
+            }
+
             std::unordered_map<std::string, ConstValue> argEnv;
             bool allConst = true;
             for (size_t i = 0; i < expr->arguments.size(); ++i) {
