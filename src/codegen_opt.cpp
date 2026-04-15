@@ -118,7 +118,9 @@
 #include <llvm/Transforms/IPO/CalledValuePropagation.h>
 #include <llvm/Transforms/IPO/Attributor.h>
 #include <llvm/Transforms/IPO/SCCP.h>
+#if LLVM_VERSION_MAJOR < 20
 #include <llvm/Transforms/IPO/SyntheticCountsPropagation.h>
+#endif
 #include <llvm/Transforms/IPO/ElimAvailExtern.h>
 #include <llvm/Transforms/Scalar/SCCP.h>
 #if LLVM_VERSION_MAJOR < 20
@@ -519,7 +521,9 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerPipelineStartEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+#if LLVM_VERSION_MAJOR < 20
             MPM.addPass(llvm::SyntheticCountsPropagation());
+#endif
         });
     }
 

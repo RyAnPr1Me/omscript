@@ -4828,7 +4828,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // Supported patterns: "var > N", "var >= N", "var != N", "var == N",
     // "var < N", "var <= N" where var is a parameter name and N is an integer.
     if (inOptMaxFunction && !currentOptMaxConfig_.assumes.empty()) {
-        llvm::Function* assumeIntr = llvm::Intrinsic::getDeclaration(
+        llvm::Function* assumeIntr = OMSC_GET_INTRINSIC(
             module.get(), llvm::Intrinsic::assume);
         for (const auto& assumeStr : currentOptMaxConfig_.assumes) {
             // Tokenise: split on whitespace into [var, op, literal]
