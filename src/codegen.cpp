@@ -7224,6 +7224,19 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
             fx.writesMemory = l.writesMemory || r.writesMemory;
             fx.hasIO        = l.hasIO        || r.hasIO;
             fx.hasMutation  = l.hasMutation  || r.hasMutation;
+            // Division and modulo by a non-constant (or zero) divisor emit a
+            // runtime div-by-zero check in codegen that calls puts() + exit(1).
+            // Mark hasIO so the function is NOT classified as pure/readnone,
+            // preventing incorrect memory(none)+speculatable+willreturn
+            // attributes that allow the optimizer to miscompile the check.
+            if (b->op == "/" || b->op == "%") {
+                auto* lit = dynamic_cast<const LiteralExpr*>(b->right.get());
+                bool divisorIsNonZeroConst = lit &&
+                    lit->literalType == LiteralExpr::LiteralType::INTEGER &&
+                    lit->intValue != 0;
+                if (!divisorIsNonZeroConst)
+                    fx.hasIO = true;
+            }
             break;
         }
         case ASTNodeType::ASSIGN_EXPR: {
