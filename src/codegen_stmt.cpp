@@ -3888,8 +3888,7 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
     for (const auto& stage : stmt->stages)
         collectArrayBases(stage.body.get(), prefetchBases);
 
-    const int nstages = static_cast<int>(stmt->stages.size());
-    const int64_t prefetchDist = std::max<int64_t>(8, 2LL * nstages);
+    const int64_t prefetchDist = std::max<int64_t>(8, 2LL * nStages);
 
     // ── Count-based form ─────────────────────────────────────────────────────
     const ScopeGuard scope(*this);
@@ -4105,7 +4104,7 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
         mds.push_back(llvm::MDNode::get(*context, {
             llvm::MDString::get(*context, "llvm.loop.interleave.count"),
             mdb.createConstant(llvm::ConstantInt::get(
-                llvm::Type::getInt32Ty(*context), std::max(2, nstages)))
+                llvm::Type::getInt32Ty(*context), std::max(2, nStages)))
         }));
 
         mds.push_back(llvm::MDNode::get(*context, {
