@@ -6043,6 +6043,114 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         }
         return std::nullopt;
     }
+    // ── Character classification predicates ─────────────────────────────
+    if (name == "is_upper" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(std::isupper(static_cast<int>(*v)) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_lower" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(std::islower(static_cast<int>(*v)) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_space" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(std::isspace(static_cast<int>(*v)) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_alnum" && n == 1) {
+        if (auto v = intArg(0)) return CV::fromInt(std::isalnum(static_cast<int>(*v)) ? 1 : 0);
+        return std::nullopt;
+    }
+    // ── Unchecked integer arithmetic (fast_* / precise_*) ────────────────
+    if (name == "fast_add" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a + *b); return std::nullopt; }
+    if (name == "fast_sub" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a - *b); return std::nullopt; }
+    if (name == "fast_mul" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a * *b); return std::nullopt; }
+    if (name == "fast_div" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b && *b != 0) return CV::fromInt(*a / *b); return std::nullopt; }
+    if (name == "precise_add" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a + *b); return std::nullopt; }
+    if (name == "precise_sub" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a - *b); return std::nullopt; }
+    if (name == "precise_mul" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(*a * *b); return std::nullopt; }
+    if (name == "precise_div" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b && *b != 0) return CV::fromInt(*a / *b); return std::nullopt; }
+    // ── Trigonometric / math (integer floor) ─────────────────────────────
+    if (name == "sin" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::sin(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "cos" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::cos(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "tan" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::tan(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "asin" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::asin(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "acos" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::acos(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "atan" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::atan(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "atan2" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(static_cast<int64_t>(std::atan2(static_cast<double>(*a), static_cast<double>(*b)))); return std::nullopt; }
+    if (name == "cbrt" && n == 1) { if (auto v = intArg(0)) return CV::fromInt(static_cast<int64_t>(std::cbrt(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "hypot" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(static_cast<int64_t>(std::hypot(static_cast<double>(*a), static_cast<double>(*b)))); return std::nullopt; }
+    if (name == "fma" && n == 3) { auto a = intArg(0), b = intArg(1), c = intArg(2); if (a && b && c) return CV::fromInt(*a * *b + *c); return std::nullopt; }
+    if (name == "copysign" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) { int64_t mag = *a < 0 ? -*a : *a; return CV::fromInt(*b >= 0 ? mag : -mag); } return std::nullopt; }
+    if (name == "min_float" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(std::min(*a, *b)); return std::nullopt; }
+    if (name == "max_float" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CV::fromInt(std::max(*a, *b)); return std::nullopt; }
+    // ── Array: reverse, sort, remove, insert ─────────────────────────────
+    if (name == "reverse" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            auto arr = args[0].arrVal;
+            std::reverse(arr.begin(), arr.end());
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    if (name == "sort" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            auto arr = args[0].arrVal;
+            for (auto& e : arr) if (e.kind != CV::Kind::Integer) return std::nullopt;
+            std::sort(arr.begin(), arr.end(), [](const CV& a, const CV& b) { return a.intVal < b.intVal; });
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    if (name == "array_remove" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            auto arr = args[0].arrVal;
+            int64_t idx = args[1].intVal;
+            if (idx < 0 || idx >= static_cast<int64_t>(arr.size())) return std::nullopt;
+            arr.erase(arr.begin() + idx);
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    if (name == "array_insert" && n == 3) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            auto arr = args[0].arrVal;
+            int64_t idx = args[1].intVal;
+            if (idx < 0 || idx > static_cast<int64_t>(arr.size())) return std::nullopt;
+            arr.insert(arr.begin() + idx, args[2]);
+            return CV::fromArr(std::move(arr));
+        }
+        return std::nullopt;
+    }
+    if (name == "array_any" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            for (auto& e : args[0].arrVal)
+                if (e.kind == CV::Kind::Integer && e.intVal != 0) return CV::fromInt(1);
+            return CV::fromInt(0);
+        }
+        return std::nullopt;
+    }
+    if (name == "array_every" && n == 1) {
+        if (args[0].kind == CV::Kind::Array) {
+            for (auto& e : args[0].arrVal) {
+                if (e.kind != CV::Kind::Integer) return std::nullopt;
+                if (e.intVal == 0) return CV::fromInt(0);
+            }
+            return CV::fromInt(1);
+        }
+        return std::nullopt;
+    }
+    if (name == "array_count" && n == 2) {
+        if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Integer) {
+            int64_t count = 0;
+            for (auto& e : args[0].arrVal)
+                if (e.kind == CV::Kind::Integer && e.intVal == args[1].intVal) ++count;
+            return CV::fromInt(count);
+        }
+        return std::nullopt;
+    }
+    // ── String: str_split (returns array of strings), str_join ───────────
+    // str_split not easily representable in ConstValue (array of strings)
+    // str_join requires array of strings — skip for ConstValue evaluator.
     // ── Integer type cast builtins ─────────────────────────────────────────
     // u64(x), i64(x), int(x), uint(x) — identity; all OmScript integers are i64.
     // u32(x), i32(x) — truncate to 32 bits (zero/sign extend back to i64).

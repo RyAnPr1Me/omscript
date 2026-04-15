@@ -1343,6 +1343,162 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         return CTValue::fromI64(-1);
     }
 
+    // ── Character classification predicates ──────────────────────────────
+    if (name == "is_upper" && n == 1) {
+        if (auto v = intArg(0)) return CTValue::fromI64(std::isupper(static_cast<int>(*v)) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_lower" && n == 1) {
+        if (auto v = intArg(0)) return CTValue::fromI64(std::islower(static_cast<int>(*v)) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_space" && n == 1) {
+        if (auto v = intArg(0)) return CTValue::fromI64(std::isspace(static_cast<int>(*v)) ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_alnum" && n == 1) {
+        if (auto v = intArg(0)) return CTValue::fromI64(std::isalnum(static_cast<int>(*v)) ? 1 : 0);
+        return std::nullopt;
+    }
+
+    // ── Unchecked integer arithmetic (fast_* and precise_*) ─────────────
+    // At compile time these are identical to normal arithmetic.
+    if (name == "fast_add" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a + *b); return std::nullopt; }
+    if (name == "fast_sub" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a - *b); return std::nullopt; }
+    if (name == "fast_mul" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a * *b); return std::nullopt; }
+    if (name == "fast_div" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b && *b != 0) return CTValue::fromI64(*a / *b); return std::nullopt; }
+    if (name == "precise_add" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a + *b); return std::nullopt; }
+    if (name == "precise_sub" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a - *b); return std::nullopt; }
+    if (name == "precise_mul" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a * *b); return std::nullopt; }
+    if (name == "precise_div" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b && *b != 0) return CTValue::fromI64(*a / *b); return std::nullopt; }
+
+    // ── Trigonometric / math (integer floor for integer args) ────────────
+    if (name == "sin" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::sin(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "cos" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::cos(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "tan" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::tan(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "asin" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::asin(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "acos" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::acos(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "atan" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::atan(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "atan2" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(static_cast<int64_t>(std::atan2(static_cast<double>(*a), static_cast<double>(*b)))); return std::nullopt; }
+    if (name == "exp" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::exp(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "cbrt" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::cbrt(static_cast<double>(*v)))); return std::nullopt; }
+    if (name == "hypot" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(static_cast<int64_t>(std::hypot(static_cast<double>(*a), static_cast<double>(*b)))); return std::nullopt; }
+    if (name == "fma" && n == 3) { auto a = intArg(0), b = intArg(1), c = intArg(2); if (a && b && c) return CTValue::fromI64(*a * *b + *c); return std::nullopt; }
+    if (name == "copysign" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) { int64_t mag = *a < 0 ? -*a : *a; return CTValue::fromI64(*b >= 0 ? mag : -mag); } return std::nullopt; }
+    if (name == "min_float" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(std::min(*a, *b)); return std::nullopt; }
+    if (name == "max_float" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(std::max(*a, *b)); return std::nullopt; }
+
+    // ── Array: reverse, sort, remove, insert ────────────────────────────
+    if (name == "reverse" && n == 1) {
+        CTArrayHandle h = arrArg(0);
+        if (h == CT_NULL_HANDLE) return std::nullopt;
+        auto elems = arrElements(h);
+        std::reverse(elems.begin(), elems.end());
+        CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
+        ++stats_.arraysAllocated;
+        for (size_t i = 0; i < elems.size(); ++i)
+            heap_.store(nh, static_cast<int64_t>(i), std::move(elems[i]));
+        return CTValue::fromArray(nh);
+    }
+    if (name == "sort" && n == 1) {
+        CTArrayHandle h = arrArg(0);
+        if (h == CT_NULL_HANDLE) return std::nullopt;
+        auto elems = arrElements(h);
+        // Sort only integer arrays at compile time.
+        for (auto& e : elems) if (!e.isInt()) return std::nullopt;
+        std::sort(elems.begin(), elems.end(), [](const CTValue& a, const CTValue& b) {
+            return a.asI64() < b.asI64();
+        });
+        CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
+        ++stats_.arraysAllocated;
+        for (size_t i = 0; i < elems.size(); ++i)
+            heap_.store(nh, static_cast<int64_t>(i), std::move(elems[i]));
+        return CTValue::fromArray(nh);
+    }
+    if (name == "array_remove" && n == 2) {
+        CTArrayHandle h = arrArg(0);
+        auto idx = intArg(1);
+        if (h == CT_NULL_HANDLE || !idx) return std::nullopt;
+        auto elems = arrElements(h);
+        int64_t i = *idx;
+        if (i < 0 || i >= static_cast<int64_t>(elems.size())) return std::nullopt;
+        elems.erase(elems.begin() + i);
+        CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
+        ++stats_.arraysAllocated;
+        for (size_t j = 0; j < elems.size(); ++j)
+            heap_.store(nh, static_cast<int64_t>(j), std::move(elems[j]));
+        return CTValue::fromArray(nh);
+    }
+    if (name == "array_insert" && n == 3) {
+        CTArrayHandle h = arrArg(0);
+        auto idx = intArg(1);
+        if (h == CT_NULL_HANDLE || !idx || !args[2].isKnown()) return std::nullopt;
+        auto elems = arrElements(h);
+        int64_t i = *idx;
+        if (i < 0 || i > static_cast<int64_t>(elems.size())) return std::nullopt;
+        elems.insert(elems.begin() + i, args[2]);
+        CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
+        ++stats_.arraysAllocated;
+        for (size_t j = 0; j < elems.size(); ++j)
+            heap_.store(nh, static_cast<int64_t>(j), std::move(elems[j]));
+        return CTValue::fromArray(nh);
+    }
+    if (name == "array_any" && n == 1) {
+        CTArrayHandle h = arrArg(0);
+        if (h == CT_NULL_HANDLE) return std::nullopt;
+        for (auto& v : arrElements(h))
+            if (v.isInt() && v.asI64() != 0) return CTValue::fromI64(1);
+        return CTValue::fromI64(0);
+    }
+    if (name == "array_every" && n == 1) {
+        CTArrayHandle h = arrArg(0);
+        if (h == CT_NULL_HANDLE) return std::nullopt;
+        for (auto& v : arrElements(h)) {
+            if (!v.isInt()) return std::nullopt;
+            if (v.asI64() == 0) return CTValue::fromI64(0);
+        }
+        return CTValue::fromI64(1);
+    }
+    if (name == "array_count" && n == 2) {
+        CTArrayHandle h = arrArg(0);
+        if (h == CT_NULL_HANDLE || !args[1].isInt()) return std::nullopt;
+        int64_t needle = args[1].asI64(), count = 0;
+        for (auto& v : arrElements(h))
+            if (v.isInt() && v.asI64() == needle) ++count;
+        return CTValue::fromI64(count);
+    }
+
+    // ── String: str_split, str_join ─────────────────────────────────────
+    if (name == "str_split" && n == 2) {
+        auto s = strArg(0), delim = strArg(1);
+        if (!s || !delim || delim->empty()) return std::nullopt;
+        std::vector<std::string> parts;
+        size_t pos = 0, prev = 0;
+        while ((pos = s->find(*delim, prev)) != std::string::npos) {
+            parts.push_back(s->substr(prev, pos - prev));
+            prev = pos + delim->size();
+        }
+        parts.push_back(s->substr(prev));
+        CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(parts.size()));
+        ++stats_.arraysAllocated;
+        for (size_t i = 0; i < parts.size(); ++i)
+            heap_.store(h, static_cast<int64_t>(i), CTValue::fromString(std::move(parts[i])));
+        return CTValue::fromArray(h);
+    }
+    if (name == "str_join" && n == 2) {
+        CTArrayHandle h = arrArg(0);
+        auto sep = strArg(1);
+        if (h == CT_NULL_HANDLE || !sep) return std::nullopt;
+        auto elems = arrElements(h);
+        std::string result;
+        for (size_t i = 0; i < elems.size(); ++i) {
+            if (!elems[i].isString()) return std::nullopt;
+            if (i > 0) result += *sep;
+            result += elems[i].asStr();
+        }
+        return CTValue::fromString(std::move(result));
+    }
+
     // Integer type-cast aliases (also handled by evalTypeCast).
     if (n == 1 && args[0].isInt()) {
         const int64_t v = args[0].asI64();
