@@ -2536,9 +2536,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Compute result size and allocate
         // ---------------------------------------------------------------
         // resultLen = strLen + totalCount * (newLen - oldLen)
-        llvm::Value* lenDiff   = builder->CreateSub(newLen, oldLen, "replace.lendiff");
-        llvm::Value* extraLen  = builder->CreateMul(totalCount, lenDiff, "replace.extralen");
-        llvm::Value* resultLen = builder->CreateAdd(strLen, extraLen, "replace.resultlen");
+        // lenDiff is signed (newLen may be < oldLen), but the final resultLen
+        // is always non-negative because totalCount * lenDiff only shrinks by
+        // at most strLen.  nsw on the mul/add lets SCEV prove this.
+        llvm::Value* lenDiff   = builder->CreateSub(newLen, oldLen, "replace.lendiff", /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* extraLen  = builder->CreateMul(totalCount, lenDiff, "replace.extralen", /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* resultLen = builder->CreateAdd(strLen, extraLen, "replace.resultlen", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* resultSize= builder->CreateAdd(resultLen, one, "replace.resultsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* resultBuf = builder->CreateCall(getOrDeclareMalloc(), {resultSize}, "replace.resultbuf");
         llvm::cast<llvm::CallInst>(resultBuf)->addRetAttr(
@@ -5107,13 +5110,35 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
              llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 2)});
         // size = ftell(fp)
         llvm::Value* fileSize = builder->CreateCall(getOrDeclareFtell(), {fp}, "fread.size");
+
+        // ftell returns -1 on error (e.g. non-seekable stream).  Guard against
+        // passing a negative value to malloc which would wrap to a huge size.
+        llvm::Value* ftellFailed = builder->CreateICmpSLT(fileSize,
+            llvm::ConstantInt::get(getDefaultType(), 0), "fread.ftellbad");
+        llvm::BasicBlock* ftellOkBB = llvm::BasicBlock::Create(*context, "fread.ftellok", parentFn);
+        llvm::BasicBlock* ftellBadBB = llvm::BasicBlock::Create(*context, "fread.ftellbad", parentFn);
+        // ftell failure is extremely rare.
+        auto* ftellW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(ftellFailed, ftellBadBB, ftellOkBB, ftellW);
+
+        // ftell error path: close file, return empty string
+        builder->SetInsertPoint(ftellBadBB);
+        builder->CreateCall(getOrDeclareFclose(), {fp});
+        llvm::Value* ftellEmptyBuf = builder->CreateCall(getOrDeclareMalloc(),
+            {llvm::ConstantInt::get(getDefaultType(), 1)}, "fread.ftempty");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ftellEmptyBuf);
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* ftellBadEndBB = builder->GetInsertBlock();
+
+        // ftell OK path: proceed with read
+        builder->SetInsertPoint(ftellOkBB);
         // fseek(fp, 0, SEEK_SET=0)
         builder->CreateCall(getOrDeclareFseek(),
             {fp, llvm::ConstantInt::get(getDefaultType(), 0),
              llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)});
         // buf = malloc(size + 1)
         llvm::Value* bufSize = builder->CreateAdd(fileSize,
-            llvm::ConstantInt::get(getDefaultType(), 1), "fread.bufsize");
+            llvm::ConstantInt::get(getDefaultType(), 1), "fread.bufsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "fread.buf");
         // fread(buf, 1, size, fp)
         builder->CreateCall(getOrDeclareFread(),
@@ -5129,8 +5154,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Merge
         builder->SetInsertPoint(mergeBB);
-        llvm::PHINode* phi = builder->CreatePHI(ptrTy, 2, "fread.result");
+        llvm::PHINode* phi = builder->CreatePHI(ptrTy, 3, "fread.result");
         phi->addIncoming(emptyResult, nullEndBB);
+        phi->addIncoming(ftellEmptyBuf, ftellBadEndBB);
         phi->addIncoming(okResult, okEndBB);
         stringReturningFunctions_.insert("file_read");
         return phi;
@@ -5827,7 +5853,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Handle gcd == 0 (when both inputs are 0): lcm(0, 0) = 0
         llvm::Value* gcdIsZero = builder->CreateICmpEQ(gcdVal, zero, "lcm.gcd.iszero");
         llvm::Value* divResult = builder->CreateUDiv(aAbs, gcdVal, "lcm.div");
-        llvm::Value* lcmResult = builder->CreateMul(divResult, bAbs, "lcm.mul");
+        llvm::Value* lcmResult = builder->CreateMul(divResult, bAbs, "lcm.mul", /*HasNUW=*/true, /*HasNSW=*/true);
         auto* lcmFinal = builder->CreateSelect(gcdIsZero, zero, lcmResult, "lcm.result");
         nonNegValues_.insert(lcmFinal);  // lcm is always non-negative (uses abs of inputs)
         return lcmFinal;
