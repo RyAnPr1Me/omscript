@@ -20,6 +20,7 @@
 #include <cctype>
 #include <cmath>
 #include <climits>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <sstream>
@@ -127,29 +128,54 @@ bool CTValue::isTruthy() const noexcept {
     return asBool();
 }
 
-std::string CTValue::memoHash() const {
+// Append a compact, deterministic representation to `out` for memoisation.
+// Uses a stack buffer + snprintf to avoid std::ostringstream overhead for
+// the common scalar cases (integers, floats, booleans).
+void CTValue::appendMemoHash(std::string& out) const {
+    char buf[32];                           // enough for "X:" + 20-digit int64
     switch (kind) {
-    case CTValueKind::CONCRETE_I64:
-        return "I:" + std::to_string(scalar.i64);
-    case CTValueKind::CONCRETE_U64:
-        return "U:" + std::to_string(scalar.u64);
+    case CTValueKind::CONCRETE_I64: {
+        int n = std::snprintf(buf, sizeof(buf), "I:%lld",
+                              static_cast<long long>(scalar.i64));
+        out.append(buf, static_cast<size_t>(n));
+        return;
+    }
+    case CTValueKind::CONCRETE_U64: {
+        int n = std::snprintf(buf, sizeof(buf), "U:%llu",
+                              static_cast<unsigned long long>(scalar.u64));
+        out.append(buf, static_cast<size_t>(n));
+        return;
+    }
     case CTValueKind::CONCRETE_F64: {
-        std::ostringstream oss;
-        oss.precision(17);
-        oss << "F:" << scalar.f64;
-        return oss.str();
+        int n = std::snprintf(buf, sizeof(buf), "F:%.17g", scalar.f64);
+        out.append(buf, static_cast<size_t>(n));
+        return;
     }
     case CTValueKind::CONCRETE_BOOL:
-        return scalar.b ? "B:1" : "B:0";
+        out.append(scalar.b ? "B:1" : "B:0", 3);
+        return;
     case CTValueKind::CONCRETE_STRING:
-        return "S:" + str;
-    case CTValueKind::CONCRETE_ARRAY:
-        // Arrays are mutable; use the handle as a unique identity.
-        return "A:" + std::to_string(arr);
-    case CTValueKind::UNINITIALIZED:
-        return "?";
+        out.append("S:", 2);
+        out.append(str);
+        return;
+    case CTValueKind::CONCRETE_ARRAY: {
+        int n = std::snprintf(buf, sizeof(buf), "A:%llu",
+                              static_cast<unsigned long long>(arr));
+        out.append(buf, static_cast<size_t>(n));
+        return;
     }
-    return "?";
+    case CTValueKind::UNINITIALIZED:
+        out.push_back('?');
+        return;
+    }
+    out.push_back('?');
+}
+
+std::string CTValue::memoHash() const {
+    std::string result;
+    result.reserve(24);                     // typical: "I:-1234567890" fits in SSO
+    appendMemoHash(result);
+    return result;
 }
 
 bool CTValue::operator==(const CTValue& o) const noexcept {
@@ -309,9 +335,14 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
     if (currentDepth_ >= kMaxDepth)  return std::nullopt;
 
     // Build memoisation key.
+    // Use appendMemoHash to avoid per-argument temporary strings.
     CTMemoKey key;
     key.fnName = fn->name;
-    for (const auto& a : args) key.argsHash += a.memoHash() + "|";
+    key.argsHash.reserve(args.size() * 24);   // typical arg hash ≤ ~22 chars
+    for (const auto& a : args) {
+        a.appendMemoHash(key.argsHash);
+        key.argsHash.push_back('|');
+    }
 
     // Cache hit?
     auto hit = memoCache_.find(key);

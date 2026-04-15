@@ -11,6 +11,7 @@
 #  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
 #endif
 #include <iostream>
+#include <llvm/ADT/SmallString.h>
 #include <llvm/ADT/Twine.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Config/llvm-config.h>
@@ -5541,7 +5542,10 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
             llvm::MDNode* domain = llvm::MDNode::getDistinct(*context,
                 {llvm::MDString::get(*context, "struct.noalias.domain")});
             domain->replaceOperandWith(0, domain);
-            std::string scopeName = "struct.noalias." + structType + "." + expr->fieldName;
+            llvm::SmallString<64> scopeBuf;
+            llvm::StringRef scopeName =
+                (llvm::Twine("struct.noalias.") + structType + "." + expr->fieldName)
+                    .toStringRef(scopeBuf);
             llvm::MDNode* scope = llvm::MDNode::getDistinct(*context,
                 {nullptr, domain, llvm::MDString::get(*context, scopeName)});
             scope->replaceOperandWith(0, scope);

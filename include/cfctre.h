@@ -104,6 +104,10 @@ struct CTValue {
     /// Produce a deterministic string key for memoisation.
     std::string memoHash() const;
 
+    /// Append the memo hash to an existing string (avoids temporary allocation
+    /// when building composite memo keys).
+    void appendMemoHash(std::string& out) const;
+
     bool operator==(const CTValue& o) const noexcept;
     bool operator!=(const CTValue& o) const noexcept { return !(*this == o); }
 };

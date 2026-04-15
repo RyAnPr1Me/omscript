@@ -6035,7 +6035,9 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     // ── array_concat(arr1, arr2) ───────────────────────────────────────────
     if (name == "array_concat" && n == 2) {
         if (args[0].kind == CV::Kind::Array && args[1].kind == CV::Kind::Array) {
-            std::vector<CV> result = args[0].arrVal;
+            std::vector<CV> result;
+            result.reserve(args[0].arrVal.size() + args[1].arrVal.size());
+            result = args[0].arrVal;
             result.insert(result.end(), args[1].arrVal.begin(), args[1].arrVal.end());
             return CV::fromArr(std::move(result));
         }
