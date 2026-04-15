@@ -252,7 +252,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // O(1) hash map lookup replaces the previous linear chain of ~80
     // string comparisons.  The switch below dispatches to the same
     // implementation code; only the dispatch mechanism has changed.
-    BuiltinId bid = lookupBuiltin(expr->callee);
+    const BuiltinId bid = lookupBuiltin(expr->callee);
 
     // All stdlib built-in functions are compiled to native machine code below.
     if (bid == BuiltinId::PRINT) {
@@ -302,7 +302,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "abs", 1);
         // Constant-fold abs(any const expr): eliminates the intrinsic call entirely.
         if (auto cv = tryFoldInt(expr->arguments[0].get())) {
-            int64_t result = (*cv < 0) ? -*cv : *cv;
+            const int64_t result = (*cv < 0) ? -*cv : *cv;
             auto* c = llvm::ConstantInt::get(getDefaultType(), result);
             nonNegValues_.insert(c);
             return c;
@@ -373,7 +373,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (call->callee == "range" && call->arguments.size() == 2) {
                 if (auto a = tryFoldInt(call->arguments[0].get())) {
                     if (auto b = tryFoldInt(call->arguments[1].get())) {
-                        int64_t count = *b > *a ? *b - *a : 0;
+                        const int64_t count = *b > *a ? *b - *a : 0;
                         auto* result = llvm::ConstantInt::get(getDefaultType(), count);
                         nonNegValues_.insert(result);
                         optStats_.constFolded++;
@@ -478,7 +478,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Constant-fold min(a, b) when both are compile-time constants.
         if (auto ca = tryFoldInt(expr->arguments[0].get())) {
             if (auto cb = tryFoldInt(expr->arguments[1].get())) {
-                int64_t result = std::min(*ca, *cb);
+                const int64_t result = std::min(*ca, *cb);
                 auto* c = llvm::ConstantInt::get(getDefaultType(), result);
                 if (result >= 0) nonNegValues_.insert(c);
                 return c;
@@ -510,7 +510,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Constant-fold max(a, b) when both are compile-time constants.
         if (auto ca = tryFoldInt(expr->arguments[0].get())) {
             if (auto cb = tryFoldInt(expr->arguments[1].get())) {
-                int64_t result = std::max(*ca, *cb);
+                const int64_t result = std::max(*ca, *cb);
                 auto* c = llvm::ConstantInt::get(getDefaultType(), result);
                 if (result >= 0) nonNegValues_.insert(c);
                 return c;
@@ -541,7 +541,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "sign", 1);
         // Constant-fold sign(any const expr).
         if (auto cv = tryFoldInt(expr->arguments[0].get())) {
-            int64_t result = (*cv > 0) ? 1 : ((*cv < 0) ? -1 : 0);
+            const int64_t result = (*cv > 0) ? 1 : ((*cv < 0) ? -1 : 0);
             return llvm::ConstantInt::get(getDefaultType(), result, true);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
@@ -570,7 +570,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (auto cv = tryFoldInt(expr->arguments[0].get())) {
             if (auto cl = tryFoldInt(expr->arguments[1].get())) {
                 if (auto ch = tryFoldInt(expr->arguments[2].get())) {
-                    int64_t result = std::max(*cl, std::min(*cv, *ch));
+                    const int64_t result = std::max(*cl, std::min(*cv, *ch));
                     auto* c = llvm::ConstantInt::get(getDefaultType(), result, true);
                     if (result >= 0) nonNegValues_.insert(c);
                     return c;
@@ -803,7 +803,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Use the llvm.sqrt intrinsic which maps directly to hardware sqrtsd/sqrtss
         // instructions on x86, producing results in a single cycle on modern CPUs.
-        bool inputIsDouble = x->getType()->isDoubleTy();
+        const bool inputIsDouble = x->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(x);
         llvm::Function* sqrtIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {getFloatType()});
         llvm::Value* result = builder->CreateCall(sqrtIntrinsic, {fval}, "sqrt.result");
@@ -868,7 +868,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             result = builder->CreateFDiv(lhs, rhs, "precise.div");
         // Strict: explicitly clear all fast-math flags for IEEE compliance.
         if (auto* fpInst = llvm::dyn_cast<llvm::Instruction>(result)) {
-            llvm::FastMathFlags strictFlags;
+            const llvm::FastMathFlags strictFlags;
             // All flags default to off — full IEEE compliance.
             fpInst->setFastMathFlags(strictFlags);
             hgoe::setInstructionPrecision(fpInst, hgoe::FPPrecision::Strict);
@@ -880,7 +880,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "is_even", 1);
         // Constant-fold is_even(any const expr).
         if (auto cv = tryFoldInt(expr->arguments[0].get())) {
-            int64_t result = ((*cv & 1) == 0) ? 1 : 0;
+            const int64_t result = ((*cv & 1) == 0) ? 1 : 0;
             auto* c = llvm::ConstantInt::get(getDefaultType(), result);
             nonNegValues_.insert(c);
             return c;
@@ -901,7 +901,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "is_odd", 1);
         // Constant-fold is_odd(any const expr).
         if (auto cv = tryFoldInt(expr->arguments[0].get())) {
-            int64_t result = (*cv & 1) ? 1 : 0;
+            const int64_t result = (*cv & 1) ? 1 : 0;
             auto* c = llvm::ConstantInt::get(getDefaultType(), result);
             nonNegValues_.insert(c);
             return c;
@@ -951,7 +951,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (call->callee == "range" && call->arguments.size() == 2) {
                 if (auto a = tryFoldInt(call->arguments[0].get())) {
                     if (auto b = tryFoldInt(call->arguments[1].get())) {
-                        int64_t count = *b > *a ? *b - *a : 0;
+                        const int64_t count = *b > *a ? *b - *a : 0;
                         int64_t series;
                         if (count == 0) {
                             series = 0;
@@ -1388,10 +1388,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // This eliminates the runtime strlen + bounds check + load entirely.
         if (auto strConst = tryFoldStr(expr->arguments[0].get())) {
             if (auto idxConst = tryFoldInt(expr->arguments[1].get())) {
-                int64_t idx = *idxConst;
-                int64_t len = static_cast<int64_t>(strConst->size());
+                const int64_t idx = *idxConst;
+                const int64_t len = static_cast<int64_t>(strConst->size());
                 if (idx >= 0 && idx < len) {
-                    char ch = (*strConst)[static_cast<size_t>(idx)];
+                    const char ch = (*strConst)[static_cast<size_t>(idx)];
                     return llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(static_cast<unsigned char>(ch)));
                 }
             }
@@ -1812,7 +1812,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                     llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
         }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
-        bool isFloat = val->getType()->isDoubleTy();
+        const bool isFloat = val->getType()->isDoubleTy();
         if (!isFloat)
             val = toDefaultType(val);
         if (isFloat) {
@@ -1879,7 +1879,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (auto v = tryFoldInt(expr->arguments[0].get()))
             return llvm::ConstantInt::get(getDefaultType(), *v);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        bool inputIsDouble = arg->getType()->isDoubleTy();
+        const bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
         llvm::Function* floorIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::floor, {getFloatType()});
         llvm::Value* result = builder->CreateCall(floorIntrinsic, {fval}, "floor.result");
@@ -1893,7 +1893,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (auto v = tryFoldInt(expr->arguments[0].get()))
             return llvm::ConstantInt::get(getDefaultType(), *v);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        bool inputIsDouble = arg->getType()->isDoubleTy();
+        const bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.ceil intrinsic for native hardware rounding
         llvm::Function* ceilIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ceil, {getFloatType()});
@@ -1909,7 +1909,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (auto v = tryFoldInt(expr->arguments[0].get()))
             return llvm::ConstantInt::get(getDefaultType(), *v);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        bool inputIsDouble = arg->getType()->isDoubleTy();
+        const bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.round intrinsic for native hardware rounding
         llvm::Function* roundIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::round, {getFloatType()});
@@ -1944,7 +1944,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-        llvm::FunctionCallee tanFn = module->getOrInsertFunction("tan", ft);
+        const llvm::FunctionCallee tanFn = module->getOrInsertFunction("tan", ft);
         return builder->CreateCall(tanFn, {fval}, "tan.result");
     }
 
@@ -1953,7 +1953,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-        llvm::FunctionCallee asinFn = module->getOrInsertFunction("asin", ft);
+        const llvm::FunctionCallee asinFn = module->getOrInsertFunction("asin", ft);
         return builder->CreateCall(asinFn, {fval}, "asin.result");
     }
 
@@ -1962,7 +1962,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-        llvm::FunctionCallee acosFn = module->getOrInsertFunction("acos", ft);
+        const llvm::FunctionCallee acosFn = module->getOrInsertFunction("acos", ft);
         return builder->CreateCall(acosFn, {fval}, "acos.result");
     }
 
@@ -1971,7 +1971,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-        llvm::FunctionCallee atanFn = module->getOrInsertFunction("atan", ft);
+        const llvm::FunctionCallee atanFn = module->getOrInsertFunction("atan", ft);
         return builder->CreateCall(atanFn, {fval}, "atan.result");
     }
 
@@ -1982,7 +1982,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* fy = ensureFloat(y);
         llvm::Value* fx = ensureFloat(x);
         llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType(), getFloatType()}, false);
-        llvm::FunctionCallee atan2Fn = module->getOrInsertFunction("atan2", ft);
+        const llvm::FunctionCallee atan2Fn = module->getOrInsertFunction("atan2", ft);
         return builder->CreateCall(atan2Fn, {fy, fx}, "atan2.result");
     }
 
@@ -2015,7 +2015,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-        llvm::FunctionCallee cbrtFn = module->getOrInsertFunction("cbrt", ft);
+        const llvm::FunctionCallee cbrtFn = module->getOrInsertFunction("cbrt", ft);
         return builder->CreateCall(cbrtFn, {fval}, "cbrt.result");
     }
 
@@ -2026,7 +2026,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* fx = ensureFloat(x);
         llvm::Value* fy = ensureFloat(y);
         llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType(), getFloatType()}, false);
-        llvm::FunctionCallee hypotFn = module->getOrInsertFunction("hypot", ft);
+        const llvm::FunctionCallee hypotFn = module->getOrInsertFunction("hypot", ft);
         return builder->CreateCall(hypotFn, {fx, fy}, "hypot.result");
     }
 
@@ -2042,7 +2042,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // constants — anything tryFoldStr/tryFoldInt can resolve.
         if (auto sv = tryFoldStr(expr->arguments[0].get())) {
             try {
-                int64_t parsed = std::stoll(*sv);
+                const int64_t parsed = std::stoll(*sv);
                 return llvm::ConstantInt::get(getDefaultType(), parsed);
             } catch (...) {
                 // Fall through to runtime parsing if conversion fails.
@@ -2077,7 +2077,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
             if (lit->literalType == LiteralExpr::LiteralType::STRING) {
                 try {
-                    double parsed = std::stod(lit->stringValue);
+                    const double parsed = std::stod(lit->stringValue);
                     return llvm::ConstantFP::get(getFloatType(), parsed);
                 } catch (...) {
                     // Fall through to runtime parsing if conversion fails.
@@ -2334,7 +2334,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // When both arguments are compile-time string constants, fold at compile time.
         if (auto hayConst = tryFoldStr(expr->arguments[0].get())) {
             if (auto needleConst = tryFoldStr(expr->arguments[1].get())) {
-                bool found = hayConst->find(*needleConst) != std::string::npos;
+                const bool found = hayConst->find(*needleConst) != std::string::npos;
                 return llvm::ConstantInt::get(getDefaultType(), found ? 1 : 0);
             }
         }
@@ -3244,7 +3244,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SORT) {
         validateArgCount(expr, "sort", 1);
-        bool sortStrings = isStringArrayExpr(expr->arguments[0].get());
+        const bool sortStrings = isStringArrayExpr(expr->arguments[0].get());
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
@@ -3618,7 +3618,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
             codegenError("array_map: second argument must be a string literal (function name)", expr);
         }
-        std::string fnName = fnNameLit->stringValue;
+        const std::string fnName = fnNameLit->stringValue;
         // Look up the target function in the LLVM module
         auto calleeIt = functions.find(fnName);
         if (calleeIt == functions.end() || !calleeIt->second) {
@@ -3696,7 +3696,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
             codegenError("array_filter: second argument must be a string literal (function name)", expr);
         }
-        std::string fnName = fnNameLit->stringValue;
+        const std::string fnName = fnNameLit->stringValue;
         auto calleeIt = functions.find(fnName);
         if (calleeIt == functions.end() || !calleeIt->second) {
             codegenError("array_filter: unknown function '" + fnName + "'", expr);
@@ -4592,7 +4592,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 auto* ci = llvm::ConstantInt::get(getDefaultType(), val);
                 if (val >= 0) nonNegValues_.insert(ci);
                 return ci;
-            } catch (...) {}
+            } catch (...) {} // NOLINT(bugprone-empty-catch)
         }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
@@ -5549,7 +5549,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                     llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
         }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
-        bool isFloat = val->getType()->isDoubleTy();
+        const bool isFloat = val->getType()->isDoubleTy();
         if (!isFloat)
             val = toDefaultType(val);
         if (isFloat) {
@@ -5582,7 +5582,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (auto sv = tryFoldStr(expr->arguments[0].get())) {
             try { return llvm::ConstantInt::get(getDefaultType(),
                       static_cast<int64_t>(std::stoll(*sv))); }
-            catch (...) {}
+            catch (...) {} // NOLINT(bugprone-empty-catch)
         }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         auto* ptrTy = llvm::PointerType::getUnqual(*context);

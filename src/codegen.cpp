@@ -867,7 +867,7 @@ llvm::MDNode* CodeGenerator::getOrCreateFieldTBAA(const std::string& structType,
     auto& C = *context;
     auto* zero = llvm::ConstantAsMetadata::get(
         llvm::ConstantInt::get(llvm::Type::getInt64Ty(C), 0));
-    std::string nodeName = "struct." + structType + "." + std::to_string(fieldIdx);
+    const std::string nodeName = "struct." + structType + "." + std::to_string(fieldIdx);
     llvm::MDNode* fieldTypeNode = llvm::MDNode::get(C, {
         llvm::MDString::get(C, nodeName),
         tbaaStructTypeNode_,
@@ -1074,7 +1074,7 @@ llvm::Value* CodeGenerator::splatScalarToVector(llvm::Value* scalar, llvm::Type*
     llvm::Value* undef = llvm::UndefValue::get(vecTy);
     llvm::Value* ins = builder->CreateInsertElement(undef, scalar,
         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "splat.ins");
-    llvm::SmallVector<int, 16> mask(fvt->getNumElements(), 0);
+    const llvm::SmallVector<int, 16> mask(fvt->getNumElements(), 0);
     return builder->CreateShuffleVector(ins, mask, "splat");
 }
 
@@ -2285,7 +2285,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
 
     // capacity = 8, total slots = 2 + 3*8 = 26, bytes = 26*8 = 208
     llvm::Value* cap = llvm::ConstantInt::get(i64Ty, 8);
-    llvm::Value* totalBytes = llvm::ConstantInt::get(i64Ty, (2 + 3 * 8) * 8);
+    llvm::Value* totalBytes = llvm::ConstantInt::get(i64Ty, (2LL + 3LL * 8LL) * 8LL);
     // Use calloc so all hash slots start as 0 (empty)
     llvm::Value* buf = builder->CreateCall(getOrDeclareCalloc(), {
         llvm::ConstantInt::get(i64Ty, 1), totalBytes
@@ -3490,7 +3490,7 @@ void CodeGenerator::preAnalyzeArrayTypes(Program* program) {
                 }
             }
             // Scan call sites to propagate array-ness to callee parameters.
-            std::function<void(Statement*)> scanCallSites = [&](Statement* st) {
+            const std::function<void(Statement*)> scanCallSites = [&](Statement* st) {
                 if (!st) return;
                 auto scanExpr = [&](auto& se, Expression* e) -> void {
                     if (!e) return;
@@ -3952,21 +3952,21 @@ void CodeGenerator::generate(Program* program) {
     if (enableEGraph_ && optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) {
             std::cout << "  [opt] Running e-graph equality saturation on AST ("
-                      << program->functions.size() << " functions)..." << std::endl;
+                      << program->functions.size() << " functions)..." << '\n';
         }
         egraph::optimizeProgram(program);
         if (verbose_) {
             auto rules = egraph::getAllRules();
             std::cout << "  [opt] E-graph saturation complete (" << rules.size()
-                      << " rewrite rules applied)" << std::endl;
+                      << " rewrite rules applied)" << '\n';
         }
     } else if (verbose_ && optimizationLevel < OptimizationLevel::O2) {
-        std::cout << "  [opt] E-graph optimization skipped (requires O2+)" << std::endl;
+        std::cout << "  [opt] E-graph optimization skipped (requires O2+)" << '\n';
     }
 
     if (verbose_) {
         std::cout << "  [codegen] Generating LLVM IR for " << program->functions.size()
-                  << " functions..." << std::endl;
+                  << " functions..." << '\n';
     }
 
     // Generate all function bodies
@@ -4236,13 +4236,13 @@ void CodeGenerator::generate(Program* program) {
     // (and possibly dead) copies after IPO has run.
     if (hasOptMaxFunctions && enableOptMax_) {
         if (verbose_) {
-            std::cout << "  [opt] Running OPTMAX per-function optimization passes..." << std::endl;
+            std::cout << "  [opt] Running OPTMAX per-function optimization passes..." << '\n';
         }
         optimizeOptMaxFunctions();
     }
 
     if (verbose_) {
-        std::cout << "  [opt] Running LLVM optimization pipeline..." << std::endl;
+        std::cout << "  [opt] Running LLVM optimization pipeline..." << '\n';
     }
     runOptimizationPasses();
 
@@ -4778,7 +4778,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // is already set to fast (line 2314-2316), so no per-function override is
     // needed.  The save/restore is still correct — savedFMF captures the
     // existing fast flags and restores them identically.
-    llvm::FastMathFlags savedFMF = builder->getFastMathFlags();
+    const llvm::FastMathFlags savedFMF = builder->getFastMathFlags();
     if (inOptMaxFunction && !useFastMath_ && currentOptMaxConfig_.fastMath) {
         // fast_math=true (or safety=off, which implies it): enable all fast-math
         // optimizations — FMA fusion, reassociation, reciprocal approximations,
@@ -5266,7 +5266,7 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
     static thread_local int depth = 0;
     if (++depth > 100) { --depth; return std::nullopt; }
 
-    struct DepthGuard { ~DepthGuard() { --depth; } } guard;
+    struct DepthGuard { ~DepthGuard() { --depth; } } const guard;
 
     // Return value (set by a ReturnStmt)
     std::optional<int64_t> retVal;
@@ -5313,7 +5313,7 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
             }
             auto rv = evalExpr(bin->right.get());
             if (!lv || !rv) return std::nullopt;
-            int64_t a = *lv, b = *rv;
+            const int64_t a = *lv, b = *rv;
             if (bin->op == "+") return a + b;
             if (bin->op == "-") return a - b;
             if (bin->op == "*") return a * b;
@@ -5395,7 +5395,7 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
             if (ret->value) {
                 auto v = evalExpr(ret->value.get());
                 if (!v) return false;
-                retVal = *v;
+                retVal = v;
             } else {
                 retVal = 0;
             }
@@ -5580,11 +5580,11 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "lcm" && n == 2) {
         auto a = intArg(0), b = intArg(1);
         if (a && b) {
-            uint64_t ua = static_cast<uint64_t>(std::abs(*a));
-            uint64_t ub = static_cast<uint64_t>(std::abs(*b));
+            const uint64_t ua = static_cast<uint64_t>(std::abs(*a));
+            const uint64_t ub = static_cast<uint64_t>(std::abs(*b));
             if (ua == 0 || ub == 0) return CV::fromInt(0);
             uint64_t g = ua, tb = ub;
-            while (tb) { uint64_t t = tb; tb = g % tb; g = t; }
+            while (tb) { const uint64_t t = tb; tb = g % tb; g = t; }
             return CV::fromInt(static_cast<int64_t>(ua / g * ub));
         }
         return std::nullopt;
@@ -5616,7 +5616,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     // ── to_char(n) → single char string ────────────────────────────────────
     if (name == "to_char" && n == 1) {
         if (auto v = intArg(0)) {
-            char c = static_cast<char>(static_cast<uint8_t>(*v & 0xFF));
+            const char c = static_cast<char>(static_cast<uint8_t>(*v & 0xFF));
             return CV::fromStr(std::string(1, c));
         }
         return std::nullopt;
@@ -5639,7 +5639,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if ((name == "to_int" || name == "string_to_number") && n == 1) {
         if (auto s = strArg(0)) {
             try { return CV::fromInt(static_cast<int64_t>(std::stoll(*s))); }
-            catch (...) {}
+            catch (...) {} // NOLINT(bugprone-empty-catch)
         }
         return std::nullopt;
     }
@@ -5677,7 +5677,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "str_starts_with" && n == 2) {
         auto s = strArg(0), prefix = strArg(1);
         if (s && prefix) {
-            bool result = s->size() >= prefix->size() &&
+            const bool result = s->size() >= prefix->size() &&
                           s->compare(0, prefix->size(), *prefix) == 0;
             return CV::fromInt(result ? 1 : 0);
         }
@@ -5687,7 +5687,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "str_ends_with" && n == 2) {
         auto s = strArg(0), suffix = strArg(1);
         if (s && suffix) {
-            bool result = s->size() >= suffix->size() &&
+            const bool result = s->size() >= suffix->size() &&
                           s->compare(s->size() - suffix->size(), suffix->size(), *suffix) == 0;
             return CV::fromInt(result ? 1 : 0);
         }
@@ -5697,9 +5697,9 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "str_substr" && n == 3) {
         auto s = strArg(0); auto start = intArg(1); auto slen = intArg(2);
         if (s && start && slen) {
-            int64_t sz = static_cast<int64_t>(s->size());
-            int64_t st = std::max(int64_t(0), std::min(*start, sz));
-            int64_t ln = std::max(int64_t(0), std::min(*slen, sz - st));
+            const int64_t sz = static_cast<int64_t>(s->size());
+            const int64_t st = std::max(int64_t(0), std::min(*start, sz));
+            const int64_t ln = std::max(int64_t(0), std::min(*slen, sz - st));
             return CV::fromStr(s->substr(static_cast<size_t>(st), static_cast<size_t>(ln)));
         }
         return std::nullopt;
@@ -5846,8 +5846,8 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "rotate_left" && n == 2) {
         auto v = intArg(0), k = intArg(1);
         if (v && k) {
-            uint64_t x = static_cast<uint64_t>(*v);
-            int sh = static_cast<int>(*k) & 63;
+            const uint64_t x = static_cast<uint64_t>(*v);
+            const int sh = static_cast<int>(*k) & 63;
             return CV::fromInt(static_cast<int64_t>((x << sh) | (x >> (64 - sh))));
         }
         return std::nullopt;
@@ -5855,8 +5855,8 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "rotate_right" && n == 2) {
         auto v = intArg(0), k = intArg(1);
         if (v && k) {
-            uint64_t x = static_cast<uint64_t>(*v);
-            int sh = static_cast<int>(*k) & 63;
+            const uint64_t x = static_cast<uint64_t>(*v);
+            const int sh = static_cast<int>(*k) & 63;
             return CV::fromInt(static_cast<int64_t>((x >> sh) | (x << (64 - sh))));
         }
         return std::nullopt;
@@ -5927,7 +5927,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "str_to_int" && n == 1) {
         if (auto s = strArg(0)) {
             try { return CV::fromInt(static_cast<int64_t>(std::stoll(*s))); }
-            catch (...) {}
+            catch (...) {} // NOLINT(bugprone-empty-catch)
         }
         return std::nullopt;
     }
@@ -5935,7 +5935,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "str_pad_left" && n == 3) {
         auto s = strArg(0); auto w = intArg(1); auto fill = strArg(2);
         if (s && w && fill && !fill->empty()) {
-            int64_t slen = static_cast<int64_t>(s->size());
+            const int64_t slen = static_cast<int64_t>(s->size());
             if (*w <= slen) return CV::fromStr(*s);
             if (*w > 65536) return std::nullopt; // guard against huge strings
             std::string r(*w - slen, (*fill)[0]);
@@ -5948,7 +5948,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "str_pad_right" && n == 3) {
         auto s = strArg(0); auto w = intArg(1); auto fill = strArg(2);
         if (s && w && fill && !fill->empty()) {
-            int64_t slen = static_cast<int64_t>(s->size());
+            const int64_t slen = static_cast<int64_t>(s->size());
             if (*w <= slen) return CV::fromStr(*s);
             if (*w > 65536) return std::nullopt; // guard against huge strings
             std::string r(*s);
@@ -6052,7 +6052,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "startswith" && n == 2) {
         auto s = strArg(0), prefix = strArg(1);
         if (s && prefix) {
-            bool result = s->size() >= prefix->size() &&
+            const bool result = s->size() >= prefix->size() &&
                           s->compare(0, prefix->size(), *prefix) == 0;
             return CV::fromInt(result ? 1 : 0);
         }
@@ -6061,7 +6061,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     if (name == "endswith" && n == 2) {
         auto s = strArg(0), suffix = strArg(1);
         if (s && suffix) {
-            bool result = s->size() >= suffix->size() &&
+            const bool result = s->size() >= suffix->size() &&
                           s->compare(s->size() - suffix->size(), suffix->size(), *suffix) == 0;
             return CV::fromInt(result ? 1 : 0);
         }
@@ -7233,7 +7233,7 @@ void CodeGenerator::runCFCTRE(Program* program) {
                   << s.functionsRegistered   << " functions registered, "
                   << s.pureFunctionsDetected << " pure, "
                   << s.functionCallsMemoized << " calls memoised, "
-                  << s.arraysAllocated       << " arrays allocated" << std::endl;
+                  << s.arraysAllocated       << " arrays allocated" << '\n';
     }
 }
 

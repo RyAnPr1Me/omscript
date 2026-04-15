@@ -204,8 +204,8 @@ struct CTMemoKey {
 
 struct CTMemoKeyHash {
     std::size_t operator()(const CTMemoKey& k) const noexcept {
-        std::size_t h1 = std::hash<std::string>{}(k.fnName);
-        std::size_t h2 = std::hash<std::string>{}(k.argsHash);
+        const std::size_t h1 = std::hash<std::string>{}(k.fnName);
+        const std::size_t h2 = std::hash<std::string>{}(k.argsHash);
         return h1 ^ (h2 * 0x9e3779b185ebca87ULL);
     }
 };
