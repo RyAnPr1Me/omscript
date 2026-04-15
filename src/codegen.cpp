@@ -2284,8 +2284,16 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
     builder->SetInsertPoint(entryBB);
 
     // capacity = 8, total slots = 2 + 3*8 = 26, bytes = 26*8 = 208
-    llvm::Value* cap = llvm::ConstantInt::get(i64Ty, 8);
-    llvm::Value* totalBytes = llvm::ConstantInt::get(i64Ty, (2LL + 3LL * 8LL) * 8LL);
+    // Layout: [len, cap, key0, val0, hash0, key1, val1, hash1, ...]
+    //   2 header slots + capacity * 3 slots (key+val+hash) = 2 + 3*cap slots
+    static constexpr int64_t kInitCapacity    = 8;
+    static constexpr int64_t kSlotsPerBucket  = 3;    // key, value, hash
+    static constexpr int64_t kHeaderSlots     = 2;    // length, capacity
+    static constexpr int64_t kInitTotalSlots  = kHeaderSlots + kSlotsPerBucket * kInitCapacity;
+    static constexpr int64_t kInitBytes       = kInitTotalSlots * 8LL;
+
+    llvm::Value* cap = llvm::ConstantInt::get(i64Ty, kInitCapacity);
+    llvm::Value* totalBytes = llvm::ConstantInt::get(i64Ty, kInitBytes);
     // Use calloc so all hash slots start as 0 (empty)
     llvm::Value* buf = builder->CreateCall(getOrDeclareCalloc(), {
         llvm::ConstantInt::get(i64Ty, 1), totalBytes
