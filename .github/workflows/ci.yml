@@ -27,6 +27,7 @@ jobs:
           find src runtime include \( -name '*.cpp' -o -name '*.h' \) 2>/dev/null | xargs -r clang-format -i
 
       - name: Commit formatting fixes
+        continue-on-error: true
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "style: auto-fix clang-format violations"
@@ -64,6 +65,7 @@ jobs:
           echo "clang-tidy check complete"
 
       - name: Commit tidy fixes
+        continue-on-error: true
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "style: auto-fix clang-tidy violations"
