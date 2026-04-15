@@ -450,6 +450,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                       ? arg
                                       : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "len.sptr");
             llvm::Value* rawLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "len.strlen");
+            // !range [0, INT64_MAX): strlen always returns non-negative.
+            if (optimizationLevel >= OptimizationLevel::O1)
+                llvm::cast<llvm::Instruction>(rawLen)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // strlen returns size_t (i64 on 64-bit); ensure we return the default type.
             auto* result = rawLen->getType() == getDefaultType()
                        ? rawLen
@@ -4943,6 +4947,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::MDNode::get(*context, {}));
         llvm::Value* celemPtr = builder->CreateIntToPtr(celemInt, ptrTy, "join.celemptr");
         llvm::Value* celemLen = builder->CreateCall(getOrDeclareStrlen(), {celemPtr}, "join.celemlen");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(celemLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* elemDst = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, afterDelim, "join.elemdst");
         builder->CreateCall(getOrDeclareMemcpy(), {elemDst, celemPtr, celemLen});
         llvm::Value* afterElem = builder->CreateAdd(afterDelim, celemLen, "join.afterelem", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -5160,6 +5167,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {contentPtr}, "fwrite.len");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(slen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         builder->CreateCall(getOrDeclareFwrite(),
             {contentPtr, llvm::ConstantInt::get(getDefaultType(), 1), slen, fp});
         builder->CreateCall(getOrDeclareFclose(), {fp});
@@ -5203,6 +5213,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {contentPtr}, "fappend.len");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(slen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         builder->CreateCall(getOrDeclareFwrite(),
             {contentPtr, llvm::ConstantInt::get(getDefaultType(), 1), slen, fp});
         builder->CreateCall(getOrDeclareFclose(), {fp});
@@ -6275,6 +6288,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // slen = strlen(str)
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strpad.slen");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(slen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
 
         // Clamp width to [0, i64_max] — negative width means no padding
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);

@@ -297,8 +297,11 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
 
     llvm::Value* lenVal;
     if (isStr) {
-        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr},
+        auto* strlenCall = builder->CreateCall(getOrDeclareStrlen(), {basePtr},
                                      llvm::Twine(prefix) + ".strlen");
+        // !range [0, INT64_MAX): strlen always returns a non-negative value.
+        strlenCall->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        lenVal = strlenCall;
     } else {
         // Loop-scope array length cache: when we're inside a loop and have
         // already loaded the length of this array, reuse the SSA value
@@ -1155,6 +1158,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
             llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {left}, "len1");
             llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {right}, "len2");
+            // !range [0, INT64_MAX): strlen always returns non-negative.
+            // This helps SCEV prove the nsw+nuw add below is safe and enables
+            // the optimizer to skip sign-extension/zero-extension checks.
+            if (optimizationLevel >= OptimizationLevel::O1) {
+                llvm::cast<llvm::Instruction>(len1)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::cast<llvm::Instruction>(len2)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            }
             // strlen results are always non-negative and bounded by addressable
             // memory, so their sum cannot overflow a 64-bit signed integer.
             // nsw+nuw enable SCEV to compute tight bounds through strlen-based
@@ -1195,6 +1207,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* strPtr =
             strVal->getType()->isPointerTy() ? strVal : builder->CreateIntToPtr(strVal, ptrTy, "strmul.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strmul.len");
+        // !range [0, INT64_MAX): strlen always returns non-negative.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(strLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
 
         // Guard against multiplication overflow: strLen * countVal could wrap
         // around the 64-bit range, causing a tiny allocation followed by a

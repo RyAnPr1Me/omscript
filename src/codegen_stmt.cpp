@@ -2196,7 +2196,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     llvm::Value* lenVal;
     if (isStr) {
         // String: strlen (no length header)
-        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "foreach.strlen");
+        auto* strlenCall = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "foreach.strlen");
+        // !range [0, INT64_MAX): strlen always returns a non-negative value.
+        // This annotation communicates the non-negativity to SCEV, enabling
+        // exact trip-count analysis for the foreach loop over strings.
+        strlenCall->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        lenVal = strlenCall;
     } else {
         // Array: length stored in slot 0
         // AlignedLoad(8) + TBAA + range: array length is stored in slot 0 which
@@ -2287,7 +2292,16 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // inbounds GEP: the loop guard (bodyIdx < strlen) guarantees the
         // index is within the allocated string buffer.
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, bodyIdx, "foreach.charptr");
-        llvm::Value* charByte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "foreach.char");
+        auto* charByte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "foreach.char");
+        // TBAA: string character loads are in the string-data type set,
+        // disjoint from array lengths, array elements, and struct fields.
+        // This enables LLVM to prove that character loads never alias
+        // array length loads, which helps LICM and vectorization.
+        charByte->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        // OmScript strings are always initialized (C NUL-terminated), so
+        // character loads within bounds are always defined.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            charByte->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
         elemVal = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext");
     } else {
         // Array: element is at slot (bodyIdx + 1).
