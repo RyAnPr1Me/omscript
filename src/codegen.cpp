@@ -4835,6 +4835,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constFloatFolds_.clear();
     stackAllocatedArrays_.clear();
     pendingArrayStackAlloc_ = false;
+    scopeComptimeInts_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -5191,8 +5192,13 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
 
         // Try CF-CTRE first (available after runCFCTRE has been called).
         if (ctEngine_) {
-            auto ctResult = ctEngine_->evalComptimeBlock(ct->body.get());
+            auto ctResult = ctEngine_->evalComptimeBlock(ct->body.get(),
+                                                         buildComptimeEnv());
             if (ctResult) {
+                // Stash the CT value so the VarDecl handler can register it
+                // under the variable name, making it visible to subsequent
+                // comptime blocks in the same function scope.
+                lastComptimeCtResult_ = *ctResult;
                 if (ctResult->isInt()) {
                     return llvm::ConstantInt::get(getDefaultType(), ctResult->asI64(), /*isSigned=*/true);
                 }
@@ -7317,6 +7323,37 @@ CTValue CodeGenerator::constValueToCTValue(const ConstValue& v) const {
     default:
         return CTValue::uninit();
     }
+}
+
+// buildComptimeEnv: snapshot all compile-time-known local variables into a
+// CTValue map that can be passed as the 'env' parameter to evalComptimeBlock.
+// This lets comptime{} blocks reference variables declared earlier in the
+// same function body (e.g. a 'var base = comptime {...}' array that is
+// referenced in a later 'var transformed = comptime { multi_stage(base); }').
+//
+// Sources:
+//   • constIntFolds_   — integer vars whose current value is compile-time known
+//   • constStringFolds_ — string vars similarly known
+//   • constArrayFolds_  — array vars folded to a vector<ConstValue>; each is
+//                          converted to a fresh CT heap array handle via
+//                          constValueToCTValue so the CF-CTRE evaluator can
+//                          index into it.
+std::unordered_map<std::string, CTValue>
+CodeGenerator::buildComptimeEnv() const {
+    std::unordered_map<std::string, CTValue> env;
+    if (!ctEngine_) return env;
+    for (const auto& e : constIntFolds_)
+        env[e.first().str()] = CTValue::fromI64(e.second);
+    for (const auto& e : scopeComptimeInts_)
+        env[e.first().str()] = CTValue::fromI64(e.second);
+    for (const auto& e : constStringFolds_)
+        env[e.first().str()] = CTValue::fromString(e.second);
+    for (const auto& e : constArrayFolds_) {
+        auto ctv = constValueToCTValue(ConstValue::fromArr(e.second));
+        if (ctv.isKnown())
+            env[e.first().str()] = std::move(ctv);
+    }
+    return env;
 }
 
 // autoDetectConstEvalFunctions: identify user-defined functions with parameters

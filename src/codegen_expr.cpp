@@ -4268,6 +4268,15 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     }
 
     builder->CreateAlignedStore(value, it->second, llvm::MaybeAlign(8));
+    // Any assignment to a mutable variable invalidates its compile-time scope
+    // entry (scopeComptimeInts_), which records the initial CT-folded value
+    // for the comptime-block env.  Must be cleared here so that a later
+    // comptime{} block sees the up-to-date value, not the initial constant.
+    scopeComptimeInts_.erase(expr->name);
+    // Also clear any stale constIntFolds_ entry — this can be set for
+    // comptime-init variables (var x = comptime{...}) which are technically
+    // mutable; without this, reassigning them would leave a stale fold.
+    constIntFolds_.erase(expr->name);
     // Track dict variables on reassignment so dict["key"] continues to work
     // after patterns like: m = map_set(m, "k", v) or m = {"a": 1}.
     if (isDictExpr(expr->value.get()))

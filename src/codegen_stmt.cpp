@@ -332,6 +332,51 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     constArrayFolds_[stmt->name] = std::move(foldedArr->arrVal);
             }
         }
+        // ── CF-CTRE scope propagation ──────────────────────────────────────
+        // Make CT-known variable values visible to subsequent comptime{} blocks
+        // in this function body via buildComptimeEnv().
+        //
+        // Case 1 — comptime-init var: the stashed CT result from generateExpr
+        //   is authoritative.  Back-fill legacy fold maps (constIntFolds_,
+        //   constArrayFolds_, constStringFolds_) in case the old
+        //   tryFoldExprToConst path failed for complex comptime bodies.
+        //
+        // Case 2 — non-comptime var whose init was CT-folded to a ConstantInt:
+        //   record in scopeComptimeInts_ so that a later comptime{} block can
+        //   read the variable (e.g. 'var reduced = lane_reduce(arr)' → final
+        //   comptime block references 'reduced').  Unlike constIntFolds_,
+        //   scopeComptimeInts_ is NOT used by generateIdentifier, so it cannot
+        //   cause wrong code generation for mutable loop variables.
+        //   generateAssign() clears the entry when the variable is mutated.
+        if (ctEngine_) {
+            bool hasComptimeInit3 = stmt->initializer &&
+                                    stmt->initializer->type == ASTNodeType::COMPTIME_EXPR;
+            if (hasComptimeInit3 && lastComptimeCtResult_) {
+                // Case 1 — consume the stashed CT result.
+                const CTValue& ctv = *lastComptimeCtResult_;
+                // Back-fill legacy fold maps if the old evaluator missed them.
+                if (ctv.isInt()) {
+                    if (!constIntFolds_.count(stmt->name))
+                        constIntFolds_[stmt->name] = ctv.asI64();
+                } else if (ctv.isString()) {
+                    if (!constStringFolds_.count(stmt->name))
+                        constStringFolds_[stmt->name] = ctv.asStr();
+                } else if (ctv.isArray() && !constArrayFolds_.count(stmt->name)) {
+                    auto cv = ctValueToConstValue(ctv);
+                    if (cv.kind == ConstValue::Kind::Array)
+                        constArrayFolds_[stmt->name] = std::move(cv.arrVal);
+                }
+                lastComptimeCtResult_.reset();
+            } else if (!hasComptimeInit3 && initValue) {
+                // Case 2 — non-comptime init folded to a scalar constant.
+                // Store in scopeComptimeInts_, not constIntFolds_, so it is
+                // invisible to generateIdentifier and cannot corrupt code gen.
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue)) {
+                    if (!scopeComptimeInts_.count(stmt->name))
+                        scopeComptimeInts_[stmt->name] = ci->getSExtValue();
+                }
+            }
+        }
         // Propagate integer constant from a zero-param constant-returning fn:
         // `const n = get_n()` where get_n() is in constIntReturnFunctions_
         // should record n as a compile-time constant integer.

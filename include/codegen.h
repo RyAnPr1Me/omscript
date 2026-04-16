@@ -1210,6 +1210,26 @@ class CodeGenerator {
     /// evaluation, memoisation, purity analysis, and pipeline SIMD semantics.
     std::unique_ptr<CTEngine> ctEngine_;
 
+    /// Stash for the CTValue produced by the most-recently evaluated
+    /// COMPTIME_EXPR.  Set inside generateExpr(COMPTIME_EXPR) right after a
+    /// successful ctEngine_->evalComptimeBlock() call, then consumed
+    /// (and cleared) by the VarDecl handler immediately after generateExpr
+    /// returns.  This lets the VarDecl handler register the CT result in
+    /// constArrayFolds_/constIntFolds_ under the variable's name so that
+    /// subsequent comptime blocks in the same function can reference it.
+    std::optional<CTValue> lastComptimeCtResult_;
+
+    /// Per-function map of variable names → their compile-time-known integer
+    /// values, populated by the VarDecl handler for variables whose
+    /// non-comptime initializer was constant-folded to a scalar (e.g.
+    /// 'var reduced = lane_reduce(derived)' where derived is CT-known).
+    /// Unlike constIntFolds_, entries here are NOT used by generateIdentifier
+    /// to replace loads with constants, so they do not interfere with mutable
+    /// loop variables or compound assignments.  They are only consulted by
+    /// buildComptimeEnv() to populate the env passed to evalComptimeBlock().
+    /// Cleared at the start of each function and on assignment (generateAssign).
+    llvm::StringMap<int64_t> scopeComptimeInts_;
+
     /// Run the CF-CTRE pass: register all functions / enum constants / global
     /// consts, then execute runPass() to pre-evaluate pure functions and
     /// populate the memoisation cache.  Called from generateProgram().
@@ -1221,6 +1241,13 @@ class CodeGenerator {
 
     /// Convert a ConstValue to a CTValue and load it into ctEngine_.
     CTValue constValueToCTValue(const ConstValue& v) const;
+
+    /// Build a CTValue environment from all compile-time-known local variables
+    /// in the current scope (constIntFolds_, constStringFolds_,
+    /// constArrayFolds_).  Passed as the 'env' argument to
+    /// ctEngine_->evalComptimeBlock() so that comptime{} blocks can reference
+    /// variables declared earlier in the same function body.
+    std::unordered_map<std::string, CTValue> buildComptimeEnv() const;
 
   public:
     // Per-function optimization for targeted optimization of individual functions

@@ -1,0 +1,161 @@
+@pure @inline
+fn rotl(x:int, k:int) -> int {
+    return (x << k) | (x >> (32 - k));
+}
+
+@pure @inline
+fn rotr(x:int, k:int) -> int {
+    return (x >> k) | (x << (32 - k));
+}
+
+// fake crypto primitive
+@pure
+fn mix3(a:int, b:int, c:int) -> int {
+    var x = a ^ rotl(b, 7);
+    var y = b + rotr(c, 11);
+    var z = c ^ (a << 3);
+
+    return u32((x * 0x9E3779B1) ^ (y * 0x85EBCA77) ^ (z * 0xC2B2AE3D));
+}
+
+// mutual recursion just to look painful
+@pure
+fn recurA(n:int) -> int {
+    if (n <= 0) { return 17; }
+    return mix3(n, recurB(n - 1), n * 13);
+}
+
+@pure
+fn recurB(n:int) -> int {
+    if (n <= 0) { return 29; }
+    return mix3(n * 7, recurA(n - 1), n * 3);
+}
+
+// fake "SIMD lane reduction"
+@pure
+fn lane_reduce(v:int[]) -> int {
+    var acc:int = 0;
+    for (i:int in 0...len(v)) {
+        var lane = v[i];
+        lane = mix3(lane, i * 101, acc);
+        lane = rotl(lane, i & 7);
+        acc ^= lane;
+    }
+    return u32(acc);
+}
+
+// fake "pipeline stage"
+@pure
+fn stage_transform(x:int, stg:int) -> int {
+    var y = x;
+    for (i:int in 0...4) {
+        y = mix3(y, stg * 12345 + i, i * 77);
+        y = u32(y ^ (y >> 13));
+    }
+    return y;
+}
+
+// builds a table using recursion + fake math
+@pure
+fn build_table(n:int) -> int[] {
+    var t:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        t[i] = mix3(recurA(i), recurB(i), i * i + 1337);
+    }
+    return t;
+}
+
+// second stage: transform table multiple times
+@pure
+fn multi_stage(table:int[]) -> int[] {
+    var out:int[] = array_fill(len(table), 0);
+
+    for (i:int in 0...len(table)) {
+        var x = table[i];
+
+        // fake deep pipeline
+        x = stage_transform(x, 1);
+        x = stage_transform(x, 2);
+        x = stage_transform(x, 3);
+
+        out[i] = x;
+    }
+
+    return out;
+}
+
+// third stage: fold everything into one value
+@pure
+fn collapse(arr:int[]) -> int {
+    var acc:int = 0;
+
+    for (i:int in 0...len(arr)) {
+        var v = arr[i];
+
+        // intentionally noisy math
+        v = mix3(v, acc, i * 999);
+        v = rotl(v, i & 15);
+        v ^= (v >> 7);
+
+        acc += v;
+        acc = u32(acc);
+    }
+
+    return acc;
+}
+
+// top-level "impossibly complex" function
+fn compute_obfuscated() -> int {
+
+    // --- STAGE 1: build base table (compile-time) ---
+    var base:int[] = comptime {
+        build_table(32);
+    };
+
+    // --- STAGE 2: multi-stage transform (still foldable) ---
+    var transformed:int[] = comptime {
+        multi_stage(base);
+    };
+
+    // --- STAGE 3: secondary derived table ---
+    var derived:int[] = comptime {
+        var d:int[] = array_fill(len(transformed), 0);
+        for (i:int in 0...len(transformed)) {
+            var x = transformed[i];
+
+            // fake dependency chain
+            x = mix3(x, i * 123, recurA(i & 7));
+            x = u32(x ^ (x << 5));
+
+            d[i] = x;
+        }
+        d;
+    };
+
+    // --- STAGE 4: reduce lanes ---
+    var reduced:int = lane_reduce(derived);
+
+    // --- STAGE 5: final chaotic folding ---
+    var final:int = comptime {
+        var x:int = reduced;
+
+        // fake RNG / LCG cascade
+        for (i:int in 0...20) {
+            x = (x * 1664525 + 1013904223);
+            x = u32(x);
+
+            // inject more fake structure
+            x ^= rotl(x, i & 7);
+            x ^= (x >> 11);
+        }
+
+        x;
+    };
+
+    return final;
+}
+
+fn main() {
+    var result = compute_obfuscated();
+    println(result);
+}
