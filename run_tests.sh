@@ -813,6 +813,7 @@ ptest_program "examples/allocator_annotation_test.om" 40
 ptest_program "examples/borrow_mut_syntax_test.om" 42
 ptest_program "examples/comptime_chain_test.om" 45
 ptest_program "examples/comptime_array_test.om" 478546148456
+ptest_program "examples/comptime_array_append_test.om" 18
 ptest_program "examples/loop_annotation_unroll_test.om" 120
 ptest_program "examples/loop_annotation_vectorize_test.om" 36
 flush_ptests

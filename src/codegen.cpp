@@ -6363,6 +6363,15 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         if (bin->op == "+" && lv->kind == ConstValue::Kind::String &&
             rv->kind == ConstValue::Kind::String)
             return ConstValue::fromStr(lv->strVal + rv->strVal);
+        // Array concatenation
+        if (bin->op == "+" && lv->kind == ConstValue::Kind::Array &&
+            rv->kind == ConstValue::Kind::Array) {
+            std::vector<ConstValue> out;
+            out.reserve(lv->arrVal.size() + rv->arrVal.size());
+            out.insert(out.end(), lv->arrVal.begin(), lv->arrVal.end());
+            out.insert(out.end(), rv->arrVal.begin(), rv->arrVal.end());
+            return ConstValue::fromArr(std::move(out));
+        }
         // String == / != comparison
         if ((bin->op == "==" || bin->op == "!=") &&
             lv->kind == ConstValue::Kind::String &&
@@ -6612,6 +6621,15 @@ CodeGenerator::tryConstEvalFull(
             if (bin->op == "+" && lv->kind == ConstValue::Kind::String &&
                 rv->kind == ConstValue::Kind::String)
                 return ConstValue::fromStr(lv->strVal + rv->strVal);
+            // Array concat
+            if (bin->op == "+" && lv->kind == ConstValue::Kind::Array &&
+                rv->kind == ConstValue::Kind::Array) {
+                std::vector<ConstValue> out;
+                out.reserve(lv->arrVal.size() + rv->arrVal.size());
+                out.insert(out.end(), lv->arrVal.begin(), lv->arrVal.end());
+                out.insert(out.end(), rv->arrVal.begin(), rv->arrVal.end());
+                return ConstValue::fromArr(std::move(out));
+            }
             // String == / !=
             if ((bin->op == "==" || bin->op == "!=") &&
                 lv->kind == ConstValue::Kind::String &&
