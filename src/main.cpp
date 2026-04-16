@@ -2795,6 +2795,7 @@ int main(int argc, char* argv[]) {
             for (const auto& w : parser.warnings()) { std::cerr << w << "\n"; }
 
             omscript::CodeGenerator codegen(optLevel);
+            codegen.setVerbose(verbose);
             codegen.setMarch(marchCpu);
             codegen.setMtune(mtuneCpu);
             codegen.setPIC(flagPIC);
