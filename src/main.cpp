@@ -271,9 +271,10 @@ bool versionGreaterThan(const Version& a, const Version& b) {
     return a.patch > b.patch;
 }
 
-// Extract the value of a simple JSON string field.
-// Handles both compact ("key":"value") and pretty ("key": "value") JSON.
-std::string extractJsonStringField(const std::string& json, const std::string& key) {
+/// Extract the value of a simple JSON string field.
+/// Handles both compact ("key":"value") and pretty ("key": "value") JSON.
+/// Used by both the GitHub releases API parser and the package manager.
+std::string jsonField(const std::string& json, const std::string& key) {
     const std::string searchKey = "\"" + key + "\"";
     size_t pos = json.find(searchKey);
     if (pos == std::string::npos) {
@@ -362,7 +363,7 @@ std::string fetchLatestReleaseTag() {
     if (json.empty()) {
         return "";
     }
-    return extractJsonStringField(json, "tag_name");
+    return jsonField(json, "tag_name");
 }
 
 // Download the release archive for `tagName` and install the binary to `installDir`.
@@ -987,38 +988,6 @@ void signalHandler(int sig) {
 // ---------------------------------------------------------------------------
 // Package manager
 // ---------------------------------------------------------------------------
-
-/// Minimal JSON string field extractor.
-/// Handles arbitrary whitespace between key, colon, and value.
-std::string jsonField(const std::string& json, const std::string& key) {
-    const std::string searchKey = "\"" + key + "\"";
-    size_t pos = json.find(searchKey);
-    if (pos == std::string::npos) {
-        return "";
-    }
-    pos += searchKey.size();
-    // Skip optional whitespace, then expect ':'.
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) {
-        ++pos;
-    }
-    if (pos >= json.size() || json[pos] != ':') {
-        return "";
-    }
-    ++pos;
-    // Skip optional whitespace after ':'.
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) {
-        ++pos;
-    }
-    if (pos >= json.size() || json[pos] != '"') {
-        return "";
-    }
-    ++pos;
-    const size_t end = json.find('"', pos);
-    if (end == std::string::npos) {
-        return "";
-    }
-    return json.substr(pos, end - pos);
-}
 
 /// Extract a JSON array of strings, e.g. "files": ["a.om", "b.om"]
 std::vector<std::string> jsonArrayField(const std::string& json, const std::string& key) {
