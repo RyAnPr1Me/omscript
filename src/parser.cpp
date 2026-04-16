@@ -3085,12 +3085,13 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                     e->column = token.column;
                     return e;
                 }
-                // ── Priority 3: flat name mangling (a::b::c → a__b__c) ─────────
-                // Handles unaliased imports and any remaining backward-compat uses.
-                std::string flatName = segments[0];
-                for (size_t i = 1; i < segments.size(); ++i)
-                    flatName += "__" + segments[i];
-                auto e = std::make_unique<IdentifierExpr>(flatName);
+                // ── Priority 3: fn-scope resolution ────────────────────────────
+                // The namespace wasn't registered via import, so treat the
+                // final segment as the plain function name.  This lets any
+                // prefix act as an organisational hint without changing what
+                // gets called: `std::len(x)` resolves to `len(x)`, a user's
+                // `math::sqrt(x)` resolves to `sqrt(x)`, etc.
+                auto e = std::make_unique<IdentifierExpr>(segments.back());
                 e->line = token.line;
                 e->column = token.column;
                 return e;
