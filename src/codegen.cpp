@@ -7264,7 +7264,8 @@ void CodeGenerator::runCFCTRE(Program* program) {
                   << s.functionsRegistered   << " functions registered, "
                   << s.pureFunctionsDetected << " pure, "
                   << s.functionCallsMemoized << " calls memoised, "
-                  << s.arraysAllocated       << " arrays allocated" << '\n';
+                  << s.arraysAllocated       << " arrays allocated, "
+                  << s.loopsReasoned         << " loops reasoned" << '\n';
     }
 }
 

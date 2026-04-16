@@ -1,0 +1,185 @@
+// comptime_loop_reason_test.om
+// Verifies CF-CTRE loop reasoning (closed-form symbolic analysis).
+//
+// Tests covered:
+//   ADD invariant delta:  x += c   →  x += N * c
+//   ADD linear delta:     x += i   →  x += Σi
+//   ADD linear delta:     x += a*i + b → x += a*Σi + b*N
+//   MUL invariant factor: x *= c   →  x *= c^N
+//   XOR invariant mask:   x ^= c   →  x ^ (c if N odd else 0)
+//   AND invariant mask:   x &= c   →  x & c
+//   OR  invariant mask:   x |= c   →  x | c
+//   INCR:                 x++      →  x += N
+//   SET constant:         x = c    →  x = c  (last-write)
+//   SET linear:           x = a*i + b → x at last iteration
+//   Two independent effects in one body
+//   Large loop (2 000 000 iterations — would exceed fuel without reasoning)
+
+// ADD invariant: count += 1 for n iterations → n
+fn count_up(n:int) -> int {
+    var x:int = 0;
+    for (i:int in 0...n) {
+        x += 1;
+    }
+    return x;
+}
+
+// ADD linear: s += i for i in 0...n → n*(n-1)/2
+fn sum_iota(n:int) -> int {
+    var s:int = 0;
+    for (i:int in 0...n) {
+        s += i;
+    }
+    return s;
+}
+
+// ADD linear with coefficient: s += 3*i + 2 for i in 0...n
+fn sum_linear(n:int) -> int {
+    var s:int = 0;
+    for (i:int in 0...n) {
+        s += 3 * i + 2;
+    }
+    return s;
+}
+
+// MUL: x *= 2 for n iterations → x * 2^n
+fn double_n(x:int, n:int) -> int {
+    for (i:int in 0...n) {
+        x *= 2;
+    }
+    return x;
+}
+
+// XOR: v ^= mask for n iterations (odd N → v^mask, even N → v)
+fn xor_n(v:int, mask:int, n:int) -> int {
+    for (i:int in 0...n) {
+        v ^= mask;
+    }
+    return v;
+}
+
+// AND: x &= mask (idempotent)
+fn and_mask(x:int, mask:int) -> int {
+    for (i:int in 0...5) {
+        x &= mask;
+    }
+    return x;
+}
+
+// OR: x |= mask (idempotent)
+fn or_mask(x:int, mask:int) -> int {
+    for (i:int in 0...5) {
+        x |= mask;
+    }
+    return x;
+}
+
+// INCR: x++ n times → x += n
+fn incr_n(n:int) -> int {
+    var x:int = 0;
+    for (i:int in 0...n) {
+        x++;
+    }
+    return x;
+}
+
+// SET constant: x = 42 every iteration — result is always 42
+fn set_const_loop(n:int) -> int {
+    var x:int = 0;
+    for (i:int in 0...n) {
+        x = 42;
+    }
+    return x;
+}
+
+// SET linear: x = i*2 every iteration — result is last i * 2 = (n-1)*2
+fn set_linear_loop(n:int) -> int {
+    var x:int = 0;
+    for (i:int in 0...n) {
+        x = i * 2;
+    }
+    return x;
+}
+
+// Two independent scalar effects in one body
+fn two_effects(n:int) -> int {
+    var a:int = 0;
+    var b:int = 100;
+    for (i:int in 0...n) {
+        a += 3;
+        b -= 1;
+    }
+    return a + b;   // 3*n + (100 - n) = 2*n + 100
+}
+
+// Large loop: 2 000 000 iterations — must use reasoning to stay within fuel
+fn big_count(n:int) -> int {
+    var x:int = 0;
+    for (i:int in 0...n) {
+        x += 1;
+    }
+    return x;
+}
+
+fn main() {
+    // count_up(100) = 100
+    const A:int = comptime { return count_up(100); };
+
+    // sum_iota(100) = 0+1+...+99 = 4950
+    const B:int = comptime { return sum_iota(100); };
+
+    // sum_linear(10) = Σ(3i+2) for i in 0..9 = 3*(0+1+...+9) + 2*10 = 135 + 20 = 155
+    const C:int = comptime { return sum_linear(10); };
+
+    // double_n(1, 10) = 1 * 2^10 = 1024
+    const D:int = comptime { return double_n(1, 10); };
+
+    // xor_n(0xFF, 0x0F, 3) → 3 is odd → 0xFF ^ 0x0F = 0xF0 = 240
+    const E:int = comptime { return xor_n(0xFF, 0x0F, 3); };
+
+    // xor_n(0xFF, 0x0F, 4) → 4 is even → unchanged = 0xFF = 255
+    const F:int = comptime { return xor_n(0xFF, 0x0F, 4); };
+
+    // and_mask(0xFF, 0x0F) = 0x0F = 15
+    const G:int = comptime { return and_mask(0xFF, 0x0F); };
+
+    // or_mask(0x00, 0x0F) = 0x0F = 15
+    const H:int = comptime { return or_mask(0x00, 0x0F); };
+
+    // incr_n(77) = 77
+    const I:int = comptime { return incr_n(77); };
+
+    // set_const_loop(50) = 42
+    const J:int = comptime { return set_const_loop(50); };
+
+    // set_linear_loop(10) = (10-1)*2 = 18
+    const K:int = comptime { return set_linear_loop(10); };
+
+    // two_effects(20) = 2*20 + 100 = 140
+    const L:int = comptime { return two_effects(20); };
+
+    // big_count(2000000) = 2000000
+    const M:int = comptime { return big_count(2000000); };
+
+    // Verify all constant values are correct.
+    // Exit code = hash of results, mod 256; computed so we can check without println.
+    //   A=100, B=4950, C=155, D=1024, E=240, F=255, G=15, H=15,
+    //   I=77,  J=42,   K=18,  L=140,  M=2000000
+    var ok:int = 1;
+    if (A != 100)     { ok = 0; }
+    if (B != 4950)    { ok = 0; }
+    if (C != 155)     { ok = 0; }
+    if (D != 1024)    { ok = 0; }
+    if (E != 240)     { ok = 0; }
+    if (F != 255)     { ok = 0; }
+    if (G != 15)      { ok = 0; }
+    if (H != 15)      { ok = 0; }
+    if (I != 77)      { ok = 0; }
+    if (J != 42)      { ok = 0; }
+    if (K != 18)      { ok = 0; }
+    if (L != 140)     { ok = 0; }
+    if (M != 2000000) { ok = 0; }
+
+    println(ok);   // prints 1 on success
+    return ok;
+}

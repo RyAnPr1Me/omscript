@@ -36,6 +36,7 @@ class BlockStmt;
 class Statement;
 class Expression;
 class Program;
+class ForStmt;
 
 // ─── CTArrayHandle ────────────────────────────────────────────────────────────
 using CTArrayHandle = uint64_t;
@@ -332,6 +333,7 @@ public:
         int64_t pipelineTilesExecuted{0};
         int64_t functionsRegistered{0};
         int64_t pureFunctionsDetected{0};
+        int64_t loopsReasoned{0};  ///< For-loops handled by closed-form symbolic analysis
     };
     const Stats& stats()      const noexcept { return stats_; }
     void         resetStats()       noexcept { stats_ = {}; }
@@ -355,6 +357,13 @@ private:
     CTValue evalCall(CTFrame& callerFrame,
                      const std::string& fnName,
                      const std::vector<CTValue>& args);
+
+    /// Attempt to symbolically reduce a for-range loop body using closed-form
+    /// arithmetic instead of iteration.  Returns true (and updates frame) if
+    /// the body was fully handled; returns false to let the caller fall back
+    /// to direct iteration.
+    bool tryReasonForLoop(CTFrame& frame, const ForStmt* fs,
+                          int64_t start, int64_t end, int64_t step, int64_t N);
 
     /// Snapshot an array from the heap into a new handle (for memoisation).
     CTArrayHandle snapshotArray(CTArrayHandle src);

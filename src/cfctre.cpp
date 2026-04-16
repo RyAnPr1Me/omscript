@@ -1624,8 +1624,488 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// evalStmt — evaluate a single AST statement
+// Loop Reasoning Engine
+//
+// When a for-range loop body consists only of simple scalar accumulations
+// (x += delta, x -= delta, x *= c, x ^= c, x &= c, x |= c, x = expr,
+//  x++ / x--) whose operands are loop-invariant or linear in the loop
+// variable, the engine computes the post-loop state in O(1) using
+// closed-form arithmetic:
+//
+//   for (i in start...end) { x += d;    }  →  x += N * d
+//   for (i in start...end) { x += i;    }  →  x += N*start + step*N*(N-1)/2
+//   for (i in start...end) { x += a*i+b;}  →  x += a*Σi + b*N
+//   for (i in start...end) { x *= c;    }  →  x *= c^N
+//   for (i in start...end) { x ^= c;    }  →  x ^= (N%2 ? c : 0)
+//   for (i in start...end) { x &= c;    }  →  x &= c   (N≥1)
+//   for (i in start...end) { x |= c;    }  →  x |= c   (N≥1)
+//   for (i in start...end) { x = c;     }  →  x = c    (last-write)
+//   for (i in start...end) { x = a*i+b; }  →  x = a*(last_i) + b
+//   for (i in start...end) { x++;       }  →  x += N
+//
+// Multiple independent effects on different variables are all applied.
+// Any body statement that cannot be classified causes the analysis to
+// abort and the caller falls back to direct iteration.
 // ═══════════════════════════════════════════════════════════════════════════
+
+// ── Linear expression descriptor ─────────────────────────────────────────
+// Represents value = coefA * loopVar + coefB where coefA == 0 is invariant.
+struct LRLinear {
+    bool    valid{false};
+    int64_t a{0};   // coefficient of the loop induction variable
+    int64_t b{0};   // loop-invariant bias
+};
+
+// Classify an expression as a*iv + b, returning {false} if unrepresentable.
+// modVars:  variables written in the loop body — treated as non-invariant.
+// The loop variable itself is NOT in modVars; it is recognized by name (iv).
+static LRLinear lrLinearize(
+    const Expression*                                   e,
+    const std::string&                                  iv,
+    const std::unordered_map<std::string, CTValue>&     snap,
+    const std::unordered_set<std::string>&              modVars)
+{
+    if (!e) return {};
+    switch (e->type) {
+
+    case ASTNodeType::LITERAL_EXPR: {
+        auto* lit = static_cast<const LiteralExpr*>(e);
+        if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+            return {true, 0, static_cast<int64_t>(lit->intValue)};
+        return {};
+    }
+
+    case ASTNodeType::IDENTIFIER_EXPR: {
+        auto* id = static_cast<const IdentifierExpr*>(e);
+        if (id->name == iv) return {true, 1, 0};
+        if (modVars.count(id->name)) return {};   // mutated — not invariant
+        auto it = snap.find(id->name);
+        if (it != snap.end() && it->second.isInt())
+            return {true, 0, it->second.asI64()};
+        return {};
+    }
+
+    case ASTNodeType::UNARY_EXPR: {
+        auto* un = static_cast<const UnaryExpr*>(e);
+        if (un->op == "-") {
+            LRLinear s = lrLinearize(un->operand.get(), iv, snap, modVars);
+            if (!s.valid) return {};
+            return {true, -s.a, -s.b};
+        }
+        if (un->op == "+")
+            return lrLinearize(un->operand.get(), iv, snap, modVars);
+        if (un->op == "~") {
+            LRLinear s = lrLinearize(un->operand.get(), iv, snap, modVars);
+            if (!s.valid || s.a != 0) return {};   // ~c only for invariant c
+            return {true, 0, ~s.b};
+        }
+        return {};
+    }
+
+    case ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<const BinaryExpr*>(e);
+        if (bin->op == "+" || bin->op == "-") {
+            LRLinear L = lrLinearize(bin->left.get(),  iv, snap, modVars);
+            LRLinear R = lrLinearize(bin->right.get(), iv, snap, modVars);
+            if (!L.valid || !R.valid) return {};
+            int64_t ra = (bin->op == "+") ?  R.a : -R.a;
+            int64_t rb = (bin->op == "+") ?  R.b : -R.b;
+            return {true, L.a + ra, L.b + rb};
+        }
+        if (bin->op == "*") {
+            LRLinear L = lrLinearize(bin->left.get(),  iv, snap, modVars);
+            LRLinear R = lrLinearize(bin->right.get(), iv, snap, modVars);
+            if (!L.valid || !R.valid) return {};
+            if (L.a == 0 && R.a == 0) return {true, 0,       L.b * R.b};
+            if (L.a == 0)             return {true, L.b*R.a,  L.b*R.b};   // L invariant
+            if (R.a == 0)             return {true, R.b*L.a,  R.b*L.b};   // R invariant
+            return {};   // quadratic — not representable
+        }
+        if (bin->op == "<<") {
+            LRLinear L = lrLinearize(bin->left.get(),  iv, snap, modVars);
+            LRLinear R = lrLinearize(bin->right.get(), iv, snap, modVars);
+            if (!L.valid || !R.valid || R.a != 0) return {};
+            if (R.b < 0 || R.b >= 64) return {};
+            unsigned sh = static_cast<unsigned>(R.b);
+            return {true, L.a << sh, L.b << sh};
+        }
+        if (bin->op == ">>" || bin->op == ">>>") {
+            LRLinear L = lrLinearize(bin->left.get(),  iv, snap, modVars);
+            LRLinear R = lrLinearize(bin->right.get(), iv, snap, modVars);
+            if (!L.valid || !R.valid || R.a != 0 || L.a != 0) return {};
+            if (R.b < 0 || R.b >= 64) return {};
+            int sh = static_cast<int>(R.b);
+            if (bin->op == ">>")
+                return {true, 0, L.b >> sh};
+            return {true, 0, static_cast<int64_t>(static_cast<uint64_t>(L.b) >> sh)};
+        }
+        // Bitwise ops on two invariant operands only.
+        if (bin->op == "&" || bin->op == "|" || bin->op == "^") {
+            LRLinear L = lrLinearize(bin->left.get(),  iv, snap, modVars);
+            LRLinear R = lrLinearize(bin->right.get(), iv, snap, modVars);
+            if (!L.valid || !R.valid || L.a != 0 || R.a != 0) return {};
+            int64_t res = 0;
+            if      (bin->op == "&") res = L.b & R.b;
+            else if (bin->op == "|") res = L.b | R.b;
+            else                     res = L.b ^ R.b;
+            return {true, 0, res};
+        }
+        return {};
+    }
+
+    default:
+        return {};
+    }
+}
+
+// ── Per-iteration effect on one scalar variable ───────────────────────────
+struct LREffect {
+    enum class Kind { ADD, MUL, XOR, AND, OR, SET, INCR, DECR };
+    Kind        kind;
+    std::string var;
+    int64_t     a{0};   // coefficient of loop var (for ADD / SET)
+    int64_t     b{0};   // constant part           (all ops)
+};
+
+// Collect all variable names written in a statement subtree.
+static void lrCollectWrites(const Statement* s,
+                             std::unordered_set<std::string>& out)
+{
+    if (!s) return;
+    switch (s->type) {
+    case ASTNodeType::BLOCK: {
+        auto* blk = static_cast<const BlockStmt*>(s);
+        for (auto& st : blk->statements) lrCollectWrites(st.get(), out);
+        break;
+    }
+    case ASTNodeType::EXPR_STMT: {
+        auto* es = static_cast<const ExprStmt*>(s);
+        const Expression* expr = es->expression.get();
+        if (expr->type == ASTNodeType::ASSIGN_EXPR)
+            out.insert(static_cast<const AssignExpr*>(expr)->name);
+        else if (expr->type == ASTNodeType::INDEX_ASSIGN_EXPR) {
+            auto* ia = static_cast<const IndexAssignExpr*>(expr);
+            if (ia->array->type == ASTNodeType::IDENTIFIER_EXPR)
+                out.insert(static_cast<const IdentifierExpr*>(ia->array.get())->name);
+        } else if (expr->type == ASTNodeType::POSTFIX_EXPR) {
+            auto* pfx = static_cast<const PostfixExpr*>(expr);
+            if (pfx->operand->type == ASTNodeType::IDENTIFIER_EXPR)
+                out.insert(static_cast<const IdentifierExpr*>(pfx->operand.get())->name);
+        } else if (expr->type == ASTNodeType::PREFIX_EXPR) {
+            auto* pfx = static_cast<const PrefixExpr*>(expr);
+            if (pfx->op == "++" || pfx->op == "--")
+                if (pfx->operand->type == ASTNodeType::IDENTIFIER_EXPR)
+                    out.insert(static_cast<const IdentifierExpr*>(pfx->operand.get())->name);
+        }
+        break;
+    }
+    case ASTNodeType::VAR_DECL:
+        out.insert(static_cast<const VarDecl*>(s)->name);
+        break;
+    default:
+        break;
+    }
+}
+
+// Analyze every statement in `body` and populate `effects`.
+// Returns false if any statement cannot be classified as a simple scalar effect.
+static bool lrAnalyzeBody(
+    const Statement*                                    body,
+    const std::string&                                  iv,
+    const std::unordered_map<std::string, CTValue>&     snap,
+    const std::unordered_set<std::string>&              modVars,
+    std::vector<LREffect>&                              effects)
+{
+    if (!body) return true;
+
+    // Flatten top-level block (one level only — nested control flow → bail).
+    std::vector<const Statement*> stmts;
+    if (body->type == ASTNodeType::BLOCK) {
+        auto* blk = static_cast<const BlockStmt*>(body);
+        for (auto& st : blk->statements) stmts.push_back(st.get());
+    } else {
+        stmts.push_back(body);
+    }
+
+    for (const Statement* s : stmts) {
+        if (!s) continue;
+        if (s->type != ASTNodeType::EXPR_STMT) return false;  // control flow → bail
+
+        auto* es   = static_cast<const ExprStmt*>(s);
+        const Expression* expr = es->expression.get();
+
+        // ── x++ / x-- (postfix or prefix) ─────────────────────────────────
+        if (expr->type == ASTNodeType::POSTFIX_EXPR ||
+            expr->type == ASTNodeType::PREFIX_EXPR) {
+            const std::string* namePtr = nullptr;
+            std::string op;
+            if (expr->type == ASTNodeType::POSTFIX_EXPR) {
+                auto* pfx = static_cast<const PostfixExpr*>(expr);
+                if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR) return false;
+                namePtr = &static_cast<const IdentifierExpr*>(pfx->operand.get())->name;
+                op = pfx->op;
+            } else {
+                auto* pfx = static_cast<const PrefixExpr*>(expr);
+                if (pfx->op != "++" && pfx->op != "--") return false;
+                if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR) return false;
+                namePtr = &static_cast<const IdentifierExpr*>(pfx->operand.get())->name;
+                op = pfx->op;
+            }
+            if (*namePtr == iv) return false;  // can't modify loop var
+            // Each variable may appear at most once (no double-effect).
+            for (auto& eff : effects) if (eff.var == *namePtr) return false;
+            effects.push_back({op == "++" ? LREffect::Kind::INCR : LREffect::Kind::DECR,
+                                *namePtr, 0, 0});
+            continue;
+        }
+
+        // ── x = RHS  (compound assignments desugared by parser) ────────────
+        if (expr->type == ASTNodeType::ASSIGN_EXPR) {
+            auto* assign = static_cast<const AssignExpr*>(expr);
+            const std::string& varName = assign->name;
+            if (varName == iv) return false;
+            for (auto& eff : effects) if (eff.var == varName) return false;
+
+            const Expression* rhs = assign->value.get();
+
+            // Try accumulation patterns:  x = x op delta
+            if (rhs->type == ASTNodeType::BINARY_EXPR) {
+                auto* bin = static_cast<const BinaryExpr*>(rhs);
+
+                auto isSelf = [&](const Expression* e) -> bool {
+                    return e->type == ASTNodeType::IDENTIFIER_EXPR &&
+                           static_cast<const IdentifierExpr*>(e)->name == varName;
+                };
+
+                // x = x + delta  /  x = delta + x
+                if (bin->op == "+" || bin->op == "-") {
+                    bool sl = isSelf(bin->left.get());
+                    bool sr = isSelf(bin->right.get());
+                    if (sl || sr) {
+                        // For subtraction, only x - delta is an accumulation.
+                        if (bin->op == "-" && !sl) return false;
+                        const Expression* deltaExpr =
+                            sl ? bin->right.get() : bin->left.get();
+                        LRLinear d = lrLinearize(deltaExpr, iv, snap, modVars);
+                        if (!d.valid) return false;
+                        int64_t sign = (bin->op == "-") ? -1 : 1;
+                        effects.push_back({LREffect::Kind::ADD, varName,
+                                           d.a * sign, d.b * sign});
+                        continue;
+                    }
+                }
+
+                // x = x * factor  (factor must be loop-invariant)
+                if (bin->op == "*") {
+                    bool sl = isSelf(bin->left.get());
+                    bool sr = isSelf(bin->right.get());
+                    if (sl || sr) {
+                        const Expression* factExpr =
+                            sl ? bin->right.get() : bin->left.get();
+                        LRLinear f = lrLinearize(factExpr, iv, snap, modVars);
+                        if (!f.valid || f.a != 0) return false;
+                        effects.push_back({LREffect::Kind::MUL, varName, 0, f.b});
+                        continue;
+                    }
+                }
+
+                // x = x ^ mask  /  x = mask ^ x  (mask invariant)
+                if (bin->op == "^") {
+                    bool sl = isSelf(bin->left.get());
+                    bool sr = isSelf(bin->right.get());
+                    if (sl || sr) {
+                        const Expression* maskExpr =
+                            sl ? bin->right.get() : bin->left.get();
+                        LRLinear m = lrLinearize(maskExpr, iv, snap, modVars);
+                        if (!m.valid || m.a != 0) return false;
+                        effects.push_back({LREffect::Kind::XOR, varName, 0, m.b});
+                        continue;
+                    }
+                }
+
+                // x = x & mask
+                if (bin->op == "&") {
+                    bool sl = isSelf(bin->left.get());
+                    bool sr = isSelf(bin->right.get());
+                    if (sl || sr) {
+                        const Expression* maskExpr =
+                            sl ? bin->right.get() : bin->left.get();
+                        LRLinear m = lrLinearize(maskExpr, iv, snap, modVars);
+                        if (!m.valid || m.a != 0) return false;
+                        effects.push_back({LREffect::Kind::AND, varName, 0, m.b});
+                        continue;
+                    }
+                }
+
+                // x = x | mask
+                if (bin->op == "|") {
+                    bool sl = isSelf(bin->left.get());
+                    bool sr = isSelf(bin->right.get());
+                    if (sl || sr) {
+                        const Expression* maskExpr =
+                            sl ? bin->right.get() : bin->left.get();
+                        LRLinear m = lrLinearize(maskExpr, iv, snap, modVars);
+                        if (!m.valid || m.a != 0) return false;
+                        effects.push_back({LREffect::Kind::OR, varName, 0, m.b});
+                        continue;
+                    }
+                }
+            }
+
+            // Pure SET:  x = expr  (RHS must not reference varName itself,
+            // which lrLinearize enforces via modVars containing varName).
+            LRLinear rhs_info = lrLinearize(rhs, iv, snap, modVars);
+            if (!rhs_info.valid) return false;
+            effects.push_back({LREffect::Kind::SET, varName,
+                                rhs_info.a, rhs_info.b});
+            continue;
+        }
+
+        return false;  // unrecognized expression statement
+    }
+
+    return true;
+}
+
+// Apply a set of loop effects after N full iterations.
+// start, step define the induction variable sequence:
+//   iv_k = start + k * step,  k in [0, N)
+static void lrApplyEffects(
+    CTFrame&                        frame,
+    const std::vector<LREffect>&    effects,
+    int64_t                         start,
+    int64_t                         step,
+    int64_t                         N)
+{
+    // Sum of the induction variable over all N iterations:
+    //   Σiv = N*start + step * N*(N-1)/2
+    // Use __int128 to avoid signed overflow during intermediate computation;
+    // the final wrap-around cast to int64 (via uint64) matches OmScript's
+    // wrapping arithmetic semantics.
+    const __int128 bigN    = static_cast<__int128>(N);
+    const __int128 bigS    = static_cast<__int128>(start);
+    const __int128 bigStep = static_cast<__int128>(step);
+    const int64_t  sumIV   = static_cast<int64_t>(
+        static_cast<uint64_t>(bigN * bigS + bigStep * bigN * (bigN - 1) / 2));
+
+    for (const auto& eff : effects) {
+        auto it  = frame.locals.find(eff.var);
+        int64_t cur = (it != frame.locals.end() && it->second.isInt())
+                      ? it->second.asI64() : 0;
+
+        switch (eff.kind) {
+
+        case LREffect::Kind::INCR:
+            // x++ N times  →  x += N
+            frame.locals[eff.var] = CTValue::fromI64(
+                static_cast<int64_t>(static_cast<uint64_t>(cur) +
+                                     static_cast<uint64_t>(N)));
+            break;
+
+        case LREffect::Kind::DECR:
+            // x-- N times  →  x -= N
+            frame.locals[eff.var] = CTValue::fromI64(
+                static_cast<int64_t>(static_cast<uint64_t>(cur) -
+                                     static_cast<uint64_t>(N)));
+            break;
+
+        case LREffect::Kind::ADD: {
+            // delta per iteration = eff.a * iv + eff.b
+            // total               = eff.a * Σiv + eff.b * N
+            const int64_t total = static_cast<int64_t>(
+                static_cast<uint64_t>(eff.a) * static_cast<uint64_t>(sumIV) +
+                static_cast<uint64_t>(eff.b) * static_cast<uint64_t>(N));
+            frame.locals[eff.var] = CTValue::fromI64(
+                static_cast<int64_t>(static_cast<uint64_t>(cur) +
+                                     static_cast<uint64_t>(total)));
+            break;
+        }
+
+        case LREffect::Kind::MUL: {
+            // x *= c, N times  →  x *= c^N
+            int64_t r = 1;
+            int64_t base = eff.b;
+            int64_t rem  = N;
+            while (rem > 0) {
+                if (rem & 1) r = static_cast<int64_t>(
+                    static_cast<uint64_t>(r) * static_cast<uint64_t>(base));
+                base = static_cast<int64_t>(
+                    static_cast<uint64_t>(base) * static_cast<uint64_t>(base));
+                rem >>= 1;
+            }
+            frame.locals[eff.var] = CTValue::fromI64(
+                static_cast<int64_t>(static_cast<uint64_t>(cur) *
+                                     static_cast<uint64_t>(r)));
+            break;
+        }
+
+        case LREffect::Kind::XOR:
+            // x ^= c, N times  →  x ^ c  if N is odd, else x unchanged
+            frame.locals[eff.var] = CTValue::fromI64(
+                (N & 1) ? (cur ^ eff.b) : cur);
+            break;
+
+        case LREffect::Kind::AND:
+            // x &= c, N≥1 times  →  x & c (idempotent)
+            frame.locals[eff.var] = CTValue::fromI64(cur & eff.b);
+            break;
+
+        case LREffect::Kind::OR:
+            // x |= c, N≥1 times  →  x | c (idempotent)
+            frame.locals[eff.var] = CTValue::fromI64(cur | eff.b);
+            break;
+
+        case LREffect::Kind::SET: {
+            // x = a*iv + b  →  value at last iteration iv_{N-1} = start+(N-1)*step
+            const int64_t lastIV = static_cast<int64_t>(
+                static_cast<uint64_t>(start) +
+                static_cast<uint64_t>(N - 1) * static_cast<uint64_t>(step));
+            frame.locals[eff.var] = CTValue::fromI64(
+                static_cast<int64_t>(
+                    static_cast<uint64_t>(eff.a) * static_cast<uint64_t>(lastIV) +
+                    static_cast<uint64_t>(eff.b)));
+            break;
+        }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTEngine::tryReasonForLoop
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool CTEngine::tryReasonForLoop(CTFrame& frame, const ForStmt* fs,
+                                 int64_t start, int64_t /*end*/, int64_t step,
+                                 int64_t N)
+{
+    // Collect all variables written by the loop body.
+    std::unordered_set<std::string> modVars;
+    lrCollectWrites(fs->body.get(), modVars);
+
+    // If the loop body writes to the loop variable itself, bail out.
+    if (modVars.count(fs->iteratorVar)) return false;
+
+    // Build a snapshot of pre-loop locals, excluding modified variables and
+    // the loop induction variable (which changes each iteration).
+    std::unordered_map<std::string, CTValue> snap;
+    snap.reserve(frame.locals.size());
+    for (auto& [k, v] : frame.locals) {
+        if (!modVars.count(k) && k != fs->iteratorVar)
+            snap[k] = v;
+    }
+
+    // Analyze every statement in the body.
+    std::vector<LREffect> effects;
+    if (!lrAnalyzeBody(fs->body.get(), fs->iteratorVar, snap, modVars, effects))
+        return false;
+
+    // Apply closed-form updates.
+    lrApplyEffects(frame, effects, start, step, N);
+    ++stats_.loopsReasoned;
+    return true;
+}
+
+
 
 bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
     if (!s || frame.hasReturned || frame.didBreak || frame.didContinue) return true;
@@ -1707,8 +2187,34 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             step = stv.asI64();
         }
         if (step == 0) return false;
-        int64_t cur = sv.asI64(), end = ev.asI64();
-        while (step > 0 ? cur < end : cur > end) {
+        const int64_t startV = sv.asI64();
+        const int64_t endV   = ev.asI64();
+
+        // Compute exact iteration count N.
+        int64_t N = 0;
+        if (step > 0 && startV < endV)
+            N = (endV - startV - 1) / step + 1;
+        else if (step < 0 && startV > endV)
+            N = (startV - endV - 1) / (-step) + 1;
+        // else N = 0 (zero-trip loop)
+
+        if (N <= 0) {
+            frame.locals.erase(fs->iteratorVar);
+            return true;
+        }
+
+        // ── Symbolic reasoning path ───────────────────────────────────────
+        // Attempt O(1) closed-form analysis before falling back to iteration.
+        // For bodies that contain only simple scalar accumulations this avoids
+        // the O(N) fuel cost and enables evaluation of million-iteration loops.
+        if (tryReasonForLoop(frame, fs, startV, endV, step, N)) {
+            frame.locals.erase(fs->iteratorVar);
+            return true;
+        }
+
+        // ── Direct iteration (fallback for complex bodies) ────────────────
+        int64_t cur = startV;
+        while (step > 0 ? cur < endV : cur > endV) {
             if (++fuel_ > kMaxInstructions) return false;
             frame.locals[fs->iteratorVar] = CTValue::fromI64(cur);
             if (!evalStmt(frame, fs->body.get())) return false;
