@@ -417,6 +417,10 @@ ptest_program "examples/constant_folding.om" 243
 ptest_program "examples/ultimate_optimization.om" 184
 ptest_program "examples/lambda_pipe_spread_test.om" 0
 ptest_program "examples/array_higher_order_test.om" 0
+ptest_program "examples/filter_command_test.om" 0
+ptest_program "examples/stdlib_additions_test.om" 0
+ptest_program "examples/sudo_command_test.om" 0
+ptest_program "examples/quality_improvements_test.om" 0
 ptest_program "examples/swap_oob.om" 134
 ptest_program "examples/char_at_oob.om" 134
 ptest_program "examples/overflow_wrap_test.om" 42
@@ -813,8 +817,12 @@ ptest_program "examples/allocator_annotation_test.om" 40
 ptest_program "examples/borrow_mut_syntax_test.om" 42
 ptest_program "examples/comptime_chain_test.om" 45
 ptest_program "examples/comptime_array_test.om" 478546148456
+ptest_program "examples/comptime_array_append_test.om" 18
+ptest_program "examples/comptime_loop_reason_test.om" 1
+ptest_program "examples/comptime_obfuscated_test.om" 0
 ptest_program "examples/loop_annotation_unroll_test.om" 120
 ptest_program "examples/loop_annotation_vectorize_test.om" 36
+ptest_program "examples/str_format_test.om" 0
 flush_ptests
 
 echo ""

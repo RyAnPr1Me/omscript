@@ -639,6 +639,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "array_contains",
                                                                 "array_copy",
                                                                 "array_count",
+                                                                "array_drop",
                                                                 "array_every",
                                                                 "array_fill",
                                                                 "array_filter",
@@ -647,25 +648,37 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "array_last",
                                                                 "array_map",
                                                                 "array_max",
+                                                                "array_mean",
                                                                 "array_min",
                                                                 "array_product",
                                                                 "array_reduce",
                                                                 "array_remove",
+                                                                "array_rotate",
                                                                 "array_slice",
+                                                                "array_take",
+                                                                "array_unique",
                                                                 "asin",
                                                                 "assert",
+                                                                "assume",
                                                                 "atan",
                                                                 "atan2",
+                                                                "bitreverse",
+                                                                "bswap",
                                                                 "cbrt",
                                                                 "ceil",
                                                                 "char_at",
                                                                 "char_code",
                                                                 "clamp",
+                                                                "clz",
+                                                                "command",
                                                                 "copysign",
                                                                 "cos",
+                                                                "ctz",
                                                                 "exit_program",
                                                                 "exit",
                                                                 "exp",
+                                                                "exp2",
+                                                                "expect",
                                                                 "fast_add",
                                                                 "fast_div",
                                                                 "fast_mul",
@@ -674,6 +687,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "file_exists",
                                                                 "file_read",
                                                                 "file_write",
+                                                                "filter",
                                                                 "floor",
                                                                 "fma",
                                                                 "gcd",
@@ -681,17 +695,26 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "index_of",
                                                                 "input",
                                                                 "input_line",
+                                                                "is_alnum",
                                                                 "is_alpha",
                                                                 "is_digit",
                                                                 "is_even",
+                                                                "is_lower",
                                                                 "is_odd",
+                                                                "is_power_of_2",
+                                                                "is_space",
+                                                                "is_upper",
+                                                                "lcm",
                                                                 "len",
                                                                 "log",
                                                                 "log10",
                                                                 "log2",
+                                                                "map_filter",
                                                                 "map_get",
                                                                 "map_has",
+                                                                "map_invert",
                                                                 "map_keys",
+                                                                "map_merge",
                                                                 "map_new",
                                                                 "map_remove",
                                                                 "map_set",
@@ -703,6 +726,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "min_float",
                                                                 "number_to_string",
                                                                 "pop",
+                                                                "popcount",
                                                                 "pow",
                                                                 "precise_add",
                                                                 "precise_div",
@@ -716,7 +740,12 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "range",
                                                                 "range_step",
                                                                 "reverse",
+                                                                "rotate_left",
+                                                                "rotate_right",
                                                                 "round",
+                                                                "saturating_add",
+                                                                "saturating_sub",
+                                                                "shell",
                                                                 "sign",
                                                                 "sin",
                                                                 "sleep",
@@ -728,16 +757,20 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "str_count",
                                                                 "str_ends_with",
                                                                 "str_eq",
+                                                                "str_filter",
                                                                 "str_find",
                                                                 "str_index_of",
                                                                 "str_join",
                                                                 "str_len",
                                                                 "str_lower",
+                                                                "str_lstrip",
                                                                 "str_pad_left",
                                                                 "str_pad_right",
+                                                                "str_remove",
                                                                 "str_repeat",
                                                                 "str_replace",
                                                                 "str_reverse",
+                                                                "str_rstrip",
                                                                 "str_split",
                                                                 "str_starts_with",
                                                                 "str_substr",
@@ -746,6 +779,9 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "str_trim",
                                                                 "str_upper",
                                                                 "string_to_number",
+                                                                "sudo_command",
+                                                                "env_get",
+                                                                "env_set",
                                                                 "sum",
                                                                 "swap",
                                                                 "tan",
@@ -761,6 +797,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "mutex_unlock",
                                                                 "mutex_destroy",
                                                                 "typeof",
+                                                                "unreachable",
                                                                 "write"};
 
 bool isStdlibFunction(const std::string& name) {
@@ -852,6 +889,14 @@ void CodeGenerator::initTBAAMetadata() {
     charRangeMD_ = llvm::MDNode::get(C, {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 256))
+    });
+    // !range [0, 65): bit-count i64 results (popcount/clz/ctz).
+    // These always return a value in [0, 64]; the upper bound is exclusive
+    // so 65 is the correct sentinel.  This lets CVP/LVI prove (clz(x) > 64)
+    // is always false and enables tighter bounds propagation through arithmetic.
+    bitcountRangeMD_ = llvm::MDNode::get(C, {
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 65))
     });
 }
 
@@ -1321,6 +1366,11 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     // of loops when the size argument is loop-invariant.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         *context, llvm::MemoryEffects::inaccessibleMemOnly()));
+    // align(16): malloc on 64-bit Linux/macOS (glibc, musl, Darwin) guarantees
+    // at least 16-byte aligned returns (_Alignof(max_align_t) == 16).  Telling
+    // LLVM about this alignment enables aligned vector loads/stores on every
+    // heap-allocated buffer (arrays, strings, maps) without runtime checks.
+    fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
     return fn;
 }
 
@@ -1350,6 +1400,8 @@ llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     // when the size arguments are loop-invariant.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         *context, llvm::MemoryEffects::inaccessibleMemOnly()));
+    // align(16): calloc has the same alignment guarantee as malloc on 64-bit POSIX.
+    fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
     return fn;
 }
 
@@ -1889,6 +1941,9 @@ llvm::Function* CodeGenerator::getOrDeclareStrndup() {
         *context, llvm::MemoryEffects(
             llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref) |
             llvm::MemoryEffects::inaccessibleMemOnly())));
+    // align(16): strndup allocates via malloc internally, inheriting the same
+    // 16-byte alignment guarantee on 64-bit POSIX systems.
+    fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
     return fn;
 }
 
@@ -1914,6 +1969,8 @@ llvm::Function* CodeGenerator::getOrDeclareRealloc() {
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::get(*context, llvm::Attribute::AllocatedPointer));
+    // align(16): realloc returns memory with the same alignment guarantee as malloc.
+    fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
     return fn;
 }
 
@@ -2181,8 +2238,36 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexDestroy() {
     return fn;
 }
 
-// ---------------------------------------------------------------------------
-// Hash-table map runtime helpers (emitted into the LLVM module)
+llvm::Function* CodeGenerator::getOrDeclareGetenv() {
+    if (auto* fn = module->getFunction("getenv"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "getenv", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareSetenv() {
+    if (auto* fn = module->getFunction("setenv"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy, ptrTy, i32Ty}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "setenv", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    return fn;
+}
 // ---------------------------------------------------------------------------
 //
 // Layout (all i64):
@@ -4674,11 +4759,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                     *context, 8));
                 // OmScript arrays/strings are allocated via calloc/malloc which
                 // guarantees at least 16-byte alignment on 64-bit Linux.  The
-                // align(8) attribute (conservative lower bound) tells LLVM's
-                // vectorizer that the pointer is at least 8-byte aligned, enabling
-                // it to emit aligned vector load/store instructions.
+                // align(16) attribute communicates this to LLVM's vectorizer,
+                // enabling aligned vector load/store instructions (movdqa, vmovdqa)
+                // and better SLP vectorization on heap-allocated buffers.
                 function->addParamAttr(i, llvm::Attribute::getWithAlignment(
-                    *context, llvm::Align(8)));
+                    *context, llvm::Align(16)));
                 OMSC_ADD_NOCAPTURE(function, i);
             }
         }
@@ -4702,7 +4787,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
                 function->addParamAttr(i, llvm::Attribute::getWithAlignment(
-                    *context, llvm::Align(8)));
+                    *context, llvm::Align(16)));
                 OMSC_ADD_NOCAPTURE(function, i);
             }
         }
@@ -4726,13 +4811,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // size for any OmScript pointer (arrays, strings).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
-                // OmScript arrays/strings are always at least 8-byte aligned
-                // (calloc/malloc on 64-bit Linux guarantees ≥16-byte alignment).
-                // align(8) is the conservative lower bound; it tells LLVM's
-                // vectorizer to use aligned load/store instructions, avoiding
-                // alignment masking and enabling better SLP vectorization.
+                // OmScript arrays/strings are allocated by calloc/malloc which
+                // guarantees at least 16-byte alignment on 64-bit Linux/macOS.
+                // align(16) communicates the actual guarantee (not just the
+                // conservative lower bound), enabling LLVM to use aligned
+                // vector instructions on all heap pointer parameters.
                 function->addParamAttr(i, llvm::Attribute::getWithAlignment(
-                    *context, llvm::Align(8)));
+                    *context, llvm::Align(16)));
                 // OmScript's ownership model ensures pointer parameters are
                 // never captured (stored into global state or returned as
                 // pointers).  The borrow checker prevents escaping references.
@@ -4835,6 +4920,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constFloatFolds_.clear();
     stackAllocatedArrays_.clear();
     pendingArrayStackAlloc_ = false;
+    scopeComptimeInts_.clear();
+    catchTable_.clear();
+    catchDefaultBB_ = nullptr;
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -4957,6 +5045,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             prefetchedParams_.insert(param.name);
         }
     }
+
+    // Pre-pass: collect all catch(code) blocks in this function body,
+    // assign integer IDs to string codes, and create BasicBlocks for each.
+    // Must happen before generating the body so throw sites can reference BBs.
+    buildCatchTable(func->body->statements, function);
 
     // Generate function body
     generateBlock(func->body.get());
@@ -5085,8 +5178,8 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::SWITCH_STMT:
         generateSwitch(static_cast<SwitchStmt*>(stmt));
         break;
-    case ASTNodeType::TRY_CATCH_STMT:
-        generateTryCatch(static_cast<TryCatchStmt*>(stmt));
+    case ASTNodeType::CATCH_STMT:
+        generateCatch(static_cast<CatchStmt*>(stmt));
         break;
     case ASTNodeType::THROW_STMT:
         generateThrow(static_cast<ThrowStmt*>(stmt));
@@ -5191,8 +5284,13 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
 
         // Try CF-CTRE first (available after runCFCTRE has been called).
         if (ctEngine_) {
-            auto ctResult = ctEngine_->evalComptimeBlock(ct->body.get());
+            auto ctResult = ctEngine_->evalComptimeBlock(ct->body.get(),
+                                                         buildComptimeEnv());
             if (ctResult) {
+                // Stash the CT value so the VarDecl handler can register it
+                // under the variable name, making it visible to subsequent
+                // comptime blocks in the same function scope.
+                lastComptimeCtResult_ = *ctResult;
                 if (ctResult->isInt()) {
                     return llvm::ConstantInt::get(getDefaultType(), ctResult->asI64(), /*isSigned=*/true);
                 }
@@ -5215,8 +5313,7 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         static const std::unordered_map<std::string, ConstValue> emptyEnv;
         auto result = tryConstEvalFull(ct->body.get(), emptyEnv);
         if (!result) {
-            codegenError("comptime block could not be evaluated at compile time "
-                         "(only pure integer/string arithmetic is supported)", expr);
+            codegenError("comptime block could not be evaluated at compile time", expr);
         }
         if (result->kind == ConstValue::Kind::Integer) {
             return llvm::ConstantInt::get(getDefaultType(), result->intVal, /*isSigned=*/true);
@@ -6363,6 +6460,15 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         if (bin->op == "+" && lv->kind == ConstValue::Kind::String &&
             rv->kind == ConstValue::Kind::String)
             return ConstValue::fromStr(lv->strVal + rv->strVal);
+        // Array concatenation
+        if (bin->op == "+" && lv->kind == ConstValue::Kind::Array &&
+            rv->kind == ConstValue::Kind::Array) {
+            std::vector<ConstValue> out;
+            out.reserve(lv->arrVal.size() + rv->arrVal.size());
+            out.insert(out.end(), lv->arrVal.begin(), lv->arrVal.end());
+            out.insert(out.end(), rv->arrVal.begin(), rv->arrVal.end());
+            return ConstValue::fromArr(std::move(out));
+        }
         // String == / != comparison
         if ((bin->op == "==" || bin->op == "!=") &&
             lv->kind == ConstValue::Kind::String &&
@@ -6576,6 +6682,8 @@ CodeGenerator::tryConstEvalFull(
             if (git != constIntFolds_.end()) return ConstValue::fromInt(git->second);
             auto gst = constStringFolds_.find(id->name);
             if (gst != constStringFolds_.end()) return ConstValue::fromStr(gst->second);
+            auto gat = constArrayFolds_.find(id->name);
+            if (gat != constArrayFolds_.end()) return ConstValue::fromArr(gat->second);
             return std::nullopt;
         }
 
@@ -6612,6 +6720,15 @@ CodeGenerator::tryConstEvalFull(
             if (bin->op == "+" && lv->kind == ConstValue::Kind::String &&
                 rv->kind == ConstValue::Kind::String)
                 return ConstValue::fromStr(lv->strVal + rv->strVal);
+            // Array concat
+            if (bin->op == "+" && lv->kind == ConstValue::Kind::Array &&
+                rv->kind == ConstValue::Kind::Array) {
+                std::vector<ConstValue> out;
+                out.reserve(lv->arrVal.size() + rv->arrVal.size());
+                out.insert(out.end(), lv->arrVal.begin(), lv->arrVal.end());
+                out.insert(out.end(), rv->arrVal.begin(), rv->arrVal.end());
+                return ConstValue::fromArr(std::move(out));
+            }
             // String == / !=
             if ((bin->op == "==" || bin->op == "!=") &&
                 lv->kind == ConstValue::Kind::String &&
@@ -7209,6 +7326,10 @@ void CodeGenerator::runCFCTRE(Program* program) {
         ctEngine_->registerGlobalConst(name.str(), CTValue::fromI64(val));
     for (auto& [name, val] : constStringFolds_)
         ctEngine_->registerGlobalConst(name.str(), CTValue::fromString(val));
+    for (auto& [name, val] : constArrayFolds_) {
+        ConstValue cv = ConstValue::fromArr(val);
+        ctEngine_->registerGlobalConst(name.str(), constValueToCTValue(cv));
+    }
 
     // Register enum constants.
     for (auto& [name, val] : enumConstants_)
@@ -7241,7 +7362,8 @@ void CodeGenerator::runCFCTRE(Program* program) {
                   << s.functionsRegistered   << " functions registered, "
                   << s.pureFunctionsDetected << " pure, "
                   << s.functionCallsMemoized << " calls memoised, "
-                  << s.arraysAllocated       << " arrays allocated" << '\n';
+                  << s.arraysAllocated       << " arrays allocated, "
+                  << s.loopsReasoned         << " loops reasoned" << '\n';
     }
 }
 
@@ -7293,6 +7415,37 @@ CTValue CodeGenerator::constValueToCTValue(const ConstValue& v) const {
     default:
         return CTValue::uninit();
     }
+}
+
+// buildComptimeEnv: snapshot all compile-time-known local variables into a
+// CTValue map that can be passed as the 'env' parameter to evalComptimeBlock.
+// This lets comptime{} blocks reference variables declared earlier in the
+// same function body (e.g. a 'var base = comptime {...}' array that is
+// referenced in a later 'var transformed = comptime { multi_stage(base); }').
+//
+// Sources:
+//   • constIntFolds_   — integer vars whose current value is compile-time known
+//   • constStringFolds_ — string vars similarly known
+//   • constArrayFolds_  — array vars folded to a vector<ConstValue>; each is
+//                          converted to a fresh CT heap array handle via
+//                          constValueToCTValue so the CF-CTRE evaluator can
+//                          index into it.
+std::unordered_map<std::string, CTValue>
+CodeGenerator::buildComptimeEnv() const {
+    std::unordered_map<std::string, CTValue> env;
+    if (!ctEngine_) return env;
+    for (const auto& e : constIntFolds_)
+        env[e.first().str()] = CTValue::fromI64(e.second);
+    for (const auto& e : scopeComptimeInts_)
+        env[e.first().str()] = CTValue::fromI64(e.second);
+    for (const auto& e : constStringFolds_)
+        env[e.first().str()] = CTValue::fromString(e.second);
+    for (const auto& e : constArrayFolds_) {
+        auto ctv = constValueToCTValue(ConstValue::fromArr(e.second));
+        if (ctv.isKnown())
+            env[e.first().str()] = std::move(ctv);
+    }
+    return env;
 }
 
 // autoDetectConstEvalFunctions: identify user-defined functions with parameters
@@ -7819,10 +7972,9 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
             }
             break;
         }
-        case ASTNodeType::TRY_CATCH_STMT: {
-            auto* tc = static_cast<const TryCatchStmt*>(stmt);
-            merge(stmtEffects(tc->tryBlock.get(), selfName));
-            merge(stmtEffects(tc->catchBlock.get(), selfName));
+        case ASTNodeType::CATCH_STMT: {
+            auto* cs = static_cast<const CatchStmt*>(stmt);
+            merge(stmtEffects(cs->body.get(), selfName));
             break;
         }
         case ASTNodeType::THROW_STMT: {

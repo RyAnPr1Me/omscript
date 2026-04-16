@@ -1,67 +1,50 @@
-// try_catch_test.om — error handling test
+// try_catch_test.om — error handling with catch(code)/throw jump-table
 //
-// Tests: try/catch/throw with error codes, nested handlers,
-// function-level throws, and control flow after exception handling.
-
-fn maybe_throw(flag) {
-    if (flag != 0) {
-        throw flag;
-    }
-    return 0;
-}
+// Tests: basic throw→catch dispatch, catch bypass (no throw), sequential
+// throws, and code-after-catch continuation.
+// Expected return value: 88
 
 fn main() {
     var result = 0;
 
-    // Test 1: Basic throw and catch
-    try {
-        throw 42;
-    } catch (err) {
-        result = result + err;  // +42
+    // Test 1: Basic throw + catch (+42)
+    throw 42;
+    catch(42) {
+        result = result + 42;
     }
 
-    // Test 2: Catch from function call
-    try {
-        maybe_throw(1);
-    } catch (err) {
-        result = result + err;  // +1
+    // Test 2: Second distinct error code (+1)
+    throw 1;
+    catch(1) {
+        result = result + 1;
     }
 
-    // Test 3: No throw path
-    try {
-        maybe_throw(0);
-        result = result + 5;    // +5
-    } catch (err) {
-        result = result + 1000; // should not reach
+    // Test 3: No throw — catch(777) block is jumped over (+5)
+    result = result + 5;
+    catch(777) {
+        result = result + 1000;  // unreachable
     }
 
-    // Test 4: Nested try/catch — inner catches
-    try {
-        try {
-            throw 7;
-        } catch (inner) {
-            result = result + inner; // +7
-        }
-        // Execution continues after inner catch
-        result = result + 1;     // +1
-    } catch (outer) {
-        result = result + 1000;  // should not reach
+    // Test 4: Throw, catch, then continue (+7 +1)
+    throw 7;
+    catch(7) {
+        result = result + 7;
+    }
+    result = result + 1;
+
+    // Test 5: Two sequential throws (+10 +20)
+    throw 10;
+    catch(10) {
+        result = result + 10;
     }
 
-    // Test 5: Multiple sequential catches
-    try {
-        throw 10;
-    } catch (e1) {
-        result = result + e1;   // +10
-    }
-    try {
-        throw 20;
-    } catch (e2) {
-        result = result + e2;   // +20
+    throw 20;
+    catch(20) {
+        result = result + 20;
     }
 
-    // Test 6: Code after try/catch continues normally
-    result = result + 2;       // +2
+    // Test 6: Final increment (+2)
+    result = result + 2;
 
     // Expected: 42 + 1 + 5 + 7 + 1 + 10 + 20 + 2 = 88
     return result;

@@ -1534,6 +1534,11 @@ Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and whe
 | `array_insert(arr, i, val)` | Insert `val` at index `i` |
 | `swap(arr, i, j)` | Swap elements at indices `i` and `j` in place (bounds-checked) |
 | `sum(arr)` | Sum of all elements |
+| `array_mean(arr)` | Arithmetic mean of elements (integer division); returns 0 for empty array |
+| `array_take(arr, n)` | First `n` elements (clamped; equivalent to `array_slice(arr, 0, n)`) |
+| `array_drop(arr, n)` | All elements after the first `n` (clamped) |
+| `array_unique(arr)` | Remove consecutive duplicate elements (like Unix `uniq`; sort first for full dedup) |
+| `array_rotate(arr, n)` | Rotate array left by `n` positions (negative = rotate right) |
 | `range(start, end)` | Create array `[start, start+1, ..., end-1]` |
 | `range_step(start, end, step)` | Create array with step |
 
@@ -1558,7 +1563,10 @@ Strings are heap-allocated and NUL-terminated. String indexing and concatenation
 | `str_contains(s, sub)` | Contains substring (1/0) |
 | `str_index_of(s, sub)` | First index of substring `sub` (-1 if not found) |
 | `str_replace(s, old, new)` | Replace all occurrences of `old` with `new` |
-| `str_trim(s)` | Strip leading/trailing whitespace |
+| `str_remove(s, sub)` | Remove all occurrences of `sub` (equivalent to `str_replace(s, sub, "")`) |
+| `str_trim(s)` | Strip leading **and** trailing whitespace |
+| `str_lstrip(s)` | Strip leading (left) whitespace only |
+| `str_rstrip(s)` | Strip trailing (right) whitespace only |
 | `str_starts_with(s, prefix)` | Starts with prefix (1/0) |
 | `str_ends_with(s, suffix)` | Ends with suffix (1/0) |
 | `str_repeat(s, n)` | Repeat string `n` times |
@@ -1611,6 +1619,9 @@ Dict literals are expressions and can be used anywhere a dict value is expected.
 | `map_keys(m)` | Array of all keys |
 | `map_values(m)` | Array of all values |
 | `map_size(m)` | Number of entries |
+| `map_merge(a, b)` | Create new map with all entries from both `a` and `b`; `b`'s values win on conflict |
+| `map_invert(m)` | Create new map with keys and values swapped |
+| `map_filter(m, fn)` | Create new map keeping entries where `fn(key) != 0` |
 
 ---
 
@@ -2129,6 +2140,29 @@ var f = i32(-1);     // -1 (sign-preserved)
 |---|---|
 | `time()` | Current Unix timestamp in seconds (integer) |
 | `sleep(ms)` | Sleep for `ms` milliseconds |
+
+### 19.6.1 Shell / Process
+
+| Function | Description |
+|---|---|
+| `command(cmd)` | Run shell command `cmd` via `popen(3)` and return its stdout as a string. Returns `""` on failure. Also available as `std::command(cmd)`. |
+| `shell(cmd)` | Alias for `command(cmd)`. |
+| `sudo_command(cmd, password)` | Run `cmd` as root via `sudo -S`, supplying `password` on stdin. Returns combined stdout+stderr as a string, or `""` if `popen` fails. Single-quote characters in the password are automatically escaped. |
+
+```omscript
+var output = command("echo hello");               // "hello\n"
+var files  = shell("ls /tmp");                    // directory listing
+var lines  = str_split(output, "\n");             // split into lines
+var result = sudo_command("apt update", "s3cr3t");// runs as root
+```
+
+> **Security note for `sudo_command`:** the password travels only through
+> the pipe fed to `sudo`'s stdin — it is never passed as a shell argument.
+> However, the full pipeline string (including the escaped password) is
+> visible in `/proc/<pid>/cmdline` and in `popen`'s shell invocation on
+> some operating systems.  For production use, prefer passwordless sudo
+> rules (`NOPASSWD` in `/etc/sudoers`) and call `command("sudo cmd")`
+> instead.
 
 ### 19.7 Optimizer Hints
 

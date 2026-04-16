@@ -5,7 +5,7 @@ set -eu
 # ──────────────────────────────────────────────────────────────
 #  OmScript Benchmark Suite  (Fair Edition)
 #
-#  36 diverse micro-benchmarks covering distinct workloads.
+#  45 diverse micro-benchmarks covering distinct workloads.
 #  No category is over-represented.  Both OM and C implementations
 #  are idiomatic and use the same algorithm.
 #
@@ -63,7 +63,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=42
+NUM_BENCHMARKS=45
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -108,6 +108,9 @@ BENCH_NAME=(
     "for_each"           # 39 — for-each loop over array (inbounds GEP path)
     "lcm_gcd"            # 40 — repeated lcm() + gcd() (nonNeg builtin tracking)
     "zext_pattern"       # 41 — bool-to-int zero-extension (select→zext patterns)
+    "str_format"         # 42 — str_format() two-pass snprintf formatting loop
+    "array_zip"          # 43 — array_zip() interleave two arrays, accumulate
+    "str_prefix_scan"    # 44 — str_starts_with(s, literal) tight loop
 )
 
 BENCH_DESC=(
@@ -153,6 +156,9 @@ BENCH_DESC=(
     "For-each loop over large array; tests auto-vectorize + inbounds GEP path"
     "Repeated lcm() and gcd() calls; tests nonNeg tracking for lcm builtin"
     "Boolean-to-int zero-extension: if(cond) acc+=1 → acc+zext(cond) patterns"
+    "str_format(\"%lld\",i) repeated N times; tests two-pass snprintf IR quality"
+    "array_zip(a,b) over N-element arrays; tests interleave loop vectorization"
+    "str_starts_with(s,\"Hello \") repeated N times; tests known-strlen const fold"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -199,6 +205,9 @@ BENCH_N=(
     5000000   # 39  for_each
     5000000   # 40  lcm_gcd
     10000000  # 41  zext_pattern
+    2000000   # 42  str_format
+    1000000   # 43  array_zip
+    5000000   # 44  str_prefix_scan
 )
 
 BOTTLENECK_LABELS=(
@@ -244,6 +253,9 @@ BOTTLENECK_LABELS=(
     "for-each loop auto-vectorization and inbounds GEP codegen"
     "lcm nonNeg tracking: lcm/gcd results proven non-negative by the compiler"
     "select(cmp,1,0) → zext(cond) strength reduction"
+    "snprintf call overhead and two-pass buffer allocation"
+    "interleave loop: array allocation, TBAA, and optional vectorization"
+    "str_starts_with with literal: known-strlen const fold + memcmp elision"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -1078,6 +1090,61 @@ fn bench_zext(@prefetch n:int) -> int {
 
 OPTMAX!:
 
+// ── 42. str_format ───────────────────────────────────────────
+// Repeated str_format("%lld", i) calls.  Each call does a two-pass
+// snprintf (probe + fill) and a malloc.  Tests the snprintf IR quality
+// and allocation-overhead.  Accumulate lengths to defeat DCE.
+@hot @static @nounwind
+fn bench_strformat(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        var s:string = str_format("%lld", i % 100000);
+        acc += len(s);
+        invalidate s;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 43. array_zip ────────────────────────────────────────────
+// Create two arrays of m elements and zip them.  Accumulate the sum
+// of all elements in the result (= sum(a) + sum(b)).
+// Tests the array_zip interleave loop, TBAA annotations, and
+// optional auto-vectorization of the accumulation.
+@hot @flatten @vectorize @static @nounwind
+fn bench_arrayzip(@prefetch n:int) -> int {
+    var m:int = n / 1000 + 2;
+    var a:int[] = array_fill(m, 0);
+    var b:int[] = array_fill(m, 0);
+    for (j:int in 0...m) { a[j] = j * 3 % 997; b[j] = j * 7 % 997; }
+    var acc:int = 0;
+    for (k:int in 0...n) {
+        var z:int[] = array_zip(a, b);
+        acc += sum(z) % 997;
+        invalidate z;
+    }
+    invalidate a; invalidate b; invalidate n;
+    return acc;
+}
+
+// ── 44. str_prefix_scan ──────────────────────────────────────
+// str_starts_with(s, "Hello ") in a tight loop.
+// The literal prefix has a compile-time-known length, so the compiler
+// replaces strlen with a constant and emits a single memcmp(s, "Hello ", 6).
+// Tests the const-fold of strlen for literal second argument.
+@hot @flatten @pure @vectorize @static @nounwind
+fn bench_strprefix(@prefetch n:int) -> int {
+    var acc:int = 0;
+    var s:string = "Hello World";
+    for (i:int in 0...n) {
+        acc += str_starts_with(s, "Hello ");
+        acc += str_ends_with(s, "World");
+        acc += str_starts_with(s, "Goodbye");
+    }
+    invalidate n;
+    return acc;
+}
+
 // ── main dispatch ────────────────────────────────────────────
 fn main() -> int {
     var test_id:int = input();
@@ -1126,6 +1193,9 @@ fn main() -> int {
         case 39: print(bench_foreach(n));        break;
         case 40: print(bench_lcmgcd(n));         break;
         case 41: print(bench_zext(n));           break;
+        case 42: print(bench_strformat(n));      break;
+        case 43: print(bench_arrayzip(n));       break;
+        case 44: print(bench_strprefix(n));      break;
         default: print(0);
     }
     invalidate n;
@@ -1833,6 +1903,49 @@ static long bench_zext(long n) {
     return acc;
 }
 
+/* 42 ── str_format ──────────────────────────────── */
+/* Repeated snprintf into a stack buffer, accumulate formatted lengths. */
+static long bench_strformat(long n) {
+    long acc = 0;
+    char buf[32];
+    for (long i = 0; i < n; i++) {
+        int len = snprintf(buf, sizeof(buf), "%ld", i % 100000);
+        acc += len;
+    }
+    return acc;
+}
+
+/* 43 ── array_zip ───────────────────────────────── */
+/* Zip two arrays of m elements, accumulate sum of combined result. */
+static long bench_arrayzip(long n) {
+    long m = n / 1000 + 2;
+    long *a = malloc(m * sizeof(long));
+    long *b = malloc(m * sizeof(long));
+    for (long j = 0; j < m; j++) { a[j] = j * 3 % 997; b[j] = j * 7 % 997; }
+    long acc = 0;
+    for (long k = 0; k < n; k++) {
+        long s = 0;
+        for (long j = 0; j < m; j++) s += (a[j] + b[j]) % 997;
+        acc += s % 997;
+    }
+    free(a); free(b);
+    return acc;
+}
+
+/* 44 ── str_prefix_scan ────────────────────────── */
+/* strncmp-based prefix/suffix test; C equivalent of str_starts_with(s, lit). */
+static long bench_strprefix(long n) {
+    const char *s = "Hello World";
+    long acc = 0;
+    size_t sl = strlen(s);
+    for (long i = 0; i < n; i++) {
+        acc += (strncmp(s, "Hello ", 6) == 0) ? 1 : 0;
+        acc += (sl >= 5 && strncmp(s + sl - 5, "World", 5) == 0) ? 1 : 0;
+        acc += (strncmp(s, "Goodbye", 7) == 0) ? 1 : 0;
+    }
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1880,6 +1993,9 @@ int main(void) {
         case 39: r = bench_foreach(n);           break;
         case 40: r = bench_lcmgcd(n);            break;
         case 41: r = bench_zext(n);              break;
+        case 42: r = bench_strformat(n);         break;
+        case 43: r = bench_arrayzip(n);          break;
+        case 44: r = bench_strprefix(n);         break;
     }
     printf("%ld\n", r);
     return 0;

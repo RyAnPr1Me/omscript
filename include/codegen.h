@@ -329,12 +329,16 @@ class CodeGenerator {
     /// Works for any runtime size, including values from input().
     llvm::StringMap<llvm::AllocaInst*> knownArraySizeAllocas_;
 
-    // Stack of innermost catch-entry basic blocks, pushed/popped by
-    // generateTryCatch(). generateThrow() branches directly to the top of this
-    // stack when a throw occurs inside a try block, ensuring that control flow
-    // reaches the catch handler immediately (rather than relying on a post-loop
-    // flag check that could allow dangerous code to execute after the throw).
-    std::vector<llvm::BasicBlock*> tryCatchStack_;
+    // Per-function catch table: maps error-code (i64) → the BasicBlock for that
+    // handler.  String error codes are assigned a unique compile-time integer
+    // (via catchStringIds_).  Populated by a pre-pass before each function is
+    // compiled, and reset at the start of every function.
+    std::unordered_map<int64_t, llvm::BasicBlock*> catchTable_;
+    // Maps string error codes to their assigned integer IDs for this module.
+    std::unordered_map<std::string, int64_t> catchStringIds_;
+    int64_t nextCatchStringId_ = 1; // start at 1; 0 reserved for "no error"
+    // Default (unmatched-throw) block used by the jump table's default arm.
+    llvm::BasicBlock* catchDefaultBB_ = nullptr;
     bool inOptMaxFunction;
     bool hasOptMaxFunctions;
     llvm::StringSet<> optMaxFunctions;
@@ -556,6 +560,12 @@ class CodeGenerator {
     /// char_at.  Allows CVP/LVI to prove non-negativity and drop any
     /// >255 branches.
     llvm::MDNode* charRangeMD_ = nullptr;
+
+    /// !range metadata for bit-count results (0..64):
+    /// popcount, clz, ctz.  These always return a value in [0, 64].
+    /// More precise than just nonNeg tracking — tells CVP/LVI the exact
+    /// upper bound so it can fold comparisons like (clz(x) > 64) → false.
+    llvm::MDNode* bitcountRangeMD_ = nullptr;
 
     /// Compile-time known array sizes: maps variable name → LLVM Value*
     /// representing the known element count.  Populated when an array is
@@ -838,8 +848,14 @@ class CodeGenerator {
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
     void generateSwitch(SwitchStmt* stmt);
-    void generateTryCatch(TryCatchStmt* stmt);
+    void generateCatch(CatchStmt* stmt);
     void generateThrow(ThrowStmt* stmt);
+    /// Assign (or look up) a unique compile-time integer ID for a string error code.
+    int64_t getCatchStringId(const std::string& s);
+    /// Pre-pass: scan a function body, register all catch(code) blocks and
+    /// create their BasicBlocks.  Must be called before generating the body.
+    void buildCatchTable(const std::vector<std::unique_ptr<Statement>>& stmts,
+                         llvm::Function* fn);
     void generateInvalidate(InvalidateStmt* stmt);
     void generateMoveDecl(MoveDecl* stmt);
     void generateFreeze(FreezeStmt* stmt);
@@ -1133,6 +1149,8 @@ class CodeGenerator {
     llvm::Function* getOrDeclarePthreadMutexLock();
     llvm::Function* getOrDeclarePthreadMutexUnlock();
     llvm::Function* getOrDeclarePthreadMutexDestroy();
+    llvm::Function* getOrDeclareGetenv();
+    llvm::Function* getOrDeclareSetenv();
 
     // ── Hash-table map runtime helpers (emitted into the LLVM module) ────
     // These implement an open-addressing hash table with linear probing,
@@ -1197,8 +1215,9 @@ class CodeGenerator {
     /// @param isStr    True for string access (uses strlen instead of header load)
     /// @param isBorrowed True if the array is borrowed (length marked invariant)
     /// @param prefix   Name prefix for emitted IR instructions
+    /// @param line     Source line number for the runtime error message (0 = unknown)
     void emitBoundsCheck(llvm::Value* idxVal, llvm::Value* basePtr,
-                         bool isStr, bool isBorrowed, const char* prefix);
+                         bool isStr, bool isBorrowed, const char* prefix, int line = 0);
 
     // Optimization methods
     void runOptimizationPasses();
@@ -1209,6 +1228,26 @@ class CodeGenerator {
     /// any function body is compiled.  Provides cross-function compile-time
     /// evaluation, memoisation, purity analysis, and pipeline SIMD semantics.
     std::unique_ptr<CTEngine> ctEngine_;
+
+    /// Stash for the CTValue produced by the most-recently evaluated
+    /// COMPTIME_EXPR.  Set inside generateExpr(COMPTIME_EXPR) right after a
+    /// successful ctEngine_->evalComptimeBlock() call, then consumed
+    /// (and cleared) by the VarDecl handler immediately after generateExpr
+    /// returns.  This lets the VarDecl handler register the CT result in
+    /// constArrayFolds_/constIntFolds_ under the variable's name so that
+    /// subsequent comptime blocks in the same function can reference it.
+    std::optional<CTValue> lastComptimeCtResult_;
+
+    /// Per-function map of variable names → their compile-time-known integer
+    /// values, populated by the VarDecl handler for variables whose
+    /// non-comptime initializer was constant-folded to a scalar (e.g.
+    /// 'var reduced = lane_reduce(derived)' where derived is CT-known).
+    /// Unlike constIntFolds_, entries here are NOT used by generateIdentifier
+    /// to replace loads with constants, so they do not interfere with mutable
+    /// loop variables or compound assignments.  They are only consulted by
+    /// buildComptimeEnv() to populate the env passed to evalComptimeBlock().
+    /// Cleared at the start of each function and on assignment (generateAssign).
+    llvm::StringMap<int64_t> scopeComptimeInts_;
 
     /// Run the CF-CTRE pass: register all functions / enum constants / global
     /// consts, then execute runPass() to pre-evaluate pure functions and
@@ -1221,6 +1260,13 @@ class CodeGenerator {
 
     /// Convert a ConstValue to a CTValue and load it into ctEngine_.
     CTValue constValueToCTValue(const ConstValue& v) const;
+
+    /// Build a CTValue environment from all compile-time-known local variables
+    /// in the current scope (constIntFolds_, constStringFolds_,
+    /// constArrayFolds_).  Passed as the 'env' argument to
+    /// ctEngine_->evalComptimeBlock() so that comptime{} blocks can reference
+    /// variables declared earlier in the same function body.
+    std::unordered_map<std::string, CTValue> buildComptimeEnv() const;
 
   public:
     // Per-function optimization for targeted optimization of individual functions

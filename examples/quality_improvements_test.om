@@ -1,0 +1,47 @@
+// Tests for the three codebase quality improvements:
+// 1. array_mean() compile-time constant folding
+// 2. stdlibFunctions completeness (popcount, clz, ctz, etc. work in @optmax)
+// 3. (Diagnostic quality: "did you mean?" for builtins is compile-time only)
+
+fn main() {
+    // --- array_mean constant folding ---
+    // All of these are evaluated at compile time (no runtime array allocation).
+    var m1 = array_mean([1, 2, 3, 4, 5]);       // = 3
+    var m2 = array_mean([10, 20, 30]);            // = 20
+    var m3 = array_mean([]);                      // = 0 (empty)
+    var m4 = array_mean(array_fill(5, 42));       // = 42
+    var m5 = array_mean([7]);                     // = 7
+    var m6 = array_mean([-3, 3]);                 // = 0
+    assert(m1 == 3);
+    assert(m2 == 20);
+    assert(m3 == 0);
+    assert(m4 == 42);
+    assert(m5 == 7);
+    assert(m6 == 0);
+
+    // --- array_mean runtime path still works ---
+    var arr = [1, 2, 3];
+    arr = push(arr, 4);
+    arr = push(arr, 5);
+    assert(array_mean(arr) == 3);
+
+    // --- stdlibFunctions completeness: previously-missing builtins ---
+    // popcount, clz, ctz, saturating_add, etc. — all should work.
+    assert(popcount(7) == 3);
+    assert(popcount(0) == 0);
+    assert(clz(1) == 63);
+    assert(ctz(8) == 3);
+    assert(saturating_add(9223372036854775807, 1) == 9223372036854775807);
+    assert(saturating_sub(0 - 9223372036854775807 - 1, 1) == 0 - 9223372036854775807 - 1);
+    assert(is_power_of_2(8) == 1);
+    assert(is_power_of_2(7) == 0);
+    assert(rotate_left(1, 1) == 2);
+    assert(rotate_right(2, 1) == 1);
+    assert(is_space(32) == 1);
+    assert(is_lower(97) == 1);
+    assert(is_upper(65) == 1);
+    assert(is_alnum(65) == 1);
+    assert(is_alnum(64) == 0);
+
+    return 0;
+}

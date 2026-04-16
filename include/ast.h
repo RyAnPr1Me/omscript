@@ -31,7 +31,7 @@ enum class ASTNodeType {
     CONTINUE_STMT,
     SWITCH_STMT,
     FOR_EACH_STMT,
-    TRY_CATCH_STMT,
+    CATCH_STMT,
     THROW_STMT,
     ENUM_DECL,
     STRUCT_DECL,
@@ -423,15 +423,27 @@ class BlockStmt : public Statement {
         : Statement(ASTNodeType::BLOCK), statements(std::move(stmts)) {}
 };
 
-class TryCatchStmt : public Statement {
+/// catch(N) { body } or catch("s") { body }
+/// A named error handler.  errorCode is either an integer or string literal.
+/// When a `throw expr` is executed and expr matches this code, execution jumps
+/// here.  After the handler body runs, execution continues at the statement
+/// immediately following this catch block.
+class CatchStmt : public Statement {
   public:
-    std::unique_ptr<BlockStmt> tryBlock;
-    std::string catchVar; // variable name for the error code in catch block
-    std::unique_ptr<BlockStmt> catchBlock;
+    bool isString;          ///< true if the error code is a string literal
+    int64_t intCode;        ///< valid when !isString
+    std::string strCode;    ///< valid when  isString
+    std::unique_ptr<BlockStmt> body;
 
-    TryCatchStmt(std::unique_ptr<BlockStmt> tryB, const std::string& var, std::unique_ptr<BlockStmt> catchB)
-        : Statement(ASTNodeType::TRY_CATCH_STMT), tryBlock(std::move(tryB)), catchVar(var),
-          catchBlock(std::move(catchB)) {}
+    /// Integer error code
+    CatchStmt(int64_t code, std::unique_ptr<BlockStmt> b)
+        : Statement(ASTNodeType::CATCH_STMT), isString(false), intCode(code), strCode(""),
+          body(std::move(b)) {}
+
+    /// String error code
+    CatchStmt(const std::string& code, std::unique_ptr<BlockStmt> b)
+        : Statement(ASTNodeType::CATCH_STMT), isString(true), intCode(0), strCode(code),
+          body(std::move(b)) {}
 };
 
 class ThrowStmt : public Statement {
