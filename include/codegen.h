@@ -1133,6 +1133,8 @@ class CodeGenerator {
     llvm::Function* getOrDeclarePthreadMutexLock();
     llvm::Function* getOrDeclarePthreadMutexUnlock();
     llvm::Function* getOrDeclarePthreadMutexDestroy();
+    llvm::Function* getOrDeclareGetenv();
+    llvm::Function* getOrDeclareSetenv();
 
     // ── Hash-table map runtime helpers (emitted into the LLVM module) ────
     // These implement an open-addressing hash table with linear probing,
@@ -1197,8 +1199,9 @@ class CodeGenerator {
     /// @param isStr    True for string access (uses strlen instead of header load)
     /// @param isBorrowed True if the array is borrowed (length marked invariant)
     /// @param prefix   Name prefix for emitted IR instructions
+    /// @param line     Source line number for the runtime error message (0 = unknown)
     void emitBoundsCheck(llvm::Value* idxVal, llvm::Value* basePtr,
-                         bool isStr, bool isBorrowed, const char* prefix);
+                         bool isStr, bool isBorrowed, const char* prefix, int line = 0);
 
     // Optimization methods
     void runOptimizationPasses();

@@ -780,6 +780,8 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "str_upper",
                                                                 "string_to_number",
                                                                 "sudo_command",
+                                                                "env_get",
+                                                                "env_set",
                                                                 "sum",
                                                                 "swap",
                                                                 "tan",
@@ -2216,8 +2218,36 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexDestroy() {
     return fn;
 }
 
-// ---------------------------------------------------------------------------
-// Hash-table map runtime helpers (emitted into the LLVM module)
+llvm::Function* CodeGenerator::getOrDeclareGetenv() {
+    if (auto* fn = module->getFunction("getenv"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "getenv", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareSetenv() {
+    if (auto* fn = module->getFunction("setenv"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy, ptrTy, i32Ty}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "setenv", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    return fn;
+}
 // ---------------------------------------------------------------------------
 //
 // Layout (all i64):

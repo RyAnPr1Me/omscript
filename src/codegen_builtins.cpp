@@ -102,7 +102,9 @@ enum class BuiltinId : uint8_t {
     // Map: merge two maps (b wins on conflict), invert keys↔values
     MAP_MERGE, MAP_INVERT,
     // Shell command execution with sudo (password provided as second arg)
-    SUDO_COMMAND
+    SUDO_COMMAND,
+    // Environment variable access
+    ENV_GET, ENV_SET
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -283,6 +285,8 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"map_invert", BuiltinId::MAP_INVERT},
     // Shell command execution with sudo (password provided as second arg)
     {"sudo_command", BuiltinId::SUDO_COMMAND},
+    {"env_get",      BuiltinId::ENV_GET},
+    {"env_set",      BuiltinId::ENV_SET},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -1130,8 +1134,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(bothValid, okBB, failBB, swapW);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: swap index out of bounds\n", "swap_oob_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
+        {
+            std::string msg = expr->line > 0
+                ? std::string("Runtime error: swap index out of bounds at line ") + std::to_string(expr->line) + "\n"
+                : "Runtime error: swap index out of bounds\n";
+            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "swap_oob_msg")});
+        }
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -1407,8 +1415,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(condVal, okBB, failBB, assertW);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: assertion failed\n", "assert_fail_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
+        {
+            std::string msg = expr->line > 0
+                ? std::string("Runtime error: assertion failed at line ") + std::to_string(expr->line) + "\n"
+                : "Runtime error: assertion failed\n";
+            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "assert_fail_msg")});
+        }
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -1477,9 +1489,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(valid, okBB, failBB, charAtW);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg =
-            builder->CreateGlobalString("Runtime error: char_at index out of bounds\n", "charat_oob_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
+        {
+            std::string msg = expr->line > 0
+                ? std::string("Runtime error: char_at index out of bounds at line ") + std::to_string(expr->line) + "\n"
+                : "Runtime error: char_at index out of bounds\n";
+            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "charat_oob_msg")});
+        }
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -3140,8 +3155,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(isEmpty, failBB, okBB, popW);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: pop from empty array\n", "pop_empty_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
+        {
+            std::string msg = expr->line > 0
+                ? std::string("Runtime error: pop from empty array at line ") + std::to_string(expr->line) + "\n"
+                : "Runtime error: pop from empty array\n";
+            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "pop_empty_msg")});
+        }
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -3630,9 +3649,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(valid, okBB, failBB, removeW);
         // Out-of-bounds: print error and abort
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg =
-            builder->CreateGlobalString("Runtime error: array_remove index out of bounds\n", "aremove_oob_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
+        {
+            std::string msg = expr->line > 0
+                ? std::string("Runtime error: array_remove index out of bounds at line ") + std::to_string(expr->line) + "\n"
+                : "Runtime error: array_remove index out of bounds\n";
+            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "aremove_oob_msg")});
+        }
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
         // In-bounds: save removed value, shift elements left, decrement length
@@ -5521,9 +5543,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(stepIsZero, stepFailBB, stepOkBB);
 
         builder->SetInsertPoint(stepFailBB);
-        llvm::Value* errMsg = builder->CreateGlobalString(
-            "Runtime error: range step cannot be zero\n", "rstep_zero_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
+        {
+            std::string msg = expr->line > 0
+                ? std::string("Runtime error: range step cannot be zero at line ") + std::to_string(expr->line) + "\n"
+                : "Runtime error: range step cannot be zero\n";
+            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "rstep_zero_msg")});
+        }
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -6234,8 +6259,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(notEmpty, okBB, failBB, alastW);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array_last called on empty array\n", "alast_empty_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
+        {
+            std::string msg = expr->line > 0
+                ? std::string("Runtime error: array_last called on empty array at line ") + std::to_string(expr->line) + "\n"
+                : "Runtime error: array_last called on empty array\n";
+            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "alast_empty_msg")});
+        }
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -6287,8 +6316,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(valid, okBB, failBB, ainsW);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array_insert index out of bounds\n", "ains_oob_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
+        {
+            std::string msg = expr->line > 0
+                ? std::string("Runtime error: array_insert index out of bounds at line ") + std::to_string(expr->line) + "\n"
+                : "Runtime error: array_insert index out of bounds\n";
+            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "ains_oob_msg")});
+        }
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -6563,6 +6596,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(rdoneBB);
         builder->CreateCall(pcloseFn, {fp});
+        // Free the temporary chunk buffer now that reading is complete.
+        builder->CreateCall(getOrDeclareFree(), {chunkBuf});
         llvm::Value* finalSz  = builder->CreateAlignedLoad(getDefaultType(), sizePtr, llvm::MaybeAlign(8), "cmd.fsz");
         llvm::Value* finalBuf = builder->CreateAlignedLoad(ptrTy, bufPtr, llvm::MaybeAlign(8), "cmd.fbuf");
         llvm::Value* ntPtr    = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), finalBuf, finalSz, "cmd.nt");
@@ -7751,6 +7786,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(scRDoneBB);
         builder->CreateCall(scPcloseFn, {scFp});
+        // Free the temporary chunk buffer now that reading is complete.
+        builder->CreateCall(getOrDeclareFree(), {scChunkBuf});
         llvm::Value* scFinalSz  = builder->CreateAlignedLoad(getDefaultType(), scSizePtr, llvm::MaybeAlign(8), "sudo.fsz");
         llvm::Value* scFinalBuf = builder->CreateAlignedLoad(scPtrTy, scBufPtr, llvm::MaybeAlign(8), "sudo.fbuf");
         llvm::Value* scNtPtr    = builder->CreateInBoundsGEP(
@@ -7766,6 +7803,77 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         scPhi->addIncoming(scReadResult, scReadEndBB);
         stringReturningFunctions_.insert("sudo_command");
         return scPhi;
+    }
+
+    // -----------------------------------------------------------------------
+    // env_get(name) — get an environment variable's value as a string.
+    //   Returns the value string if the variable exists, or an empty string
+    //   if it is not set (getenv returns NULL).
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ENV_GET) {
+        validateArgCount(expr, "env_get", 1);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* nameArg = generateExpression(expr->arguments[0].get());
+        // nameArg may be an i64 pointer-as-int or already a ptr
+        llvm::Value* namePtr = nameArg->getType()->isPointerTy()
+            ? nameArg
+            : builder->CreateIntToPtr(nameArg, ptrTy, "env_get.name");
+        // Call getenv(name) — returns char* or NULL
+        llvm::Value* envPtr = builder->CreateCall(getOrDeclareGetenv(), {namePtr}, "env_get.res");
+        // If NULL, return empty string constant; otherwise return the pointer as i64
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* nullBB  = llvm::BasicBlock::Create(*context, "env_get.null",    parentFn);
+        llvm::BasicBlock* okBB    = llvm::BasicBlock::Create(*context, "env_get.ok",      parentFn);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "env_get.merge",   parentFn);
+        llvm::Value* isNull = builder->CreateICmpEQ(
+            envPtr, llvm::ConstantPointerNull::get(ptrTy), "env_get.isnull");
+        // Env variable not set is somewhat uncommon — favour the non-null path.
+        llvm::MDNode* egW = llvm::MDBuilder(*context).createBranchWeights(1, 99);
+        builder->CreateCondBr(isNull, nullBB, okBB, egW);
+
+        builder->SetInsertPoint(nullBB);
+        // Return a heap-allocated empty string when the variable is not set.
+        llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
+            {llvm::ConstantInt::get(getDefaultType(), 1)}, "env_get.empty");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf);
+        llvm::Value* emptyI64 = builder->CreatePtrToInt(emptyBuf, getDefaultType(), "env_get.emptyi64");
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(okBB);
+        llvm::Value* okI64 = builder->CreatePtrToInt(envPtr, getDefaultType(), "env_get.i64");
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "env_get.phi");
+        phi->addIncoming(emptyI64, nullBB);
+        phi->addIncoming(okI64, okBB);
+        stringReturningFunctions_.insert("env_get");
+        return phi;
+    }
+
+    // -----------------------------------------------------------------------
+    // env_set(name, value) — set an environment variable.
+    //   Returns 1 on success, 0 on failure (same sign convention as the rest
+    //   of the standard library boolean returns).
+    //   Calls setenv(name, value, 1) — overwrite always.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ENV_SET) {
+        validateArgCount(expr, "env_set", 2);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* nameArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* valArg  = generateExpression(expr->arguments[1].get());
+        llvm::Value* namePtr = nameArg->getType()->isPointerTy()
+            ? nameArg : builder->CreateIntToPtr(nameArg, ptrTy, "env_set.name");
+        llvm::Value* valPtr = valArg->getType()->isPointerTy()
+            ? valArg : builder->CreateIntToPtr(valArg, ptrTy, "env_set.val");
+        // setenv(name, value, 1) — overwrite = 1
+        llvm::Value* overwrite = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1);
+        llvm::Value* rc = builder->CreateCall(getOrDeclareSetenv(), {namePtr, valPtr, overwrite}, "env_set.rc");
+        // setenv returns 0 on success, -1 on failure; convert to 1/0
+        llvm::Value* success = builder->CreateICmpEQ(rc,
+            llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "env_set.ok");
+        llvm::Value* result = builder->CreateZExt(success, getDefaultType(), "env_set.res");
+        return result;
     }
 
     if (inOptMaxFunction) {

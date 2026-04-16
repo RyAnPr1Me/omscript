@@ -288,7 +288,8 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
                                      llvm::Value* basePtr,
                                      bool isStr,
                                      bool isBorrowed,
-                                     const char* prefix) {
+                                     const char* prefix,
+                                     int line) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     llvm::BasicBlock* okBB = llvm::BasicBlock::Create(
         *context, llvm::Twine(prefix) + ".ok", function);
@@ -346,12 +347,18 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg =
-        isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n",
-                                            llvm::Twine(prefix) + "_str_oob_msg")
-              : builder->CreateGlobalString("Runtime error: array index out of bounds\n",
-                                            llvm::Twine(prefix) + "_arr_oob_msg");
-    builder->CreateCall(getPrintfFunction(), {errMsg});
+    {
+        std::string strMsg = line > 0
+            ? std::string("Runtime error: string index out of bounds at line ") + std::to_string(line) + "\n"
+            : "Runtime error: string index out of bounds\n";
+        std::string arrMsg = line > 0
+            ? std::string("Runtime error: array index out of bounds at line ") + std::to_string(line) + "\n"
+            : "Runtime error: array index out of bounds\n";
+        llvm::Value* errMsg =
+            isStr ? builder->CreateGlobalString(strMsg, llvm::Twine(prefix) + "_str_oob_msg")
+                  : builder->CreateGlobalString(arrMsg, llvm::Twine(prefix) + "_arr_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+    }
     builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();
 
@@ -1232,9 +1239,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->CreateCondBr(overflowed, ovfBB, okBB, ovfW);
 
         builder->SetInsertPoint(ovfBB);
-        llvm::Value* ovfMsg = builder->CreateGlobalString(
-            "Runtime error: string repetition size overflow\n", "strmul_ovf_msg");
-        builder->CreateCall(getPrintfFunction(), {ovfMsg});
+        {
+            std::string ovfMsgStr = expr->line > 0
+                ? std::string("Runtime error: string repetition size overflow at line ") + std::to_string(expr->line) + "\n"
+                : "Runtime error: string repetition size overflow\n";
+            llvm::Value* ovfMsg = builder->CreateGlobalString(ovfMsgStr, "strmul_ovf_msg");
+            builder->CreateCall(getPrintfFunction(), {ovfMsg});
+        }
         builder->CreateCall(getOrDeclareExit(),
             {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1)});
         builder->CreateUnreachable();
@@ -3535,10 +3546,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->CreateCondBr(isZero, zeroBB, opBB, brWeights);
 
         builder->SetInsertPoint(zeroBB);
-        const char* messageText = isDivision ? "Runtime error: division by zero\n" : "Runtime error: modulo by zero\n";
-        const char* messageName = isDivision ? "divzero_msg" : "modzero_msg";
-        llvm::Value* message = builder->CreateGlobalString(messageText, messageName);
-        builder->CreateCall(getPrintfFunction(), {message});
+        {
+            std::string msg = isDivision
+                ? (expr->line > 0 ? std::string("Runtime error: division by zero at line ") + std::to_string(expr->line) + "\n"
+                                  : "Runtime error: division by zero\n")
+                : (expr->line > 0 ? std::string("Runtime error: modulo by zero at line ") + std::to_string(expr->line) + "\n"
+                                  : "Runtime error: modulo by zero\n");
+            const char* messageName = isDivision ? "divzero_msg" : "modzero_msg";
+            llvm::Value* message = builder->CreateGlobalString(msg, messageName);
+            builder->CreateCall(getPrintfFunction(), {message});
+        }
         builder->CreateCall(getOrDeclareExit(), {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1)});
         builder->CreateUnreachable();
 
@@ -4432,7 +4449,8 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
             arrPtr, /*isStr=*/false, "incdec");
 
         if (!boundsCheckElidedID) {
-            emitBoundsCheck(idxVal, arrPtr, /*isStr=*/false, /*isBorrowed=*/false, "incdec");
+            emitBoundsCheck(idxVal, arrPtr, /*isStr=*/false, /*isBorrowed=*/false, "incdec",
+                            indexExpr->line);
         }
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
@@ -5244,7 +5262,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     }
 
     if (!boundsCheckElided) {
-        emitBoundsCheck(idxVal, basePtr, isStr, arrayIsBorrowed, "idx");
+        emitBoundsCheck(idxVal, basePtr, isStr, arrayIsBorrowed, "idx", expr->line);
     }
 
     if (isStr) {
@@ -5361,7 +5379,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     }
 
     if (!boundsCheckElidedA) {
-        emitBoundsCheck(idxVal, basePtr, isStr, arrayIsBorrowedA, "idxa");
+        emitBoundsCheck(idxVal, basePtr, isStr, arrayIsBorrowedA, "idxa", expr->line);
     }
 
     if (isStr) {
