@@ -1,0 +1,23 @@
+// Tests for sudo_command(cmd, password)
+// The function executes a shell command with sudo -S (password via stdin).
+// Since sudo is not available with a known password in the test environment,
+// we only verify that:
+//  1. The function compiles and links.
+//  2. It returns a string (no crash) when sudo is unavailable.
+//  3. Password strings with single quotes are handled without crash.
+
+fn main() {
+    // Any failure to open popen returns an empty string — still a valid string.
+    var out1 = sudo_command("whoami", "doesnotmatter");
+    assert(str_len(out1) >= 0);
+
+    // Password with single-quote characters must be safely escaped.
+    var out2 = sudo_command("true", "pa'ss'wo'rd");
+    assert(str_len(out2) >= 0);
+
+    // Regular command() must still work side-by-side.
+    var out3 = command("echo hello");
+    assert(str_contains(out3, "hello"));
+
+    return 0;
+}

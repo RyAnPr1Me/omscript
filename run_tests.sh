@@ -419,6 +419,7 @@ ptest_program "examples/lambda_pipe_spread_test.om" 0
 ptest_program "examples/array_higher_order_test.om" 0
 ptest_program "examples/filter_command_test.om" 0
 ptest_program "examples/stdlib_additions_test.om" 0
+ptest_program "examples/sudo_command_test.om" 0
 ptest_program "examples/swap_oob.om" 134
 ptest_program "examples/char_at_oob.om" 134
 ptest_program "examples/overflow_wrap_test.om" 42

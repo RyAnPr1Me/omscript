@@ -2147,12 +2147,22 @@ var f = i32(-1);     // -1 (sign-preserved)
 |---|---|
 | `command(cmd)` | Run shell command `cmd` via `popen(3)` and return its stdout as a string. Returns `""` on failure. Also available as `std::command(cmd)`. |
 | `shell(cmd)` | Alias for `command(cmd)`. |
+| `sudo_command(cmd, password)` | Run `cmd` as root via `sudo -S`, supplying `password` on stdin. Returns combined stdout+stderr as a string, or `""` if `popen` fails. Single-quote characters in the password are automatically escaped. |
 
 ```omscript
-var output = command("echo hello");      // "hello\n"
-var files  = shell("ls /tmp");           // directory listing
-var lines  = str_split(output, "\n");    // split into lines
+var output = command("echo hello");               // "hello\n"
+var files  = shell("ls /tmp");                    // directory listing
+var lines  = str_split(output, "\n");             // split into lines
+var result = sudo_command("apt update", "s3cr3t");// runs as root
 ```
+
+> **Security note for `sudo_command`:** the password travels only through
+> the pipe fed to `sudo`'s stdin — it is never passed as a shell argument.
+> However, the full pipeline string (including the escaped password) is
+> visible in `/proc/<pid>/cmdline` and in `popen`'s shell invocation on
+> some operating systems.  For production use, prefer passwordless sudo
+> rules (`NOPASSWD` in `/etc/sudoers`) and call `command("sudo cmd")`
+> instead.
 
 ### 19.7 Optimizer Hints
 

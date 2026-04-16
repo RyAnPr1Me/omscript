@@ -100,7 +100,9 @@ enum class BuiltinId : uint8_t {
     // Array: arithmetic mean (integer division)
     ARRAY_MEAN,
     // Map: merge two maps (b wins on conflict), invert keys↔values
-    MAP_MERGE, MAP_INVERT
+    MAP_MERGE, MAP_INVERT,
+    // Shell command execution with sudo (password provided as second arg)
+    SUDO_COMMAND
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -279,6 +281,8 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     // Map: merge two maps, invert keys↔values
     {"map_merge",  BuiltinId::MAP_MERGE},
     {"map_invert", BuiltinId::MAP_INVERT},
+    // Shell command execution with sudo (password provided as second arg)
+    {"sudo_command", BuiltinId::SUDO_COMMAND},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -7483,6 +7487,254 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(miDoneBB);
         llvm::Value* miFinalRes = builder->CreateAlignedLoad(miPtrTy, miResA, llvm::MaybeAlign(8), "minv.final");
         return builder->CreatePtrToInt(miFinalRes, getDefaultType(), "minv.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // sudo_command(cmd, password) — run shell command via sudo, providing
+    //   the password on stdin using `sudo -S`.
+    //
+    //   The command is run as:
+    //     printf '%s\n' 'ESCAPED_PASS' | sudo -S -- sh -c 'CMD' 2>&1
+    //
+    //   Single-quote characters in the password are escaped as `'\''` so that
+    //   the printf argument is always a valid single-quoted shell word.
+    //   The command string is passed as-is to `sh -c` (same as `command`).
+    //   Returns the combined stdout+stderr of the subprocess as a string,
+    //   or an empty string if popen() fails.
+    //
+    //   Security note: the password is never passed as a process argument —
+    //   it travels only through the pipe from printf to sudo's stdin.
+    //   However the full pipeline string is visible in /proc on some systems;
+    //   prefer passwordless sudo rules (NOPASSWD) for production use.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::SUDO_COMMAND) {
+        validateArgCount(expr, "sudo_command", 2);
+        llvm::Value* scCmdArg  = generateExpression(expr->arguments[0].get());
+        llvm::Value* scPassArg = generateExpression(expr->arguments[1].get());
+        auto* scPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* scCmdPtr  = scCmdArg->getType()->isPointerTy()
+            ? scCmdArg
+            : builder->CreateIntToPtr(scCmdArg, scPtrTy, "sudo.cmdptr");
+        llvm::Value* scPassPtr = scPassArg->getType()->isPointerTy()
+            ? scPassArg
+            : builder->CreateIntToPtr(scPassArg, scPtrTy, "sudo.passptr");
+
+        llvm::Function* scParentFn = builder->GetInsertBlock()->getParent();
+
+        // ---- Step 1: escape single-quotes in the password ----
+        // Escaped form: each `'` → `'\''`.  Worst case: 4x expansion.
+        llvm::Value* scPassLen = builder->CreateCall(getOrDeclareStrlen(), {scPassPtr}, "sudo.passlen");
+        nonNegValues_.insert(scPassLen);
+        llvm::Value* scEscMax  = builder->CreateAdd(
+            builder->CreateMul(scPassLen, llvm::ConstantInt::get(getDefaultType(), 4), "sudo.escmax4"),
+            llvm::ConstantInt::get(getDefaultType(), 1), "sudo.escmax", true, true);
+        llvm::Value* scEscBuf  = builder->CreateCall(getOrDeclareMalloc(), {scEscMax}, "sudo.escbuf");
+        llvm::AllocaInst* scEscWrA = createEntryBlockAlloca(scParentFn, "sudo.escwr", getDefaultType());
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), scEscWrA);
+
+        llvm::BasicBlock* scEscPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* scEscLoopBB = llvm::BasicBlock::Create(*context, "sudo.escloop", scParentFn);
+        llvm::BasicBlock* scEscBodyBB = llvm::BasicBlock::Create(*context, "sudo.escbody", scParentFn);
+        llvm::BasicBlock* scEscSqBB   = llvm::BasicBlock::Create(*context, "sudo.escsq",   scParentFn);
+        llvm::BasicBlock* scEscNormBB = llvm::BasicBlock::Create(*context, "sudo.escnorm",  scParentFn);
+        llvm::BasicBlock* scEscIncBB  = llvm::BasicBlock::Create(*context, "sudo.escinc",   scParentFn);
+        llvm::BasicBlock* scEscDoneBB = llvm::BasicBlock::Create(*context, "sudo.escdone",  scParentFn);
+        llvm::Value* scEscZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* scEscOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(scEscLoopBB)));
+
+        builder->SetInsertPoint(scEscLoopBB);
+        llvm::PHINode* scEscI = builder->CreatePHI(getDefaultType(), 2, "sudo.esci");
+        scEscI->addIncoming(scEscZero, scEscPreBB);
+        builder->CreateCondBr(builder->CreateICmpULT(scEscI, scPassLen, "sudo.esccond"),
+            scEscBodyBB, scEscDoneBB);
+
+        builder->SetInsertPoint(scEscBodyBB);
+        llvm::Value* scCharPtr  = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), scPassPtr, scEscI, "sudo.charptr");
+        auto* scCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), scCharPtr, "sudo.char");
+        scCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* scIsSq = builder->CreateICmpEQ(
+            scCharLoad, llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), '\''), "sudo.issq");
+        builder->CreateCondBr(scIsSq, scEscSqBB, scEscNormBB);
+
+        // Single-quote path: emit  ' \ ' '  (4 bytes)
+        builder->SetInsertPoint(scEscSqBB);
+        llvm::Value* scWrSq  = builder->CreateAlignedLoad(getDefaultType(), scEscWrA, llvm::MaybeAlign(8), "sudo.wrsq");
+        auto scEmitByte = [&](llvm::Value* wrIdx, uint8_t byte) -> llvm::Value* {
+            llvm::Value* p = builder->CreateInBoundsGEP(
+                llvm::Type::getInt8Ty(*context), scEscBuf, wrIdx, "sudo.ep");
+            builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), byte), p);
+            return builder->CreateAdd(wrIdx, scEscOne, "sudo.wr1", true, true);
+        };
+        llvm::Value* scWrSq1 = scEmitByte(scWrSq,  '\'');
+        llvm::Value* scWrSq2 = scEmitByte(scWrSq1, '\\');
+        llvm::Value* scWrSq3 = scEmitByte(scWrSq2, '\'');
+        llvm::Value* scWrSq4 = scEmitByte(scWrSq3, '\'');
+        builder->CreateStore(scWrSq4, scEscWrA);
+        builder->CreateBr(scEscIncBB);
+
+        // Normal path: emit byte as-is
+        builder->SetInsertPoint(scEscNormBB);
+        llvm::Value* scWrNorm  = builder->CreateAlignedLoad(getDefaultType(), scEscWrA, llvm::MaybeAlign(8), "sudo.wrnorm");
+        {
+            llvm::Value* scNP = builder->CreateInBoundsGEP(
+                llvm::Type::getInt8Ty(*context), scEscBuf, scWrNorm, "sudo.np");
+            builder->CreateStore(scCharLoad, scNP);
+            llvm::Value* scWrNorm2 = builder->CreateAdd(scWrNorm, scEscOne, "sudo.wrnorm2", true, true);
+            builder->CreateStore(scWrNorm2, scEscWrA);
+        }
+        builder->CreateBr(scEscIncBB);
+
+        builder->SetInsertPoint(scEscIncBB);
+        llvm::Value* scEscI1 = builder->CreateAdd(scEscI, scEscOne, "sudo.esci1", true, true);
+        scEscI->addIncoming(scEscI1, scEscIncBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(scEscLoopBB)));
+
+        builder->SetInsertPoint(scEscDoneBB);
+        // NUL-terminate escaped password
+        llvm::Value* scEscWrFinal = builder->CreateAlignedLoad(getDefaultType(), scEscWrA, llvm::MaybeAlign(8), "sudo.escfin");
+        llvm::Value* scEscNulPtr  = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), scEscBuf, scEscWrFinal, "sudo.escnul");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scEscNulPtr);
+
+        // ---- Step 2: build full pipeline command string ----
+        // Format: printf '%%s\n' 'ESCAPED_PASS' | sudo -S -- sh -c 'CMD' 2>&1
+        // Length = len("printf '%s\n' '' | sudo -S -- sh -c '' 2>&1") + len(escaped_pass) + len(cmd)
+        //        = 45 + scEscWrFinal + len(cmd) + 1
+        llvm::Value* scCmdLen   = builder->CreateCall(getOrDeclareStrlen(), {scCmdPtr}, "sudo.cmdlen");
+        nonNegValues_.insert(scCmdLen);
+        // prefix: "printf '%s\n' '" = 16 chars, suffix: "' | sudo -S -- sh -c '" = 22 chars,
+        // cmd_suffix: "' 2>&1" = 6 chars, NUL = 1
+        llvm::Value* scFmtFixed = llvm::ConstantInt::get(getDefaultType(), 16 + 22 + 6 + 1);
+        llvm::Value* scFmtLen   = builder->CreateAdd(
+            builder->CreateAdd(scFmtFixed, scEscWrFinal, "sudo.flen1", true, true),
+            scCmdLen, "sudo.flen", true, true);
+        llvm::Value* scFmtBuf   = builder->CreateCall(getOrDeclareMalloc(), {scFmtLen}, "sudo.fmtbuf");
+
+        // Use snprintf to build the command string
+        // format string: "printf '%%s\n' '%s' | sudo -S -- sh -c '%s' 2>&1"
+        // Note: %% becomes % in the output, so printf gets '%s\n'
+        llvm::GlobalVariable* scFmtStr = module->getGlobalVariable("__sudo_fmt", true);
+        if (!scFmtStr)
+            scFmtStr = builder->CreateGlobalString(
+                "printf '%%s\\n' '%s' | sudo -S -- sh -c '%s' 2>&1",
+                "__sudo_fmt");
+        builder->CreateCall(getOrDeclareSnprintf(), {scFmtBuf, scFmtLen, scFmtStr, scEscBuf, scCmdPtr});
+
+        // ---- Step 3: popen + read loop (identical to COMMAND) ----
+        auto* scPopenFn = llvm::dyn_cast_or_null<llvm::Function>(
+            module->getOrInsertFunction("popen",
+                llvm::FunctionType::get(scPtrTy, {scPtrTy, scPtrTy}, false))
+            .getCallee());
+        if (scPopenFn) {
+            scPopenFn->addFnAttr(llvm::Attribute::NoUnwind);
+            OMSC_ADD_NOCAPTURE(scPopenFn, 0);
+            OMSC_ADD_NOCAPTURE(scPopenFn, 1);
+        }
+        auto* scPcloseFn = llvm::dyn_cast_or_null<llvm::Function>(
+            module->getOrInsertFunction("pclose",
+                llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {scPtrTy}, false))
+            .getCallee());
+        if (scPcloseFn) scPcloseFn->addFnAttr(llvm::Attribute::NoUnwind);
+
+        llvm::GlobalVariable* scModeR = module->getGlobalVariable("__popen_mode_r", true);
+        if (!scModeR) scModeR = builder->CreateGlobalString("r", "__popen_mode_r");
+
+        llvm::Value* scFp = builder->CreateCall(scPopenFn, {scFmtBuf, scModeR}, "sudo.fp");
+        llvm::Value* scNullPtr = llvm::ConstantPointerNull::get(scPtrTy);
+        llvm::Value* scIsNull  = builder->CreateICmpEQ(scFp, scNullPtr, "sudo.isnull");
+
+        llvm::BasicBlock* scNullBB  = llvm::BasicBlock::Create(*context, "sudo.null",  scParentFn);
+        llvm::BasicBlock* scReadBB  = llvm::BasicBlock::Create(*context, "sudo.read",  scParentFn);
+        llvm::BasicBlock* scMergeBB = llvm::BasicBlock::Create(*context, "sudo.merge", scParentFn);
+
+        builder->CreateCondBr(scIsNull, scNullBB, scReadBB,
+            llvm::MDBuilder(*context).createBranchWeights(1, 100));
+
+        // Null path → empty string
+        builder->SetInsertPoint(scNullBB);
+        llvm::Value* scEmptyBuf = builder->CreateCall(getOrDeclareMalloc(),
+            {llvm::ConstantInt::get(getDefaultType(), 1)}, "sudo.empty");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scEmptyBuf);
+        llvm::Value* scEmptyI64 = builder->CreatePtrToInt(scEmptyBuf, getDefaultType(), "sudo.emptyi64");
+        builder->CreateBr(scMergeBB);
+        llvm::BasicBlock* scNullEndBB = builder->GetInsertBlock();
+
+        // Read path: growing buffer with fgets
+        builder->SetInsertPoint(scReadBB);
+        llvm::Value* scInitCap  = llvm::ConstantInt::get(getDefaultType(), 4096);
+        llvm::AllocaInst* scCapPtr  = createEntryBlockAlloca(scParentFn, "sudo.cap",  getDefaultType());
+        llvm::AllocaInst* scSizePtr = createEntryBlockAlloca(scParentFn, "sudo.size", getDefaultType());
+        llvm::AllocaInst* scBufPtr  = createEntryBlockAlloca(scParentFn, "sudo.bufp", scPtrTy);
+        builder->CreateStore(scInitCap, scCapPtr);
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), scSizePtr);
+        llvm::Value* scInitBuf = builder->CreateCall(getOrDeclareMalloc(), {scInitCap}, "sudo.buf");
+        builder->CreateStore(scInitBuf, scBufPtr);
+
+        llvm::Value* scChunkBuf  = builder->CreateCall(getOrDeclareMalloc(),
+            {llvm::ConstantInt::get(getDefaultType(), 256)}, "sudo.chunk");
+        llvm::Value* scChunkSize = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 256);
+
+        llvm::BasicBlock* scRLoopBB  = llvm::BasicBlock::Create(*context, "sudo.rloop",  scParentFn);
+        llvm::BasicBlock* scAppendBB = llvm::BasicBlock::Create(*context, "sudo.append", scParentFn);
+        llvm::BasicBlock* scRDoneBB  = llvm::BasicBlock::Create(*context, "sudo.rdone",  scParentFn);
+        llvm::BasicBlock* scGrowBB   = llvm::BasicBlock::Create(*context, "sudo.grow",   scParentFn);
+        llvm::BasicBlock* scCopyBB   = llvm::BasicBlock::Create(*context, "sudo.copy",   scParentFn);
+
+        builder->CreateBr(scRLoopBB);
+        builder->SetInsertPoint(scRLoopBB);
+
+        llvm::Value* scGot     = builder->CreateCall(getOrDeclareFgets(),
+            {scChunkBuf, scChunkSize, scFp}, "sudo.got");
+        llvm::Value* scGotNull = builder->CreateICmpEQ(scGot, scNullPtr, "sudo.gotnull");
+        builder->CreateCondBr(scGotNull, scRDoneBB, scAppendBB,
+            llvm::MDBuilder(*context).createBranchWeights(1, 1000));
+
+        builder->SetInsertPoint(scAppendBB);
+        llvm::Value* scChunkLen = builder->CreateCall(getOrDeclareStrlen(), {scChunkBuf}, "sudo.clen");
+        llvm::Value* scCurSize  = builder->CreateAlignedLoad(getDefaultType(), scSizePtr, llvm::MaybeAlign(8), "sudo.csz");
+        llvm::Value* scCurCap   = builder->CreateAlignedLoad(getDefaultType(), scCapPtr,  llvm::MaybeAlign(8), "sudo.ccap");
+        llvm::Value* scNewSize  = builder->CreateAdd(scCurSize, scChunkLen, "sudo.nsz", true, true);
+        llvm::Value* scNeedOne  = builder->CreateAdd(scNewSize,
+            llvm::ConstantInt::get(getDefaultType(), 1), "sudo.ns1", true, true);
+        llvm::Value* scNeedGrow = builder->CreateICmpUGT(scNeedOne, scCurCap, "sudo.needgrow");
+        builder->CreateCondBr(scNeedGrow, scGrowBB, scCopyBB);
+
+        builder->SetInsertPoint(scGrowBB);
+        llvm::Value* scNewCap  = builder->CreateMul(scCurCap,
+            llvm::ConstantInt::get(getDefaultType(), 2), "sudo.ncap", true, true);
+        llvm::Value* scCurBufG = builder->CreateAlignedLoad(scPtrTy, scBufPtr, llvm::MaybeAlign(8), "sudo.cbufg");
+        llvm::Value* scNewBuf  = builder->CreateCall(getOrDeclareRealloc(), {scCurBufG, scNewCap}, "sudo.nbuf");
+        builder->CreateStore(scNewBuf, scBufPtr);
+        builder->CreateStore(scNewCap, scCapPtr);
+        builder->CreateBr(scCopyBB);
+
+        builder->SetInsertPoint(scCopyBB);
+        llvm::Value* scCurBufC = builder->CreateAlignedLoad(scPtrTy, scBufPtr, llvm::MaybeAlign(8), "sudo.cbufc");
+        llvm::Value* scDst     = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), scCurBufC, scCurSize, "sudo.dst");
+        builder->CreateCall(getOrDeclareMemcpy(), {scDst, scChunkBuf, scChunkLen});
+        builder->CreateStore(scNewSize, scSizePtr);
+        builder->CreateBr(scRLoopBB);
+
+        builder->SetInsertPoint(scRDoneBB);
+        builder->CreateCall(scPcloseFn, {scFp});
+        llvm::Value* scFinalSz  = builder->CreateAlignedLoad(getDefaultType(), scSizePtr, llvm::MaybeAlign(8), "sudo.fsz");
+        llvm::Value* scFinalBuf = builder->CreateAlignedLoad(scPtrTy, scBufPtr, llvm::MaybeAlign(8), "sudo.fbuf");
+        llvm::Value* scNtPtr    = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), scFinalBuf, scFinalSz, "sudo.nt");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scNtPtr);
+        llvm::Value* scReadResult = builder->CreatePtrToInt(scFinalBuf, getDefaultType(), "sudo.res");
+        builder->CreateBr(scMergeBB);
+        llvm::BasicBlock* scReadEndBB = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(scMergeBB);
+        llvm::PHINode* scPhi = builder->CreatePHI(getDefaultType(), 2, "sudo.phi");
+        scPhi->addIncoming(scEmptyI64, scNullEndBB);
+        scPhi->addIncoming(scReadResult, scReadEndBB);
+        stringReturningFunctions_.insert("sudo_command");
+        return scPhi;
     }
 
     if (inOptMaxFunction) {
