@@ -2130,6 +2130,19 @@ var f = i32(-1);     // -1 (sign-preserved)
 | `time()` | Current Unix timestamp in seconds (integer) |
 | `sleep(ms)` | Sleep for `ms` milliseconds |
 
+### 19.6.1 Shell / Process
+
+| Function | Description |
+|---|---|
+| `command(cmd)` | Run shell command `cmd` via `popen(3)` and return its stdout as a string. Returns `""` on failure. Also available as `std::command(cmd)`. |
+| `shell(cmd)` | Alias for `command(cmd)`. |
+
+```omscript
+var output = command("echo hello");      // "hello\n"
+var files  = shell("ls /tmp");           // directory listing
+var lines  = str_split(output, "\n");    // split into lines
+```
+
 ### 19.7 Optimizer Hints
 
 | Function | Description |

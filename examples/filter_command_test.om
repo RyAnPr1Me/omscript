@@ -1,0 +1,44 @@
+// Test filter, str_filter, and command built-in functions
+
+fn is_even(x:int) -> int {
+    return x % 2 == 0;
+}
+
+fn not_space(c:int) -> int {
+    if (c == 32) { return 0; }
+    return 1;
+}
+
+fn main() {
+    // --- filter on array (delegates to array_filter) ---
+    var nums = [1, 2, 3, 4, 5, 6];
+    var evens = filter(nums, "is_even");
+    assert(len(evens) == 3);
+    assert(evens[0] == 2);
+    assert(evens[1] == 4);
+    assert(evens[2] == 6);
+
+    // --- std:: prefix resolves to same builtin ---
+    var evens2 = std::filter(nums, "is_even");
+    assert(len(evens2) == 3);
+
+    // --- str_filter: remove spaces ---
+    var s = "Hello World";
+    var nospace = str_filter(s, "not_space");
+    assert(nospace == "HelloWorld");
+    assert(len(nospace) == 10);
+
+    // --- filter on string (dispatches to str_filter) ---
+    var nospace2 = filter(s, "not_space");
+    assert(nospace2 == "HelloWorld");
+
+    // --- command: run a shell command and capture stdout ---
+    var out = command("echo hello_from_command");
+    assert(str_contains(out, "hello_from_command"));
+
+    // --- shell alias for command ---
+    var out2 = shell("echo shell_alias_works");
+    assert(str_contains(out2, "shell_alias_works"));
+
+    return 0;
+}

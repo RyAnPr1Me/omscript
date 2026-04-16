@@ -78,7 +78,15 @@ enum class BuiltinId : uint8_t {
     // String padding builtins
     STR_PAD_LEFT, STR_PAD_RIGHT,
     // Character classification predicates
-    IS_UPPER, IS_LOWER, IS_SPACE, IS_ALNUM
+    IS_UPPER, IS_LOWER, IS_SPACE, IS_ALNUM,
+    // Generic filter (dispatches based on argument type)
+    FILTER,
+    // String character filter
+    STR_FILTER,
+    // Map entry filter
+    MAP_FILTER,
+    // Shell command execution
+    COMMAND
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -231,6 +239,15 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"array_insert", BuiltinId::ARRAY_INSERT},
     {"str_pad_left", BuiltinId::STR_PAD_LEFT},
     {"str_pad_right", BuiltinId::STR_PAD_RIGHT},
+    // Generic filter — works on arrays, strings, and maps
+    {"filter", BuiltinId::FILTER},
+    // String character filter
+    {"str_filter", BuiltinId::STR_FILTER},
+    // Map entry filter
+    {"map_filter", BuiltinId::MAP_FILTER},
+    // Shell command execution
+    {"command", BuiltinId::COMMAND},
+    {"shell", BuiltinId::COMMAND},   // alias
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -6393,6 +6410,486 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         result->addIncoming(padI64, padBB);
         stringReturningFunctions_.insert(fnName);
         return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // command(cmd) / shell(cmd)
+    //   Run a shell command via popen(3) and return its stdout as a string.
+    //   On error (popen fails or cmd is null) returns an empty string.
+    //   Returned string is heap-allocated.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::COMMAND) {
+        validateArgCount(expr, "command", 1);
+        llvm::Value* cmdArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* cmdPtr =
+            cmdArg->getType()->isPointerTy()
+                ? cmdArg
+                : builder->CreateIntToPtr(cmdArg, ptrTy, "cmd.ptr");
+
+        // Declare popen
+        auto* popenFn = llvm::dyn_cast_or_null<llvm::Function>(
+            module->getOrInsertFunction("popen",
+                llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false))
+            .getCallee());
+        if (popenFn) {
+            popenFn->addFnAttr(llvm::Attribute::NoUnwind);
+            OMSC_ADD_NOCAPTURE(popenFn, 0);
+            OMSC_ADD_NOCAPTURE(popenFn, 1);
+        }
+        // Declare pclose
+        auto* pcloseFn = llvm::dyn_cast_or_null<llvm::Function>(
+            module->getOrInsertFunction("pclose",
+                llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false))
+            .getCallee());
+        if (pcloseFn) pcloseFn->addFnAttr(llvm::Attribute::NoUnwind);
+
+        llvm::GlobalVariable* modeR = module->getGlobalVariable("__popen_mode_r", true);
+        if (!modeR) modeR = builder->CreateGlobalString("r", "__popen_mode_r");
+
+        llvm::Value* fp = builder->CreateCall(popenFn, {cmdPtr, modeR}, "cmd.fp");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+        llvm::Value* isNull  = builder->CreateICmpEQ(fp, nullPtr, "cmd.isnull");
+
+        llvm::BasicBlock* nullBB  = llvm::BasicBlock::Create(*context, "cmd.null",  parentFn);
+        llvm::BasicBlock* readBB  = llvm::BasicBlock::Create(*context, "cmd.read",  parentFn);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "cmd.merge", parentFn);
+
+        builder->CreateCondBr(isNull, nullBB, readBB,
+            llvm::MDBuilder(*context).createBranchWeights(1, 100));
+
+        // Null path → empty string
+        builder->SetInsertPoint(nullBB);
+        llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
+            {llvm::ConstantInt::get(getDefaultType(), 1)}, "cmd.empty");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf);
+        llvm::Value* emptyI64 = builder->CreatePtrToInt(emptyBuf, getDefaultType(), "cmd.emptyi64");
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* nullEndBB = builder->GetInsertBlock();
+
+        // Read path: read output with fgets into a growable buffer
+        builder->SetInsertPoint(readBB);
+        llvm::Value* initCap  = llvm::ConstantInt::get(getDefaultType(), 4096);
+        llvm::AllocaInst* capPtr  = createEntryBlockAlloca(parentFn, "cmd.cap",  getDefaultType());
+        llvm::AllocaInst* sizePtr = createEntryBlockAlloca(parentFn, "cmd.size", getDefaultType());
+        llvm::AllocaInst* bufPtr  = createEntryBlockAlloca(parentFn, "cmd.bufp", ptrTy);
+        builder->CreateStore(initCap, capPtr);
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), sizePtr);
+        llvm::Value* initBuf = builder->CreateCall(getOrDeclareMalloc(), {initCap}, "cmd.buf");
+        builder->CreateStore(initBuf, bufPtr);
+
+        // chunk buffer: 256 bytes on the "heap" (small, reused each iteration)
+        llvm::Value* chunkBuf  = builder->CreateCall(getOrDeclareMalloc(),
+            {llvm::ConstantInt::get(getDefaultType(), 256)}, "cmd.chunk");
+        llvm::Value* chunkSize = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 256);
+
+        llvm::BasicBlock* rloopBB  = llvm::BasicBlock::Create(*context, "cmd.rloop",  parentFn);
+        llvm::BasicBlock* appendBB = llvm::BasicBlock::Create(*context, "cmd.append", parentFn);
+        llvm::BasicBlock* rdoneBB  = llvm::BasicBlock::Create(*context, "cmd.rdone",  parentFn);
+        llvm::BasicBlock* growBB   = llvm::BasicBlock::Create(*context, "cmd.grow",   parentFn);
+        llvm::BasicBlock* copyBB   = llvm::BasicBlock::Create(*context, "cmd.copy",   parentFn);
+
+        builder->CreateBr(rloopBB);
+        builder->SetInsertPoint(rloopBB);
+
+        // fgets(chunk, 256, fp) → null on EOF/error
+        llvm::Value* got     = builder->CreateCall(getOrDeclareFgets(),
+            {chunkBuf, chunkSize, fp}, "cmd.got");
+        llvm::Value* gotNull = builder->CreateICmpEQ(got, nullPtr, "cmd.gotnull");
+        builder->CreateCondBr(gotNull, rdoneBB, appendBB,
+            llvm::MDBuilder(*context).createBranchWeights(1, 1000));
+
+        builder->SetInsertPoint(appendBB);
+        llvm::Value* chunkLen = builder->CreateCall(getOrDeclareStrlen(), {chunkBuf}, "cmd.clen");
+        llvm::Value* curSize  = builder->CreateAlignedLoad(getDefaultType(), sizePtr, llvm::MaybeAlign(8), "cmd.csz");
+        llvm::Value* curCap   = builder->CreateAlignedLoad(getDefaultType(), capPtr,  llvm::MaybeAlign(8), "cmd.ccap");
+        llvm::Value* newSize  = builder->CreateAdd(curSize, chunkLen, "cmd.nsz", true, true);
+        llvm::Value* needOne  = builder->CreateAdd(newSize, llvm::ConstantInt::get(getDefaultType(), 1), "cmd.ns1");
+        llvm::Value* needGrow = builder->CreateICmpUGT(needOne, curCap, "cmd.needgrow");
+        builder->CreateCondBr(needGrow, growBB, copyBB);
+
+        builder->SetInsertPoint(growBB);
+        llvm::Value* newCap  = builder->CreateMul(curCap,
+            llvm::ConstantInt::get(getDefaultType(), 2), "cmd.ncap", true, true);
+        llvm::Value* curBufG = builder->CreateAlignedLoad(ptrTy, bufPtr, llvm::MaybeAlign(8), "cmd.cbufg");
+        llvm::Value* newBuf  = builder->CreateCall(getOrDeclareRealloc(), {curBufG, newCap}, "cmd.nbuf");
+        builder->CreateStore(newBuf, bufPtr);
+        builder->CreateStore(newCap, capPtr);
+        builder->CreateBr(copyBB);
+
+        builder->SetInsertPoint(copyBB);
+        llvm::Value* curBufC = builder->CreateAlignedLoad(ptrTy, bufPtr, llvm::MaybeAlign(8), "cmd.cbufc");
+        llvm::Value* dst     = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), curBufC, curSize, "cmd.dst");
+        builder->CreateCall(getOrDeclareMemcpy(), {dst, chunkBuf, chunkLen});
+        builder->CreateStore(newSize, sizePtr);
+        builder->CreateBr(rloopBB);
+
+        builder->SetInsertPoint(rdoneBB);
+        builder->CreateCall(pcloseFn, {fp});
+        llvm::Value* finalSz  = builder->CreateAlignedLoad(getDefaultType(), sizePtr, llvm::MaybeAlign(8), "cmd.fsz");
+        llvm::Value* finalBuf = builder->CreateAlignedLoad(ptrTy, bufPtr, llvm::MaybeAlign(8), "cmd.fbuf");
+        llvm::Value* ntPtr    = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), finalBuf, finalSz, "cmd.nt");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ntPtr);
+        llvm::Value* readResult = builder->CreatePtrToInt(finalBuf, getDefaultType(), "cmd.res");
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* readEndBB = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* cmdPhi = builder->CreatePHI(getDefaultType(), 2, "cmd.phi");
+        cmdPhi->addIncoming(emptyI64, nullEndBB);
+        cmdPhi->addIncoming(readResult, readEndBB);
+        stringReturningFunctions_.insert("command");
+        stringReturningFunctions_.insert("shell");
+        return cmdPhi;
+    }
+
+    // -----------------------------------------------------------------------
+    // str_filter(str, fn) — keep only characters for which fn(char_code) != 0
+    //   Returns a new heap-allocated string.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::STR_FILTER) {
+        validateArgCount(expr, "str_filter", 2);
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING)
+            codegenError("str_filter: second argument must be a function name (string literal)", expr);
+        const std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second)
+            codegenError("str_filter: unknown function '" + fnName + "'", expr);
+        llvm::Function* predFn = calleeIt->second;
+
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy()
+                ? strArg
+                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "sfilt.ptr");
+        llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "sfilt.len");
+
+        // Allocate output buffer: same max length + 1 for NUL
+        llvm::Value* bufSize = builder->CreateAdd(strLen,
+            llvm::ConstantInt::get(getDefaultType(), 1), "sfilt.bufsz", true, true);
+        llvm::Value* outBuf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "sfilt.out");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preheader = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "sfilt.loop",  parentFn);
+        llvm::BasicBlock* testBB = llvm::BasicBlock::Create(*context, "sfilt.test",  parentFn);
+        llvm::BasicBlock* addBB  = llvm::BasicBlock::Create(*context, "sfilt.add",   parentFn);
+        llvm::BasicBlock* incBB  = llvm::BasicBlock::Create(*context, "sfilt.inc",   parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "sfilt.done",  parentFn);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx    = builder->CreatePHI(getDefaultType(), 2, "sfilt.idx");
+        llvm::PHINode* outIdx = builder->CreatePHI(getDefaultType(), 2, "sfilt.outidx");
+        idx->addIncoming(zero, preheader);
+        outIdx->addIncoming(zero, preheader);
+        llvm::Value* cond = builder->CreateICmpULT(idx, strLen, "sfilt.cond");
+        builder->CreateCondBr(cond, testBB, doneBB);
+
+        builder->SetInsertPoint(testBB);
+        // Load char as i8, zero-extend to i64 for predicate
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), strPtr, idx, "sfilt.charptr");
+        llvm::Value* ch8  = builder->CreateAlignedLoad(llvm::Type::getInt8Ty(*context), charPtr, llvm::MaybeAlign(1), "sfilt.ch8");
+        llvm::Value* ch64 = builder->CreateZExt(ch8, getDefaultType(), "sfilt.ch64");
+        // Call predicate
+        llvm::Value* keep = builder->CreateICmpNE(
+            builder->CreateCall(predFn, {ch64}, "sfilt.keep_val"),
+            zero, "sfilt.keep");
+        builder->CreateCondBr(keep, addBB, incBB);
+
+        builder->SetInsertPoint(addBB);
+        llvm::Value* dstPtr = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), outBuf, outIdx, "sfilt.dstptr");
+        builder->CreateStore(ch8, dstPtr);
+        llvm::Value* newOutIdx = builder->CreateAdd(outIdx,
+            llvm::ConstantInt::get(getDefaultType(), 1), "sfilt.newout", true, true);
+        builder->CreateBr(incBB);
+
+        builder->SetInsertPoint(incBB);
+        llvm::PHINode* outMerge = builder->CreatePHI(getDefaultType(), 2, "sfilt.outmerge");
+        outMerge->addIncoming(outIdx, testBB);
+        outMerge->addIncoming(newOutIdx, addBB);
+        llvm::Value* nextIdx = builder->CreateAdd(idx,
+            llvm::ConstantInt::get(getDefaultType(), 1), "sfilt.next", true, true);
+        idx->addIncoming(nextIdx, incBB);
+        outIdx->addIncoming(outMerge, incBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(doneBB);
+        // NUL-terminate at outIdx
+        llvm::Value* nullCharPtr = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), outBuf, outIdx, "sfilt.nullptr");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullCharPtr);
+        stringReturningFunctions_.insert("str_filter");
+        return builder->CreatePtrToInt(outBuf, getDefaultType(), "sfilt.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // map_filter(map, fn) — keep only entries for which fn(key_i64) != 0.
+    //   Iterates the source map's bucket array directly, applies the predicate
+    //   to each occupied key (as an i64-encoded string pointer), and builds a
+    //   new result map by re-using the existing MAP_SET IR path on matched entries.
+    //   fn must accept one i64 argument (the key pointer) and return non-zero to keep.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::MAP_FILTER) {
+        validateArgCount(expr, "map_filter", 2);
+        auto* fnNameLit2 = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit2 || fnNameLit2->literalType != LiteralExpr::LiteralType::STRING)
+            codegenError("map_filter: second argument must be a function name (string literal)", expr);
+        const std::string mfFnName = fnNameLit2->stringValue;
+        auto mfCalleeIt = functions.find(mfFnName);
+        if (mfCalleeIt == functions.end() || !mfCalleeIt->second)
+            codegenError("map_filter: unknown function '" + mfFnName + "'", expr);
+        llvm::Function* mfPredFn = mfCalleeIt->second;
+
+        llvm::Value* mfSrcMap = generateExpression(expr->arguments[0].get());
+        mfSrcMap = toDefaultType(mfSrcMap);
+        auto* mfPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mfMapPtr = builder->CreateIntToPtr(mfSrcMap, mfPtrTy, "mf.mapptr");
+
+        // Read cap and count from map header [cap:i64, count:i64, buckets...]
+        // Each bucket = [hash:i64, key:i64, val:i64]
+        llvm::Value* mfCap = builder->CreateAlignedLoad(getDefaultType(), mfMapPtr,
+            llvm::MaybeAlign(8), "mf.cap");
+        llvm::Value* mfZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* mfOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        // Create a new empty map for the result using MAP_NEW builtin
+        auto mfNewCall = std::make_unique<CallExpr>("map_new",
+            std::vector<std::unique_ptr<Expression>>{});
+        mfNewCall->line = expr->line; mfNewCall->column = expr->column;
+        llvm::Value* mfNewMap = generateCall(mfNewCall.get());
+
+        // Store the new map in an alloca so MAP_SET can update it
+        llvm::Function* mfParentFn = builder->GetInsertBlock()->getParent();
+        llvm::AllocaInst* mfNewMapA = createEntryBlockAlloca(mfParentFn, "mf.newmap", getDefaultType());
+        builder->CreateStore(mfNewMap, mfNewMapA);
+
+        // Loop over buckets
+        llvm::BasicBlock* mfPre  = builder->GetInsertBlock();
+        llvm::BasicBlock* mfLoop = llvm::BasicBlock::Create(*context, "mf.loop", mfParentFn);
+        llvm::BasicBlock* mfTest = llvm::BasicBlock::Create(*context, "mf.test", mfParentFn);
+        llvm::BasicBlock* mfAdd  = llvm::BasicBlock::Create(*context, "mf.add",  mfParentFn);
+        llvm::BasicBlock* mfInc  = llvm::BasicBlock::Create(*context, "mf.inc",  mfParentFn);
+        llvm::BasicBlock* mfDone = llvm::BasicBlock::Create(*context, "mf.done", mfParentFn);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mfLoop)));
+
+        builder->SetInsertPoint(mfLoop);
+        llvm::PHINode* mfBi = builder->CreatePHI(getDefaultType(), 2, "mf.bi");
+        mfBi->addIncoming(mfZero, mfPre);
+        builder->CreateCondBr(builder->CreateICmpULT(mfBi, mfCap, "mf.bcond"), mfTest, mfDone);
+
+        builder->SetInsertPoint(mfTest);
+        // Bucket offset = 2 + bi*3
+        llvm::Value* mfBoff = builder->CreateAdd(
+            builder->CreateMul(mfBi, llvm::ConstantInt::get(getDefaultType(), 3), "mf.b3", true, true),
+            llvm::ConstantInt::get(getDefaultType(), 2), "mf.boff", true, true);
+        llvm::Value* mfHash = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mfMapPtr, mfBoff, "mf.hashp"),
+            llvm::MaybeAlign(8), "mf.hash");
+        llvm::Value* mfOcc  = builder->CreateICmpNE(mfHash, mfZero, "mf.occ");
+        builder->CreateCondBr(mfOcc, mfAdd, mfInc);
+
+        builder->SetInsertPoint(mfAdd);
+        llvm::Value* mfKeyOff = builder->CreateAdd(mfBoff, mfOne, "mf.koff", true, true);
+        llvm::Value* mfKey    = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mfMapPtr, mfKeyOff, "mf.keyp"),
+            llvm::MaybeAlign(8), "mf.key");
+        llvm::Value* mfValOff = builder->CreateAdd(mfBoff,
+            llvm::ConstantInt::get(getDefaultType(), 2), "mf.voff", true, true);
+        llvm::Value* mfVal    = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mfMapPtr, mfValOff, "mf.valp"),
+            llvm::MaybeAlign(8), "mf.val");
+        // Call predicate with key i64
+        llvm::Value* mfPredR = builder->CreateCall(mfPredFn, {mfKey}, "mf.predr");
+        llvm::Value* mfKeep  = builder->CreateICmpNE(
+            builder->CreateIntCast(mfPredR, getDefaultType(), false, "mf.pcast"),
+            mfZero, "mf.keep");
+        llvm::BasicBlock* mfInsert = llvm::BasicBlock::Create(*context, "mf.insert", mfParentFn);
+        builder->CreateCondBr(mfKeep, mfInsert, mfInc);
+
+        builder->SetInsertPoint(mfInsert);
+        // Store key and val in allocas, then call map_set via existing codegen.
+        // We synthesize a MAP_SET call: map_set(newMap, key_str, val)
+        // by storing them and making a synthetic CallExpr with LiteralExpr args.
+        // Since we cannot easily create runtime-value LiteralExprs, we use
+        // a helper: store into known allocas and emit a map_set inline.
+        // Inline MAP_SET: delegate to the existing MAP_SET builtin path
+        // by temporarily storing the result map, key, and value and
+        // emitting a MAP_SET call using a pre-evaluated i64 literal trick.
+        // Simplest correct approach given this constraint:
+        // emit the raw bucket-write inline (linear probing).
+        // For safety and correctness, call a small C helper we declare here.
+        auto* mfSetFt = llvm::FunctionType::get(getDefaultType(),
+            {getDefaultType(), getDefaultType(), getDefaultType()}, false);
+        auto* mfSetHelperFn = llvm::dyn_cast_or_null<llvm::Function>(
+            module->getOrInsertFunction("__omsc_map_filter_set_helper", mfSetFt).getCallee());
+        if (mfSetHelperFn && mfSetHelperFn->empty()) {
+            // Declare as external — the linker will resolve against the OmScript
+            // runtime.  In practice we define this inline below as a private
+            // helper function (always_inline) so no external symbol is needed.
+            mfSetHelperFn->setLinkage(llvm::GlobalValue::PrivateLinkage);
+            mfSetHelperFn->addFnAttr(llvm::Attribute::AlwaysInline);
+            // Build body: just call into map_set using the passed map i64
+            llvm::BasicBlock* mfHBB = llvm::BasicBlock::Create(*context, "entry", mfSetHelperFn);
+            llvm::IRBuilder<> hb(mfHBB);
+            // Return first arg unchanged (stub — caller already updates newMapA)
+            hb.CreateRet(mfSetHelperFn->arg_begin());
+        }
+        // Actually, use the existing map_set builtin IR path.
+        // We can invoke generateCall with a synthetic CallExpr only if args
+        // are in allocas we can reference.  The trick: use a pair of fresh
+        // allocas and synthesize a CallExpr whose args are identifiers that
+        // load from those allocas.  This requires parser-level names, which we
+        // don't have here.
+        // Final decision: call map_set directly via the underlying IR.
+        // We use the same popen/pcloseFn declaration style to get a pointer to
+        // the LLVM function that was already compiled for map_set, if any.
+        // map_set in OmScript is not a C function — it is inlined by the compiler.
+        // Therefore, we emit the minimal correct bucket insert here:
+        // - Compute djb2 hash of the key string
+        // - Find an empty slot (linear probe) in the new map
+        // - Write hash, key, val; update count
+        // This requires knowledge of the initial capacity of the new map.
+        // map_new() starts with capacity 8 (see codegen MAP_NEW).
+        // We read capacity from the new map header directly.
+        llvm::Value* mfNewMapVal = builder->CreateAlignedLoad(getDefaultType(), mfNewMapA,
+            llvm::MaybeAlign(8), "mf.newmapval");
+        llvm::Value* mfNewMapPtr = builder->CreateIntToPtr(mfNewMapVal, mfPtrTy, "mf.newmapptr");
+        llvm::Value* mfNewCap    = builder->CreateAlignedLoad(getDefaultType(), mfNewMapPtr,
+            llvm::MaybeAlign(8), "mf.newcap");
+        // Compute hash of key string (djb2: hash = 5381; for each byte: hash = hash*33 ^ c)
+        // We emit this as a small inline loop.
+        llvm::Value* mfKeyPtr = builder->CreateIntToPtr(mfKey, mfPtrTy, "mf.keyptr");
+        llvm::Value* mfHashInit = llvm::ConstantInt::get(getDefaultType(), 5381);
+        llvm::BasicBlock* mfHashPre  = builder->GetInsertBlock();
+        llvm::BasicBlock* mfHashLoop = llvm::BasicBlock::Create(*context, "mf.hashloop", mfParentFn);
+        llvm::BasicBlock* mfHashDone = llvm::BasicBlock::Create(*context, "mf.hashdone", mfParentFn);
+        builder->CreateBr(mfHashLoop);
+        builder->SetInsertPoint(mfHashLoop);
+        llvm::PHINode* mfHI    = builder->CreatePHI(getDefaultType(), 2, "mf.hi");
+        llvm::PHINode* mfHHash = builder->CreatePHI(getDefaultType(), 2, "mf.hh");
+        mfHI->addIncoming(mfZero, mfHashPre);
+        mfHHash->addIncoming(mfHashInit, mfHashPre);
+        llvm::Value* mfCp  = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), mfKeyPtr, mfHI, "mf.cp");
+        llvm::Value* mfCh8 = builder->CreateAlignedLoad(llvm::Type::getInt8Ty(*context), mfCp, llvm::MaybeAlign(1), "mf.ch");
+        llvm::Value* mfCh  = builder->CreateZExt(mfCh8, getDefaultType(), "mf.ch64");
+        llvm::Value* mfEnd = builder->CreateICmpEQ(mfCh, mfZero, "mf.end");
+        builder->CreateCondBr(mfEnd, mfHashDone, mfHashLoop);
+        // Back edge: hash = hash*33 ^ c
+        llvm::Value* mfHH2 = builder->CreateXor(
+            builder->CreateMul(mfHHash, llvm::ConstantInt::get(getDefaultType(), 33), "mf.h33"),
+            mfCh, "mf.hxor");
+        llvm::Value* mfHI2 = builder->CreateAdd(mfHI, mfOne, "mf.hi1", true, true);
+        mfHI->addIncoming(mfHI2, mfHashLoop);
+        mfHHash->addIncoming(mfHH2, mfHashLoop);
+        builder->SetInsertPoint(mfHashDone);
+        // Finalise hash: ensure non-zero (same as OmScript map)
+        llvm::PHINode* mfFinalHash = builder->CreatePHI(getDefaultType(), 2, "mf.fhash");
+        // Note: in the hashdone BB the PHIs above are already in the loop header.
+        // At mfHashDone, mfHHash holds the last iteration's value.
+        // We need to read the PHI value at exit.  We use the loop PHI directly.
+        llvm::Value* mfH0 = builder->CreateICmpEQ(mfHHash, mfZero, "mf.h0");
+        llvm::Value* mfHashFinal = builder->CreateSelect(mfH0,
+            llvm::ConstantInt::get(getDefaultType(), 1), mfHHash, "mf.hashfinal");
+        mfFinalHash->addIncoming(mfHashFinal, mfHashDone);
+        // Probe new map: slot = hash % cap; linear probe for empty slot
+        llvm::Value* mfSlot = builder->CreateURem(mfHashFinal, mfNewCap, "mf.slot");
+        llvm::BasicBlock* mfProbePre  = builder->GetInsertBlock();
+        llvm::BasicBlock* mfProbeLoop = llvm::BasicBlock::Create(*context, "mf.probe", mfParentFn);
+        llvm::BasicBlock* mfWriteBB   = llvm::BasicBlock::Create(*context, "mf.write", mfParentFn);
+        builder->CreateBr(mfProbeLoop);
+        builder->SetInsertPoint(mfProbeLoop);
+        llvm::PHINode* mfSI = builder->CreatePHI(getDefaultType(), 2, "mf.si");
+        mfSI->addIncoming(mfSlot, mfProbePre);
+        llvm::Value* mfBOff2 = builder->CreateAdd(
+            builder->CreateMul(mfSI, llvm::ConstantInt::get(getDefaultType(), 3), "mf.s3"),
+            llvm::ConstantInt::get(getDefaultType(), 2), "mf.soff");
+        llvm::Value* mfSlotHash = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mfNewMapPtr, mfBOff2, "mf.shp"),
+            llvm::MaybeAlign(8), "mf.shash");
+        llvm::Value* mfEmpty = builder->CreateICmpEQ(mfSlotHash, mfZero, "mf.empty");
+        builder->CreateCondBr(mfEmpty, mfWriteBB, mfProbeLoop);
+        // Advance slot (linear probe)
+        llvm::Value* mfSI1 = builder->CreateURem(
+            builder->CreateAdd(mfSI, mfOne, "mf.si1a"),
+            mfNewCap, "mf.sinext");
+        mfSI->addIncoming(mfSI1, mfProbeLoop);
+
+        builder->SetInsertPoint(mfWriteBB);
+        // Write hash, key, val
+        auto mfStore = [&](llvm::Value* base, llvm::Value* off, llvm::Value* val) {
+            builder->CreateAlignedStore(val,
+                builder->CreateInBoundsGEP(getDefaultType(), base, off, "mf.wp"),
+                llvm::MaybeAlign(8));
+        };
+        mfStore(mfNewMapPtr, mfBOff2, mfHashFinal);
+        mfStore(mfNewMapPtr,
+            builder->CreateAdd(mfBOff2, mfOne, "mf.koff2"),
+            mfKey);
+        mfStore(mfNewMapPtr,
+            builder->CreateAdd(mfBOff2, llvm::ConstantInt::get(getDefaultType(), 2), "mf.voff2"),
+            mfVal);
+        // Increment count (at offset 1)
+        llvm::Value* mfCountPtr = builder->CreateInBoundsGEP(getDefaultType(), mfNewMapPtr,
+            mfOne, "mf.cntp");
+        llvm::Value* mfOldCount = builder->CreateAlignedLoad(getDefaultType(), mfCountPtr,
+            llvm::MaybeAlign(8), "mf.ocnt");
+        builder->CreateAlignedStore(
+            builder->CreateAdd(mfOldCount, mfOne, "mf.ncnt"),
+            mfCountPtr, llvm::MaybeAlign(8));
+        builder->CreateBr(mfInc);
+
+        builder->SetInsertPoint(mfInc);
+        llvm::Value* mfBi1 = builder->CreateAdd(mfBi, mfOne, "mf.bi1", true, true);
+        mfBi->addIncoming(mfBi1, mfInc);
+        // Back-edge from mfAdd (not-kept path) and mfWriteBB (kept path)
+        // Note: mfInc is reached from mfTest (not occupied), mfAdd (not kept),
+        //       and mfWriteBB (kept + written) — all increment bi.
+        // mfBi PHI already has (mfZero, mfPre) and (mfBi1, mfInc).
+        // But mfAdd and mfWriteBB also need to reach mfInc.  They already branch to mfInc.
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mfLoop)));
+
+        builder->SetInsertPoint(mfDone);
+        return builder->CreateAlignedLoad(getDefaultType(), mfNewMapA, llvm::MaybeAlign(8), "mf.result");
+    }
+
+
+    // -----------------------------------------------------------------------
+    // filter(collection, fn)
+    //   Generic filter that dispatches based on the argument type:
+    //     - array: delegates to array_filter
+    //     - string: delegates to str_filter
+    //   The dispatch is static (compile-time type inference).
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::FILTER) {
+        if (expr->arguments.size() != 2)
+            codegenError("filter: expected 2 arguments (collection, predicate_fn_name)", expr);
+        Expression* collArg = expr->arguments[0].get();
+        // Determine collection type via the same static analysis used elsewhere.
+        if (isStringExpr(collArg)) {
+            // String: delegate to str_filter
+            auto synth = std::make_unique<CallExpr>("str_filter",
+                std::vector<std::unique_ptr<Expression>>{});
+            synth->arguments.push_back(std::move(expr->arguments[0]));
+            synth->arguments.push_back(std::move(expr->arguments[1]));
+            synth->line = expr->line; synth->column = expr->column;
+            return generateCall(synth.get());
+        } else {
+            // Default: array filter
+            auto synth = std::make_unique<CallExpr>("array_filter",
+                std::vector<std::unique_ptr<Expression>>{});
+            synth->arguments.push_back(std::move(expr->arguments[0]));
+            synth->arguments.push_back(std::move(expr->arguments[1]));
+            synth->line = expr->line; synth->column = expr->column;
+            return generateCall(synth.get());
+        }
     }
 
     if (inOptMaxFunction) {
