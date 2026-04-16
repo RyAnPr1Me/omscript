@@ -364,6 +364,11 @@ class CodeGenerator {
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
     llvm::StringMap<llvm::Function*> functions;
 
+    /// Maps variable name → its declared type annotation (e.g. "u8", "i32", "i128").
+    /// Empty string means the type is untyped (default: i64 semantics).
+    /// Populated by bindVariableAnnotated() when a type annotation is known.
+    llvm::StringMap<std::string> varTypeAnnotations_;
+
     // Store AST function declarations for default parameter lookup at call sites.
     llvm::StringMap<const FunctionDecl*> functionDecls_;
 
@@ -937,6 +942,13 @@ class CodeGenerator {
     void beginScope();
     void endScope();
     void bindVariable(const std::string& name, llvm::Value* value, bool isConst = false);
+    /// Bind a variable with its type annotation (for signed/unsigned tracking).
+    void bindVariableAnnotated(const std::string& name, llvm::Value* value,
+                               const std::string& typeAnnot, bool isConst = false);
+    /// Returns true for unsigned type annotation strings: "uint", "uN" (N=1..256).
+    [[nodiscard]] static bool isUnsignedAnnot(const std::string& annot);
+    /// Returns true if \p v is an unsigned integer value based on its declared type annotation.
+    [[nodiscard]] bool isUnsignedValue(llvm::Value* v) const;
     void checkConstModification(const std::string& name, const std::string& action);
     void validateScopeStacksMatch(const char* location);
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name,

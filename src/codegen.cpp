@@ -1192,6 +1192,7 @@ void CodeGenerator::endScope() {
             namedValues[entry.first] = entry.second;
         } else {
             namedValues.erase(entry.first);
+            varTypeAnnotations_.erase(entry.first);
         }
     }
     for (const auto& entry : constScope) {
@@ -1270,6 +1271,51 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
         constFloatFolds_.erase(name);
         constStringFolds_.erase(name);
     }
+}
+
+void CodeGenerator::bindVariableAnnotated(const std::string& name, llvm::Value* value,
+                                          const std::string& typeAnnot, bool isConst) {
+    bindVariable(name, value, isConst);
+    if (!typeAnnot.empty())
+        varTypeAnnotations_[name] = typeAnnot;
+    else
+        varTypeAnnotations_.erase(name);
+}
+
+bool CodeGenerator::isUnsignedAnnot(const std::string& annot) {
+    if (annot == "uint") return true;
+    if (annot.size() >= 2 && annot[0] == 'u') {
+        for (size_t j = 1; j < annot.size(); ++j)
+            if (!std::isdigit(static_cast<unsigned char>(annot[j]))) return false;
+        return true;
+    }
+    return false;
+}
+
+bool CodeGenerator::isUnsignedValue(llvm::Value* v) const {
+    llvm::Value* base = v;
+    // Trace through loads and zero-extending casts to find the alloca name.
+    while (base) {
+        if (auto* li = llvm::dyn_cast<llvm::LoadInst>(base)) {
+            base = li->getPointerOperand();
+            continue;
+        }
+        if (auto* cast = llvm::dyn_cast<llvm::CastInst>(base)) {
+            if (cast->getOpcode() == llvm::Instruction::ZExt ||
+                cast->getOpcode() == llvm::Instruction::BitCast) {
+                base = cast->getOperand(0);
+                continue;
+            }
+        }
+        break;
+    }
+    if (!base) return false;
+    const llvm::StringRef name = base->getName();
+    if (name.empty()) return false;
+    auto it = varTypeAnnotations_.find(name);
+    if (it != varTypeAnnotations_.end())
+        return isUnsignedAnnot(it->second);
+    return false;
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
@@ -4974,6 +5020,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name, argIt->getType());
         builder->CreateStore(&(*argIt), alloca);
         bindVariable(param.name, alloca);
+        // Annotate parameter with its declared type for signed/unsigned tracking.
+        if (!param.typeName.empty())
+            varTypeAnnotations_[param.name] = param.typeName;
 
         if (paramStrIt != funcParamStringTypes_.end() && paramStrIt->second.count(paramIdx))
             stringVars_.insert(param.name);

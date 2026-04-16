@@ -802,7 +802,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             llvm::Value* right = generateExpression(expr->right.get());
             return toDefaultType(right);
         }
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* zero = llvm::ConstantInt::get(left->getType(), 0);
         llvm::Value* isNonZero = builder->CreateICmpNE(left, zero, "coalesce.nz");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* nonZeroBB = llvm::BasicBlock::Create(*context, "coalesce.nonzero", function);
@@ -3397,6 +3397,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";
 
+        // If either operand is explicitly declared unsigned (u8, u32, etc.), use unsigned ops.
+        if (isUnsignedValue(left) || isUnsignedValue(right)) {
+            return isDivision
+                ? builder->CreateUDiv(left, right, "udivtmp")
+                : builder->CreateURem(left, right, "uremtmp");
+        }
+
         // Strength reduction: unsigned-compatible division/modulo by power of 2.
         // For signed division by a positive power of 2, we can use an
         // arithmetic right shift with sign-correction for correct rounding
@@ -3423,12 +3430,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                         // mod: x & (2^s - 1)
                         if (isDivision) {
                             auto* result = builder->CreateLShr(left,
-                                llvm::ConstantInt::get(getDefaultType(), s), "div.lshr");
+                                llvm::ConstantInt::get(left->getType(), s), "div.lshr");
                             nonNegValues_.insert(result);
                             return result;
                         } else {
                             auto* result = builder->CreateAnd(left,
-                                llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "mod.and");
+                                llvm::ConstantInt::get(left->getType(), (1LL << s) - 1), "mod.and");
                             nonNegValues_.insert(result);
                             return result;
                         }
@@ -3531,7 +3538,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bodyHasNonPow2ModuloValue_ = true;
         }
 
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* zero = llvm::ConstantInt::get(right->getType(), 0);
         llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         const char* zeroName = isDivision ? "div.zero" : "mod.zero";
@@ -3602,6 +3609,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // enable better vectorization — LLVM's loop vectorizer can widen
         // unsigned comparisons without sign-correction in each lane.
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        // Explicit unsigned type annotation always selects unsigned comparison.
+        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             // Also check for non-negative constant operands.
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
@@ -3623,6 +3632,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == "<=") {
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
@@ -3642,6 +3652,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == ">") {
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
@@ -3661,6 +3672,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == ">=") {
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();

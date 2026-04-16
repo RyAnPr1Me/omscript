@@ -225,7 +225,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             arrayVars_.erase(stmt->name);
     }
 
-    bindVariable(stmt->name, alloca, stmt->isConst);
+    bindVariableAnnotated(stmt->name, alloca, stmt->typeName, stmt->isConst);
 
     // If the initializer was a borrow expression, register the alias mapping
     // now that we know the ref variable's name.  This enables scope-based
@@ -3074,7 +3074,7 @@ void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
     }
 
     llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
-    bindVariable(stmt->name, alloca);
+    bindVariableAnnotated(stmt->name, alloca, stmt->typeName);
 
     if (initValue) {
         builder->CreateStore(initValue, alloca);
