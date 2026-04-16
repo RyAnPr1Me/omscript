@@ -890,6 +890,14 @@ void CodeGenerator::initTBAAMetadata() {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 256))
     });
+    // !range [0, 65): bit-count i64 results (popcount/clz/ctz).
+    // These always return a value in [0, 64]; the upper bound is exclusive
+    // so 65 is the correct sentinel.  This lets CVP/LVI prove (clz(x) > 64)
+    // is always false and enables tighter bounds propagation through arithmetic.
+    bitcountRangeMD_ = llvm::MDNode::get(C, {
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 65))
+    });
 }
 
 llvm::MDNode* CodeGenerator::getOrCreateFieldTBAA(const std::string& structType, size_t fieldIdx) {

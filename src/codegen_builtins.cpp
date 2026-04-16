@@ -4705,6 +4705,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::STR_TO_FLOAT) {
         validateArgCount(expr, "str_to_float", 1);
+        // Constant-fold str_to_float("literal") at compile time.
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            try {
+                double val = std::stod(*sv);
+                optStats_.constFolded++;
+                return llvm::ConstantFP::get(getFloatType(), val);
+            } catch (...) {} // NOLINT(bugprone-empty-catch)
+        }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -5820,6 +5828,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* ctpopFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctpop, {getDefaultType()});
         auto* result = builder->CreateCall(ctpopFn, {arg}, "popcount.result");
         nonNegValues_.insert(result);  // popcount is always in [0, 64]
+        // !range [0,65): tighter than just nonNeg; lets CVP/LVI fold
+        // comparisons like (popcount(x) > 64) → false.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, bitcountRangeMD_);
         return result;
     }
 
@@ -5836,6 +5848,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
         auto* result = builder->CreateCall(ctlzFn, {arg, builder->getFalse()}, "clz.result");
         nonNegValues_.insert(result);  // clz is always in [0, 64]
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, bitcountRangeMD_);
         return result;
     }
 
@@ -5852,6 +5866,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* cttzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::cttz, {getDefaultType()});
         auto* result = builder->CreateCall(cttzFn, {arg, builder->getFalse()}, "ctz.result");
         nonNegValues_.insert(result);  // ctz is always in [0, 64]
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, bitcountRangeMD_);
         return result;
     }
 

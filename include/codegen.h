@@ -561,6 +561,12 @@ class CodeGenerator {
     /// >255 branches.
     llvm::MDNode* charRangeMD_ = nullptr;
 
+    /// !range metadata for bit-count results (0..64):
+    /// popcount, clz, ctz.  These always return a value in [0, 64].
+    /// More precise than just nonNeg tracking — tells CVP/LVI the exact
+    /// upper bound so it can fold comparisons like (clz(x) > 64) → false.
+    llvm::MDNode* bitcountRangeMD_ = nullptr;
+
     /// Compile-time known array sizes: maps variable name → LLVM Value*
     /// representing the known element count.  Populated when an array is
     /// created via array_fill(N, val) where N is a compile-time constant
