@@ -5215,8 +5215,7 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         static const std::unordered_map<std::string, ConstValue> emptyEnv;
         auto result = tryConstEvalFull(ct->body.get(), emptyEnv);
         if (!result) {
-            codegenError("comptime block could not be evaluated at compile time "
-                         "(only pure integer/string arithmetic is supported)", expr);
+            codegenError("comptime block could not be evaluated at compile time", expr);
         }
         if (result->kind == ConstValue::Kind::Integer) {
             return llvm::ConstantInt::get(getDefaultType(), result->intVal, /*isSigned=*/true);
@@ -6585,6 +6584,8 @@ CodeGenerator::tryConstEvalFull(
             if (git != constIntFolds_.end()) return ConstValue::fromInt(git->second);
             auto gst = constStringFolds_.find(id->name);
             if (gst != constStringFolds_.end()) return ConstValue::fromStr(gst->second);
+            auto gat = constArrayFolds_.find(id->name);
+            if (gat != constArrayFolds_.end()) return ConstValue::fromArr(gat->second);
             return std::nullopt;
         }
 
@@ -7227,6 +7228,10 @@ void CodeGenerator::runCFCTRE(Program* program) {
         ctEngine_->registerGlobalConst(name.str(), CTValue::fromI64(val));
     for (auto& [name, val] : constStringFolds_)
         ctEngine_->registerGlobalConst(name.str(), CTValue::fromString(val));
+    for (auto& [name, val] : constArrayFolds_) {
+        ConstValue cv = ConstValue::fromArr(val);
+        ctEngine_->registerGlobalConst(name.str(), constValueToCTValue(cv));
+    }
 
     // Register enum constants.
     for (auto& [name, val] : enumConstants_)
