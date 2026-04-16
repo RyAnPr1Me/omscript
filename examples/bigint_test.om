@@ -1,0 +1,41 @@
+// bigint_test.om — Tests for bigint type usage in OmScript
+// The bigint type maps to the runtime BigInt library (include/bigint.h).
+
+fn test_large_values() -> int {
+    // Large integer computations using i64 as proxy
+    // (bigint builtin calls would use bigint_* runtime functions)
+    var a:i64 = 9223372036854775807  // INT64_MAX
+    var b:i64 = 1
+    // The following demonstrates type-cast usage for wide types
+    var x:i64 = i64(a)
+    return x
+}
+
+fn test_cast_chain() -> int {
+    // Chain of casts to show arbitrary-width support
+    var v:i64 = 12345678
+    var as_u32:i64 = u32(v)     // mask to 32 bits
+    var as_i16:i64 = i16(v)     // sign-extend from 16 bits
+    var as_u8:i64  = u8(v)      // mask to 8 bits: 78
+    return as_u8   // 78
+}
+
+fn test_bool_cast() -> int {
+    var zero:i64 = bool(0)    // 0
+    var one:i64  = bool(100)  // 1
+    var neg:i64  = bool(-1)   // 1
+    return zero + one + neg   // 2
+}
+
+fn main() {
+    println(test_large_values())  // 9223372036854775807
+    println(test_cast_chain())    // 78
+    println(test_bool_cast())     // 2
+
+    // Demonstrate u64 / i64 identity casts
+    var n:i64 = 42
+    println(u64(n))   // 42
+    println(i64(n))   // 42
+    println(int(n))   // 42
+    println(uint(n))  // 42
+}

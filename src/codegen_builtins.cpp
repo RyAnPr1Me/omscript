@@ -8279,47 +8279,89 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
     }
 
-    // ── Integer type cast syntax: u64(x), u32(x), etc. ───────────────────────
-    // These look like function calls in the AST but are actually type coercions.
-    // All OmScript integers are i64; the casts apply the appropriate truncation
-    // or masking so that the value semantics match the declared bit width.
+    // ── Integer / wide-integer type-cast syntax ────────────────────────────
+    // iN(x) and uN(x) for N in [1..256], plus "int", "uint", "bool".
+    // Replaces the old fixed kIntTypeCasts set.
     {
-        static const std::unordered_set<std::string> kIntTypeCasts{
-            "u64", "i64", "int", "uint",
-            "u32", "i32", "u16", "i16", "u8", "i8", "bool"
-        };
-        if (kIntTypeCasts.count(expr->callee) && expr->arguments.size() == 1) {
-            llvm::Value* arg = generateExpression(expr->arguments[0].get());
-            arg = toDefaultType(arg);
-            const std::string& cn = expr->callee;
-            if (cn == "u32") {
-                arg = builder->CreateAnd(arg,
-                    llvm::ConstantInt::get(getDefaultType(), 0xFFFFFFFFLL));
-            } else if (cn == "u16") {
-                arg = builder->CreateAnd(arg,
-                    llvm::ConstantInt::get(getDefaultType(), 0xFFFFLL));
-            } else if (cn == "u8") {
-                arg = builder->CreateAnd(arg,
-                    llvm::ConstantInt::get(getDefaultType(), 0xFFLL));
-            } else if (cn == "i32") {
-                auto* trunc = builder->CreateTrunc(arg,
-                    llvm::Type::getInt32Ty(*context), "i32.trunc");
-                arg = builder->CreateSExt(trunc, getDefaultType(), "i32.sext");
-            } else if (cn == "i16") {
-                auto* trunc = builder->CreateTrunc(arg,
-                    llvm::Type::getInt16Ty(*context), "i16.trunc");
-                arg = builder->CreateSExt(trunc, getDefaultType(), "i16.sext");
-            } else if (cn == "i8") {
-                auto* trunc = builder->CreateTrunc(arg,
-                    llvm::Type::getInt8Ty(*context), "i8.trunc");
-                arg = builder->CreateSExt(trunc, getDefaultType(), "i8.sext");
-            } else if (cn == "bool") {
-                auto* cmp = builder->CreateICmpNE(arg,
-                    llvm::ConstantInt::get(getDefaultType(), 0), "bool.cmp");
-                arg = builder->CreateZExt(cmp, getDefaultType(), "bool.zext");
+        const std::string& cn = expr->callee;
+        unsigned castBits = 0;
+        bool castUnsigned = false;
+        // Parse "iN" / "uN" pattern
+        if (cn.size() >= 2 && (cn[0] == 'i' || cn[0] == 'u')) {
+            bool allDigits = true;
+            int n = 0;
+            for (size_t j = 1; j < cn.size(); ++j) {
+                if (!std::isdigit(static_cast<unsigned char>(cn[j]))) { allDigits = false; break; }
+                n = n * 10 + (cn[j] - '0');
+                if (n > 256) { allDigits = false; break; }
             }
-            // u64 / i64 / int / uint: identity — no transformation needed.
-            return arg;
+            if (allDigits && n >= 1 && n <= 256) {
+                castBits = static_cast<unsigned>(n);
+                castUnsigned = (cn[0] == 'u');
+            }
+        }
+        // Accept "int" / "uint" as aliases for i64/u64
+        if (cn == "int")  { castBits = 64; castUnsigned = false; }
+        if (cn == "uint") { castBits = 64; castUnsigned = true;  }
+        if (cn == "bool") { castBits = 1;  castUnsigned = true;  }
+
+        if (castBits >= 1 && expr->arguments.size() == 1) {
+            llvm::Value* arg = generateExpression(expr->arguments[0].get());
+
+            // Normalise input to a scalar integer (pointer/float → i64 first).
+            if (arg->getType()->isPointerTy())
+                arg = builder->CreatePtrToInt(arg, getDefaultType(), "cast.ptoi");
+            else if (arg->getType()->isDoubleTy())
+                arg = builder->CreateFPToSI(arg, getDefaultType(), "cast.ftoi");
+
+            const unsigned srcBits = arg->getType()->isIntegerTy()
+                ? arg->getType()->getIntegerBitWidth() : 64u;
+            auto* destTy = llvm::IntegerType::get(*context, castBits);
+
+            if (castBits == 1) {
+                // bool(x): normalise to 0 or 1
+                auto* zero = llvm::ConstantInt::get(arg->getType(), 0);
+                auto* cmp  = builder->CreateICmpNE(arg, zero, "bool.cmp");
+                // Return as i64 (widen back for default-type context)
+                return builder->CreateZExt(cmp, getDefaultType(), "bool.zext");
+            }
+
+            if (castBits == srcBits) {
+                // Same width: identity (includes i64(x), u64(x), int(x), uint(x))
+                return arg;
+            }
+
+            if (castBits > srcBits) {
+                // Widen: ZExt for unsigned, SExt for signed
+                if (castUnsigned)
+                    return builder->CreateZExt(arg, destTy, cn + ".zext");
+                else
+                    return builder->CreateSExt(arg, destTy, cn + ".sext");
+            }
+
+            // Narrow: castBits < srcBits
+            if (castBits <= 64 && srcBits <= 64) {
+                // Both fit in i64 — keep result as i64 for backward compat
+                if (castUnsigned) {
+                    // uN(x): AND off the high bits, return as i64
+                    const uint64_t mask = castBits == 64 ? UINT64_MAX
+                                        : (UINT64_C(1) << castBits) - 1u;
+                    auto* maskVal = llvm::ConstantInt::get(getDefaultType(), mask);
+                    // Ensure arg is i64 for the AND
+                    if (arg->getType() != getDefaultType())
+                        arg = builder->CreateZExt(arg, getDefaultType(), "cast.zext64");
+                    return builder->CreateAnd(arg, maskVal, cn + ".and");
+                } else {
+                    // iN(x): trunc to iN, sext back to i64
+                    if (arg->getType() != getDefaultType())
+                        arg = builder->CreateSExt(arg, getDefaultType(), "cast.sext64");
+                    auto* trunc = builder->CreateTrunc(arg, destTy, cn + ".trunc");
+                    return builder->CreateSExt(trunc, getDefaultType(), cn + ".sext");
+                }
+            }
+
+            // Wide → narrow OR wide → wide: produce value at destTy width
+            return builder->CreateTrunc(arg, destTy, cn + ".trunc");
         }
     }
 

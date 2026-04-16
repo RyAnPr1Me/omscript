@@ -766,22 +766,29 @@ CTValue CTEngine::evalTypeCast(const std::string& name, const CTValue& val) {
     if (!val.isKnown()) return CTValue::uninit();
     if (val.isInt()) {
         const int64_t v = val.asI64();
-        if (name == "u64" || name == "i64" || name == "int" || name == "uint")
-            return CTValue::fromI64(v);
-        if (name == "u32")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<uint32_t>(v)));
-        if (name == "i32")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<int32_t>(v)));
-        if (name == "u16")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<uint16_t>(v)));
-        if (name == "i16")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<int16_t>(v)));
-        if (name == "u8")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<uint8_t>(v)));
-        if (name == "i8")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<int8_t>(v)));
-        if (name == "bool")
-            return CTValue::fromI64(v != 0 ? 1 : 0);
+        // General iN/uN handler for N in [1..256]
+        unsigned castBits = 0; bool castUnsigned = false;
+        if (name == "int")  { castBits = 64; castUnsigned = false; }
+        else if (name == "uint") { castBits = 64; castUnsigned = true; }
+        else if (name == "bool") { castBits = 1;  castUnsigned = true; }
+        else if (name.size() >= 2 && (name[0] == 'i' || name[0] == 'u')) {
+            bool allDigits = true; int bw = 0;
+            for (size_t j = 1; j < name.size(); ++j) {
+                if (!std::isdigit(static_cast<unsigned char>(name[j]))) { allDigits = false; break; }
+                bw = bw * 10 + (name[j] - '0'); if (bw > 256) { allDigits = false; break; }
+            }
+            if (allDigits && bw >= 1 && bw <= 256) { castBits = static_cast<unsigned>(bw); castUnsigned = (name[0] == 'u'); }
+        }
+        if (castBits >= 1) {
+            if (castBits == 1) return CTValue::fromI64(v != 0 ? 1 : 0);
+            if (castBits >= 64) return CTValue::fromI64(v);
+            const uint64_t mask = (UINT64_C(1) << castBits) - 1u;
+            if (castUnsigned) return CTValue::fromI64(static_cast<int64_t>(static_cast<uint64_t>(v) & mask));
+            uint64_t uv = static_cast<uint64_t>(v) & mask;
+            const uint64_t signBit = UINT64_C(1) << (castBits - 1);
+            if (uv & signBit) uv |= ~mask;
+            return CTValue::fromI64(static_cast<int64_t>(uv));
+        }
     }
     return CTValue::uninit();
 }
@@ -793,11 +800,19 @@ CTValue CTEngine::evalTypeCast(const std::string& name, const CTValue& val) {
 CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
                             const std::string& fnName,
                             const std::vector<CTValue>& args) {
-    // 1. Type-cast builtins.
-    static const std::unordered_set<std::string> kTypeCasts = {
-        "u64","i64","int","uint","u32","i32","u16","i16","u8","i8","bool"
+    // 1. Type-cast builtins — iN/uN for N in [1..256], plus int/uint/bool.
+    auto isTypeCastName = [](const std::string& nm) -> bool {
+        if (nm == "int" || nm == "uint" || nm == "bool") return true;
+        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
+        int bw = 0;
+        for (size_t j = 1; j < nm.size(); ++j) {
+            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
+            bw = bw * 10 + (nm[j] - '0');
+            if (bw > 256) return false;
+        }
+        return bw >= 1 && bw <= 256;
     };
-    if (kTypeCasts.count(fnName) && args.size() == 1)
+    if (isTypeCastName(fnName) && args.size() == 1)
         return evalTypeCast(fnName, args[0]);
 
     // 2. Pure built-in functions.
@@ -845,11 +860,21 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         "reverse","sort","array_remove","array_insert",
         "array_any","array_every","array_count",
         "str_split","str_join",
-        // Type casts are handled by evalTypeCast, not here, but include for
-        // completeness if they reach evalBuiltin via the fallback path:
-        "u64","i64","int","uint","u32","i32","u16","i16","u8","i8","bool"
+        // int/uint/bool: type casts handled by evalTypeCast; iN/uN handled dynamically
+        "int","uint","bool"
     };
-    if (kKnownBuiltins.find(name) == kKnownBuiltins.end())
+    // Also accept iN/uN type-cast names (handled by evalTypeCast via evalCall).
+    auto isIntWidthCastName = [](const std::string& nm) -> bool {
+        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
+        int bw = 0;
+        for (size_t j = 1; j < nm.size(); ++j) {
+            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
+            bw = bw * 10 + (nm[j] - '0');
+            if (bw > 256) return false;
+        }
+        return bw >= 1 && bw <= 256;
+    };
+    if (kKnownBuiltins.find(name) == kKnownBuiltins.end() && !isIntWidthCastName(name))
         return std::nullopt;
 
     const size_t n = args.size();
@@ -2544,7 +2569,19 @@ void CTEngine::runPass(const Program* program) {
         "array_fill","range","range_step","array_concat","array_slice",
         "array_copy","sum","array_product","array_min","array_max",
         "array_last","array_contains","index_of","array_find",
-        "u64","u32","u16","u8","i64","i32","i16","i8","bool","int","uint"
+        // int/uint/bool type casts; iN/uN handled dynamically below
+        "bool","int","uint"
+    };
+    // iN/uN type-cast names (for N in [1..256]) are always pure.
+    auto isIntWidthCastNamePure = [](const std::string& nm) -> bool {
+        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
+        int bw = 0;
+        for (size_t j = 1; j < nm.size(); ++j) {
+            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
+            bw = bw * 10 + (nm[j] - '0');
+            if (bw > 256) return false;
+        }
+        return bw >= 1 && bw <= 256;
     };
 
     // Detect whether a function body is pure (no I/O, no mutations of globals).
@@ -2552,7 +2589,7 @@ void CTEngine::runPass(const Program* program) {
     std::function<bool(const FunctionDecl*, std::unordered_set<std::string>&)> isPureBody;
     isPureBody = [&](const FunctionDecl* fn, std::unordered_set<std::string>& visiting) -> bool {
         if (!fn || !fn->body) return false;
-        if (kBuiltinPure.count(fn->name)) return true;
+        if (kBuiltinPure.count(fn->name) || isIntWidthCastNamePure(fn->name)) return true;
         if (pureFunctions_.count(fn->name)) return true;
         if (visiting.count(fn->name)) return false; // conservatively not pure (recursion)
         visiting.insert(fn->name);
@@ -2573,7 +2610,7 @@ void CTEngine::runPass(const Program* program) {
             if (ex->type == ASTNodeType::CALL_EXPR) {
                 auto* call = static_cast<const CallExpr*>(ex);
                 if (kImpure.count(call->callee)) return false;
-                if (!kBuiltinPure.count(call->callee)) {
+                if (!kBuiltinPure.count(call->callee) && !isIntWidthCastNamePure(call->callee)) {
                     auto it = functions_.find(call->callee);
                     if (it != functions_.end()) {
                         if (!isPureBody(it->second, visiting)) return false;

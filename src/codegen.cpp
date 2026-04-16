@@ -630,6 +630,18 @@ void optimizeOptMaxStatement(Statement* stmt) {
 
 namespace omscript {
 
+/// Returns true if a type-annotation string represents an unsigned integer
+/// (uint, or any uN for N in [1..256]).
+static bool isUnsignedAnnotation(const std::string& tn) {
+    if (tn == "uint") return true;
+    if (tn.size() >= 2 && tn[0] == 'u') {
+        for (size_t j = 1; j < tn.size(); ++j)
+            if (!std::isdigit(static_cast<unsigned char>(tn[j]))) return false;
+        return true; // u1, u2, ..., u256, u64, etc.
+    }
+    return false;
+}
+
 // Canonical set of all stdlib built-in function names.
 // These functions are always compiled to native machine code via LLVM IR.
 static const std::unordered_set<std::string> stdlibFunctions = {"abs",
@@ -1008,7 +1020,27 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (structDefs_.count(ann))
         return llvm::PointerType::getUnqual(*context);
 
-    // "int", "i64", "u64", generics, and empty annotations map to i64.
+    // General iN/uN handler for arbitrary bit widths [1..256].
+    // Handles i2, i3, ..., i128, u128, i256, u256, etc.
+    // Must come AFTER the specific i8/u8, i16/u16, i32/u32 checks above.
+    // i64/u64 and others also fall through to here (returning i64 as before).
+    {
+        const std::string& a = ann;
+        if (a.size() >= 2 && (a[0] == 'i' || a[0] == 'u')) {
+            bool allDigits = true;
+            int n = 0;
+            for (size_t j = 1; j < a.size(); ++j) {
+                if (!std::isdigit(static_cast<unsigned char>(a[j]))) { allDigits = false; break; }
+                n = n * 10 + (a[j] - '0');
+                if (n > 256) { allDigits = false; break; }
+            }
+            if (allDigits && n >= 1 && n <= 256) {
+                return llvm::IntegerType::get(*context, static_cast<unsigned>(n));
+            }
+        }
+    }
+
+    // "int", "uint", generics, and empty annotations map to i64.
     return getDefaultType();
 }
 
@@ -1071,7 +1103,14 @@ llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
     if (v->getType()->isPointerTy()) {
         return builder->CreatePtrToInt(v, getDefaultType(), "ptoi");
     }
-    if (v->getType()->isIntegerTy() && v->getType() != getDefaultType()) {
+    if (v->getType()->isIntegerTy()) {
+        const unsigned srcBits = v->getType()->getIntegerBitWidth();
+        if (srcBits > 64) {
+            // Wide integers (i65–i256): keep at native width; callers that
+            // need i64 must truncate explicitly with convertTo().
+            return v;
+        }
+        // Narrow integers (i1–i63): zero-extend to i64.
         return builder->CreateZExt(v, getDefaultType(), "zext");
     }
     return v;
@@ -3883,7 +3922,7 @@ void CodeGenerator::generate(Program* program) {
             function->addParamAttr(i, llvm::Attribute::NoUndef);
             if (paramTypes[i]->isIntegerTy()) {
                 const auto& tn = func->parameters[i].typeName;
-                if (tn == "u8" || tn == "u16" || tn == "u32" || tn == "u64")
+                if (isUnsignedAnnotation(tn))
                     function->addParamAttr(i, llvm::Attribute::ZExt);
                 else
                     function->addParamAttr(i, llvm::Attribute::SExt);
@@ -3891,8 +3930,7 @@ void CodeGenerator::generate(Program* program) {
         }
         function->addRetAttr(llvm::Attribute::NoUndef);
         if (retType->isIntegerTy()) {
-            if (func->returnType == "u8" || func->returnType == "u16" ||
-                func->returnType == "u32" || func->returnType == "u64")
+            if (isUnsignedAnnotation(func->returnType))
                 function->addRetAttr(llvm::Attribute::ZExt);
             else
                 function->addRetAttr(llvm::Attribute::SExt);
@@ -5598,9 +5636,21 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         "fma","copysign","min_float","max_float",
         "reverse","sort","array_remove","array_insert",
         "array_any","array_every","array_count",
-        "u64","i64","int","uint","u32","i32","u16","i16","u8","i8","bool"
+        // int/uint/bool kept here; iN/uN are handled by isIntWidthCastName below
+        "int","uint","bool"
     };
-    if (kKnownBuiltins.find(name) == kKnownBuiltins.end())
+    // Check if name is in the known-builtins set OR is an iN/uN type-cast name.
+    auto isIntWidthCastName = [](const std::string& nm) -> bool {
+        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
+        int bw = 0;
+        for (size_t j = 1; j < nm.size(); ++j) {
+            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
+            bw = bw * 10 + (nm[j] - '0');
+            if (bw > 256) return false;
+        }
+        return bw >= 1 && bw <= 256;
+    };
+    if (kKnownBuiltins.find(name) == kKnownBuiltins.end() && !isIntWidthCastName(name))
         return std::nullopt;
 
     const size_t n = args.size();
@@ -6336,31 +6386,40 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     // ── String: str_split (returns array of strings), str_join ───────────
     // str_split not easily representable in ConstValue (array of strings)
     // str_join requires array of strings — skip for ConstValue evaluator.
-    // ── Integer type cast builtins ─────────────────────────────────────────
+    // ── General iN/uN constant cast (for comptime evaluation) ─────────────────
     // u64(x), i64(x), int(x), uint(x) — identity; all OmScript integers are i64.
     // u32(x), i32(x) — truncate to 32 bits (zero/sign extend back to i64).
     // u16(x), i16(x) — truncate to 16 bits.
     // u8(x),  i8(x)  — truncate to 8 bits.
     // bool(x)        — normalise to 0 or 1.
-    // These match the runtime behaviour so comptime and runtime agree.
-    if (n == 1 && args[0].kind == CV::Kind::Integer) {
-        const int64_t v = args[0].intVal;
-        if (name == "u64" || name == "i64" || name == "int" || name == "uint")
-            return CV::fromInt(v);
-        if (name == "u32")
-            return CV::fromInt(static_cast<int64_t>(static_cast<uint32_t>(v)));
-        if (name == "i32")
-            return CV::fromInt(static_cast<int64_t>(static_cast<int32_t>(v)));
-        if (name == "u16")
-            return CV::fromInt(static_cast<int64_t>(static_cast<uint16_t>(v)));
-        if (name == "i16")
-            return CV::fromInt(static_cast<int64_t>(static_cast<int16_t>(v)));
-        if (name == "u8")
-            return CV::fromInt(static_cast<int64_t>(static_cast<uint8_t>(v)));
-        if (name == "i8")
-            return CV::fromInt(static_cast<int64_t>(static_cast<int8_t>(v)));
-        if (name == "bool")
-            return CV::fromInt(v != 0 ? 1 : 0);
+    // Arbitrary uN(x)/iN(x) for N in [1..256] — mask/sign-extend as appropriate.
+    // For N > 64, ConstValue only holds i64, so upper bits are truncated.
+    {
+        const std::string& nm = name;
+        unsigned castBits = 0; bool castUnsigned = false;
+        if (nm == "int")  { castBits = 64; castUnsigned = false; }
+        else if (nm == "uint") { castBits = 64; castUnsigned = true; }
+        else if (nm == "bool") { castBits = 1;  castUnsigned = true; }
+        else if (nm.size() >= 2 && (nm[0] == 'i' || nm[0] == 'u')) {
+            bool allDigits = true; int bw = 0;
+            for (size_t j = 1; j < nm.size(); ++j) {
+                if (!std::isdigit(static_cast<unsigned char>(nm[j]))) { allDigits = false; break; }
+                bw = bw * 10 + (nm[j] - '0'); if (bw > 256) { allDigits = false; break; }
+            }
+            if (allDigits && bw >= 1 && bw <= 256) { castBits = static_cast<unsigned>(bw); castUnsigned = (nm[0] == 'u'); }
+        }
+        if (castBits >= 1 && n == 1 && args[0].kind == CV::Kind::Integer) {
+            const int64_t v = args[0].intVal;
+            if (castBits == 1) return CV::fromInt(v != 0 ? 1 : 0);
+            if (castBits >= 64) return CV::fromInt(v); // identity for i64/u64/wider
+            const uint64_t mask = (UINT64_C(1) << castBits) - 1u;
+            if (castUnsigned) return CV::fromInt(static_cast<int64_t>(static_cast<uint64_t>(v) & mask));
+            // Signed: mask then sign-extend
+            uint64_t uv = static_cast<uint64_t>(v) & mask;
+            const uint64_t signBit = UINT64_C(1) << (castBits - 1);
+            if (uv & signBit) uv |= ~mask; // sign-extend
+            return CV::fromInt(static_cast<int64_t>(uv));
+        }
     }
     return std::nullopt;
 }

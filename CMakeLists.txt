@@ -88,6 +88,9 @@ set(SRC
 
     # Runtime
     runtime/value.cpp
+
+    # BigInt library
+    src/bigint.cpp
 )
 
 add_executable(omsc ${SRC})
