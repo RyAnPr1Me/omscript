@@ -86,7 +86,21 @@ enum class BuiltinId : uint8_t {
     // Map entry filter
     MAP_FILTER,
     // Shell command execution
-    COMMAND
+    COMMAND,
+    // String: strip leading / trailing whitespace independently
+    STR_LSTRIP, STR_RSTRIP,
+    // String: remove all occurrences of a substring
+    STR_REMOVE,
+    // Array: take first n / drop first n elements
+    ARRAY_TAKE, ARRAY_DROP,
+    // Array: deduplicate consecutive equal elements
+    ARRAY_UNIQUE,
+    // Array: rotate left by n positions
+    ARRAY_ROTATE,
+    // Array: arithmetic mean (integer division)
+    ARRAY_MEAN,
+    // Map: merge two maps (b wins on conflict), invert keys↔values
+    MAP_MERGE, MAP_INVERT
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -248,6 +262,23 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     // Shell command execution
     {"command", BuiltinId::COMMAND},
     {"shell", BuiltinId::COMMAND},   // alias
+    // String: single-sided trim
+    {"str_lstrip", BuiltinId::STR_LSTRIP},
+    {"str_rstrip", BuiltinId::STR_RSTRIP},
+    // String: remove all occurrences of substring
+    {"str_remove", BuiltinId::STR_REMOVE},
+    // Array: take / drop
+    {"array_take", BuiltinId::ARRAY_TAKE},
+    {"array_drop", BuiltinId::ARRAY_DROP},
+    // Array: deduplicate consecutive equal elements
+    {"array_unique", BuiltinId::ARRAY_UNIQUE},
+    // Array: rotate left
+    {"array_rotate", BuiltinId::ARRAY_ROTATE},
+    // Array: mean
+    {"array_mean", BuiltinId::ARRAY_MEAN},
+    // Map: merge two maps, invert keys↔values
+    {"map_merge",  BuiltinId::MAP_MERGE},
+    {"map_invert", BuiltinId::MAP_INVERT},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -6890,6 +6921,568 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             synth->line = expr->line; synth->column = expr->column;
             return generateCall(synth.get());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // str_lstrip(s) — strip leading whitespace
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::STR_LSTRIP) {
+        validateArgCount(expr, "str_lstrip", 1);
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+            ? strArg
+            : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "lstrip.ptr");
+        llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "lstrip.len");
+        nonNegValues_.insert(strLen);
+
+        llvm::Function* lsParentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* lsPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* lsLoopBB = llvm::BasicBlock::Create(*context, "lstrip.loop", lsParentFn);
+        llvm::BasicBlock* lsBodyBB = llvm::BasicBlock::Create(*context, "lstrip.body", lsParentFn);
+        llvm::BasicBlock* lsContBB = llvm::BasicBlock::Create(*context, "lstrip.cont", lsParentFn);
+        llvm::BasicBlock* lsDoneBB = llvm::BasicBlock::Create(*context, "lstrip.done", lsParentFn);
+        llvm::Value* lsZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* lsOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(lsLoopBB)));
+
+        builder->SetInsertPoint(lsLoopBB);
+        llvm::PHINode* lsIdx = builder->CreatePHI(getDefaultType(), 2, "lstrip.idx");
+        lsIdx->addIncoming(lsZero, lsPreBB);
+        builder->CreateCondBr(
+            builder->CreateICmpULT(lsIdx, strLen, "lstrip.cond"), lsBodyBB, lsDoneBB);
+
+        builder->SetInsertPoint(lsBodyBB);
+        llvm::Value* lsCharPtr = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), strPtr, lsIdx, "lstrip.cp");
+        auto* lsCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), lsCharPtr, "lstrip.ch");
+        lsCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* lsCh32 = builder->CreateZExt(lsCharLoad, llvm::Type::getInt32Ty(*context), "lstrip.ch32");
+        llvm::Value* lsIsSp = builder->CreateCall(getOrDeclareIsspace(), {lsCh32}, "lstrip.issp");
+        builder->CreateCondBr(
+            builder->CreateICmpNE(lsIsSp, builder->getInt32(0), "lstrip.spcond"),
+            lsContBB, lsDoneBB);
+
+        builder->SetInsertPoint(lsContBB);
+        llvm::Value* lsNext = builder->CreateAdd(lsIdx, lsOne, "lstrip.next", true, true);
+        lsIdx->addIncoming(lsNext, lsContBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(lsLoopBB)));
+
+        builder->SetInsertPoint(lsDoneBB);
+        llvm::PHINode* lsStart = builder->CreatePHI(getDefaultType(), 3, "lstrip.start");
+        lsStart->addIncoming(lsIdx, lsLoopBB);
+        lsStart->addIncoming(lsIdx, lsBodyBB);
+        // Build result string from lsStart to end
+        llvm::Value* lsResultLen = builder->CreateSub(strLen, lsStart, "lstrip.rlen", true, true);
+        llvm::Value* lsAllocSz   = builder->CreateAdd(lsResultLen, lsOne, "lstrip.allocsz", true, true);
+        llvm::Value* lsBuf       = builder->CreateCall(getOrDeclareMalloc(), {lsAllocSz}, "lstrip.buf");
+        llvm::Value* lsSrc       = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), strPtr, lsStart, "lstrip.src");
+        builder->CreateCall(getOrDeclareMemcpy(), {lsBuf, lsSrc, lsResultLen});
+        llvm::Value* lsNulPtr = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), lsBuf, lsResultLen, "lstrip.nul");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), lsNulPtr);
+        stringReturningFunctions_.insert("str_lstrip");
+        return builder->CreatePtrToInt(lsBuf, getDefaultType(), "lstrip.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // str_rstrip(s) — strip trailing whitespace
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::STR_RSTRIP) {
+        validateArgCount(expr, "str_rstrip", 1);
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+            ? strArg
+            : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "rstrip.ptr");
+        llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "rstrip.len");
+        nonNegValues_.insert(strLen);
+
+        llvm::Function* rsParentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* rsPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* rsLoopBB = llvm::BasicBlock::Create(*context, "rstrip.loop", rsParentFn);
+        llvm::BasicBlock* rsBodyBB = llvm::BasicBlock::Create(*context, "rstrip.body", rsParentFn);
+        llvm::BasicBlock* rsContBB = llvm::BasicBlock::Create(*context, "rstrip.cont", rsParentFn);
+        llvm::BasicBlock* rsDoneBB = llvm::BasicBlock::Create(*context, "rstrip.done", rsParentFn);
+        llvm::Value* rsZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* rsOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(rsLoopBB)));
+
+        builder->SetInsertPoint(rsLoopBB);
+        llvm::PHINode* rsEnd = builder->CreatePHI(getDefaultType(), 2, "rstrip.end");
+        rsEnd->addIncoming(strLen, rsPreBB);
+        builder->CreateCondBr(
+            builder->CreateICmpUGT(rsEnd, rsZero, "rstrip.cond"), rsBodyBB, rsDoneBB);
+
+        builder->SetInsertPoint(rsBodyBB);
+        llvm::Value* rsPrev = builder->CreateSub(rsEnd, rsOne, "rstrip.prev", true, true);
+        llvm::Value* rsCharPtr = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), strPtr, rsPrev, "rstrip.cp");
+        auto* rsCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), rsCharPtr, "rstrip.ch");
+        rsCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* rsCh32 = builder->CreateZExt(rsCharLoad, llvm::Type::getInt32Ty(*context), "rstrip.ch32");
+        llvm::Value* rsIsSp = builder->CreateCall(getOrDeclareIsspace(), {rsCh32}, "rstrip.issp");
+        builder->CreateCondBr(
+            builder->CreateICmpNE(rsIsSp, builder->getInt32(0), "rstrip.spcond"),
+            rsContBB, rsDoneBB);
+
+        builder->SetInsertPoint(rsContBB);
+        rsEnd->addIncoming(rsPrev, rsContBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(rsLoopBB)));
+
+        builder->SetInsertPoint(rsDoneBB);
+        llvm::PHINode* rsFinalEnd = builder->CreatePHI(getDefaultType(), 3, "rstrip.finalend");
+        rsFinalEnd->addIncoming(rsEnd, rsLoopBB);
+        rsFinalEnd->addIncoming(rsEnd, rsBodyBB);
+        // Build result: strPtr[0..rsFinalEnd)
+        llvm::Value* rsAllocSz = builder->CreateAdd(rsFinalEnd, rsOne, "rstrip.allocsz", true, true);
+        llvm::Value* rsBuf     = builder->CreateCall(getOrDeclareMalloc(), {rsAllocSz}, "rstrip.buf");
+        builder->CreateCall(getOrDeclareMemcpy(), {rsBuf, strPtr, rsFinalEnd});
+        llvm::Value* rsNulPtr  = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), rsBuf, rsFinalEnd, "rstrip.nul");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), rsNulPtr);
+        stringReturningFunctions_.insert("str_rstrip");
+        return builder->CreatePtrToInt(rsBuf, getDefaultType(), "rstrip.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // str_remove(s, sub) — remove all occurrences of sub from s
+    //   Equivalent to str_replace(s, sub, "") but with a clearer name.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::STR_REMOVE) {
+        validateArgCount(expr, "str_remove", 2);
+        // Synthesize str_replace(s, sub, "")
+        auto srEmptyLit = std::make_unique<LiteralExpr>(std::string(""));
+        srEmptyLit->line   = expr->line;
+        srEmptyLit->column = expr->column;
+        auto srSynth = std::make_unique<CallExpr>("str_replace",
+            std::vector<std::unique_ptr<Expression>>{});
+        srSynth->arguments.push_back(std::move(expr->arguments[0]));
+        srSynth->arguments.push_back(std::move(expr->arguments[1]));
+        srSynth->arguments.push_back(std::move(srEmptyLit));
+        srSynth->line = expr->line; srSynth->column = expr->column;
+        llvm::Value* srResult = generateCall(srSynth.get());
+        stringReturningFunctions_.insert("str_remove");
+        return srResult;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_take(arr, n) — first n elements (clamped to array length)
+    //   Equivalent to array_slice(arr, 0, n).
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_TAKE) {
+        validateArgCount(expr, "array_take", 2);
+        auto atZeroLit = std::make_unique<LiteralExpr>(0LL);
+        atZeroLit->line = expr->line; atZeroLit->column = expr->column;
+        auto atSynth = std::make_unique<CallExpr>("array_slice",
+            std::vector<std::unique_ptr<Expression>>{});
+        atSynth->arguments.push_back(std::move(expr->arguments[0]));
+        atSynth->arguments.push_back(std::move(atZeroLit));
+        atSynth->arguments.push_back(std::move(expr->arguments[1]));
+        atSynth->line = expr->line; atSynth->column = expr->column;
+        return generateCall(atSynth.get());
+    }
+
+    // -----------------------------------------------------------------------
+    // array_drop(arr, n) — all elements after the first n
+    //   Equivalent to array_slice(arr, n, len(arr)).
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_DROP) {
+        validateArgCount(expr, "array_drop", 2);
+        // We need len(arr) as the end argument.  Evaluate arr first, store in alloca.
+        llvm::Value* adArr = generateExpression(expr->arguments[0].get());
+        adArr = toDefaultType(adArr);
+        llvm::Value* adN   = generateExpression(expr->arguments[1].get());
+        adN = toDefaultType(adN);
+        auto* adPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* adArrPtr = builder->CreateIntToPtr(adArr, adPtrTy, "adrop.arrptr");
+        auto* adLenLoad = builder->CreateAlignedLoad(getDefaultType(), adArrPtr, llvm::MaybeAlign(8), "adrop.len");
+        adLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        adLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(adLenLoad);
+        // Clamp n: max(0, min(n, len))
+        llvm::Value* adZero    = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* adNNeg    = builder->CreateICmpSLT(adN, adZero, "adrop.nneg");
+        llvm::Value* adNClamp  = builder->CreateSelect(adNNeg, adZero, adN, "adrop.nclamp");
+        llvm::Value* adNOver   = builder->CreateICmpSGT(adNClamp, adLenLoad, "adrop.nover");
+        llvm::Value* adStart   = builder->CreateSelect(adNOver, adLenLoad, adNClamp, "adrop.start");
+        llvm::Value* adSliceLen = builder->CreateSub(adLenLoad, adStart, "adrop.slen", true, true);
+        // Allocate result
+        llvm::Value* adOne    = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* adEight  = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* adSlots  = builder->CreateAdd(adSliceLen, adOne, "adrop.slots", true, true);
+        llvm::Value* adBytes  = builder->CreateMul(adSlots, adEight, "adrop.bytes", true, true);
+        llvm::Value* adBuf    = builder->CreateCall(getOrDeclareMalloc(), {adBytes}, "adrop.buf");
+        llvm::cast<llvm::CallInst>(adBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        auto* adLenSt = builder->CreateStore(adSliceLen, adBuf);
+        adLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        llvm::Value* adSrcIdx = builder->CreateAdd(adStart, adOne, "adrop.srcidx", true, true);
+        llvm::Value* adSrc    = builder->CreateInBoundsGEP(getDefaultType(), adArrPtr, adSrcIdx, "adrop.src");
+        llvm::Value* adDst    = builder->CreateInBoundsGEP(getDefaultType(), adBuf, adOne, "adrop.dst");
+        llvm::Value* adCpSz   = builder->CreateMul(adSliceLen, adEight, "adrop.cpsz", true, true);
+        builder->CreateCall(getOrDeclareMemcpy(), {adDst, adSrc, adCpSz});
+        return builder->CreatePtrToInt(adBuf, getDefaultType(), "adrop.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // array_unique(arr) — deduplicate consecutive equal elements (like Unix uniq)
+    //   For a sorted array this removes all duplicates.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_UNIQUE) {
+        validateArgCount(expr, "array_unique", 1);
+        llvm::Value* auArr = generateExpression(expr->arguments[0].get());
+        auArr = toDefaultType(auArr);
+        auto* auPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* auArrPtr = builder->CreateIntToPtr(auArr, auPtrTy, "auniq.arrptr");
+        auto* auLenLoad = builder->CreateAlignedLoad(getDefaultType(), auArrPtr, llvm::MaybeAlign(8), "auniq.len");
+        auLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        auLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(auLenLoad);
+        llvm::Value* auZero  = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* auOne   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* auEight = llvm::ConstantInt::get(getDefaultType(), 8);
+        // Allocate output buffer same size as input (worst case: all unique)
+        llvm::Value* auSlots = builder->CreateAdd(auLenLoad, auOne, "auniq.slots", true, true);
+        llvm::Value* auBytes = builder->CreateMul(auSlots, auEight, "auniq.bytes", true, true);
+        llvm::Value* auBuf   = builder->CreateCall(getOrDeclareMalloc(), {auBytes}, "auniq.buf");
+        llvm::cast<llvm::CallInst>(auBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        // outLen alloca (count of unique elements written)
+        llvm::Function* auParentFn = builder->GetInsertBlock()->getParent();
+        llvm::AllocaInst* auOutLenA = createEntryBlockAlloca(auParentFn, "auniq.outlen", getDefaultType());
+        builder->CreateStore(auZero, auOutLenA);
+
+        // Loop: for i in 0..arrLen { if i==0 or arr[i]!=arr[i-1]: write }
+        llvm::BasicBlock* auPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* auLoopBB = llvm::BasicBlock::Create(*context, "auniq.loop", auParentFn);
+        llvm::BasicBlock* auBodyBB = llvm::BasicBlock::Create(*context, "auniq.body", auParentFn);
+        llvm::BasicBlock* auDedBB  = llvm::BasicBlock::Create(*context, "auniq.ded",  auParentFn);
+        llvm::BasicBlock* auIncBB  = llvm::BasicBlock::Create(*context, "auniq.inc",  auParentFn);
+        llvm::BasicBlock* auDoneBB = llvm::BasicBlock::Create(*context, "auniq.done", auParentFn);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(auLoopBB)));
+
+        builder->SetInsertPoint(auLoopBB);
+        llvm::PHINode* auI = builder->CreatePHI(getDefaultType(), 2, "auniq.i");
+        auI->addIncoming(auZero, auPreBB);
+        builder->CreateCondBr(builder->CreateICmpULT(auI, auLenLoad, "auniq.cond"), auBodyBB, auDoneBB);
+
+        builder->SetInsertPoint(auBodyBB);
+        llvm::Value* auElemIdx  = builder->CreateAdd(auI, auOne, "auniq.ei", true, true);
+        llvm::Value* auElemPtr  = builder->CreateInBoundsGEP(getDefaultType(), auArrPtr, auElemIdx, "auniq.ep");
+        auto* auElemLoad = builder->CreateAlignedLoad(getDefaultType(), auElemPtr, llvm::MaybeAlign(8), "auniq.elem");
+        auElemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        // Check: is this the first element (i==0) or different from the previous?
+        llvm::Value* auIsFirst = builder->CreateICmpEQ(auI, auZero, "auniq.isfirst");
+        llvm::Value* auPrevIdx = builder->CreateSub(auI, auOne, "auniq.prevei");
+        // auPrevIdx is only valid when i>0; PHI select doesn't evaluate
+        llvm::Value* auPrevElemIdx = builder->CreateAdd(auPrevIdx, auOne, "auniq.pei", true, true);
+        llvm::Value* auPrevElemPtr = builder->CreateInBoundsGEP(getDefaultType(), auArrPtr, auPrevElemIdx, "auniq.pep");
+        auto* auPrevLoad = builder->CreateAlignedLoad(getDefaultType(), auPrevElemPtr, llvm::MaybeAlign(8), "auniq.prev");
+        auPrevLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* auDiff = builder->CreateICmpNE(auElemLoad, auPrevLoad, "auniq.diff");
+        llvm::Value* auKeep = builder->CreateOr(auIsFirst, auDiff, "auniq.keep");
+        builder->CreateCondBr(auKeep, auDedBB, auIncBB);
+
+        builder->SetInsertPoint(auDedBB);
+        llvm::Value* auOutLen  = builder->CreateAlignedLoad(getDefaultType(), auOutLenA, llvm::MaybeAlign(8), "auniq.ol");
+        llvm::Value* auDstIdx  = builder->CreateAdd(auOutLen, auOne, "auniq.di", true, true);
+        llvm::Value* auDstPtr  = builder->CreateInBoundsGEP(getDefaultType(), auBuf, auDstIdx, "auniq.dp");
+        auto* auDstSt = builder->CreateAlignedStore(auElemLoad, auDstPtr, llvm::MaybeAlign(8));
+        auDstSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        builder->CreateStore(
+            builder->CreateAdd(auOutLen, auOne, "auniq.ol1", true, true), auOutLenA);
+        builder->CreateBr(auIncBB);
+
+        builder->SetInsertPoint(auIncBB);
+        llvm::Value* auI1 = builder->CreateAdd(auI, auOne, "auniq.i1", true, true);
+        auI->addIncoming(auI1, auIncBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(auLoopBB)));
+
+        builder->SetInsertPoint(auDoneBB);
+        llvm::Value* auFinalLen = builder->CreateAlignedLoad(getDefaultType(), auOutLenA, llvm::MaybeAlign(8), "auniq.fl");
+        auto* auFinalLenSt = builder->CreateStore(auFinalLen, auBuf);
+        auFinalLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        return builder->CreatePtrToInt(auBuf, getDefaultType(), "auniq.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // array_rotate(arr, n) — rotate array left by n positions
+    //   Positive n: rotate left (elements shift towards index 0).
+    //   Negative n: rotate right.
+    //   Handles n outside [-len, len] via modulo.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_ROTATE) {
+        validateArgCount(expr, "array_rotate", 2);
+        llvm::Value* arArr = generateExpression(expr->arguments[0].get());
+        llvm::Value* arN   = generateExpression(expr->arguments[1].get());
+        arArr = toDefaultType(arArr);
+        arN   = toDefaultType(arN);
+        auto* arPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* arArrPtr = builder->CreateIntToPtr(arArr, arPtrTy, "arot.arrptr");
+        auto* arLenLoad = builder->CreateAlignedLoad(getDefaultType(), arArrPtr, llvm::MaybeAlign(8), "arot.len");
+        arLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        arLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(arLenLoad);
+        llvm::Value* arZero  = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* arOne   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* arEight = llvm::ConstantInt::get(getDefaultType(), 8);
+        // Allocate result (same size)
+        llvm::Value* arSlots = builder->CreateAdd(arLenLoad, arOne, "arot.slots", true, true);
+        llvm::Value* arBytes = builder->CreateMul(arSlots, arEight, "arot.bytes", true, true);
+        llvm::Value* arBuf   = builder->CreateCall(getOrDeclareMalloc(), {arBytes}, "arot.buf");
+        llvm::cast<llvm::CallInst>(arBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        auto* arLenSt = builder->CreateStore(arLenLoad, arBuf);
+        arLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        // Handle empty array
+        llvm::Function* arParentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* arPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* arDoBB   = llvm::BasicBlock::Create(*context, "arot.do",   arParentFn);
+        llvm::BasicBlock* arLoopBB = llvm::BasicBlock::Create(*context, "arot.loop", arParentFn);
+        llvm::BasicBlock* arBodyBB = llvm::BasicBlock::Create(*context, "arot.body", arParentFn);
+        llvm::BasicBlock* arDoneBB = llvm::BasicBlock::Create(*context, "arot.done", arParentFn);
+        llvm::Value* arEmpty = builder->CreateICmpEQ(arLenLoad, arZero, "arot.empty");
+        builder->CreateCondBr(arEmpty, arDoneBB, arDoBB);
+
+        builder->SetInsertPoint(arDoBB);
+        // Normalize shift: k = ((n % len) + len) % len
+        llvm::Value* arMod1 = builder->CreateSRem(arN, arLenLoad, "arot.mod1");
+        llvm::Value* arMod2 = builder->CreateAdd(arMod1, arLenLoad, "arot.mod2");
+        llvm::Value* arK    = builder->CreateSRem(arMod2, arLenLoad, "arot.k");
+        nonNegValues_.insert(arK);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(arLoopBB)));
+
+        builder->SetInsertPoint(arLoopBB);
+        llvm::PHINode* arI = builder->CreatePHI(getDefaultType(), 2, "arot.i");
+        arI->addIncoming(arZero, arDoBB);
+        builder->CreateCondBr(builder->CreateICmpULT(arI, arLenLoad, "arot.cond"), arBodyBB, arDoneBB);
+
+        builder->SetInsertPoint(arBodyBB);
+        // src index = (i + k) % len
+        llvm::Value* arSrcI   = builder->CreateURem(
+            builder->CreateAdd(arI, arK, "arot.ik"), arLenLoad, "arot.srci");
+        llvm::Value* arSrcIdx = builder->CreateAdd(arSrcI, arOne, "arot.srcidx", true, true);
+        llvm::Value* arSrcPtr = builder->CreateInBoundsGEP(getDefaultType(), arArrPtr, arSrcIdx, "arot.sp");
+        auto* arSrcLoad = builder->CreateAlignedLoad(getDefaultType(), arSrcPtr, llvm::MaybeAlign(8), "arot.sv");
+        arSrcLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* arDstIdx = builder->CreateAdd(arI, arOne, "arot.dstidx", true, true);
+        llvm::Value* arDstPtr = builder->CreateInBoundsGEP(getDefaultType(), arBuf, arDstIdx, "arot.dp");
+        auto* arDstSt = builder->CreateAlignedStore(arSrcLoad, arDstPtr, llvm::MaybeAlign(8));
+        arDstSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* arI1 = builder->CreateAdd(arI, arOne, "arot.i1", true, true);
+        arI->addIncoming(arI1, arBodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(arLoopBB)));
+
+        builder->SetInsertPoint(arDoneBB);
+        return builder->CreatePtrToInt(arBuf, getDefaultType(), "arot.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // array_mean(arr) — arithmetic mean of integer elements
+    //   Returns sum / len (integer division), or 0 for an empty array.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_MEAN) {
+        validateArgCount(expr, "array_mean", 1);
+        llvm::Value* amArr = generateExpression(expr->arguments[0].get());
+        amArr = toDefaultType(amArr);
+        auto* amPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* amArrPtr = builder->CreateIntToPtr(amArr, amPtrTy, "amean.arrptr");
+        auto* amLenLoad = builder->CreateAlignedLoad(getDefaultType(), amArrPtr, llvm::MaybeAlign(8), "amean.len");
+        amLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        amLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(amLenLoad);
+        llvm::Value* amZero  = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* amOne   = llvm::ConstantInt::get(getDefaultType(), 1);
+        // If empty, return 0
+        llvm::Function* amParentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* amPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* amLoopBB = llvm::BasicBlock::Create(*context, "amean.loop", amParentFn);
+        llvm::BasicBlock* amBodyBB = llvm::BasicBlock::Create(*context, "amean.body", amParentFn);
+        llvm::BasicBlock* amDoneBB = llvm::BasicBlock::Create(*context, "amean.done", amParentFn);
+        llvm::AllocaInst* amSumA   = createEntryBlockAlloca(amParentFn, "amean.sum", getDefaultType());
+        builder->CreateStore(amZero, amSumA);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(amLoopBB)));
+
+        builder->SetInsertPoint(amLoopBB);
+        llvm::PHINode* amI = builder->CreatePHI(getDefaultType(), 2, "amean.i");
+        amI->addIncoming(amZero, amPreBB);
+        builder->CreateCondBr(builder->CreateICmpULT(amI, amLenLoad, "amean.cond"), amBodyBB, amDoneBB);
+
+        builder->SetInsertPoint(amBodyBB);
+        llvm::Value* amElemIdx = builder->CreateAdd(amI, amOne, "amean.ei", true, true);
+        llvm::Value* amElemPtr = builder->CreateInBoundsGEP(getDefaultType(), amArrPtr, amElemIdx, "amean.ep");
+        auto* amElemLoad = builder->CreateAlignedLoad(getDefaultType(), amElemPtr, llvm::MaybeAlign(8), "amean.elem");
+        amElemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* amOldSum = builder->CreateAlignedLoad(getDefaultType(), amSumA, llvm::MaybeAlign(8), "amean.os");
+        builder->CreateStore(builder->CreateAdd(amOldSum, amElemLoad, "amean.ns"), amSumA);
+        llvm::Value* amI1 = builder->CreateAdd(amI, amOne, "amean.i1", true, true);
+        amI->addIncoming(amI1, amBodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(amLoopBB)));
+
+        builder->SetInsertPoint(amDoneBB);
+        llvm::Value* amFinalSum = builder->CreateAlignedLoad(getDefaultType(), amSumA, llvm::MaybeAlign(8), "amean.fs");
+        // Return sum / len (sdiv), or 0 when len == 0
+        llvm::Value* amIsEmpty  = builder->CreateICmpEQ(amLenLoad, amZero, "amean.isempty");
+        llvm::Value* amDiv      = builder->CreateSDiv(amFinalSum, amLenLoad, "amean.div");
+        return builder->CreateSelect(amIsEmpty, amZero, amDiv, "amean.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // map_merge(a, b) — create a new map with all entries from a and b.
+    //   When a key exists in both, b's value wins.
+    //   Neither a nor b is mutated.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::MAP_MERGE) {
+        validateArgCount(expr, "map_merge", 2);
+        llvm::Value* mmA = generateExpression(expr->arguments[0].get());
+        llvm::Value* mmB = generateExpression(expr->arguments[1].get());
+        mmA = toDefaultType(mmA); mmB = toDefaultType(mmB);
+        auto* mmPtrTy = llvm::PointerType::getUnqual(*context);
+        // Create new result map (copy of a)
+        llvm::Value* mmAPtr  = builder->CreateIntToPtr(mmA, mmPtrTy, "mmerge.aptr");
+        llvm::Value* mmBPtr  = builder->CreateIntToPtr(mmB, mmPtrTy, "mmerge.bptr");
+        // result = map_new(); then insert all of a, then all of b (b wins)
+        llvm::Value* mmRes = builder->CreateCall(getOrEmitHashMapNew(), {}, "mmerge.res");
+        llvm::AllocaInst* mmResA = createEntryBlockAlloca(
+            builder->GetInsertBlock()->getParent(), "mmerge.resmap", mmPtrTy);
+        builder->CreateStore(mmRes, mmResA);
+
+        // Helper lambda: iterate a map's buckets and insert into result
+        auto mmInsertAll = [&](llvm::Value* srcMapPtr, const char* pfx) {
+            // Read cap from offset 0
+            llvm::Value* mmCap = builder->CreateAlignedLoad(getDefaultType(), srcMapPtr,
+                llvm::MaybeAlign(8), (std::string(pfx)+".cap").c_str());
+            llvm::Value* mmZero = llvm::ConstantInt::get(getDefaultType(), 0);
+            llvm::Value* mmOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+            llvm::Function* mmFn = builder->GetInsertBlock()->getParent();
+            llvm::BasicBlock* mmPreBB  = builder->GetInsertBlock();
+            llvm::BasicBlock* mmLoopBB = llvm::BasicBlock::Create(*context,
+                (std::string(pfx)+".loop").c_str(), mmFn);
+            llvm::BasicBlock* mmTestBB = llvm::BasicBlock::Create(*context,
+                (std::string(pfx)+".test").c_str(), mmFn);
+            llvm::BasicBlock* mmInsB   = llvm::BasicBlock::Create(*context,
+                (std::string(pfx)+".ins").c_str(),  mmFn);
+            llvm::BasicBlock* mmIncBB  = llvm::BasicBlock::Create(*context,
+                (std::string(pfx)+".inc").c_str(),  mmFn);
+            llvm::BasicBlock* mmDoneBB = llvm::BasicBlock::Create(*context,
+                (std::string(pfx)+".done").c_str(), mmFn);
+            attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mmLoopBB)));
+            builder->SetInsertPoint(mmLoopBB);
+            llvm::PHINode* mmBi = builder->CreatePHI(getDefaultType(), 2, (std::string(pfx)+".bi").c_str());
+            mmBi->addIncoming(mmZero, mmPreBB);
+            builder->CreateCondBr(builder->CreateICmpULT(mmBi, mmCap), mmTestBB, mmDoneBB);
+            builder->SetInsertPoint(mmTestBB);
+            // bucket offset = 2 + bi*3
+            llvm::Value* mmBoff = builder->CreateAdd(
+                builder->CreateMul(mmBi, llvm::ConstantInt::get(getDefaultType(), 3)),
+                llvm::ConstantInt::get(getDefaultType(), 2));
+            auto* mmHashV = builder->CreateAlignedLoad(getDefaultType(),
+                builder->CreateInBoundsGEP(getDefaultType(), srcMapPtr, mmBoff),
+                llvm::MaybeAlign(8));
+            mmHashV->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
+            llvm::Value* mmOcc = builder->CreateICmpNE(mmHashV, mmZero);
+            builder->CreateCondBr(mmOcc, mmInsB, mmIncBB);
+            builder->SetInsertPoint(mmInsB);
+            auto* mmKeyV = builder->CreateAlignedLoad(getDefaultType(),
+                builder->CreateInBoundsGEP(getDefaultType(), srcMapPtr,
+                    builder->CreateAdd(mmBoff, mmOne)),
+                llvm::MaybeAlign(8));
+            mmKeyV->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
+            auto* mmValV = builder->CreateAlignedLoad(getDefaultType(),
+                builder->CreateInBoundsGEP(getDefaultType(), srcMapPtr,
+                    builder->CreateAdd(mmBoff, llvm::ConstantInt::get(getDefaultType(), 2))),
+                llvm::MaybeAlign(8));
+            mmValV->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
+            llvm::Value* mmCurRes = builder->CreateAlignedLoad(mmPtrTy, mmResA, llvm::MaybeAlign(8));
+            llvm::Value* mmNewRes = builder->CreateCall(getOrEmitHashMapSet(),
+                {mmCurRes, mmKeyV, mmValV});
+            builder->CreateStore(mmNewRes, mmResA);
+            builder->CreateBr(mmIncBB);
+            builder->SetInsertPoint(mmIncBB);
+            llvm::Value* mmBi1 = builder->CreateAdd(mmBi, mmOne, "", true, true);
+            mmBi->addIncoming(mmBi1, mmIncBB);
+            attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mmLoopBB)));
+            builder->SetInsertPoint(mmDoneBB);
+        };
+
+        mmInsertAll(mmAPtr, "mmerge.a");
+        mmInsertAll(mmBPtr, "mmerge.b");
+
+        llvm::Value* mmFinalRes = builder->CreateAlignedLoad(mmPtrTy, mmResA, llvm::MaybeAlign(8), "mmerge.final");
+        return builder->CreatePtrToInt(mmFinalRes, getDefaultType(), "mmerge.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // map_invert(m) — create a new map with keys and values swapped.
+    //   If multiple keys map to the same value, the last one (bucket order)
+    //   wins for the corresponding key in the inverted map.
+    //   Values must be strings (i64 string pointers) to be used as keys.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::MAP_INVERT) {
+        validateArgCount(expr, "map_invert", 1);
+        llvm::Value* miM = generateExpression(expr->arguments[0].get());
+        miM = toDefaultType(miM);
+        auto* miPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* miMPtr = builder->CreateIntToPtr(miM, miPtrTy, "minv.mptr");
+        llvm::Value* miCap  = builder->CreateAlignedLoad(getDefaultType(), miMPtr,
+            llvm::MaybeAlign(8), "minv.cap");
+        llvm::Value* miZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* miOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+        // Create result map
+        llvm::Value* miRes = builder->CreateCall(getOrEmitHashMapNew(), {}, "minv.res");
+        llvm::AllocaInst* miResA = createEntryBlockAlloca(
+            builder->GetInsertBlock()->getParent(), "minv.resmap", miPtrTy);
+        builder->CreateStore(miRes, miResA);
+
+        llvm::Function* miFn   = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* miPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* miLoopBB = llvm::BasicBlock::Create(*context, "minv.loop", miFn);
+        llvm::BasicBlock* miTestBB = llvm::BasicBlock::Create(*context, "minv.test", miFn);
+        llvm::BasicBlock* miInsB   = llvm::BasicBlock::Create(*context, "minv.ins",  miFn);
+        llvm::BasicBlock* miIncBB  = llvm::BasicBlock::Create(*context, "minv.inc",  miFn);
+        llvm::BasicBlock* miDoneBB = llvm::BasicBlock::Create(*context, "minv.done", miFn);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(miLoopBB)));
+
+        builder->SetInsertPoint(miLoopBB);
+        llvm::PHINode* miBi = builder->CreatePHI(getDefaultType(), 2, "minv.bi");
+        miBi->addIncoming(miZero, miPreBB);
+        builder->CreateCondBr(builder->CreateICmpULT(miBi, miCap), miTestBB, miDoneBB);
+
+        builder->SetInsertPoint(miTestBB);
+        llvm::Value* miBoff = builder->CreateAdd(
+            builder->CreateMul(miBi, llvm::ConstantInt::get(getDefaultType(), 3)),
+            llvm::ConstantInt::get(getDefaultType(), 2));
+        auto* miHashV = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), miMPtr, miBoff),
+            llvm::MaybeAlign(8));
+        miHashV->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
+        builder->CreateCondBr(builder->CreateICmpNE(miHashV, miZero), miInsB, miIncBB);
+
+        builder->SetInsertPoint(miInsB);
+        auto* miKeyV = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), miMPtr, builder->CreateAdd(miBoff, miOne)),
+            llvm::MaybeAlign(8));
+        miKeyV->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
+        auto* miValV = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), miMPtr,
+                builder->CreateAdd(miBoff, llvm::ConstantInt::get(getDefaultType(), 2))),
+            llvm::MaybeAlign(8));
+        miValV->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
+        // Invert: new key = old value, new value = old key
+        llvm::Value* miCurRes = builder->CreateAlignedLoad(miPtrTy, miResA, llvm::MaybeAlign(8));
+        llvm::Value* miNewRes = builder->CreateCall(getOrEmitHashMapSet(),
+            {miCurRes, miValV, miKeyV});
+        builder->CreateStore(miNewRes, miResA);
+        builder->CreateBr(miIncBB);
+
+        builder->SetInsertPoint(miIncBB);
+        llvm::Value* miBi1 = builder->CreateAdd(miBi, miOne, "minv.bi1", true, true);
+        miBi->addIncoming(miBi1, miIncBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(miLoopBB)));
+
+        builder->SetInsertPoint(miDoneBB);
+        llvm::Value* miFinalRes = builder->CreateAlignedLoad(miPtrTy, miResA, llvm::MaybeAlign(8), "minv.final");
+        return builder->CreatePtrToInt(miFinalRes, getDefaultType(), "minv.result");
     }
 
     if (inOptMaxFunction) {

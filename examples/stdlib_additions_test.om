@@ -1,0 +1,82 @@
+// Tests for stdlib additions: str_lstrip, str_rstrip, str_remove,
+// array_take, array_drop, array_unique, array_rotate, array_mean,
+// map_merge, map_invert
+
+fn main() {
+    // --- str_lstrip ---
+    assert(str_lstrip("   hello") == "hello");
+    assert(str_lstrip("hello")    == "hello");
+    assert(str_lstrip("   ")      == "");
+    assert(str_lstrip("")         == "");
+
+    // --- str_rstrip ---
+    assert(str_rstrip("hello   ") == "hello");
+    assert(str_rstrip("hello")    == "hello");
+    assert(str_rstrip("   ")      == "");
+
+    // --- str_remove ---
+    assert(str_remove("hello world", "l") == "heo word");
+    assert(str_remove("abcabc", "b")      == "acac");
+
+    // --- array_take ---
+    var arr = [10, 20, 30, 40, 50];
+    var t = array_take(arr, 3);
+    assert(len(t) == 3);
+    assert(t[0] == 10);
+    assert(t[2] == 30);
+    assert(len(array_take(arr, 0))   == 0);
+    assert(len(array_take(arr, 100)) == 5);
+
+    // --- array_drop ---
+    var d = array_drop(arr, 2);
+    assert(len(d) == 3);
+    assert(d[0] == 30);
+    assert(d[2] == 50);
+    assert(len(array_drop(arr, 0))   == 5);
+    assert(len(array_drop(arr, 100)) == 0);
+
+    // --- array_unique ---
+    var u = array_unique([1, 1, 2, 2, 2, 3, 3]);
+    assert(len(u) == 3);
+    assert(u[0] == 1);
+    assert(u[1] == 2);
+    assert(u[2] == 3);
+    assert(len(array_unique([1, 2, 3])) == 3);
+    assert(len(array_unique([5, 5, 5])) == 1);
+
+    // --- array_rotate ---
+    var r = array_rotate([1, 2, 3, 4, 5], 2);
+    assert(r[0] == 3);
+    assert(r[4] == 2);
+    var rl = array_rotate([1, 2, 3, 4, 5], -1);
+    assert(rl[0] == 5);
+    assert(rl[1] == 1);
+
+    // --- array_mean ---
+    assert(array_mean([1, 2, 3, 4, 5]) == 3);
+    assert(array_mean([10, 20])         == 15);
+    assert(array_mean([])               == 0);
+
+    // --- map_merge ---
+    var ma = map_new();
+    ma = map_set(ma, "a", 1);
+    ma = map_set(ma, "b", 2);
+    var mb = map_new();
+    mb = map_set(mb, "b", 99);
+    mb = map_set(mb, "c", 3);
+    var mc = map_merge(ma, mb);
+    assert(map_get(mc, "a", 0) == 1);
+    assert(map_get(mc, "b", 0) == 99);
+    assert(map_get(mc, "c", 0) == 3);
+    assert(map_size(mc) == 3);
+    assert(map_get(ma, "b", 0) == 2);  // original unchanged
+
+    // --- map_invert ---
+    var mi = map_new();
+    mi = map_set(mi, "x", 7);
+    mi = map_set(mi, "y", 8);
+    var inv = map_invert(mi);
+    assert(map_size(inv) == 2);
+
+    return 0;
+}

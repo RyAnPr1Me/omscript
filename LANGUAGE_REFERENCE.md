@@ -1534,6 +1534,11 @@ Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and whe
 | `array_insert(arr, i, val)` | Insert `val` at index `i` |
 | `swap(arr, i, j)` | Swap elements at indices `i` and `j` in place (bounds-checked) |
 | `sum(arr)` | Sum of all elements |
+| `array_mean(arr)` | Arithmetic mean of elements (integer division); returns 0 for empty array |
+| `array_take(arr, n)` | First `n` elements (clamped; equivalent to `array_slice(arr, 0, n)`) |
+| `array_drop(arr, n)` | All elements after the first `n` (clamped) |
+| `array_unique(arr)` | Remove consecutive duplicate elements (like Unix `uniq`; sort first for full dedup) |
+| `array_rotate(arr, n)` | Rotate array left by `n` positions (negative = rotate right) |
 | `range(start, end)` | Create array `[start, start+1, ..., end-1]` |
 | `range_step(start, end, step)` | Create array with step |
 
@@ -1558,7 +1563,10 @@ Strings are heap-allocated and NUL-terminated. String indexing and concatenation
 | `str_contains(s, sub)` | Contains substring (1/0) |
 | `str_index_of(s, sub)` | First index of substring `sub` (-1 if not found) |
 | `str_replace(s, old, new)` | Replace all occurrences of `old` with `new` |
-| `str_trim(s)` | Strip leading/trailing whitespace |
+| `str_remove(s, sub)` | Remove all occurrences of `sub` (equivalent to `str_replace(s, sub, "")`) |
+| `str_trim(s)` | Strip leading **and** trailing whitespace |
+| `str_lstrip(s)` | Strip leading (left) whitespace only |
+| `str_rstrip(s)` | Strip trailing (right) whitespace only |
 | `str_starts_with(s, prefix)` | Starts with prefix (1/0) |
 | `str_ends_with(s, suffix)` | Ends with suffix (1/0) |
 | `str_repeat(s, n)` | Repeat string `n` times |
@@ -1611,6 +1619,9 @@ Dict literals are expressions and can be used anywhere a dict value is expected.
 | `map_keys(m)` | Array of all keys |
 | `map_values(m)` | Array of all values |
 | `map_size(m)` | Number of entries |
+| `map_merge(a, b)` | Create new map with all entries from both `a` and `b`; `b`'s values win on conflict |
+| `map_invert(m)` | Create new map with keys and values swapped |
+| `map_filter(m, fn)` | Create new map keeping entries where `fn(key) != 0` |
 
 ---
 
