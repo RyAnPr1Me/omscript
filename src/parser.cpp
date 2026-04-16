@@ -866,9 +866,9 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
-    if (match(TokenType::TRY)) {
+    if (match(TokenType::CATCH)) {
         const Token kw = tokens[current - 1];
-        auto stmt = parseTryCatchStmt();
+        auto stmt = parseCatchStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
@@ -1444,14 +1444,25 @@ std::unique_ptr<Statement> Parser::parseReturnStmt() {
     return std::make_unique<ReturnStmt>(std::move(value));
 }
 
-std::unique_ptr<Statement> Parser::parseTryCatchStmt() {
-    auto tryBlock = parseBlock();
-    consume(TokenType::CATCH, "Expected 'catch' after try block");
+std::unique_ptr<Statement> Parser::parseCatchStmt() {
+    // catch(N) { body }    where N is an integer or string literal
     consume(TokenType::LPAREN, "Expected '(' after 'catch'");
-    const Token varToken = consume(TokenType::IDENTIFIER, "Expected error variable name in catch");
-    consume(TokenType::RPAREN, "Expected ')' after catch variable");
-    auto catchBlock = parseBlock();
-    return std::make_unique<TryCatchStmt>(std::move(tryBlock), varToken.lexeme, std::move(catchBlock));
+    if (check(TokenType::INTEGER)) {
+        const Token codeToken = advance();
+        int64_t code = 0;
+        try { code = std::stoll(codeToken.lexeme); } catch (...) {}
+        consume(TokenType::RPAREN, "Expected ')' after catch code");
+        auto body = parseBlock();
+        return std::make_unique<CatchStmt>(code, std::move(body));
+    } else if (check(TokenType::STRING)) {
+        const Token codeToken = advance();
+        consume(TokenType::RPAREN, "Expected ')' after catch code");
+        auto body = parseBlock();
+        return std::make_unique<CatchStmt>(codeToken.lexeme, std::move(body));
+    } else {
+        error("catch requires an integer or string literal error code");
+        return nullptr;
+    }
 }
 
 std::unique_ptr<Statement> Parser::parseThrowStmt() {

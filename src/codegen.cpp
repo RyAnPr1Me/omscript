@@ -4901,6 +4901,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     stackAllocatedArrays_.clear();
     pendingArrayStackAlloc_ = false;
     scopeComptimeInts_.clear();
+    catchTable_.clear();
+    catchDefaultBB_ = nullptr;
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -5023,6 +5025,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             prefetchedParams_.insert(param.name);
         }
     }
+
+    // Pre-pass: collect all catch(code) blocks in this function body,
+    // assign integer IDs to string codes, and create BasicBlocks for each.
+    // Must happen before generating the body so throw sites can reference BBs.
+    buildCatchTable(func->body->statements, function);
 
     // Generate function body
     generateBlock(func->body.get());
@@ -5151,8 +5158,8 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::SWITCH_STMT:
         generateSwitch(static_cast<SwitchStmt*>(stmt));
         break;
-    case ASTNodeType::TRY_CATCH_STMT:
-        generateTryCatch(static_cast<TryCatchStmt*>(stmt));
+    case ASTNodeType::CATCH_STMT:
+        generateCatch(static_cast<CatchStmt*>(stmt));
         break;
     case ASTNodeType::THROW_STMT:
         generateThrow(static_cast<ThrowStmt*>(stmt));
@@ -7945,10 +7952,9 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
             }
             break;
         }
-        case ASTNodeType::TRY_CATCH_STMT: {
-            auto* tc = static_cast<const TryCatchStmt*>(stmt);
-            merge(stmtEffects(tc->tryBlock.get(), selfName));
-            merge(stmtEffects(tc->catchBlock.get(), selfName));
+        case ASTNodeType::CATCH_STMT: {
+            auto* cs = static_cast<const CatchStmt*>(stmt);
+            merge(stmtEffects(cs->body.get(), selfName));
             break;
         }
         case ASTNodeType::THROW_STMT: {

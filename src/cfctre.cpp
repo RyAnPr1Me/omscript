@@ -2613,7 +2613,7 @@ void CTEngine::runPass(const Program* program) {
         pureS = [&](const Statement* st) -> bool {
             if (!st) return true;
             if (st->type == ASTNodeType::THROW_STMT) return false;
-            if (st->type == ASTNodeType::TRY_CATCH_STMT) return false;
+            if (st->type == ASTNodeType::CATCH_STMT) return false;
             if (st->type == ASTNodeType::RETURN_STMT) {
                 auto* r = static_cast<const ReturnStmt*>(st);
                 return !r->value || pureE(r->value.get());

@@ -2484,7 +2484,11 @@ void CodeGenerator::generateBlock(BlockStmt* stmt) {
 
     for (auto& statement : stmt->statements) {
         if (builder->GetInsertBlock()->getTerminator()) {
-            break; // Don't generate unreachable code
+            // After a terminator (e.g. throw/return), skip unreachable code,
+            // but ALWAYS process catch blocks — they are handler targets that
+            // must be filled regardless of what precedes them.
+            if (statement->type != ASTNodeType::CATCH_STMT)
+                continue;
         }
         if (statement->type == ASTNodeType::DEFER_STMT) {
             // Collect deferred statements for later execution
@@ -2831,169 +2835,150 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     builder->SetInsertPoint(mergeBB);
 }
 
-void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
-    // Implementation uses a global error-flag/value approach combined with
-    // direct-branch throw semantics:
-    //
-    // For a `throw` that occurs DIRECTLY inside the try block (or in any
-    // function on the call stack that is itself inside a try block),
-    // generateThrow() uses tryCatchStack_.back() to branch straight to the
-    // catch entry block, which terminates the basic block immediately and
-    // prevents any subsequent code in the try block or the throwing function
-    // from executing.
-    //
-    // For a `throw` that occurs in a callee that was compiled WITHOUT a
-    // surrounding try block (i.e. the callee was emitted when tryCatchStack_
-    // was empty), generateThrow() instead emits `ret i64 0` so the function
-    // returns immediately.  The try block then performs a per-statement flag
-    // check and branches to catchBB if the callee set the error flag.
-    //
-    // Steps:
-    //   1. Save old error state, clear flag.
-    //   2. Create catch/restore/end blocks BEFORE generating the try body
-    //      (so generateThrow can reference catchBB via tryCatchStack_).
-    //   3. Push catchBB onto tryCatchStack_; generate try body with
-    //      per-statement flag checks; pop tryCatchStack_.
-    //   4. Catch block: bind catch variable, clear flag, generate catch body.
-    //   5. restoreBB: restore old error state.  endBB: normal continuation.
+// ---------------------------------------------------------------------------
+// New catch/throw system: jump-table dispatch
+// ---------------------------------------------------------------------------
 
-    // --- Get or create global error flag / value ---
-    llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
-    if (!errFlag) {
-        errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
-                                           llvm::ConstantInt::get(getDefaultType(), 0), "__om_error_flag");
-    }
-    llvm::GlobalVariable* errVal = module->getGlobalVariable("__om_error_value", true);
-    if (!errVal) {
-        errVal = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
-                                          llvm::ConstantInt::get(getDefaultType(), 0), "__om_error_value");
-    }
-
-    llvm::Function* function = builder->GetInsertBlock()->getParent();
-
-    // --- Save and clear old error state ---
-    llvm::Value* oldFlag = builder->CreateLoad(getDefaultType(), errFlag, "try.oldflag");
-    llvm::Value* oldVal = builder->CreateLoad(getDefaultType(), errVal, "try.oldval");
-    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
-
-    // --- Create all blocks upfront so generateThrow() can reference catchBB ---
-    llvm::BasicBlock* catchBB = llvm::BasicBlock::Create(*context, "catch.body", function);
-    llvm::BasicBlock* restoreBB = llvm::BasicBlock::Create(*context, "try.restore", function);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "try.end", function);
-
-    // --- Generate try body ---
-    // Push catchBB so that any `throw` emitted during code generation of this
-    // try block (or inside a callee that is currently being inlined/compiled
-    // within this scope) branches directly here.
-    tryCatchStack_.push_back(catchBB);
-    {
-        const ScopeGuard scope(*this);
-        for (auto& s : stmt->tryBlock->statements) {
-            // Stop if the current block already has a terminator (e.g. a direct
-            // `throw` branched to catchBB or a `return`).
-            if (builder->GetInsertBlock()->getTerminator())
-                break;
-
-            generateStatement(s.get());
-
-            // After each statement that didn't terminate the block, check
-            // whether a *called function* propagated an error via the flag.
-            // Callees compiled without a surrounding try block use `ret i64 0`
-            // + flag to propagate throws; we must detect that here.
-            //
-            // Performance note: this adds a load + compare + conditional branch
-            // per try-block statement.  The branch is strongly predicted not-taken
-            // because the cold weight is implied by LLVM's default branch predictor.
-            // O3 can often hoist or eliminate the check when the statement is a
-            // simple arithmetic expression with no calls (dead-store elimination of
-            // the flag store + load pair).  The cost is acceptable because try blocks
-            // are rare in tight loops; try/catch is an error-handling construct.
-            if (!builder->GetInsertBlock()->getTerminator()) {
-                llvm::Value* flagNow = builder->CreateLoad(getDefaultType(), errFlag, "try.chk");
-                llvm::Value* flagSet =
-                    builder->CreateICmpNE(flagNow, llvm::ConstantInt::get(getDefaultType(), 0), "try.flagset");
-                llvm::BasicBlock* contBB = llvm::BasicBlock::Create(*context, "try.cont", function);
-                // Error flag is rarely set — favour the non-error continuation.
-                auto* tryW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
-                builder->CreateCondBr(flagSet, catchBB, contBB, tryW);
-                builder->SetInsertPoint(contBB);
-            }
-        }
-    }
-    tryCatchStack_.pop_back();
-
-    // Fall through from the try body to the restore path (no error thrown).
-    if (!builder->GetInsertBlock()->getTerminator())
-        builder->CreateBr(restoreBB);
-
-    // --- Catch block ---
-    builder->SetInsertPoint(catchBB);
-    {
-        const ScopeGuard scope(*this);
-        llvm::Value* errValLoaded = builder->CreateLoad(getDefaultType(), errVal, "catch.errval");
-        llvm::AllocaInst* catchVar = createEntryBlockAlloca(function, stmt->catchVar);
-        builder->CreateStore(errValLoaded, catchVar);
-        bindVariable(stmt->catchVar, catchVar);
-
-        // Clear error state so the catch body executes normally.
-        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
-        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errVal);
-
-        for (auto& s : stmt->catchBlock->statements) {
-            if (builder->GetInsertBlock()->getTerminator())
-                break;
-            generateStatement(s.get());
-        }
-    }
-    if (!builder->GetInsertBlock()->getTerminator())
-        builder->CreateBr(restoreBB);
-
-    // --- Restore old error state ---
-    builder->SetInsertPoint(restoreBB);
-    builder->CreateStore(oldFlag, errFlag);
-    builder->CreateStore(oldVal, errVal);
-    builder->CreateBr(endBB);
-
-    // --- Continuation ---
-    builder->SetInsertPoint(endBB);
+int64_t CodeGenerator::getCatchStringId(const std::string& s) {
+    auto it = catchStringIds_.find(s);
+    if (it != catchStringIds_.end())
+        return it->second;
+    int64_t id = nextCatchStringId_++;
+    catchStringIds_[s] = id;
+    return id;
 }
 
-void CodeGenerator::generateThrow(ThrowStmt* stmt) {
-    // Get or create global error flag / value.
-    llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
-    if (!errFlag) {
-        errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
-                                           llvm::ConstantInt::get(getDefaultType(), 0), "__om_error_flag");
+void CodeGenerator::buildCatchTable(
+        const std::vector<std::unique_ptr<Statement>>& stmts,
+        llvm::Function* fn) {
+    // Walk the top-level statements of a function body and register every
+    // catch(code) block.  We only scan top-level statements here; catch blocks
+    // nested inside other blocks are NOT supported (they must be at function
+    // top-level or directly inside a BlockStmt that is the function body).
+    for (const auto& s : stmts) {
+        if (s->type != ASTNodeType::CATCH_STMT) continue;
+        auto* cs = static_cast<CatchStmt*>(s.get());
+        int64_t key = cs->isString ? getCatchStringId(cs->strCode) : cs->intCode;
+        if (catchTable_.count(key)) {
+            codegenError("Duplicate catch(" +
+                (cs->isString ? ("\"" + cs->strCode + "\"") : std::to_string(cs->intCode)) +
+                ") block in the same function", cs);
+        }
+        llvm::BasicBlock* bb = llvm::BasicBlock::Create(
+            *context,
+            cs->isString ? ("catch.str." + cs->strCode) : ("catch." + std::to_string(key)),
+            fn);
+        catchTable_[key] = bb;
     }
-    llvm::GlobalVariable* errVal = module->getGlobalVariable("__om_error_value", true);
-    if (!errVal) {
-        errVal = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
-                                          llvm::ConstantInt::get(getDefaultType(), 0), "__om_error_value");
+    // Create the default (unmatched throw) block once per function.
+    if (!catchTable_.empty()) {
+        catchDefaultBB_ = llvm::BasicBlock::Create(*context, "catch.unmatched", fn);
+    }
+}
+
+/// Emit the handler body for a catch(code) block.
+/// The BasicBlock was pre-created by buildCatchTable(); we just switch to it
+/// and generate the body.  After the body, execution falls through to
+/// whatever follows this catch statement in the source.
+void CodeGenerator::generateCatch(CatchStmt* stmt) {
+    int64_t key = stmt->isString ? getCatchStringId(stmt->strCode) : stmt->intCode;
+    auto it = catchTable_.find(key);
+    if (it == catchTable_.end()) {
+        // Should not happen if buildCatchTable ran correctly.
+        codegenError("Internal error: catch block not in table", stmt);
+    }
+    llvm::BasicBlock* handlerBB = it->second;
+    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+
+    // If the previous block doesn't have a terminator, it's the normal
+    // (non-throwing) path — it must jump OVER this handler to the merge block
+    // that comes after it.  We don't know the merge block yet, so we emit a
+    // forward branch that gets filled in below.
+    llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "catch.merge", fn);
+
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(mergeBB);
+
+    // Switch to the handler BasicBlock and generate the body.
+    builder->SetInsertPoint(handlerBB);
+    {
+        const ScopeGuard scope(*this);
+        for (auto& s : stmt->body->statements) {
+            if (builder->GetInsertBlock()->getTerminator()) break;
+            generateStatement(s.get());
+        }
+    }
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(mergeBB);
+
+    // Emit the unmatched-throw abort here if this is the last catch in the
+    // table and the default block hasn't been terminated yet.
+    // (We defer defaultBB generation to the end of the function's last catch.)
+    if (catchDefaultBB_ && !catchDefaultBB_->getTerminator()) {
+        // Check if all catch entries point to a non-null, terminated BB; if not
+        // we may still need the default.  For safety, emit it here speculatively.
+        // If it becomes unreachable LLVM will eliminate it.
+        bool allTerminated = true;
+        for (auto& [k, bb] : catchTable_) {
+            if (!bb->getTerminator()) { allTerminated = false; break; }
+        }
+        if (allTerminated) {
+            builder->SetInsertPoint(catchDefaultBB_);
+            // Unmatched throw: print a message and abort.
+            std::string errText = "Runtime error: unmatched throw\n";
+            builder->CreateCall(getPrintfFunction(),
+                {builder->CreateGlobalString(errText, "catch_unmatched_msg")});
+            builder->CreateCall(getOrDeclareAbort());
+            builder->CreateUnreachable();
+        }
     }
 
+    // Continue at the merge point.
+    builder->SetInsertPoint(mergeBB);
+}
+
+/// throw expr; — compile to a switch over the catch table.
+/// If the thrown value is a compile-time constant that matches a handler,
+/// LLVM will fold this to an unconditional branch.  If no handler matches
+/// at runtime, execution falls through to the catchDefaultBB_ (abort).
+void CodeGenerator::generateThrow(ThrowStmt* stmt) {
     llvm::Value* val = generateExpression(stmt->value.get());
     val = toDefaultType(val);
 
-    // Set the error flag and store the thrown value.
-    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 1), errFlag);
-    builder->CreateStore(val, errVal);
+    if (catchTable_.empty()) {
+        // No catch blocks in this function — abort with a clear error.
+        std::string errText = stmt->line > 0
+            ? std::string("Runtime error: unhandled throw at line ") + std::to_string(stmt->line) + "\n"
+            : "Runtime error: unhandled throw\n";
+        builder->CreateCall(getPrintfFunction(),
+            {builder->CreateGlobalString(errText, "throw_unhandled_msg")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        return;
+    }
 
-    // Terminate the basic block so that no code after `throw` executes.
-    //
-    // Two cases:
-    //   (a) We are currently generating code INSIDE a try block:
-    //       tryCatchStack_.back() is the catch-entry block for the innermost
-    //       surrounding try.  Branch there directly — this is the fast path
-    //       that does not require the per-statement flag checks in the caller.
-    //
-    //   (b) We are NOT inside any try block (or we are inside a called function
-    //       that was compiled without a surrounding try):
-    //       Return 0 from the current function so the caller can detect the
-    //       thrown error via the global flag.
-    if (!tryCatchStack_.empty()) {
-        builder->CreateBr(tryCatchStack_.back());
-    } else {
-        builder->CreateRet(llvm::ConstantInt::get(getDefaultType(), 0));
+    // Emit a switch: switch(val) { case key: br handlerBB, ... default: br catchDefaultBB_ }
+    llvm::BasicBlock* defaultBB = catchDefaultBB_;
+    if (!defaultBB) {
+        // Safety: create an inline abort block if catchDefaultBB_ is null.
+        defaultBB = llvm::BasicBlock::Create(*context, "throw.nodefault",
+                                             builder->GetInsertBlock()->getParent());
+        builder->SetInsertPoint(defaultBB);
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(builder->GetInsertBlock());
+    }
+
+    // Re-point to the block before the switch instruction.
+    llvm::BasicBlock* curBB = builder->GetInsertBlock();
+    builder->SetInsertPoint(curBB);
+
+    llvm::SwitchInst* sw = builder->CreateSwitch(val, defaultBB,
+                                                  static_cast<unsigned>(catchTable_.size()));
+    for (auto& [key, handlerBB] : catchTable_) {
+        auto* caseVal = llvm::ConstantInt::getSigned(
+            llvm::cast<llvm::IntegerType>(getDefaultType()), key);
+        sw->addCase(caseVal, handlerBB);
     }
 }
 
@@ -3808,137 +3793,22 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
         codegenError("pipeline statement outside of function", stmt);
     }
 
-    // ── Pipeline failure semantics ───────────────────────────────────────────
-    // • Stages execute strictly in order.
-    // • If any non-final stage sets __om_error_flag (throw / runtime error),
-    //   the pipeline captures the failure, skips the remaining middle stages,
-    //   and jumps directly to the LAST stage which always runs ("finally").
-    // • After the last stage, a counted pipeline exits the loop immediately
-    //   (no further iterations).
-    //
-    // Error detection reuses the existing __om_error_flag global so that
-    // `throw` inside a stage is caught without needing setjmp/longjmp.
-
+    // Stages execute strictly in order.  `throw` inside a stage routes to
+    // the function-level catch handler via the jump-table mechanism.
     const int nStages = static_cast<int>(stmt->stages.size());
 
-    // Helper: get-or-create the global error flag.
-    auto getErrFlag = [&]() -> llvm::GlobalVariable* {
-        llvm::GlobalVariable* ef = module->getGlobalVariable("__om_error_flag", true);
-        if (!ef) {
-            ef = new llvm::GlobalVariable(*module, getDefaultType(), false,
-                                          llvm::GlobalValue::InternalLinkage,
-                                          llvm::ConstantInt::get(getDefaultType(), 0),
-                                          "__om_error_flag");
-        }
-        return ef;
-    };
-
     // ── One-shot form ────────────────────────────────────────────────────────
-    // No count expression → emit stages once with failure semantics.
+    // No count expression → emit stages sequentially.
+    // With the jump-table catch/throw system, `throw` inside any stage
+    // routes directly to the function-level catch handler.  There is no
+    // implicit "finally" stage — all stages execute in declaration order.
     if (!stmt->count) {
         const ScopeGuard scope(*this);
-
-        if (nStages <= 1) {
-            // Single stage — no failure skip needed, just run it.
-            const ScopeGuard stageScope(*this);
-            generateBlock(stmt->stages[0].body.get());
-            return;
-        }
-
-        // Allocate local failed flag (i1).
-        llvm::AllocaInst* failedFlag =
-            createEntryBlockAlloca(function, "__pipeline_failed",
-                                   llvm::Type::getInt1Ty(*context));
-        builder->CreateStore(llvm::ConstantInt::getFalse(*context), failedFlag);
-
-        // Create the "finally" block for the last stage and the merge block.
-        // The catchBB intercepts throws from non-final stages.
-        llvm::BasicBlock* catchBB =
-            llvm::BasicBlock::Create(*context, "pipeline.catch", function);
-        llvm::BasicBlock* finallyBB =
-            llvm::BasicBlock::Create(*context, "pipeline.finally", function);
-        llvm::BasicBlock* endBB =
-            llvm::BasicBlock::Create(*context, "pipeline.oneshot.end", function);
-
-        llvm::GlobalVariable* errFlag = getErrFlag();
-
-        // Push our catch block so that `throw` inside non-final stages
-        // branches here rather than to any outer try/catch handler.
-        tryCatchStack_.push_back(catchBB);
-
-        // Execute non-final stages with error checks.
-        for (int si = 0; si < nStages - 1; ++si) {
+        for (int si = 0; si < nStages; ++si) {
             if (builder->GetInsertBlock()->getTerminator()) break;
-
-            {
-                const ScopeGuard stageScope(*this);
-                generateBlock(stmt->stages[si].body.get());
-            }
-
-            // After each non-final stage, check __om_error_flag (for errors
-            // propagated via callee return, not via direct throw).
-            if (!builder->GetInsertBlock()->getTerminator()) {
-                llvm::Value* ef = builder->CreateLoad(getDefaultType(), errFlag,
-                                                       "pipeline.chk");
-                llvm::Value* failed = builder->CreateICmpNE(
-                    ef, llvm::ConstantInt::get(getDefaultType(), 0),
-                    "pipeline.failed");
-
-                llvm::BasicBlock* nextBB = llvm::BasicBlock::Create(
-                    *context, "pipeline.stage." + std::to_string(si + 1), function);
-
-                auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
-                builder->CreateCondBr(failed, catchBB, nextBB, w);
-
-                builder->SetInsertPoint(nextBB);
-            }
-        }
-
-        tryCatchStack_.pop_back();
-
-        // Fall through to finally from the last successful non-final stage.
-        if (!builder->GetInsertBlock()->getTerminator())
-            builder->CreateBr(finallyBB);
-
-        // ── Catch: a throw or error was detected ─────────────────────────────
-        // Record the failure, clear the error flag so the finally stage can
-        // run normally, then fall through to finally.
-        builder->SetInsertPoint(catchBB);
-        builder->CreateStore(llvm::ConstantInt::getTrue(*context), failedFlag);
-        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
-        builder->CreateBr(finallyBB);
-
-        // ── Finally: last stage always runs ──────────────────────────────────
-        builder->SetInsertPoint(finallyBB);
-        {
             const ScopeGuard stageScope(*this);
-            generateBlock(stmt->stages[nStages - 1].body.get());
+            generateBlock(stmt->stages[si].body.get());
         }
-
-        // After finally: re-raise the error so any outer try/catch sees it.
-        if (!builder->GetInsertBlock()->getTerminator()) {
-            llvm::Value* didFail = builder->CreateLoad(
-                llvm::Type::getInt1Ty(*context), failedFlag,
-                "pipeline.reraise.chk");
-            llvm::BasicBlock* reraiseBB = llvm::BasicBlock::Create(
-                *context, "pipeline.reraise", function);
-            auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
-            builder->CreateCondBr(didFail, reraiseBB, endBB, w);
-
-            builder->SetInsertPoint(reraiseBB);
-            // Re-set the error flag so outer try/catch can detect it.
-            builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 1),
-                                 errFlag);
-            // If there's an outer try/catch, branch there; otherwise just
-            // fall through to endBB (the error flag stays set for the caller).
-            if (!tryCatchStack_.empty()) {
-                builder->CreateBr(tryCatchStack_.back());
-            } else {
-                builder->CreateBr(endBB);
-            }
-        }
-
-        builder->SetInsertPoint(endBB);
         return;
     }
 
@@ -4035,104 +3905,18 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
         }
     }
 
-    // ② Execute stage bodies sequentially with failure semantics.
-    //
-    // For multi-stage pipelines the last stage is the "finally" stage that
-    // always runs.  If any non-final stage triggers an error (__om_error_flag),
-    // the pipeline captures the failure, skips remaining middle stages, runs
-    // the finally stage, and then exits the loop (no further iterations).
+    // ② Execute stage bodies sequentially.
+    // With the jump-table catch/throw system, `throw` inside any stage routes
+    // directly to the function-level catch handler.  All stages execute in
+    // declaration order; there is no implicit "finally" stage.
 
-    if (nStages <= 1) {
-        // Single stage — no failure skip needed.
+    {
         const ScopeGuard stageScope(*this);
-        generateBlock(stmt->stages[0].body.get());
-    } else {
-        llvm::GlobalVariable* errFlag = getErrFlag();
-
-        // Allocate local failed flag (i1, init false at each iteration).
-        llvm::AllocaInst* failedFlag =
-            createEntryBlockAlloca(function, "__pipeline_failed",
-                                   llvm::Type::getInt1Ty(*context));
-        builder->CreateStore(llvm::ConstantInt::getFalse(*context), failedFlag);
-
-        llvm::BasicBlock* catchBB =
-            llvm::BasicBlock::Create(*context, "pipeline.catch", function);
-        llvm::BasicBlock* finallyBB =
-            llvm::BasicBlock::Create(*context, "pipeline.finally", function);
-        llvm::BasicBlock* postFinallyBB =
-            llvm::BasicBlock::Create(*context, "pipeline.post_finally", function);
-
-        // Push our catch block so `throw` inside non-final stages branches
-        // here rather than to any outer try/catch.
-        tryCatchStack_.push_back(catchBB);
-
-        // Execute non-final stages with error checks.
-        for (int si = 0; si < nStages - 1; ++si) {
+        for (int si = 0; si < nStages; ++si) {
             if (builder->GetInsertBlock()->getTerminator()) break;
-
-            {
-                const ScopeGuard stageScope(*this);
-                generateBlock(stmt->stages[si].body.get());
-            }
-
-            // Check for errors propagated via callee return (flag-based).
-            if (!builder->GetInsertBlock()->getTerminator()) {
-                llvm::Value* ef = builder->CreateLoad(getDefaultType(), errFlag,
-                                                       "pipeline.chk");
-                llvm::Value* failed = builder->CreateICmpNE(
-                    ef, llvm::ConstantInt::get(getDefaultType(), 0),
-                    "pipeline.failed");
-
-                llvm::BasicBlock* nextBB = llvm::BasicBlock::Create(
-                    *context, "pipeline.stage." + std::to_string(si + 1),
-                    function);
-
-                auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
-                builder->CreateCondBr(failed, catchBB, nextBB, w);
-
-                builder->SetInsertPoint(nextBB);
-            }
+            const ScopeGuard innerScope(*this);
+            generateBlock(stmt->stages[si].body.get());
         }
-
-        tryCatchStack_.pop_back();
-
-        // Fall through to finally from the last successful non-final stage.
-        if (!builder->GetInsertBlock()->getTerminator())
-            builder->CreateBr(finallyBB);
-
-        // ── Catch: a throw or error was detected ────────────────────────────
-        builder->SetInsertPoint(catchBB);
-        builder->CreateStore(llvm::ConstantInt::getTrue(*context), failedFlag);
-        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
-        builder->CreateBr(finallyBB);
-
-        // ── Finally: last stage always runs ──────────────────────────────────
-        builder->SetInsertPoint(finallyBB);
-        {
-            const ScopeGuard stageScope(*this);
-            generateBlock(stmt->stages[nStages - 1].body.get());
-        }
-        if (!builder->GetInsertBlock()->getTerminator())
-            builder->CreateBr(postFinallyBB);
-
-        // ── Post-finally: if failed, re-raise and exit loop ─────────────────
-        builder->SetInsertPoint(postFinallyBB);
-        llvm::Value* didFail = builder->CreateLoad(
-            llvm::Type::getInt1Ty(*context), failedFlag, "pipeline.didfail");
-
-        llvm::BasicBlock* reraiseBB = llvm::BasicBlock::Create(
-            *context, "pipeline.reraise", function);
-        llvm::BasicBlock* incrBB = llvm::BasicBlock::Create(
-            *context, "pipeline.incr", function);
-        auto* wf = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
-        builder->CreateCondBr(didFail, reraiseBB, incrBB, wf);
-
-        // Re-raise: set the error flag and exit the pipeline loop.
-        builder->SetInsertPoint(reraiseBB);
-        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 1), errFlag);
-        builder->CreateBr(exitBB);
-
-        builder->SetInsertPoint(incrBB);
     }
 
     // ③ __pipeline_i++

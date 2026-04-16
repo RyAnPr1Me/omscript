@@ -329,12 +329,16 @@ class CodeGenerator {
     /// Works for any runtime size, including values from input().
     llvm::StringMap<llvm::AllocaInst*> knownArraySizeAllocas_;
 
-    // Stack of innermost catch-entry basic blocks, pushed/popped by
-    // generateTryCatch(). generateThrow() branches directly to the top of this
-    // stack when a throw occurs inside a try block, ensuring that control flow
-    // reaches the catch handler immediately (rather than relying on a post-loop
-    // flag check that could allow dangerous code to execute after the throw).
-    std::vector<llvm::BasicBlock*> tryCatchStack_;
+    // Per-function catch table: maps error-code (i64) → the BasicBlock for that
+    // handler.  String error codes are assigned a unique compile-time integer
+    // (via catchStringIds_).  Populated by a pre-pass before each function is
+    // compiled, and reset at the start of every function.
+    std::unordered_map<int64_t, llvm::BasicBlock*> catchTable_;
+    // Maps string error codes to their assigned integer IDs for this module.
+    std::unordered_map<std::string, int64_t> catchStringIds_;
+    int64_t nextCatchStringId_ = 1; // start at 1; 0 reserved for "no error"
+    // Default (unmatched-throw) block used by the jump table's default arm.
+    llvm::BasicBlock* catchDefaultBB_ = nullptr;
     bool inOptMaxFunction;
     bool hasOptMaxFunctions;
     llvm::StringSet<> optMaxFunctions;
@@ -838,8 +842,14 @@ class CodeGenerator {
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
     void generateSwitch(SwitchStmt* stmt);
-    void generateTryCatch(TryCatchStmt* stmt);
+    void generateCatch(CatchStmt* stmt);
     void generateThrow(ThrowStmt* stmt);
+    /// Assign (or look up) a unique compile-time integer ID for a string error code.
+    int64_t getCatchStringId(const std::string& s);
+    /// Pre-pass: scan a function body, register all catch(code) blocks and
+    /// create their BasicBlocks.  Must be called before generating the body.
+    void buildCatchTable(const std::vector<std::unique_ptr<Statement>>& stmts,
+                         llvm::Function* fn);
     void generateInvalidate(InvalidateStmt* stmt);
     void generateMoveDecl(MoveDecl* stmt);
     void generateFreeze(FreezeStmt* stmt);
