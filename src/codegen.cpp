@@ -1358,6 +1358,11 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     // of loops when the size argument is loop-invariant.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         *context, llvm::MemoryEffects::inaccessibleMemOnly()));
+    // align(16): malloc on 64-bit Linux/macOS (glibc, musl, Darwin) guarantees
+    // at least 16-byte aligned returns (_Alignof(max_align_t) == 16).  Telling
+    // LLVM about this alignment enables aligned vector loads/stores on every
+    // heap-allocated buffer (arrays, strings, maps) without runtime checks.
+    fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
     return fn;
 }
 
@@ -1387,6 +1392,8 @@ llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     // when the size arguments are loop-invariant.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         *context, llvm::MemoryEffects::inaccessibleMemOnly()));
+    // align(16): calloc has the same alignment guarantee as malloc on 64-bit POSIX.
+    fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
     return fn;
 }
 
@@ -1926,6 +1933,9 @@ llvm::Function* CodeGenerator::getOrDeclareStrndup() {
         *context, llvm::MemoryEffects(
             llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref) |
             llvm::MemoryEffects::inaccessibleMemOnly())));
+    // align(16): strndup allocates via malloc internally, inheriting the same
+    // 16-byte alignment guarantee on 64-bit POSIX systems.
+    fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
     return fn;
 }
 
@@ -1951,6 +1961,8 @@ llvm::Function* CodeGenerator::getOrDeclareRealloc() {
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::get(*context, llvm::Attribute::AllocatedPointer));
+    // align(16): realloc returns memory with the same alignment guarantee as malloc.
+    fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
     return fn;
 }
 
@@ -4739,11 +4751,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                     *context, 8));
                 // OmScript arrays/strings are allocated via calloc/malloc which
                 // guarantees at least 16-byte alignment on 64-bit Linux.  The
-                // align(8) attribute (conservative lower bound) tells LLVM's
-                // vectorizer that the pointer is at least 8-byte aligned, enabling
-                // it to emit aligned vector load/store instructions.
+                // align(16) attribute communicates this to LLVM's vectorizer,
+                // enabling aligned vector load/store instructions (movdqa, vmovdqa)
+                // and better SLP vectorization on heap-allocated buffers.
                 function->addParamAttr(i, llvm::Attribute::getWithAlignment(
-                    *context, llvm::Align(8)));
+                    *context, llvm::Align(16)));
                 OMSC_ADD_NOCAPTURE(function, i);
             }
         }
@@ -4767,7 +4779,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
                 function->addParamAttr(i, llvm::Attribute::getWithAlignment(
-                    *context, llvm::Align(8)));
+                    *context, llvm::Align(16)));
                 OMSC_ADD_NOCAPTURE(function, i);
             }
         }
@@ -4791,13 +4803,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // size for any OmScript pointer (arrays, strings).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
-                // OmScript arrays/strings are always at least 8-byte aligned
-                // (calloc/malloc on 64-bit Linux guarantees ≥16-byte alignment).
-                // align(8) is the conservative lower bound; it tells LLVM's
-                // vectorizer to use aligned load/store instructions, avoiding
-                // alignment masking and enabling better SLP vectorization.
+                // OmScript arrays/strings are allocated by calloc/malloc which
+                // guarantees at least 16-byte alignment on 64-bit Linux/macOS.
+                // align(16) communicates the actual guarantee (not just the
+                // conservative lower bound), enabling LLVM to use aligned
+                // vector instructions on all heap pointer parameters.
                 function->addParamAttr(i, llvm::Attribute::getWithAlignment(
-                    *context, llvm::Align(8)));
+                    *context, llvm::Align(16)));
                 // OmScript's ownership model ensures pointer parameters are
                 // never captured (stored into global state or returned as
                 // pointers).  The borrow checker prevents escaping references.

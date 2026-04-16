@@ -1,0 +1,33 @@
+// Test str_format builtin — format values into a string via snprintf.
+// Verify: compile-time folding (all-const args), runtime formatting,
+// and mixed int/float/string argument combinations.
+fn main() {
+    // ── Compile-time folds (all args constant) ──────────────────
+    var a = str_format("%lld items", 42);
+    assert(str_eq(a, "42 items"));
+
+    var b = str_format("hello %s!", "world");
+    assert(str_eq(b, "hello world!"));
+
+    var c = str_format("%lld + %lld = %lld", 2, 3, 5);
+    // 3-arg call falls to runtime path (fold only handles 1-2 value args).
+    assert(str_eq(c, "2 + 3 = 5"));
+
+    // ── Runtime path (non-constant first arg) ───────────────────
+    var fmt = "%lld%%";       // format is a variable, not a constant
+    var pct = str_format(fmt, 75);
+    assert(str_eq(pct, "75%"));
+
+    // ── Float formatting via runtime path ───────────────────────
+    var pi = 3.14159;
+    var piStr = str_format("%.2f", pi);
+    // "3.14" expected
+    assert(str_starts_with(piStr, "3.14"));
+
+    // ── Two-arg mixed: int and string ───────────────────────────
+    var label = "score";
+    var msg = str_format("%s: %lld", label, 100);
+    assert(str_eq(msg, "score: 100"));
+
+    return 0;
+}

@@ -104,7 +104,9 @@ enum class BuiltinId : uint8_t {
     // Shell command execution with sudo (password provided as second arg)
     SUDO_COMMAND,
     // Environment variable access
-    ENV_GET, ENV_SET
+    ENV_GET, ENV_SET,
+    // String formatting: str_format(fmt, val1[, val2[, ...]]) via snprintf
+    STR_FORMAT
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -287,6 +289,8 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"sudo_command", BuiltinId::SUDO_COMMAND},
     {"env_get",      BuiltinId::ENV_GET},
     {"env_set",      BuiltinId::ENV_SET},
+    // String formatting
+    {"str_format",   BuiltinId::STR_FORMAT},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -2801,11 +2805,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Use strncmp(str, prefix, prefix_len) == 0 instead of strstr
         // strncmp only examines the first prefix_len bytes, while strstr
         // would scan the entire string looking for the prefix anywhere.
-        llvm::Value* prefixLen = builder->CreateCall(getOrDeclareStrlen(), {prefixPtr}, "startswith.plen");
-        nonNegValues_.insert(prefixLen);
-        if (optimizationLevel >= OptimizationLevel::O1)
-            llvm::cast<llvm::Instruction>(prefixLen)->setMetadata(
-                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        //
+        // Optimization: when the prefix is a compile-time string literal,
+        // use the known constant length instead of calling strlen at runtime.
+        llvm::Value* prefixLen;
+        if (auto prefixLit = tryFoldStr(expr->arguments[1].get())) {
+            // Constant-fold strlen(prefix) — no runtime call needed.
+            prefixLen = llvm::ConstantInt::get(getDefaultType(),
+                                               static_cast<int64_t>(prefixLit->size()));
+        } else {
+            prefixLen = builder->CreateCall(getOrDeclareStrlen(), {prefixPtr}, "startswith.plen");
+            nonNegValues_.insert(prefixLen);
+            if (optimizationLevel >= OptimizationLevel::O1)
+                llvm::cast<llvm::Instruction>(prefixLen)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrncmp(),
             {strPtr, prefixPtr, prefixLen}, "startswith.cmp");
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "startswith.eq");
@@ -2844,11 +2858,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(strLen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        llvm::Value* sufLen = builder->CreateCall(getOrDeclareStrlen(), {suffixPtr}, "endswith.suflen");
-        nonNegValues_.insert(sufLen);
-        if (optimizationLevel >= OptimizationLevel::O1)
-            llvm::cast<llvm::Instruction>(sufLen)->setMetadata(
-                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        // Optimization: when the suffix is a compile-time string literal,
+        // constant-fold strlen(suffix) to avoid the runtime call.
+        llvm::Value* sufLen;
+        if (auto suffixLit = tryFoldStr(expr->arguments[1].get())) {
+            sufLen = llvm::ConstantInt::get(getDefaultType(),
+                                            static_cast<int64_t>(suffixLit->size()));
+        } else {
+            sufLen = builder->CreateCall(getOrDeclareStrlen(), {suffixPtr}, "endswith.suflen");
+            nonNegValues_.insert(sufLen);
+            if (optimizationLevel >= OptimizationLevel::O1)
+                llvm::cast<llvm::Instruction>(sufLen)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
         // If suffix longer than string, return 0
         llvm::Value* tooLong = builder->CreateICmpSGT(sufLen, strLen, "endswith.toolong");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -7874,6 +7896,131 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "env_set.ok");
         llvm::Value* result = builder->CreateZExt(success, getDefaultType(), "env_set.res");
         return result;
+    }
+
+    // ── str_format(fmt, val1[, val2[, val3[, val4]]]) ──────────────────────
+    // Format one to four values into a string using a printf-style format template.
+    // Implemented via a two-pass snprintf: first probe for the required buffer
+    // size (snprintf(NULL, 0, fmt, ...)), then allocate and fill.
+    //
+    // Supported argument types: integers (i64 → %lld), floats (double → %f/
+    // %g/etc.), and strings (ptr → %s).  The caller's format string must use
+    // matching format specifiers.
+    //
+    // Compile-time fold: when the format string and ALL value arguments are
+    // compile-time constants, the formatted string is produced at compile time
+    // and interned as a global string constant, eliminating all runtime overhead.
+    if (bid == BuiltinId::STR_FORMAT) {
+        const size_t nArgs = expr->arguments.size();
+        if (nArgs < 2 || nArgs > 5)
+            codegenError("str_format requires 2 to 5 arguments (fmt + 1 to 4 values)", expr);
+
+        // ── Compile-time fold ───────────────────────────────────────
+        // Try to constant-fold when fmt and ALL value args are compile-time
+        // constants.  Only Integer and String ConstValues are supported (Float
+        // values are not tracked as ConstValues in OmScript's constant system;
+        // they fall through to the runtime snprintf path).
+        if (auto fmtConst = tryFoldStr(expr->arguments[0].get())) {
+            bool allConst = true;
+            std::vector<ConstValue> constArgs;
+            for (size_t i = 1; i < nArgs; ++i) {
+                if (auto cv = tryFoldExprToConst(expr->arguments[i].get())) {
+                    if (cv->kind != ConstValue::Kind::Integer &&
+                        cv->kind != ConstValue::Kind::String) {
+                        allConst = false;
+                        break;
+                    }
+                    constArgs.push_back(*cv);
+                } else {
+                    allConst = false;
+                    break;
+                }
+            }
+            if (allConst) {
+                const std::string& fmt = *fmtConst;
+                char buf[4096];
+                int written = -1;
+                auto asStr = [](const ConstValue& cv) -> const char* {
+                    return cv.strVal.c_str();
+                };
+                if (constArgs.size() == 1) {
+                    const auto& a0 = constArgs[0];
+                    if (a0.kind == ConstValue::Kind::Integer)
+                        written = std::snprintf(buf, sizeof(buf), fmt.c_str(), a0.intVal);
+                    else
+                        written = std::snprintf(buf, sizeof(buf), fmt.c_str(), asStr(a0));
+                } else if (constArgs.size() == 2) {
+                    const auto& a0 = constArgs[0];
+                    const auto& a1 = constArgs[1];
+                    bool i0 = (a0.kind == ConstValue::Kind::Integer);
+                    bool i1 = (a1.kind == ConstValue::Kind::Integer);
+                    if      (i0 && i1)  written = std::snprintf(buf, sizeof(buf), fmt.c_str(), a0.intVal,   a1.intVal);
+                    else if (i0 && !i1) written = std::snprintf(buf, sizeof(buf), fmt.c_str(), a0.intVal,   asStr(a1));
+                    else if (!i0 && i1) written = std::snprintf(buf, sizeof(buf), fmt.c_str(), asStr(a0),   a1.intVal);
+                    else                written = std::snprintf(buf, sizeof(buf), fmt.c_str(), asStr(a0),   asStr(a1));
+                }
+                if (written > 0 && written < static_cast<int>(sizeof(buf))) {
+                    optStats_.constFolded++;
+                    llvm::GlobalVariable* gv = internString(std::string(buf, static_cast<size_t>(written)));
+                    stringReturningFunctions_.insert("str_format");
+                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                        gv->getValueType(), gv,
+                        llvm::ArrayRef<llvm::Constant*>{
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                }
+            }
+        }
+
+        // ── Runtime path: two-pass snprintf ────────────────────────
+        // Pass 1: probe required buffer size via snprintf(NULL, 0, fmt, ...).
+        // Pass 2: allocate (size + 1) bytes and fill.
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+
+        // Codegen format string argument (must be a pointer/string).
+        llvm::Value* fmtArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fmtPtr = fmtArg->getType()->isPointerTy()
+            ? fmtArg
+            : builder->CreateIntToPtr(fmtArg, ptrTy, "strfmt.fmtptr");
+
+        // Codegen value arguments, keeping track of their LLVM types for snprintf.
+        std::vector<llvm::Value*> valArgs;
+        for (size_t i = 1; i < nArgs; ++i) {
+            llvm::Value* v = generateExpression(expr->arguments[i].get());
+            // Strings are passed as pointers; integers as i64; floats as double.
+            if (!v->getType()->isPointerTy() && !v->getType()->isDoubleTy())
+                v = toDefaultType(v); // ensure i64
+            valArgs.push_back(v);
+        }
+
+        // Probe call: snprintf(NULL, 0, fmt, val...) → required length.
+        llvm::Value* nullBuf = llvm::ConstantPointerNull::get(ptrTy);
+        llvm::Value* zero32  = llvm::ConstantInt::get(getDefaultType(), 0);
+        std::vector<llvm::Value*> probeCallArgs = {nullBuf, zero32, fmtPtr};
+        probeCallArgs.insert(probeCallArgs.end(), valArgs.begin(), valArgs.end());
+        llvm::Value* probeResult = builder->CreateCall(
+            getOrDeclareSnprintf(), probeCallArgs, "strfmt.probe");
+        // snprintf returns the number of characters that would have been written
+        // (not counting the null terminator).  Extend to i64 for arithmetic.
+        llvm::Value* neededLen = builder->CreateZExt(probeResult, getDefaultType(), "strfmt.needed");
+        nonNegValues_.insert(neededLen);
+
+        // Allocate neededLen + 1 bytes (room for null terminator).
+        llvm::Value* allocSize = builder->CreateAdd(
+            neededLen, llvm::ConstantInt::get(getDefaultType(), 1),
+            "strfmt.allocsz", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strfmt.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
+
+        // Fill call: snprintf(buf, neededLen + 1, fmt, val...).
+        std::vector<llvm::Value*> fillCallArgs = {buf, allocSize, fmtPtr};
+        fillCallArgs.insert(fillCallArgs.end(), valArgs.begin(), valArgs.end());
+        builder->CreateCall(getOrDeclareSnprintf(), fillCallArgs);
+
+        stringReturningFunctions_.insert("str_format");
+        return buf;
     }
 
     if (inOptMaxFunction) {

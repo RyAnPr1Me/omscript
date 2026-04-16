@@ -822,6 +822,7 @@ ptest_program "examples/comptime_loop_reason_test.om" 1
 ptest_program "examples/comptime_obfuscated_test.om" 0
 ptest_program "examples/loop_annotation_unroll_test.om" 120
 ptest_program "examples/loop_annotation_vectorize_test.om" 36
+ptest_program "examples/str_format_test.om" 0
 flush_ptests
 
 echo ""
