@@ -106,7 +106,10 @@ enum class BuiltinId : uint8_t {
     // Environment variable access
     ENV_GET, ENV_SET,
     // String formatting: str_format(fmt, val1[, val2[, ...]]) via snprintf
-    STR_FORMAT
+    STR_FORMAT,
+    // Array: interleave two arrays into [a[0],b[0], a[1],b[1], ...].
+    // Result length = 2 * min(len(a), len(b)).
+    ARRAY_ZIP
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -291,6 +294,7 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"env_set",      BuiltinId::ENV_SET},
     // String formatting
     {"str_format",   BuiltinId::STR_FORMAT},
+    {"array_zip",    BuiltinId::ARRAY_ZIP},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -2144,18 +2148,25 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "to_float", 1);
 
         // ── Compile-time to_float folding ───────────────────────────
-        // to_float("3.14") → 3.14, to_float(42) → 42.0 at compile time.
+        // Handles literals, const string variables, and integer constants.
+        // tryFoldStr handles string literals + const string variables;
+        // tryFoldInt handles integer literals + const integer variables.
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            try {
+                const double parsed = std::stod(*sv);
+                optStats_.constFolded++;
+                return llvm::ConstantFP::get(getFloatType(), parsed);
+            } catch (...) {
+                // Fall through to runtime parsing if conversion fails.
+            }
+        }
+        if (auto iv = tryFoldInt(expr->arguments[0].get())) {
+            optStats_.constFolded++;
+            return llvm::ConstantFP::get(getFloatType(), static_cast<double>(*iv));
+        }
         if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
-                try {
-                    const double parsed = std::stod(lit->stringValue);
-                    return llvm::ConstantFP::get(getFloatType(), parsed);
-                } catch (...) {
-                    // Fall through to runtime parsing if conversion fails.
-                }
-            } else if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                return llvm::ConstantFP::get(getFloatType(), static_cast<double>(lit->intValue));
-            } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+            if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+                optStats_.constFolded++;
                 return llvm::ConstantFP::get(getFloatType(), lit->floatValue);
             }
         }
@@ -8037,6 +8048,120 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         stringReturningFunctions_.insert("str_format");
         return buf;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_zip(a, b) — interleave two arrays.
+    //   Result: [a[0], b[0], a[1], b[1], ..., a[m-1], b[m-1]]
+    //   where m = min(len(a), len(b)).
+    //   Result length = 2 * m.
+    //
+    // This lets callers access the i-th pair as result[2*i] and result[2*i+1].
+    // The output is a heap-allocated OmScript array (length header + elements).
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_ZIP) {
+        validateArgCount(expr, "array_zip", 2);
+
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* aPtr = builder->CreateIntToPtr(a, ptrTy, "azip.aptr");
+        llvm::Value* bPtr = builder->CreateIntToPtr(b, ptrTy, "azip.bptr");
+
+        auto* aLenLoad = builder->CreateAlignedLoad(getDefaultType(), aPtr, llvm::MaybeAlign(8), "azip.alen");
+        aLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        aLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(aLenLoad);
+
+        auto* bLenLoad = builder->CreateAlignedLoad(getDefaultType(), bPtr, llvm::MaybeAlign(8), "azip.blen");
+        bLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        bLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(bLenLoad);
+
+        // m = min(len(a), len(b))
+        llvm::Value* aLtB = builder->CreateICmpSLT(aLenLoad, bLenLoad, "azip.altb");
+        llvm::Value* m    = builder->CreateSelect(aLtB, aLenLoad, bLenLoad, "azip.m");
+        nonNegValues_.insert(m);
+
+        // outLen = 2 * m  (nuw+nsw: m ≤ INT64_MAX/2)
+        llvm::Value* outLen = builder->CreateAdd(m, m, "azip.outlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        nonNegValues_.insert(outLen);
+
+        // Allocate (outLen + 1) * 8 bytes
+        llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* slots = builder->CreateAdd(outLen, one, "azip.slots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "azip.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* buf   = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "azip.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+
+        // Store length header
+        auto* lenSt = builder->CreateStore(outLen, buf);
+        lenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+
+        // Emit loop: for i in 0...m: buf[2*i+1] = a[i+1]; buf[2*i+2] = b[i+1]
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "azip.loop", parentFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "azip.body", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "azip.done", parentFn);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        // Skip the loop entirely when m == 0 (branch weight: m>0 is likely)
+        auto* skipW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(builder->CreateICmpSGT(m, zero, "azip.mgt0"), loopBB, doneBB, skipW);
+
+        // loop header: phi i
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "azip.i");
+        i->addIncoming(zero, preBB);
+        builder->CreateCondBr(
+            builder->CreateICmpSLT(i, m, "azip.cond"),
+            bodyBB, doneBB,
+            llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        // loop body
+        builder->SetInsertPoint(bodyBB);
+        // srcIdx = i + 1  (nuw+nsw: i < m ≤ INT64_MAX-1)
+        llvm::Value* srcIdx = builder->CreateAdd(i, one, "azip.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        // dstIdx_a = 2*i + 1  (nuw+nsw)
+        llvm::Value* two_i    = builder->CreateAdd(i, i, "azip.2i", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* dstIdxA  = builder->CreateAdd(two_i, one, "azip.dstidxa", /*HasNUW=*/true, /*HasNSW=*/true);
+        // dstIdx_b = 2*i + 2  (nuw+nsw)
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* dstIdxB  = builder->CreateAdd(two_i, two, "azip.dstidxb", /*HasNUW=*/true, /*HasNSW=*/true);
+
+        // Load a[i] and b[i] (element at srcIdx in the header+data layout)
+        llvm::Value* aElemPtr = builder->CreateInBoundsGEP(getDefaultType(), aPtr, srcIdx, "azip.aelemptr");
+        auto* aElemLoad = builder->CreateAlignedLoad(getDefaultType(), aElemPtr, llvm::MaybeAlign(8), "azip.aelem");
+        aElemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+
+        llvm::Value* bElemPtr = builder->CreateInBoundsGEP(getDefaultType(), bPtr, srcIdx, "azip.belemptr");
+        auto* bElemLoad = builder->CreateAlignedLoad(getDefaultType(), bElemPtr, llvm::MaybeAlign(8), "azip.belem");
+        bElemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+
+        // Store into output buf at interleaved positions
+        llvm::Value* dstPtrA = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdxA, "azip.dstptra");
+        auto* stA = builder->CreateStore(aElemLoad, dstPtrA);
+        stA->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+
+        llvm::Value* dstPtrB = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdxB, "azip.dstptrb");
+        auto* stB = builder->CreateStore(bElemLoad, dstPtrB);
+        stB->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+
+        // Increment: next = i + 1  (nuw+nsw)
+        llvm::Value* next = builder->CreateAdd(i, one, "azip.next", /*HasNUW=*/true, /*HasNSW=*/true);
+        i->addIncoming(next, bodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(doneBB);
+        arrayReturningFunctions_.insert("array_zip");
+        return builder->CreatePtrToInt(buf, getDefaultType(), "azip.result");
     }
 
     if (inOptMaxFunction) {
