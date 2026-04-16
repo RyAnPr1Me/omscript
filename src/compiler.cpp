@@ -266,7 +266,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     }
 
     if (!quiet_) {
-        std::cout << "compiled " << outputFile << std::endl;
+        std::cout << "compiled " << outputFile << "\n";
     }
 }
 

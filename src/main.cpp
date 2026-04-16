@@ -2912,13 +2912,13 @@ int main(int argc, char* argv[]) {
     } catch (const omscript::DiagnosticError& e) {
         // Structured diagnostic: include source file path for context.
         if (!sourceFile.empty()) {
-            std::cerr << sourceFile << ": " << e.what() << std::endl;
+            std::cerr << sourceFile << ": " << e.what() << "\n";
         } else {
-            std::cerr << e.what() << std::endl;
+            std::cerr << e.what() << "\n";
         }
         return 1;
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
 }
