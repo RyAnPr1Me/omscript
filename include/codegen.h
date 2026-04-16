@@ -1164,6 +1164,34 @@ class CodeGenerator {
     llvm::Function* getOrDeclareGetenv();
     llvm::Function* getOrDeclareSetenv();
 
+    // ── BigInt runtime helpers ────────────────────────────────────────────────
+    // These declare the C functions from bigint_runtime.h in the LLVM module.
+    llvm::Function* getOrDeclareBigintNewI64();
+    llvm::Function* getOrDeclareBigintNewStr();
+    llvm::Function* getOrDeclareBigintFree();
+    llvm::Function* getOrDeclareBigintAdd();
+    llvm::Function* getOrDeclareBigintSub();
+    llvm::Function* getOrDeclareBigintMul();
+    llvm::Function* getOrDeclareBigintDiv();
+    llvm::Function* getOrDeclareBigintMod();
+    llvm::Function* getOrDeclareBigintNeg();
+    llvm::Function* getOrDeclareBigintAbs();
+    llvm::Function* getOrDeclareBigintPow();
+    llvm::Function* getOrDeclareBigintGcd();
+    llvm::Function* getOrDeclareBigintEq();
+    llvm::Function* getOrDeclareBigintLt();
+    llvm::Function* getOrDeclareBigintLe();
+    llvm::Function* getOrDeclareBigintGt();
+    llvm::Function* getOrDeclareBigintGe();
+    llvm::Function* getOrDeclareBigintCmp();
+    llvm::Function* getOrDeclareBigintTostring();
+    llvm::Function* getOrDeclareBigintToI64();
+    llvm::Function* getOrDeclareBigintBitLength();
+    llvm::Function* getOrDeclareBigintIsZero();
+    llvm::Function* getOrDeclareBigintIsNegative();
+    llvm::Function* getOrDeclareBigintShl();
+    llvm::Function* getOrDeclareBigintShr();
+
     // ── Hash-table map runtime helpers (emitted into the LLVM module) ────
     // These implement an open-addressing hash table with linear probing,
     // power-of-2 capacity, and FNV-1a hashing.  Each helper is emitted once

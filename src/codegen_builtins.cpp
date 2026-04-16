@@ -109,7 +109,13 @@ enum class BuiltinId : uint8_t {
     STR_FORMAT,
     // Array: interleave two arrays into [a[0],b[0], a[1],b[1], ...].
     // Result length = 2 * min(len(a), len(b)).
-    ARRAY_ZIP
+    ARRAY_ZIP,
+    // Arbitrary-precision integer (bigint) builtins
+    BIGINT_NEW, BIGINT_ADD, BIGINT_SUB, BIGINT_MUL, BIGINT_DIV, BIGINT_MOD,
+    BIGINT_NEG, BIGINT_ABS, BIGINT_POW, BIGINT_GCD,
+    BIGINT_EQ, BIGINT_LT, BIGINT_LE, BIGINT_GT, BIGINT_GE, BIGINT_CMP,
+    BIGINT_TOSTRING, BIGINT_TO_I64, BIGINT_BIT_LENGTH,
+    BIGINT_IS_ZERO, BIGINT_IS_NEGATIVE, BIGINT_SHL, BIGINT_SHR
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -295,6 +301,30 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     // String formatting
     {"str_format",   BuiltinId::STR_FORMAT},
     {"array_zip",    BuiltinId::ARRAY_ZIP},
+    // bigint builtins
+    {"bigint",           BuiltinId::BIGINT_NEW},
+    {"bigint_add",       BuiltinId::BIGINT_ADD},
+    {"bigint_sub",       BuiltinId::BIGINT_SUB},
+    {"bigint_mul",       BuiltinId::BIGINT_MUL},
+    {"bigint_div",       BuiltinId::BIGINT_DIV},
+    {"bigint_mod",       BuiltinId::BIGINT_MOD},
+    {"bigint_neg",       BuiltinId::BIGINT_NEG},
+    {"bigint_abs",       BuiltinId::BIGINT_ABS},
+    {"bigint_pow",       BuiltinId::BIGINT_POW},
+    {"bigint_gcd",       BuiltinId::BIGINT_GCD},
+    {"bigint_eq",        BuiltinId::BIGINT_EQ},
+    {"bigint_lt",        BuiltinId::BIGINT_LT},
+    {"bigint_le",        BuiltinId::BIGINT_LE},
+    {"bigint_gt",        BuiltinId::BIGINT_GT},
+    {"bigint_ge",        BuiltinId::BIGINT_GE},
+    {"bigint_cmp",       BuiltinId::BIGINT_CMP},
+    {"bigint_tostring",  BuiltinId::BIGINT_TOSTRING},
+    {"bigint_to_i64",    BuiltinId::BIGINT_TO_I64},
+    {"bigint_bit_length",BuiltinId::BIGINT_BIT_LENGTH},
+    {"bigint_is_zero",   BuiltinId::BIGINT_IS_ZERO},
+    {"bigint_is_negative",BuiltinId::BIGINT_IS_NEGATIVE},
+    {"bigint_shl",       BuiltinId::BIGINT_SHL},
+    {"bigint_shr",       BuiltinId::BIGINT_SHR},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -8162,6 +8192,149 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(doneBB);
         arrayReturningFunctions_.insert("array_zip");
         return builder->CreatePtrToInt(buf, getDefaultType(), "azip.result");
+    }
+
+    // ── BigInt builtins ──────────────────────────────────────────────────────
+    // All bigint values are opaque pointers to heap-allocated OmBigInt objects.
+    // The C runtime API is declared in include/bigint_runtime.h.
+
+    // bigint(x) — construct from integer or string
+    if (bid == BuiltinId::BIGINT_NEW) {
+        if (expr->arguments.size() == 1) {
+            llvm::Value* arg = generateExpression(expr->arguments[0].get());
+            if (arg->getType()->isPointerTy()) {
+                // Assume string argument
+                return builder->CreateCall(getOrDeclareBigintNewStr(), {arg}, "bigint.new.str");
+            } else {
+                // Integer argument — widen to i64 if needed
+                if (arg->getType() != getDefaultType())
+                    arg = builder->CreateSExt(arg, getDefaultType(), "bigint.arg.sext");
+                return builder->CreateCall(getOrDeclareBigintNewI64(), {arg}, "bigint.new.i64");
+            }
+        }
+        codegenError("bigint() requires exactly 1 argument", expr);
+    }
+
+    // Binary bigint ops: both args must be bigint pointers
+    auto getBigintBinaryArgs = [&](const char* name) -> std::pair<llvm::Value*, llvm::Value*> {
+        validateArgCount(expr, name, 2);
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        if (!a->getType()->isPointerTy() || !b->getType()->isPointerTy())
+            codegenError(std::string(name) + ": arguments must be bigint values", expr);
+        return {a, b};
+    };
+    auto getBigintUnaryArg = [&](const char* name) -> llvm::Value* {
+        validateArgCount(expr, name, 1);
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        if (!a->getType()->isPointerTy())
+            codegenError(std::string(name) + ": argument must be a bigint value", expr);
+        return a;
+    };
+
+    if (bid == BuiltinId::BIGINT_ADD) {
+        auto [a, b] = getBigintBinaryArgs("bigint_add");
+        return builder->CreateCall(getOrDeclareBigintAdd(), {a, b}, "bigint.add");
+    }
+    if (bid == BuiltinId::BIGINT_SUB) {
+        auto [a, b] = getBigintBinaryArgs("bigint_sub");
+        return builder->CreateCall(getOrDeclareBigintSub(), {a, b}, "bigint.sub");
+    }
+    if (bid == BuiltinId::BIGINT_MUL) {
+        auto [a, b] = getBigintBinaryArgs("bigint_mul");
+        return builder->CreateCall(getOrDeclareBigintMul(), {a, b}, "bigint.mul");
+    }
+    if (bid == BuiltinId::BIGINT_DIV) {
+        auto [a, b] = getBigintBinaryArgs("bigint_div");
+        return builder->CreateCall(getOrDeclareBigintDiv(), {a, b}, "bigint.div");
+    }
+    if (bid == BuiltinId::BIGINT_MOD) {
+        auto [a, b] = getBigintBinaryArgs("bigint_mod");
+        return builder->CreateCall(getOrDeclareBigintMod(), {a, b}, "bigint.mod");
+    }
+    if (bid == BuiltinId::BIGINT_NEG) {
+        llvm::Value* a = getBigintUnaryArg("bigint_neg");
+        return builder->CreateCall(getOrDeclareBigintNeg(), {a}, "bigint.neg");
+    }
+    if (bid == BuiltinId::BIGINT_ABS) {
+        llvm::Value* a = getBigintUnaryArg("bigint_abs");
+        return builder->CreateCall(getOrDeclareBigintAbs(), {a}, "bigint.abs");
+    }
+    if (bid == BuiltinId::BIGINT_POW) {
+        auto [a, b] = getBigintBinaryArgs("bigint_pow");
+        return builder->CreateCall(getOrDeclareBigintPow(), {a, b}, "bigint.pow");
+    }
+    if (bid == BuiltinId::BIGINT_GCD) {
+        auto [a, b] = getBigintBinaryArgs("bigint_gcd");
+        return builder->CreateCall(getOrDeclareBigintGcd(), {a, b}, "bigint.gcd");
+    }
+    // Comparison builtins: return i32 (0 or 1), widened to i64 for OmScript
+    if (bid == BuiltinId::BIGINT_EQ) {
+        auto [a, b] = getBigintBinaryArgs("bigint_eq");
+        llvm::Value* r = builder->CreateCall(getOrDeclareBigintEq(), {a, b}, "bigint.eq");
+        return builder->CreateZExt(r, getDefaultType(), "bigint.eq.zext");
+    }
+    if (bid == BuiltinId::BIGINT_LT) {
+        auto [a, b] = getBigintBinaryArgs("bigint_lt");
+        llvm::Value* r = builder->CreateCall(getOrDeclareBigintLt(), {a, b}, "bigint.lt");
+        return builder->CreateZExt(r, getDefaultType(), "bigint.lt.zext");
+    }
+    if (bid == BuiltinId::BIGINT_LE) {
+        auto [a, b] = getBigintBinaryArgs("bigint_le");
+        llvm::Value* r = builder->CreateCall(getOrDeclareBigintLe(), {a, b}, "bigint.le");
+        return builder->CreateZExt(r, getDefaultType(), "bigint.le.zext");
+    }
+    if (bid == BuiltinId::BIGINT_GT) {
+        auto [a, b] = getBigintBinaryArgs("bigint_gt");
+        llvm::Value* r = builder->CreateCall(getOrDeclareBigintGt(), {a, b}, "bigint.gt");
+        return builder->CreateZExt(r, getDefaultType(), "bigint.gt.zext");
+    }
+    if (bid == BuiltinId::BIGINT_GE) {
+        auto [a, b] = getBigintBinaryArgs("bigint_ge");
+        llvm::Value* r = builder->CreateCall(getOrDeclareBigintGe(), {a, b}, "bigint.ge");
+        return builder->CreateZExt(r, getDefaultType(), "bigint.ge.zext");
+    }
+    if (bid == BuiltinId::BIGINT_CMP) {
+        auto [a, b] = getBigintBinaryArgs("bigint_cmp");
+        llvm::Value* r = builder->CreateCall(getOrDeclareBigintCmp(), {a, b}, "bigint.cmp");
+        return builder->CreateSExt(r, getDefaultType(), "bigint.cmp.sext");
+    }
+    if (bid == BuiltinId::BIGINT_TOSTRING) {
+        llvm::Value* a = getBigintUnaryArg("bigint_tostring");
+        stringReturningFunctions_.insert("bigint_tostring");
+        return builder->CreateCall(getOrDeclareBigintTostring(), {a}, "bigint.tostring");
+    }
+    if (bid == BuiltinId::BIGINT_TO_I64) {
+        llvm::Value* a = getBigintUnaryArg("bigint_to_i64");
+        return builder->CreateCall(getOrDeclareBigintToI64(), {a}, "bigint.to_i64");
+    }
+    if (bid == BuiltinId::BIGINT_BIT_LENGTH) {
+        llvm::Value* a = getBigintUnaryArg("bigint_bit_length");
+        return builder->CreateCall(getOrDeclareBigintBitLength(), {a}, "bigint.bitlen");
+    }
+    if (bid == BuiltinId::BIGINT_IS_ZERO) {
+        llvm::Value* a = getBigintUnaryArg("bigint_is_zero");
+        llvm::Value* r = builder->CreateCall(getOrDeclareBigintIsZero(), {a}, "bigint.iszero");
+        return builder->CreateZExt(r, getDefaultType(), "bigint.iszero.zext");
+    }
+    if (bid == BuiltinId::BIGINT_IS_NEGATIVE) {
+        llvm::Value* a = getBigintUnaryArg("bigint_is_negative");
+        llvm::Value* r = builder->CreateCall(getOrDeclareBigintIsNegative(), {a}, "bigint.isneg");
+        return builder->CreateZExt(r, getDefaultType(), "bigint.isneg.zext");
+    }
+    if (bid == BuiltinId::BIGINT_SHL) {
+        validateArgCount(expr, "bigint_shl", 2);
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* n = generateExpression(expr->arguments[1].get());
+        n = toDefaultType(n);
+        return builder->CreateCall(getOrDeclareBigintShl(), {a, n}, "bigint.shl");
+    }
+    if (bid == BuiltinId::BIGINT_SHR) {
+        validateArgCount(expr, "bigint_shr", 2);
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* n = generateExpression(expr->arguments[1].get());
+        n = toDefaultType(n);
+        return builder->CreateCall(getOrDeclareBigintShr(), {a, n}, "bigint.shr");
     }
 
     if (inOptMaxFunction) {

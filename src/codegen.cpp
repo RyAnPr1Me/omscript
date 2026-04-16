@@ -1010,6 +1010,9 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     // -----------------------------------------------------------------------
     if (ann == "string")
         return llvm::PointerType::getUnqual(*context);
+    // bigint: heap-allocated arbitrary-precision integer — opaque pointer
+    if (ann == "bigint")
+        return llvm::PointerType::getUnqual(*context);
     // Array types: int[], string[], float[], etc.
     if (ann.size() >= 2 && ann.compare(ann.size() - 2, 2, "[]") == 0)
         return llvm::PointerType::getUnqual(*context);
@@ -2351,6 +2354,202 @@ llvm::Function* CodeGenerator::getOrDeclareSetenv() {
     fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     OMSC_ADD_NOCAPTURE(fn, 1);
+    return fn;
+}
+// ── BigInt runtime helper declarations ──────────────────────────────────────
+// All bigint* functions take/return opaque pointers to heap-allocated OmBigInt
+// objects.  The convention matches bigint_runtime.h (C ABI).
+
+namespace {
+/// Shorthand: (ptr) -> ptr — the most common bigint binary-op signature.
+static llvm::FunctionType* bigintBinaryTy(llvm::LLVMContext& ctx) {
+    auto* p = llvm::PointerType::getUnqual(ctx);
+    return llvm::FunctionType::get(p, {p, p}, false);
+}
+/// Shorthand: (ptr) -> ptr — the unary signature.
+static llvm::FunctionType* bigintUnaryTy(llvm::LLVMContext& ctx) {
+    auto* p = llvm::PointerType::getUnqual(ctx);
+    return llvm::FunctionType::get(p, {p}, false);
+}
+/// Shorthand: (ptr, ptr) -> i32 — comparison returning int.
+static llvm::FunctionType* bigintCmpTy(llvm::LLVMContext& ctx) {
+    auto* p = llvm::PointerType::getUnqual(ctx);
+    return llvm::FunctionType::get(llvm::Type::getInt32Ty(ctx), {p, p}, false);
+}
+} // namespace
+
+llvm::Function* CodeGenerator::getOrDeclareBigintNewI64() {
+    if (auto* fn = module->getFunction("omsc_bigint_new_i64")) return fn;
+    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {i64Ty}, false);
+    auto* fn = declareExternalFn("omsc_bigint_new_i64", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree); // allocates
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareBigintNewStr() {
+    if (auto* fn = module->getFunction("omsc_bigint_new_str")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_bigint_new_str", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareBigintFree() {
+    if (auto* fn = module->getFunction("omsc_bigint_free")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {ptrTy}, false);
+    auto* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage,
+                                      "omsc_bigint_free", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareBigintAdd() {
+    if (auto* fn = module->getFunction("omsc_bigint_add")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_add", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintSub() {
+    if (auto* fn = module->getFunction("omsc_bigint_sub")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_sub", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintMul() {
+    if (auto* fn = module->getFunction("omsc_bigint_mul")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_mul", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintDiv() {
+    if (auto* fn = module->getFunction("omsc_bigint_div")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_div", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintMod() {
+    if (auto* fn = module->getFunction("omsc_bigint_mod")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_mod", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintNeg() {
+    if (auto* fn = module->getFunction("omsc_bigint_neg")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_neg", bigintUnaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintAbs() {
+    if (auto* fn = module->getFunction("omsc_bigint_abs")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_abs", bigintUnaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintPow() {
+    if (auto* fn = module->getFunction("omsc_bigint_pow")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_pow", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintGcd() {
+    if (auto* fn = module->getFunction("omsc_bigint_gcd")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_gcd", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintEq() {
+    if (auto* fn = module->getFunction("omsc_bigint_eq")) return fn;
+    return declareExternalFn("omsc_bigint_eq", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintLt() {
+    if (auto* fn = module->getFunction("omsc_bigint_lt")) return fn;
+    return declareExternalFn("omsc_bigint_lt", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintLe() {
+    if (auto* fn = module->getFunction("omsc_bigint_le")) return fn;
+    return declareExternalFn("omsc_bigint_le", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintGt() {
+    if (auto* fn = module->getFunction("omsc_bigint_gt")) return fn;
+    return declareExternalFn("omsc_bigint_gt", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintGe() {
+    if (auto* fn = module->getFunction("omsc_bigint_ge")) return fn;
+    return declareExternalFn("omsc_bigint_ge", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintCmp() {
+    if (auto* fn = module->getFunction("omsc_bigint_cmp")) return fn;
+    return declareExternalFn("omsc_bigint_cmp", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintTostring() {
+    if (auto* fn = module->getFunction("omsc_bigint_tostring")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_bigint_tostring", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintToI64() {
+    if (auto* fn = module->getFunction("omsc_bigint_to_i64")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt64Ty(*context), {ptrTy}, false);
+    return declareExternalFn("omsc_bigint_to_i64", ty);
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintBitLength() {
+    if (auto* fn = module->getFunction("omsc_bigint_bit_length")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt64Ty(*context), {ptrTy}, false);
+    return declareExternalFn("omsc_bigint_bit_length", ty);
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintIsZero() {
+    if (auto* fn = module->getFunction("omsc_bigint_is_zero")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy}, false);
+    return declareExternalFn("omsc_bigint_is_zero", ty);
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintIsNegative() {
+    if (auto* fn = module->getFunction("omsc_bigint_is_negative")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy}, false);
+    return declareExternalFn("omsc_bigint_is_negative", ty);
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintShl() {
+    if (auto* fn = module->getFunction("omsc_bigint_shl")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false);
+    auto* fn = declareExternalFn("omsc_bigint_shl", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintShr() {
+    if (auto* fn = module->getFunction("omsc_bigint_shr")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false);
+    auto* fn = declareExternalFn("omsc_bigint_shr", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     return fn;
 }
 // ---------------------------------------------------------------------------

@@ -285,6 +285,18 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         linkArgs.push_back("-lm");
         // Link against pthreads for concurrency primitives.
         linkArgs.push_back("-lpthread");
+        // Link the BigInt runtime library if it exists alongside the compiler binary.
+        // OMSC_BIGINT_LIB_PATH is set at build time to the location of libomsc_bigint.a.
+#ifdef OMSC_BIGINT_LIB_PATH
+        {
+            const std::string bigintLib = OMSC_BIGINT_LIB_PATH;
+            if (!bigintLib.empty() && std::filesystem::exists(bigintLib)) {
+                linkArgs.push_back(bigintLib);
+            }
+        }
+#endif
+        // Also link C++ standard library (bigint runtime is C++ internally).
+        linkArgs.push_back("-lstdc++");
         llvm::SmallVector<llvm::StringRef, 8> argRefs;
         argRefs.push_back(linkerProgram);
         for (const auto& arg : linkArgs) {

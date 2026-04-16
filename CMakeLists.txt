@@ -93,7 +93,28 @@ set(SRC
     src/bigint.cpp
 )
 
+# ── BigInt runtime static library (linked into user programs) ────────────────
+# bigint_runtime.cpp wraps OmBigInt and exposes a C API for OmScript's
+# `bigint` type.  It is compiled separately so the compiler can pass
+# libomsc_bigint.a to the linker when linking user programs.
+add_library(omsc_bigint STATIC
+    src/bigint.cpp
+    src/bigint_runtime.cpp
+)
+target_include_directories(omsc_bigint PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_compile_options(omsc_bigint PRIVATE -O2 -fPIC)
+
 add_executable(omsc ${SRC})
+# Ensure omsc_bigint is built before omsc so the .a path is valid.
+add_dependencies(omsc omsc_bigint)
+
+# Tell the compiler binary where the bigint runtime library lives at build time.
+# At install time the path is overridden via OMSC_BIGINT_LIB_PATH.
+target_compile_definitions(omsc PRIVATE
+    OMSC_BIGINT_LIB_PATH=\"${CMAKE_CURRENT_BINARY_DIR}/libomsc_bigint.a\"
+)
 
 # ── Version define ────────────────────────────────────────────────────────────
 target_compile_definitions(omsc PRIVATE
@@ -343,3 +364,10 @@ target_precompile_headers(omsc PRIVATE
 
 # ── Install ───────────────────────────────────────────────────────────────────
 install(TARGETS omsc RUNTIME DESTINATION bin)
+install(TARGETS omsc_bigint ARCHIVE DESTINATION lib/omscript)
+# When installed, override OMSC_BIGINT_LIB_PATH to the install prefix.
+# (This is set as a property so it only affects installed builds.)
+install(CODE "
+    get_filename_component(OMSC_BIN \"\${CMAKE_INSTALL_PREFIX}/bin/omsc\" ABSOLUTE)
+    message(STATUS \"BigInt runtime installed to \${CMAKE_INSTALL_PREFIX}/lib/omscript/libomsc_bigint.a\")
+")
