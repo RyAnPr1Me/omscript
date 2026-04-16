@@ -478,6 +478,7 @@ ptest_compile_fail "examples/missing_semicolon.om"
 ptest_compile_fail "examples/invalid_hex.om"
 ptest_compile_fail "examples/invalid_binary.om"
 ptest_compile_fail "examples/invalid_octal.om"
+ptest_compile_fail "examples/invalid_numeric_underscore.om"
 ptest_compile_fail "examples/unknown_annotation.om"
 flush_ptests
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
@@ -492,6 +493,7 @@ test_cli_output "switch-float-case-msg" "case value must be an integer constant,
 test_cli_output "invalid-hex-msg" "Expected hex digit after" 1 ./build/omsc examples/invalid_hex.om -o /tmp/test_hex_err
 test_cli_output "invalid-binary-msg" "Expected binary digit after" 1 ./build/omsc examples/invalid_binary.om -o /tmp/test_bin_err
 test_cli_output "invalid-octal-msg" "Expected octal digit after" 1 ./build/omsc examples/invalid_octal.om -o /tmp/test_oct_err
+test_cli_output "invalid-numeric-underscore-msg" "Invalid underscore placement in numeric literal" 1 ./build/omsc examples/invalid_numeric_underscore.om -o /tmp/test_num_uscore_err
 
 echo ""
 echo "============================================"
