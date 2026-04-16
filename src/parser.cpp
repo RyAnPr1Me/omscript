@@ -233,7 +233,7 @@ std::unique_ptr<Program> Parser::parse() {
                         consume(TokenType::ASSIGN, "Expected '=' in @allocator");
                         const Token paramVal = advance();
                         int idx = 0;
-                        try { idx = std::stoi(paramVal.lexeme); } catch(...) {}
+                        if (paramVal.type == TokenType::INTEGER) idx = static_cast<int>(paramVal.intValue);
                         if (paramKey.lexeme == "size") {
                             allocatorSizeParam = idx;
                         } else if (paramKey.lexeme == "count") {
@@ -926,7 +926,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
                 error("Expected integer offset after '+' in prefetch");
             }
             const Token offsetTok = advance();
-            offsetBytes = std::stoll(offsetTok.lexeme);
+            offsetBytes = offsetTok.intValue;
         }
 
         // Parse optional attributes: hot, immut
@@ -1450,7 +1450,7 @@ std::unique_ptr<Statement> Parser::parseCatchStmt() {
     if (check(TokenType::INTEGER)) {
         const Token codeToken = advance();
         int64_t code = 0;
-        try { code = std::stoll(codeToken.lexeme); } catch (...) {}
+        code = codeToken.intValue;
         consume(TokenType::RPAREN, "Expected ')' after catch code");
         auto body = parseBlock();
         return std::make_unique<CatchStmt>(code, std::move(body));
@@ -3359,13 +3359,13 @@ OptMaxConfig Parser::parseOptMaxConfig() {
                     consume(TokenType::ASSIGN, "Expected '=' in loop config");
                     if (lk.lexeme == "unroll") {
                         const Token v = advance();
-                        try { cfg.loop.unrollCount = std::stoi(v.lexeme); } catch(...) {}
+                        if (v.type == TokenType::INTEGER) cfg.loop.unrollCount = static_cast<int>(v.intValue);
                     } else if (lk.lexeme == "vectorize") {
                         const Token v = advance();
                         cfg.loop.vectorize = (v.lexeme == "true" || v.type == TokenType::TRUE);
                     } else if (lk.lexeme == "tile") {
                         const Token v = advance();
-                        try { cfg.loop.tileSize = std::stoi(v.lexeme); } catch(...) {}
+                        if (v.type == TokenType::INTEGER) cfg.loop.tileSize = static_cast<int>(v.intValue);
                     } else if (lk.lexeme == "parallel") {
                         const Token v = advance();
                         cfg.loop.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);
@@ -3418,14 +3418,14 @@ LoopConfig Parser::parseLoopAnnotation() {
             consume(TokenType::ASSIGN, "Expected '=' after key in @loop");
             if (key.lexeme == "unroll") {
                 const Token v = advance();
-                try { cfg.unrollCount = std::stoi(v.lexeme); } catch(...) {}
+                if (v.type == TokenType::INTEGER) cfg.unrollCount = static_cast<int>(v.intValue);
             } else if (key.lexeme == "vectorize") {
                 const Token v = advance(); // true/false may be keywords
                 cfg.vectorize = (v.lexeme == "true" || v.type == TokenType::TRUE);
                 cfg.noVectorize = (v.lexeme == "false" || v.type == TokenType::FALSE);
             } else if (key.lexeme == "tile") {
                 const Token v = advance();
-                try { cfg.tileSize = std::stoi(v.lexeme); } catch(...) {}
+                if (v.type == TokenType::INTEGER) cfg.tileSize = static_cast<int>(v.intValue);
             } else if (key.lexeme == "parallel") {
                 const Token v = advance();
                 cfg.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);
