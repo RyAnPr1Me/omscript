@@ -1,5 +1,8 @@
 // Regression: custom pure array builder using `out += [val]` must evaluate in comptime.
 fn array_fill_custom(n:int, val:u64) -> u64[] {
+    if (n <= 0) {
+        return [];
+    }
     var out:u64[] = [];
     for (i:int in 0...n) {
         out += [val];

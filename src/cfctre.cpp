@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -649,9 +650,10 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
     if (op == "+" && lhs.isArray() && rhs.isArray()) {
         auto l = extractArray(lhs.asArr());
         auto r = extractArray(rhs.asArr());
-        CTArrayHandle out = heap_.alloc(
-            static_cast<uint64_t>(l.size() + r.size()),
-            CTValue::uninit());
+        if (l.size() > (std::numeric_limits<uint64_t>::max)() - r.size())
+            return CTValue::uninit();
+        const uint64_t outLen = static_cast<uint64_t>(l.size() + r.size());
+        CTArrayHandle out = heap_.alloc(outLen, CTValue::uninit());
         ++stats_.arraysAllocated;
         uint64_t i = 0;
         for (const auto& v : l) heap_.store(out, static_cast<int64_t>(i++), v);
