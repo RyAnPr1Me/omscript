@@ -6826,14 +6826,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         mfHHash->addIncoming(mfHH2, mfHashLoop);
         builder->SetInsertPoint(mfHashDone);
         // Finalise hash: ensure non-zero (same as OmScript map)
-        llvm::PHINode* mfFinalHash = builder->CreatePHI(getDefaultType(), 2, "mf.fhash");
-        // Note: in the hashdone BB the PHIs above are already in the loop header.
-        // At mfHashDone, mfHHash holds the last iteration's value.
-        // We need to read the PHI value at exit.  We use the loop PHI directly.
         llvm::Value* mfH0 = builder->CreateICmpEQ(mfHHash, mfZero, "mf.h0");
         llvm::Value* mfHashFinal = builder->CreateSelect(mfH0,
             llvm::ConstantInt::get(getDefaultType(), 1), mfHHash, "mf.hashfinal");
-        mfFinalHash->addIncoming(mfHashFinal, mfHashDone);
         // Probe new map: slot = hash % cap; linear probe for empty slot
         llvm::Value* mfSlot = builder->CreateURem(mfHashFinal, mfNewCap, "mf.slot");
         llvm::BasicBlock* mfProbePre  = builder->GetInsertBlock();
@@ -7287,6 +7282,42 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_MEAN) {
         validateArgCount(expr, "array_mean", 1);
+        // Constant-fold array_mean([c0, c1, ...]) when the array is a compile-time literal.
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                bool allInt = true;
+                for (const auto& elem : cv->arrVal) {
+                    if (elem.kind != ConstValue::Kind::Integer) { allInt = false; break; }
+                }
+                if (allInt) {
+                    optStats_.constFolded++;
+                    if (cv->arrVal.empty())
+                        return llvm::ConstantInt::get(getDefaultType(), 0);
+                    int64_t total = 0;
+                    for (const auto& elem : cv->arrVal)
+                        total += elem.intVal;
+                    return llvm::ConstantInt::get(getDefaultType(),
+                        total / static_cast<int64_t>(cv->arrVal.size()));
+                }
+            }
+        }
+        // Constant-fold array_mean(array_fill(n, v)) → v when n > 0 (mean of n identical values)
+        if (auto* call = dynamic_cast<CallExpr*>(expr->arguments[0].get())) {
+            if (call->callee == "array_fill" && call->arguments.size() == 2) {
+                if (auto n = tryFoldInt(call->arguments[0].get())) {
+                    if (auto v = tryFoldInt(call->arguments[1].get())) {
+                        if (*n > 0) {
+                            optStats_.constFolded++;
+                            return llvm::ConstantInt::get(getDefaultType(), *v);
+                        }
+                        if (*n == 0) {
+                            optStats_.constFolded++;
+                            return llvm::ConstantInt::get(getDefaultType(), 0);
+                        }
+                    }
+                }
+            }
+        }
         llvm::Value* amArr = generateExpression(expr->arguments[0].get());
         amArr = toDefaultType(amArr);
         auto* amPtrTy = llvm::PointerType::getUnqual(*context);
@@ -7898,14 +7929,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     auto calleeIt = functions.find(expr->callee);
     if (calleeIt == functions.end() || !calleeIt->second) {
-        // Build "did you mean?" suggestion from known functions.
+        // Build "did you mean?" suggestion from both user-defined functions
+        // AND all built-in names so that typos like "abss" → "abs" work.
         std::string msg = "Unknown function: " + expr->callee;
         std::vector<std::string> candidates;
-        candidates.reserve(functions.size());
+        candidates.reserve(functions.size() + builtinLookup.size());
         for (const auto& kv : functions) {
             if (kv.second)
                 candidates.push_back(kv.getKey().str());
         }
+        for (const auto& kv : builtinLookup)
+            candidates.emplace_back(kv.first);
         std::string suggestion = suggestSimilar(expr->callee, candidates);
         if (!suggestion.empty()) {
             msg += " (did you mean '" + suggestion + "'?)";
