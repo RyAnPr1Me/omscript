@@ -3110,15 +3110,28 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                     return e;
                 }
                 // ── Priority 3: fn-scope resolution ────────────────────────────
-                // The namespace wasn't registered via import, so treat the
-                // final segment as the plain function name.  This lets any
-                // prefix act as an organisational hint without changing what
-                // gets called: `std::len(x)` resolves to `len(x)`, a user's
-                // `math::sqrt(x)` resolves to `sqrt(x)`, etc.
-                auto e = std::make_unique<IdentifierExpr>(segments.back());
-                e->line = token.line;
-                e->column = token.column;
-                return e;
+                // The namespace wasn't registered via import, so fall back to a
+                // flat name concatenation (scope1__scope2__...__func).  For the
+                // `std` namespace specifically this is important: `std::synthesize`
+                // must resolve to `std__synthesize` so that the CF-CTRE builtin
+                // evaluator and codegen builtins can dispatch on the full name.
+                // For other unregistered namespaces (e.g. `math::sqrt`, `user::fn`)
+                // we still use `segments.back()` for backwards compatibility.
+                {
+                    std::string flatName = segments[0];
+                    for (size_t i = 1; i < segments.size(); ++i)
+                        flatName += "__" + segments[i];
+                    // Only use the flat std__ name for the "std" namespace, where
+                    // we own the semantics and can dispatch by the full flat name.
+                    // For all other namespaces keep the existing "last segment wins"
+                    // behaviour to avoid breaking existing user code.
+                    const bool isStdNamespace = (segments[0] == "std");
+                    auto e = std::make_unique<IdentifierExpr>(
+                        isStdNamespace ? flatName : segments.back());
+                    e->line = token.line;
+                    e->column = token.column;
+                    return e;
+                }
             }
 
             // Not a call: single-level → classic enum member access.

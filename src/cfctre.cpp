@@ -14,6 +14,7 @@
 
 #include "cfctre.h"
 #include "ast.h"
+#include "synthesize.h"
 
 #include <algorithm>
 #include <cassert>
@@ -912,7 +913,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         "array_any","array_every","array_count",
         "str_split","str_join",
         // int/uint/bool: type casts handled by evalTypeCast; iN/uN handled dynamically
-        "int","uint","bool"
+        "int","uint","bool",
+        // Program synthesis stdlib function (flat-name form of std::synthesize)
+        "std__synthesize","std_synthesize"
     };
     // Also accept iN/uN type-cast names (handled by evalTypeCast via evalCall).
     auto isIntWidthCastName = [](const std::string& nm) -> bool {
@@ -1696,11 +1699,79 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (name == "bool")return CTValue::fromI64(v != 0 ? 1 : 0);
     }
 
+    // ── std::synthesize (program synthesis stdlib function) ──────────────
+    // Recognized as "std__synthesize" (scope-resolved flat name from the
+    // `std::` namespace lowering) or "std_synthesize" (legacy flat name).
+    // Signature: std::synthesize(examples, [ops], [max_depth], [cost_hint])
+    //   examples  : int[][]  — each inner array = [in0,in1,...,inN-1,expected]
+    //   ops       : string[] — allowed operators (optional)
+    //   max_depth : int      — expression depth limit (optional, default 4)
+    //   cost_hint : string   — "size"|"speed" (optional, default "speed")
+    // Returns the synthesized expression's value on the first example's inputs.
+    if ((name == "std__synthesize" || name == "std_synthesize") && n >= 1) {
+        // Argument 0: examples must be a concrete array of arrays.
+        CTArrayHandle examplesH = arrArg(0);
+        if (examplesH == CT_NULL_HANDLE) return std::nullopt;
+        const auto* outerArr = heap_.get(examplesH);
+        if (!outerArr || outerArr->data.empty()) return std::nullopt;
+
+        std::vector<omscript::SynthExample> examples;
+        size_t nInputs = 0;
+        for (const auto& inner : outerArr->data) {
+            if (!inner.isArray()) return std::nullopt;
+            const auto* innerArr = heap_.get(inner.asArr());
+            if (!innerArr || innerArr->data.size() < 2) return std::nullopt;
+            if (nInputs == 0) nInputs = innerArr->data.size() - 1;
+            if (innerArr->data.size() - 1 != nInputs) return std::nullopt; // mismatched widths
+
+            omscript::SynthExample ex;
+            ex.inputs.reserve(nInputs);
+            for (size_t i = 0; i < innerArr->data.size(); ++i) {
+                if (!innerArr->data[i].isInt()) return std::nullopt;
+                if (i < nInputs)
+                    ex.inputs.push_back(innerArr->data[i].asI64());
+                else
+                    ex.output = innerArr->data[i].asI64();
+            }
+            examples.push_back(std::move(ex));
+        }
+        if (examples.empty()) return std::nullopt;
+
+        omscript::SynthConfig cfg;
+        cfg.maxCandidates = 200000;
+
+        // Argument 1 (optional): ops array.
+        if (n >= 2) {
+            CTArrayHandle opsH = arrArg(1);
+            if (opsH != CT_NULL_HANDLE) {
+                const auto* opsArr = heap_.get(opsH);
+                if (opsArr) {
+                    for (const auto& opV : opsArr->data) {
+                        if (opV.isString()) cfg.ops.push_back(opV.asStr());
+                    }
+                }
+            }
+        }
+
+        // Argument 2 (optional): max_depth.
+        if (n >= 3 && args[2].isInt()) {
+            int d = static_cast<int>(args[2].asI64());
+            cfg.maxDepth = std::min(std::max(d, 1), 8);
+        }
+
+        // Argument 3 (optional): cost_hint.
+        if (n >= 4 && args[3].isString()) {
+            cfg.preferSize = (args[3].asStr() == "size");
+        }
+
+        omscript::SynthesisEngine eng;
+        auto result = eng.synthesize(static_cast<int>(nInputs), examples, cfg);
+        if (!result) return std::nullopt;
+        return CTValue::fromI64(result->firstOutput);
+    }
+
     return std::nullopt;
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Loop Reasoning Engine
 //
 // When a for-range loop body consists only of simple scalar accumulations
 // (x += delta, x -= delta, x *= c, x ^= c, x &= c, x |= c, x = expr,

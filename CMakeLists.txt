@@ -68,6 +68,9 @@ set(SRC
     # CF-CTRE — Cross-Function Compile-Time Reasoning Engine
     src/cfctre.cpp
 
+    # std::synthesize — compile-time program synthesis engine
+    src/synthesize.cpp
+
     # Codegen pipeline
     src/codegen.cpp
     src/codegen_builtins.cpp

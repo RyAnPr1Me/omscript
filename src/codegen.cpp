@@ -1,6 +1,7 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "egraph.h"
+#include "synthesize.h"
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -4311,6 +4312,13 @@ void CodeGenerator::generate(Program* program) {
     // reads/writes, or observable mutation.  Must run after autoDetectConstEvalFunctions
     // so that the constEvalFunctions_ set is already populated (those are pure).
     inferFunctionEffects(program);
+
+    // std::synthesize body synthesis: detect functions whose entire body is
+    //   return std__synthesize(examples_literal[, ops[, depth[, hint]]]);
+    // and replace that body with a synthesized expression tree.  Must run
+    // before CF-CTRE so the synthesized body is visible to the constant
+    // folder and purity analysis.
+    runSynthesisPass(program, verbose_);
 
     // CF-CTRE (Cross-Function Compile-Time Reasoning Engine): execute pure
     // functions across call boundaries at compile time.  Populates the
