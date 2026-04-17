@@ -2578,10 +2578,14 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
 
             // Case 1: both branches return the same concrete non-array value.
             // The result is independent of the condition → constant fold.
-            if (thenOk && thenF.hasReturned &&
-                !thenF.returnValue.isArray() && !thenF.returnValue.isSymbolic() &&
-                elseOk && elseF.hasReturned &&
-                !elseF.returnValue.isArray() && !elseF.returnValue.isSymbolic() &&
+            // Helper: branch returned a concrete scalar/string value we can merge.
+            auto isConcreteScalarReturn = [](const CTFrame& f) {
+                return f.hasReturned &&
+                       !f.returnValue.isArray() &&
+                       !f.returnValue.isSymbolic();
+            };
+            if (thenOk && elseOk &&
+                isConcreteScalarReturn(thenF) && isConcreteScalarReturn(elseF) &&
                 thenF.returnValue == elseF.returnValue) {
                 frame.returnValue = thenF.returnValue;
                 frame.hasReturned = true;
