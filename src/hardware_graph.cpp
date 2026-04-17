@@ -651,6 +651,44 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     return p;
 }
 
+/// Return an Intel Sandy Bridge / Ivy Bridge (Intel 2nd/3rd gen) profile.
+/// Sandy Bridge (2011): 6 execution ports, 3 integer ALUs, AVX 256-bit (no FMA).
+/// Ivy Bridge (2012): same microarchitecture, minor improvements.
+[[gnu::cold]] static MicroarchProfile sandyBridgeProfile() {
+    MicroarchProfile p;
+    p.name = "sandybridge";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 4;
+    p.issueWidth = 4;           // 4-wide dispatch
+    p.pipelineDepth = 14;
+    p.intALUs = 3;              // ports 0, 1, 5 (no port 6 like Skylake)
+    p.vecUnits = 2;             // ports 0 and 1 handle vector ops
+    p.fmaUnits = 0;             // Sandy Bridge has no FMA; introduced in Haswell
+    p.loadPorts = 2;            // ports 2, 3
+    p.storePorts = 1;           // port 4 (data); port 7 (address) counted in agus
+    p.branchUnits = 1;
+    p.agus = 2;
+    p.dividers = 1;
+    p.mulPortCount = 1;         // integer multiply: port 1 only
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 22;
+    p.latFPAdd = 5; p.latFPMul = 5; p.latFPDiv = 14; p.latFMA = 0;
+    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.33; p.tputIntMul = 1.0;
+    p.tputFPAdd = 1.0; p.tputFPMul = 1.0;
+    p.tputLoad = 0.5; p.tputStore = 1.0;
+    p.l1DSize = 32;   p.l1DLatency = 4;
+    p.l2Size = 256;   p.l2Latency = 12;
+    p.l3Size = 8192;  p.l3Latency = 36;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;        // AVX1 (256-bit SIMD, but FP ops are 2×128-bit)
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 15.0;
+    p.btbEntries = 2048;
+    p.memoryLatency = 200;
+    p.robSize = 168;
+    return p;
+}
+
 /// Return a Haswell (Intel 4th gen) microarchitecture profile.
 [[gnu::cold]] static MicroarchProfile haswellProfile() {
     MicroarchProfile p = skylakeProfile();
@@ -1047,6 +1085,18 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
 
     if (normalized == "haswell" || normalized == "broadwell")
         return haswellProfile();
+
+    if (normalized == "sandybridge" || normalized == "sandybridgep" ||
+        normalized == "ivybridge" || normalized == "ivybridgep" ||
+        normalized == "ivytown" || normalized == "jaketown" ||
+        normalized == "westmere" || normalized == "nehalem") {
+        auto p = sandyBridgeProfile();
+        p.name = normalized;
+        if (normalized == "ivybridge" || normalized == "ivybridgep" ||
+            normalized == "ivytown")
+            p.name = "ivybridge";
+        return p;
+    }
 
     if (normalized == "alderlake" || normalized == "raptorlake" ||
         normalized == "meteorlake" || normalized == "arrowlake")
@@ -2015,8 +2065,73 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
     return count;
 }
 
+/// Try to synthesize |absCV| as a 1- or 2-instruction shift+add/sub sequence.
+///
+/// Recognises three forms that are strictly cheaper than a multiply
+/// (latency 2 cycles vs 3, and use general ALU ports instead of the
+/// dedicated multiply port):
+///
+///   Power of 2 :  x << a              (1 shift, 1 cycle latency)
+///   Add form   :  (x << a) + (x << b) (2 shifts + 1 add, latency 2)
+///   Sub form   :  (x << a) - (x << b) (2 shifts + 1 sub, latency 2)
+///
+/// where, in the Add/Sub forms, b may be 0, which means the second operand
+/// is just `x` itself (no shift needed).
+///
+/// Returns the synthesised Value*, or nullptr if no 2-instruction form exists.
+[[nodiscard]] static llvm::Value*
+tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
+                llvm::Type* ty, uint64_t absCV, unsigned bitWidth) {
+    if (absCV == 0 || bitWidth == 0) return nullptr;
+    // Safety: avoid shifts >= bitWidth (UB in LLVM IR).
+    if (bitWidth > 64) bitWidth = 64;
+    // Reject constants that cannot be represented in the integer type.
+    if (bitWidth < 64 && absCV >= (uint64_t(1) << bitWidth)) return nullptr;
+
+    auto mk  = [&](unsigned sh) -> llvm::Value* {
+        return llvm::ConstantInt::get(ty, static_cast<uint64_t>(sh));
+    };
+    auto shl = [&](llvm::Value* v, unsigned sh) -> llvm::Value* {
+        return (sh == 0) ? v : builder.CreateShl(v, mk(sh), "sr.shl");
+    };
+
+    // ── Form 1: power of 2 ─────────────────────────────────────────────────
+    if ((absCV & (absCV - 1)) == 0) {
+        unsigned sh = static_cast<unsigned>(__builtin_ctzll(absCV));
+        if (sh < bitWidth) return shl(xv, sh);
+        return nullptr;
+    }
+
+    // ── Form 2: exactly 2 set bits  → (x << hi) + (x << lo) ───────────────
+    if (__builtin_popcountll(absCV) == 2) {
+        unsigned lo = static_cast<unsigned>(__builtin_ctzll(absCV));
+        unsigned hi = static_cast<unsigned>(63 - __builtin_clzll(absCV));
+        if (hi < bitWidth)
+            return builder.CreateAdd(shl(xv, hi), shl(xv, lo), "sr.add2");
+        return nullptr;
+    }
+
+    // ── Form 3: 2^a - 2^b  (a > b)  → (x << a) - (x << b) ────────────────
+    // absCV = 2^a - 2^b  ⟺  absCV + 2^b is a power of 2.
+    for (unsigned b = 0; b < bitWidth; ++b) {
+        uint64_t adjusted = absCV + (uint64_t(1) << b);
+        if ((adjusted & (adjusted - 1)) == 0) {
+            unsigned a = static_cast<unsigned>(__builtin_ctzll(adjusted));
+            if (a > b && a < bitWidth)
+                return builder.CreateSub(shl(xv, a), shl(xv, b), "sr.sub2");
+        }
+    }
+
+    return nullptr;
+}
+
 /// Integer strength reduction: replace multiply-by-small-constant with
 /// shifts and adds, which execute on more ports and have lower latency.
+///
+/// Covers ALL constants expressible as 2^a ± 2^b (a > b ≥ 0) in 2
+/// instructions, plus 3-set-bit constants in 3 instructions when the
+/// multiply unit is the throughput bottleneck.
+///
 /// Returns the number of multiplies strength-reduced.
 [[gnu::hot]] static unsigned integerStrengthReduce(llvm::Function& func,
                                        const MicroarchProfile& profile) {
@@ -2044,587 +2159,45 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
                     break;
                 }
             }
-            if (!xv || cv == 0) continue;
+            if (!xv || cv == 0 || cv == 1 || cv == -1) continue;
 
             llvm::IRBuilder<> builder(&inst);
             llvm::Type* ty = inst.getType();
-            auto mk = [&](int64_t v) { return llvm::ConstantInt::get(ty, v); };
-            auto shl = [&](llvm::Value* v, int64_t sh) {
-                return builder.CreateShl(v, mk(sh), "sr_shl");
-            };
+            unsigned bitWidth = ty->getIntegerBitWidth();
 
-            llvm::Value* rep = nullptr;
-            switch (cv) {
-            // 2-instruction sequences
-            case  3: rep = builder.CreateAdd(shl(xv,1), xv, "sr_mul3"); break;
-            case  5: rep = builder.CreateAdd(shl(xv,2), xv, "sr_mul5"); break;
-            case  6: rep = builder.CreateAdd(shl(xv,2), shl(xv,1), "sr_mul6"); break;
-            case  7: rep = builder.CreateSub(shl(xv,3), xv, "sr_mul7"); break;
-            case  9: rep = builder.CreateAdd(shl(xv,3), xv, "sr_mul9"); break;
-            case 10: rep = builder.CreateAdd(shl(xv,3), shl(xv,1), "sr_mul10"); break;
-            case 12: rep = builder.CreateAdd(shl(xv,3), shl(xv,2), "sr_mul12"); break;
-            case 15: rep = builder.CreateSub(shl(xv,4), xv, "sr_mul15"); break;
-            case 17: rep = builder.CreateAdd(shl(xv,4), xv, "sr_mul17"); break;
-            case 18: rep = builder.CreateAdd(shl(xv,4), shl(xv,1), "sr_mul18"); break;
-            case 20: rep = builder.CreateAdd(shl(xv,4), shl(xv,2), "sr_mul20"); break;
-            case 24: rep = builder.CreateAdd(shl(xv,4), shl(xv,3), "sr_mul24"); break;
-            case 31: rep = builder.CreateSub(shl(xv,5), xv, "sr_mul31"); break;
-            case 33: rep = builder.CreateAdd(shl(xv,5), xv, "sr_mul33"); break;
-            case 48: rep = builder.CreateAdd(shl(xv,5), shl(xv,4), "sr_mul48"); break;
-            case 63: rep = builder.CreateSub(shl(xv,6), xv, "sr_mul63"); break;
-            case 65: rep = builder.CreateAdd(shl(xv,6), xv, "sr_mul65"); break;
-            case 96: rep = builder.CreateAdd(shl(xv,6), shl(xv,5), "sr_mul96"); break;
-            case 127: rep = builder.CreateSub(shl(xv,7), xv, "sr_mul127"); break;
-            case 255: rep = builder.CreateSub(shl(xv,8), xv, "sr_mul255"); break;
-            // 3-instruction sequences
-            case 11: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,1), "t"), xv, "sr_mul11"); break;
-            case 13: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,2), "t"), xv, "sr_mul13"); break;
-            case 14: rep = builder.CreateSub(shl(xv,4), shl(xv,1), "sr_mul14"); break;
-            case 19: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1), "t"), xv, "sr_mul19"); break;
-            case 21: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), xv, "sr_mul21"); break;
-            case 22: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), shl(xv,1), "sr_mul22"); break;
-            case 25: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3), "t"), xv, "sr_mul25"); break;
-            case 26: rep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), shl(xv,1), "sr_mul26"); break;
-            case 27: rep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul27"); break;
-            case 28: rep = builder.CreateSub(shl(xv,5), shl(xv,2), "sr_mul28"); break;
-            case 30: rep = builder.CreateSub(shl(xv,5), shl(xv,1), "sr_mul30"); break;
-            case 34: rep = builder.CreateAdd(shl(xv,5), shl(xv,1), "sr_mul34"); break;
-            case 36: rep = builder.CreateAdd(shl(xv,5), shl(xv,2), "sr_mul36"); break;
-            case 37: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul37"); break;
-            case 40: rep = builder.CreateAdd(shl(xv,5), shl(xv,3), "sr_mul40"); break;
-            case 41: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3), "t"), xv, "sr_mul41"); break;
-            case 49: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4), "t"), xv, "sr_mul49"); break;
-            case 50: rep = builder.CreateAdd(builder.CreateSub(shl(xv,6), shl(xv,4), "t"), shl(xv,1), "sr_mul50"); break;
-            case 60: rep = builder.CreateSub(shl(xv,6), shl(xv,2), "sr_mul60"); break;
-            case 100: {
-                // n*100 → (n<<7) - (n<<5) + (n<<2)  [128n - 32n + 4n]
-                auto* t1 = builder.CreateSub(shl(xv,7), shl(xv,5), "sr_mul100.t");
-                rep = builder.CreateAdd(t1, shl(xv,2), "sr_mul100");
-                break;
-            }
-            case 120: rep = builder.CreateSub(shl(xv,7), shl(xv,3), "sr_mul120"); break;
-            case 200: {
-                // n*200 → (n<<8) - (n<<6) + (n<<3)  [256n - 64n + 8n]
-                auto* t1 = builder.CreateSub(shl(xv,8), shl(xv,6), "sr_mul200.t");
-                rep = builder.CreateAdd(t1, shl(xv,3), "sr_mul200");
-                break;
-            }
-            // ── Extended multiply-by-constant patterns (2-instruction) ─────────
-            case  56: rep = builder.CreateSub(shl(xv,6), shl(xv,3), "sr_mul56"); break;
-            case  57: {
-                // n*57 → (n<<6) - (n<<3) + n  (= 64n - 8n + n)
-                auto* t1 = builder.CreateSub(shl(xv,6), shl(xv,3), "sr_mul57.t");
-                rep = builder.CreateAdd(t1, xv, "sr_mul57");
-                break;
-            }
-            case  62: rep = builder.CreateSub(shl(xv,6), shl(xv,1), "sr_mul62"); break;
-            case  66: rep = builder.CreateAdd(shl(xv,6), shl(xv,1), "sr_mul66"); break;
-            case  68: rep = builder.CreateAdd(shl(xv,6), shl(xv,2), "sr_mul68"); break;
-            case  72: rep = builder.CreateAdd(shl(xv,6), shl(xv,3), "sr_mul72"); break;
-            case  80: rep = builder.CreateAdd(shl(xv,6), shl(xv,4), "sr_mul80"); break;
-            case 112: rep = builder.CreateSub(shl(xv,7), shl(xv,4), "sr_mul112"); break;
-            case 129: rep = builder.CreateAdd(shl(xv,7), xv,         "sr_mul129"); break;
-            case 136: rep = builder.CreateAdd(shl(xv,7), shl(xv,3), "sr_mul136"); break;
-            case 144: rep = builder.CreateAdd(shl(xv,7), shl(xv,4), "sr_mul144"); break;
-            case 160: rep = builder.CreateAdd(shl(xv,7), shl(xv,5), "sr_mul160"); break;
-            case 192: rep = builder.CreateAdd(shl(xv,7), shl(xv,6), "sr_mul192"); break;
-            case 224: rep = builder.CreateSub(shl(xv,8), shl(xv,5), "sr_mul224"); break;
-            case 240: rep = builder.CreateSub(shl(xv,8), shl(xv,4), "sr_mul240"); break;
-            case 248: rep = builder.CreateSub(shl(xv,8), shl(xv,3), "sr_mul248"); break;
-            case 257: rep = builder.CreateAdd(shl(xv,8), xv,         "sr_mul257"); break;
-            case 264: rep = builder.CreateAdd(shl(xv,8), shl(xv,3), "sr_mul264"); break;
-            case 272: rep = builder.CreateAdd(shl(xv,8), shl(xv,4), "sr_mul272"); break;
-            case 288: rep = builder.CreateAdd(shl(xv,8), shl(xv,5), "sr_mul288"); break;
-            case 320: rep = builder.CreateAdd(shl(xv,8), shl(xv,6), "sr_mul320"); break;
-            case 384: rep = builder.CreateAdd(shl(xv,8), shl(xv,7), "sr_mul384"); break;
-            case 448: rep = builder.CreateSub(shl(xv,9), shl(xv,6), "sr_mul448"); break;
-            case 480: rep = builder.CreateSub(shl(xv,9), shl(xv,5), "sr_mul480"); break;
-            case 496: rep = builder.CreateSub(shl(xv,9), shl(xv,4), "sr_mul496"); break;
-            case 504: rep = builder.CreateSub(shl(xv,9), shl(xv,3), "sr_mul504"); break;
-            case 511: rep = builder.CreateSub(shl(xv,9), xv,         "sr_mul511"); break;
-            case 513: rep = builder.CreateAdd(shl(xv,9), xv,         "sr_mul513"); break;
-            case 640: rep = builder.CreateAdd(shl(xv,9), shl(xv,7), "sr_mul640"); break;
-            case 768: rep = builder.CreateAdd(shl(xv,9), shl(xv,8), "sr_mul768"); break;
-            case 1023: rep = builder.CreateSub(shl(xv,10), xv,        "sr_mul1023"); break;
-            case 1025: rep = builder.CreateAdd(shl(xv,10), xv,        "sr_mul1025"); break;
-            case 1152: rep = builder.CreateAdd(shl(xv,10), shl(xv,7), "sr_mul1152"); break;
-            case 1280: rep = builder.CreateAdd(shl(xv,10), shl(xv,8), "sr_mul1280"); break;
-            case 1536: rep = builder.CreateAdd(shl(xv,10), shl(xv,9), "sr_mul1536"); break;
-            case 1792: rep = builder.CreateSub(shl(xv,11), shl(xv,8), "sr_mul1792"); break;
-            case 2047: rep = builder.CreateSub(shl(xv,11), xv,        "sr_mul2047"); break;
-            case 2048: rep = shl(xv,11); break;
-            case 2049: rep = builder.CreateAdd(shl(xv,11), xv,        "sr_mul2049"); break;
-            // ── n×128 family ──────────────────────────────────────────────────────
-            case 124:  rep = builder.CreateSub(shl(xv,7), shl(xv,2),  "sr_mul124");  break;
-            case 126:  rep = builder.CreateSub(shl(xv,7), shl(xv,1),  "sr_mul126");  break;
-            case 130:  rep = builder.CreateAdd(shl(xv,7), shl(xv,1),  "sr_mul130");  break;
-            case 132:  rep = builder.CreateAdd(shl(xv,7), shl(xv,2),  "sr_mul132");  break;
-            // ── n×256 family ──────────────────────────────────────────────────────
-            case 252:  rep = builder.CreateSub(shl(xv,8), shl(xv,2),  "sr_mul252");  break;
-            case 254:  rep = builder.CreateSub(shl(xv,8), shl(xv,1),  "sr_mul254");  break;
-            case 258:  rep = builder.CreateAdd(shl(xv,8), shl(xv,1),  "sr_mul258");  break;
-            case 260:  rep = builder.CreateAdd(shl(xv,8), shl(xv,2),  "sr_mul260");  break;
-            // ── n×512 family ──────────────────────────────────────────────────────
-            case 508:  rep = builder.CreateSub(shl(xv,9), shl(xv,2),  "sr_mul508");  break;
-            case 510:  rep = builder.CreateSub(shl(xv,9), shl(xv,1),  "sr_mul510");  break;
-            case 514:  rep = builder.CreateAdd(shl(xv,9), shl(xv,1),  "sr_mul514");  break;
-            case 516:  rep = builder.CreateAdd(shl(xv,9), shl(xv,2),  "sr_mul516");  break;
-            case 520:  rep = builder.CreateAdd(shl(xv,9), shl(xv,3),  "sr_mul520");  break;
-            case 528:  rep = builder.CreateAdd(shl(xv,9), shl(xv,4),  "sr_mul528");  break;
-            case 544:  rep = builder.CreateAdd(shl(xv,9), shl(xv,5),  "sr_mul544");  break;
-            case 576:  rep = builder.CreateAdd(shl(xv,9), shl(xv,6),  "sr_mul576");  break;
-            // ── n×1024 family ─────────────────────────────────────────────────────
-            case 960:  rep = builder.CreateSub(shl(xv,10), shl(xv,6), "sr_mul960");  break;
-            case 992:  rep = builder.CreateSub(shl(xv,10), shl(xv,5), "sr_mul992");  break;
-            case 1008: rep = builder.CreateSub(shl(xv,10), shl(xv,4), "sr_mul1008"); break;
-            case 1016: rep = builder.CreateSub(shl(xv,10), shl(xv,3), "sr_mul1016"); break;
-            case 1020: rep = builder.CreateSub(shl(xv,10), shl(xv,2), "sr_mul1020"); break;
-            case 1022: rep = builder.CreateSub(shl(xv,10), shl(xv,1), "sr_mul1022"); break;
-            case 1026: rep = builder.CreateAdd(shl(xv,10), shl(xv,1), "sr_mul1026"); break;
-            case 1028: rep = builder.CreateAdd(shl(xv,10), shl(xv,2), "sr_mul1028"); break;
-            case 1032: rep = builder.CreateAdd(shl(xv,10), shl(xv,3), "sr_mul1032"); break;
-            case 1040: rep = builder.CreateAdd(shl(xv,10), shl(xv,4), "sr_mul1040"); break;
-            case 1056: rep = builder.CreateAdd(shl(xv,10), shl(xv,5), "sr_mul1056"); break;
-            case 1088: rep = builder.CreateAdd(shl(xv,10), shl(xv,6), "sr_mul1088"); break;
-            // ── n×2048 family ─────────────────────────────────────────────────────
-            case 1920: rep = builder.CreateSub(shl(xv,11), shl(xv,7), "sr_mul1920"); break;
-            case 1984: rep = builder.CreateSub(shl(xv,11), shl(xv,6), "sr_mul1984"); break;
-            case 2016: rep = builder.CreateSub(shl(xv,11), shl(xv,5), "sr_mul2016"); break;
-            case 2032: rep = builder.CreateSub(shl(xv,11), shl(xv,4), "sr_mul2032"); break;
-            case 2040: rep = builder.CreateSub(shl(xv,11), shl(xv,3), "sr_mul2040"); break;
-            case 2044: rep = builder.CreateSub(shl(xv,11), shl(xv,2), "sr_mul2044"); break;
-            case 2046: rep = builder.CreateSub(shl(xv,11), shl(xv,1), "sr_mul2046"); break;
-            case 2050: rep = builder.CreateAdd(shl(xv,11), shl(xv,1), "sr_mul2050"); break;
-            case 2052: rep = builder.CreateAdd(shl(xv,11), shl(xv,2), "sr_mul2052"); break;
-            case 2056: rep = builder.CreateAdd(shl(xv,11), shl(xv,3), "sr_mul2056"); break;
-            case 2064: rep = builder.CreateAdd(shl(xv,11), shl(xv,4), "sr_mul2064"); break;
-            case 2080: rep = builder.CreateAdd(shl(xv,11), shl(xv,5), "sr_mul2080"); break;
-            case 2112: rep = builder.CreateAdd(shl(xv,11), shl(xv,6), "sr_mul2112"); break;
-            case 2176: rep = builder.CreateAdd(shl(xv,11), shl(xv,7), "sr_mul2176"); break;
-            case 2304: rep = builder.CreateAdd(shl(xv,11), shl(xv,8), "sr_mul2304"); break;
-            case 2560: rep = builder.CreateAdd(shl(xv,11), shl(xv,9), "sr_mul2560"); break;
-            case 3072: rep = builder.CreateAdd(shl(xv,11), shl(xv,10),"sr_mul3072"); break;
-            // ── n×4096 family ─────────────────────────────────────────────────────
-            case 3584: rep = builder.CreateSub(shl(xv,12), shl(xv,9), "sr_mul3584"); break;
-            case 3840: rep = builder.CreateSub(shl(xv,12), shl(xv,8), "sr_mul3840"); break;
-            case 3968: rep = builder.CreateSub(shl(xv,12), shl(xv,7), "sr_mul3968"); break;
-            case 4032: rep = builder.CreateSub(shl(xv,12), shl(xv,6), "sr_mul4032"); break;
-            case 4064: rep = builder.CreateSub(shl(xv,12), shl(xv,5), "sr_mul4064"); break;
-            case 4080: rep = builder.CreateSub(shl(xv,12), shl(xv,4), "sr_mul4080"); break;
-            case 4088: rep = builder.CreateSub(shl(xv,12), shl(xv,3), "sr_mul4088"); break;
-            case 4092: rep = builder.CreateSub(shl(xv,12), shl(xv,2), "sr_mul4092"); break;
-            case 4094: rep = builder.CreateSub(shl(xv,12), shl(xv,1), "sr_mul4094"); break;
-            case 4095: rep = builder.CreateSub(shl(xv,12), xv,         "sr_mul4095"); break;
-            case 4096: rep = shl(xv,12); break;
-            case 4097: rep = builder.CreateAdd(shl(xv,12), xv,         "sr_mul4097"); break;
-            case 4098: rep = builder.CreateAdd(shl(xv,12), shl(xv,1),  "sr_mul4098"); break;
-            case 4100: rep = builder.CreateAdd(shl(xv,12), shl(xv,2),  "sr_mul4100"); break;
-            case 4104: rep = builder.CreateAdd(shl(xv,12), shl(xv,3),  "sr_mul4104"); break;
-            case 4112: rep = builder.CreateAdd(shl(xv,12), shl(xv,4),  "sr_mul4112"); break;
-            case 4128: rep = builder.CreateAdd(shl(xv,12), shl(xv,5),  "sr_mul4128"); break;
-            case 4160: rep = builder.CreateAdd(shl(xv,12), shl(xv,6),  "sr_mul4160"); break;
-            case 4224: rep = builder.CreateAdd(shl(xv,12), shl(xv,7),  "sr_mul4224"); break;
-            case 4352: rep = builder.CreateAdd(shl(xv,12), shl(xv,8),  "sr_mul4352"); break;
-            case 4608: rep = builder.CreateAdd(shl(xv,12), shl(xv,9),  "sr_mul4608"); break;
-            case 5120: rep = builder.CreateAdd(shl(xv,12), shl(xv,10), "sr_mul5120"); break;
-            case 6144: rep = builder.CreateAdd(shl(xv,12), shl(xv,11), "sr_mul6144"); break;
-            // ── n×8192 family ─────────────────────────────────────────────────
-            case 7168:  rep = builder.CreateSub(shl(xv,13), shl(xv,10), "sr_mul7168");  break;
-            case 7680:  rep = builder.CreateSub(shl(xv,13), shl(xv,9),  "sr_mul7680");  break;
-            case 7936:  rep = builder.CreateSub(shl(xv,13), shl(xv,8),  "sr_mul7936");  break;
-            case 8064:  rep = builder.CreateSub(shl(xv,13), shl(xv,7),  "sr_mul8064");  break;
-            case 8128:  rep = builder.CreateSub(shl(xv,13), shl(xv,6),  "sr_mul8128");  break;
-            case 8160:  rep = builder.CreateSub(shl(xv,13), shl(xv,5),  "sr_mul8160");  break;
-            case 8176:  rep = builder.CreateSub(shl(xv,13), shl(xv,4),  "sr_mul8176");  break;
-            case 8184:  rep = builder.CreateSub(shl(xv,13), shl(xv,3),  "sr_mul8184");  break;
-            case 8188:  rep = builder.CreateSub(shl(xv,13), shl(xv,2),  "sr_mul8188");  break;
-            case 8190:  rep = builder.CreateSub(shl(xv,13), shl(xv,1),  "sr_mul8190");  break;
-            case 8191:  rep = builder.CreateSub(shl(xv,13), xv,          "sr_mul8191");  break;
-            case 8192:  rep = shl(xv,13); break;
-            case 8193:  rep = builder.CreateAdd(shl(xv,13), xv,          "sr_mul8193");  break;
-            case 8194:  rep = builder.CreateAdd(shl(xv,13), shl(xv,1),  "sr_mul8194");  break;
-            case 8196:  rep = builder.CreateAdd(shl(xv,13), shl(xv,2),  "sr_mul8196");  break;
-            case 8200:  rep = builder.CreateAdd(shl(xv,13), shl(xv,3),  "sr_mul8200");  break;
-            case 8208:  rep = builder.CreateAdd(shl(xv,13), shl(xv,4),  "sr_mul8208");  break;
-            case 8224:  rep = builder.CreateAdd(shl(xv,13), shl(xv,5),  "sr_mul8224");  break;
-            case 8256:  rep = builder.CreateAdd(shl(xv,13), shl(xv,6),  "sr_mul8256");  break;
-            case 8320:  rep = builder.CreateAdd(shl(xv,13), shl(xv,7),  "sr_mul8320");  break;
-            case 8448:  rep = builder.CreateAdd(shl(xv,13), shl(xv,8),  "sr_mul8448");  break;
-            case 8704:  rep = builder.CreateAdd(shl(xv,13), shl(xv,9),  "sr_mul8704");  break;
-            case 9216:  rep = builder.CreateAdd(shl(xv,13), shl(xv,10), "sr_mul9216");  break;
-            case 10240: rep = builder.CreateAdd(shl(xv,13), shl(xv,11), "sr_mul10240"); break;
-            case 12288: rep = builder.CreateAdd(shl(xv,13), shl(xv,12), "sr_mul12288"); break;
-            // ── n×16384 family ──────────────────────────────────────────────────────
-            case 14336: rep = builder.CreateSub(shl(xv,14), shl(xv,11), "sr_mul14336"); break;
-            case 15360: rep = builder.CreateSub(shl(xv,14), shl(xv,10), "sr_mul15360"); break;
-            case 16384: rep = shl(xv,14); break;
-            case 16385: rep = builder.CreateAdd(shl(xv,14), xv,          "sr_mul16385"); break;
-            case 16386: rep = builder.CreateAdd(shl(xv,14), shl(xv,1),   "sr_mul16386"); break;
-            case 16388: rep = builder.CreateAdd(shl(xv,14), shl(xv,2),   "sr_mul16388"); break;
-            case 16392: rep = builder.CreateAdd(shl(xv,14), shl(xv,3),   "sr_mul16392"); break;
-            case 16400: rep = builder.CreateAdd(shl(xv,14), shl(xv,4),   "sr_mul16400"); break;
-            case 16416: rep = builder.CreateAdd(shl(xv,14), shl(xv,5),   "sr_mul16416"); break;
-            case 16448: rep = builder.CreateAdd(shl(xv,14), shl(xv,6),   "sr_mul16448"); break;
-            case 16512: rep = builder.CreateAdd(shl(xv,14), shl(xv,7),   "sr_mul16512"); break;
-            case 16640: rep = builder.CreateAdd(shl(xv,14), shl(xv,8),   "sr_mul16640"); break;
-            case 16896: rep = builder.CreateAdd(shl(xv,14), shl(xv,9),   "sr_mul16896"); break;
-            case 17408: rep = builder.CreateAdd(shl(xv,14), shl(xv,10),  "sr_mul17408"); break;
-            case 18432: rep = builder.CreateAdd(shl(xv,14), shl(xv,11),  "sr_mul18432"); break;
-            case 20480: rep = builder.CreateAdd(shl(xv,14), shl(xv,12),  "sr_mul20480"); break;
-            case 24576: rep = builder.CreateAdd(shl(xv,14), shl(xv,13),  "sr_mul24576"); break;
-            // ── n×32768 family ──────────────────────────────────────────────────────
-            case 28672: rep = builder.CreateSub(shl(xv,15), shl(xv,12), "sr_mul28672"); break;
-            case 30720: rep = builder.CreateSub(shl(xv,15), shl(xv,11), "sr_mul30720"); break;
-            case 32768: rep = shl(xv,15); break;
-            case 32769: rep = builder.CreateAdd(shl(xv,15), xv,          "sr_mul32769"); break;
-            case 32770: rep = builder.CreateAdd(shl(xv,15), shl(xv,1),   "sr_mul32770"); break;
-            case 32772: rep = builder.CreateAdd(shl(xv,15), shl(xv,2),   "sr_mul32772"); break;
-            case 32776: rep = builder.CreateAdd(shl(xv,15), shl(xv,3),   "sr_mul32776"); break;
-            case 32800: rep = builder.CreateAdd(shl(xv,15), shl(xv,5),   "sr_mul32800"); break;
-            case 32896: rep = builder.CreateAdd(shl(xv,15), shl(xv,7),   "sr_mul32896"); break;
-            case 33024: rep = builder.CreateAdd(shl(xv,15), shl(xv,8),   "sr_mul33024"); break;
-            case 33280: rep = builder.CreateAdd(shl(xv,15), shl(xv,9),   "sr_mul33280"); break;
-            case 33792: rep = builder.CreateAdd(shl(xv,15), shl(xv,10),  "sr_mul33792"); break;
-            case 34816: rep = builder.CreateAdd(shl(xv,15), shl(xv,11),  "sr_mul34816"); break;
-            case 36864: rep = builder.CreateAdd(shl(xv,15), shl(xv,12),  "sr_mul36864"); break;
-            case 40960: rep = builder.CreateAdd(shl(xv,15), shl(xv,13),  "sr_mul40960"); break;
-            case 49152: rep = builder.CreateAdd(shl(xv,15), shl(xv,14),  "sr_mul49152"); break;
-            // ── n×65536 family ──────────────────────────────────────────────────────
-            case 57344: rep = builder.CreateSub(shl(xv,16), shl(xv,13), "sr_mul57344"); break;
-            case 61440: rep = builder.CreateSub(shl(xv,16), shl(xv,12), "sr_mul61440"); break;
-            case 65536: rep = shl(xv,16); break;
-            case 65537: rep = builder.CreateAdd(shl(xv,16), xv,          "sr_mul65537"); break;
-            case 65538: rep = builder.CreateAdd(shl(xv,16), shl(xv,1),   "sr_mul65538"); break;
-            case 65540: rep = builder.CreateAdd(shl(xv,16), shl(xv,2),   "sr_mul65540"); break;
-            case 65544: rep = builder.CreateAdd(shl(xv,16), shl(xv,3),   "sr_mul65544"); break;
-            case 65600: rep = builder.CreateAdd(shl(xv,16), shl(xv,6),   "sr_mul65600"); break;
-            case 65664: rep = builder.CreateAdd(shl(xv,16), shl(xv,7),   "sr_mul65664"); break;
-            case 65792: rep = builder.CreateAdd(shl(xv,16), shl(xv,8),   "sr_mul65792"); break;
-            case 66048: rep = builder.CreateAdd(shl(xv,16), shl(xv,9),   "sr_mul66048"); break;
-            case 66560: rep = builder.CreateAdd(shl(xv,16), shl(xv,10),  "sr_mul66560"); break;
-            case 67584: rep = builder.CreateAdd(shl(xv,16), shl(xv,11),  "sr_mul67584"); break;
-            case 69632: rep = builder.CreateAdd(shl(xv,16), shl(xv,12),  "sr_mul69632"); break;
-            case 73728: rep = builder.CreateAdd(shl(xv,16), shl(xv,13),  "sr_mul73728"); break;
-            case 81920: rep = builder.CreateAdd(shl(xv,16), shl(xv,14),  "sr_mul81920"); break;
-            case 98304: rep = builder.CreateAdd(shl(xv,16), shl(xv,15),  "sr_mul98304"); break;
-            case 114688: rep = builder.CreateSub(shl(xv,17), shl(xv,14), "sr_mul114688"); break;
-            case 122880: rep = builder.CreateSub(shl(xv,17), shl(xv,13), "sr_mul122880"); break;
-            case 131072: rep = shl(xv,17); break;
-            case 131073: rep = builder.CreateAdd(shl(xv,17), xv,          "sr_mul131073"); break;
-            case 131074: rep = builder.CreateAdd(shl(xv,17), shl(xv,1),   "sr_mul131074"); break;
-            case 131076: rep = builder.CreateAdd(shl(xv,17), shl(xv,2),   "sr_mul131076"); break;
-            case 131080: rep = builder.CreateAdd(shl(xv,17), shl(xv,3),   "sr_mul131080"); break;
-            case 131136: rep = builder.CreateAdd(shl(xv,17), shl(xv,6),   "sr_mul131136"); break;
-            case 131200: rep = builder.CreateAdd(shl(xv,17), shl(xv,7),   "sr_mul131200"); break;
-            case 131328: rep = builder.CreateAdd(shl(xv,17), shl(xv,8),   "sr_mul131328"); break;
-            case 131584: rep = builder.CreateAdd(shl(xv,17), shl(xv,9),   "sr_mul131584"); break;
-            case 132096: rep = builder.CreateAdd(shl(xv,17), shl(xv,10),  "sr_mul132096"); break;
-            case 133120: rep = builder.CreateAdd(shl(xv,17), shl(xv,11),  "sr_mul133120"); break;
-            case 135168: rep = builder.CreateAdd(shl(xv,17), shl(xv,12),  "sr_mul135168"); break;
-            case 139264: rep = builder.CreateAdd(shl(xv,17), shl(xv,13),  "sr_mul139264"); break;
-            case 147456: rep = builder.CreateAdd(shl(xv,17), shl(xv,14),  "sr_mul147456"); break;
-            case 163840: rep = builder.CreateAdd(shl(xv,17), shl(xv,15),  "sr_mul163840"); break;
-            case 196608: rep = builder.CreateAdd(shl(xv,17), shl(xv,16),  "sr_mul196608"); break;
-            // ── Extended multiply-by-constant patterns (3-instruction) ─────────
-            case 1000: {
-                // n*1000 → (n<<10) - (n<<5) + (n<<3)  [1024n - 32n + 8n]
-                auto* t1 = builder.CreateSub(shl(xv,10), shl(xv,5), "sr_mul1000.t");
-                rep = builder.CreateAdd(t1, shl(xv,3), "sr_mul1000");
-                break;
-            }
-            default: break;
+            // Work with the absolute value; negate the result if cv was negative.
+            bool negate = (cv < 0);
+            uint64_t absCV = negate ? static_cast<uint64_t>(-cv)
+                                    : static_cast<uint64_t>(cv);
+
+            llvm::Value* rep = tryShiftAddForm(builder, xv, ty, absCV, bitWidth);
+
+            // ── 3-instruction form: 3 set bits → 2 shifts + 2 adds ──────────
+            // Latency is 3 cycles (same as mul) but uses general ALU ports
+            // instead of the scarce multiply port.  Only generate when the
+            // multiply port count is less than the number of ALU ports, i.e.
+            // when multiply throughput is the bottleneck.
+            if (!rep && profile.mulPortCount < profile.intALUs &&
+                __builtin_popcountll(absCV) == 3) {
+                unsigned b0 = static_cast<unsigned>(__builtin_ctzll(absCV));
+                uint64_t rest = absCV ^ (uint64_t(1) << b0);
+                unsigned b1 = static_cast<unsigned>(__builtin_ctzll(rest));
+                unsigned b2 = static_cast<unsigned>(63 - __builtin_clzll(rest));
+                if (b2 < bitWidth) {
+                    auto mk2 = [&](unsigned sh) -> llvm::Value* {
+                        return llvm::ConstantInt::get(ty, static_cast<uint64_t>(sh));
+                    };
+                    auto sh2 = [&](llvm::Value* v, unsigned sh) -> llvm::Value* {
+                        return (sh == 0) ? v
+                             : builder.CreateShl(v, mk2(sh), "sr.shl3");
+                    };
+                    auto* t = builder.CreateAdd(sh2(xv, b2), sh2(xv, b1), "sr.add3a");
+                    rep = builder.CreateAdd(t, sh2(xv, b0), "sr.add3b");
+                }
             }
 
-            // Negative constant: compute |cv|'s strength-reduced form, then negate.
-            // e.g. x * -7 → -(x * 7) → -((x<<3) - x)
-            if (!rep && cv < -1) {
-                int64_t absCV = -cv;
-                llvm::Value* posRep = nullptr;
-                switch (absCV) {
-                // 2-instruction positive sequences (shift + add/sub)
-                case  3: posRep = builder.CreateAdd(shl(xv,1), xv, "sr_mul3"); break;
-                case  5: posRep = builder.CreateAdd(shl(xv,2), xv, "sr_mul5"); break;
-                case  6: posRep = builder.CreateAdd(shl(xv,2), shl(xv,1), "sr_mul6"); break;
-                case  7: posRep = builder.CreateSub(shl(xv,3), xv, "sr_mul7"); break;
-                case  9: posRep = builder.CreateAdd(shl(xv,3), xv, "sr_mul9"); break;
-                case 10: posRep = builder.CreateAdd(shl(xv,3), shl(xv,1), "sr_mul10"); break;
-                case 12: posRep = builder.CreateAdd(shl(xv,3), shl(xv,2), "sr_mul12"); break;
-                case 15: posRep = builder.CreateSub(shl(xv,4), xv, "sr_mul15"); break;
-                case 17: posRep = builder.CreateAdd(shl(xv,4), xv, "sr_mul17"); break;
-                case 18: posRep = builder.CreateAdd(shl(xv,4), shl(xv,1), "sr_mul18"); break;
-                case 20: posRep = builder.CreateAdd(shl(xv,4), shl(xv,2), "sr_mul20"); break;
-                case 24: posRep = builder.CreateAdd(shl(xv,4), shl(xv,3), "sr_mul24"); break;
-                case 28: posRep = builder.CreateSub(shl(xv,5), shl(xv,2), "sr_mul28"); break;
-                case 30: posRep = builder.CreateSub(shl(xv,5), shl(xv,1), "sr_mul30"); break;
-                case 31: posRep = builder.CreateSub(shl(xv,5), xv, "sr_mul31"); break;
-                case 33: posRep = builder.CreateAdd(shl(xv,5), xv, "sr_mul33"); break;
-                case 34: posRep = builder.CreateAdd(shl(xv,5), shl(xv,1), "sr_mul34"); break;
-                case 36: posRep = builder.CreateAdd(shl(xv,5), shl(xv,2), "sr_mul36"); break;
-                case 40: posRep = builder.CreateAdd(shl(xv,5), shl(xv,3), "sr_mul40"); break;
-                case 48: posRep = builder.CreateAdd(shl(xv,5), shl(xv,4), "sr_mul48"); break;
-                case 60: posRep = builder.CreateSub(shl(xv,6), shl(xv,2), "sr_mul60"); break;
-                case 63: posRep = builder.CreateSub(shl(xv,6), xv, "sr_mul63"); break;
-                case 65: posRep = builder.CreateAdd(shl(xv,6), xv, "sr_mul65"); break;
-                case 96: posRep = builder.CreateAdd(shl(xv,6), shl(xv,5), "sr_mul96"); break;
-                case 120: posRep = builder.CreateSub(shl(xv,7), shl(xv,3), "sr_mul120"); break;
-                case 127: posRep = builder.CreateSub(shl(xv,7), xv, "sr_mul127"); break;
-                case 255: posRep = builder.CreateSub(shl(xv,8), xv, "sr_mul255"); break;
-                // ── Extended 2-instruction negative sequences ──────────────────
-                case  56: posRep = builder.CreateSub(shl(xv,6), shl(xv,3), "sr_mulp56"); break;
-                case  57: {
-                    // n*57 → (n<<6) - (n<<3) + n  (= 64n - 8n + n)
-                    auto* t1 = builder.CreateSub(shl(xv,6), shl(xv,3), "sr_mulp57.t");
-                    posRep = builder.CreateAdd(t1, xv, "sr_mulp57");
-                    break;
-                }
-                case  62: posRep = builder.CreateSub(shl(xv,6), shl(xv,1), "sr_mulp62"); break;
-                case  66: posRep = builder.CreateAdd(shl(xv,6), shl(xv,1), "sr_mulp66"); break;
-                case  68: posRep = builder.CreateAdd(shl(xv,6), shl(xv,2), "sr_mulp68"); break;
-                case  72: posRep = builder.CreateAdd(shl(xv,6), shl(xv,3), "sr_mulp72"); break;
-                case  80: posRep = builder.CreateAdd(shl(xv,6), shl(xv,4), "sr_mulp80"); break;
-                case 112: posRep = builder.CreateSub(shl(xv,7), shl(xv,4), "sr_mulp112"); break;
-                case 129: posRep = builder.CreateAdd(shl(xv,7), xv,         "sr_mulp129"); break;
-                case 136: posRep = builder.CreateAdd(shl(xv,7), shl(xv,3), "sr_mulp136"); break;
-                case 144: posRep = builder.CreateAdd(shl(xv,7), shl(xv,4), "sr_mulp144"); break;
-                case 160: posRep = builder.CreateAdd(shl(xv,7), shl(xv,5), "sr_mulp160"); break;
-                case 192: posRep = builder.CreateAdd(shl(xv,7), shl(xv,6), "sr_mulp192"); break;
-                case 224: posRep = builder.CreateSub(shl(xv,8), shl(xv,5), "sr_mulp224"); break;
-                case 240: posRep = builder.CreateSub(shl(xv,8), shl(xv,4), "sr_mulp240"); break;
-                case 248: posRep = builder.CreateSub(shl(xv,8), shl(xv,3), "sr_mulp248"); break;
-                case 257: posRep = builder.CreateAdd(shl(xv,8), xv,         "sr_mulp257"); break;
-                case 264: posRep = builder.CreateAdd(shl(xv,8), shl(xv,3), "sr_mulp264"); break;
-                case 272: posRep = builder.CreateAdd(shl(xv,8), shl(xv,4), "sr_mulp272"); break;
-                case 288: posRep = builder.CreateAdd(shl(xv,8), shl(xv,5), "sr_mulp288"); break;
-                case 320: posRep = builder.CreateAdd(shl(xv,8), shl(xv,6), "sr_mulp320"); break;
-                case 384: posRep = builder.CreateAdd(shl(xv,8), shl(xv,7), "sr_mulp384"); break;
-                case 448: posRep = builder.CreateSub(shl(xv,9), shl(xv,6), "sr_mulp448"); break;
-                case 480: posRep = builder.CreateSub(shl(xv,9), shl(xv,5), "sr_mulp480"); break;
-                case 496: posRep = builder.CreateSub(shl(xv,9), shl(xv,4), "sr_mulp496"); break;
-                case 504: posRep = builder.CreateSub(shl(xv,9), shl(xv,3), "sr_mulp504"); break;
-                case 511: posRep = builder.CreateSub(shl(xv,9), xv,         "sr_mulp511"); break;
-                case 513: posRep = builder.CreateAdd(shl(xv,9), xv,         "sr_mulp513"); break;
-                case 640: posRep = builder.CreateAdd(shl(xv,9), shl(xv,7), "sr_mulp640"); break;
-                case 768: posRep = builder.CreateAdd(shl(xv,9), shl(xv,8), "sr_mulp768"); break;
-                case 1023: posRep = builder.CreateSub(shl(xv,10), xv,       "sr_mulp1023"); break;
-                case 1025: posRep = builder.CreateAdd(shl(xv,10), xv,       "sr_mulp1025"); break;
-                case 1152: posRep = builder.CreateAdd(shl(xv,10), shl(xv,7), "sr_mulp1152"); break;
-                case 1280: posRep = builder.CreateAdd(shl(xv,10), shl(xv,8), "sr_mulp1280"); break;
-                case 1536: posRep = builder.CreateAdd(shl(xv,10), shl(xv,9), "sr_mulp1536"); break;
-                case 1792: posRep = builder.CreateSub(shl(xv,11), shl(xv,8), "sr_mulp1792"); break;
-                case 2047: posRep = builder.CreateSub(shl(xv,11), xv,        "sr_mulp2047"); break;
-                case 2048: posRep = shl(xv,11); break;
-                case 2049: posRep = builder.CreateAdd(shl(xv,11), xv,        "sr_mulp2049"); break;
-                // ── n×128 family ───────────────────────────────────────────────
-                case 124:  posRep = builder.CreateSub(shl(xv,7), shl(xv,2),  "sr_mulp124");  break;
-                case 126:  posRep = builder.CreateSub(shl(xv,7), shl(xv,1),  "sr_mulp126");  break;
-                case 130:  posRep = builder.CreateAdd(shl(xv,7), shl(xv,1),  "sr_mulp130");  break;
-                case 132:  posRep = builder.CreateAdd(shl(xv,7), shl(xv,2),  "sr_mulp132");  break;
-                // ── n×256 family ───────────────────────────────────────────────
-                case 252:  posRep = builder.CreateSub(shl(xv,8), shl(xv,2),  "sr_mulp252");  break;
-                case 254:  posRep = builder.CreateSub(shl(xv,8), shl(xv,1),  "sr_mulp254");  break;
-                case 258:  posRep = builder.CreateAdd(shl(xv,8), shl(xv,1),  "sr_mulp258");  break;
-                case 260:  posRep = builder.CreateAdd(shl(xv,8), shl(xv,2),  "sr_mulp260");  break;
-                // ── n×512 family ───────────────────────────────────────────────
-                case 508:  posRep = builder.CreateSub(shl(xv,9), shl(xv,2),  "sr_mulp508");  break;
-                case 510:  posRep = builder.CreateSub(shl(xv,9), shl(xv,1),  "sr_mulp510");  break;
-                case 514:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,1),  "sr_mulp514");  break;
-                case 516:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,2),  "sr_mulp516");  break;
-                case 520:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,3),  "sr_mulp520");  break;
-                case 528:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,4),  "sr_mulp528");  break;
-                case 544:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,5),  "sr_mulp544");  break;
-                case 576:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,6),  "sr_mulp576");  break;
-                // ── n×1024 family ──────────────────────────────────────────────
-                case 960:  posRep = builder.CreateSub(shl(xv,10), shl(xv,6), "sr_mulp960");  break;
-                case 992:  posRep = builder.CreateSub(shl(xv,10), shl(xv,5), "sr_mulp992");  break;
-                case 1008: posRep = builder.CreateSub(shl(xv,10), shl(xv,4), "sr_mulp1008"); break;
-                case 1016: posRep = builder.CreateSub(shl(xv,10), shl(xv,3), "sr_mulp1016"); break;
-                case 1020: posRep = builder.CreateSub(shl(xv,10), shl(xv,2), "sr_mulp1020"); break;
-                case 1022: posRep = builder.CreateSub(shl(xv,10), shl(xv,1), "sr_mulp1022"); break;
-                case 1026: posRep = builder.CreateAdd(shl(xv,10), shl(xv,1), "sr_mulp1026"); break;
-                case 1028: posRep = builder.CreateAdd(shl(xv,10), shl(xv,2), "sr_mulp1028"); break;
-                case 1032: posRep = builder.CreateAdd(shl(xv,10), shl(xv,3), "sr_mulp1032"); break;
-                case 1040: posRep = builder.CreateAdd(shl(xv,10), shl(xv,4), "sr_mulp1040"); break;
-                case 1056: posRep = builder.CreateAdd(shl(xv,10), shl(xv,5), "sr_mulp1056"); break;
-                case 1088: posRep = builder.CreateAdd(shl(xv,10), shl(xv,6), "sr_mulp1088"); break;
-                // ── n×2048 family ──────────────────────────────────────────────
-                case 1920: posRep = builder.CreateSub(shl(xv,11), shl(xv,7), "sr_mulp1920"); break;
-                case 1984: posRep = builder.CreateSub(shl(xv,11), shl(xv,6), "sr_mulp1984"); break;
-                case 2016: posRep = builder.CreateSub(shl(xv,11), shl(xv,5), "sr_mulp2016"); break;
-                case 2032: posRep = builder.CreateSub(shl(xv,11), shl(xv,4), "sr_mulp2032"); break;
-                case 2040: posRep = builder.CreateSub(shl(xv,11), shl(xv,3), "sr_mulp2040"); break;
-                case 2044: posRep = builder.CreateSub(shl(xv,11), shl(xv,2), "sr_mulp2044"); break;
-                case 2046: posRep = builder.CreateSub(shl(xv,11), shl(xv,1), "sr_mulp2046"); break;
-                case 2050: posRep = builder.CreateAdd(shl(xv,11), shl(xv,1), "sr_mulp2050"); break;
-                case 2052: posRep = builder.CreateAdd(shl(xv,11), shl(xv,2), "sr_mulp2052"); break;
-                case 2056: posRep = builder.CreateAdd(shl(xv,11), shl(xv,3), "sr_mulp2056"); break;
-                case 2064: posRep = builder.CreateAdd(shl(xv,11), shl(xv,4), "sr_mulp2064"); break;
-                case 2080: posRep = builder.CreateAdd(shl(xv,11), shl(xv,5), "sr_mulp2080"); break;
-                case 2112: posRep = builder.CreateAdd(shl(xv,11), shl(xv,6), "sr_mulp2112"); break;
-                case 2176: posRep = builder.CreateAdd(shl(xv,11), shl(xv,7), "sr_mulp2176"); break;
-                case 2304: posRep = builder.CreateAdd(shl(xv,11), shl(xv,8), "sr_mulp2304"); break;
-                case 2560: posRep = builder.CreateAdd(shl(xv,11), shl(xv,9), "sr_mulp2560"); break;
-                case 3072: posRep = builder.CreateAdd(shl(xv,11), shl(xv,10),"sr_mulp3072"); break;
-                // ── n×4096 family ───────────────────────────────────────────────
-                case 3584: posRep = builder.CreateSub(shl(xv,12), shl(xv,9),  "sr_mulp3584"); break;
-                case 3840: posRep = builder.CreateSub(shl(xv,12), shl(xv,8),  "sr_mulp3840"); break;
-                case 3968: posRep = builder.CreateSub(shl(xv,12), shl(xv,7),  "sr_mulp3968"); break;
-                case 4032: posRep = builder.CreateSub(shl(xv,12), shl(xv,6),  "sr_mulp4032"); break;
-                case 4064: posRep = builder.CreateSub(shl(xv,12), shl(xv,5),  "sr_mulp4064"); break;
-                case 4080: posRep = builder.CreateSub(shl(xv,12), shl(xv,4),  "sr_mulp4080"); break;
-                case 4088: posRep = builder.CreateSub(shl(xv,12), shl(xv,3),  "sr_mulp4088"); break;
-                case 4092: posRep = builder.CreateSub(shl(xv,12), shl(xv,2),  "sr_mulp4092"); break;
-                case 4094: posRep = builder.CreateSub(shl(xv,12), shl(xv,1),  "sr_mulp4094"); break;
-                case 4095: posRep = builder.CreateSub(shl(xv,12), xv,          "sr_mulp4095"); break;
-                case 4096: posRep = shl(xv,12); break;
-                case 4097: posRep = builder.CreateAdd(shl(xv,12), xv,          "sr_mulp4097"); break;
-                case 4098: posRep = builder.CreateAdd(shl(xv,12), shl(xv,1),   "sr_mulp4098"); break;
-                case 4100: posRep = builder.CreateAdd(shl(xv,12), shl(xv,2),   "sr_mulp4100"); break;
-                case 4104: posRep = builder.CreateAdd(shl(xv,12), shl(xv,3),   "sr_mulp4104"); break;
-                case 4112: posRep = builder.CreateAdd(shl(xv,12), shl(xv,4),   "sr_mulp4112"); break;
-                case 4128: posRep = builder.CreateAdd(shl(xv,12), shl(xv,5),   "sr_mulp4128"); break;
-                case 4160: posRep = builder.CreateAdd(shl(xv,12), shl(xv,6),   "sr_mulp4160"); break;
-                case 4224: posRep = builder.CreateAdd(shl(xv,12), shl(xv,7),   "sr_mulp4224"); break;
-                case 4352: posRep = builder.CreateAdd(shl(xv,12), shl(xv,8),   "sr_mulp4352"); break;
-                case 4608: posRep = builder.CreateAdd(shl(xv,12), shl(xv,9),   "sr_mulp4608"); break;
-                case 5120: posRep = builder.CreateAdd(shl(xv,12), shl(xv,10),  "sr_mulp5120"); break;
-                case 6144: posRep = builder.CreateAdd(shl(xv,12), shl(xv,11),  "sr_mulp6144"); break;
-                // ── n×8192 family ──────────────────────────────────────────────
-                case 7168:  posRep = builder.CreateSub(shl(xv,13), shl(xv,10), "sr_mulp7168");  break;
-                case 7680:  posRep = builder.CreateSub(shl(xv,13), shl(xv,9),  "sr_mulp7680");  break;
-                case 7936:  posRep = builder.CreateSub(shl(xv,13), shl(xv,8),  "sr_mulp7936");  break;
-                case 8064:  posRep = builder.CreateSub(shl(xv,13), shl(xv,7),  "sr_mulp8064");  break;
-                case 8128:  posRep = builder.CreateSub(shl(xv,13), shl(xv,6),  "sr_mulp8128");  break;
-                case 8160:  posRep = builder.CreateSub(shl(xv,13), shl(xv,5),  "sr_mulp8160");  break;
-                case 8176:  posRep = builder.CreateSub(shl(xv,13), shl(xv,4),  "sr_mulp8176");  break;
-                case 8184:  posRep = builder.CreateSub(shl(xv,13), shl(xv,3),  "sr_mulp8184");  break;
-                case 8188:  posRep = builder.CreateSub(shl(xv,13), shl(xv,2),  "sr_mulp8188");  break;
-                case 8190:  posRep = builder.CreateSub(shl(xv,13), shl(xv,1),  "sr_mulp8190");  break;
-                case 8191:  posRep = builder.CreateSub(shl(xv,13), xv,          "sr_mulp8191");  break;
-                case 8192:  posRep = shl(xv,13); break;
-                case 8193:  posRep = builder.CreateAdd(shl(xv,13), xv,          "sr_mulp8193");  break;
-                case 8194:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,1),  "sr_mulp8194");  break;
-                case 8196:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,2),  "sr_mulp8196");  break;
-                case 8200:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,3),  "sr_mulp8200");  break;
-                case 8208:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,4),  "sr_mulp8208");  break;
-                case 8224:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,5),  "sr_mulp8224");  break;
-                case 8256:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,6),  "sr_mulp8256");  break;
-                case 8320:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,7),  "sr_mulp8320");  break;
-                case 8448:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,8),  "sr_mulp8448");  break;
-                case 8704:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,9),  "sr_mulp8704");  break;
-                case 9216:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,10), "sr_mulp9216");  break;
-                case 10240: posRep = builder.CreateAdd(shl(xv,13), shl(xv,11), "sr_mulp10240"); break;
-                case 12288: posRep = builder.CreateAdd(shl(xv,13), shl(xv,12), "sr_mulp12288"); break;
-                // ── n×16384 family ──────────────────────────────────────────────
-                case 14336: posRep = builder.CreateSub(shl(xv,14), shl(xv,11), "sr_mulp14336"); break;
-                case 15360: posRep = builder.CreateSub(shl(xv,14), shl(xv,10), "sr_mulp15360"); break;
-                case 16384: posRep = shl(xv,14); break;
-                case 16385: posRep = builder.CreateAdd(shl(xv,14), xv,          "sr_mulp16385"); break;
-                case 16386: posRep = builder.CreateAdd(shl(xv,14), shl(xv,1),   "sr_mulp16386"); break;
-                case 16388: posRep = builder.CreateAdd(shl(xv,14), shl(xv,2),   "sr_mulp16388"); break;
-                case 16392: posRep = builder.CreateAdd(shl(xv,14), shl(xv,3),   "sr_mulp16392"); break;
-                case 16400: posRep = builder.CreateAdd(shl(xv,14), shl(xv,4),   "sr_mulp16400"); break;
-                case 16416: posRep = builder.CreateAdd(shl(xv,14), shl(xv,5),   "sr_mulp16416"); break;
-                case 16448: posRep = builder.CreateAdd(shl(xv,14), shl(xv,6),   "sr_mulp16448"); break;
-                case 16512: posRep = builder.CreateAdd(shl(xv,14), shl(xv,7),   "sr_mulp16512"); break;
-                case 16640: posRep = builder.CreateAdd(shl(xv,14), shl(xv,8),   "sr_mulp16640"); break;
-                case 16896: posRep = builder.CreateAdd(shl(xv,14), shl(xv,9),   "sr_mulp16896"); break;
-                case 17408: posRep = builder.CreateAdd(shl(xv,14), shl(xv,10),  "sr_mulp17408"); break;
-                case 18432: posRep = builder.CreateAdd(shl(xv,14), shl(xv,11),  "sr_mulp18432"); break;
-                case 20480: posRep = builder.CreateAdd(shl(xv,14), shl(xv,12),  "sr_mulp20480"); break;
-                case 24576: posRep = builder.CreateAdd(shl(xv,14), shl(xv,13),  "sr_mulp24576"); break;
-                // ── n×32768 family ──────────────────────────────────────────────
-                case 28672: posRep = builder.CreateSub(shl(xv,15), shl(xv,12), "sr_mulp28672"); break;
-                case 30720: posRep = builder.CreateSub(shl(xv,15), shl(xv,11), "sr_mulp30720"); break;
-                case 32768: posRep = shl(xv,15); break;
-                case 32769: posRep = builder.CreateAdd(shl(xv,15), xv,          "sr_mulp32769"); break;
-                case 32770: posRep = builder.CreateAdd(shl(xv,15), shl(xv,1),   "sr_mulp32770"); break;
-                case 32772: posRep = builder.CreateAdd(shl(xv,15), shl(xv,2),   "sr_mulp32772"); break;
-                case 32776: posRep = builder.CreateAdd(shl(xv,15), shl(xv,3),   "sr_mulp32776"); break;
-                case 32800: posRep = builder.CreateAdd(shl(xv,15), shl(xv,5),   "sr_mulp32800"); break;
-                case 32896: posRep = builder.CreateAdd(shl(xv,15), shl(xv,7),   "sr_mulp32896"); break;
-                case 33024: posRep = builder.CreateAdd(shl(xv,15), shl(xv,8),   "sr_mulp33024"); break;
-                case 33280: posRep = builder.CreateAdd(shl(xv,15), shl(xv,9),   "sr_mulp33280"); break;
-                case 33792: posRep = builder.CreateAdd(shl(xv,15), shl(xv,10),  "sr_mulp33792"); break;
-                case 34816: posRep = builder.CreateAdd(shl(xv,15), shl(xv,11),  "sr_mulp34816"); break;
-                case 36864: posRep = builder.CreateAdd(shl(xv,15), shl(xv,12),  "sr_mulp36864"); break;
-                case 40960: posRep = builder.CreateAdd(shl(xv,15), shl(xv,13),  "sr_mulp40960"); break;
-                case 49152: posRep = builder.CreateAdd(shl(xv,15), shl(xv,14),  "sr_mulp49152"); break;
-                // ── n×65536 family ──────────────────────────────────────────────
-                case 57344: posRep = builder.CreateSub(shl(xv,16), shl(xv,13), "sr_mulp57344"); break;
-                case 61440: posRep = builder.CreateSub(shl(xv,16), shl(xv,12), "sr_mulp61440"); break;
-                case 65536: posRep = shl(xv,16); break;
-                case 65537: posRep = builder.CreateAdd(shl(xv,16), xv,          "sr_mulp65537"); break;
-                case 65538: posRep = builder.CreateAdd(shl(xv,16), shl(xv,1),   "sr_mulp65538"); break;
-                case 65540: posRep = builder.CreateAdd(shl(xv,16), shl(xv,2),   "sr_mulp65540"); break;
-                case 65544: posRep = builder.CreateAdd(shl(xv,16), shl(xv,3),   "sr_mulp65544"); break;
-                case 65600: posRep = builder.CreateAdd(shl(xv,16), shl(xv,6),   "sr_mulp65600"); break;
-                case 65664: posRep = builder.CreateAdd(shl(xv,16), shl(xv,7),   "sr_mulp65664"); break;
-                case 65792: posRep = builder.CreateAdd(shl(xv,16), shl(xv,8),   "sr_mulp65792"); break;
-                case 66048: posRep = builder.CreateAdd(shl(xv,16), shl(xv,9),   "sr_mulp66048"); break;
-                case 66560: posRep = builder.CreateAdd(shl(xv,16), shl(xv,10),  "sr_mulp66560"); break;
-                case 67584: posRep = builder.CreateAdd(shl(xv,16), shl(xv,11),  "sr_mulp67584"); break;
-                case 69632: posRep = builder.CreateAdd(shl(xv,16), shl(xv,12),  "sr_mulp69632"); break;
-                case 73728: posRep = builder.CreateAdd(shl(xv,16), shl(xv,13),  "sr_mulp73728"); break;
-                case 81920: posRep = builder.CreateAdd(shl(xv,16), shl(xv,14),  "sr_mulp81920"); break;
-                case 98304: posRep = builder.CreateAdd(shl(xv,16), shl(xv,15),  "sr_mulp98304"); break;
-                case 114688: posRep = builder.CreateSub(shl(xv,17), shl(xv,14), "sr_mulp114688"); break;
-                case 122880: posRep = builder.CreateSub(shl(xv,17), shl(xv,13), "sr_mulp122880"); break;
-                case 131072: posRep = shl(xv,17); break;
-                case 131073: posRep = builder.CreateAdd(shl(xv,17), xv,          "sr_mulp131073"); break;
-                case 131074: posRep = builder.CreateAdd(shl(xv,17), shl(xv,1),   "sr_mulp131074"); break;
-                case 131076: posRep = builder.CreateAdd(shl(xv,17), shl(xv,2),   "sr_mulp131076"); break;
-                case 131080: posRep = builder.CreateAdd(shl(xv,17), shl(xv,3),   "sr_mulp131080"); break;
-                case 131136: posRep = builder.CreateAdd(shl(xv,17), shl(xv,6),   "sr_mulp131136"); break;
-                case 131200: posRep = builder.CreateAdd(shl(xv,17), shl(xv,7),   "sr_mulp131200"); break;
-                case 131328: posRep = builder.CreateAdd(shl(xv,17), shl(xv,8),   "sr_mulp131328"); break;
-                case 131584: posRep = builder.CreateAdd(shl(xv,17), shl(xv,9),   "sr_mulp131584"); break;
-                case 132096: posRep = builder.CreateAdd(shl(xv,17), shl(xv,10),  "sr_mulp132096"); break;
-                case 133120: posRep = builder.CreateAdd(shl(xv,17), shl(xv,11),  "sr_mulp133120"); break;
-                case 135168: posRep = builder.CreateAdd(shl(xv,17), shl(xv,12),  "sr_mulp135168"); break;
-                case 139264: posRep = builder.CreateAdd(shl(xv,17), shl(xv,13),  "sr_mulp139264"); break;
-                case 147456: posRep = builder.CreateAdd(shl(xv,17), shl(xv,14),  "sr_mulp147456"); break;
-                case 163840: posRep = builder.CreateAdd(shl(xv,17), shl(xv,15),  "sr_mulp163840"); break;
-                case 196608: posRep = builder.CreateAdd(shl(xv,17), shl(xv,16),  "sr_mulp196608"); break;
-                // 3-instruction positive sequences
-                case 11: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,1), "t"), xv, "sr_mul11"); break;
-                case 13: { auto* t = builder.CreateSub(shl(xv,4), shl(xv,1), "t"); posRep = builder.CreateSub(t, xv, "sr_mul13"); break; }
-                case 14: posRep = builder.CreateSub(shl(xv,4), shl(xv,1), "sr_mul14"); break;
-                case 19: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1), "t"), xv, "sr_mul19"); break;
-                case 21: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), xv, "sr_mul21"); break;
-                case 22: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), shl(xv,1), "sr_mul22"); break;
-                case 25: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3), "t"), xv, "sr_mul25"); break;
-                case 26: posRep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), shl(xv,1), "sr_mul26"); break;
-                case 27: posRep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul27"); break;
-                case 37: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul37"); break;
-                case 41: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3), "t"), xv, "sr_mul41"); break;
-                case 49: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4), "t"), xv, "sr_mul49"); break;
-                case 50: {
-                    auto* t = builder.CreateSub(shl(xv,6), shl(xv,4), "sr_mulp50.t");
-                    posRep = builder.CreateAdd(t, shl(xv,1), "sr_mulp50");
-                    break;
-                }
-                case 100: {
-                    auto* t = builder.CreateSub(shl(xv,7), shl(xv,5), "sr_mulp100.t");
-                    posRep = builder.CreateAdd(t, shl(xv,2), "sr_mulp100");
-                    break;
-                }
-                case 200: {
-                    // n*200 → (n<<8) - (n<<6) + (n<<3)  [256n - 64n + 8n]
-                    auto* t = builder.CreateSub(shl(xv,8), shl(xv,6), "sr_mulp200.t");
-                    posRep = builder.CreateAdd(t, shl(xv,3), "sr_mulp200");
-                    break;
-                }
-                case 1000: {
-                    // n*1000 → (n<<10) - (n<<5) + (n<<3)  [1024n - 32n + 8n]
-                    auto* t = builder.CreateSub(shl(xv,10), shl(xv,5), "sr_mulp1000.t");
-                    posRep = builder.CreateAdd(t, shl(xv,3), "sr_mulp1000");
-                    break;
-                }
-                default: break;
-                }
-                if (posRep)
-                    rep = builder.CreateNeg(posRep, "sr_mulneg");
-            }
+            if (rep && negate)
+                rep = builder.CreateNeg(rep, "sr.neg");
 
             if (rep) {
                 replacements.emplace_back(&inst, rep);
@@ -2877,12 +2450,23 @@ static void applyTargetAttributes(llvm::Function& func,
     case ISAFamily::X86_64:
         addF("+sse");
         addF("+sse2");
+        addF("+sse4.1");
         addF("+sse4.2");
-        addF("+bmi");
-        addF("+bmi2");
         addF("+popcnt");
-        addF("+lzcnt");
-        if (profile.vectorWidth >= 256) { addF("+avx"); addF("+avx2"); }
+        // BMI, BMI2, and LZCNT were introduced with Haswell (2013).
+        // Sandy Bridge / Ivy Bridge profiles have fmaUnits==0 since they
+        // predate FMA; use that as the proxy for "pre-Haswell baseline".
+        if (profile.fmaUnits > 0) {
+            addF("+bmi");
+            addF("+bmi2");
+            addF("+lzcnt");
+        }
+        if (profile.vectorWidth >= 256) {
+            addF("+avx");
+            // AVX2 was introduced together with FMA in Haswell (2013).
+            if (profile.fmaUnits > 0)
+                addF("+avx2");
+        }
         if (profile.vectorWidth >= 512) {
             addF("+avx512f");
             addF("+avx512vl");
