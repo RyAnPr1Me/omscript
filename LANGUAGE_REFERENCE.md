@@ -172,7 +172,7 @@ OmScript is a **statically-compiled, dynamically-typed** language with optional 
 
 ### Design Philosophy
 
-OmScript prioritizes **predictable performance**: the programmer should always be able to reason about what machine code will be emitted. The type system is deliberately simple (all integers share `i64` storage) to minimize abstraction overhead while still providing enough static information for aggressive optimization via annotations.
+OmScript prioritizes **predictable performance**: the programmer should always be able to reason about what machine code will be emitted. The type system uses a clear storage model: unannotated integers default to `i64`, narrow annotations (`i8`, `i32`, `bool`, etc.) produce their actual LLVM widths, and pointer-holding types (`string`, arrays, structs) use `ptr`. This minimizes abstraction overhead while providing enough static information for aggressive optimization via annotations.
 
 The language does not have:
 - Garbage collection (memory is managed manually or via ownership annotations)
@@ -520,7 +520,7 @@ var s:string = "hello"
 | `bool` | Boolean (1-bit) | `i1` |
 | `string` | String (heap-allocated, NUL-terminated) | `ptr` |
 
-> **Important:** All integer types in OmScript (`int`, `i64`, `u64`, `i32`, `u32`, etc.) share the **same underlying LLVM representation: `i64`**. The width annotations affect how the compiler treats arithmetic results when you apply an explicit type-cast builtin — they do not change storage width. This is covered in detail in §5.7 and §27.
+> **Storage model:** The LLVM type column above is the actual storage type used. Variables annotated with `i32`/`u32` are stored as LLVM `i32`; `i8`/`u8` as `i8`; `bool` as `i1`; and so on. Unannotated variables, and those annotated with `int`/`i64`/`u64`/`uint`, use the default `i64` storage. Any `iN`/`uN` annotation for N ∈ [1, 256] produces the corresponding `iN` LLVM type. **Struct fields** are always stored as `i64` regardless of annotation (field type annotations are informational for CF-CTRE and documentation purposes only). The integer type-cast **expressions** (`u32(x)`, `i8(x)`, etc.) are separate from annotations: they transform an expression value and always return `i64`; see §5.7 and §27.
 
 ### 5.3 Array Types
 
@@ -590,10 +590,10 @@ OmScript provides **function-call-style type coercions** that truncate or sign-e
 
 | Syntax | Runtime Behavior | LLVM IR Emitted | Identity? |
 |---|---|---|---|
-| `u64(x)` | No-op — identity | none (value passes through) | ✓ |
-| `i64(x)` | No-op — identity | none | ✓ |
-| `int(x)` | No-op — identity | none | ✓ |
-| `uint(x)` | No-op — identity | none | ✓ |
+| `u64(x)` | No-op — identity (when x is `i64`) | none (value passes through) | ✓ |
+| `i64(x)` | No-op — identity (when x is `i64`) | none | ✓ |
+| `int(x)` | No-op — identity (when x is `i64`) | none | ✓ |
+| `uint(x)` | No-op — identity (when x is `i64`) | none | ✓ |
 | `u32(x)` | Mask to lower 32 bits | `and i64 %x, 4294967295` | — |
 | `i32(x)` | Truncate to 32 bits, sign-extend back to 64 | `trunc i64 → i32`, `sext i32 → i64` | — |
 | `u16(x)` | Mask to lower 16 bits | `and i64 %x, 65535` | — |
@@ -601,6 +601,9 @@ OmScript provides **function-call-style type coercions** that truncate or sign-e
 | `u8(x)` | Mask to lower 8 bits | `and i64 %x, 255` | — |
 | `i8(x)` | Truncate to 8 bits, sign-extend back to 64 | `trunc i64 → i8`, `sext i8 → i64` | — |
 | `bool(x)` | Normalize to 0 or 1 | `icmp ne i64 %x, 0`, `zext i1 → i64` | — |
+
+> **Note:** The LLVM IR descriptions above assume `x` is an `i64` value (the default for unannotated variables). When `x` is already at the target width (e.g., applying `u64(x)` to a narrow-annotated variable), the cast is an identity at that width. When `x` is narrower than 64 bits, `u64`/`i64`/`int`/`uint` widen it (zero-extend for `u64`/`uint`, sign-extend for `i64`/`int`).
+> These cast **expressions** are distinct from type **annotations**: `u32(x)` transforms a value and returns `i64`, while `var y:u32 = ...` creates an `i32` alloca. See §5.2 for the storage model.
 
 **Compile-time folding:** All nine forms are recognized by `evalConstBuiltin` inside `comptime {}` blocks and wherever constant folding applies. For example, `u8(300)` folds to `44` at compile time (300 & 0xFF = 44).
 
@@ -1006,10 +1009,11 @@ fn max_of<T>(a:T, b:T) -> T {
 **Rules:**
 - Type parameters are declared in `<...>` after the function name and before `(`.
 - Multiple type parameters are comma-separated: `<A, B, C>`.
-- Type parameters are **informational only** — they do not generate actual template specializations in the LLVM backend (all values are `i64`/`ptr` under the hood). Their primary purpose is:
+- Type parameters are **informational only** — they do not generate actual template specializations in the LLVM backend. Their primary purpose is:
   1. **Documentation** — making it clear what types are expected.
   2. **CF-CTRE reasoning** — the compile-time engine can use type annotations from generic parameters to specialize evaluation.
-- Generic functions work the same as untyped functions at runtime; the `<T>` syntax is a marker, not a monomorphization trigger.
+
+  Unannotated and `int`/`i64`-annotated values use `i64` storage; narrow-annotated values (`i32`, `u8`, etc.) use their actual LLVM widths; strings, arrays, and structs use `ptr`. Generic functions work the same as explicitly typed functions at runtime; the `<T>` syntax is a marker, not a monomorphization trigger.
 
 ### 7.6 Function Annotations
 
@@ -4544,7 +4548,7 @@ This appendix provides a complete, unambiguous reference for all 9 integer type-
 
 ### 27.1 Overview Table
 
-| Cast | Width | Behavior | LLVM IR | Identity? | Comptime Folds? |
+| Cast | Width | Behavior | LLVM IR (assumes `i64` input) | Identity for `i64`? | Comptime Folds? |
 |---|---|---|---|---|---|
 | `u64(x)` | 64-bit unsigned | Pass-through | (none) | ✓ | ✓ |
 | `i64(x)` | 64-bit signed | Pass-through | (none) | ✓ | ✓ |
@@ -4560,7 +4564,7 @@ This appendix provides a complete, unambiguous reference for all 9 integer type-
 
 ### 27.2 Identity Casts: `u64`, `i64`, `int`, `uint`
 
-These four casts are complete no-ops at runtime. The value is passed through unchanged. They exist to:
+These four casts are no-ops when the input is already `i64` (the type of all unannotated variables). When applied to a narrow-annotated variable (e.g., an `i8` or `i32` alloca), they **widen** the value: `u64`/`uint` zero-extend, `i64`/`int` sign-extend. They exist to:
 - **Document intent** in code that mixes signed and unsigned interpretations
 - **Suppress type-mismatch warnings** from future type-stricter analysis tools
 - **Enable zero-cost `u64(s[i])` patterns** where the programmer needs to assert "treat this byte as unsigned before shifting"
@@ -4807,21 +4811,29 @@ The following rules govern when a type-cast expression is folded at compile time
 
 ### 27.11 Interaction with the Type System
 
-Since all OmScript integers share the same LLVM type (`i64`), the type-cast functions do not change the storage type of a variable. They are purely **value-transforming operations** that create a new `i64` value with different bits.
+Variables annotated with narrow types **do** use the actual narrow LLVM storage type (not `i64`). The type-cast **expressions** (`u32(x)`, `i8(x)`, etc.) are distinct from type annotations: they transform a value and always return `i64` for storage in untyped contexts, while the annotation determines the variable's alloca width.
 
 This means:
-- `var x:u32 = u32(y)` — the annotation `:u32` is informational only; the underlying value is still `i64`, but the `u32()` cast ensures the upper 32 bits are zero.
-- `var x:i8 = i8(y)` — the annotation `:i8` is informational; the actual value is `i64` with bits 8–63 set to the sign of bit 7.
-- Arithmetic on a `u8`-cast value is still 64-bit arithmetic — you must re-apply `u8()` after arithmetic to clamp back to 8 bits if needed.
+- `var x:u32 = u32(y)` — the alloca for `x` is `i32` (32-bit storage); `u32(y)` masks `y` to 32 bits and stores the truncated value.
+- `var x:i8 = i8(y)` — the alloca for `x` is `i8` (8-bit storage); `i8(y)` truncates to 8 bits and sign-extends back to `i64` as an intermediate, then the result is truncated again when stored in the `i8` alloca.
+- Arithmetic between two narrow-annotated variables uses their native width — the result wraps at that width. You must annotate the result variable or apply a cast if you need the full-range value.
 
 ```omscript
-var a:u8 = u8(200);    // a = 200
-var b:u8 = u8(200);    // b = 200
-var c = a + b;         // c = 400 (64-bit addition — NOT 144!)
-var d:u8 = u8(a + b);  // d = 144 (400 & 0xFF = 0x90 = 144)
+var a:u8 = u8(200);    // a stored as i8 (0xC8 = 200 unsigned / -56 signed)
+var b:u8 = u8(200);    // b stored as i8
+var c = a + b;         // c = 144  (i8 addition wraps: 200+200 mod 256 = 144)
+var d:u8 = u8(a + b);  // d = 144  (u8() applied to i8 is a same-width identity)
+
+// Contrast: applying u8() to unannotated (i64) values
+var x = 200;           // x is i64(200)
+var y = 200;           // y is i64(200)
+var e = u8(x) + u8(y); // u8() on i64(200) returns i64(200); then i64(200)+i64(200) = i64(400)
+                       // e = 400  (no narrowing — both operands are i64)
 ```
 
-This is intentional — it matches C's behavior where arithmetic on narrow integers is promoted to `int`.
+**Note:** CF-CTRE (the cross-function compile-time evaluator) evaluates function bodies in 64-bit arithmetic. If you call a function through a `comptime` block or a pure-function context that CF-CTRE can fold, the result may differ from inline arithmetic that operates on narrow-type allocas. This is an implementation detail, not intentional semantics.
+
+This differs from C: in C, arithmetic on `uint8_t` operands undergoes integer promotion to `int` before the operation. In OmScript, annotated narrow variables stay at their alloca width through arithmetic unless widened by an explicit cast.
 
 ### 27.12 Complete Examples
 
