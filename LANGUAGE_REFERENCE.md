@@ -610,16 +610,16 @@ An explicit `return` in the middle of a `comptime` block still works and exits t
 Many built-in functions are recognized as **pure** and evaluated at compile time when their arguments are constant. The full list of comptime-foldable builtins:
 
 **Math builtins (comptime-foldable):**
-`abs`, `min`, `max`, `pow`, `sqrt`, `floor`, `ceil`, `round`, `exp2`, `log2`, `sign`, `clamp`, `lcm`, `gcd`, `is_even`, `is_odd`, `is_power_of_2`, `saturating_add`, `saturating_sub`
+`std::abs`, `std::min`, `std::max`, `std::pow`, `std::sqrt`, `std::floor`, `std::ceil`, `std::round`, `std::exp2`, `std::log2`, `std::sign`, `std::clamp`, `std::lcm`, `std::gcd`, `std::is_even`, `std::is_odd`, `std::is_power_of_2`, `std::saturating_add`, `std::saturating_sub`
 
 **Bit manipulation (comptime-foldable):**
-`popcount`, `clz`, `ctz`, `bswap`, `bitreverse`, `rotate_left`, `rotate_right`
+`std::popcount`, `std::clz`, `std::ctz`, `std::bswap`, `std::bitreverse`, `std::rotate_left`, `std::rotate_right`
 
 **String builtins (comptime-foldable):**
-`len` / `str_len`, `str_eq`, `str_concat`, `str_upper`, `str_lower`, `str_contains`, `str_index_of`, `str_replace`, `str_trim`, `str_starts_with`, `str_ends_with`, `str_repeat`, `str_reverse`, `str_count`, `str_pad_left`, `str_pad_right`, `str_to_int`, `to_char`, `is_alpha`, `is_digit`
+`std::len` / `std::str_len`, `std::str_eq`, `std::str_concat`, `std::str_upper`, `std::str_lower`, `std::str_contains`, `std::str_index_of`, `std::str_replace`, `std::str_trim`, `std::str_starts_with`, `std::str_ends_with`, `std::str_repeat`, `std::str_reverse`, `std::str_count`, `std::str_pad_left`, `std::str_pad_right`, `std::str_to_int`, `std::to_char`, `std::is_alpha`, `std::is_digit`
 
 **Array builtins (comptime-foldable):**
-`len` (on `array_fill`, `range`, `range_step`, `array_concat`, `str_chars`), `sum`, `array_product`, `array_last`, `array_min`, `array_max`, `array_contains`, `array_find`, `index_of`
+`std::len` (on `std::array_fill`, `std::range`, `std::range_step`, `std::array_concat`, `std::str_chars`), `std::sum`, `std::array_product`, `std::array_last`, `std::array_min`, `std::array_max`, `std::array_contains`, `std::array_find`, `std::index_of`
 
 **Integer type-cast builtins (comptime-foldable, v4.1.1+):**
 `u64`, `i64`, `int`, `uint`, `u32`, `i32`, `u16`, `i16`, `u8`, `i8`, `bool`
@@ -703,8 +703,8 @@ A `comptime` block is **guaranteed to evaluate at compile time**. If the body re
 
 **Not allowed inside comptime:**
 - Reading non-constant variables from outer scope
-- I/O operations (`print`, `input`, etc.)
-- File operations (`file_read`, etc.)
+- I/O operations (`std::print`, `std::input`, etc.)
+- File operations (`std::file_read`, etc.)
 - Threading operations
 - Random number generation (`std::random()`)
 - Any function with observable side effects
@@ -1412,75 +1412,225 @@ x++    x--    ++x    --x
 
 ### 10.13 Type-Namespace Method Dispatch
 
-The `::` operator supports calling built-in operations using a type name as a namespace. This is purely syntactic sugar — it desugars to the corresponding function call or operator at parse time.
+The `::` operator supports calling built-in operations using a type name as a namespace. This is parsed as **Priority 1** — the desugaring happens entirely at parse time before namespace-registry lookup, so no import is needed and no `std::` prefix is required.
+
+All desugared calls set `fromStdNamespace = true`, making them exempt from the `std::` prefix requirement.
+
+---
 
 **Integer namespace** (`int`, `i64`, `i32`, `i16`, `i8`, `u64`, `u32`, `u16`, `u8`, `uint`):
-```
-int::abs(x)         // std::abs(x)
-int::min(a, b)      // std::min(a, b)
-int::max(a, b)      // std::max(a, b)
-int::sign(x)        // std::sign(x)
-int::clamp(x,lo,hi) // std::clamp(x, lo, hi)
+
+```omscript
+// Arithmetic (desugars to binary expression)
+int::add(a, b)      // a + b
+int::sub(a, b)      // a - b
+int::mul(a, b)      // a * b
+int::div(a, b)      // a / b
 int::mod(a, b)      // a % b
-int::is_even(x)     // std::is_even(x)
-int::is_odd(x)      // std::is_odd(x)
-int::to_float(x)    // std::to_float(x)
+int::neg(x)         // -x
+// Comparison
+int::eq(a, b)       // a == b
+int::ne(a, b)       // a != b
+int::lt(a, b)       // a < b
+int::le(a, b)       // a <= b
+int::gt(a, b)       // a > b
+int::ge(a, b)       // a >= b
+// Bitwise
 int::bitand(a, b)   // a & b
 int::bitor(a, b)    // a | b
 int::bitxor(a, b)   // a ^ b
+int::bitnot(x)      // ~x
 int::shl(a, n)      // a << n
 int::shr(a, n)      // a >> n
+// Math builtins
+int::abs(x)         // std::abs(x)
+int::min(a, b)      // std::min(a, b)
+int::max(a, b)      // std::max(a, b)
 int::pow(a, b)      // std::pow(a, b)
+int::sign(x)        // std::sign(x)
+int::clamp(x,lo,hi) // std::clamp(x, lo, hi)
 int::gcd(a, b)      // std::gcd(a, b)
 int::lcm(a, b)      // std::lcm(a, b)
+int::is_even(x)     // std::is_even(x)
+int::is_odd(x)      // std::is_odd(x)
+int::is_power_of_2(x)   // std::is_power_of_2(x)
+// Bit operations (builtins)
+int::popcount(x)    // std::popcount(x)
+int::clz(x)         // std::clz(x)
+int::ctz(x)         // std::ctz(x)
+int::bitreverse(x)  // std::bitreverse(x)
+int::bswap(x)       // std::bswap(x)
+int::rotl(x, n)     // std::rotate_left(x, n)   (alias: int::rotate_left)
+int::rotr(x, n)     // std::rotate_right(x, n)  (alias: int::rotate_right)
+int::saturating_add(a, b)  // std::saturating_add(a, b)
+int::saturating_sub(a, b)  // std::saturating_sub(a, b)
+// 128-bit / high-precision
+int::mulhi(a, b)    // std::mulhi(a, b)
+int::mulhi_u(a, b)  // std::mulhi_u(a, b)
+int::absdiff(a, b)  // std::absdiff(a, b)
+// Conversion
+int::to_float(x)    // std::to_float(x)
+int::to_string(x)   // std::to_string(x)
+int::to_char(x)     // std::to_char(x)
+int::char_code(c)   // std::char_code(c)
+// Fast / precise
+int::fast_add(a,b)  // std::fast_add(a,b)
+int::fast_sub(a,b)  // std::fast_sub(a,b)
+int::fast_mul(a,b)  // std::fast_mul(a,b)
+int::fast_div(a,b)  // std::fast_div(a,b)
+int::precise_add(a,b)  // std::precise_add(a,b)
+int::precise_sub(a,b)  // std::precise_sub(a,b)
+int::precise_mul(a,b)  // std::precise_mul(a,b)
+int::precise_div(a,b)  // std::precise_div(a,b)
 ```
+
+> **Width-specific dispatch:** When a sub-64-bit type name is used (e.g. `i32`, `u16`, `i8`), the bit-counting/rotation/saturation operations emit the narrower LLVM intrinsic directly (e.g. `llvm.ctpop.i32`), avoiding unnecessary widening. Example: `i32::popcount(x)` emits `llvm.ctpop.i32`.
+
+---
 
 **Float namespace** (`float`, `f64`, `f32`, `double`):
+
+```omscript
+// Arithmetic
+float::add(a, b)        // a + b
+float::sub(a, b)        // a - b
+float::mul(a, b)        // a * b
+float::div(a, b)        // a / b
+float::neg(x)           // -x
+// Comparison
+float::eq(a, b)  float::ne(a, b)  float::lt(a, b)
+float::le(a, b)  float::gt(a, b)  float::ge(a, b)
+// Math
+float::abs(x)           // std::abs(x)
+float::min(a, b)        // std::min_float(a, b)
+float::max(a, b)        // std::max_float(a, b)
+float::pow(a, b)        // std::pow(a, b)
+float::clamp(x, lo, hi) // std::clamp(x, lo, hi)
+float::sqrt(x)          // std::sqrt(x)
+float::floor(x)         // std::floor(x)
+float::ceil(x)          // std::ceil(x)
+float::round(x)         // std::round(x)
+float::fast_sqrt(x)     // std::fast_sqrt(x)
+// Trigonometry
+float::sin(x)  float::cos(x)  float::tan(x)
+float::asin(x) float::acos(x) float::atan(x)
+float::atan2(y, x)      // std::atan2(y, x)
+// Transcendentals
+float::log(x)  float::log2(x)  float::log10(x)
+float::exp(x)  float::exp2(x)  float::cbrt(x)
+float::hypot(x, y)      // std::hypot(x, y)
+float::fma(a, b, c)     // std::fma(a, b, c)
+float::copysign(x, y)   // std::copysign(x, y)
+// Predicates
+float::is_nan(x)        // std::is_nan(x)
+float::is_inf(x)        // std::is_inf(x)
+float::min_float(a, b)  // std::min_float(a, b)
+float::max_float(a, b)  // std::max_float(a, b)
+// Conversion
+float::to_int(x)        // std::to_int(x)
+float::to_string(x)     // std::to_string(x)
+// Fast / precise
+float::fast_add(a,b)  float::fast_sub(a,b)
+float::fast_mul(a,b)  float::fast_div(a,b)
+float::precise_add(a,b)  float::precise_sub(a,b)
+float::precise_mul(a,b)  float::precise_div(a,b)
 ```
-float::sqrt(x)      // std::sqrt(x)
-float::floor(x)     // std::floor(x)
-float::ceil(x)      // std::ceil(x)
-float::round(x)     // std::round(x)
-float::abs(x)       // std::abs(x)
-float::sin(x)       // std::sin(x)
-float::cos(x)       // std::cos(x)
-float::to_int(x)    // std::to_int(x)
-float::min(a, b)    // std::min_float(a, b)
-float::max(a, b)    // std::max_float(a, b)
-```
+
+> **f32 dispatch:** When the type is `f32`, float operations emit 32-bit LLVM intrinsics (`llvm.sqrt.f32`, `llvm.sin.f32`, etc.) via a `__tf_*` callee, avoiding implicit `f32↔f64` conversions.
+
+---
 
 **String namespace** (`string`, `str`):
+
+```omscript
+string::len(s)                  // std::len(s)
+string::concat(s1, s2)          // s1 + s2  (binary expression)
+string::eq(s1, s2)              // std::str_eq(s1, s2)
+string::contains(s, sub)        // std::str_contains(s, sub)
+string::starts_with(s, prefix)  // std::str_starts_with(s, prefix)
+string::ends_with(s, suffix)    // std::str_ends_with(s, suffix)
+string::index_of(s, sub)        // std::str_index_of(s, sub)
+string::find(s, c)              // std::str_find(s, c)
+string::replace(s, old, new)    // std::str_replace(s, old, new)
+string::remove(s, sub)          // std::str_remove(s, sub)
+string::repeat(s, n)            // std::str_repeat(s, n)
+string::char_at(s, i)           // std::char_at(s, i)
+string::upper(s)                // std::str_upper(s)   (alias: string::to_upper)
+string::lower(s)                // std::str_lower(s)   (alias: string::to_lower)
+string::trim(s)                 // std::str_trim(s)
+string::lstrip(s)               // std::str_lstrip(s)
+string::rstrip(s)               // std::str_rstrip(s)
+string::split(s, delim)         // std::str_split(s, delim)
+string::substr(s, start, len)   // std::str_substr(s, start, len)
+string::reverse(s)              // std::str_reverse(s)
+string::pad_left(s, n, ch)      // std::str_pad_left(s, n, ch)
+string::pad_right(s, n, ch)     // std::str_pad_right(s, n, ch)
+string::count(s, sub)           // std::str_count(s, sub)
+string::format(fmt, ...)        // std::str_format(fmt, ...)
+string::chars(s)                // std::str_chars(s)
+string::join(arr, delim)        // std::str_join(arr, delim)
+string::filter(s, fn)           // std::str_filter(s, fn)
+string::to_int(s)               // std::to_int(s)
+string::to_float(s)             // std::to_float(s)
+string::to_string(x)            // std::to_string(x)
+string::is_alpha(c)             // std::is_alpha(c)
+string::is_digit(c)             // std::is_digit(c)
 ```
-string::len(s)              // std::len(s)
-string::contains(s, sub)    // std::str_contains(s, sub)
-string::replace(s, old, new) // std::str_replace(s, old, new)
-string::str_upper(s)        // std::str_upper(s)
-string::str_lower(s)        // std::str_lower(s)
-string::trim(s)             // std::str_trim(s)
-string::split(s, delim)     // std::str_split(s, delim)
-string::to_int(s)           // std::str_to_int(s)
-string::to_float(s)         // std::str_to_float(s)
-```
+
+> **Note on `string::to_int` / `string::to_float`:** These desugar to `std::to_int` and `std::to_float` respectively — the same as the generic conversion builtins. For a strict parse-only path, use `std::str_to_int` / `std::str_to_float` directly.
+
+---
 
 **Array namespace** (`array`, `arr`):
-```
-array::len(a)           // std::len(a)
-array::push(a, v)       // std::push(a, v)
-array::pop(a)           // std::pop(a)
-array::sort(a)          // std::sort(a)
-array::reverse(a)       // std::reverse(a)
-array::sum(a)           // std::sum(a)
-array::min(a)           // std::array_min(a)
-array::max(a)           // std::array_max(a)
+
+```omscript
+array::len(a)               // std::len(a)
+array::push(a, v)           // std::push(a, v)
+array::pop(a)               // std::pop(a)
+array::sort(a)              // std::sort(a)
+array::reverse(a)           // std::reverse(a)
+array::sum(a)               // std::sum(a)
+array::product(a)           // std::array_product(a)
+array::mean(a)              // std::array_mean(a)
+array::min(a)               // std::array_min(a)
+array::max(a)               // std::array_max(a)
+array::last(a)              // std::array_last(a)
+array::fill(n, v)           // std::array_fill(n, v)
+array::contains(a, v)       // std::array_contains(a, v)
+array::find(a, fn)          // std::array_find(a, fn)
+array::index_of(a, v)       // std::index_of(a, v)
+array::remove(a, i)         // std::array_remove(a, i)
+array::insert(a, i, v)      // std::array_insert(a, i, v)
+array::concat(a, b)         // std::array_concat(a, b)
+array::slice(a, start, end) // std::array_slice(a, start, end)
+array::copy(a)              // std::array_copy(a)
+array::map(a, fn)           // std::array_map(a, fn)
+array::filter(a, fn)        // std::array_filter(a, fn)
+array::reduce(a, fn, init)  // std::array_reduce(a, fn, init)
+array::any(a, fn)           // std::array_any(a, fn)
+array::every(a, fn)         // std::array_every(a, fn)
+array::count(a, fn)         // std::array_count(a, fn)
+array::unique(a)            // std::array_unique(a)
+array::zip(a, b)            // std::array_zip(a, b)
+array::take(a, n)           // std::array_take(a, n)
+array::drop(a, n)           // std::array_drop(a, n)
+array::rotate(a, n)         // std::array_rotate(a, n)
 ```
 
+---
+
 **Bool namespace** (`bool`):
+
+```omscript
+bool::and(a, b)     // a && b
+bool::or(a, b)      // a || b
+bool::not(x)        // !x
+bool::to_string(x)  // std::to_string(x)
 ```
-bool::and(a, b)   // a && b
-bool::or(a, b)    // a || b
-bool::not(x)      // !x
-bool::xor(a, b)   // a ^ b
-```
+
+---
+
+> **Error behavior:** If the method name is not recognized for the given type namespace (e.g. `int::unknown(x)`), the compiler falls through to the normal namespace-registry lookup. If that also fails, a hard compile error is emitted.
 
 ### 10.14 Integer Type-Cast Dispatch
 
@@ -1676,6 +1826,10 @@ Strings are heap-allocated and NUL-terminated. String indexing and concatenation
 | `std::char_code(c)` | Character to integer code point |
 | `std::is_alpha(c)` | Is alphabetic (1/0) |
 | `std::is_digit(c)` | Is decimal digit (1/0) |
+| `std::is_upper(c)` | Is uppercase letter (1/0) |
+| `std::is_lower(c)` | Is lowercase letter (1/0) |
+| `std::is_space(c)` | Is whitespace character (1/0) |
+| `std::is_alnum(c)` | Is alphanumeric (letter or digit) (1/0) |
 
 ---
 
@@ -2314,9 +2468,9 @@ These builtins expose 128-bit intermediate results for operations that would ove
 
 | Function | Description |
 |---|---|
-| `std::mulhi(a, b)` | Signed 128-bit multiply of `a` and `b`; returns the **high 64 bits** of the 128-bit signed product (also: `std::mulhi`) |
-| `std::mulhi_u(a, b)` | Unsigned 128-bit multiply; returns the **high 64 bits** of the unsigned 128-bit product (also: `std::mulhi_u`) |
-| `std::absdiff(a, b)` | `|a - b|` computed without overflow by widening to i128 before subtracting; always non-negative (also: `std::absdiff`) |
+| `std::mulhi(a, b)` | Signed 128-bit multiply of `a` and `b`; returns the **high 64 bits** of the 128-bit signed product |
+| `std::mulhi_u(a, b)` | Unsigned 128-bit multiply; returns the **high 64 bits** of the unsigned 128-bit product |
+| `std::absdiff(a, b)` | `|a - b|` computed without overflow by widening to i128 before subtracting; always non-negative |
 | `std::fast_sqrt(x)` | `std::sqrt(x)` with `reassociate` and `nnan` fast-math flags — slightly less precise than `sqrt` but faster on some microarchitectures |
 | `std::is_nan(x)` | Reinterpret `x` as `f64` and return 1 if it is NaN, 0 otherwise |
 | `std::is_inf(x)` | Reinterpret `x` as `f64` and return 1 if it is ±Infinity, 0 otherwise |
@@ -2341,7 +2495,7 @@ var inf = std::is_inf(x);          // 0
 
 | Function | Signature | Description |
 |---|---|---|
-| `bigint` | `std::bigint(x)` | Create bigint from integer or string `x` (also: `std::bigint`) |
+| `bigint` | `std::bigint(x)` | Create bigint from integer or string `x` |
 | `bigint_add` | `std::bigint_add(a, b)` | Add |
 | `bigint_sub` | `std::bigint_sub(a, b)` | Subtract |
 | `bigint_mul` | `std::bigint_mul(a, b)` | Multiply |
@@ -2385,7 +2539,7 @@ fn mod_pow(base, exp, m) {
     var mod = std::bigint(m);
     var result = std::bigint(1);
     while (!std::bigint_is_zero(e)) {
-        if (std::bigint_mod(e, std::bigint(2)) |> bigint_is_zero |> !_) {
+        if (!std::bigint_is_zero(std::bigint_mod(e, std::bigint(2)))) {
             result = std::bigint_mod(std::bigint_mul(result, b), mod);
         }
         b = std::bigint_mod(std::bigint_mul(b, b), mod);
@@ -2397,7 +2551,7 @@ fn mod_pow(base, exp, m) {
 
 ### 19.13 The `std::` Namespace
 
-All built-in functions **must** be called with the `std::` prefix — bare calls such as `std::len(arr)` or `std::print(x)` are a **compile error**. No import is required; the `std` namespace is always available.
+All built-in functions **must** be called with the `std::` prefix — bare calls such as `len(arr)` or `print(x)` are a **compile error**. No import is required; the `std` namespace is always available.
 
 `std::funcname(args)` is desugared at parse time into the corresponding built-in call.
 
@@ -5030,12 +5184,12 @@ Emits: llvm.loop.pipeline.initiationinterval(MII)
 
 ### 32.6 Arrays and Strings
 
-    var a = [1,2,3]; a[0]; a[1...3]
-    push(a,4); pop(a); sort(a); len(a); sum(a)
-    array_fill(n,v)  range(lo,hi)  range_step(lo,hi,step)
-    array_map(a,|x| x*2)  array_filter(a,|x| x>0)
-    array_zip(a,b)  array_take(a,n)  array_drop(a,n)
-    str_format("n=%d",n)  str_split(s,sep)  str_join(arr,sep)
+    var a = [1,2,3]; a[0]; a[1:4]              // literal, index, slice
+    std::push(a,4); std::pop(a); std::sort(a); std::len(a); std::sum(a)
+    std::array_fill(n,v)  std::range(lo,hi)  std::range_step(lo,hi,step)
+    std::array_map(a,|x| x*2)  std::array_filter(a,|x| x>0)
+    std::array_zip(a,b)  std::array_take(a,n)  std::array_drop(a,n)
+    std::str_format("n=%d",n)  std::str_split(s,sep)  std::str_join(arr,sep)
 
 ### 32.7 Memory Ownership
 
