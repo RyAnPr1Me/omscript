@@ -742,7 +742,7 @@ The result of a `comptime` block participates in the full constant-folding chain
 var BLOCK_SIZE:int = comptime { 1 << 6; };    // 64
 var HALF:int = BLOCK_SIZE / 2;                // also folded: 32
 var MASK:int = BLOCK_SIZE - 1;                // also folded: 63
-var LOG2:int = log2(BLOCK_SIZE);              // also folded: 6
+var LOG2:int = std::log2(BLOCK_SIZE);              // also folded: 6
 ```
 
 All four variables become compile-time constants — no division, subtraction, or `log2` call occurs at runtime.
@@ -2153,8 +2153,8 @@ The `precise_*` variants explicitly omit any wrap/exact flags, giving conservati
 
 The `saturating_*` variants map to LLVM's `llvm.sadd.sat.i64` / `llvm.ssub.sat.i64` intrinsics and fold at compile time with literal arguments:
 ```omscript
-const MAX_PLUS_1 = saturating_add(9223372036854775807, 1);  // 9223372036854775807 (no overflow)
-const MIN_MINUS_1 = saturating_sub(-9223372036854775808, 1); // -9223372036854775808 (no underflow)
+const MAX_PLUS_1 = std::saturating_add(9223372036854775807, 1);  // 9223372036854775807 (no overflow)
+const MIN_MINUS_1 = std::saturating_sub(-9223372036854775808, 1); // -9223372036854775808 (no underflow)
 ```
 
 ### 19.4 Bit Manipulation
@@ -2174,9 +2174,9 @@ const MIN_MINUS_1 = saturating_sub(-9223372036854775808, 1); // -922337203685477
 const BITS  = std::popcount(0xFF00FF00);  // 16
 const LEAD  = std::clz(0x0001000000000000); // 15
 const TRAIL = std::ctz(0x0010);           // 4
-const REV   = bitreverse(0x0F0F0F0F); // 0xF0F0F0F000000000 (as u64)
+const REV   = std::bitreverse(0x0F0F0F0F); // 0xF0F0F0F000000000 (as u64)
 const SWAP  = std::bswap(0x0102030405060708); // 0x0807060504030201
-const ROT   = rotate_left(1, 3);     // 8
+const ROT   = std::rotate_left(1, 3);     // 8
 ```
 
 ### 19.5 Type Utilities
@@ -2235,10 +2235,10 @@ var f = i32(-1);     // -1 (sign-preserved)
 | `sudo_command(cmd, password)` | Run `cmd` as root via `sudo -S`, supplying `password` on stdin. Returns combined stdout+stderr as a string, or `""` if `popen` fails. Single-quote characters in the password are automatically escaped. |
 
 ```omscript
-var output = command("echo hello");               // "hello\n"
-var files  = shell("ls /tmp");                    // directory listing
-var lines  = str_split(output, "\n");             // split into lines
-var result = sudo_command("apt update", "s3cr3t");// runs as root
+var output = std::command("echo hello");               // "hello\n"
+var files  = std::shell("ls /tmp");                    // directory listing
+var lines  = std::str_split(output, "\n");             // split into lines
+var result = std::sudo_command("apt update", "s3cr3t");// runs as root
 ```
 
 > **Security note for `sudo_command`:** the password travels only through
@@ -2266,16 +2266,16 @@ var result = sudo_command("apt update", "s3cr3t");// runs as root
 | `filter` | `filter(x, fn)` | Generic filter — dispatches to `array_filter`, `str_filter`, or `map_filter` based on the runtime type of `x`. |
 
 ```omscript
-var s = str_format("x=%d, y=%.3f, name=%s", 42, 3.14159, "hello");
+var s = std::str_format("x=%d, y=%.3f, name=%s", 42, 3.14159, "hello");
 // s == "x=42, y=3.142, name=hello"
 
-var hex = str_format("0x%016llX", 0xDEADBEEF);
+var hex = std::str_format("0x%016llX", 0xDEADBEEF);
 // hex == "0x00000000DEADBEEF"
 
-var digits_only = str_filter("abc123def456", |c| c >= 48 && c <= 57);
+var digits_only = std::str_filter("abc123def456", |c| c >= 48 && c <= 57);
 // digits_only == "123456"
 
-var evens = filter([1,2,3,4,5,6], |x| x % 2 == 0);
+var evens = std::filter([1,2,3,4,5,6], |x| x % 2 == 0);
 // evens == [2, 4, 6]
 ```
 
@@ -2287,10 +2287,10 @@ var evens = filter([1,2,3,4,5,6], |x| x % 2 == 0);
 | `env_set(name, value)` | Set environment variable `name` to `value` (wraps `setenv(3)`); returns 0 on success, -1 on error |
 
 ```omscript
-var home = env_get("HOME");         // e.g. "/home/user"
-var path = env_get("PATH");
-env_set("MY_APP_MODE", "release");
-var mode = env_get("MY_APP_MODE");  // "release"
+var home = std::env_get("HOME");         // e.g. "/home/user"
+var path = std::env_get("PATH");
+std::env_set("MY_APP_MODE", "release");
+var mode = std::env_get("MY_APP_MODE");  // "release"
 ```
 
 ### 19.10 Array Interleave
@@ -2302,7 +2302,7 @@ var mode = env_get("MY_APP_MODE");  // "release"
 ```omscript
 var keys   = [1, 2, 3];
 var values = [10, 20, 30];
-var zipped = array_zip(keys, values);  // [1, 10, 2, 20, 3, 30]
+var zipped = std::array_zip(keys, values);  // [1, 10, 2, 20, 3, 30]
 ```
 
 ### 19.11 High-Precision Integer Arithmetic
@@ -2321,15 +2321,15 @@ These builtins expose 128-bit intermediate results for operations that would ove
 ```omscript
 // High-32-bit multiply (useful for fixed-point and hash mixing):
 var lo = a * b;                     // lower 64 bits
-var hi = mulhi(a, b);               // upper 64 bits of 128-bit signed product
+var hi = std::mulhi(a, b);               // upper 64 bits of 128-bit signed product
 
 // Overflow-safe absolute difference:
-var d = absdiff(INT64_MIN, INT64_MAX);  // 18446744073709551615 (correct)
+var d = std::absdiff(INT64_MIN, INT64_MAX);  // 18446744073709551615 (correct)
 
 // Fast NaN/Inf detection on raw bit patterns:
 var x = 0x7FF8000000000000;   // NaN bit pattern
-var nan = is_nan(x);          // 1
-var inf = is_inf(x);          // 0
+var nan = std::is_nan(x);          // 1
+var inf = std::is_inf(x);          // 0
 ```
 
 ### 19.12 Arbitrary-Precision Integers (bigint)
@@ -2365,11 +2365,11 @@ var inf = is_inf(x);          // 0
 ```omscript
 // Compute 100! (factorial of 100)
 fn factorial(n:int) {
-    var result = bigint(1);
+    var result = std::bigint(1);
     for (i:int in 2...n+1) {
-        result = bigint_mul(result, bigint(i));
+        result = std::bigint_mul(result, std::bigint(i));
     }
-    return bigint_tostring(result);
+    return std::bigint_tostring(result);
 }
 
 var f100 = factorial(100);
@@ -2377,18 +2377,18 @@ var f100 = factorial(100);
 
 // Modular exponentiation:
 fn mod_pow(base, exp, m) {
-    var b = bigint(base);
-    var e = bigint(exp);
-    var mod = bigint(m);
-    var result = bigint(1);
-    while (!bigint_is_zero(e)) {
-        if (bigint_mod(e, bigint(2)) |> bigint_is_zero |> !_) {
-            result = bigint_mod(bigint_mul(result, b), mod);
+    var b = std::bigint(base);
+    var e = std::bigint(exp);
+    var mod = std::bigint(m);
+    var result = std::bigint(1);
+    while (!std::bigint_is_zero(e)) {
+        if (std::bigint_mod(e, std::bigint(2)) |> bigint_is_zero |> !_) {
+            result = std::bigint_mod(std::bigint_mul(result, b), mod);
         }
-        b = bigint_mod(bigint_mul(b, b), mod);
-        e = bigint_shr(e, 1);
+        b = std::bigint_mod(std::bigint_mul(b, b), mod);
+        e = std::bigint_shr(e, 1);
     }
-    return bigint_to_i64(result);
+    return std::bigint_to_i64(result);
 }
 ```
 
@@ -2840,7 +2840,7 @@ At O2+ inside `@hot`-annotated functions and OPTMAX blocks, redundant bounds che
 
 ```omscript
 @hot
-fn sum(arr, n) {
+fn std::sum(arr, n) {
     var s = 0;
     for (i:int in 0...n) {
         s += arr[i];   // check hoisted: verified once before the loop
@@ -3006,9 +3006,9 @@ The canonical use case for comptime array evaluation is encoding a string as an 
 **Full function listing with annotation:**
 ```omscript
 fn str_to_u64_fast(s:string) -> u64[] {
-    var n:int = len(s);                    // comptime: 5
+    var n:int = std::len(s);                    // comptime: 5
     var blocks:int = (n + 7) >> 3;        // comptime: 1
-    var out:u64[] = array_fill(blocks, 0); // comptime: [0]
+    var out:u64[] = std::array_fill(blocks, 0); // comptime: [0]
     for (i:int in 0...blocks) {            // runs once: i=0
         var base:int = i << 3;             // comptime: 0
         var x:u64 = 0;
@@ -3028,11 +3028,11 @@ fn str_to_u64_fast(s:string) -> u64[] {
 
 var M:u64[] = comptime { str_to_u64_fast("hello"); };
 // Emitted IR: @M = private unnamed_addr constant [2 x i64] [i64 1, i64 478560413544]
-// len(M) == 1, M[0] == 478560413544 == 0x6F6C6C6568
+// std::len(M) == 1, M[0] == 478560413544 == 0x6F6C6C6568
 
 // Usage: fast substring check at runtime
 fn contains_hello(s:string) -> bool {
-    if (len(s) < 5) { return false; }
+    if (std::len(s) < 5) { return false; }
     var word = u64(s[0]) | (u64(s[1]) << 8) | (u64(s[2]) << 16) |
                (u64(s[3]) << 24) | (u64(s[4]) << 32);
     return (word & 0xFFFFFFFFFF) == M[0];
@@ -3110,7 +3110,7 @@ pipeline n {
 }
 
 // ③ Dynamic count from a function call
-pipeline len(data) {
+pipeline std::len(data) {
     stage process { consume(data[__pipeline_i]); }
 }
 ```
@@ -3125,7 +3125,7 @@ accessible inside all stage bodies:
 pipeline n {
     stage body {
         var elem = arr[__pipeline_i];   // index the array with the iterator
-        print(__pipeline_i);            // print iteration number
+        std::print(__pipeline_i);            // print iteration number
     }
 }
 ```
@@ -3333,7 +3333,7 @@ u8(300)     // 44    (300 & 0xFF = 0x2C)
 // Reading bytes from a string for hashing or pattern matching:
 fn hash_string(s:string) -> u64 {
     var h:u64 = 14695981039346656037;  // FNV offset basis
-    var n = len(s);
+    var n = std::len(s);
     for (i:int in 0...n) {
         h ^= u64(s[i]);          // u64() zero-extends the byte
         h *= 1099511628211;      // FNV prime
@@ -3353,7 +3353,7 @@ const BYTE_FF  = u8(0xFF00); // 0
 
 // In a loop inside comptime — generates a lookup table:
 fn byte_parity_table() -> int[] {
-    var t:int[] = array_fill(256, 0);
+    var t:int[] = std::array_fill(256, 0);
     for (i:int in 0...256) {
         var x = i;
         x ^= x >> 4; x ^= x >> 2; x ^= x >> 1;
@@ -3383,7 +3383,7 @@ i8(200)     // -56   (200 = 0xC8; 0xC8 as signed i8 = -56)
 **Use case:** Implementing algorithms that process signed bytes (e.g., audio samples, temperature deltas):
 ```omscript
 fn apply_signed_delta(data:int[], deltas:int[], n:int) -> int[] {
-    var out:int[] = array_fill(n, 0);
+    var out:int[] = std::array_fill(n, 0);
     for (i:int in 0...n) {
         out[i] = data[i] + i8(deltas[i]);  // treat delta as signed 8-bit
     }
@@ -3415,7 +3415,7 @@ var count_nonzero = bool(a) + bool(b) + bool(c);  // sum of booleans
 **Comptime:**
 ```omscript
 const FLAGS:int[] = comptime {
-    var t:int[] = array_fill(8, 0);
+    var t:int[] = std::array_fill(8, 0);
     for (i:int in 0...8) {
         t[i] = bool(i % 3);   // 0,1,1,0,1,1,0,1
     }
@@ -3469,10 +3469,10 @@ This is intentional — it matches C's behavior where arithmetic on narrow integ
 **Example 1: Building a Bloom Filter Bitmask at Compile Time**
 ```omscript
 fn build_bloom_mask(keys:string[]) -> u64[] {
-    var mask:u64[] = array_fill(4, 0);  // 256-bit bloom filter (4 × 64-bit words)
+    var mask:u64[] = std::array_fill(4, 0);  // 256-bit bloom filter (4 × 64-bit words)
     for (k in keys) {
         var h:u64 = 14695981039346656037;
-        for (i:int in 0...len(k)) {
+        for (i:int in 0...std::len(k)) {
             h ^= u64(k[i]);
             h *= 1099511628211;
         }
@@ -3489,7 +3489,7 @@ const BLOOM:u64[] = comptime { build_bloom_mask(["foo", "bar", "baz"]); };
 **Example 2: CRC-8 Table Generation at Compile Time**
 ```omscript
 fn make_crc8_table() -> u8[] {
-    var t:u8[] = array_fill(256, 0);
+    var t:u8[] = std::array_fill(256, 0);
     for (i:int in 0...256) {
         var crc:int = i;
         for (j:int in 0...8) {
@@ -3726,7 +3726,7 @@ Annotating a function `@const_eval` **forces** eligibility regardless of the pur
 @const_eval
 fn my_hash(s:string) -> int {
     var h:int = 0xcbf29ce484222325;
-    for (i:int in 0...len(s)) {
+    for (i:int in 0...std::len(s)) {
         h ^= s[i];
         h *= 0x100000001b3;
     }
@@ -3870,7 +3870,7 @@ All arithmetic wraps at 64 bits (two's-complement):
 
 **Array allocation:**
 ```omscript
-var arr:int[] = array_fill(n, value)
+var arr:int[] = std::array_fill(n, value)
 ```
 CF-CTRE:
 1. Evaluates `n` → must be a non-negative `CTValue` integer.
@@ -3899,7 +3899,7 @@ CF-CTRE:
 
 **Array length:**
 ```omscript
-len(arr)
+std::len(arr)
 ```
 Returns `CTValue::fromI64(heap_.length(handle))`.
 
@@ -4198,7 +4198,7 @@ const RESULT = comptime { sum_of_squares(3, 4); }
 ```omscript
 @pure
 fn make_powers_of_two(n:int) -> int[] {
-    var out:int[] = array_fill(n, 0);
+    var out:int[] = std::array_fill(n, 0);
     for (i:int in 0...n) {
         out[i] = 1 << i;
     }
@@ -4233,7 +4233,7 @@ const F29 = comptime { fib(29); }   // cached — instant
 ```omscript
 @pure
 fn build_sbox(n:int) -> int[] {
-    var s:int[] = array_fill(n, 0);
+    var s:int[] = std::array_fill(n, 0);
     for (i:int in 0...n) {
         // AES-like S-box step (simplified for illustration)
         s[i] = (i * 0x1F + 0x63) & 0xFF;
@@ -4260,7 +4260,7 @@ pipeline 8 {
 @pure
 fn hash_string(s:string, seed:int) -> int {
     var h:int = seed;
-    for (i:int in 0...len(s)) {
+    for (i:int in 0...std::len(s)) {
         h ^= s[i];
         h *= 0x100000001b3;
     }
@@ -4554,7 +4554,7 @@ Example: a loop over a compile-time constant-size array:
 
 ```omscript
 const SIZE = 16;
-var arr: int[] = array_fill(SIZE, 0);
+var arr: int[] = std::array_fill(SIZE, 0);
 
 // Loop trip count = 16. Compiler emits:
 //   - unroll.full (16 ≤ threshold) at O3, OR
