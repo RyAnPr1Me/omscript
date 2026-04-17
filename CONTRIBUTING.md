@@ -88,14 +88,29 @@ cmake --build build --parallel $(nproc)
 ### Running Tests
 
 ```bash
-# Unit tests (GTest, 14 suites)
+# Unit tests (GTest via CTest)
 cd build && ctest --output-on-failure
 
-# Integration tests (~330 example programs)
+# Integration tests (full CLI + language suite)
 bash run_tests.sh
 
 # Run a single example manually
 ./build/omsc run examples/fibonacci.om
+```
+
+### Coverage Workflow
+
+```bash
+# Coverage-instrumented build
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCOVERAGE=ON -DLLVM_DIR=/usr/lib/llvm-18/cmake
+cmake --build build --parallel $(nproc)
+
+# Execute all tests
+cd build && ctest --output-on-failure && cd ..
+bash run_tests.sh
+
+# Coverage summary for production sources
+gcovr -r . --filter 'src/' --filter 'runtime/' --exclude 'build/' --print-summary
 ```
 
 ---
@@ -971,4 +986,3 @@ Before submitting a PR, verify all items:
 - [ ] For performance-critical changes, run the PGO benchmark: `bash benchmark_pgo.sh`
 - [ ] OptStats counters are updated if this optimization tracks a new metric
 - [ ] No new unnecessary heap allocations in the compiler hot path
-

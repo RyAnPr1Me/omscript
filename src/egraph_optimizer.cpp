@@ -255,7 +255,9 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
         for (auto child : node.children) {
             args.push_back(eNodeToAST(graph, child, model, cache));
         }
-        return std::make_unique<CallExpr>(node.name, std::move(args));
+        auto e = std::make_unique<CallExpr>(node.name, std::move(args));
+        e->fromStdNamespace = true; // e-graph optimizer generated
+        return e;
     }
 
     // Fallback

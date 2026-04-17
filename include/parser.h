@@ -49,6 +49,11 @@ class Parser {
     int lambdaCounter_ = 0;
     int recursionDepth_ = 0;
 
+    /// Set to true by parsePrimary() when it resolves a namespace-qualified
+    /// call (e.g. std::abs).  Read and immediately cleared by parseCall() to
+    /// set CallExpr::fromStdNamespace on the resulting node.
+    bool lastCallWasNsResolved_ = false;
+
     /// Maximum allowed parser recursion depth to prevent stack overflow on
     /// adversarial or deeply-nested input.
     static constexpr int kMaxRecursionDepth = 256;

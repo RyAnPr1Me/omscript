@@ -691,6 +691,7 @@ TEST(HardwareGraphTest, MicroarchProfileConsistency) {
     // All known architectures should have reasonable values
     std::vector<std::string> cpus = {
         "skylake", "haswell", "alderlake",
+        "sandybridge", "ivybridge",
         "znver3", "znver4",
         "apple-m1", "apple-m3",
         "neoverse-v2", "neoverse-n2",
@@ -1089,5 +1090,162 @@ TEST(HardwareGraphTest, ScheduleCacheMissAwareLoads) {
 
     unsigned cycles = scheduleInstructions(*tm.func, hw, *profile);
     EXPECT_GT(cycles, 0u);
+    ASSERT_TRUE(tm.verify());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Sandy Bridge / Ivy Bridge profile tests
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(HardwareGraphTest, SandyBridgeProfileAccuracy) {
+    auto profile = lookupMicroarch("sandybridge");
+    ASSERT_TRUE(profile.has_value());
+    EXPECT_EQ(profile->isa, ISAFamily::X86_64);
+    EXPECT_EQ(profile->issueWidth, 4u);
+    EXPECT_EQ(profile->intALUs, 3u);
+    EXPECT_EQ(profile->fmaUnits, 0u);    // no FMA on Sandy Bridge
+    EXPECT_EQ(profile->vectorWidth, 256u); // AVX (256-bit)
+    EXPECT_EQ(profile->robSize, 168u);
+    EXPECT_EQ(profile->l1DSize, 32u);
+    EXPECT_EQ(profile->mulPortCount, 1u);
+}
+
+TEST(HardwareGraphTest, IvyBridgeLookup) {
+    auto p1 = lookupMicroarch("ivybridge");
+    auto p2 = lookupMicroarch("ivy-bridge");
+    ASSERT_TRUE(p1.has_value());
+    ASSERT_TRUE(p2.has_value());
+    EXPECT_EQ(p1->name, p2->name);
+    EXPECT_EQ(p1->isa, ISAFamily::X86_64);
+    EXPECT_EQ(p1->fmaUnits, 0u); // no FMA on Ivy Bridge either
+}
+
+TEST(HardwareGraphTest, SandyBridgeOptimize) {
+    HGOETestModule tm;
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+    tm.builder.CreateRet(tm.builder.CreateAdd(a, b));
+
+    HGOEConfig config;
+    config.marchCpu = "sandybridge";
+    auto stats = optimizeFunction(*tm.func, config);
+    EXPECT_TRUE(stats.activated);
+    EXPECT_EQ(stats.resolvedArch, "sandybridge");
+    EXPECT_GE(stats.functionsOptimized, 1u);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Integer strength reduction — generic algorithm tests
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(HardwareGraphTest, StrengthReducePowerOf2) {
+    // x * 64 -> x << 6 (single shift, latency 1 instead of 3)
+    HGOETestModule tm("sr_pow2", 1);
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, tm.builder.getInt64(64), "sr_pow2");
+    tm.builder.CreateRet(mul);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    TransformStats stats = applyHardwareTransforms(*tm.func, *profile);
+    EXPECT_GE(stats.intStrengthReduced, 1u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, StrengthReduceAddForm) {
+    // x * 3 -> (x<<1) + x, x * 5 -> (x<<2) + x, x * 65537 -> (x<<16) + x
+    for (int64_t c : {3LL, 5LL, 65537LL, 131073LL}) {
+        HGOETestModule tm("sr_add", 1);
+        auto* x = tm.arg(0);
+        auto* mul = tm.builder.CreateMul(x, tm.builder.getInt64(c), "sr_add");
+        tm.builder.CreateRet(mul);
+        ASSERT_TRUE(tm.verify());
+
+        auto profile = lookupMicroarch("skylake");
+        ASSERT_TRUE(profile.has_value());
+        TransformStats stats = applyHardwareTransforms(*tm.func, *profile);
+        EXPECT_GE(stats.intStrengthReduced, 1u) << "Failed for constant " << c;
+        ASSERT_TRUE(tm.verify()) << "Verify failed for constant " << c;
+    }
+}
+
+TEST(HardwareGraphTest, StrengthReduceSubForm) {
+    // x * 7 -> (x<<3) - x, x * 63 -> (x<<6) - x, x * 255 -> (x<<8) - x
+    for (int64_t c : {7LL, 15LL, 31LL, 63LL, 127LL, 255LL}) {
+        HGOETestModule tm("sr_sub", 1);
+        auto* x = tm.arg(0);
+        auto* mul = tm.builder.CreateMul(x, tm.builder.getInt64(c), "sr_sub");
+        tm.builder.CreateRet(mul);
+        ASSERT_TRUE(tm.verify());
+
+        auto profile = lookupMicroarch("skylake");
+        ASSERT_TRUE(profile.has_value());
+        TransformStats stats = applyHardwareTransforms(*tm.func, *profile);
+        EXPECT_GE(stats.intStrengthReduced, 1u) << "Failed for constant " << c;
+        ASSERT_TRUE(tm.verify()) << "Verify failed for constant " << c;
+    }
+}
+
+TEST(HardwareGraphTest, StrengthReduceNegativeConstant) {
+    // x * -7 -> -((x<<3) - x)
+    HGOETestModule tm("sr_neg", 1);
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, tm.builder.getInt64(-7), "sr_neg");
+    tm.builder.CreateRet(mul);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    TransformStats stats = applyHardwareTransforms(*tm.func, *profile);
+    EXPECT_GE(stats.intStrengthReduced, 1u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, StrengthReduceLargeConstant) {
+    // Ensure we don't generate incorrect code for arbitrary constants.
+    HGOETestModule tm("sr_large", 1);
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, tm.builder.getInt64(196609), "sr_large");
+    tm.builder.CreateRet(mul);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    // Whether or not it's reduced, the IR must remain valid.
+    applyHardwareTransforms(*tm.func, *profile);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, StrengthReduceThreeSetBitsWhenBottlenecked) {
+    // x * 11 = x * (8+2+1) -- 3 set bits, uses 3 instructions when
+    // mulPortCount < intALUs (i.e., multiply is the bottleneck port).
+    HGOETestModule tm("sr_3bit", 1);
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, tm.builder.getInt64(11), "sr_3bit");
+    tm.builder.CreateRet(mul);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    // Skylake has mulPortCount=2, intALUs=4 -> 3-bit form should apply.
+    EXPECT_LT(profile->mulPortCount, profile->intALUs);
+    TransformStats stats = applyHardwareTransforms(*tm.func, *profile);
+    EXPECT_GE(stats.intStrengthReduced, 1u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, StrengthReduceNoChangeForMul1) {
+    // x * 1 should never be strength-reduced (identity).
+    HGOETestModule tm("sr_one", 1);
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, tm.builder.getInt64(1), "sr_one");
+    tm.builder.CreateRet(mul);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    TransformStats stats = applyHardwareTransforms(*tm.func, *profile);
+    EXPECT_EQ(stats.intStrengthReduced, 0u);
     ASSERT_TRUE(tm.verify());
 }

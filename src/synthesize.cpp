@@ -503,7 +503,9 @@ std::unique_ptr<Expression> SynthesisEngine::lowerToAST(
     case SynthOp::ABS: {
         std::vector<std::unique_ptr<Expression>> args;
         args.push_back(lowerToAST(node->left.get(), paramNames));
-        return std::make_unique<CallExpr>("abs", std::move(args));
+        auto e = std::make_unique<CallExpr>("abs", std::move(args));
+        e->fromStdNamespace = true; // synthesizer-generated
+        return e;
     }
     case SynthOp::NOT:
         return std::make_unique<UnaryExpr>("~", lowerToAST(node->left.get(), paramNames));
@@ -556,13 +558,17 @@ std::unique_ptr<Expression> SynthesisEngine::lowerToAST(
         std::vector<std::unique_ptr<Expression>> args;
         args.push_back(lowerToAST(node->left.get(),  paramNames));
         args.push_back(lowerToAST(node->right.get(), paramNames));
-        return std::make_unique<CallExpr>("min", std::move(args));
+        auto e = std::make_unique<CallExpr>("min", std::move(args));
+        e->fromStdNamespace = true; // synthesizer-generated
+        return e;
     }
     case SynthOp::MAX2: {
         std::vector<std::unique_ptr<Expression>> args;
         args.push_back(lowerToAST(node->left.get(),  paramNames));
         args.push_back(lowerToAST(node->right.get(), paramNames));
-        return std::make_unique<CallExpr>("max", std::move(args));
+        auto e = std::make_unique<CallExpr>("max", std::move(args));
+        e->fromStdNamespace = true; // synthesizer-generated
+        return e;
     }
     }
     return std::make_unique<LiteralExpr>(static_cast<long long>(0));

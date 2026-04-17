@@ -123,6 +123,7 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
 
     case llvm::Instruction::FAdd:
     case llvm::Instruction::FSub:
+    case llvm::Instruction::FNeg:   // bit-flip on sign; uses FP pipeline
         return OpClass::FPArith;
 
     case llvm::Instruction::FMul:
@@ -162,9 +163,21 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
     case llvm::Instruction::BitCast:
     case llvm::Instruction::IntToPtr:
     case llvm::Instruction::PtrToInt:
+    case llvm::Instruction::FPTrunc:
+    case llvm::Instruction::FPExt:
         return OpClass::Conversion;
 
+    // SIMD / vector instructions map to the vector execution units.
+    case llvm::Instruction::ExtractElement:
+    case llvm::Instruction::InsertElement:
+    case llvm::Instruction::ShuffleVector:
+        return OpClass::VectorOp;
+
+    // Zero-latency / register-file bookkeeping ops.
     case llvm::Instruction::PHI:
+    case llvm::Instruction::ExtractValue:
+    case llvm::Instruction::InsertValue:
+    case llvm::Instruction::Alloca:   // stack allocation done in function prolog
         return OpClass::Phi;
 
     case llvm::Instruction::Call: {
@@ -237,9 +250,47 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     }
 
     // Phase 2: Add data-dependency edges based on def-use chains.
-    // Use OpClass-level latency estimate for the PRODUCER instruction instead
-    // of a flat "1" — this makes the dependency graph's critical-path
-    // computation much more accurate (e.g. mul ≈ 3 cycles, div ≈ 20 cycles).
+    // Use per-opcode default latency estimates for edge weights so that
+    // the critical-path computation in the abstract ProgramGraph is accurate
+    // even without a MicroarchProfile (which is not available here).
+    //
+    // These defaults are calibrated to modern OOO CPUs (Skylake-class x86,
+    // Apple M-series AArch64).  The per-opcode scheduler in scheduleBasicBlock
+    // uses the exact profile values; these defaults only affect the abstract
+    // ProgramGraph used by mapProgramToHardware and criticalPathLength.
+    auto defaultLatency = [](const llvm::Instruction* inst) -> unsigned {
+        if (!inst) return 1;
+        switch (inst->getOpcode()) {
+        case llvm::Instruction::Mul:        return 3;
+        case llvm::Instruction::SDiv:
+        case llvm::Instruction::UDiv:
+        case llvm::Instruction::SRem:
+        case llvm::Instruction::URem:       return 20;
+        case llvm::Instruction::FMul:       return 4;
+        case llvm::Instruction::FDiv:
+        case llvm::Instruction::FRem:       return 15;
+        case llvm::Instruction::FAdd:
+        case llvm::Instruction::FSub:       return 4;
+        case llvm::Instruction::FNeg:       return 1;  // bit-flip on sign
+        case llvm::Instruction::Load:       return 4;
+        case llvm::Instruction::Store:      return 4;
+        case llvm::Instruction::Call:
+            if (llvm::isa<llvm::IntrinsicInst>(inst)) return 4;
+            return 10;
+        case llvm::Instruction::ExtractElement:
+        case llvm::Instruction::InsertElement:
+        case llvm::Instruction::ShuffleVector: return 2;
+        case llvm::Instruction::PHI:
+        case llvm::Instruction::ExtractValue:
+        case llvm::Instruction::InsertValue:
+        case llvm::Instruction::Alloca:
+        case llvm::Instruction::BitCast:
+        case llvm::Instruction::IntToPtr:
+        case llvm::Instruction::PtrToInt:   return 0;
+        default:                            return 1;
+        }
+    };
+
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto consIt = instToNode_.find(&inst);
@@ -250,22 +301,7 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                 if (auto* opInst = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(i))) {
                     auto prodIt = instToNode_.find(opInst);
                     if (prodIt != instToNode_.end()) {
-                        // Use the producer's OpClass for a rough latency.
-                        unsigned prodLat = 1;
-                        const auto* prodNode = getNode(prodIt->second);
-                        if (prodNode) {
-                            switch (prodNode->opClass) {
-                            case OpClass::IntMul:   prodLat = 3;  break;
-                            case OpClass::IntDiv:   prodLat = 20; break;
-                            case OpClass::FPMul:
-                            case OpClass::FMA:
-                            case OpClass::Load:
-                            case OpClass::FPArith:  prodLat = 4;  break;
-                            case OpClass::FPDiv:    prodLat = 15; break;
-                            case OpClass::Phi:      prodLat = 0;  break;
-                            default:                prodLat = 1;  break;
-                            }
-                        }
+                        unsigned prodLat = defaultLatency(opInst);
                         addEdge(prodIt->second, consId, DepType::Data, prodLat);
                     }
                 }
@@ -365,17 +401,24 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
 
 unsigned ProgramGraph::criticalPathLength() const {
     if (nodes_.empty()) return 0;
+    const size_t n = nodes_.size();
 
-    // Topological sort + longest-path computation.
-    std::vector<unsigned> dist(nodes_.size(), 0);
-    std::vector<unsigned> inDeg(nodes_.size(), 0);
-
+    // Build adjacency list (outgoing edges per node) and in-degree array in
+    // a single pass over edges_.  This avoids the O(N×E) inner-loop scan that
+    // the previous edge-scan approach had when the node count grows.
+    std::vector<std::vector<std::pair<unsigned, unsigned>>> succ(n); // succ[u] = {(v, lat)}
+    std::vector<unsigned> inDeg(n, 0);
     for (const auto& e : edges_) {
-        if (e.dstId < inDeg.size()) inDeg[e.dstId]++;
+        if (e.srcId < n && e.dstId < n) {
+            succ[e.srcId].emplace_back(e.dstId, e.latency);
+            inDeg[e.dstId]++;
+        }
     }
 
+    // Topological sort (Kahn's algorithm) + longest-path (ASAP distances).
+    std::vector<unsigned> dist(n, 0);
     std::queue<unsigned> ready;
-    for (unsigned i = 0; i < nodes_.size(); ++i) {
+    for (unsigned i = 0; i < n; ++i) {
         if (inDeg[i] == 0) {
             ready.push(i);
             dist[i] = 1; // Minimum 1 cycle per instruction
@@ -385,23 +428,16 @@ unsigned ProgramGraph::criticalPathLength() const {
     while (!ready.empty()) {
         unsigned u = ready.front();
         ready.pop();
-        for (const auto& e : edges_) {
-            if (e.srcId == u) {
-                unsigned newDist = dist[u] + e.latency;
-                if (newDist > dist[e.dstId]) {
-                    dist[e.dstId] = newDist;
-                }
-                if (--inDeg[e.dstId] == 0) {
-                    ready.push(e.dstId);
-                }
-            }
+        for (auto [v, lat] : succ[u]) {
+            unsigned newDist = dist[u] + lat;
+            if (newDist > dist[v]) dist[v] = newDist;
+            if (--inDeg[v] == 0) ready.push(v);
         }
     }
 
     unsigned maxDist = 0;
-    for (unsigned d : dist) {
+    for (unsigned d : dist)
         if (d > maxDist) maxDist = d;
-    }
     return maxDist;
 }
 
@@ -522,20 +558,25 @@ double HardwareCostModel::instructionCost(const llvm::Instruction* inst) const {
 double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     if (pg.nodeCount() == 0) return 0.0;
 
-    // Simple cycle-accurate simulation: assign each node to the earliest
-    // cycle where all dependencies are satisfied and a port is available.
+    // Build adjacency lists (O(N+E)) to avoid O(N×E) inner-loop edge scans.
     const size_t n = pg.nodeCount();
-    std::vector<unsigned> scheduledCycle(n, 0);
+    std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n); // (dst, lat)
     std::vector<unsigned> inDeg(n, 0);
 
     for (const auto& e : pg.edges()) {
-        if (e.dstId < n) inDeg[e.dstId]++;
+        if (e.srcId < n && e.dstId < n) {
+            succList[e.srcId].emplace_back(e.dstId, e.latency);
+            inDeg[e.dstId]++;
+        }
     }
 
+    // Cycle-accurate simulation: assign each node to the earliest cycle where
+    // all dependencies are satisfied and a port is available.
+    std::vector<unsigned> scheduledCycle(n, 0);
+
     std::queue<unsigned> ready;
-    for (unsigned i = 0; i < n; ++i) {
+    for (unsigned i = 0; i < n; ++i)
         if (inDeg[i] == 0) ready.push(i);
-    }
 
     unsigned maxCycle = 0;
 
@@ -543,10 +584,13 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         unsigned u = ready.front();
         ready.pop();
 
-        // Compute earliest start cycle from predecessors.
+        // Compute earliest start cycle from predecessors.  Because we build
+        // scheduledCycle in topological order, predecessors are already set.
         unsigned earliest = 0;
+        // Re-scan edges for incoming latency (predecessors are set already).
+        // This is still O(E) total across all iterations in the outer loop.
         for (const auto& e : pg.edges()) {
-            if (e.dstId == u) {
+            if (e.dstId == u && e.srcId < n) {
                 unsigned predEnd = scheduledCycle[e.srcId] + e.latency;
                 if (predEnd > earliest) earliest = predEnd;
             }
@@ -560,13 +604,9 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
             if (endCycle > maxCycle) maxCycle = endCycle;
         }
 
-        // Release successors.
-        for (const auto& e : pg.edges()) {
-            if (e.srcId == u) {
-                if (--inDeg[e.dstId] == 0) {
-                    ready.push(e.dstId);
-                }
-            }
+        // Release successors (latency not needed here; only topology matters).
+        for (auto& [v, ignored] : succList[u]) {
+            if (--inDeg[v] == 0) ready.push(v);
         }
     }
 
@@ -648,6 +688,44 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 4096;
     p.memoryLatency = 200;
     p.robSize = 224;
+    return p;
+}
+
+/// Return an Intel Sandy Bridge / Ivy Bridge (Intel 2nd/3rd gen) profile.
+/// Sandy Bridge (2011): 6 execution ports, 3 integer ALUs, AVX 256-bit (no FMA).
+/// Ivy Bridge (2012): same microarchitecture, minor improvements.
+[[gnu::cold]] static MicroarchProfile sandyBridgeProfile() {
+    MicroarchProfile p;
+    p.name = "sandybridge";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 4;
+    p.issueWidth = 4;           // 4-wide dispatch
+    p.pipelineDepth = 14;
+    p.intALUs = 3;              // ports 0, 1, 5 (no port 6 like Skylake)
+    p.vecUnits = 2;             // ports 0 and 1 handle vector ops
+    p.fmaUnits = 0;             // Sandy Bridge has no FMA; introduced in Haswell
+    p.loadPorts = 2;            // ports 2, 3
+    p.storePorts = 1;           // port 4 (data); port 7 (address) counted in agus
+    p.branchUnits = 1;
+    p.agus = 2;
+    p.dividers = 1;
+    p.mulPortCount = 1;         // integer multiply: port 1 only
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 22;
+    p.latFPAdd = 5; p.latFPMul = 5; p.latFPDiv = 14; p.latFMA = 0;
+    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.33; p.tputIntMul = 1.0;
+    p.tputFPAdd = 1.0; p.tputFPMul = 1.0;
+    p.tputLoad = 0.5; p.tputStore = 1.0;
+    p.l1DSize = 32;   p.l1DLatency = 4;
+    p.l2Size = 256;   p.l2Latency = 12;
+    p.l3Size = 8192;  p.l3Latency = 36;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;        // AVX1 (256-bit SIMD, but FP ops are 2×128-bit)
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 15.0;
+    p.btbEntries = 2048;
+    p.memoryLatency = 200;
+    p.robSize = 168;
     return p;
 }
 
@@ -1023,6 +1101,50 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     return p;
 }
 
+/// Return an Intel Sapphire Rapids / Emerald Rapids profile.
+/// Sapphire Rapids (Xeon 4th Gen, 2023): 8-wide decode, 6 ALU ports,
+/// AVX-512 native at 512 bits (not double-pumped like Skylake-AVX512),
+/// ROB doubled to 512, 3 load + 3 store ports.
+/// Emerald Rapids (Xeon 5th Gen, 2023): same µarch, minor improvements.
+[[gnu::cold]] static MicroarchProfile sapphireRapidsProfile() {
+    MicroarchProfile p;
+    p.name = "sapphirerapids";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 6;         // µop cache delivers 6/cycle (MITE decoder 4)
+    p.issueWidth = 6;          // 6 µops dispatched per cycle (same as Skylake)
+    p.pipelineDepth = 14;
+    p.intALUs = 5;             // ports 0,1,5,6,10 (5 integer execution ports)
+    p.vecUnits = 3;            // ports 0,1,5 with native 512-bit EVEX width
+    p.fmaUnits = 2;            // ports 0 and 1
+    p.loadPorts = 3;           // ports 2,3,8 (all three with AGU)
+    p.storePorts = 3;          // ports 4,7,9 (incl. store-address port 9)
+    p.branchUnits = 2;
+    p.agus = 5;                // 3 load AGUs + 2 store-address AGUs
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 18;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 15; p.latFMA = 4;
+    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.20;       // 5 integer ports → ~5/cycle
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.33; p.tputFPMul = 0.33;
+    p.tputLoad = 0.33; p.tputStore = 0.33;
+    p.l1DSize = 48;            // 48 KB L1D (same as Ice Lake)
+    p.l1DLatency = 5;
+    p.l2Size = 2048;           // 2 MB L2 per core
+    p.l2Latency = 14;
+    p.l3Size = 61440;          // up to 60 MB shared L3
+    p.l3Latency = 52;          // larger L3 → higher latency
+    p.cacheLineSize = 64;
+    p.vectorWidth = 512;       // Native AVX-512, not double-pumped
+    p.intRegisters = 16; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 15.0;
+    p.btbEntries = 12288;
+    p.memoryLatency = 200;
+    p.robSize = 512;           // Doubled from Skylake's 224
+    return p;
+}
+
 /// Normalize a CPU name for lookup: lowercase, strip hyphens.
 static std::string normalizeCpuName(const std::string& name) {
     std::string result;
@@ -1048,22 +1170,44 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     if (normalized == "haswell" || normalized == "broadwell")
         return haswellProfile();
 
+    if (normalized == "sandybridge" || normalized == "sandybridgep" ||
+        normalized == "ivybridge" || normalized == "ivybridgep" ||
+        normalized == "ivytown" || normalized == "jaketown" ||
+        normalized == "westmere" || normalized == "nehalem") {
+        auto p = sandyBridgeProfile();
+        p.name = normalized;
+        if (normalized == "ivybridge" || normalized == "ivybridgep" ||
+            normalized == "ivytown")
+            p.name = "ivybridge";
+        return p;
+    }
+
     if (normalized == "alderlake" || normalized == "raptorlake" ||
-        normalized == "meteorlake" || normalized == "arrowlake")
+        normalized == "meteorlake")
         return alderlakeProfile();
+
+    if (normalized == "arrowlake")
+        return lunarLakeProfile(); // Arrow Lake uses Lion Cove P-cores (same as Lunar Lake)
 
     if (normalized == "lunarlake" || normalized == "pantherlake")
         return lunarLakeProfile();
 
     if (normalized == "icelakeserver" || normalized == "icelakeclient" ||
-        normalized == "tigerlake" || normalized == "sapphirerapids" ||
-        normalized == "emeraldrapids") {
+        normalized == "tigerlake") {
         auto p = skylakeProfile();
         p.name = cpuName;
         p.vectorWidth = 512; // AVX-512
         p.vecRegisters = 32;
+        p.loadPorts = 3;     // Ice Lake: 3 load ports
+        p.storePorts = 2;
+        p.robSize = 352;     // Ice Lake ROB is 352
         return p;
     }
+
+    // Sapphire Rapids / Emerald Rapids: dedicated profile with ROB=512,
+    // AVX-512 native, 3 load + 3 store ports.
+    if (normalized == "sapphirerapids" || normalized == "emeraldrapids")
+        return sapphireRapidsProfile();
 
     // AMD Zen family
     if (normalized == "znver4" || normalized == "zen4")
@@ -1074,6 +1218,7 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         auto p = zen3Profile();
         p.name = "znver2";
         p.pipelineDepth = 19;
+        p.loadPorts = 2;   // Zen 2 has 2 load/store AGU units (Zen 3 added a 3rd)
         p.l2Size = 512;
         p.l3Latency = 42;
         return p;
@@ -1416,13 +1561,17 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     case llvm::Instruction::FSub:
     case llvm::Instruction::FCmp:
         return profile.latFPAdd;
+    case llvm::Instruction::FNeg:
+        // FNeg is a sign-bit flip: VXORPS/VANDNPS on x86 (1 cycle),
+        // FNEG on AArch64 (2 cycles, same as latFPAdd on most ARM profiles).
+        // Use the minimum of 1 and latFPAdd so fast CPUs (x86 vectorized) get
+        // the accurate 1-cycle model, while ARM profiles use their own latency.
+        return (profile.isa == ISAFamily::X86_64) ? 1u : profile.latFPAdd;
     case llvm::Instruction::FMul:
         return profile.latFPMul;
     case llvm::Instruction::FDiv:
     case llvm::Instruction::FRem:
         return profile.latFPDiv;
-    case llvm::Instruction::FNeg:
-        return profile.latFPAdd;
 
     // ── Memory ──────────────────────────────────────────────────────────────
     case llvm::Instruction::Load:
@@ -1431,6 +1580,23 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         return profile.latStore;
     case llvm::Instruction::GetElementPtr:
         return profile.latIntAdd; // address arithmetic
+
+    // ── SIMD / vector element operations ────────────────────────────────────
+    // These go through the vector execution units; use latFPAdd as a proxy
+    // since on most CPUs they share the same pipeline.
+    case llvm::Instruction::ExtractElement:
+    case llvm::Instruction::InsertElement:
+        return profile.latFPAdd;
+    case llvm::Instruction::ShuffleVector:
+        // On x86, cross-lane shuffles are 3-5 cycles; within-lane are 1 cycle.
+        // Use latFPAdd * 2 as a conservative estimate that stays proportional.
+        return profile.latFPAdd * 2;
+
+    // ── Zero-latency structural / bookkeeping ops ────────────────────────────
+    case llvm::Instruction::ExtractValue:
+    case llvm::Instruction::InsertValue:
+    case llvm::Instruction::Alloca:   // stack allocation done in function prolog
+        return 0u;
 
     // ── Control flow ────────────────────────────────────────────────────────
     case llvm::Instruction::Br:
@@ -1441,10 +1607,15 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         return 0;
 
     // ── Type conversions ────────────────────────────────────────────────────
+    // ZExt/SExt/Trunc latency: on x86-64 and AArch64, narrowing truncations
+    // and zero-extensions between integer widths are typically implemented
+    // as MOV with register-renaming (zero latency for ABI-safe cases) or a
+    // single ALU cycle.  We model them as 1-cycle operations (not full ALU
+    // pipeline latency) because they never stall the issue slot.
     case llvm::Instruction::Trunc:
     case llvm::Instruction::ZExt:
     case llvm::Instruction::SExt:
-        return profile.latIntAdd; // requires ALU
+        return 1u; // single-cycle move / rename; always cheaper than any mul/fp op
     case llvm::Instruction::FPToUI:
     case llvm::Instruction::FPToSI:
     case llvm::Instruction::UIToFP:
@@ -1481,6 +1652,41 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         case llvm::Intrinsic::ctlz:
         case llvm::Intrinsic::cttz:     return profile.latIntAdd;
         case llvm::Intrinsic::prefetch: return 0; // hint, no result latency
+        // ── Transcendental / math intrinsics ───────────────────────────────
+        // On x86 these are typically library calls (80-250+ cycles).
+        // On AArch64, some may have native FRINT* instructions (2-4 cycles).
+        // We model conservative cycle counts so the scheduler hoists them
+        // early to hide the latency.
+        case llvm::Intrinsic::floor:
+        case llvm::Intrinsic::ceil:
+        case llvm::Intrinsic::trunc:
+        case llvm::Intrinsic::round:
+        case llvm::Intrinsic::roundeven:
+        case llvm::Intrinsic::rint:
+        case llvm::Intrinsic::nearbyint:
+            // VROUNDPD/VROUNDPS on x86 (8 cycles), FRINTX on AArch64 (2 cycles).
+            // Use latFPAdd as a conservative estimate (always >= 2).
+            return profile.latFPAdd * 2;
+        case llvm::Intrinsic::log:
+        case llvm::Intrinsic::log2:
+        case llvm::Intrinsic::log10:
+            // Typically software emulation: ~80-120 cycles.
+            // Model as latFPDiv * 6 (14*6 = 84 on Skylake, 10*6 = 60 on M1).
+            return profile.latFPDiv * 6;
+        case llvm::Intrinsic::exp:
+        case llvm::Intrinsic::exp2:
+            // Similar to log: ~80-100 cycles.
+            return profile.latFPDiv * 5;
+        case llvm::Intrinsic::sin:
+        case llvm::Intrinsic::cos:
+            // FSIN/FCOS (x87) ≈ 80-100 cycles; libm call ≈ 100-150 cycles.
+            return profile.latFPDiv * 7;
+        case llvm::Intrinsic::fabs:
+            // FABS is a single cycle bit-clear operation.
+            return 1u;
+        case llvm::Intrinsic::copysign:
+            // Single cycle: isolate sign + OR into mantissa.
+            return 1u;
         default:                        return kUnknownIntrinsicLatency;
         }
     }
@@ -1495,59 +1701,97 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     MappingResult result;
     if (pg.nodeCount() == 0) return result;
 
-    // Use the hardware graph to verify port counts are consistent.
-    // (The profile is the primary source, but the graph provides validation.)
     (void)hw; // Graph structure used for validation in debug builds
 
     const size_t n = pg.nodeCount();
 
-    // Annotate program nodes with hardware latencies.
+    // ── Annotate nodes with per-opcode latencies ──────────────────────────────
+    // Use `getOpcodeLatency` when the node has an instruction pointer (always
+    // for code built via buildFromFunction).  Fall back to the coarser
+    // OpClass-based latency for synthetic nodes.
     for (unsigned i = 0; i < n; ++i) {
         ProgramNode* node = pg.getNodeMut(i);
-        if (node) {
-            node->estimatedLatency = static_cast<double>(getLatency(node->opClass, profile));
+        if (!node) continue;
+        unsigned lat = node->inst
+            ? getOpcodeLatency(node->inst, profile)
+            : getLatency(node->opClass, profile);
+        node->estimatedLatency = static_cast<double>(lat);
+    }
+
+    // ── Build adjacency lists for O(N+E) operations ───────────────────────────
+    // succList[u] = {(v, edge_latency)}  (outgoing edges)
+    // predList[v] = {(u, edge_latency)}  (incoming edges)
+    std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n), predList(n);
+    std::vector<unsigned> inDeg(n, 0);
+    for (const auto& e : pg.edges()) {
+        if (e.srcId < n && e.dstId < n) {
+            succList[e.srcId].emplace_back(e.dstId, e.latency);
+            predList[e.dstId].emplace_back(e.srcId, e.latency);
+            ++inDeg[e.dstId];
         }
     }
 
-    // Compute in-degree for topological scheduling.
-    std::vector<unsigned> inDeg(n, 0);
-    for (const auto& e : pg.edges()) {
-        if (e.dstId < n) inDeg[e.dstId]++;
-    }
-
-    // Ready queue: nodes with all predecessors scheduled.
-    // Priority: higher critical-path priority first (longest path to exit).
+    // ── Compute priority (longest latency-weighted path to any sink) ──────────
+    // Iterative bottom-up Kahn traversal: process nodes in reverse topological
+    // order (sinks first) to propagate critical-path distances.
     std::vector<unsigned> priority(n, 0);
     {
-        // Compute bottom-up priority (longest path from node to any sink).
-        std::vector<bool> visited(n, false);
-        std::function<unsigned(unsigned)> computePriority = [&](unsigned id) -> unsigned {
-            if (visited[id]) return priority[id];
-            visited[id] = true;
-            unsigned maxSucc = 0;
-            for (const auto& e : pg.edges()) {
-                if (e.srcId == id) {
-                    unsigned sp = computePriority(e.dstId) + e.latency;
-                    if (sp > maxSucc) maxSucc = sp;
-                }
+        // Kahn's algorithm to get topological order.
+        std::vector<unsigned> topoOrder;
+        topoOrder.reserve(n);
+        std::vector<unsigned> deg(inDeg);  // copy
+        std::queue<unsigned> q;
+        for (unsigned i = 0; i < n; ++i)
+            if (deg[i] == 0) q.push(i);
+        while (!q.empty()) {
+            unsigned u = q.front(); q.pop();
+            topoOrder.push_back(u);
+            for (auto& [v, lat] : succList[u])
+                if (--deg[v] == 0) q.push(v);
+        }
+        // Process in reverse topological order (sinks → sources).
+        for (auto it = topoOrder.rbegin(); it != topoOrder.rend(); ++it) {
+            unsigned u = *it;
+            unsigned nodeLat = static_cast<unsigned>(
+                pg.getNode(u) ? pg.getNode(u)->estimatedLatency : 1);
+            unsigned maxSuccDist = 0;
+            for (auto& [v, edgeLat] : succList[u]) {
+                unsigned dist = priority[v] + edgeLat;
+                if (dist > maxSuccDist) maxSuccDist = dist;
             }
-            priority[id] = maxSucc + static_cast<unsigned>(
-                pg.getNode(id) ? pg.getNode(id)->estimatedLatency : 1);
-            return priority[id];
-        };
-        for (unsigned i = 0; i < n; ++i) computePriority(i);
+            priority[u] = nodeLat + maxSuccDist;
+        }
     }
+
+    // ── Per-port-type throughput budget ──────────────────────────────────────
+    // busy_cycles[rt] = how many cycles a port of this type is occupied per op.
+    // For pipelined units (ALU, FMA) this is 1.
+    // For non-pipelined units (divider on most CPUs) this is the full latency.
+    auto portBusyCycles = [&](ResourceType rt) -> unsigned {
+        switch (rt) {
+        case ResourceType::IntegerALU:  return 1;
+        case ResourceType::VectorALU:   return 1;
+        case ResourceType::FMAUnit:     return 1;
+        case ResourceType::LoadUnit:    return 1;
+        case ResourceType::StoreUnit:   return 1;
+        case ResourceType::BranchUnit:  return 1;
+        case ResourceType::DividerUnit:
+            // Divider is typically non-pipelined; occupy it for the full latency
+            // divided by the number of divider units.
+            return profile.latIntDiv;
+        default:                        return 1;
+        }
+    };
 
     // Scheduled cycle for each node.
     std::vector<unsigned> scheduledCycle(n, 0);
     std::vector<bool> scheduled(n, false);
 
-    // Resource availability: next free cycle for each port type.
-    // We track per-port-instance availability.
+    // Resource availability: next free cycle for each port instance.
     std::unordered_map<int, std::vector<unsigned>> portAvail;
     auto initPort = [&](ResourceType rt) {
-        unsigned count = getPortCount(rt, profile);
-        portAvail[static_cast<int>(rt)].assign(count, 0);
+        unsigned cnt = getPortCount(rt, profile);
+        portAvail[static_cast<int>(rt)].assign(cnt, 0u);
     };
     initPort(ResourceType::IntegerALU);
     initPort(ResourceType::VectorALU);
@@ -1557,78 +1801,77 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     initPort(ResourceType::BranchUnit);
     initPort(ResourceType::DividerUnit);
 
+    // Working in-degree (decremented as predecessors complete).
+    std::vector<unsigned> workInDeg(inDeg);
+    std::queue<unsigned> readyQ;
+    for (unsigned i = 0; i < n; ++i)
+        if (workInDeg[i] == 0) readyQ.push(i);
+
     unsigned totalScheduled = 0;
     unsigned maxCycle = 0;
     unsigned stallCycles = 0;
 
     while (totalScheduled < n) {
-        // Collect ready nodes.
+        // Collect ready nodes and sort by descending priority.
         std::vector<unsigned> ready;
-        for (unsigned i = 0; i < n; ++i) {
-            if (!scheduled[i] && inDeg[i] == 0) {
-                ready.push_back(i);
-            }
+        while (!readyQ.empty()) {
+            ready.push_back(readyQ.front());
+            readyQ.pop();
         }
 
         if (ready.empty()) {
-            // Cycle with unresolved dependencies — break deadlock for
-            // graphs with cycles (shouldn't happen in SSA form).
-            for (unsigned i = 0; i < n; ++i) {
+            // Deadlock guard: should not happen for valid DAGs.
+            for (unsigned i = 0; i < n; ++i)
                 if (!scheduled[i]) { ready.push_back(i); break; }
-            }
             if (ready.empty()) break;
         }
 
-        // Sort by priority (higher = more critical, schedule first).
         std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
             return priority[a] > priority[b];
         });
 
-        // Limit to issue width per cycle.
         unsigned issued = 0;
         for (unsigned nodeId : ready) {
             if (issued >= profile.issueWidth) break;
+            if (scheduled[nodeId]) continue;
 
-            const ProgramNode* node = pg.getNode(nodeId);
-            if (!node) continue;
-
-            // Compute earliest cycle from dependencies.
+            // Earliest start: max over all predecessors of (sched_cycle + latency).
             unsigned earliest = 0;
-            for (const auto& e : pg.edges()) {
-                if (e.dstId == nodeId && scheduled[e.srcId]) {
-                    auto lat = static_cast<unsigned>(
-                        pg.getNode(e.srcId) ? pg.getNode(e.srcId)->estimatedLatency : 1);
-                    unsigned predEnd = scheduledCycle[e.srcId] + lat;
+            for (auto& [pred, edgeLat] : predList[nodeId]) {
+                if (scheduled[pred]) {
+                    unsigned predLat = static_cast<unsigned>(
+                        pg.getNode(pred) ? pg.getNode(pred)->estimatedLatency : 1);
+                    unsigned predEnd = scheduledCycle[pred] + predLat;
                     if (predEnd > earliest) earliest = predEnd;
                 }
             }
 
-            // Find a free port for this operation.
-            ResourceType rt = mapOpToResource(node->opClass);
+            // Find earliest-free port for this operation.
+            ResourceType rt = mapOpToResource(
+                pg.getNode(nodeId) ? pg.getNode(nodeId)->opClass : OpClass::Other);
             auto& ports = portAvail[static_cast<int>(rt)];
-            if (ports.empty()) {
-                // No dedicated port — use default timing.
-                scheduledCycle[nodeId] = earliest;
-            } else {
-                // Find the port with the earliest availability.
-                unsigned bestPort = 0;
+            unsigned startCycle = earliest;
+            unsigned bestPort = 0;
+            if (!ports.empty()) {
                 unsigned bestTime = ports[0];
                 for (unsigned p = 1; p < ports.size(); ++p) {
-                    if (ports[p] < bestTime) {
-                        bestTime = ports[p];
-                        bestPort = p;
-                    }
+                    if (ports[p] < bestTime) { bestTime = ports[p]; bestPort = p; }
                 }
+                startCycle = std::max(earliest, bestTime);
+                unsigned busy = portBusyCycles(rt);
+                ports[bestPort] = startCycle + busy;
+            }
+            if (startCycle > earliest) stallCycles += (startCycle - earliest);
 
-                unsigned startCycle = std::max(earliest, bestTime);
-                ports[bestPort] = startCycle + 1; // Port busy for 1 cycle (pipelined)
+            scheduledCycle[nodeId] = startCycle;
 
-                scheduledCycle[nodeId] = startCycle;
-                if (startCycle > earliest) {
-                    stallCycles += (startCycle - earliest);
-                }
+            // Update program node.
+            ProgramNode* mutableNode = pg.getNodeMut(nodeId);
+            if (mutableNode) {
+                mutableNode->scheduledCycle = startCycle;
+                mutableNode->assignedPort = bestPort;
 
-                // Record schedule entry.
+                // Record a ScheduleEntry for consumers of the result.
                 ScheduleEntry entry;
                 entry.nodeId = nodeId;
                 entry.cycle = startCycle;
@@ -1637,26 +1880,18 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
                 result.schedule.push_back(entry);
             }
 
-            // Update program node.
-            ProgramNode* mutableNode = pg.getNodeMut(nodeId);
-            if (mutableNode) {
-                mutableNode->scheduledCycle = scheduledCycle[nodeId];
-                mutableNode->assignedPort = 0;
-            }
-
-            unsigned endCycle = scheduledCycle[nodeId] +
-                static_cast<unsigned>(node->estimatedLatency);
+            unsigned endCycle = startCycle + static_cast<unsigned>(
+                pg.getNode(nodeId) ? pg.getNode(nodeId)->estimatedLatency : 1);
             if (endCycle > maxCycle) maxCycle = endCycle;
 
             scheduled[nodeId] = true;
-            totalScheduled++;
-            issued++;
+            ++totalScheduled;
+            ++issued;
 
-            // Release successors.
-            for (const auto& e : pg.edges()) {
-                if (e.srcId == nodeId) {
-                    if (e.dstId < n) inDeg[e.dstId]--;
-                }
+            // Release successors whose all predecessors are now scheduled.
+            for (auto& [succ, succLat] : succList[nodeId]) {
+                if (--workInDeg[succ] == 0)
+                    readyQ.push(succ);
             }
         }
     }
@@ -1664,11 +1899,9 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     result.totalCycles = maxCycle;
     result.stallCycles = stallCycles;
 
-    // Compute port utilization.
-    if (maxCycle > 0 && profile.issueWidth > 0) {
+    if (maxCycle > 0 && profile.issueWidth > 0)
         result.portUtilization = static_cast<double>(totalScheduled) /
             (static_cast<double>(maxCycle) * profile.issueWidth);
-    }
 
     return result;
 }
@@ -1855,6 +2088,21 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
 static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& profile) {
     unsigned count = 0;
 
+    // Compute a latency-driven prefetch distance.  To hide a full memory-
+    // level miss (L3 → DRAM), we need to prefetch far enough ahead so the
+    // hardware fetch completes before the data is needed.  A rough model:
+    //
+    //   prefetch_distance_bytes = (L3_latency_cycles / 2) * cache_line_size
+    //
+    // The /2 accounts for a typical loop throughput of ≈0.5 iterations/cycle
+    // (a conservative assumption that avoids over-prefetching on fast loops).
+    // We clamp to [2, 64] cache lines so we never insert a useless prefetch
+    // for a tiny latency or an enormous one that thrashes the cache.
+    unsigned prefetchLines = (profile.l3Latency > 0)
+        ? std::max(2u, std::min(64u, profile.l3Latency / (2 * profile.pipelineDepth + 1)))
+        : 8u;
+    unsigned prefetchBytes = prefetchLines * profile.cacheLineSize;
+
     for (auto& bb : func) {
         // Look for basic blocks that are likely loop bodies (have a backedge).
         auto* term = bb.getTerminator();
@@ -1879,18 +2127,47 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
             }
         }
 
-        // Insert prefetch for each load (prefetch the next cache line).
+        // Cap prefetches per function to avoid significant instruction-count
+        // overhead (each prefetch is a call-like instruction).
         for (auto* load : loads) {
-            if (count >= 4) break; // Limit prefetches to avoid overhead
+            if (count >= 8) break;
+
+            llvm::Value* ptr = load->getPointerOperand();
+            llvm::Type* ptrTy = ptr->getType();
+
+            // Determine the prefetch offset.
+            // If the pointer is a GEP with a constant stride, prefetch
+            // strideBytes * prefetchLines ahead.  This is more accurate than
+            // always using the element-agnostic prefetchBytes heuristic.
+            unsigned offsetBytes = prefetchBytes;
+            if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+                // Single-index GEP: stride is the element type's byte size.
+                if (gep->getNumIndices() == 1) {
+                    llvm::Type* elemTy = gep->getSourceElementType();
+                    const llvm::DataLayout* dl = nullptr;
+                    if (auto* mod = func.getParent())
+                        dl = &mod->getDataLayout();
+                    if (dl && elemTy->isSized()) {
+                        uint64_t elemBytes = dl->getTypeAllocSize(elemTy);
+                        if (elemBytes > 0 && elemBytes <= 32) {
+                            // prefetch_offset = prefetchLines cache lines
+                            // expressed in element units.
+                            unsigned elemLinesPerPrefetch =
+                                (prefetchLines * profile.cacheLineSize
+                                 + static_cast<unsigned>(elemBytes) - 1)
+                                / static_cast<unsigned>(elemBytes);
+                            offsetBytes = elemLinesPerPrefetch
+                                          * static_cast<unsigned>(elemBytes);
+                        }
+                    }
+                }
+            }
 
             llvm::IRBuilder<> builder(load);
             llvm::Module* mod = func.getParent();
 
-            // Compute address + cache_line_size for prefetch (opaque ptr).
-            llvm::Value* ptr = load->getPointerOperand();
-            llvm::Type* ptrTy = ptr->getType(); // opaque ptr in LLVM 18+
             llvm::Value* offset = llvm::ConstantInt::get(
-                builder.getInt64Ty(), profile.cacheLineSize);
+                builder.getInt64Ty(), offsetBytes);
             llvm::Value* prefetchAddr = builder.CreateGEP(
                 builder.getInt8Ty(), ptr, offset, "prefetch_addr");
 
@@ -1898,11 +2175,13 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
             llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
                 mod, llvm::Intrinsic::prefetch, {ptrTy});
 
-            // Args: ptr, rw (0=read), locality (3=high), cache_type (1=data)
+            // Args: ptr, rw (0=read), locality (2=medium — L2/L3, not L1),
+            // cache_type (1=data).  Use locality=2 so the prefetch warms L2
+            // and L3 without polluting L1 with data that may not be used soon.
             builder.CreateCall(prefetchFn, {
                 prefetchAddr,
                 builder.getInt32(0),  // read
-                builder.getInt32(3),  // high locality
+                builder.getInt32(2),  // medium locality (L2/L3)
                 builder.getInt32(1)   // data cache
             });
             count++;
@@ -1913,11 +2192,23 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
 }
 
 /// Optimise branch layout for the hardware's branch predictor.
-/// Ensures the fall-through path is the most likely one.
+/// Ensures the fall-through path is the most likely one, and annotates
+/// branches with profile weights when the outcome is predictable from
+/// structural information:
+///   • Exit-block detection: successor with ret/unreachable → unlikely
+///   • Null-pointer checks: ICmp(ptr, null) → null is rare → non-null path hot
+///   • Loop-closing back-edges: the latch branch is taken on most iterations
 /// Returns the number of branches optimized.
 static unsigned optimizeBranchLayout(llvm::Function& func,
                                       const MicroarchProfile& /*profile*/) {
     unsigned count = 0;
+
+    // Pre-compute a linear order for back-edge detection.
+    std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
+    {
+        unsigned ord = 0;
+        for (auto& bb : func) bbOrder[&bb] = ord++;
+    }
 
     for (auto& bb : func) {
         auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator());
@@ -1965,6 +2256,71 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
                 auto* brWeights = mdBuilder.createBranchWeights(1, 99);
                 br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
                 count++;
+            }
+            continue;
+        }
+
+        // ── Null-pointer check: ICmp(ptr, null) ──────────────────────────────
+        // Null dereferences are rare in correct programs.  When a branch
+        // checks whether a pointer is null, the non-null path is hot.
+        //   ICmp EQ  ptr, null  → branch to trueBB if null  → trueBB is cold
+        //   ICmp NE  ptr, null  → branch to trueBB if !null → trueBB is hot
+        // Skip if already annotated with branch weights.
+        if (!br->getMetadata(llvm::LLVMContext::MD_prof)) {
+            if (auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(br->getCondition())) {
+                llvm::Value* op0 = icmp->getOperand(0);
+                llvm::Value* op1 = icmp->getOperand(1);
+                bool isNullCheck =
+                    (op0->getType()->isPointerTy() || op1->getType()->isPointerTy()) &&
+                    (llvm::isa<llvm::ConstantPointerNull>(op1) ||
+                     llvm::isa<llvm::ConstantPointerNull>(op0));
+                if (isNullCheck) {
+                    llvm::MDBuilder mdBuilder(func.getContext());
+                    llvm::MDNode* weights;
+                    if (icmp->getPredicate() == llvm::ICmpInst::ICMP_EQ) {
+                        // EQ null → true branch is the null (rare) path
+                        weights = mdBuilder.createBranchWeights(1, 99);
+                    } else if (icmp->getPredicate() == llvm::ICmpInst::ICMP_NE) {
+                        // NE null → true branch is the non-null (common) path
+                        weights = mdBuilder.createBranchWeights(99, 1);
+                    } else {
+                        weights = nullptr;
+                    }
+                    if (weights) {
+                        br->setMetadata(llvm::LLVMContext::MD_prof, weights);
+                        count++;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // ── Loop-closing back-edge: branch target precedes current BB ────────
+        // If the true successor has a smaller linear order than the current BB,
+        // the true branch is a back-edge (loop-closing).  Back-edges are taken
+        // on every iteration except the last, so they are highly likely to be
+        // taken (weight ≈ 90%).  Annotate with branch weights if not already set.
+        if (!br->getMetadata(llvm::LLVMContext::MD_prof)) {
+            auto itCur  = bbOrder.find(&bb);
+            auto itTrue = bbOrder.find(trueBB);
+            auto itFalse= bbOrder.find(falseBB);
+            if (itCur != bbOrder.end() && itTrue != bbOrder.end()
+                    && itFalse != bbOrder.end()) {
+                bool trueIsBackEdge  = (itTrue->second  < itCur->second);
+                bool falseIsBackEdge = (itFalse->second < itCur->second);
+                if (trueIsBackEdge && !falseIsBackEdge) {
+                    // true = loop continue (hot), false = loop exit (cold)
+                    llvm::MDBuilder mdBuilder(func.getContext());
+                    br->setMetadata(llvm::LLVMContext::MD_prof,
+                        mdBuilder.createBranchWeights(9, 1));
+                    count++;
+                } else if (falseIsBackEdge && !trueIsBackEdge) {
+                    // false = loop continue (hot), true = loop exit (cold)
+                    llvm::MDBuilder mdBuilder(func.getContext());
+                    br->setMetadata(llvm::LLVMContext::MD_prof,
+                        mdBuilder.createBranchWeights(1, 9));
+                    count++;
+                }
             }
         }
     }
@@ -2015,8 +2371,74 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
     return count;
 }
 
+/// Try to synthesize |absCV| as a 1- or 2-instruction shift+add/sub sequence.
+///
+/// Recognises three forms that are strictly cheaper than a multiply
+/// (latency 2 cycles vs 3, and use general ALU ports instead of the
+/// dedicated multiply port):
+///
+///   Power of 2 :  x << a              (1 shift, 1 cycle latency)
+///   Add form   :  (x << a) + (x << b) (2 shifts + 1 add, latency 2)
+///   Sub form   :  (x << a) - (x << b) (2 shifts + 1 sub, latency 2)
+///
+/// where, in the Add/Sub forms, b may be 0, which means the second operand
+/// is just `x` itself (no shift needed).
+///
+/// Returns the synthesised Value*, or nullptr if no 2-instruction form exists.
+[[nodiscard]] static llvm::Value*
+tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
+                llvm::Type* ty, uint64_t absCV, unsigned bitWidth) {
+    if (absCV == 0 || bitWidth == 0) return nullptr;
+    // Clamp bitWidth first so the absCV bounds check below uses the
+    // same (clamped) width and cannot trigger UB via 1<<64.
+    if (bitWidth > 64) bitWidth = 64;
+    // Reject constants that cannot be represented in the (clamped) integer type.
+    if (bitWidth < 64 && absCV >= (uint64_t(1) << bitWidth)) return nullptr;
+
+    auto mk  = [&](unsigned sh) -> llvm::Value* {
+        return llvm::ConstantInt::get(ty, static_cast<uint64_t>(sh));
+    };
+    auto shl = [&](llvm::Value* v, unsigned sh) -> llvm::Value* {
+        return (sh == 0) ? v : builder.CreateShl(v, mk(sh), "sr.shl");
+    };
+
+    // ── Form 1: power of 2 ─────────────────────────────────────────────────
+    if ((absCV & (absCV - 1)) == 0) {
+        unsigned sh = static_cast<unsigned>(__builtin_ctzll(absCV));
+        if (sh < bitWidth) return shl(xv, sh);
+        return nullptr;
+    }
+
+    // ── Form 2: exactly 2 set bits  → (x << hi) + (x << lo) ───────────────
+    if (__builtin_popcountll(absCV) == 2) {
+        unsigned lo = static_cast<unsigned>(__builtin_ctzll(absCV));
+        unsigned hi = static_cast<unsigned>(63 - __builtin_clzll(absCV));
+        if (hi < bitWidth)
+            return builder.CreateAdd(shl(xv, hi), shl(xv, lo), "sr.add2");
+        return nullptr;
+    }
+
+    // ── Form 3: 2^a - 2^b  (a > b)  → (x << a) - (x << b) ────────────────
+    // absCV = 2^a - 2^b  ⟺  absCV + 2^b is a power of 2.
+    for (unsigned b = 0; b < bitWidth; ++b) {
+        uint64_t adjusted = absCV + (uint64_t(1) << b);
+        if ((adjusted & (adjusted - 1)) == 0) {
+            unsigned a = static_cast<unsigned>(__builtin_ctzll(adjusted));
+            if (a > b && a < bitWidth)
+                return builder.CreateSub(shl(xv, a), shl(xv, b), "sr.sub2");
+        }
+    }
+
+    return nullptr;
+}
+
 /// Integer strength reduction: replace multiply-by-small-constant with
 /// shifts and adds, which execute on more ports and have lower latency.
+///
+/// Covers ALL constants expressible as 2^a ± 2^b (a > b ≥ 0) in 2
+/// instructions, plus 3-set-bit constants in 3 instructions when the
+/// multiply unit is the throughput bottleneck.
+///
 /// Returns the number of multiplies strength-reduced.
 [[gnu::hot]] static unsigned integerStrengthReduce(llvm::Function& func,
                                        const MicroarchProfile& profile) {
@@ -2044,587 +2466,45 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
                     break;
                 }
             }
-            if (!xv || cv == 0) continue;
+            if (!xv || cv == 0 || cv == 1 || cv == -1) continue;
 
             llvm::IRBuilder<> builder(&inst);
             llvm::Type* ty = inst.getType();
-            auto mk = [&](int64_t v) { return llvm::ConstantInt::get(ty, v); };
-            auto shl = [&](llvm::Value* v, int64_t sh) {
-                return builder.CreateShl(v, mk(sh), "sr_shl");
-            };
+            unsigned bitWidth = ty->getIntegerBitWidth();
 
-            llvm::Value* rep = nullptr;
-            switch (cv) {
-            // 2-instruction sequences
-            case  3: rep = builder.CreateAdd(shl(xv,1), xv, "sr_mul3"); break;
-            case  5: rep = builder.CreateAdd(shl(xv,2), xv, "sr_mul5"); break;
-            case  6: rep = builder.CreateAdd(shl(xv,2), shl(xv,1), "sr_mul6"); break;
-            case  7: rep = builder.CreateSub(shl(xv,3), xv, "sr_mul7"); break;
-            case  9: rep = builder.CreateAdd(shl(xv,3), xv, "sr_mul9"); break;
-            case 10: rep = builder.CreateAdd(shl(xv,3), shl(xv,1), "sr_mul10"); break;
-            case 12: rep = builder.CreateAdd(shl(xv,3), shl(xv,2), "sr_mul12"); break;
-            case 15: rep = builder.CreateSub(shl(xv,4), xv, "sr_mul15"); break;
-            case 17: rep = builder.CreateAdd(shl(xv,4), xv, "sr_mul17"); break;
-            case 18: rep = builder.CreateAdd(shl(xv,4), shl(xv,1), "sr_mul18"); break;
-            case 20: rep = builder.CreateAdd(shl(xv,4), shl(xv,2), "sr_mul20"); break;
-            case 24: rep = builder.CreateAdd(shl(xv,4), shl(xv,3), "sr_mul24"); break;
-            case 31: rep = builder.CreateSub(shl(xv,5), xv, "sr_mul31"); break;
-            case 33: rep = builder.CreateAdd(shl(xv,5), xv, "sr_mul33"); break;
-            case 48: rep = builder.CreateAdd(shl(xv,5), shl(xv,4), "sr_mul48"); break;
-            case 63: rep = builder.CreateSub(shl(xv,6), xv, "sr_mul63"); break;
-            case 65: rep = builder.CreateAdd(shl(xv,6), xv, "sr_mul65"); break;
-            case 96: rep = builder.CreateAdd(shl(xv,6), shl(xv,5), "sr_mul96"); break;
-            case 127: rep = builder.CreateSub(shl(xv,7), xv, "sr_mul127"); break;
-            case 255: rep = builder.CreateSub(shl(xv,8), xv, "sr_mul255"); break;
-            // 3-instruction sequences
-            case 11: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,1), "t"), xv, "sr_mul11"); break;
-            case 13: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,2), "t"), xv, "sr_mul13"); break;
-            case 14: rep = builder.CreateSub(shl(xv,4), shl(xv,1), "sr_mul14"); break;
-            case 19: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1), "t"), xv, "sr_mul19"); break;
-            case 21: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), xv, "sr_mul21"); break;
-            case 22: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), shl(xv,1), "sr_mul22"); break;
-            case 25: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3), "t"), xv, "sr_mul25"); break;
-            case 26: rep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), shl(xv,1), "sr_mul26"); break;
-            case 27: rep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul27"); break;
-            case 28: rep = builder.CreateSub(shl(xv,5), shl(xv,2), "sr_mul28"); break;
-            case 30: rep = builder.CreateSub(shl(xv,5), shl(xv,1), "sr_mul30"); break;
-            case 34: rep = builder.CreateAdd(shl(xv,5), shl(xv,1), "sr_mul34"); break;
-            case 36: rep = builder.CreateAdd(shl(xv,5), shl(xv,2), "sr_mul36"); break;
-            case 37: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul37"); break;
-            case 40: rep = builder.CreateAdd(shl(xv,5), shl(xv,3), "sr_mul40"); break;
-            case 41: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3), "t"), xv, "sr_mul41"); break;
-            case 49: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4), "t"), xv, "sr_mul49"); break;
-            case 50: rep = builder.CreateAdd(builder.CreateSub(shl(xv,6), shl(xv,4), "t"), shl(xv,1), "sr_mul50"); break;
-            case 60: rep = builder.CreateSub(shl(xv,6), shl(xv,2), "sr_mul60"); break;
-            case 100: {
-                // n*100 → (n<<7) - (n<<5) + (n<<2)  [128n - 32n + 4n]
-                auto* t1 = builder.CreateSub(shl(xv,7), shl(xv,5), "sr_mul100.t");
-                rep = builder.CreateAdd(t1, shl(xv,2), "sr_mul100");
-                break;
-            }
-            case 120: rep = builder.CreateSub(shl(xv,7), shl(xv,3), "sr_mul120"); break;
-            case 200: {
-                // n*200 → (n<<8) - (n<<6) + (n<<3)  [256n - 64n + 8n]
-                auto* t1 = builder.CreateSub(shl(xv,8), shl(xv,6), "sr_mul200.t");
-                rep = builder.CreateAdd(t1, shl(xv,3), "sr_mul200");
-                break;
-            }
-            // ── Extended multiply-by-constant patterns (2-instruction) ─────────
-            case  56: rep = builder.CreateSub(shl(xv,6), shl(xv,3), "sr_mul56"); break;
-            case  57: {
-                // n*57 → (n<<6) - (n<<3) + n  (= 64n - 8n + n)
-                auto* t1 = builder.CreateSub(shl(xv,6), shl(xv,3), "sr_mul57.t");
-                rep = builder.CreateAdd(t1, xv, "sr_mul57");
-                break;
-            }
-            case  62: rep = builder.CreateSub(shl(xv,6), shl(xv,1), "sr_mul62"); break;
-            case  66: rep = builder.CreateAdd(shl(xv,6), shl(xv,1), "sr_mul66"); break;
-            case  68: rep = builder.CreateAdd(shl(xv,6), shl(xv,2), "sr_mul68"); break;
-            case  72: rep = builder.CreateAdd(shl(xv,6), shl(xv,3), "sr_mul72"); break;
-            case  80: rep = builder.CreateAdd(shl(xv,6), shl(xv,4), "sr_mul80"); break;
-            case 112: rep = builder.CreateSub(shl(xv,7), shl(xv,4), "sr_mul112"); break;
-            case 129: rep = builder.CreateAdd(shl(xv,7), xv,         "sr_mul129"); break;
-            case 136: rep = builder.CreateAdd(shl(xv,7), shl(xv,3), "sr_mul136"); break;
-            case 144: rep = builder.CreateAdd(shl(xv,7), shl(xv,4), "sr_mul144"); break;
-            case 160: rep = builder.CreateAdd(shl(xv,7), shl(xv,5), "sr_mul160"); break;
-            case 192: rep = builder.CreateAdd(shl(xv,7), shl(xv,6), "sr_mul192"); break;
-            case 224: rep = builder.CreateSub(shl(xv,8), shl(xv,5), "sr_mul224"); break;
-            case 240: rep = builder.CreateSub(shl(xv,8), shl(xv,4), "sr_mul240"); break;
-            case 248: rep = builder.CreateSub(shl(xv,8), shl(xv,3), "sr_mul248"); break;
-            case 257: rep = builder.CreateAdd(shl(xv,8), xv,         "sr_mul257"); break;
-            case 264: rep = builder.CreateAdd(shl(xv,8), shl(xv,3), "sr_mul264"); break;
-            case 272: rep = builder.CreateAdd(shl(xv,8), shl(xv,4), "sr_mul272"); break;
-            case 288: rep = builder.CreateAdd(shl(xv,8), shl(xv,5), "sr_mul288"); break;
-            case 320: rep = builder.CreateAdd(shl(xv,8), shl(xv,6), "sr_mul320"); break;
-            case 384: rep = builder.CreateAdd(shl(xv,8), shl(xv,7), "sr_mul384"); break;
-            case 448: rep = builder.CreateSub(shl(xv,9), shl(xv,6), "sr_mul448"); break;
-            case 480: rep = builder.CreateSub(shl(xv,9), shl(xv,5), "sr_mul480"); break;
-            case 496: rep = builder.CreateSub(shl(xv,9), shl(xv,4), "sr_mul496"); break;
-            case 504: rep = builder.CreateSub(shl(xv,9), shl(xv,3), "sr_mul504"); break;
-            case 511: rep = builder.CreateSub(shl(xv,9), xv,         "sr_mul511"); break;
-            case 513: rep = builder.CreateAdd(shl(xv,9), xv,         "sr_mul513"); break;
-            case 640: rep = builder.CreateAdd(shl(xv,9), shl(xv,7), "sr_mul640"); break;
-            case 768: rep = builder.CreateAdd(shl(xv,9), shl(xv,8), "sr_mul768"); break;
-            case 1023: rep = builder.CreateSub(shl(xv,10), xv,        "sr_mul1023"); break;
-            case 1025: rep = builder.CreateAdd(shl(xv,10), xv,        "sr_mul1025"); break;
-            case 1152: rep = builder.CreateAdd(shl(xv,10), shl(xv,7), "sr_mul1152"); break;
-            case 1280: rep = builder.CreateAdd(shl(xv,10), shl(xv,8), "sr_mul1280"); break;
-            case 1536: rep = builder.CreateAdd(shl(xv,10), shl(xv,9), "sr_mul1536"); break;
-            case 1792: rep = builder.CreateSub(shl(xv,11), shl(xv,8), "sr_mul1792"); break;
-            case 2047: rep = builder.CreateSub(shl(xv,11), xv,        "sr_mul2047"); break;
-            case 2048: rep = shl(xv,11); break;
-            case 2049: rep = builder.CreateAdd(shl(xv,11), xv,        "sr_mul2049"); break;
-            // ── n×128 family ──────────────────────────────────────────────────────
-            case 124:  rep = builder.CreateSub(shl(xv,7), shl(xv,2),  "sr_mul124");  break;
-            case 126:  rep = builder.CreateSub(shl(xv,7), shl(xv,1),  "sr_mul126");  break;
-            case 130:  rep = builder.CreateAdd(shl(xv,7), shl(xv,1),  "sr_mul130");  break;
-            case 132:  rep = builder.CreateAdd(shl(xv,7), shl(xv,2),  "sr_mul132");  break;
-            // ── n×256 family ──────────────────────────────────────────────────────
-            case 252:  rep = builder.CreateSub(shl(xv,8), shl(xv,2),  "sr_mul252");  break;
-            case 254:  rep = builder.CreateSub(shl(xv,8), shl(xv,1),  "sr_mul254");  break;
-            case 258:  rep = builder.CreateAdd(shl(xv,8), shl(xv,1),  "sr_mul258");  break;
-            case 260:  rep = builder.CreateAdd(shl(xv,8), shl(xv,2),  "sr_mul260");  break;
-            // ── n×512 family ──────────────────────────────────────────────────────
-            case 508:  rep = builder.CreateSub(shl(xv,9), shl(xv,2),  "sr_mul508");  break;
-            case 510:  rep = builder.CreateSub(shl(xv,9), shl(xv,1),  "sr_mul510");  break;
-            case 514:  rep = builder.CreateAdd(shl(xv,9), shl(xv,1),  "sr_mul514");  break;
-            case 516:  rep = builder.CreateAdd(shl(xv,9), shl(xv,2),  "sr_mul516");  break;
-            case 520:  rep = builder.CreateAdd(shl(xv,9), shl(xv,3),  "sr_mul520");  break;
-            case 528:  rep = builder.CreateAdd(shl(xv,9), shl(xv,4),  "sr_mul528");  break;
-            case 544:  rep = builder.CreateAdd(shl(xv,9), shl(xv,5),  "sr_mul544");  break;
-            case 576:  rep = builder.CreateAdd(shl(xv,9), shl(xv,6),  "sr_mul576");  break;
-            // ── n×1024 family ─────────────────────────────────────────────────────
-            case 960:  rep = builder.CreateSub(shl(xv,10), shl(xv,6), "sr_mul960");  break;
-            case 992:  rep = builder.CreateSub(shl(xv,10), shl(xv,5), "sr_mul992");  break;
-            case 1008: rep = builder.CreateSub(shl(xv,10), shl(xv,4), "sr_mul1008"); break;
-            case 1016: rep = builder.CreateSub(shl(xv,10), shl(xv,3), "sr_mul1016"); break;
-            case 1020: rep = builder.CreateSub(shl(xv,10), shl(xv,2), "sr_mul1020"); break;
-            case 1022: rep = builder.CreateSub(shl(xv,10), shl(xv,1), "sr_mul1022"); break;
-            case 1026: rep = builder.CreateAdd(shl(xv,10), shl(xv,1), "sr_mul1026"); break;
-            case 1028: rep = builder.CreateAdd(shl(xv,10), shl(xv,2), "sr_mul1028"); break;
-            case 1032: rep = builder.CreateAdd(shl(xv,10), shl(xv,3), "sr_mul1032"); break;
-            case 1040: rep = builder.CreateAdd(shl(xv,10), shl(xv,4), "sr_mul1040"); break;
-            case 1056: rep = builder.CreateAdd(shl(xv,10), shl(xv,5), "sr_mul1056"); break;
-            case 1088: rep = builder.CreateAdd(shl(xv,10), shl(xv,6), "sr_mul1088"); break;
-            // ── n×2048 family ─────────────────────────────────────────────────────
-            case 1920: rep = builder.CreateSub(shl(xv,11), shl(xv,7), "sr_mul1920"); break;
-            case 1984: rep = builder.CreateSub(shl(xv,11), shl(xv,6), "sr_mul1984"); break;
-            case 2016: rep = builder.CreateSub(shl(xv,11), shl(xv,5), "sr_mul2016"); break;
-            case 2032: rep = builder.CreateSub(shl(xv,11), shl(xv,4), "sr_mul2032"); break;
-            case 2040: rep = builder.CreateSub(shl(xv,11), shl(xv,3), "sr_mul2040"); break;
-            case 2044: rep = builder.CreateSub(shl(xv,11), shl(xv,2), "sr_mul2044"); break;
-            case 2046: rep = builder.CreateSub(shl(xv,11), shl(xv,1), "sr_mul2046"); break;
-            case 2050: rep = builder.CreateAdd(shl(xv,11), shl(xv,1), "sr_mul2050"); break;
-            case 2052: rep = builder.CreateAdd(shl(xv,11), shl(xv,2), "sr_mul2052"); break;
-            case 2056: rep = builder.CreateAdd(shl(xv,11), shl(xv,3), "sr_mul2056"); break;
-            case 2064: rep = builder.CreateAdd(shl(xv,11), shl(xv,4), "sr_mul2064"); break;
-            case 2080: rep = builder.CreateAdd(shl(xv,11), shl(xv,5), "sr_mul2080"); break;
-            case 2112: rep = builder.CreateAdd(shl(xv,11), shl(xv,6), "sr_mul2112"); break;
-            case 2176: rep = builder.CreateAdd(shl(xv,11), shl(xv,7), "sr_mul2176"); break;
-            case 2304: rep = builder.CreateAdd(shl(xv,11), shl(xv,8), "sr_mul2304"); break;
-            case 2560: rep = builder.CreateAdd(shl(xv,11), shl(xv,9), "sr_mul2560"); break;
-            case 3072: rep = builder.CreateAdd(shl(xv,11), shl(xv,10),"sr_mul3072"); break;
-            // ── n×4096 family ─────────────────────────────────────────────────────
-            case 3584: rep = builder.CreateSub(shl(xv,12), shl(xv,9), "sr_mul3584"); break;
-            case 3840: rep = builder.CreateSub(shl(xv,12), shl(xv,8), "sr_mul3840"); break;
-            case 3968: rep = builder.CreateSub(shl(xv,12), shl(xv,7), "sr_mul3968"); break;
-            case 4032: rep = builder.CreateSub(shl(xv,12), shl(xv,6), "sr_mul4032"); break;
-            case 4064: rep = builder.CreateSub(shl(xv,12), shl(xv,5), "sr_mul4064"); break;
-            case 4080: rep = builder.CreateSub(shl(xv,12), shl(xv,4), "sr_mul4080"); break;
-            case 4088: rep = builder.CreateSub(shl(xv,12), shl(xv,3), "sr_mul4088"); break;
-            case 4092: rep = builder.CreateSub(shl(xv,12), shl(xv,2), "sr_mul4092"); break;
-            case 4094: rep = builder.CreateSub(shl(xv,12), shl(xv,1), "sr_mul4094"); break;
-            case 4095: rep = builder.CreateSub(shl(xv,12), xv,         "sr_mul4095"); break;
-            case 4096: rep = shl(xv,12); break;
-            case 4097: rep = builder.CreateAdd(shl(xv,12), xv,         "sr_mul4097"); break;
-            case 4098: rep = builder.CreateAdd(shl(xv,12), shl(xv,1),  "sr_mul4098"); break;
-            case 4100: rep = builder.CreateAdd(shl(xv,12), shl(xv,2),  "sr_mul4100"); break;
-            case 4104: rep = builder.CreateAdd(shl(xv,12), shl(xv,3),  "sr_mul4104"); break;
-            case 4112: rep = builder.CreateAdd(shl(xv,12), shl(xv,4),  "sr_mul4112"); break;
-            case 4128: rep = builder.CreateAdd(shl(xv,12), shl(xv,5),  "sr_mul4128"); break;
-            case 4160: rep = builder.CreateAdd(shl(xv,12), shl(xv,6),  "sr_mul4160"); break;
-            case 4224: rep = builder.CreateAdd(shl(xv,12), shl(xv,7),  "sr_mul4224"); break;
-            case 4352: rep = builder.CreateAdd(shl(xv,12), shl(xv,8),  "sr_mul4352"); break;
-            case 4608: rep = builder.CreateAdd(shl(xv,12), shl(xv,9),  "sr_mul4608"); break;
-            case 5120: rep = builder.CreateAdd(shl(xv,12), shl(xv,10), "sr_mul5120"); break;
-            case 6144: rep = builder.CreateAdd(shl(xv,12), shl(xv,11), "sr_mul6144"); break;
-            // ── n×8192 family ─────────────────────────────────────────────────
-            case 7168:  rep = builder.CreateSub(shl(xv,13), shl(xv,10), "sr_mul7168");  break;
-            case 7680:  rep = builder.CreateSub(shl(xv,13), shl(xv,9),  "sr_mul7680");  break;
-            case 7936:  rep = builder.CreateSub(shl(xv,13), shl(xv,8),  "sr_mul7936");  break;
-            case 8064:  rep = builder.CreateSub(shl(xv,13), shl(xv,7),  "sr_mul8064");  break;
-            case 8128:  rep = builder.CreateSub(shl(xv,13), shl(xv,6),  "sr_mul8128");  break;
-            case 8160:  rep = builder.CreateSub(shl(xv,13), shl(xv,5),  "sr_mul8160");  break;
-            case 8176:  rep = builder.CreateSub(shl(xv,13), shl(xv,4),  "sr_mul8176");  break;
-            case 8184:  rep = builder.CreateSub(shl(xv,13), shl(xv,3),  "sr_mul8184");  break;
-            case 8188:  rep = builder.CreateSub(shl(xv,13), shl(xv,2),  "sr_mul8188");  break;
-            case 8190:  rep = builder.CreateSub(shl(xv,13), shl(xv,1),  "sr_mul8190");  break;
-            case 8191:  rep = builder.CreateSub(shl(xv,13), xv,          "sr_mul8191");  break;
-            case 8192:  rep = shl(xv,13); break;
-            case 8193:  rep = builder.CreateAdd(shl(xv,13), xv,          "sr_mul8193");  break;
-            case 8194:  rep = builder.CreateAdd(shl(xv,13), shl(xv,1),  "sr_mul8194");  break;
-            case 8196:  rep = builder.CreateAdd(shl(xv,13), shl(xv,2),  "sr_mul8196");  break;
-            case 8200:  rep = builder.CreateAdd(shl(xv,13), shl(xv,3),  "sr_mul8200");  break;
-            case 8208:  rep = builder.CreateAdd(shl(xv,13), shl(xv,4),  "sr_mul8208");  break;
-            case 8224:  rep = builder.CreateAdd(shl(xv,13), shl(xv,5),  "sr_mul8224");  break;
-            case 8256:  rep = builder.CreateAdd(shl(xv,13), shl(xv,6),  "sr_mul8256");  break;
-            case 8320:  rep = builder.CreateAdd(shl(xv,13), shl(xv,7),  "sr_mul8320");  break;
-            case 8448:  rep = builder.CreateAdd(shl(xv,13), shl(xv,8),  "sr_mul8448");  break;
-            case 8704:  rep = builder.CreateAdd(shl(xv,13), shl(xv,9),  "sr_mul8704");  break;
-            case 9216:  rep = builder.CreateAdd(shl(xv,13), shl(xv,10), "sr_mul9216");  break;
-            case 10240: rep = builder.CreateAdd(shl(xv,13), shl(xv,11), "sr_mul10240"); break;
-            case 12288: rep = builder.CreateAdd(shl(xv,13), shl(xv,12), "sr_mul12288"); break;
-            // ── n×16384 family ──────────────────────────────────────────────────────
-            case 14336: rep = builder.CreateSub(shl(xv,14), shl(xv,11), "sr_mul14336"); break;
-            case 15360: rep = builder.CreateSub(shl(xv,14), shl(xv,10), "sr_mul15360"); break;
-            case 16384: rep = shl(xv,14); break;
-            case 16385: rep = builder.CreateAdd(shl(xv,14), xv,          "sr_mul16385"); break;
-            case 16386: rep = builder.CreateAdd(shl(xv,14), shl(xv,1),   "sr_mul16386"); break;
-            case 16388: rep = builder.CreateAdd(shl(xv,14), shl(xv,2),   "sr_mul16388"); break;
-            case 16392: rep = builder.CreateAdd(shl(xv,14), shl(xv,3),   "sr_mul16392"); break;
-            case 16400: rep = builder.CreateAdd(shl(xv,14), shl(xv,4),   "sr_mul16400"); break;
-            case 16416: rep = builder.CreateAdd(shl(xv,14), shl(xv,5),   "sr_mul16416"); break;
-            case 16448: rep = builder.CreateAdd(shl(xv,14), shl(xv,6),   "sr_mul16448"); break;
-            case 16512: rep = builder.CreateAdd(shl(xv,14), shl(xv,7),   "sr_mul16512"); break;
-            case 16640: rep = builder.CreateAdd(shl(xv,14), shl(xv,8),   "sr_mul16640"); break;
-            case 16896: rep = builder.CreateAdd(shl(xv,14), shl(xv,9),   "sr_mul16896"); break;
-            case 17408: rep = builder.CreateAdd(shl(xv,14), shl(xv,10),  "sr_mul17408"); break;
-            case 18432: rep = builder.CreateAdd(shl(xv,14), shl(xv,11),  "sr_mul18432"); break;
-            case 20480: rep = builder.CreateAdd(shl(xv,14), shl(xv,12),  "sr_mul20480"); break;
-            case 24576: rep = builder.CreateAdd(shl(xv,14), shl(xv,13),  "sr_mul24576"); break;
-            // ── n×32768 family ──────────────────────────────────────────────────────
-            case 28672: rep = builder.CreateSub(shl(xv,15), shl(xv,12), "sr_mul28672"); break;
-            case 30720: rep = builder.CreateSub(shl(xv,15), shl(xv,11), "sr_mul30720"); break;
-            case 32768: rep = shl(xv,15); break;
-            case 32769: rep = builder.CreateAdd(shl(xv,15), xv,          "sr_mul32769"); break;
-            case 32770: rep = builder.CreateAdd(shl(xv,15), shl(xv,1),   "sr_mul32770"); break;
-            case 32772: rep = builder.CreateAdd(shl(xv,15), shl(xv,2),   "sr_mul32772"); break;
-            case 32776: rep = builder.CreateAdd(shl(xv,15), shl(xv,3),   "sr_mul32776"); break;
-            case 32800: rep = builder.CreateAdd(shl(xv,15), shl(xv,5),   "sr_mul32800"); break;
-            case 32896: rep = builder.CreateAdd(shl(xv,15), shl(xv,7),   "sr_mul32896"); break;
-            case 33024: rep = builder.CreateAdd(shl(xv,15), shl(xv,8),   "sr_mul33024"); break;
-            case 33280: rep = builder.CreateAdd(shl(xv,15), shl(xv,9),   "sr_mul33280"); break;
-            case 33792: rep = builder.CreateAdd(shl(xv,15), shl(xv,10),  "sr_mul33792"); break;
-            case 34816: rep = builder.CreateAdd(shl(xv,15), shl(xv,11),  "sr_mul34816"); break;
-            case 36864: rep = builder.CreateAdd(shl(xv,15), shl(xv,12),  "sr_mul36864"); break;
-            case 40960: rep = builder.CreateAdd(shl(xv,15), shl(xv,13),  "sr_mul40960"); break;
-            case 49152: rep = builder.CreateAdd(shl(xv,15), shl(xv,14),  "sr_mul49152"); break;
-            // ── n×65536 family ──────────────────────────────────────────────────────
-            case 57344: rep = builder.CreateSub(shl(xv,16), shl(xv,13), "sr_mul57344"); break;
-            case 61440: rep = builder.CreateSub(shl(xv,16), shl(xv,12), "sr_mul61440"); break;
-            case 65536: rep = shl(xv,16); break;
-            case 65537: rep = builder.CreateAdd(shl(xv,16), xv,          "sr_mul65537"); break;
-            case 65538: rep = builder.CreateAdd(shl(xv,16), shl(xv,1),   "sr_mul65538"); break;
-            case 65540: rep = builder.CreateAdd(shl(xv,16), shl(xv,2),   "sr_mul65540"); break;
-            case 65544: rep = builder.CreateAdd(shl(xv,16), shl(xv,3),   "sr_mul65544"); break;
-            case 65600: rep = builder.CreateAdd(shl(xv,16), shl(xv,6),   "sr_mul65600"); break;
-            case 65664: rep = builder.CreateAdd(shl(xv,16), shl(xv,7),   "sr_mul65664"); break;
-            case 65792: rep = builder.CreateAdd(shl(xv,16), shl(xv,8),   "sr_mul65792"); break;
-            case 66048: rep = builder.CreateAdd(shl(xv,16), shl(xv,9),   "sr_mul66048"); break;
-            case 66560: rep = builder.CreateAdd(shl(xv,16), shl(xv,10),  "sr_mul66560"); break;
-            case 67584: rep = builder.CreateAdd(shl(xv,16), shl(xv,11),  "sr_mul67584"); break;
-            case 69632: rep = builder.CreateAdd(shl(xv,16), shl(xv,12),  "sr_mul69632"); break;
-            case 73728: rep = builder.CreateAdd(shl(xv,16), shl(xv,13),  "sr_mul73728"); break;
-            case 81920: rep = builder.CreateAdd(shl(xv,16), shl(xv,14),  "sr_mul81920"); break;
-            case 98304: rep = builder.CreateAdd(shl(xv,16), shl(xv,15),  "sr_mul98304"); break;
-            case 114688: rep = builder.CreateSub(shl(xv,17), shl(xv,14), "sr_mul114688"); break;
-            case 122880: rep = builder.CreateSub(shl(xv,17), shl(xv,13), "sr_mul122880"); break;
-            case 131072: rep = shl(xv,17); break;
-            case 131073: rep = builder.CreateAdd(shl(xv,17), xv,          "sr_mul131073"); break;
-            case 131074: rep = builder.CreateAdd(shl(xv,17), shl(xv,1),   "sr_mul131074"); break;
-            case 131076: rep = builder.CreateAdd(shl(xv,17), shl(xv,2),   "sr_mul131076"); break;
-            case 131080: rep = builder.CreateAdd(shl(xv,17), shl(xv,3),   "sr_mul131080"); break;
-            case 131136: rep = builder.CreateAdd(shl(xv,17), shl(xv,6),   "sr_mul131136"); break;
-            case 131200: rep = builder.CreateAdd(shl(xv,17), shl(xv,7),   "sr_mul131200"); break;
-            case 131328: rep = builder.CreateAdd(shl(xv,17), shl(xv,8),   "sr_mul131328"); break;
-            case 131584: rep = builder.CreateAdd(shl(xv,17), shl(xv,9),   "sr_mul131584"); break;
-            case 132096: rep = builder.CreateAdd(shl(xv,17), shl(xv,10),  "sr_mul132096"); break;
-            case 133120: rep = builder.CreateAdd(shl(xv,17), shl(xv,11),  "sr_mul133120"); break;
-            case 135168: rep = builder.CreateAdd(shl(xv,17), shl(xv,12),  "sr_mul135168"); break;
-            case 139264: rep = builder.CreateAdd(shl(xv,17), shl(xv,13),  "sr_mul139264"); break;
-            case 147456: rep = builder.CreateAdd(shl(xv,17), shl(xv,14),  "sr_mul147456"); break;
-            case 163840: rep = builder.CreateAdd(shl(xv,17), shl(xv,15),  "sr_mul163840"); break;
-            case 196608: rep = builder.CreateAdd(shl(xv,17), shl(xv,16),  "sr_mul196608"); break;
-            // ── Extended multiply-by-constant patterns (3-instruction) ─────────
-            case 1000: {
-                // n*1000 → (n<<10) - (n<<5) + (n<<3)  [1024n - 32n + 8n]
-                auto* t1 = builder.CreateSub(shl(xv,10), shl(xv,5), "sr_mul1000.t");
-                rep = builder.CreateAdd(t1, shl(xv,3), "sr_mul1000");
-                break;
-            }
-            default: break;
+            // Work with the absolute value; negate the result if cv was negative.
+            bool negate = (cv < 0);
+            uint64_t absCV = negate ? static_cast<uint64_t>(-cv)
+                                    : static_cast<uint64_t>(cv);
+
+            llvm::Value* rep = tryShiftAddForm(builder, xv, ty, absCV, bitWidth);
+
+            // ── 3-instruction form: 3 set bits → 2 shifts + 2 adds ──────────
+            // Latency is 3 cycles (same as mul) but uses general ALU ports
+            // instead of the scarce multiply port.  Only generate when the
+            // multiply port count is less than the number of ALU ports, i.e.
+            // when multiply throughput is the bottleneck.
+            if (!rep && profile.mulPortCount < profile.intALUs &&
+                __builtin_popcountll(absCV) == 3) {
+                unsigned b0 = static_cast<unsigned>(__builtin_ctzll(absCV));
+                uint64_t rest = absCV ^ (uint64_t(1) << b0);
+                unsigned b1 = static_cast<unsigned>(__builtin_ctzll(rest));
+                unsigned b2 = static_cast<unsigned>(63 - __builtin_clzll(rest));
+                if (b2 < bitWidth) {
+                    auto mk2 = [&](unsigned sh) -> llvm::Value* {
+                        return llvm::ConstantInt::get(ty, static_cast<uint64_t>(sh));
+                    };
+                    auto sh2 = [&](llvm::Value* v, unsigned sh) -> llvm::Value* {
+                        return (sh == 0) ? v
+                             : builder.CreateShl(v, mk2(sh), "sr.shl3");
+                    };
+                    auto* t = builder.CreateAdd(sh2(xv, b2), sh2(xv, b1), "sr.add3a");
+                    rep = builder.CreateAdd(t, sh2(xv, b0), "sr.add3b");
+                }
             }
 
-            // Negative constant: compute |cv|'s strength-reduced form, then negate.
-            // e.g. x * -7 → -(x * 7) → -((x<<3) - x)
-            if (!rep && cv < -1) {
-                int64_t absCV = -cv;
-                llvm::Value* posRep = nullptr;
-                switch (absCV) {
-                // 2-instruction positive sequences (shift + add/sub)
-                case  3: posRep = builder.CreateAdd(shl(xv,1), xv, "sr_mul3"); break;
-                case  5: posRep = builder.CreateAdd(shl(xv,2), xv, "sr_mul5"); break;
-                case  6: posRep = builder.CreateAdd(shl(xv,2), shl(xv,1), "sr_mul6"); break;
-                case  7: posRep = builder.CreateSub(shl(xv,3), xv, "sr_mul7"); break;
-                case  9: posRep = builder.CreateAdd(shl(xv,3), xv, "sr_mul9"); break;
-                case 10: posRep = builder.CreateAdd(shl(xv,3), shl(xv,1), "sr_mul10"); break;
-                case 12: posRep = builder.CreateAdd(shl(xv,3), shl(xv,2), "sr_mul12"); break;
-                case 15: posRep = builder.CreateSub(shl(xv,4), xv, "sr_mul15"); break;
-                case 17: posRep = builder.CreateAdd(shl(xv,4), xv, "sr_mul17"); break;
-                case 18: posRep = builder.CreateAdd(shl(xv,4), shl(xv,1), "sr_mul18"); break;
-                case 20: posRep = builder.CreateAdd(shl(xv,4), shl(xv,2), "sr_mul20"); break;
-                case 24: posRep = builder.CreateAdd(shl(xv,4), shl(xv,3), "sr_mul24"); break;
-                case 28: posRep = builder.CreateSub(shl(xv,5), shl(xv,2), "sr_mul28"); break;
-                case 30: posRep = builder.CreateSub(shl(xv,5), shl(xv,1), "sr_mul30"); break;
-                case 31: posRep = builder.CreateSub(shl(xv,5), xv, "sr_mul31"); break;
-                case 33: posRep = builder.CreateAdd(shl(xv,5), xv, "sr_mul33"); break;
-                case 34: posRep = builder.CreateAdd(shl(xv,5), shl(xv,1), "sr_mul34"); break;
-                case 36: posRep = builder.CreateAdd(shl(xv,5), shl(xv,2), "sr_mul36"); break;
-                case 40: posRep = builder.CreateAdd(shl(xv,5), shl(xv,3), "sr_mul40"); break;
-                case 48: posRep = builder.CreateAdd(shl(xv,5), shl(xv,4), "sr_mul48"); break;
-                case 60: posRep = builder.CreateSub(shl(xv,6), shl(xv,2), "sr_mul60"); break;
-                case 63: posRep = builder.CreateSub(shl(xv,6), xv, "sr_mul63"); break;
-                case 65: posRep = builder.CreateAdd(shl(xv,6), xv, "sr_mul65"); break;
-                case 96: posRep = builder.CreateAdd(shl(xv,6), shl(xv,5), "sr_mul96"); break;
-                case 120: posRep = builder.CreateSub(shl(xv,7), shl(xv,3), "sr_mul120"); break;
-                case 127: posRep = builder.CreateSub(shl(xv,7), xv, "sr_mul127"); break;
-                case 255: posRep = builder.CreateSub(shl(xv,8), xv, "sr_mul255"); break;
-                // ── Extended 2-instruction negative sequences ──────────────────
-                case  56: posRep = builder.CreateSub(shl(xv,6), shl(xv,3), "sr_mulp56"); break;
-                case  57: {
-                    // n*57 → (n<<6) - (n<<3) + n  (= 64n - 8n + n)
-                    auto* t1 = builder.CreateSub(shl(xv,6), shl(xv,3), "sr_mulp57.t");
-                    posRep = builder.CreateAdd(t1, xv, "sr_mulp57");
-                    break;
-                }
-                case  62: posRep = builder.CreateSub(shl(xv,6), shl(xv,1), "sr_mulp62"); break;
-                case  66: posRep = builder.CreateAdd(shl(xv,6), shl(xv,1), "sr_mulp66"); break;
-                case  68: posRep = builder.CreateAdd(shl(xv,6), shl(xv,2), "sr_mulp68"); break;
-                case  72: posRep = builder.CreateAdd(shl(xv,6), shl(xv,3), "sr_mulp72"); break;
-                case  80: posRep = builder.CreateAdd(shl(xv,6), shl(xv,4), "sr_mulp80"); break;
-                case 112: posRep = builder.CreateSub(shl(xv,7), shl(xv,4), "sr_mulp112"); break;
-                case 129: posRep = builder.CreateAdd(shl(xv,7), xv,         "sr_mulp129"); break;
-                case 136: posRep = builder.CreateAdd(shl(xv,7), shl(xv,3), "sr_mulp136"); break;
-                case 144: posRep = builder.CreateAdd(shl(xv,7), shl(xv,4), "sr_mulp144"); break;
-                case 160: posRep = builder.CreateAdd(shl(xv,7), shl(xv,5), "sr_mulp160"); break;
-                case 192: posRep = builder.CreateAdd(shl(xv,7), shl(xv,6), "sr_mulp192"); break;
-                case 224: posRep = builder.CreateSub(shl(xv,8), shl(xv,5), "sr_mulp224"); break;
-                case 240: posRep = builder.CreateSub(shl(xv,8), shl(xv,4), "sr_mulp240"); break;
-                case 248: posRep = builder.CreateSub(shl(xv,8), shl(xv,3), "sr_mulp248"); break;
-                case 257: posRep = builder.CreateAdd(shl(xv,8), xv,         "sr_mulp257"); break;
-                case 264: posRep = builder.CreateAdd(shl(xv,8), shl(xv,3), "sr_mulp264"); break;
-                case 272: posRep = builder.CreateAdd(shl(xv,8), shl(xv,4), "sr_mulp272"); break;
-                case 288: posRep = builder.CreateAdd(shl(xv,8), shl(xv,5), "sr_mulp288"); break;
-                case 320: posRep = builder.CreateAdd(shl(xv,8), shl(xv,6), "sr_mulp320"); break;
-                case 384: posRep = builder.CreateAdd(shl(xv,8), shl(xv,7), "sr_mulp384"); break;
-                case 448: posRep = builder.CreateSub(shl(xv,9), shl(xv,6), "sr_mulp448"); break;
-                case 480: posRep = builder.CreateSub(shl(xv,9), shl(xv,5), "sr_mulp480"); break;
-                case 496: posRep = builder.CreateSub(shl(xv,9), shl(xv,4), "sr_mulp496"); break;
-                case 504: posRep = builder.CreateSub(shl(xv,9), shl(xv,3), "sr_mulp504"); break;
-                case 511: posRep = builder.CreateSub(shl(xv,9), xv,         "sr_mulp511"); break;
-                case 513: posRep = builder.CreateAdd(shl(xv,9), xv,         "sr_mulp513"); break;
-                case 640: posRep = builder.CreateAdd(shl(xv,9), shl(xv,7), "sr_mulp640"); break;
-                case 768: posRep = builder.CreateAdd(shl(xv,9), shl(xv,8), "sr_mulp768"); break;
-                case 1023: posRep = builder.CreateSub(shl(xv,10), xv,       "sr_mulp1023"); break;
-                case 1025: posRep = builder.CreateAdd(shl(xv,10), xv,       "sr_mulp1025"); break;
-                case 1152: posRep = builder.CreateAdd(shl(xv,10), shl(xv,7), "sr_mulp1152"); break;
-                case 1280: posRep = builder.CreateAdd(shl(xv,10), shl(xv,8), "sr_mulp1280"); break;
-                case 1536: posRep = builder.CreateAdd(shl(xv,10), shl(xv,9), "sr_mulp1536"); break;
-                case 1792: posRep = builder.CreateSub(shl(xv,11), shl(xv,8), "sr_mulp1792"); break;
-                case 2047: posRep = builder.CreateSub(shl(xv,11), xv,        "sr_mulp2047"); break;
-                case 2048: posRep = shl(xv,11); break;
-                case 2049: posRep = builder.CreateAdd(shl(xv,11), xv,        "sr_mulp2049"); break;
-                // ── n×128 family ───────────────────────────────────────────────
-                case 124:  posRep = builder.CreateSub(shl(xv,7), shl(xv,2),  "sr_mulp124");  break;
-                case 126:  posRep = builder.CreateSub(shl(xv,7), shl(xv,1),  "sr_mulp126");  break;
-                case 130:  posRep = builder.CreateAdd(shl(xv,7), shl(xv,1),  "sr_mulp130");  break;
-                case 132:  posRep = builder.CreateAdd(shl(xv,7), shl(xv,2),  "sr_mulp132");  break;
-                // ── n×256 family ───────────────────────────────────────────────
-                case 252:  posRep = builder.CreateSub(shl(xv,8), shl(xv,2),  "sr_mulp252");  break;
-                case 254:  posRep = builder.CreateSub(shl(xv,8), shl(xv,1),  "sr_mulp254");  break;
-                case 258:  posRep = builder.CreateAdd(shl(xv,8), shl(xv,1),  "sr_mulp258");  break;
-                case 260:  posRep = builder.CreateAdd(shl(xv,8), shl(xv,2),  "sr_mulp260");  break;
-                // ── n×512 family ───────────────────────────────────────────────
-                case 508:  posRep = builder.CreateSub(shl(xv,9), shl(xv,2),  "sr_mulp508");  break;
-                case 510:  posRep = builder.CreateSub(shl(xv,9), shl(xv,1),  "sr_mulp510");  break;
-                case 514:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,1),  "sr_mulp514");  break;
-                case 516:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,2),  "sr_mulp516");  break;
-                case 520:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,3),  "sr_mulp520");  break;
-                case 528:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,4),  "sr_mulp528");  break;
-                case 544:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,5),  "sr_mulp544");  break;
-                case 576:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,6),  "sr_mulp576");  break;
-                // ── n×1024 family ──────────────────────────────────────────────
-                case 960:  posRep = builder.CreateSub(shl(xv,10), shl(xv,6), "sr_mulp960");  break;
-                case 992:  posRep = builder.CreateSub(shl(xv,10), shl(xv,5), "sr_mulp992");  break;
-                case 1008: posRep = builder.CreateSub(shl(xv,10), shl(xv,4), "sr_mulp1008"); break;
-                case 1016: posRep = builder.CreateSub(shl(xv,10), shl(xv,3), "sr_mulp1016"); break;
-                case 1020: posRep = builder.CreateSub(shl(xv,10), shl(xv,2), "sr_mulp1020"); break;
-                case 1022: posRep = builder.CreateSub(shl(xv,10), shl(xv,1), "sr_mulp1022"); break;
-                case 1026: posRep = builder.CreateAdd(shl(xv,10), shl(xv,1), "sr_mulp1026"); break;
-                case 1028: posRep = builder.CreateAdd(shl(xv,10), shl(xv,2), "sr_mulp1028"); break;
-                case 1032: posRep = builder.CreateAdd(shl(xv,10), shl(xv,3), "sr_mulp1032"); break;
-                case 1040: posRep = builder.CreateAdd(shl(xv,10), shl(xv,4), "sr_mulp1040"); break;
-                case 1056: posRep = builder.CreateAdd(shl(xv,10), shl(xv,5), "sr_mulp1056"); break;
-                case 1088: posRep = builder.CreateAdd(shl(xv,10), shl(xv,6), "sr_mulp1088"); break;
-                // ── n×2048 family ──────────────────────────────────────────────
-                case 1920: posRep = builder.CreateSub(shl(xv,11), shl(xv,7), "sr_mulp1920"); break;
-                case 1984: posRep = builder.CreateSub(shl(xv,11), shl(xv,6), "sr_mulp1984"); break;
-                case 2016: posRep = builder.CreateSub(shl(xv,11), shl(xv,5), "sr_mulp2016"); break;
-                case 2032: posRep = builder.CreateSub(shl(xv,11), shl(xv,4), "sr_mulp2032"); break;
-                case 2040: posRep = builder.CreateSub(shl(xv,11), shl(xv,3), "sr_mulp2040"); break;
-                case 2044: posRep = builder.CreateSub(shl(xv,11), shl(xv,2), "sr_mulp2044"); break;
-                case 2046: posRep = builder.CreateSub(shl(xv,11), shl(xv,1), "sr_mulp2046"); break;
-                case 2050: posRep = builder.CreateAdd(shl(xv,11), shl(xv,1), "sr_mulp2050"); break;
-                case 2052: posRep = builder.CreateAdd(shl(xv,11), shl(xv,2), "sr_mulp2052"); break;
-                case 2056: posRep = builder.CreateAdd(shl(xv,11), shl(xv,3), "sr_mulp2056"); break;
-                case 2064: posRep = builder.CreateAdd(shl(xv,11), shl(xv,4), "sr_mulp2064"); break;
-                case 2080: posRep = builder.CreateAdd(shl(xv,11), shl(xv,5), "sr_mulp2080"); break;
-                case 2112: posRep = builder.CreateAdd(shl(xv,11), shl(xv,6), "sr_mulp2112"); break;
-                case 2176: posRep = builder.CreateAdd(shl(xv,11), shl(xv,7), "sr_mulp2176"); break;
-                case 2304: posRep = builder.CreateAdd(shl(xv,11), shl(xv,8), "sr_mulp2304"); break;
-                case 2560: posRep = builder.CreateAdd(shl(xv,11), shl(xv,9), "sr_mulp2560"); break;
-                case 3072: posRep = builder.CreateAdd(shl(xv,11), shl(xv,10),"sr_mulp3072"); break;
-                // ── n×4096 family ───────────────────────────────────────────────
-                case 3584: posRep = builder.CreateSub(shl(xv,12), shl(xv,9),  "sr_mulp3584"); break;
-                case 3840: posRep = builder.CreateSub(shl(xv,12), shl(xv,8),  "sr_mulp3840"); break;
-                case 3968: posRep = builder.CreateSub(shl(xv,12), shl(xv,7),  "sr_mulp3968"); break;
-                case 4032: posRep = builder.CreateSub(shl(xv,12), shl(xv,6),  "sr_mulp4032"); break;
-                case 4064: posRep = builder.CreateSub(shl(xv,12), shl(xv,5),  "sr_mulp4064"); break;
-                case 4080: posRep = builder.CreateSub(shl(xv,12), shl(xv,4),  "sr_mulp4080"); break;
-                case 4088: posRep = builder.CreateSub(shl(xv,12), shl(xv,3),  "sr_mulp4088"); break;
-                case 4092: posRep = builder.CreateSub(shl(xv,12), shl(xv,2),  "sr_mulp4092"); break;
-                case 4094: posRep = builder.CreateSub(shl(xv,12), shl(xv,1),  "sr_mulp4094"); break;
-                case 4095: posRep = builder.CreateSub(shl(xv,12), xv,          "sr_mulp4095"); break;
-                case 4096: posRep = shl(xv,12); break;
-                case 4097: posRep = builder.CreateAdd(shl(xv,12), xv,          "sr_mulp4097"); break;
-                case 4098: posRep = builder.CreateAdd(shl(xv,12), shl(xv,1),   "sr_mulp4098"); break;
-                case 4100: posRep = builder.CreateAdd(shl(xv,12), shl(xv,2),   "sr_mulp4100"); break;
-                case 4104: posRep = builder.CreateAdd(shl(xv,12), shl(xv,3),   "sr_mulp4104"); break;
-                case 4112: posRep = builder.CreateAdd(shl(xv,12), shl(xv,4),   "sr_mulp4112"); break;
-                case 4128: posRep = builder.CreateAdd(shl(xv,12), shl(xv,5),   "sr_mulp4128"); break;
-                case 4160: posRep = builder.CreateAdd(shl(xv,12), shl(xv,6),   "sr_mulp4160"); break;
-                case 4224: posRep = builder.CreateAdd(shl(xv,12), shl(xv,7),   "sr_mulp4224"); break;
-                case 4352: posRep = builder.CreateAdd(shl(xv,12), shl(xv,8),   "sr_mulp4352"); break;
-                case 4608: posRep = builder.CreateAdd(shl(xv,12), shl(xv,9),   "sr_mulp4608"); break;
-                case 5120: posRep = builder.CreateAdd(shl(xv,12), shl(xv,10),  "sr_mulp5120"); break;
-                case 6144: posRep = builder.CreateAdd(shl(xv,12), shl(xv,11),  "sr_mulp6144"); break;
-                // ── n×8192 family ──────────────────────────────────────────────
-                case 7168:  posRep = builder.CreateSub(shl(xv,13), shl(xv,10), "sr_mulp7168");  break;
-                case 7680:  posRep = builder.CreateSub(shl(xv,13), shl(xv,9),  "sr_mulp7680");  break;
-                case 7936:  posRep = builder.CreateSub(shl(xv,13), shl(xv,8),  "sr_mulp7936");  break;
-                case 8064:  posRep = builder.CreateSub(shl(xv,13), shl(xv,7),  "sr_mulp8064");  break;
-                case 8128:  posRep = builder.CreateSub(shl(xv,13), shl(xv,6),  "sr_mulp8128");  break;
-                case 8160:  posRep = builder.CreateSub(shl(xv,13), shl(xv,5),  "sr_mulp8160");  break;
-                case 8176:  posRep = builder.CreateSub(shl(xv,13), shl(xv,4),  "sr_mulp8176");  break;
-                case 8184:  posRep = builder.CreateSub(shl(xv,13), shl(xv,3),  "sr_mulp8184");  break;
-                case 8188:  posRep = builder.CreateSub(shl(xv,13), shl(xv,2),  "sr_mulp8188");  break;
-                case 8190:  posRep = builder.CreateSub(shl(xv,13), shl(xv,1),  "sr_mulp8190");  break;
-                case 8191:  posRep = builder.CreateSub(shl(xv,13), xv,          "sr_mulp8191");  break;
-                case 8192:  posRep = shl(xv,13); break;
-                case 8193:  posRep = builder.CreateAdd(shl(xv,13), xv,          "sr_mulp8193");  break;
-                case 8194:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,1),  "sr_mulp8194");  break;
-                case 8196:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,2),  "sr_mulp8196");  break;
-                case 8200:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,3),  "sr_mulp8200");  break;
-                case 8208:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,4),  "sr_mulp8208");  break;
-                case 8224:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,5),  "sr_mulp8224");  break;
-                case 8256:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,6),  "sr_mulp8256");  break;
-                case 8320:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,7),  "sr_mulp8320");  break;
-                case 8448:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,8),  "sr_mulp8448");  break;
-                case 8704:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,9),  "sr_mulp8704");  break;
-                case 9216:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,10), "sr_mulp9216");  break;
-                case 10240: posRep = builder.CreateAdd(shl(xv,13), shl(xv,11), "sr_mulp10240"); break;
-                case 12288: posRep = builder.CreateAdd(shl(xv,13), shl(xv,12), "sr_mulp12288"); break;
-                // ── n×16384 family ──────────────────────────────────────────────
-                case 14336: posRep = builder.CreateSub(shl(xv,14), shl(xv,11), "sr_mulp14336"); break;
-                case 15360: posRep = builder.CreateSub(shl(xv,14), shl(xv,10), "sr_mulp15360"); break;
-                case 16384: posRep = shl(xv,14); break;
-                case 16385: posRep = builder.CreateAdd(shl(xv,14), xv,          "sr_mulp16385"); break;
-                case 16386: posRep = builder.CreateAdd(shl(xv,14), shl(xv,1),   "sr_mulp16386"); break;
-                case 16388: posRep = builder.CreateAdd(shl(xv,14), shl(xv,2),   "sr_mulp16388"); break;
-                case 16392: posRep = builder.CreateAdd(shl(xv,14), shl(xv,3),   "sr_mulp16392"); break;
-                case 16400: posRep = builder.CreateAdd(shl(xv,14), shl(xv,4),   "sr_mulp16400"); break;
-                case 16416: posRep = builder.CreateAdd(shl(xv,14), shl(xv,5),   "sr_mulp16416"); break;
-                case 16448: posRep = builder.CreateAdd(shl(xv,14), shl(xv,6),   "sr_mulp16448"); break;
-                case 16512: posRep = builder.CreateAdd(shl(xv,14), shl(xv,7),   "sr_mulp16512"); break;
-                case 16640: posRep = builder.CreateAdd(shl(xv,14), shl(xv,8),   "sr_mulp16640"); break;
-                case 16896: posRep = builder.CreateAdd(shl(xv,14), shl(xv,9),   "sr_mulp16896"); break;
-                case 17408: posRep = builder.CreateAdd(shl(xv,14), shl(xv,10),  "sr_mulp17408"); break;
-                case 18432: posRep = builder.CreateAdd(shl(xv,14), shl(xv,11),  "sr_mulp18432"); break;
-                case 20480: posRep = builder.CreateAdd(shl(xv,14), shl(xv,12),  "sr_mulp20480"); break;
-                case 24576: posRep = builder.CreateAdd(shl(xv,14), shl(xv,13),  "sr_mulp24576"); break;
-                // ── n×32768 family ──────────────────────────────────────────────
-                case 28672: posRep = builder.CreateSub(shl(xv,15), shl(xv,12), "sr_mulp28672"); break;
-                case 30720: posRep = builder.CreateSub(shl(xv,15), shl(xv,11), "sr_mulp30720"); break;
-                case 32768: posRep = shl(xv,15); break;
-                case 32769: posRep = builder.CreateAdd(shl(xv,15), xv,          "sr_mulp32769"); break;
-                case 32770: posRep = builder.CreateAdd(shl(xv,15), shl(xv,1),   "sr_mulp32770"); break;
-                case 32772: posRep = builder.CreateAdd(shl(xv,15), shl(xv,2),   "sr_mulp32772"); break;
-                case 32776: posRep = builder.CreateAdd(shl(xv,15), shl(xv,3),   "sr_mulp32776"); break;
-                case 32800: posRep = builder.CreateAdd(shl(xv,15), shl(xv,5),   "sr_mulp32800"); break;
-                case 32896: posRep = builder.CreateAdd(shl(xv,15), shl(xv,7),   "sr_mulp32896"); break;
-                case 33024: posRep = builder.CreateAdd(shl(xv,15), shl(xv,8),   "sr_mulp33024"); break;
-                case 33280: posRep = builder.CreateAdd(shl(xv,15), shl(xv,9),   "sr_mulp33280"); break;
-                case 33792: posRep = builder.CreateAdd(shl(xv,15), shl(xv,10),  "sr_mulp33792"); break;
-                case 34816: posRep = builder.CreateAdd(shl(xv,15), shl(xv,11),  "sr_mulp34816"); break;
-                case 36864: posRep = builder.CreateAdd(shl(xv,15), shl(xv,12),  "sr_mulp36864"); break;
-                case 40960: posRep = builder.CreateAdd(shl(xv,15), shl(xv,13),  "sr_mulp40960"); break;
-                case 49152: posRep = builder.CreateAdd(shl(xv,15), shl(xv,14),  "sr_mulp49152"); break;
-                // ── n×65536 family ──────────────────────────────────────────────
-                case 57344: posRep = builder.CreateSub(shl(xv,16), shl(xv,13), "sr_mulp57344"); break;
-                case 61440: posRep = builder.CreateSub(shl(xv,16), shl(xv,12), "sr_mulp61440"); break;
-                case 65536: posRep = shl(xv,16); break;
-                case 65537: posRep = builder.CreateAdd(shl(xv,16), xv,          "sr_mulp65537"); break;
-                case 65538: posRep = builder.CreateAdd(shl(xv,16), shl(xv,1),   "sr_mulp65538"); break;
-                case 65540: posRep = builder.CreateAdd(shl(xv,16), shl(xv,2),   "sr_mulp65540"); break;
-                case 65544: posRep = builder.CreateAdd(shl(xv,16), shl(xv,3),   "sr_mulp65544"); break;
-                case 65600: posRep = builder.CreateAdd(shl(xv,16), shl(xv,6),   "sr_mulp65600"); break;
-                case 65664: posRep = builder.CreateAdd(shl(xv,16), shl(xv,7),   "sr_mulp65664"); break;
-                case 65792: posRep = builder.CreateAdd(shl(xv,16), shl(xv,8),   "sr_mulp65792"); break;
-                case 66048: posRep = builder.CreateAdd(shl(xv,16), shl(xv,9),   "sr_mulp66048"); break;
-                case 66560: posRep = builder.CreateAdd(shl(xv,16), shl(xv,10),  "sr_mulp66560"); break;
-                case 67584: posRep = builder.CreateAdd(shl(xv,16), shl(xv,11),  "sr_mulp67584"); break;
-                case 69632: posRep = builder.CreateAdd(shl(xv,16), shl(xv,12),  "sr_mulp69632"); break;
-                case 73728: posRep = builder.CreateAdd(shl(xv,16), shl(xv,13),  "sr_mulp73728"); break;
-                case 81920: posRep = builder.CreateAdd(shl(xv,16), shl(xv,14),  "sr_mulp81920"); break;
-                case 98304: posRep = builder.CreateAdd(shl(xv,16), shl(xv,15),  "sr_mulp98304"); break;
-                case 114688: posRep = builder.CreateSub(shl(xv,17), shl(xv,14), "sr_mulp114688"); break;
-                case 122880: posRep = builder.CreateSub(shl(xv,17), shl(xv,13), "sr_mulp122880"); break;
-                case 131072: posRep = shl(xv,17); break;
-                case 131073: posRep = builder.CreateAdd(shl(xv,17), xv,          "sr_mulp131073"); break;
-                case 131074: posRep = builder.CreateAdd(shl(xv,17), shl(xv,1),   "sr_mulp131074"); break;
-                case 131076: posRep = builder.CreateAdd(shl(xv,17), shl(xv,2),   "sr_mulp131076"); break;
-                case 131080: posRep = builder.CreateAdd(shl(xv,17), shl(xv,3),   "sr_mulp131080"); break;
-                case 131136: posRep = builder.CreateAdd(shl(xv,17), shl(xv,6),   "sr_mulp131136"); break;
-                case 131200: posRep = builder.CreateAdd(shl(xv,17), shl(xv,7),   "sr_mulp131200"); break;
-                case 131328: posRep = builder.CreateAdd(shl(xv,17), shl(xv,8),   "sr_mulp131328"); break;
-                case 131584: posRep = builder.CreateAdd(shl(xv,17), shl(xv,9),   "sr_mulp131584"); break;
-                case 132096: posRep = builder.CreateAdd(shl(xv,17), shl(xv,10),  "sr_mulp132096"); break;
-                case 133120: posRep = builder.CreateAdd(shl(xv,17), shl(xv,11),  "sr_mulp133120"); break;
-                case 135168: posRep = builder.CreateAdd(shl(xv,17), shl(xv,12),  "sr_mulp135168"); break;
-                case 139264: posRep = builder.CreateAdd(shl(xv,17), shl(xv,13),  "sr_mulp139264"); break;
-                case 147456: posRep = builder.CreateAdd(shl(xv,17), shl(xv,14),  "sr_mulp147456"); break;
-                case 163840: posRep = builder.CreateAdd(shl(xv,17), shl(xv,15),  "sr_mulp163840"); break;
-                case 196608: posRep = builder.CreateAdd(shl(xv,17), shl(xv,16),  "sr_mulp196608"); break;
-                // 3-instruction positive sequences
-                case 11: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,1), "t"), xv, "sr_mul11"); break;
-                case 13: { auto* t = builder.CreateSub(shl(xv,4), shl(xv,1), "t"); posRep = builder.CreateSub(t, xv, "sr_mul13"); break; }
-                case 14: posRep = builder.CreateSub(shl(xv,4), shl(xv,1), "sr_mul14"); break;
-                case 19: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1), "t"), xv, "sr_mul19"); break;
-                case 21: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), xv, "sr_mul21"); break;
-                case 22: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), shl(xv,1), "sr_mul22"); break;
-                case 25: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3), "t"), xv, "sr_mul25"); break;
-                case 26: posRep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), shl(xv,1), "sr_mul26"); break;
-                case 27: posRep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul27"); break;
-                case 37: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul37"); break;
-                case 41: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3), "t"), xv, "sr_mul41"); break;
-                case 49: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4), "t"), xv, "sr_mul49"); break;
-                case 50: {
-                    auto* t = builder.CreateSub(shl(xv,6), shl(xv,4), "sr_mulp50.t");
-                    posRep = builder.CreateAdd(t, shl(xv,1), "sr_mulp50");
-                    break;
-                }
-                case 100: {
-                    auto* t = builder.CreateSub(shl(xv,7), shl(xv,5), "sr_mulp100.t");
-                    posRep = builder.CreateAdd(t, shl(xv,2), "sr_mulp100");
-                    break;
-                }
-                case 200: {
-                    // n*200 → (n<<8) - (n<<6) + (n<<3)  [256n - 64n + 8n]
-                    auto* t = builder.CreateSub(shl(xv,8), shl(xv,6), "sr_mulp200.t");
-                    posRep = builder.CreateAdd(t, shl(xv,3), "sr_mulp200");
-                    break;
-                }
-                case 1000: {
-                    // n*1000 → (n<<10) - (n<<5) + (n<<3)  [1024n - 32n + 8n]
-                    auto* t = builder.CreateSub(shl(xv,10), shl(xv,5), "sr_mulp1000.t");
-                    posRep = builder.CreateAdd(t, shl(xv,3), "sr_mulp1000");
-                    break;
-                }
-                default: break;
-                }
-                if (posRep)
-                    rep = builder.CreateNeg(posRep, "sr_mulneg");
-            }
+            if (rep && negate)
+                rep = builder.CreateNeg(rep, "sr.neg");
 
             if (rep) {
                 replacements.emplace_back(&inst, rep);
@@ -2643,12 +2523,19 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
 /// Detect adjacent scalar load pairs that can be annotated for hardware
 /// load pairing / memory access coalescing.  Marks paired loads with
 /// llvm.access.group metadata to hint the backend's load-store unit.
+///
+/// Detects two patterns:
+///   1. Consecutive GEP indices (diff == 1): classic adjacent elements.
+///   2. GEP indices whose byte-offset difference is within one cache line:
+///      covers non-unit strides (e.g. struct fields) that share a cache line.
 /// Returns the number of load pairs identified.
 static unsigned markLoadStorePairs(llvm::Function& func,
                                     const MicroarchProfile& profile) {
     if (profile.loadPorts < 2) return 0;
 
     unsigned count = 0;
+    const llvm::DataLayout* dl = nullptr;
+    if (auto* mod = func.getParent()) dl = &mod->getDataLayout();
 
     for (auto& bb : func) {
         std::vector<llvm::LoadInst*> loads;
@@ -2658,14 +2545,13 @@ static unsigned markLoadStorePairs(llvm::Function& func,
             }
         }
 
-        // Look for consecutive GEP-based loads from the same base pointer.
+        // Look for loads from the same base pointer that access addresses
+        // within the same cache line (distance < cacheLineSize bytes).
         for (size_t i = 0; i + 1 < loads.size(); ++i) {
             llvm::LoadInst* ld0 = loads[i];
             llvm::LoadInst* ld1 = loads[i + 1];
 
-            // Both loads must have the same type and be from GEP instructions.
-            if (ld0->getType() != ld1->getType()) continue;
-
+            // Both loads must be from GEP instructions off the same base.
             auto* gep0 = llvm::dyn_cast<llvm::GetElementPtrInst>(ld0->getPointerOperand());
             auto* gep1 = llvm::dyn_cast<llvm::GetElementPtrInst>(ld1->getPointerOperand());
             if (!gep0 || !gep1) continue;
@@ -2676,17 +2562,40 @@ static unsigned markLoadStorePairs(llvm::Function& func,
             auto* idx1 = llvm::dyn_cast<llvm::ConstantInt>(gep1->getOperand(1));
             if (!idx0 || !idx1) continue;
 
-            int64_t diff = idx1->getSExtValue() - idx0->getSExtValue();
-            if (diff != 1) continue;
+            int64_t idxDiff = idx1->getSExtValue() - idx0->getSExtValue();
+            if (idxDiff < 0) idxDiff = -idxDiff; // absolute difference
 
-            // Consecutive indices — annotate with access.group metadata to hint
-            // the backend's load-store unit about pairing.
+            // Compute the byte-offset difference using the GEP element type
+            // and the data layout.  Fall back to index difference if no DL.
+            bool pairOk = false;
+            if (dl) {
+                llvm::Type* elemTy = gep0->getSourceElementType();
+                if (elemTy && elemTy->isSized()) {
+                    uint64_t elemBytes = dl->getTypeAllocSize(elemTy);
+                    if (elemBytes > 0) {
+                        uint64_t byteDiff = static_cast<uint64_t>(idxDiff) * elemBytes;
+                        // Pair if the byte distance is strictly within one cache line.
+                        pairOk = (byteDiff > 0 && byteDiff < profile.cacheLineSize);
+                    }
+                }
+            } else {
+                // No data layout: use the classic consecutive-index heuristic.
+                pairOk = (idxDiff == 1);
+            }
+
+            if (!pairOk) continue;
+
+            // Both loads must have the same result type for the backend to
+            // treat them as a coalescing candidate.
+            if (ld0->getType() != ld1->getType()) continue;
+
+            // Annotate with access.group metadata to hint the backend.
             llvm::LLVMContext& ctx = func.getContext();
             llvm::MDNode* agMD = llvm::MDNode::get(ctx, {});
             ld0->setMetadata(llvm::LLVMContext::MD_access_group, agMD);
             ld1->setMetadata(llvm::LLVMContext::MD_access_group, agMD);
             count++;
-            ++i; // skip ld1 in outer loop
+            ++i; // skip ld1 in outer loop (already paired)
         }
     }
     return count;
@@ -2768,12 +2677,109 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         checkRT(ResourceType::StoreUnit);
         checkRT(ResourceType::DividerUnit);
 
+        // ── Compute Recurrence MII (RecMII) ────────────────────────────────
+        // For loops with loop-carried dependencies (e.g. reduction: acc += a[i]),
+        // the hardware-imposed minimum is not just resource pressure but also
+        // the latency of the recurrence cycle.  RecMII = max over all PHI-based
+        // recurrences of the latency of the dependency chain from the PHI's
+        // back-edge value back to the PHI itself.
+        //
+        // Algorithm (per-PHI):
+        //   1. Forward-mark: BFS from phi via use-def edges within the loop
+        //      body to find all instructions reachable from phi ("onChain").
+        //   2. Walk backward from the back-edge value, at each step following
+        //      only the operand that is onChain (i.e., part of the recurrence
+        //      cycle), accumulating instruction latencies.
+        //   3. RecMII = max latency over all PHIs.
+        //
+        // This correctly handles multi-hop recurrences like:
+        //   acc = fma(a[i], b[i], fma(c[i], d[i], acc))
+        // where naive "follow first operand" would miss the recurrence path.
+        unsigned recMII = 1;
+        {
+            // Build a local index of instructions in this BB and the latch.
+            std::unordered_map<const llvm::Instruction*, unsigned> bbInstIdx;
+            unsigned ord = 0;
+            for (auto& inst : bb)    bbInstIdx[&inst] = ord++;
+            if (latch != &bb)
+                for (auto& inst : *latch) bbInstIdx[&inst] = ord++;
+
+            for (auto& phiInst : bb) {
+                auto* phi = llvm::dyn_cast<llvm::PHINode>(&phiInst);
+                if (!phi) break; // PHIs are always first in a BB
+
+                // Find the back-edge incoming value (value coming from the latch).
+                llvm::Value* backVal = nullptr;
+                for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
+                    if (phi->getIncomingBlock(i) == latch) {
+                        backVal = phi->getIncomingValue(i);
+                        break;
+                    }
+                }
+                if (!backVal) continue;
+
+                // Step 1: Forward BFS from phi to mark all instructions in
+                // the loop body that are reachable via uses from phi.
+                // These form the "recurrence spine" — only these can be on
+                // the loop-carried dependency path.
+                std::unordered_set<const llvm::Instruction*> onChain;
+                {
+                    std::queue<const llvm::Instruction*> wl;
+                    onChain.insert(phi);
+                    wl.push(phi);
+                    while (!wl.empty()) {
+                        const llvm::Instruction* cur = wl.front();
+                        wl.pop();
+                        for (auto* usr : cur->users()) {
+                            auto* uInst = llvm::dyn_cast<llvm::Instruction>(usr);
+                            if (!uInst) continue;
+                            if (bbInstIdx.find(uInst) == bbInstIdx.end()) continue;
+                            if (onChain.insert(uInst).second) wl.push(uInst);
+                        }
+                    }
+                }
+
+                // Step 2: Walk backward from backVal, following only operands
+                // that are in onChain (guarantees we stay on the recurrence path).
+                unsigned chainLat = 0;
+                llvm::Value* cur = backVal;
+                std::unordered_set<const llvm::Value*> visited;
+                while (true) {
+                    auto* curInst = llvm::dyn_cast<llvm::Instruction>(cur);
+                    if (!curInst) break;
+                    if (curInst == phi) break;  // closed the cycle
+                    if (!visited.insert(curInst).second) break;  // cycle guard
+                    if (bbInstIdx.find(curInst) == bbInstIdx.end()) break;
+
+                    chainLat += getOpcodeLatency(curInst, profile);
+
+                    // Follow the operand that is on the recurrence chain.
+                    llvm::Value* next = nullptr;
+                    for (auto& op : curInst->operands()) {
+                        auto* opInst = llvm::dyn_cast<llvm::Instruction>(op.get());
+                        if (!opInst) continue;
+                        // phi itself or any onChain member is a valid next hop.
+                        if (opInst == phi || onChain.count(opInst)) {
+                            next = opInst;
+                            break;
+                        }
+                    }
+                    if (!next) break;
+                    cur = next;
+                }
+                if (chainLat > recMII) recMII = chainLat;
+            }
+        }
+
+        // True MII is the max of resource-constrained and recurrence-constrained.
+        unsigned mii = std::max(resMII, recMII);
+
         // Unroll count: expose enough iterations to fill the pipeline.
         // Upper-bound prevents excessive code-size growth from very deep pipelines
         // combined with very short MII (e.g. a 14-stage pipeline with MII=1 would
         // otherwise produce 14 unrolled copies).
         constexpr unsigned kMaxUnrollCount = 8;
-        unsigned unroll = (profile.pipelineDepth + resMII - 1) / resMII;
+        unsigned unroll = (profile.pipelineDepth + mii - 1) / mii;
         unroll = std::max(unroll, 2u);
         unroll = std::min(unroll, kMaxUnrollCount);
 
@@ -2877,12 +2883,27 @@ static void applyTargetAttributes(llvm::Function& func,
     case ISAFamily::X86_64:
         addF("+sse");
         addF("+sse2");
+        addF("+sse4.1");
         addF("+sse4.2");
-        addF("+bmi");
-        addF("+bmi2");
         addF("+popcnt");
-        addF("+lzcnt");
-        if (profile.vectorWidth >= 256) { addF("+avx"); addF("+avx2"); }
+        // BMI, BMI2, LZCNT, F16C, and FMA were introduced with Haswell (2013).
+        // Sandy Bridge / Ivy Bridge profiles have fmaUnits==0 since they
+        // predate FMA; use that as the proxy for "pre-Haswell baseline".
+        if (profile.fmaUnits > 0) {
+            addF("+bmi");
+            addF("+bmi2");
+            addF("+lzcnt");
+            addF("+fma");    // FMA3 instructions (VFMADD132/213/231)
+            addF("+f16c");   // half-float conversion (VCVTPH2PS, VCVTPS2PH)
+            addF("+cx16");   // CMPXCHG16B
+            addF("+sahf");   // LAHF/SAHF in 64-bit mode (needed by some libms)
+        }
+        if (profile.vectorWidth >= 256) {
+            addF("+avx");
+            // AVX2 was introduced together with FMA in Haswell (2013).
+            if (profile.fmaUnits > 0)
+                addF("+avx2");
+        }
         if (profile.vectorWidth >= 512) {
             addF("+avx512f");
             addF("+avx512vl");
@@ -2904,9 +2925,16 @@ static void applyTargetAttributes(llvm::Function& func,
     case ISAFamily::AArch64:
         addF("+neon");
         addF("+fp-armv8");
+        addF("+fp16");       // half-precision FP arithmetic (ARMv8.2+)
+        addF("+dotprod");    // 8-bit dot product (ARMv8.2-dotprod, all modern ARM)
+        addF("+crypto");     // AES + SHA (ARMv8.0-crypto, ubiquitous in AArch64)
+        addF("+zcm");        // zero cycle move (register renaming hint)
+        addF("+zcz");        // zero cycle zeroing
         if (profile.vectorWidth >= 256) {
             addF("+sve");
             addF("+sve2");
+            addF("+sve2-sha3");
+            addF("+sve2-aes");
         }
         break;
 
@@ -2916,6 +2944,10 @@ static void applyTargetAttributes(llvm::Function& func,
         addF("+f");  // single-precision FP
         addF("+d");  // double-precision FP
         addF("+c");  // compressed instructions
+        addF("+zba"); // address generation bitmanip (SH1ADD, SH2ADD, SH3ADD)
+        addF("+zbb"); // basic bitmanip (ANDN, CLZ, CTZ, ORC.B, REV8, etc.)
+        addF("+zbc"); // carry-less multiplication
+        addF("+zbs"); // single-bit instructions
         if (profile.vecUnits > 0 && profile.vectorWidth >= 128) addF("+v");
         break;
 
@@ -2927,6 +2959,142 @@ static void applyTargetAttributes(llvm::Function& func,
         func.addFnAttr("target-features", features);
 }
 
+/// Detect `select(icmp slt x 0, sub(0, x), x)` and similar patterns and
+/// replace with `llvm.abs(x, false)`.
+/// Returns the number of abs patterns replaced.
+static unsigned generateIntegerAbs(llvm::Function& func,
+                                    const MicroarchProfile& profile) {
+    // llvm.abs is beneficial on all architectures that have a native abs-like
+    // instruction (x86 VABS* in AVX2, AArch64 ABS, RISC-V). Even without a
+    // native instruction the backend can emit `neg + cmov` which is 2 µops
+    // instead of 3 (cmp + neg + conditional move).
+    if (profile.intALUs == 0) return 0;
+
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+            if (!sel->getType()->isIntegerTy()) continue;
+
+            // Pattern: select(icmp_slt(x, 0), sub(0, x), x)
+            //    or:   select(icmp_sgt(x, 0), x, sub(0, x))
+            auto* cond = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition());
+            if (!cond) continue;
+
+            llvm::Value* x = nullptr;
+            llvm::Value* negX = nullptr;
+
+            auto matchNeg = [](llvm::Value* v, llvm::Value* base) -> bool {
+                // sub(0, base) or sub(0, x) with constant zero LHS
+                if (auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(v)) {
+                    if (sub->getOpcode() == llvm::Instruction::Sub) {
+                        if (auto* lhs = llvm::dyn_cast<llvm::ConstantInt>(sub->getOperand(0)))
+                            if (lhs->isZero() && sub->getOperand(1) == base)
+                                return true;
+                    }
+                }
+                return false;
+            };
+
+            if (cond->getPredicate() == llvm::ICmpInst::ICMP_SLT) {
+                // select(icmp slt x 0, neg(x), x)  →  abs(x)
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(cond->getOperand(1))) {
+                    if (ci->isZero()) {
+                        x    = cond->getOperand(0);
+                        negX = sel->getTrueValue();
+                        if (!matchNeg(negX, x) || sel->getFalseValue() != x)
+                            x = nullptr;
+                    }
+                }
+            } else if (cond->getPredicate() == llvm::ICmpInst::ICMP_SGT) {
+                // select(icmp sgt x 0, x, neg(x))  →  abs(x)
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(cond->getOperand(1))) {
+                    if (ci->isZero()) {
+                        x    = cond->getOperand(0);
+                        negX = sel->getFalseValue();
+                        if (!matchNeg(negX, x) || sel->getTrueValue() != x)
+                            x = nullptr;
+                    }
+                }
+            }
+
+            if (!x) continue;
+
+            llvm::IRBuilder<> builder(sel);
+            llvm::Module* mod = func.getParent();
+            llvm::Type* ty = sel->getType();
+            llvm::Function* absFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::abs, {ty});
+            // `false` = result may NOT be poison if the input is INT_MIN
+            // (the safe/conservative version).
+            llvm::Value* absVal = builder.CreateCall(
+                absFn, {x, builder.getInt1(false)}, "abs");
+            replacements.emplace_back(sel, absVal);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Canonicalise `fadd fast x (fneg y)` → `fsub fast x y`.
+/// This avoids an extra FNeg instruction on CPUs that lack a native FNMADD,
+/// since the FP subtract maps directly to FSUBSS/FSUBD/VFNMADD on many arches.
+/// The transformation is only applied when the fadd has `nsz` or `reassoc`
+/// fast-math flags, or when the fneg result is only used by this fadd (so we
+/// know the fneg can be folded away).
+/// Returns the number of patterns replaced.
+static unsigned canonicalizeFaddFneg(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Instruction*>> work;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FAdd) continue;
+            auto* fadd = llvm::cast<llvm::BinaryOperator>(&inst);
+
+            // Only canonicalize when the fadd is "fast" (no strict FP semantics).
+            // This guards against changing NaN/Inf behaviour.
+            if (!fadd->isFast() && !fadd->hasNoNaNs()) continue;
+
+            // Try both operands: fadd(x, fneg(y)) or fadd(fneg(y), x).
+            for (int side = 0; side < 2; ++side) {
+                llvm::Value* candidate = fadd->getOperand(side);
+                auto* fneg = llvm::dyn_cast<llvm::UnaryOperator>(candidate);
+                if (!fneg || fneg->getOpcode() != llvm::Instruction::FNeg) continue;
+                // Only fold when the fneg result is used solely by this fadd,
+                // OR when the fadd has reassoc — in that case a separate fneg
+                // consumer can re-emit its own fneg.
+                if (!fneg->hasOneUse() && !fadd->hasAllowReassoc()) continue;
+
+                work.emplace_back(fadd, fneg);
+                break;
+            }
+        }
+    }
+
+    for (auto& [fadd, fneg] : work) {
+        // Determine which operand is the fneg and which is the other addend.
+        llvm::Value* other = (fadd->getOperand(0) == fneg)
+                             ? fadd->getOperand(1) : fadd->getOperand(0);
+        llvm::Value* negated = fneg->getOperand(0);
+
+        llvm::IRBuilder<> builder(fadd);
+        llvm::Value* fsub = builder.CreateFSubFMF(other, negated, fadd, "fsub_canon");
+        fadd->replaceAllUsesWith(fsub);
+        fadd->eraseFromParent();
+        if (fneg->use_empty()) fneg->eraseFromParent();
+        ++count;
+    }
+    return count;
+}
+
 TransformStats applyHardwareTransforms(llvm::Function& func,
                                         const MicroarchProfile& profile,
                                         bool enableLoopAnnotation) {
@@ -2936,6 +3104,9 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.fmaGenerated     = generateFMA(func, profile);
     stats.fmaGenerated    += generateFMASub(func, profile);
     stats.fmaGenerated    += generateFMAChain(func, profile);
+    // Canonicalize fadd(x, fneg(y)) → fsub(x, y) before FMA scan so the
+    // FMA pass can recognise the resulting fsub patterns.
+    stats.fmaGenerated    += canonicalizeFaddFneg(func);
     stats.prefetchesInserted = insertPrefetches(func, profile);
     stats.branchesOptimized  = optimizeBranchLayout(func, profile);
     stats.loadsStorePaired   = markLoadStorePairs(func, profile);
@@ -2948,6 +3119,9 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
     stats.intStrengthReduced = integerStrengthReduce(func, profile);
+    // Integer abs detection: replace select+icmp+sub patterns with llvm.abs.
+    // Runs after strength reduction so we don't accidentally undo any reductions.
+    stats.intStrengthReduced += generateIntegerAbs(func, profile);
 
     return stats;
 }
@@ -3161,6 +3335,39 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
     return false;
 }
 
+/// Returns true when the instruction's result lives in the vector/FP register
+/// file rather than the integer general-purpose register file.
+/// Used by the scheduler to track register pressure per physical register file.
+static bool producesVecOrFP(const llvm::Instruction* inst) {
+    if (!inst) return false;
+    llvm::Type* ty = inst->getType();
+    if (ty->isFloatingPointTy() || ty->isVectorTy()) return true;
+    // FP conversions: int→FP or FP→int consume the FP register file.
+    switch (inst->getOpcode()) {
+    case llvm::Instruction::UIToFP:
+    case llvm::Instruction::SIToFP:
+    case llvm::Instruction::FPExt:
+    case llvm::Instruction::FPTrunc:
+        return true;
+    case llvm::Instruction::Call:
+        if (const auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(inst)) {
+            switch (ii->getIntrinsicID()) {
+            case llvm::Intrinsic::fma:
+            case llvm::Intrinsic::fmuladd:
+            case llvm::Intrinsic::sqrt:
+            case llvm::Intrinsic::minnum:
+            case llvm::Intrinsic::maxnum:
+                return true;
+            default:
+                return ty->isFloatingPointTy() || ty->isVectorTy();
+            }
+        }
+        return false;
+    default:
+        return false;
+    }
+}
+
 /// Per-basic-block list scheduler driven by the detailed hardware graph.
 ///
 /// Algorithm:
@@ -3275,11 +3482,27 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
             const llvm::Value* baseA = underlyingBase(ptrA);
             const llvm::Value* baseB = underlyingBase(ptrB);
             if (baseA != baseB) {
-                const bool allocA = llvm::isa<llvm::AllocaInst>(baseA) ||
-                              llvm::isa<llvm::Argument>(baseA);
-                const bool allocB = llvm::isa<llvm::AllocaInst>(baseB) ||
-                              llvm::isa<llvm::Argument>(baseB);
-                if (allocA && allocB) return false;
+                bool aIsAlloca = llvm::isa<llvm::AllocaInst>(baseA);
+                bool bIsAlloca = llvm::isa<llvm::AllocaInst>(baseB);
+                bool aIsArg    = llvm::isa<llvm::Argument>(baseA);
+                bool bIsArg    = llvm::isa<llvm::Argument>(baseB);
+
+                // Two distinct stack allocations never alias.
+                if (aIsAlloca && bIsAlloca) return false;
+
+                // Alloca and a pointer argument don't alias: the alloca was
+                // created after the call and its address cannot have been
+                // passed to the caller that holds the argument.
+                if ((aIsAlloca && bIsArg) || (aIsArg && bIsAlloca)) return false;
+
+                // Two different pointer arguments only provably don't alias
+                // when at least one carries the `noalias` (restrict) attribute.
+                if (aIsArg && bIsArg) {
+                    const auto* argA = llvm::cast<llvm::Argument>(baseA);
+                    const auto* argB = llvm::cast<llvm::Argument>(baseB);
+                    if (argA->hasNoAliasAttr() || argB->hasNoAliasAttr())
+                        return false;
+                }
             }
 
             return true;  // conservative fallback
@@ -3480,17 +3703,22 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
     }
 
     // ── 6c. Register pressure model ──────────────────────────────────────────
-    // Track approximate live-value count during scheduling to penalise
-    // schedules that spike register pressure beyond the physical register
-    // file.  Each instruction that produces a non-void, non-zero-latency
-    // result adds to liveValues; when ALL consumers of a value are scheduled,
-    // the value dies and liveValues decreases.
+    // Track live-value count per physical register file independently.
+    // Modern CPUs have completely separate integer and vector/FP register files
+    // (e.g. x86: 16 GPRs and 16/32 XMM/YMM/ZMM registers), so pressure in
+    // one file does not affect the other.  Using a single shared counter
+    // over-penalises code that mixes int and FP operations — splitting the
+    // budget eliminates false pressure signals and improves IPC for such code.
     //
-    // The register budget excludes stack pointer and frame pointer.
-    unsigned regBudget = (profile.isa == ISAFamily::AArch64)
-        ? std::max(profile.intRegisters, 16u) - 2
-        : std::max(profile.intRegisters, 16u) - 2;
-    unsigned currentLive = 0;
+    // Integer register budget: total GPRs minus SP and FP.
+    unsigned intRegBudget = (profile.intRegisters > 2)
+        ? profile.intRegisters - 2 : 14u;
+    // Vector/FP register budget: total SIMD/FP registers (no SP/FP equiv.).
+    unsigned vecRegBudget = (profile.vecRegisters > 0)
+        ? profile.vecRegisters : 16u;
+
+    unsigned intLive = 0;   // current live integer register values
+    unsigned vecLive = 0;   // current live vector/FP register values
 
     // Count how many not-yet-scheduled users each producer has.
     std::vector<unsigned> remainingUsers(n, 0);
@@ -3499,24 +3727,28 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
     }
 
     // Pre-count values live-in from outside the BB (function args, cross-BB defs).
-    unsigned liveInCount = 0;
+    // Split by register file type so each budget is initialized correctly.
     {
-        std::unordered_set<const llvm::Value*> externalDefs;
+        std::unordered_set<const llvm::Value*> externalIntDefs;
+        std::unordered_set<const llvm::Value*> externalVecDefs;
         for (unsigned i = 0; i < n; ++i) {
             for (auto& use : moveable[i]->operands()) {
                 auto* val = use.get();
                 if (llvm::isa<llvm::Constant>(val)) continue;
-                if (auto* arg = llvm::dyn_cast<llvm::Argument>(val))
-                    externalDefs.insert(arg);
-                else if (auto* defInst = llvm::dyn_cast<llvm::Instruction>(val)) {
-                    if (idx.find(defInst) == idx.end()) // defined outside BB
-                        externalDefs.insert(defInst);
+                bool isVec = val->getType()->isFloatingPointTy()
+                          || val->getType()->isVectorTy();
+                if (auto* arg = llvm::dyn_cast<llvm::Argument>(val)) {
+                    (isVec ? externalVecDefs : externalIntDefs).insert(arg);
+                } else if (auto* defInst = llvm::dyn_cast<llvm::Instruction>(val)) {
+                    if (idx.find(defInst) == idx.end()) {
+                        (isVec ? externalVecDefs : externalIntDefs).insert(defInst);
+                    }
                 }
             }
         }
-        liveInCount = static_cast<unsigned>(externalDefs.size());
+        intLive = static_cast<unsigned>(externalIntDefs.size());
+        vecLive = static_cast<unsigned>(externalVecDefs.size());
     }
-    currentLive = liveInCount;
 
     // ── 6e. Reorder buffer pressure tracking ─────────────────────────────────
     // Modern out-of-order CPUs retire instructions in order from a reorder
@@ -3571,7 +3803,7 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
         //   4. Stall distance (consumer work remaining — more = better hiding)
         //   5. Fusion affinity (schedule fusion partners adjacently)
         //   6. Port pressure (schedule bottleneck resource first)
-        //   7. Register pressure penalty (penalise if over budget)
+        //   7. Register pressure penalty (per register file — int vs vec/FP)
         //   8. Register-freeing score (reduce live values)
         //   9. Instruction index (deterministic tie-break)
         //
@@ -3618,22 +3850,26 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
             return done[it->second]; // partner already scheduled
         };
 
-        // Register pressure penalty: returns a higher value when scheduling
-        // this instruction would push live values over the register budget.
-        // Instructions that produce a result (non-void) increase pressure.
+        // Register pressure penalty — per physical register file.
+        // On all major architectures, integer and vector/FP registers are
+        // completely independent files.  A penalty only applies when scheduling
+        // this instruction would push the *appropriate* file over its budget.
+        // This eliminates false penalties when mixing int and FP operations:
+        // e.g. being over integer budget should not penalise an FP instruction.
         auto regPressurePenalty = [&](unsigned id) -> unsigned {
             if (moveable[id]->getType()->isVoidTy()) return 0;
             if (lat[id] == 0) return 0; // free ops (bitcast, phi) don't need regs
-            // If we're already over budget, penalise instructions that add live values
-            // unless they also free values (via regFreeScore).
+            bool isVec = producesVecOrFP(moveable[id]);
+            unsigned live   = isVec ? vecLive   : intLive;
+            unsigned budget = isVec ? vecRegBudget : intRegBudget;
             unsigned rfs = regFreeScore(id);
-            if (currentLive + 1 - rfs > regBudget) {
-                unsigned penalty = currentLive + 1 - rfs - regBudget;
+            // Net delta: +1 produced, rfs freed.  Only penalise if net is positive
+            // and pushes past budget.
+            if (live + 1 > budget + rfs) {
+                unsigned penalty = (live + 1 - rfs > budget) ? (live + 1 - rfs - budget) : 0;
                 // Dampen penalty for instructions with slack — they can be
-                // delayed to a point with lower pressure without extending
-                // the critical path.
-                // Divisor grows with slack; /4 chosen so slack of 4 halves
-                // the penalty — empirically a good balance on Skylake/Zen.
+                // delayed to a lower-pressure point without extending the
+                // critical path.  /4 chosen so slack of 4 halves the penalty.
                 if (slack[id] > 0)
                     penalty = std::max(1u, penalty / (1 + slack[id] / 4));
                 return penalty;
@@ -3806,18 +4042,26 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
                 issuedPortsThisCycle.insert(rtKey);
                 issuedChainsThisCycle.insert(chainId[id]);
 
-                // ── Register pressure tracking ──────────────────────────────
-                // Instruction produces a value → increase live count.
-                if (!moveable[id]->getType()->isVoidTy() && lat[id] > 0)
-                    ++currentLive;
+                // ── Register pressure tracking (per register file) ──────────
+                // Instruction produces a value → increase live count in the
+                // appropriate register file (int or vector/FP).
+                if (!moveable[id]->getType()->isVoidTy() && lat[id] > 0) {
+                    if (producesVecOrFP(moveable[id])) ++vecLive;
+                    else ++intLive;
+                }
                 // Check if scheduling this instruction kills any predecessor's
-                // last use, decreasing the live count.
+                // last use, decreasing the live count in the correct file.
                 for (unsigned p : pred[id]) {
                     if (!done[p]) continue;
                     if (moveable[p]->getType()->isVoidTy()) continue;
                     if (remainingUsers[p] > 0) --remainingUsers[p];
-                    if (remainingUsers[p] == 0 && currentLive > 0)
-                        --currentLive;
+                    if (remainingUsers[p] == 0) {
+                        if (producesVecOrFP(moveable[p])) {
+                            if (vecLive > 0) --vecLive;
+                        } else {
+                            if (intLive > 0) --intLive;
+                        }
+                    }
                 }
 
                 // Decrement in-degrees of successors.
@@ -4326,16 +4570,36 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
                     }
                 }
             }
-            if (!hasVecMD && profile.vectorWidth >= 64) {
-                // vectorWidth is in bits (128/256/512); divide by 64 for i64 lane count.
-                // All known profiles have vectorWidth >= 128 (SSE2 minimum),
-                // but clamp to at least 2 for safety.
-                unsigned vecWidth = std::max(profile.vectorWidth / 64, 2u);
-                mds.push_back(llvm::MDNode::get(ctx, {
-                    llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
-                    llvm::ConstantAsMetadata::get(
-                        llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), vecWidth))
-                }));
+            if (!hasVecMD && profile.vectorWidth >= 128 && profile.vecUnits > 0) {
+                // Determine the dominant element bit-width in the loop body
+                // (same approach as softwarePipelineLoops) so the vectorize width
+                // is expressed in lane count rather than always assuming 64-bit.
+                std::unordered_map<unsigned, unsigned> widthFreq;
+                for (auto& loopInst : bb) {
+                    if (llvm::isa<llvm::PHINode>(loopInst) || loopInst.isTerminator())
+                        continue;
+                    llvm::Type* ty = loopInst.getType();
+                    unsigned bits = 0;
+                    if (ty->isIntegerTy())       bits = ty->getIntegerBitWidth();
+                    else if (ty->isFloatTy())    bits = 32;
+                    else if (ty->isDoubleTy())   bits = 64;
+                    else if (ty->isHalfTy())     bits = 16;
+                    if (bits >= 8 && bits <= 64) widthFreq[bits]++;
+                }
+                unsigned domBits = 64; // default: OmScript's native int is i64
+                unsigned domCount = 0;
+                for (auto& [bits, cnt] : widthFreq)
+                    if (cnt > domCount) { domBits = bits; domCount = cnt; }
+
+                unsigned lanes = profile.vectorWidth / domBits;
+                if (lanes >= 2) {
+                    unsigned vecWidth = std::min(lanes, 16u);
+                    mds.push_back(llvm::MDNode::get(ctx, {
+                        llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
+                        llvm::ConstantAsMetadata::get(
+                            llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), vecWidth))
+                    }));
+                }
             }
         }
 
