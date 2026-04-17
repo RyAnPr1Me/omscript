@@ -51,6 +51,7 @@ enum class CTValueKind : uint8_t {
     CONCRETE_STRING,  ///< Heap-owned UTF-8 string
     CONCRETE_ARRAY,   ///< Array stored in CTHeap; value holds handle
     UNINITIALIZED,    ///< Placeholder / missing value
+    SYMBOLIC,         ///< Unknown value for partial evaluation (path-sensitive folding)
 };
 
 // ─── CTValue ─────────────────────────────────────────────────────────────────
@@ -79,10 +80,13 @@ struct CTValue {
     static CTValue fromBool(bool    v)    noexcept;
     static CTValue fromString(std::string s);
     static CTValue fromArray(CTArrayHandle h) noexcept;
-    static CTValue uninit()               noexcept { return CTValue{}; }
+    static CTValue uninit()    noexcept { return CTValue{}; }
+    static CTValue symbolic()  noexcept { CTValue r; r.kind = CTValueKind::SYMBOLIC; return r; }
 
     // ── Kind predicates ───────────────────────────────────────────────────
-    bool isKnown()  const noexcept { return kind != CTValueKind::UNINITIALIZED; }
+    bool isKnown()     const noexcept { return kind != CTValueKind::UNINITIALIZED; }
+    bool isSymbolic()  const noexcept { return kind == CTValueKind::SYMBOLIC; }
+    bool isConcrete()  const noexcept { return isKnown() && !isSymbolic(); }
     bool isInt()    const noexcept {
         return kind == CTValueKind::CONCRETE_I64 || kind == CTValueKind::CONCRETE_U64;
     }

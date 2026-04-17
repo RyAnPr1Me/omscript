@@ -363,8 +363,11 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
     frame.fn   = fn;
     frame.heap = &heap_;
     if (fn->parameters.size() != args.size()) return std::nullopt;
-    for (size_t i = 0; i < args.size(); ++i)
+    bool hasSymbolic = false;
+    for (size_t i = 0; i < args.size(); ++i) {
         frame.locals[fn->parameters[i].name] = args[i];
+        if (args[i].isSymbolic()) hasSymbolic = true;
+    }
 
     // Execute.
     ++currentDepth_;
@@ -379,11 +382,20 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
     else if (frame.hasLastBare) result = frame.lastBareExpr;
     else                    return std::nullopt;
 
-    // Snapshot array results before storing in cache (so cache is stable).
-    CTValue cached = result;
-    if (cached.isArray() && cached.arr != CT_NULL_HANDLE)
-        cached.arr = snapshotArray(cached.arr);
-    memoCache_[key] = cached;
+    // SYMBOLIC result means we couldn't fully evaluate — don't fold to constant.
+    if (result.isSymbolic()) return std::nullopt;
+
+    // Don't cache results produced with symbolic args: the result is only
+    // valid for the specific combination of concrete args that drove the
+    // evaluation; other callers with different concrete values for the same
+    // args might produce a different result.
+    if (!hasSymbolic) {
+        // Snapshot array results before storing in cache (so cache is stable).
+        CTValue cached = result;
+        if (cached.isArray() && cached.arr != CT_NULL_HANDLE)
+            cached.arr = snapshotArray(cached.arr);
+        memoCache_[key] = cached;
+    }
 
     // Record call graph edge.
     if (currentDepth_ > 0) {
@@ -473,18 +485,32 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         // Short-circuit logical ops first.
         if (bin->op == "&&") {
             const CTValue lv = evalExpr(frame, bin->left.get());
+            if (lv.isSymbolic()) {
+                // SYMBOLIC && x: can only short-circuit if right is known false.
+                const CTValue rv = evalExpr(frame, bin->right.get());
+                if (rv.isConcrete() && !rv.isTruthy()) return CTValue::fromI64(0); // false && anything = false
+                return CTValue::symbolic();
+            }
             if (!lv.isKnown()) return CTValue::uninit();
             if (!lv.isTruthy()) return CTValue::fromI64(0);
             const CTValue rv = evalExpr(frame, bin->right.get());
             if (!rv.isKnown()) return CTValue::uninit();
+            if (rv.isSymbolic()) return CTValue::symbolic();
             return CTValue::fromI64(rv.isTruthy() ? 1 : 0);
         }
         if (bin->op == "||") {
             const CTValue lv = evalExpr(frame, bin->left.get());
+            if (lv.isSymbolic()) {
+                // SYMBOLIC || x: can only short-circuit if right is known true.
+                const CTValue rv = evalExpr(frame, bin->right.get());
+                if (rv.isConcrete() && rv.isTruthy()) return CTValue::fromI64(1); // true || anything = true
+                return CTValue::symbolic();
+            }
             if (!lv.isKnown()) return CTValue::uninit();
             if (lv.isTruthy()) return CTValue::fromI64(1);
             const CTValue rv = evalExpr(frame, bin->right.get());
             if (!rv.isKnown()) return CTValue::uninit();
+            if (rv.isSymbolic()) return CTValue::symbolic();
             return CTValue::fromI64(rv.isTruthy() ? 1 : 0);
         }
         // Null-coalescing (??)
@@ -642,6 +668,29 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
 CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const CTValue& rhs) {
     if (!lhs.isKnown() || !rhs.isKnown()) return CTValue::uninit();
 
+    // Partial-evaluation: propagate SYMBOLIC through binary ops.
+    // For most ops, one SYMBOLIC operand makes the result SYMBOLIC.
+    // Exceptions (absorbers that yield CONCRETE regardless of the other operand):
+    //   x * 0  = 0,   0 * x  = 0
+    //   x & 0  = 0,   0 & x  = 0
+    //   x ** 0 = 1   (anything to the 0th power = 1)
+    //   x && false = false  (already handled by short-circuit in evalExpr for "&&")
+    //   x || true  = true   (already handled by short-circuit in evalExpr for "||")
+    if (lhs.isSymbolic() || rhs.isSymbolic()) {
+        if (op == "*") {
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
+        }
+        if (op == "&") {
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
+        }
+        if (op == "**") {
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(1);
+        }
+        return CTValue::symbolic();
+    }
+
     // String concatenation.
     if (op == "+" && lhs.isString() && rhs.isString())
         return CTValue::fromString(lhs.asStr() + rhs.asStr());
@@ -741,6 +790,7 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
 
 CTValue CTEngine::evalUnaryOp(const std::string& op, const CTValue& val) {
     if (!val.isKnown()) return CTValue::uninit();
+    if (val.isSymbolic()) return CTValue::symbolic(); // propagate symbolic
     if (val.isFloat()) {
         if (op == "-")  return CTValue::fromF64(-val.asF64());
         if (op == "+")  return val;
@@ -764,6 +814,7 @@ CTValue CTEngine::evalUnaryOp(const std::string& op, const CTValue& val) {
 
 CTValue CTEngine::evalTypeCast(const std::string& name, const CTValue& val) {
     if (!val.isKnown()) return CTValue::uninit();
+    if (val.isSymbolic()) return CTValue::symbolic(); // propagate symbolic
     if (val.isInt()) {
         const int64_t v = val.asI64();
         // General iN/uN handler for N in [1..256]
@@ -2144,7 +2195,9 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
         auto* ret = static_cast<const ReturnStmt*>(s);
         if (!ret->value) { frame.returnValue = CTValue::fromI64(0); frame.hasReturned = true; return true; }
         CTValue v = evalExpr(frame, ret->value.get());
-        if (!v.isKnown()) return false;
+        // Propagate SYMBOLIC returns — caller (executeFunction) will check and
+        // discard them rather than baking a symbolic value into the IR.
+        if (!v.isKnown() && !v.isSymbolic()) return false;
         frame.returnValue = std::move(v);
         frame.hasReturned = true;
         return true;
@@ -2156,7 +2209,9 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
         CTValue v = decl->initializer
                     ? evalExpr(frame, decl->initializer.get())
                     : CTValue::fromI64(0);
-        if (!v.isKnown()) return false;
+        // Allow SYMBOLIC to be stored — it propagates through subsequent uses
+        // of this variable.  UNINITIALIZED (truly unknown expr) still aborts.
+        if (!v.isKnown() && !v.isSymbolic()) return false;
         frame.locals[decl->name] = std::move(v);
         return true;
     }
@@ -2168,7 +2223,8 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
         if (es->expression->type == ASTNodeType::ASSIGN_EXPR) {
             auto* assign = static_cast<const AssignExpr*>(es->expression.get());
             CTValue v = evalExpr(frame, assign->value.get());
-            if (!v.isKnown()) return false;
+            // Allow SYMBOLIC assignments — propagates unknown value into variable.
+            if (!v.isKnown() && !v.isSymbolic()) return false;
             frame.locals[assign->name] = std::move(v);
             return true;
         }
@@ -2179,21 +2235,23 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             CTValue idxVal = evalExpr(frame, ia->index.get());
             CTValue newVal = evalExpr(frame, ia->value.get());
             if (!arrVal.isKnown() || !idxVal.isKnown() || !newVal.isKnown()) return false;
+            if (arrVal.isSymbolic() || idxVal.isSymbolic()) return false;
             if (!arrVal.isArray() || !idxVal.isInt()) return false;
             heap_.store(arrVal.asArr(), idxVal.asI64(), std::move(newVal));
             return true;
         }
         // General expression (++/-- / function call with side effects / etc.)
         CTValue v = evalExpr(frame, es->expression.get());
-        if (v.isKnown()) { frame.lastBareExpr = v; frame.hasLastBare = true; }
-        return v.isKnown();
+        if (v.isConcrete()) { frame.lastBareExpr = v; frame.hasLastBare = true; }
+        return v.isKnown(); // includes SYMBOLIC (just don't set lastBare)
     }
 
     // ── If / else ─────────────────────────────────────────────────────────
     case ASTNodeType::IF_STMT: {
         auto* ifs = static_cast<const IfStmt*>(s);
         CTValue cond = evalExpr(frame, ifs->condition.get());
-        if (!cond.isKnown()) return false;
+        // SYMBOLIC condition: we don't know which branch to take → abort.
+        if (!cond.isKnown() || cond.isSymbolic()) return false;
         if (cond.isTruthy()) return evalStmt(frame, ifs->thenBranch.get());
         if (ifs->elseBranch) return evalStmt(frame, ifs->elseBranch.get());
         return true;

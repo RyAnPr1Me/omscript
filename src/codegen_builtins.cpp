@@ -8384,12 +8384,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 std::vector<CTValue> ctArgs;
                 ctArgs.reserve(expr->arguments.size());
                 bool allConst = true;
+                bool anyConst = false;
                 for (auto& arg : expr->arguments) {
                     auto cv = tryFoldExprToConst(arg.get());
-                    if (!cv) { allConst = false; break; }
-                    ctArgs.push_back(constValueToCTValue(*cv));
+                    if (!cv) {
+                        allConst = false;
+                        ctArgs.push_back(CTValue::symbolic()); // use symbolic for unknown args
+                    } else {
+                        ctArgs.push_back(constValueToCTValue(*cv));
+                        anyConst = true;
+                    }
                 }
-                if (allConst) {
+                // Full evaluation (all args known): normal path.
+                // Partial evaluation (some args symbolic): attempt path-sensitive folding.
+                // A symbolic arg means "we don't know the value"; executeFunction will
+                // propagate SYMBOLIC through the body and return a CONCRETE result if
+                // an early-exit guard based on the known args fires before the symbolic
+                // value is needed (e.g. `if n == 0 { return 0 }` with n=0).
+                if (allConst || anyConst) {
                     auto ctResult = ctEngine_->executeFunction(expr->callee, ctArgs);
                     if (ctResult) {
                         if (ctResult->isInt()) {
