@@ -568,9 +568,8 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
             if (endCycle > maxCycle) maxCycle = endCycle;
         }
 
-        // Release successors.
-        for (auto [v, lat] : succList[u]) {
-            (void)lat;
+        // Release successors (latency not needed here; only topology matters).
+        for (auto& [v, ignored] : succList[u]) {
             if (--inDeg[v] == 0) ready.push(v);
         }
     }
@@ -1559,7 +1558,7 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     case llvm::Instruction::Trunc:
     case llvm::Instruction::ZExt:
     case llvm::Instruction::SExt:
-        return 1u; // single-cycle move / rename, cheaper than latIntAdd (may be 3)
+        return 1u; // single-cycle move / rename; always cheaper than any mul/fp op
     case llvm::Instruction::FPToUI:
     case llvm::Instruction::FPToSI:
     case llvm::Instruction::UIToFP:
@@ -2306,9 +2305,10 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
 tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
                 llvm::Type* ty, uint64_t absCV, unsigned bitWidth) {
     if (absCV == 0 || bitWidth == 0) return nullptr;
-    // Safety: avoid shifts >= bitWidth (UB in LLVM IR).
+    // Clamp bitWidth first so the absCV bounds check below uses the
+    // same (clamped) width and cannot trigger UB via 1<<64.
     if (bitWidth > 64) bitWidth = 64;
-    // Reject constants that cannot be represented in the integer type.
+    // Reject constants that cannot be represented in the (clamped) integer type.
     if (bitWidth < 64 && absCV >= (uint64_t(1) << bitWidth)) return nullptr;
 
     auto mk  = [&](unsigned sh) -> llvm::Value* {
