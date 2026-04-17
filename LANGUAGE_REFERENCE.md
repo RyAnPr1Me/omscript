@@ -4831,7 +4831,7 @@ var e = u8(x) + u8(y); // u8() on i64(200) returns i64(200); then i64(200)+i64(2
                        // e = 400  (no narrowing — both operands are i64)
 ```
 
-**Note:** CF-CTRE (the cross-function compile-time evaluator) evaluates function bodies in 64-bit arithmetic. If you call a function through a `comptime` block or a pure-function context that CF-CTRE can fold, the result may differ from inline arithmetic that operates on narrow-type allocas. This is an implementation detail, not intentional semantics.
+**Known limitation — CF-CTRE and function-boundary arithmetic:** The cross-function compile-time evaluator (CF-CTRE) evaluates function bodies using 64-bit arithmetic and does not apply per-variable narrowing. If CF-CTRE folds a call to a pure function that contains narrow-type arithmetic, the folded result may be wider than the inline equivalent (e.g., it may produce 400 instead of 144 for an i8 add). This is a known inconsistency between inline and CF-CTRE-evaluated code paths. To avoid it in performance-critical or correctness-sensitive code, apply explicit cast expressions inside the function body (e.g., `u8(a + b)` instead of `a + b`).
 
 This differs from C: in C, arithmetic on `uint8_t` operands undergoes integer promotion to `int` before the operation. In OmScript, annotated narrow variables stay at their alloca width through arithmetic unless widened by an explicit cast.
 
