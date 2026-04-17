@@ -10828,6 +10828,44 @@ std::vector<RewriteRule> getRelationalRules() {
             return g.isClassBoolean(s.at("x"));
         });
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Generalized multiply by power-of-2 → left shift.
+    // x * 2^n → x << n  for ANY power of 2.
+    // The specific mul_2_to_shl1 … mul_8192_to_shl13 rules cover small
+    // powers; this guard-based rule handles ALL remaining powers up to 2^62
+    // (e.g. x * 65536 → x << 16, x * 1<<32 → x << 32, etc.).
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("mul_pow2_to_shl_general",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto cv = g.getConstValue(s.at("c"));
+            long long v = *cv;
+            int shift = 0;
+            while (v > 1) { v >>= 1; ++shift; }
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(shift));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassPowerOfTwo(s.at("c")) &&
+                   g.getConstValue(s.at("c")).has_value() &&
+                   *g.getConstValue(s.at("c")) >= 2;
+        });
+
+    // Commutative: c * x → x << log2(c) when c is power of 2
+    rules.emplace_back("mul_pow2_to_shl_general_comm",
+        P::OpPat(Op::Mul, {P::Wild("c"), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            auto cv = g.getConstValue(s.at("c"));
+            long long v = *cv;
+            int shift = 0;
+            while (v > 1) { v >>= 1; ++shift; }
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(shift));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassPowerOfTwo(s.at("c")) &&
+                   g.getConstValue(s.at("c")).has_value() &&
+                   *g.getConstValue(s.at("c")) >= 2;
+        });
+
     return rules;
 }
 
@@ -11190,6 +11228,53 @@ std::vector<RewriteRule> getFloatingPointRules() {
     rules.emplace_back("fp_sub_self",
         P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("x")}),
         [](EGraph& g, const Subst&) { return g.addConstF(0.0); });
+
+    // ── FP add negation → subtract ─────────────────────────────────────
+    // x + (-y) → x - y  (save a negation by folding into subtraction)
+    rules.emplace_back("fp_add_neg_to_sub",
+        P::OpPat(Op::Add, {P::Wild("x"), P::OpPat(Op::Neg, {P::Wild("y")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Sub, s.at("x"), s.at("y"));
+        });
+
+    // (-x) + y → y - x
+    rules.emplace_back("fp_neg_add_to_sub",
+        P::OpPat(Op::Add, {P::OpPat(Op::Neg, {P::Wild("x")}), P::Wild("y")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Sub, s.at("y"), s.at("x"));
+        });
+
+    // x + (-x) → 0.0  (separate from x-x: explicitly handles add+neg pattern)
+    rules.emplace_back("fp_add_neg_self",
+        P::OpPat(Op::Add, {P::Wild("x"), P::OpPat(Op::Neg, {P::Wild("x")})}),
+        [](EGraph& g, const Subst&) { return g.addConstF(0.0); });
+
+    // (-x) + x → 0.0
+    rules.emplace_back("fp_neg_add_self",
+        P::OpPat(Op::Add, {P::OpPat(Op::Neg, {P::Wild("x")}), P::Wild("x")}),
+        [](EGraph& g, const Subst&) { return g.addConstF(0.0); });
+
+    // ── FP subtract → add negation (reverse direction for exploration) ──
+    // x - y → x + (-y)  (allows cost model to compare both forms)
+    rules.emplace_back("fp_sub_to_add_neg",
+        P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("y")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId ny = g.addUnaryOp(Op::Neg, s.at("y"));
+            return g.addBinOp(Op::Add, s.at("x"), ny);
+        });
+
+    // ── FP mul by -1 → neg ──────────────────────────────────────────────
+    // x * -1.0 → -x  (avoid multiplication just to negate)
+    rules.emplace_back("fp_mul_neg1_to_neg",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(-1.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addUnaryOp(Op::Neg, s.at("x"));
+        });
+    rules.emplace_back("fp_neg1_mul_to_neg",
+        P::OpPat(Op::Mul, {P::ConstFPat(-1.0), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addUnaryOp(Op::Neg, s.at("x"));
+        });
 
     // ── FP division of same → one ───────────────────────────────────────
     // x / x → 1.0  (IEEE-754: x/x = 1.0 for all non-zero finite x;
