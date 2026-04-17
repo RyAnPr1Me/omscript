@@ -365,17 +365,24 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
 
 unsigned ProgramGraph::criticalPathLength() const {
     if (nodes_.empty()) return 0;
+    const size_t n = nodes_.size();
 
-    // Topological sort + longest-path computation.
-    std::vector<unsigned> dist(nodes_.size(), 0);
-    std::vector<unsigned> inDeg(nodes_.size(), 0);
-
+    // Build adjacency list (outgoing edges per node) and in-degree array in
+    // a single pass over edges_.  This avoids the O(N×E) inner-loop scan that
+    // the previous edge-scan approach had when the node count grows.
+    std::vector<std::vector<std::pair<unsigned, unsigned>>> succ(n); // succ[u] = {(v, lat)}
+    std::vector<unsigned> inDeg(n, 0);
     for (const auto& e : edges_) {
-        if (e.dstId < inDeg.size()) inDeg[e.dstId]++;
+        if (e.srcId < n && e.dstId < n) {
+            succ[e.srcId].emplace_back(e.dstId, e.latency);
+            inDeg[e.dstId]++;
+        }
     }
 
+    // Topological sort (Kahn's algorithm) + longest-path (ASAP distances).
+    std::vector<unsigned> dist(n, 0);
     std::queue<unsigned> ready;
-    for (unsigned i = 0; i < nodes_.size(); ++i) {
+    for (unsigned i = 0; i < n; ++i) {
         if (inDeg[i] == 0) {
             ready.push(i);
             dist[i] = 1; // Minimum 1 cycle per instruction
@@ -385,23 +392,16 @@ unsigned ProgramGraph::criticalPathLength() const {
     while (!ready.empty()) {
         unsigned u = ready.front();
         ready.pop();
-        for (const auto& e : edges_) {
-            if (e.srcId == u) {
-                unsigned newDist = dist[u] + e.latency;
-                if (newDist > dist[e.dstId]) {
-                    dist[e.dstId] = newDist;
-                }
-                if (--inDeg[e.dstId] == 0) {
-                    ready.push(e.dstId);
-                }
-            }
+        for (auto [v, lat] : succ[u]) {
+            unsigned newDist = dist[u] + lat;
+            if (newDist > dist[v]) dist[v] = newDist;
+            if (--inDeg[v] == 0) ready.push(v);
         }
     }
 
     unsigned maxDist = 0;
-    for (unsigned d : dist) {
+    for (unsigned d : dist)
         if (d > maxDist) maxDist = d;
-    }
     return maxDist;
 }
 
@@ -522,20 +522,25 @@ double HardwareCostModel::instructionCost(const llvm::Instruction* inst) const {
 double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     if (pg.nodeCount() == 0) return 0.0;
 
-    // Simple cycle-accurate simulation: assign each node to the earliest
-    // cycle where all dependencies are satisfied and a port is available.
+    // Build adjacency lists (O(N+E)) to avoid O(N×E) inner-loop edge scans.
     const size_t n = pg.nodeCount();
-    std::vector<unsigned> scheduledCycle(n, 0);
+    std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n); // (dst, lat)
     std::vector<unsigned> inDeg(n, 0);
 
     for (const auto& e : pg.edges()) {
-        if (e.dstId < n) inDeg[e.dstId]++;
+        if (e.srcId < n && e.dstId < n) {
+            succList[e.srcId].emplace_back(e.dstId, e.latency);
+            inDeg[e.dstId]++;
+        }
     }
 
+    // Cycle-accurate simulation: assign each node to the earliest cycle where
+    // all dependencies are satisfied and a port is available.
+    std::vector<unsigned> scheduledCycle(n, 0);
+
     std::queue<unsigned> ready;
-    for (unsigned i = 0; i < n; ++i) {
+    for (unsigned i = 0; i < n; ++i)
         if (inDeg[i] == 0) ready.push(i);
-    }
 
     unsigned maxCycle = 0;
 
@@ -543,10 +548,13 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         unsigned u = ready.front();
         ready.pop();
 
-        // Compute earliest start cycle from predecessors.
+        // Compute earliest start cycle from predecessors.  Because we build
+        // scheduledCycle in topological order, predecessors are already set.
         unsigned earliest = 0;
+        // Re-scan edges for incoming latency (predecessors are set already).
+        // This is still O(E) total across all iterations in the outer loop.
         for (const auto& e : pg.edges()) {
-            if (e.dstId == u) {
+            if (e.dstId == u && e.srcId < n) {
                 unsigned predEnd = scheduledCycle[e.srcId] + e.latency;
                 if (predEnd > earliest) earliest = predEnd;
             }
@@ -561,12 +569,9 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         }
 
         // Release successors.
-        for (const auto& e : pg.edges()) {
-            if (e.srcId == u) {
-                if (--inDeg[e.dstId] == 0) {
-                    ready.push(e.dstId);
-                }
-            }
+        for (auto [v, lat] : succList[u]) {
+            (void)lat;
+            if (--inDeg[v] == 0) ready.push(v);
         }
     }
 
@@ -1061,6 +1066,50 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     return p;
 }
 
+/// Return an Intel Sapphire Rapids / Emerald Rapids profile.
+/// Sapphire Rapids (Xeon 4th Gen, 2023): 8-wide decode, 6 ALU ports,
+/// AVX-512 native at 512 bits (not double-pumped like Skylake-AVX512),
+/// ROB doubled to 512, 3 load + 3 store ports.
+/// Emerald Rapids (Xeon 5th Gen, 2023): same µarch, minor improvements.
+[[gnu::cold]] static MicroarchProfile sapphireRapidsProfile() {
+    MicroarchProfile p;
+    p.name = "sapphirerapids";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 6;         // µop cache delivers 6/cycle (MITE decoder 4)
+    p.issueWidth = 6;          // 6 µops dispatched per cycle (same as Skylake)
+    p.pipelineDepth = 14;
+    p.intALUs = 5;             // ports 0,1,5,6,10 (5 integer execution ports)
+    p.vecUnits = 3;            // ports 0,1,5 with native 512-bit EVEX width
+    p.fmaUnits = 2;            // ports 0 and 1
+    p.loadPorts = 3;           // ports 2,3,8 (all three with AGU)
+    p.storePorts = 3;          // ports 4,7,9 (incl. store-address port 9)
+    p.branchUnits = 2;
+    p.agus = 5;                // 3 load AGUs + 2 store-address AGUs
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 18;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 15; p.latFMA = 4;
+    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.20;       // 5 integer ports → ~5/cycle
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.33; p.tputFPMul = 0.33;
+    p.tputLoad = 0.33; p.tputStore = 0.33;
+    p.l1DSize = 48;            // 48 KB L1D (same as Ice Lake)
+    p.l1DLatency = 5;
+    p.l2Size = 2048;           // 2 MB L2 per core
+    p.l2Latency = 14;
+    p.l3Size = 61440;          // up to 60 MB shared L3
+    p.l3Latency = 52;          // larger L3 → higher latency
+    p.cacheLineSize = 64;
+    p.vectorWidth = 512;       // Native AVX-512, not double-pumped
+    p.intRegisters = 16; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 15.0;
+    p.btbEntries = 12288;
+    p.memoryLatency = 200;
+    p.robSize = 512;           // Doubled from Skylake's 224
+    return p;
+}
+
 /// Normalize a CPU name for lookup: lowercase, strip hyphens.
 static std::string normalizeCpuName(const std::string& name) {
     std::string result;
@@ -1099,21 +1148,31 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     }
 
     if (normalized == "alderlake" || normalized == "raptorlake" ||
-        normalized == "meteorlake" || normalized == "arrowlake")
+        normalized == "meteorlake")
         return alderlakeProfile();
+
+    if (normalized == "arrowlake")
+        return lunarLakeProfile(); // Arrow Lake uses Lion Cove P-cores (same as Lunar Lake)
 
     if (normalized == "lunarlake" || normalized == "pantherlake")
         return lunarLakeProfile();
 
     if (normalized == "icelakeserver" || normalized == "icelakeclient" ||
-        normalized == "tigerlake" || normalized == "sapphirerapids" ||
-        normalized == "emeraldrapids") {
+        normalized == "tigerlake") {
         auto p = skylakeProfile();
         p.name = cpuName;
         p.vectorWidth = 512; // AVX-512
         p.vecRegisters = 32;
+        p.loadPorts = 3;     // Ice Lake: 3 load ports
+        p.storePorts = 2;
+        p.robSize = 352;     // Ice Lake ROB is 352
         return p;
     }
+
+    // Sapphire Rapids / Emerald Rapids: dedicated profile with ROB=512,
+    // AVX-512 native, 3 load + 3 store ports.
+    if (normalized == "sapphirerapids" || normalized == "emeraldrapids")
+        return sapphireRapidsProfile();
 
     // AMD Zen family
     if (normalized == "znver4" || normalized == "zen4")
@@ -1124,6 +1183,7 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         auto p = zen3Profile();
         p.name = "znver2";
         p.pipelineDepth = 19;
+        p.loadPorts = 2;   // Zen 2 has 2 load/store AGU units (Zen 3 added a 3rd)
         p.l2Size = 512;
         p.l3Latency = 42;
         return p;
@@ -1536,6 +1596,41 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         case llvm::Intrinsic::ctlz:
         case llvm::Intrinsic::cttz:     return profile.latIntAdd;
         case llvm::Intrinsic::prefetch: return 0; // hint, no result latency
+        // ── Transcendental / math intrinsics ───────────────────────────────
+        // On x86 these are typically library calls (80-250+ cycles).
+        // On AArch64, some may have native FRINT* instructions (2-4 cycles).
+        // We model conservative cycle counts so the scheduler hoists them
+        // early to hide the latency.
+        case llvm::Intrinsic::floor:
+        case llvm::Intrinsic::ceil:
+        case llvm::Intrinsic::trunc:
+        case llvm::Intrinsic::round:
+        case llvm::Intrinsic::roundeven:
+        case llvm::Intrinsic::rint:
+        case llvm::Intrinsic::nearbyint:
+            // VROUNDPD/VROUNDPS on x86 (8 cycles), FRINTX on AArch64 (2 cycles).
+            // Use latFPAdd as a conservative estimate (always >= 2).
+            return profile.latFPAdd * 2;
+        case llvm::Intrinsic::log:
+        case llvm::Intrinsic::log2:
+        case llvm::Intrinsic::log10:
+            // Typically software emulation: ~80-120 cycles.
+            // Model as latFPDiv * 6 (14*6 = 84 on Skylake, 10*6 = 60 on M1).
+            return profile.latFPDiv * 6;
+        case llvm::Intrinsic::exp:
+        case llvm::Intrinsic::exp2:
+            // Similar to log: ~80-100 cycles.
+            return profile.latFPDiv * 5;
+        case llvm::Intrinsic::sin:
+        case llvm::Intrinsic::cos:
+            // FSIN/FCOS (x87) ≈ 80-100 cycles; libm call ≈ 100-150 cycles.
+            return profile.latFPDiv * 7;
+        case llvm::Intrinsic::fabs:
+            // FABS is a single cycle bit-clear operation.
+            return 1u;
+        case llvm::Intrinsic::copysign:
+            // Single cycle: isolate sign + OR into mantissa.
+            return 1u;
         default:                        return kUnknownIntrinsicLatency;
         }
     }
@@ -2505,8 +2600,17 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         // recurrences of the latency of the dependency chain from the PHI's
         // back-edge value back to the PHI itself.
         //
-        // We detect simple single-PHI recurrences using a depth-limited walk:
-        //   phi → inst1 → inst2 → ... → back_edge_value → (back to phi)
+        // Algorithm (per-PHI):
+        //   1. Forward-mark: BFS from phi via use-def edges within the loop
+        //      body to find all instructions reachable from phi ("onChain").
+        //   2. Walk backward from the back-edge value, at each step following
+        //      only the operand that is onChain (i.e., part of the recurrence
+        //      cycle), accumulating instruction latencies.
+        //   3. RecMII = max latency over all PHIs.
+        //
+        // This correctly handles multi-hop recurrences like:
+        //   acc = fma(a[i], b[i], fma(c[i], d[i], acc))
+        // where naive "follow first operand" would miss the recurrence path.
         unsigned recMII = 1;
         {
             // Build a local index of instructions in this BB and the latch.
@@ -2530,34 +2634,54 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
                 }
                 if (!backVal) continue;
 
-                // Walk the dependency chain from backVal toward phi, accumulating
-                // instruction latencies.  Limit depth to avoid quadratic blow-up.
+                // Step 1: Forward BFS from phi to mark all instructions in
+                // the loop body that are reachable via uses from phi.
+                // These form the "recurrence spine" — only these can be on
+                // the loop-carried dependency path.
+                std::unordered_set<const llvm::Instruction*> onChain;
+                {
+                    std::queue<const llvm::Instruction*> wl;
+                    onChain.insert(phi);
+                    wl.push(phi);
+                    while (!wl.empty()) {
+                        const llvm::Instruction* cur = wl.front();
+                        wl.pop();
+                        for (auto* usr : cur->users()) {
+                            auto* uInst = llvm::dyn_cast<llvm::Instruction>(usr);
+                            if (!uInst) continue;
+                            if (bbInstIdx.find(uInst) == bbInstIdx.end()) continue;
+                            if (onChain.insert(uInst).second) wl.push(uInst);
+                        }
+                    }
+                }
+
+                // Step 2: Walk backward from backVal, following only operands
+                // that are in onChain (guarantees we stay on the recurrence path).
                 unsigned chainLat = 0;
-                constexpr unsigned kMaxWalkDepth = 20;
                 llvm::Value* cur = backVal;
                 std::unordered_set<const llvm::Value*> visited;
-                for (unsigned depth = 0; depth < kMaxWalkDepth; ++depth) {
+                while (true) {
                     auto* curInst = llvm::dyn_cast<llvm::Instruction>(cur);
                     if (!curInst) break;
-                    if (curInst == phi) break; // closed the cycle
-                    if (visited.count(curInst)) break; // cycle guard
-                    visited.insert(curInst);
-                    // Only include instructions in this loop body.
+                    if (curInst == phi) break;  // closed the cycle
+                    if (!visited.insert(curInst).second) break;  // cycle guard
                     if (bbInstIdx.find(curInst) == bbInstIdx.end()) break;
+
                     chainLat += getOpcodeLatency(curInst, profile);
-                    // Follow the first operand that is also in the loop body
-                    // and traces back toward the phi.
-                    bool found = false;
+
+                    // Follow the operand that is on the recurrence chain.
+                    llvm::Value* next = nullptr;
                     for (auto& op : curInst->operands()) {
                         auto* opInst = llvm::dyn_cast<llvm::Instruction>(op.get());
                         if (!opInst) continue;
-                        if (bbInstIdx.find(opInst) == bbInstIdx.end()) continue;
-                        if (visited.count(opInst)) continue;
-                        cur = opInst;
-                        found = true;
-                        break;
+                        // phi itself or any onChain member is a valid next hop.
+                        if (opInst == phi || onChain.count(opInst)) {
+                            next = opInst;
+                            break;
+                        }
                     }
-                    if (!found) break;
+                    if (!next) break;
+                    cur = next;
                 }
                 if (chainLat > recMII) recMII = chainLat;
             }
@@ -2678,13 +2802,17 @@ static void applyTargetAttributes(llvm::Function& func,
         addF("+sse4.1");
         addF("+sse4.2");
         addF("+popcnt");
-        // BMI, BMI2, and LZCNT were introduced with Haswell (2013).
+        // BMI, BMI2, LZCNT, F16C, and FMA were introduced with Haswell (2013).
         // Sandy Bridge / Ivy Bridge profiles have fmaUnits==0 since they
         // predate FMA; use that as the proxy for "pre-Haswell baseline".
         if (profile.fmaUnits > 0) {
             addF("+bmi");
             addF("+bmi2");
             addF("+lzcnt");
+            addF("+fma");    // FMA3 instructions (VFMADD132/213/231)
+            addF("+f16c");   // half-float conversion (VCVTPH2PS, VCVTPS2PH)
+            addF("+cx16");   // CMPXCHG16B
+            addF("+sahf");   // LAHF/SAHF in 64-bit mode (needed by some libms)
         }
         if (profile.vectorWidth >= 256) {
             addF("+avx");
@@ -2713,9 +2841,16 @@ static void applyTargetAttributes(llvm::Function& func,
     case ISAFamily::AArch64:
         addF("+neon");
         addF("+fp-armv8");
+        addF("+fp16");       // half-precision FP arithmetic (ARMv8.2+)
+        addF("+dotprod");    // 8-bit dot product (ARMv8.2-dotprod, all modern ARM)
+        addF("+crypto");     // AES + SHA (ARMv8.0-crypto, ubiquitous in AArch64)
+        addF("+zcm");        // zero cycle move (register renaming hint)
+        addF("+zcz");        // zero cycle zeroing
         if (profile.vectorWidth >= 256) {
             addF("+sve");
             addF("+sve2");
+            addF("+sve2-sha3");
+            addF("+sve2-aes");
         }
         break;
 
@@ -2725,6 +2860,10 @@ static void applyTargetAttributes(llvm::Function& func,
         addF("+f");  // single-precision FP
         addF("+d");  // double-precision FP
         addF("+c");  // compressed instructions
+        addF("+zba"); // address generation bitmanip (SH1ADD, SH2ADD, SH3ADD)
+        addF("+zbb"); // basic bitmanip (ANDN, CLZ, CTZ, ORC.B, REV8, etc.)
+        addF("+zbc"); // carry-less multiplication
+        addF("+zbs"); // single-bit instructions
         if (profile.vecUnits > 0 && profile.vectorWidth >= 128) addF("+v");
         break;
 
@@ -3117,11 +3256,27 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             const llvm::Value* baseA = underlyingBase(ptrA);
             const llvm::Value* baseB = underlyingBase(ptrB);
             if (baseA != baseB) {
-                const bool allocA = llvm::isa<llvm::AllocaInst>(baseA) ||
-                              llvm::isa<llvm::Argument>(baseA);
-                const bool allocB = llvm::isa<llvm::AllocaInst>(baseB) ||
-                              llvm::isa<llvm::Argument>(baseB);
-                if (allocA && allocB) return false;
+                bool aIsAlloca = llvm::isa<llvm::AllocaInst>(baseA);
+                bool bIsAlloca = llvm::isa<llvm::AllocaInst>(baseB);
+                bool aIsArg    = llvm::isa<llvm::Argument>(baseA);
+                bool bIsArg    = llvm::isa<llvm::Argument>(baseB);
+
+                // Two distinct stack allocations never alias.
+                if (aIsAlloca && bIsAlloca) return false;
+
+                // Alloca and a pointer argument don't alias: the alloca was
+                // created after the call and its address cannot have been
+                // passed to the caller that holds the argument.
+                if ((aIsAlloca && bIsArg) || (aIsArg && bIsAlloca)) return false;
+
+                // Two different pointer arguments only provably don't alias
+                // when at least one carries the `noalias` (restrict) attribute.
+                if (aIsArg && bIsArg) {
+                    const auto* argA = llvm::cast<llvm::Argument>(baseA);
+                    const auto* argB = llvm::cast<llvm::Argument>(baseB);
+                    if (argA->hasNoAliasAttr() || argB->hasNoAliasAttr())
+                        return false;
+                }
             }
 
             return true;  // conservative fallback
