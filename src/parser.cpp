@@ -33,11 +33,160 @@ static bool isKnownTypeName(const std::string& name) {
 
 Parser::Parser(const std::vector<Token>& tokens)
     : tokens(tokens), current(0), inOptMaxFunction(false),
-      importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {}
+      importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {
+    registerStdNamespace();
+}
 
 Parser::Parser(std::vector<Token>&& tokens)
     : tokens(std::move(tokens)), current(0), inOptMaxFunction(false),
-      importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {}
+      importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {
+    registerStdNamespace();
+}
+
+void Parser::registerStdNamespace() {
+    // The `std` namespace is built-in: every standard library function is
+    // accessible as std::name without any import statement.  Each entry maps
+    // the unqualified name to itself (same resolution as a plain call).
+    // `std::synthesize` maps to `std__synthesize` which is handled specially
+    // by the CF-CTRE evaluator and the synthesis pre-codegen pass.
+    static const std::vector<std::pair<std::string, std::string>> kStdFunctions = {
+        // ── Math ────────────────────────────────────────────────────────────
+        {"abs",        "abs"},        {"min",        "min"},
+        {"max",        "max"},        {"sign",       "sign"},
+        {"clamp",      "clamp"},      {"pow",        "pow"},
+        {"sqrt",       "sqrt"},       {"cbrt",       "cbrt"},
+        {"floor",      "floor"},      {"ceil",       "ceil"},
+        {"round",      "round"},      {"log",        "log"},
+        {"log2",       "log2"},       {"log10",      "log10"},
+        {"exp",        "exp"},        {"exp2",       "exp2"},
+        {"gcd",        "gcd"},        {"lcm",        "lcm"},
+        {"hypot",      "hypot"},      {"fma",        "fma"},
+        {"copysign",   "copysign"},   {"min_float",  "min_float"},
+        {"max_float",  "max_float"},
+        // ── Trig ────────────────────────────────────────────────────────────
+        {"sin",        "sin"},        {"cos",        "cos"},
+        {"tan",        "tan"},        {"asin",       "asin"},
+        {"acos",       "acos"},       {"atan",       "atan"},
+        {"atan2",      "atan2"},
+        // ── Bit ops ─────────────────────────────────────────────────────────
+        {"popcount",   "popcount"},   {"clz",        "clz"},
+        {"ctz",        "ctz"},        {"bitreverse", "bitreverse"},
+        {"bswap",      "bswap"},
+        {"rotate_left","rotate_left"},{"rotate_right","rotate_right"},
+        {"saturating_add","saturating_add"},
+        {"saturating_sub","saturating_sub"},
+        {"is_power_of_2","is_power_of_2"},
+        {"is_even",    "is_even"},    {"is_odd",     "is_odd"},
+        // ── Type casts / numeric ─────────────────────────────────────────────
+        {"to_int",     "to_int"},     {"to_float",   "to_float"},
+        {"to_string",  "to_string"},  {"to_char",    "to_char"},
+        {"number_to_string","number_to_string"},
+        {"string_to_number","string_to_number"},
+        {"str_to_int", "str_to_int"},{"str_to_float","str_to_float"},
+        {"typeof",     "typeof"},
+        // ── String ──────────────────────────────────────────────────────────
+        {"len",        "len"},        {"str_len",    "str_len"},
+        {"str_eq",     "str_eq"},     {"str_concat", "str_concat"},
+        {"str_find",   "str_find"},   {"str_index_of","str_index_of"},
+        {"str_contains","str_contains"},
+        {"str_starts_with","str_starts_with"},
+        {"str_ends_with","str_ends_with"},
+        {"str_substr", "str_substr"}, {"str_upper",  "str_upper"},
+        {"str_lower",  "str_lower"},  {"str_trim",   "str_trim"},
+        {"str_lstrip", "str_lstrip"}, {"str_rstrip", "str_rstrip"},
+        {"str_reverse","str_reverse"},{"str_repeat", "str_repeat"},
+        {"str_count",  "str_count"},  {"str_replace","str_replace"},
+        {"str_pad_left","str_pad_left"},
+        {"str_pad_right","str_pad_right"},
+        {"str_chars",  "str_chars"},  {"str_split",  "str_split"},
+        {"str_join",   "str_join"},   {"str_filter", "str_filter"},
+        {"str_remove", "str_remove"}, {"str_format", "str_format"},
+        {"char_at",    "char_at"},    {"char_code",  "char_code"},
+        {"is_alpha",   "is_alpha"},   {"is_digit",   "is_digit"},
+        {"is_upper",   "is_upper"},   {"is_lower",   "is_lower"},
+        {"is_space",   "is_space"},   {"is_alnum",   "is_alnum"},
+        // ── Array ────────────────────────────────────────────────────────────
+        {"push",       "push"},       {"pop",        "pop"},
+        {"len",        "len"},        {"reverse",    "reverse"},
+        {"sort",       "sort"},       {"sum",        "sum"},
+        {"index_of",   "index_of"},   {"swap",       "swap"},
+        {"array_fill", "array_fill"}, {"range",      "range"},
+        {"range_step", "range_step"}, {"array_concat","array_concat"},
+        {"array_slice","array_slice"},{"array_copy", "array_copy"},
+        {"array_contains","array_contains"},
+        {"array_find", "array_find"}, {"array_min",  "array_min"},
+        {"array_max",  "array_max"},  {"array_last", "array_last"},
+        {"array_product","array_product"},
+        {"array_map",  "array_map"},  {"array_filter","array_filter"},
+        {"array_reduce","array_reduce"},
+        {"array_any",  "array_any"},  {"array_every","array_every"},
+        {"array_count","array_count"},{"array_unique","array_unique"},
+        {"array_zip",  "array_zip"},  {"array_take", "array_take"},
+        {"array_drop", "array_drop"}, {"array_rotate","array_rotate"},
+        {"array_insert","array_insert"},
+        {"array_remove","array_remove"},
+        {"array_mean", "array_mean"},
+        // ── Map ─────────────────────────────────────────────────────────────
+        {"map_new",    "map_new"},    {"map_get",    "map_get"},
+        {"map_set",    "map_set"},    {"map_has",    "map_has"},
+        {"map_remove", "map_remove"}, {"map_keys",   "map_keys"},
+        {"map_values", "map_values"}, {"map_size",   "map_size"},
+        {"map_merge",  "map_merge"},  {"map_filter", "map_filter"},
+        {"map_invert", "map_invert"},
+        // ── Generic ──────────────────────────────────────────────────────────
+        {"filter",     "filter"},
+        // ── I/O ─────────────────────────────────────────────────────────────
+        {"print",      "print"},      {"println",    "println"},
+        {"write",      "write"},      {"print_char", "print_char"},
+        {"input",      "input"},      {"input_line", "input_line"},
+        {"file_read",  "file_read"},  {"file_write", "file_write"},
+        {"file_append","file_append"},{"file_exists","file_exists"},
+        // ── System ──────────────────────────────────────────────────────────
+        {"exit",       "exit"},       {"exit_program","exit_program"},
+        {"command",    "command"},    {"shell",      "shell"},
+        {"sudo_command","sudo_command"},
+        {"env_get",    "env_get"},    {"env_set",    "env_set"},
+        {"time",       "time"},       {"sleep",      "sleep"},
+        {"random",     "random"},
+        // ── Threading ────────────────────────────────────────────────────────
+        {"thread_create","thread_create"},{"thread_join","thread_join"},
+        {"mutex_new",  "mutex_new"},  {"mutex_lock", "mutex_lock"},
+        {"mutex_unlock","mutex_unlock"},
+        {"mutex_destroy","mutex_destroy"},
+        // ── Assertions / hints ────────────────────────────────────────────────
+        {"assert",     "assert"},     {"expect",     "expect"},
+        {"assume",     "assume"},     {"unreachable","unreachable"},
+        // ── BigInt ───────────────────────────────────────────────────────────
+        {"bigint",         "bigint"},
+        {"bigint_add",     "bigint_add"},   {"bigint_sub",  "bigint_sub"},
+        {"bigint_mul",     "bigint_mul"},   {"bigint_div",  "bigint_div"},
+        {"bigint_mod",     "bigint_mod"},   {"bigint_neg",  "bigint_neg"},
+        {"bigint_abs",     "bigint_abs"},   {"bigint_pow",  "bigint_pow"},
+        {"bigint_gcd",     "bigint_gcd"},   {"bigint_cmp",  "bigint_cmp"},
+        {"bigint_eq",      "bigint_eq"},    {"bigint_lt",   "bigint_lt"},
+        {"bigint_le",      "bigint_le"},    {"bigint_gt",   "bigint_gt"},
+        {"bigint_ge",      "bigint_ge"},
+        {"bigint_tostring","bigint_tostring"},
+        {"bigint_to_i64",  "bigint_to_i64"},
+        {"bigint_shl",     "bigint_shl"},   {"bigint_shr",  "bigint_shr"},
+        {"bigint_bit_length","bigint_bit_length"},
+        {"bigint_is_zero","bigint_is_zero"},
+        {"bigint_is_negative","bigint_is_negative"},
+        // ── Fast / precise arithmetic ─────────────────────────────────────────
+        {"fast_add",   "fast_add"},   {"fast_sub",   "fast_sub"},
+        {"fast_mul",   "fast_mul"},   {"fast_div",   "fast_div"},
+        {"precise_add","precise_add"},{"precise_sub","precise_sub"},
+        {"precise_mul","precise_mul"},{"precise_div","precise_div"},
+        // ── std::synthesize — the program synthesis stdlib function ───────────
+        // Resolves to the internal name "std__synthesize" so that the CF-CTRE
+        // builtin evaluator and the synthesis pre-codegen pass can identify it.
+        {"synthesize", "std__synthesize"},
+    };
+
+    auto& stdNS = importNamespaces_["std"];
+    for (const auto& [alias, actual] : kStdFunctions)
+        stdNS[alias] = actual;
+}
 
 const Token& Parser::peek(int offset) const noexcept {
     static const Token eofToken(TokenType::END_OF_FILE, "", 0, 0);
@@ -3109,28 +3258,30 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                     e->column = token.column;
                     return e;
                 }
-                // ── Priority 3: fn-scope resolution ────────────────────────────
-                // The namespace wasn't registered via import, so fall back to a
-                // flat name concatenation (scope1__scope2__...__func).  For the
-                // `std` namespace specifically this is important: `std::synthesize`
-                // must resolve to `std__synthesize` so that the CF-CTRE builtin
-                // evaluator and codegen builtins can dispatch on the full name.
-                // For other unregistered namespaces (e.g. `math::sqrt`, `user::fn`)
-                // we still use `segments.back()` for backwards compatibility.
+                // ── Priority 3: unknown namespace — hard error ─────────────────
+                // resolveNamespacedPath() returned empty, meaning no namespace
+                // prefix in the registry matched.  This is always a compile
+                // error: either the namespace was never imported, it was
+                // misspelled, or the function does not exist in it.
                 {
-                    std::string flatName = segments[0];
-                    for (size_t i = 1; i < segments.size(); ++i)
-                        flatName += "__" + segments[i];
-                    // Only use the flat std__ name for the "std" namespace, where
-                    // we own the semantics and can dispatch by the full flat name.
-                    // For all other namespaces keep the existing "last segment wins"
-                    // behaviour to avoid breaking existing user code.
-                    const bool isStdNamespace = (segments[0] == "std");
-                    auto e = std::make_unique<IdentifierExpr>(
-                        isStdNamespace ? flatName : segments.back());
-                    e->line = token.line;
-                    e->column = token.column;
-                    return e;
+                    const std::string nsName = segments[0];
+                    // Build a helpful candidates list from registered namespaces.
+                    std::vector<std::string> knownNS;
+                    for (const auto& [ns, _] : importNamespaces_)
+                        knownNS.push_back(ns);
+                    std::string msg = "Unknown namespace '" + nsName + "'";
+                    if (!knownNS.empty()) {
+                        msg += ". Known namespaces: ";
+                        for (size_t ki = 0; ki < knownNS.size(); ++ki) {
+                            if (ki) msg += ", ";
+                            msg += knownNS[ki];
+                        }
+                    } else {
+                        msg += ". No namespaces are currently imported "
+                               "(use 'import \"file\" as name' to register one, "
+                               "or call 'std::synthesize' which is built-in)";
+                    }
+                    error(msg);
                 }
             }
 

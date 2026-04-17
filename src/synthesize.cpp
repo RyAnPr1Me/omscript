@@ -135,12 +135,18 @@ int64_t SynthesisEngine::eval(const SynthNode* node,
     case SynthOp::DIV: {
         int64_t rhs = eval(node->right.get(), inputs);
         if (rhs == 0) return 0; // safe division
-        return eval(node->left.get(), inputs) / rhs;
+        int64_t lhs = eval(node->left.get(), inputs);
+        // Guard against INT64_MIN / -1 (undefined behaviour → SIGFPE on x86-64).
+        if (lhs == INT64_MIN && rhs == -1) return INT64_MIN;
+        return lhs / rhs;
     }
     case SynthOp::MOD: {
         int64_t rhs = eval(node->right.get(), inputs);
         if (rhs == 0) return 0; // safe modulo
-        return eval(node->left.get(), inputs) % rhs;
+        int64_t lhs = eval(node->left.get(), inputs);
+        // Guard against INT64_MIN % -1 (undefined behaviour → SIGFPE on x86-64).
+        if (lhs == INT64_MIN && rhs == -1) return 0;
+        return lhs % rhs;
     }
     case SynthOp::AND:
         return eval(node->left.get(), inputs) & eval(node->right.get(), inputs);
@@ -249,96 +255,106 @@ std::vector<SynthOp> SynthesisEngine::resolveOps(const SynthConfig& cfg) {
 //              (prune dominated expressions using output fingerprint)
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// enumerate — BFS bottom-up enumeration of expression trees
+//
+// Strategy:
+//   - depth 0: PARAM (0..nParams-1) + small constants
+//   - depth d: combine depth-(d-1) subtrees with each allowed op
+//   - Hard cap of kMaxPerLevel distinct (fingerprinted) nodes per depth level
+//     to prevent combinatorial explosion at depth ≥ 2.
+//   - Global cap of `maxCandidates` total generated nodes.
+// ═══════════════════════════════════════════════════════════════════════════
+
+static constexpr int kMaxPerLevel = 512;  ///< Max distinct expressions per depth level
+
 void SynthesisEngine::enumerate(
     int                              maxDepth,
     int                              nParams,
     const std::vector<SynthOp>&      allowedOps,
     std::vector<std::unique_ptr<SynthNode>>& out) {
 
-    // Fingerprint: evaluate on a fixed probe vector to deduplicate
-    // expressions that produce identical results for the probe.
-    static const std::vector<int64_t> kProbe = {1, 2, 3, 5, 7, 11, 13, 17};
+    // We use TWO separate fingerprint probe sets to reduce hash collisions.
+    // The inputs for param i are varied across both probes.
+    auto makeProbe = [&](int seed) -> std::vector<int64_t> {
+        std::vector<int64_t> p(static_cast<size_t>(nParams));
+        for (int i = 0; i < nParams; ++i)
+            p[static_cast<size_t>(i)] = static_cast<int64_t>(seed * 7 + i * 13 + 1);
+        return p;
+    };
+    const auto probe1 = makeProbe(1);
+    const auto probe2 = makeProbe(5);
 
     std::unordered_set<std::string> seen;
+    seen.reserve(kMaxPerLevel * (maxDepth + 1) * 2);
+
     auto fingerprint = [&](const SynthNode* n) -> std::string {
-        std::string fp;
-        fp.reserve(8 * sizeof(int64_t));
-        for (int64_t v : kProbe) {
-            std::vector<int64_t> probe(static_cast<size_t>(nParams), v);
-            // vary each input individually
-            for (int i = 0; i < nParams; ++i)
-                probe[static_cast<size_t>(i)] = kProbe[static_cast<size_t>(i % 8)] + i;
-            int64_t r = eval(n, probe);
-            fp += std::to_string(r);
-            fp += ',';
-        }
-        return fp;
+        int64_t r1 = eval(n, probe1);
+        int64_t r2 = eval(n, probe2);
+        // Pack both into a short string key.
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%lld|%lld",
+                      static_cast<long long>(r1), static_cast<long long>(r2));
+        return buf;
     };
 
-    auto addIfNew = [&](std::unique_ptr<SynthNode> node) {
+    // `byDepth[d]` holds raw pointers into `out` at depth exactly d.
+    std::vector<std::vector<const SynthNode*>> byDepth(static_cast<size_t>(maxDepth + 1));
+
+    auto addIfNew = [&](std::unique_ptr<SynthNode> node, int depth) -> bool {
+        if (static_cast<int>(byDepth[static_cast<size_t>(depth)].size()) >= kMaxPerLevel)
+            return false;
         std::string fp = fingerprint(node.get());
-        if (seen.insert(fp).second)
-            out.push_back(std::move(node));
+        if (!seen.insert(fp).second) return false;
+        const SynthNode* raw = node.get();
+        out.push_back(std::move(node));
+        byDepth[static_cast<size_t>(depth)].push_back(raw);
+        return true;
     };
 
     // ── Depth-0 leaves ──────────────────────────────────────────────────
-    std::vector<std::unique_ptr<SynthNode>> level0;
     // Parameters
-    for (int i = 0; i < nParams; ++i) {
-        auto n = std::make_unique<SynthNode>(SynthOp::PARAM, i);
-        addIfNew(cloneNode(n.get()));
-        level0.push_back(std::move(n));
-    }
+    for (int i = 0; i < nParams; ++i)
+        addIfNew(std::make_unique<SynthNode>(SynthOp::PARAM, i), 0);
     // Small constants
-    for (int c : {-2, -1, 0, 1, 2, 3, 4, 8, 16, 32, 64}) {
-        auto n = std::make_unique<SynthNode>(SynthOp::CONST, c);
-        addIfNew(cloneNode(n.get()));
-        level0.push_back(cloneNode(n.get()));
-    }
+    for (int c : {-1, 0, 1, 2, 3, 4, 8, 16})
+        addIfNew(std::make_unique<SynthNode>(SynthOp::CONST, c), 0);
 
     if (maxDepth <= 0) return;
 
     // ── Bottom-up enumeration ───────────────────────────────────────────
-    // `byDepth[d]` holds all de-duplicated nodes of depth exactly d.
-    std::vector<std::vector<const SynthNode*>> byDepth(maxDepth + 1);
-    for (auto& n : out)
-        byDepth[0].push_back(n.get());
-
     for (int d = 1; d <= maxDepth; ++d) {
-        // Build up expressions combining subtrees of depth < d.
         for (SynthOp op : allowedOps) {
             if (isUnaryOp(op)) {
-                // Unary: apply to each subtree of depth d-1
                 for (const SynthNode* child : byDepth[static_cast<size_t>(d - 1)]) {
+                    if (static_cast<int>(byDepth[static_cast<size_t>(d)].size()) >= kMaxPerLevel)
+                        break;
                     auto n = std::make_unique<SynthNode>(op);
                     n->left = cloneNode(child);
-                    SynthNode* raw = n.get();
-                    addIfNew(std::move(n));
-                    if (out.back().get() == raw)
-                        byDepth[static_cast<size_t>(d)].push_back(raw);
+                    addIfNew(std::move(n), d);
                 }
             } else if (isBinaryOp(op)) {
-                // Binary: combine subtrees at depths (d1, d2) where max(d1,d2) == d-1
-                for (int d1 = 0; d1 < d; ++d1) {
-                    for (int d2 = 0; d2 < d; ++d2) {
+                // Combine subtrees from depths d1 and d2 where max(d1,d2) == d-1.
+                for (int d1 = 0; d1 < d && static_cast<int>(byDepth[static_cast<size_t>(d)].size()) < kMaxPerLevel; ++d1) {
+                    for (int d2 = 0; d2 < d && static_cast<int>(byDepth[static_cast<size_t>(d)].size()) < kMaxPerLevel; ++d2) {
                         if (std::max(d1, d2) != d - 1) continue;
-                        for (const SynthNode* lhs : byDepth[static_cast<size_t>(d1)]) {
-                            for (const SynthNode* rhs : byDepth[static_cast<size_t>(d2)]) {
-                                // Prune: skip symmetric duplicates for commutative ops.
-                                // Use pointer ordering as a canonical form.
-                                if ((op == SynthOp::ADD || op == SynthOp::MUL ||
+                        const auto& lhsVec = byDepth[static_cast<size_t>(d1)];
+                        const auto& rhsVec = byDepth[static_cast<size_t>(d2)];
+                        for (size_t li = 0; li < lhsVec.size() && static_cast<int>(byDepth[static_cast<size_t>(d)].size()) < kMaxPerLevel; ++li) {
+                            for (size_t ri = 0; ri < rhsVec.size() && static_cast<int>(byDepth[static_cast<size_t>(d)].size()) < kMaxPerLevel; ++ri) {
+                                const SynthNode* lhs = lhsVec[li];
+                                const SynthNode* rhs = rhsVec[ri];
+                                // Prune symmetric duplicates for commutative ops.
+                                const bool commutative =
+                                    (op == SynthOp::ADD || op == SynthOp::MUL ||
                                      op == SynthOp::AND || op == SynthOp::OR  ||
                                      op == SynthOp::XOR || op == SynthOp::MIN2 ||
-                                     op == SynthOp::MAX2) && lhs > rhs) {
-                                    continue;
-                                }
+                                     op == SynthOp::MAX2);
+                                if (commutative && d1 == d2 && li > ri) continue;
                                 auto n = std::make_unique<SynthNode>(op);
                                 n->left  = cloneNode(lhs);
                                 n->right = cloneNode(rhs);
-                                SynthNode* raw = n.get();
-                                addIfNew(std::move(n));
-                                if (!out.empty() && out.back().get() == raw)
-                                    byDepth[static_cast<size_t>(d)].push_back(raw);
+                                addIfNew(std::move(n), d);
                             }
                         }
                     }
@@ -574,6 +590,28 @@ static bool extractSynthesisArgs(
         return false;
     if (call->arguments.empty()) return false;
 
+    // Helper: extract an integer value from a literal or unary-negated literal.
+    auto tryExtractInt = [](const Expression* expr, int64_t& out) -> bool {
+        if (const auto* lit = dynamic_cast<const LiteralExpr*>(expr)) {
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                out = static_cast<int64_t>(lit->intValue);
+                return true;
+            }
+        }
+        // Handle -N parsed as UnaryExpr("-", LiteralExpr(N)).
+        if (const auto* unary = dynamic_cast<const UnaryExpr*>(expr)) {
+            if (unary->op == "-") {
+                if (const auto* lit = dynamic_cast<const LiteralExpr*>(unary->operand.get())) {
+                    if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                        out = -static_cast<int64_t>(lit->intValue);
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    };
+
     // ── Argument 0: examples — must be ARRAY_EXPR of ARRAY_EXPR of literals ──
     const auto* examplesArg = dynamic_cast<const ArrayExpr*>(call->arguments[0].get());
     if (!examplesArg) return false;
@@ -585,13 +623,13 @@ static bool extractSynthesisArgs(
         SynthExample ex;
         ex.inputs.reserve(innerArr->elements.size() - 1);
         for (size_t i = 0; i < innerArr->elements.size(); ++i) {
-            const auto* lit = dynamic_cast<const LiteralExpr*>(innerArr->elements[i].get());
-            if (!lit || lit->literalType != LiteralExpr::LiteralType::INTEGER)
+            int64_t val = 0;
+            if (!tryExtractInt(innerArr->elements[i].get(), val))
                 return false;
             if (i + 1 < innerArr->elements.size())
-                ex.inputs.push_back(static_cast<int64_t>(lit->intValue));
+                ex.inputs.push_back(val);
             else
-                ex.output = static_cast<int64_t>(lit->intValue);
+                ex.output = val;
         }
         examples.push_back(std::move(ex));
     }
@@ -617,9 +655,9 @@ static bool extractSynthesisArgs(
 
     // ── Argument 2 (optional): max_depth — integer literal ────────────────
     if (call->arguments.size() >= 3) {
-        const auto* depthLit = dynamic_cast<const LiteralExpr*>(call->arguments[2].get());
-        if (depthLit && depthLit->literalType == LiteralExpr::LiteralType::INTEGER)
-            cfg.maxDepth = static_cast<int>(std::min(std::max(depthLit->intValue, 1LL), 8LL));
+        int64_t d = 0;
+        if (tryExtractInt(call->arguments[2].get(), d))
+            cfg.maxDepth = static_cast<int>(std::min(std::max(d, INT64_C(1)), INT64_C(8)));
     }
 
     // ── Argument 3 (optional): cost_hint — "size" | "speed" ────────────────

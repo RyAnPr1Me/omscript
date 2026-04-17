@@ -4395,3 +4395,135 @@ For memory-bound workloads, SoA can yield 2–5× speedups by maximising cache l
 All OmScript heap allocations (via `malloc` / `calloc`) are tagged with `align(16)` in the LLVM IR.  This tells the auto-vectorizer that every array base pointer is 16-byte aligned, enabling aligned SSE/AVX loads (`vmovaps`, `vmovdqa`) instead of unaligned variants (`vmovups`, `vmovdqu`).  Aligned loads are 1–3 cycles faster on cache-miss paths and avoid potential stalls from crossing cache-line boundaries.
 
 ---
+
+---
+
+## 30. std::synthesize — Compile-Time Program Synthesis
+
+### 30.1 Overview
+
+`std::synthesize` is a compile-time program synthesis function in the OmScript standard library.  Given a set of input/output examples, it enumerates integer expression trees over the function's parameters, verifies each candidate against the examples, scores them with a cost model, and returns the synthesized value.
+
+When `std::synthesize` is the **sole expression** in a pure function's return statement, the compiler's synthesis pass (which runs before CF-CTRE) replaces the entire function body with the discovered expression at compile time.  The synthesized body then passes through the full optimization pipeline: CF-CTRE → e-graph equality saturation → superoptimizer.
+
+### 30.2 Syntax
+
+```omscript
+std::synthesize(examples)
+std::synthesize(examples, ops)
+std::synthesize(examples, ops, max_depth)
+std::synthesize(examples, ops, max_depth, cost_hint)
+```
+
+| Argument     | Type       | Required | Description |
+|-------------|-----------|----------|-------------|
+| `examples`  | `int[][]` | Yes      | Each inner array is `[in0, in1, …, inN-1, expected_output]` |
+| `ops`       | `string[]`| No       | Allowed operators. Default: all integer ops |
+| `max_depth` | `int`     | No       | Maximum expression-tree depth (1–8). Default: `4` |
+| `cost_hint` | `string`  | No       | `"size"` (minimise code size) or `"speed"` (minimise latency). Default: `"speed"` |
+
+**Allowed operator strings:** `"+"`, `"-"`, `"*"`, `"/"`, `"%"`, `"&"`, `"|"`, `"^"`, `"<<"`, `">>"`, `"**"`, `"min"`, `"max"`, `"abs"`, `"neg"`, `"~"`
+
+### 30.3 Return Value
+
+Returns the integer result of the synthesized expression applied to the **first example's inputs**.  When all examples are compile-time constants and the function body is replaced by the synthesis pass, the function's runtime cost is zero — calls to it are folded to constants by CF-CTRE.
+
+### 30.4 Body Replacement Pattern
+
+Place `std::synthesize` as the sole return expression in a function body.  The compiler detects this pattern and replaces the body at compile time:
+
+```omscript
+// Before synthesis: body is the std::synthesize call
+fn multiply_add(a: int, b: int, c: int) -> int {
+    return std::synthesize([
+        [1, 2, 3, 5],    // a=1, b=2, c=3  → 1*2+3 = 5
+        [2, 3, 4, 10],   // a=2, b=3, c=4  → 2*3+4 = 10
+        [0, 5, 1, 1],    // a=0, b=5, c=1  → 0*5+1 = 1
+        [3, 3, 0, 9],    // a=3, b=3, c=0  → 3*3+0 = 9
+    ]);
+}
+
+// After synthesis: body is the discovered expression
+// fn multiply_add(a: int, b: int, c: int) -> int {
+//     return (a * b) + c;
+// }
+```
+
+### 30.5 Examples
+
+#### 30.5.1 Addition
+
+```omscript
+fn add(a: int, b: int) -> int {
+    return std::synthesize([[1,2,3],[5,3,8],[0,0,0],[10,1,11]]);
+}
+```
+
+#### 30.5.2 Multiplication
+
+```omscript
+fn mul(a: int, b: int) -> int {
+    return std::synthesize([[2,3,6],[4,5,20],[1,1,1],[0,7,0]],
+                           ["*"]);   // restrict to multiply only
+}
+```
+
+#### 30.5.3 Subtraction with restricted ops
+
+```omscript
+fn diff(a: int, b: int) -> int {
+    return std::synthesize([[5,3,2],[10,4,6],[1,1,0]], ["-"]);
+}
+```
+
+#### 30.5.4 Constant function
+
+```omscript
+// Always returns 42 regardless of input
+fn the_answer(x: int) -> int {
+    return std::synthesize([[0,42],[1,42],[99,42],[-1,42]]);
+}
+```
+
+#### 30.5.5 Bitwise operations
+
+```omscript
+// Synthesize x & (x - 1)  — clear the lowest set bit
+fn clear_lowest_bit(x: int) -> int {
+    return std::synthesize([[6,4],[12,8],[7,6],[3,2]],
+                           ["&", "-"]);
+}
+```
+
+### 30.6 Restricting the Search
+
+By default the synthesizer searches all integer operators at depth ≤ 4.  For simple functions this is fast; for complex functions you can guide it:
+
+```omscript
+// Only allow addition and multiplication, search up to depth 3
+fn fast_mul_add(a: int, b: int, c: int) -> int {
+    return std::synthesize([[...]], ["+", "*"], 3);
+}
+
+// Optimise for code size instead of speed
+fn compact(a: int, b: int) -> int {
+    return std::synthesize([[...]], [], 4, "size");
+}
+```
+
+### 30.7 Error Conditions
+
+| Condition | Result |
+|-----------|--------|
+| No expression found within budget | Compile-time warning; body left unchanged (function calls `std__synthesize` at runtime → codegen error) |
+| Example input count ≠ parameter count | Synthesis skipped; warning emitted |
+| `max_depth` > 8 | Clamped to 8 |
+| Negative integer literals in examples | Supported (`-3` is parsed correctly) |
+
+### 30.8 Implementation Notes
+
+- The enumerator uses bottom-up BFS with fingerprint-based deduplication (evaluates on two probe input vectors to identify semantically identical expressions).
+- Each depth level is capped at 512 distinct expressions to prevent combinatorial explosion.
+- Integer division and modulo by zero return `0` (safe evaluation).
+- `INT64_MIN / -1` and `INT64_MIN % -1` are handled safely.
+- The synthesized function is automatically marked `@pure` and `@const_eval`, enabling CF-CTRE to fold all calls to it when arguments are compile-time constants.
