@@ -1273,14 +1273,37 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         writePtr->addIncoming(buf, preHdr);
         builder->CreateCondBr(builder->CreateICmpSLT(idx, countVal, "strmul.cond"), bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
-        // memcpy(writePtr, strPtr, strLen)  — no null terminator yet
-        builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strPtr, strLen});
+        // memcpy(writePtr, strPtr, strLen)  — no null terminator yet.
+        // Guard: skip memcpy for zero-length strings (strLen==0 produces an empty
+        // result regardless of count; the null-terminator in doneBB handles it).
+        // For non-zero lengths ≤ ~8, the C runtime typically inlines the copy.
+        if (auto* strLenCI = llvm::dyn_cast<llvm::ConstantInt>(strLen)) {
+            if (strLenCI->getZExtValue() > 0) {
+                builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strPtr, strLen});
+            }
+            // else: zero-length string — no copy needed; writePtr stays unchanged
+        } else {
+            // Dynamic length: guard with a runtime check so we don't call
+            // memcpy(dst, src, 0) on every iteration when the string is empty.
+            llvm::BasicBlock* copyBB = llvm::BasicBlock::Create(*context, "strmul.copy", curFn);
+            llvm::BasicBlock* skipBB = llvm::BasicBlock::Create(*context, "strmul.skip", curFn);
+            builder->CreateCondBr(
+                builder->CreateICmpNE(strLen, llvm::ConstantInt::get(getDefaultType(), 0), "strmul.nonempty"),
+                copyBB, skipBB);
+            builder->SetInsertPoint(copyBB);
+            builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strPtr, strLen});
+            builder->CreateBr(skipBB);
+            builder->SetInsertPoint(skipBB);
+        }
         // Advance the write pointer by strLen bytes (nuw+nsw: no wrap possible)
         llvm::Value* nextWrite = builder->CreateInBoundsGEP(
             llvm::Type::getInt8Ty(*context), writePtr, strLen, "strmul.nwptr");
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next", /*HasNUW=*/true, /*HasNSW=*/true);
-        idx->addIncoming(nextIdx, bodyBB);
-        writePtr->addIncoming(nextWrite, bodyBB);
+        // Use GetInsertBlock() — not bodyBB — because the dynamic strLen guard above
+        // may have moved the insert point to a new 'skip' block.
+        llvm::BasicBlock* latchBB = builder->GetInsertBlock();
+        idx->addIncoming(nextIdx, latchBB);
+        writePtr->addIncoming(nextWrite, latchBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(doneBB);
         // Null-terminate: when doneBB is reached from loopBB, writePtr holds
