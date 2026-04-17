@@ -297,7 +297,7 @@ This is a compact implementation-aligned map of keyword-led statement forms:
 | Range for | `for (i in start...end)` / `for (i in start...end...step)` |
 | Foreach | `foreach (item in arrayOrString) { ... }` |
 | Repeat | `repeat (N) { ... }` |
-| Times | `N times { ... }` |
+| Times | `times N { ... }` |
 | Until | `until (cond) { ... }` |
 | Forever | `forever { ... }` |
 | Loop | `loop { ... }` |
@@ -305,8 +305,8 @@ This is a compact implementation-aligned map of keyword-led statement forms:
 | Error handling | `throw expr;` followed by `catch(N) { ... }` |
 | Lifetime ops | `move x;`, `freeze x;`, `invalidate x;`, `borrow x;`, `reborrow x;` |
 | Deferred execution | `defer { ... }` |
-| Guard | `guard (cond) { ... }` |
-| With | `with (expr) { ... }` |
+| Guard | `guard (cond) else { ... }` |
+| With | `with (var x = expr) { ... }` |
 | Pipeline | `pipeline (...) { stage { ... } ... }` |
 | Compile-time block | `comptime { ... }` |
 
@@ -342,7 +342,7 @@ Unsigned 64-bit values whose bit pattern exceeds `INT64_MAX` are accepted and st
 **String literals:**
 ```
 "hello"
-"line\nnewline"    // \n, \t, \r, \\, \", \0, \xHH supported
+"line\nnewline"    // \n, \t, \r, \b, \f, \v, \\, \", \xHH supported (\0 NOT allowed)
 ```
 
 **String interpolation:** `$"..."` with `{expr}` placeholders — desugars into a concatenation chain at parse time:
@@ -375,17 +375,24 @@ line two
 |---|---|
 | `\n` | Newline (LF) |
 | `\r` | Carriage return (CR) |
-| `\t` | Tab |
+| `\t` | Horizontal tab |
+| `\b` | Backspace (0x08) |
+| `\f` | Form-feed (0x0C) |
+| `\v` | Vertical tab (0x0B) |
 | `\\` | Literal backslash |
 | `\"` | Literal double-quote |
-| `\0` | Null byte (0x00) |
-| `\xHH` | Byte with hex value HH |
+| `\xHH` | Byte with hex value HH (e.g., `\xFF`) |
+
+> **Note:** `\0` (null byte) is **not allowed** in string literals — the lexer rejects it with a hard error. Use `\x00` if you need a null-byte representation in a bytes literal instead.
+
+**Interpolated-string extra escapes:** Inside `$"..."` strings, `\{` and `\}` produce literal `{` and `}` characters (since `{...}` is otherwise the interpolation delimiter).
 
 **Bytes literals:** A hex byte-array literal creates an array of integer byte values at parse time:
 ```omscript
 var data = 0x"DEADBEEF";    // [0xDE, 0xAD, 0xBE, 0xEF]  (4 integers)
-var b2   = 0x"01 02 03";    // [1, 2, 3] — spaces between byte pairs are allowed
-var b3   = 0x"ff00ff";      // [255, 0, 255]  — lowercase hex also works
+var b2   = 0x"01 02 03";    // [1, 2, 3] — spaces, tabs, or underscores between byte pairs are allowed
+var b3   = 0x"ff_00_ff";    // [255, 0, 255] — underscore separator also works
+var b4   = 0x"ff00ff";      // [255, 0, 255]  — no separator also works
 ```
 The literal is desugared to an array literal at parse time; `std::len(data) == 4`.
 
@@ -457,7 +464,13 @@ var m = MAX(x + 1, y);     // expands to: ((x + 1) > (y) ? (x + 1) : (y))
 #endif
 ```
 
-The `#if`/`#elif` expressions support integer arithmetic, comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`), and `defined(NAME)`.
+The `#if`/`#elif` expressions support a full arithmetic/logical expression language:
+- Arithmetic: `+`, `-` (binary and unary), `*`, `/`, `%`
+- Comparisons: `==`, `!=`, `<`, `>`, `<=`, `>=`
+- Logical: `&&`, `||`, `!` (unary)
+- Grouping: parentheses
+- `defined(NAME)` — evaluates to 1 if `NAME` is a defined macro, 0 otherwise
+- Macro names are expanded before evaluation; undefined names evaluate to 0
 
 ### 4.3 Diagnostics
 
@@ -1047,6 +1060,7 @@ fn add(a:int, b:int) -> int = a + b;
 | `@noparallel` | Disable loop parallelization hints |
 | `@minsize` | Optimize for code size |
 | `@optnone` | Disable all optimizations (overrides `@inline`, `@hot`) |
+| `@optmax` | Apply full OPTMAX optimizations to this function (equivalent to wrapping body in `OPTMAX=:`) |
 | `@nounwind` | Function never throws (no unwind tables) |
 | `@const_eval` | Evaluate at compile time when possible |
 | `@allocator(size=N)` | Function is a memory allocator; adds LLVM `allocsize(N)` + `noalias` on return (see §7.9) |
@@ -1135,7 +1149,7 @@ if (condition) {
 }
 ```
 
-`elif` is a first-class keyword (not `else if`). There is no `else if` — use `elif`.
+`elif` is the idiomatic chained-condition keyword. `else if (cond) { }` also parses correctly as a nested `if` inside an `else` branch and is functionally identical to `elif`.
 
 **Detailed rules:**
 - The condition expression must be wrapped in parentheses.
@@ -1175,7 +1189,7 @@ unless (x == 0) {
 }
 ```
 
-Desugars to `if (!condition)`. It cannot be combined with `else` or `elif` — add those to the desugared `if` form instead.
+Desugars to `if (!condition)`. It can optionally be combined with `else`: `unless (cond) { } else { }` desugars to `if (!cond) { } else { }`.
 
 **Use case:** `unless` reads more naturally when you want to express "do this unless a condition holds", avoiding a double negation:
 
@@ -1266,7 +1280,7 @@ switch (value) {
 - OmScript has **no C-style fallthrough** — control exits the switch after the matching case body executes, regardless of whether a `break` is present. To match multiple values with the same body, use comma syntax.
 - `default:` handles any value not matched by a `case`. It is optional; without it, unmatched values are silently skipped.
 - `break` inside a case arm exits the switch immediately (and also works for loop-break in nested loops).
-- Case values must be integer constants or enum members — expressions are not allowed in case labels.
+- Case values are evaluated by `parseExpression()` — arbitrary expressions (including enum member lookups and arithmetic) are accepted. In practice, use compile-time constant values for predictable switch codegen.
 
 **Example — enum switch:**
 ```omscript
@@ -1593,7 +1607,7 @@ Desugars to a `for` loop. `foreach` is an alternative spelling of the collection
 - `foreach item in arr` is exactly equivalent to `for (item in arr)`.
 - `foreach (i, item in arr)` is exactly equivalent to `for (i, item in arr)`.
 
-**Note:** The parentheses are optional in the non-indexed form but required in the indexed form. Both spellings are idiomatic; use whichever reads better in context.
+**Note:** The parentheses are optional in both the non-indexed and indexed forms. Both spellings are idiomatic; use whichever reads better in context.
 
 ### 9.8 loop
 
@@ -1700,25 +1714,21 @@ Counted loop:
 ```omscript
 times 3 { ... }     // run body 3 times (literal count)
 times (n) { ... }   // run body n times (expression count)
-N times { ... }     // alternate syntax: N first (N can be any expression)
 ```
 
-**Desugaring:** `N times { body }` → `for (__times_k in 0...N) { body }`.
+**Desugaring:** `times N { body }` → `for (__times_k in 0...N) { body }`.
 
 **Notes:**
+- The `times` keyword must appear **first**. `N times { ... }` (count before keyword) is **not valid syntax** and will produce a parse error.
 - The iteration counter is not exposed — use `for` if you need it.
 - The count expression can be a variable or any integer expression.
 - `break` and `continue` work normally inside `times` loops.
 
 ```omscript
-// Print a separator N times:
+// Print a separator 40 times:
 var width = 40;
-width times { std::write("-"); }
+times (width) { std::write("-"); }
 std::println("");
-
-// Or equivalently:
-times width { std::write("-"); }
-```
 
 ### 9.12 OPTMAX Loop Variables
 
@@ -1779,7 +1789,7 @@ swap a, b, c, d;   // a←b, b←c, c←d, d←a
 - With two variables: classic exchange — equivalent to `var tmp = a; a = b; b = tmp;`.
 - With three or more variables: **left rotation** — each variable gets the value of the next one, and the last gets the original first.
 - The swap is logically atomic at the statement level (all old values are read before any writes).
-- `swap` can be used on array elements too: `swap arr[i], arr[j];`.
+- Operands must be **plain variable names** — array subscripts (`arr[i]`), field accesses (`p.x`), and other expressions are not accepted (the parser will error with "swap operands must be variable names").
 - All variables in the swap must already be declared.
 
 ```omscript
@@ -2139,8 +2149,8 @@ fn zero_out(p: &int) { *p = 0; }  // reference parameter (conceptual)
 12. `||`
 13. `??`, `?:`
 14. `? :` (ternary)
-15. Assignment (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `??=`, `&&=`, `||=`)
-16. `|>` (pipe forward)
+15. `|>` (pipe forward)
+16. Assignment (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `??=`, `&&=`, `||=`)
 
 ### 10.13 Type-Namespace Method Dispatch
 
@@ -2681,7 +2691,7 @@ struct Node {
 - All standard scalar types, array types, and other struct types can be used as field types.
 - Structs are **value types** — they are allocated inline (not heap-allocated by default), though they can escape to the heap through assignment.
 - Field names must be unique within a struct.
-- Structs can define operator overloads (see §14.5) and the `fn` keyword to define methods.
+- Structs can define operator overloads inside the struct body using `fn operator<op>(...)` (see §14.5). Regular methods cannot be defined inside a struct body — instead, define top-level functions that take the struct as a parameter (using dot-notation sugar, see §7.10).
 - Struct names are registered in the parser's struct namespace so they can be used in type annotations.
 
 ### 14.2 Field Attributes
@@ -2695,7 +2705,7 @@ struct Buffer {
     noalias ptr: int,        // pointer does not alias other fields
     immut size: int,         // immutable after construction
     align(16) data: float,   // alignment requirement
-    std::range(0, 100) percent: int,  // value range hint
+    range(0, 100) percent: int,  // value range hint (no std:: prefix)
     move payload: int        // field carries move semantics
 }
 ```
@@ -2709,7 +2719,7 @@ var person = Person { name: "Alice", age: 30, score: 9.5 }
 
 **Rules:**
 - Struct literal syntax: `StructName { field1: value1, field2: value2, ... }`.
-- All fields must be provided in the literal (there are no default field values).
+- Fields not listed in the literal default to `0` (or `null` / `""` for pointer types). There is no compile error for a partial struct literal.
 - Fields can be specified in any order (they do not have to match the struct declaration order).
 - The trailing comma after the last field is optional.
 - Struct literals are expressions — they can be passed as arguments and returned from functions.
@@ -2857,7 +2867,7 @@ catch("msg") { ... }   // catch a specific string literal code (compile-time mat
 
 - `throw expr;` — evaluates `expr` to an integer (or value coerced to integer) and jumps to the nearest matching `catch` in the same function.
 - `catch(N) { ... }` — matches when the most recent `throw` had the integer value `N`. `N` must be a **non-negative integer literal**.
-- `catch("str") { ... }` — compile-time string code; the string literal is mapped to a unique integer ID at compile time. Matching `throw "str"` is not reliable at runtime (use integer codes for portability).
+- `catch("str") { ... }` — the string literal is assigned a unique sequential integer ID at compile time. **This can never match a `throw` of a string expression at runtime:** `throw "str"` coerces the string's heap pointer to an integer (a large address), which will never equal the small compile-time ID. Use `catch("str")` only as a readable alias for the compile-time integer it represents, or use integer codes directly for portability.
 - After a `catch` block executes, execution continues normally with the statement after the `catch` block.
 - If no `throw` precedes a `catch`, the `catch` block is **skipped entirely** — this is the "bypass" behavior.
 - If a `throw` occurs with no matching `catch` in the current function, the program **aborts** with a runtime error message.
@@ -3429,7 +3439,7 @@ fn check_flag(flags:int, bit:int) -> int {
 |---|---|---|
 | `str_format` | `std::str_format(fmt, v1[, v2[, ...]])` | Printf-style formatting via `snprintf`. `fmt` is a C-style format string; supports `%d`, `%i`, `%u`, `%ld`, `%s`, `%f`, `%e`, `%g`, `%x`, `%X`, `%o`, `%c`, `%%`, and width/precision specifiers. Returns a new heap-allocated string. |
 | `str_filter` | `std::str_filter(s, fn)` | Return a new string containing only the characters of `s` for which `fn(char_code)` returns non-zero. |
-| `filter` | `std::filter(x, fn)` | Generic filter — dispatches to `array_filter`, `str_filter`, or `map_filter` based on the runtime type of `x`. |
+| `filter` | `std::filter(x, fn)` | Generic filter — dispatches to `array_filter` or `str_filter` based on a **compile-time** type analysis of `x`. Pass an array for `array_filter`, a string for `str_filter`. Passing a dict falls through to `array_filter` (no map branch exists). |
 
 ```omscript
 var s = std::str_format("x=%d, y=%.3f, name=%s", 42, 3.14159, "hello");
@@ -3603,7 +3613,7 @@ OmScript provides **low-level threading and mutex primitives** wrapping the plat
 
 **Rules:**
 - The function passed to `std::thread_create` must be a **zero-argument** function defined in the same program.
-- The function name is passed as a **string literal** (the name is looked up at runtime).
+- The function name is passed as a **string literal** and is resolved in the compiler's function table **at compile time**. Using a named function that does not exist, or passing a string variable instead of a literal, produces a hard compile error.
 - The returned thread handle must be joined with `std::thread_join` to avoid resource leaks.
 - Communication between threads must be done through shared global variables or shared arrays — there is no built-in channel or message-passing mechanism.
 - Thread safety is the programmer's responsibility — use mutexes to protect shared state.
@@ -3732,7 +3742,6 @@ Lambdas are first-class values and can be passed to higher-order functions:
 var doubled = std::array_map([1, 2, 3], |x| x * 2)         // [2, 4, 6]
 var evens   = std::array_filter([1, 2, 3, 4], |x| x % 2 == 0)  // [2, 4]
 var total   = std::array_reduce([1, 2, 3, 4], |acc, x| acc + x, 0)  // 10
-var sorted  = std::sort_with([3,1,2], |a, b| a - b)
 var mapped  = std::array_map(strings, |s| s.str_upper())    // uppercase each
 var checked = std::array_any([1,2,3], |x| x > 2)           // 1 (true)
 var all_pos = std::array_every([1,2,3], |x| x > 0)         // 1 (true)
@@ -3742,7 +3751,7 @@ var found   = std::array_find([10,20,30], |x| x > 15)      // 20
 
 **Rules:**
 - Lambda body is a **single expression** — for multi-statement lambdas, define a named function.
-- Parameters can optionally have type annotations: `|x:int, y:float|`.
+- Parameters can optionally have type annotations: `|x:int, y:float|`. **Note:** Type annotations are parsed and accepted but are silently discarded — the generated `__lambda_N` function has untyped parameters. They serve as documentation only and have no effect on codegen.
 - The body expression can be any valid expression (arithmetic, function calls, ternary, etc.).
 - Lambdas do not capture variables from the enclosing scope (no closures) — they are stateless functions.
 - Because lambdas desugar to top-level functions, they cannot reference local variables defined outside them. Pass all needed values as parameters.
