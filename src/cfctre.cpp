@@ -930,8 +930,13 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         }
         return bw >= 1 && bw <= 256;
     };
-    if (kKnownBuiltins.find(name) == kKnownBuiltins.end() && !isIntWidthCastName(name))
-        return std::nullopt;
+    if (kKnownBuiltins.find(name) == kKnownBuiltins.end() && !isIntWidthCastName(name)) {
+        // Accept __tw_* and __tf_* width/type-specific builtins for comptime eval.
+        const bool isTW = name.size()>5 && name.substr(0,5)=="__tw_";
+        const bool isTF = name.size()>5 && name.substr(0,5)=="__tf_";
+        if (!isTW && !isTF)
+            return std::nullopt;
+    }
 
     const size_t n = args.size();
 
@@ -1834,6 +1839,123 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
             std::memcpy(&d, &bits, 8);
             return CTValue::fromI64(std::isinf(d) ? 1 : 0);
         }
+        return std::nullopt;
+    }
+
+    // ── __tw_<op>_<N> — width-specific integer comptime evaluation ───────────
+    if (name.size() > 5 && name.substr(0,5) == "__tw_") {
+        const std::string suffix = name.substr(5);
+        const auto uscore = suffix.rfind('_');
+        if (uscore == std::string::npos) return std::nullopt;
+        const std::string opname   = suffix.substr(0, uscore);
+        const std::string widthStr = suffix.substr(uscore+1);
+        int bw = 0;
+        for (char c : widthStr) {
+            if (!std::isdigit(static_cast<unsigned char>(c))) return std::nullopt;
+            bw = bw*10+(c-'0');
+        }
+        if (bw<1 || bw>64) return std::nullopt;
+        const uint64_t mask = (bw<64) ? ((1ULL<<bw)-1) : ~0ULL;
+
+        if (opname=="popcount" && n==1) {
+            if (auto v = intArg(0))
+                return CTValue::fromI64(static_cast<int64_t>(__builtin_popcountll(static_cast<uint64_t>(*v) & mask)));
+        }
+        if (opname=="clz" && n==1) {
+            if (auto v = intArg(0)) {
+                uint64_t bits = static_cast<uint64_t>(*v) & mask;
+                int64_t r = bits==0 ? bw : static_cast<int64_t>(__builtin_clzll(bits)-(64-bw));
+                return CTValue::fromI64(r);
+            }
+        }
+        if (opname=="ctz" && n==1) {
+            if (auto v = intArg(0)) {
+                uint64_t bits = static_cast<uint64_t>(*v) & mask;
+                int64_t r = bits==0 ? bw : static_cast<int64_t>(__builtin_ctzll(bits));
+                return CTValue::fromI64(r);
+            }
+        }
+        if (opname=="bitreverse" && n==1) {
+            if (auto v = intArg(0)) {
+                uint64_t bits = static_cast<uint64_t>(*v) & mask;
+                uint64_t rev = 0;
+                for (int i=0;i<bw;++i) rev|=((bits>>i)&1ULL)<<(bw-1-i);
+                return CTValue::fromI64(static_cast<int64_t>(rev));
+            }
+        }
+        if (opname=="bswap" && n==1 && bw>=16 && (bw%8)==0) {
+            if (auto v = intArg(0)) {
+                uint64_t bits = static_cast<uint64_t>(*v) & mask;
+                uint64_t sw = 0; int bytes=bw/8;
+                for (int i=0;i<bytes;++i) sw|=((bits>>(i*8))&0xFF)<<((bytes-1-i)*8);
+                return CTValue::fromI64(static_cast<int64_t>(sw));
+            }
+        }
+        if ((opname=="rotate_left"||opname=="rotl") && n==2) {
+            if (auto v=intArg(0)) if (auto a=intArg(1)) {
+                uint64_t bits=static_cast<uint64_t>(*v)&mask;
+                int amt=static_cast<int>(*a)%bw; if(amt<0) amt+=bw;
+                uint64_t r=(bits<<amt)|(bits>>(bw-amt));
+                return CTValue::fromI64(static_cast<int64_t>(r&mask));
+            }
+        }
+        if ((opname=="rotate_right"||opname=="rotr") && n==2) {
+            if (auto v=intArg(0)) if (auto a=intArg(1)) {
+                uint64_t bits=static_cast<uint64_t>(*v)&mask;
+                int amt=static_cast<int>(*a)%bw; if(amt<0) amt+=bw;
+                uint64_t r=(bits>>amt)|(bits<<(bw-amt));
+                return CTValue::fromI64(static_cast<int64_t>(r&mask));
+            }
+        }
+        if (opname=="saturating_add" && n==2) {
+            if (auto a=intArg(0)) if (auto b=intArg(1)) {
+                using I128=__int128;
+                I128 res=static_cast<I128>(*a)+static_cast<I128>(*b);
+                int64_t lo=-(int64_t(1)<<(bw-1)), hi=(int64_t(1)<<(bw-1))-1;
+                if(res<lo) res=lo; if(res>hi) res=hi;
+                return CTValue::fromI64(static_cast<int64_t>(res));
+            }
+        }
+        if (opname=="saturating_sub" && n==2) {
+            if (auto a=intArg(0)) if (auto b=intArg(1)) {
+                using I128=__int128;
+                I128 res=static_cast<I128>(*a)-static_cast<I128>(*b);
+                int64_t lo=-(int64_t(1)<<(bw-1)), hi=(int64_t(1)<<(bw-1))-1;
+                if(res<lo) res=lo; if(res>hi) res=hi;
+                return CTValue::fromI64(static_cast<int64_t>(res));
+            }
+        }
+        return std::nullopt;
+    }
+
+    // ── __tf_<op> — f32-typed float comptime evaluation ──────────────────────
+    if (name.size() > 5 && name.substr(0,5) == "__tf_") {
+        const std::string opname = name.substr(5);
+        // For comptime eval, just compute with double precision and return.
+        auto dArg = [&](size_t i) -> std::optional<double> {
+            if (i>=n) return std::nullopt;
+            if (auto v = intArg(i)) return static_cast<double>(*v);
+            return std::nullopt;
+        };
+        auto fromD = [](double d) { return CTValue::fromI64(static_cast<int64_t>(d)); };
+        if (opname=="sqrt"  && n==1) { if(auto v=dArg(0)) return fromD(std::sqrt(*v)); }
+        if (opname=="sin"   && n==1) { if(auto v=dArg(0)) return fromD(std::sin(*v)); }
+        if (opname=="cos"   && n==1) { if(auto v=dArg(0)) return fromD(std::cos(*v)); }
+        if (opname=="tan"   && n==1) { if(auto v=dArg(0)) return fromD(std::tan(*v)); }
+        if (opname=="asin"  && n==1) { if(auto v=dArg(0)) return fromD(std::asin(*v)); }
+        if (opname=="acos"  && n==1) { if(auto v=dArg(0)) return fromD(std::acos(*v)); }
+        if (opname=="atan"  && n==1) { if(auto v=dArg(0)) return fromD(std::atan(*v)); }
+        if (opname=="atan2" && n==2) { if(auto a=dArg(0)) if(auto b=dArg(1)) return fromD(std::atan2(*a,*b)); }
+        if (opname=="log"   && n==1) { if(auto v=dArg(0)) return fromD(std::log(*v)); }
+        if (opname=="log2"  && n==1) { if(auto v=dArg(0)) return fromD(std::log2(*v)); }
+        if (opname=="log10" && n==1) { if(auto v=dArg(0)) return fromD(std::log10(*v)); }
+        if (opname=="exp"   && n==1) { if(auto v=dArg(0)) return fromD(std::exp(*v)); }
+        if (opname=="exp2"  && n==1) { if(auto v=dArg(0)) return fromD(std::exp2(*v)); }
+        if (opname=="cbrt"  && n==1) { if(auto v=dArg(0)) return fromD(std::cbrt(*v)); }
+        if (opname=="hypot" && n==2) { if(auto a=dArg(0)) if(auto b=dArg(1)) return fromD(std::hypot(*a,*b)); }
+        if (opname=="fma"   && n==3) { if(auto a=dArg(0)) if(auto b=dArg(1)) if(auto c=dArg(2)) return fromD(std::fma(*a,*b,*c)); }
+        if (opname=="copysign" && n==2) { if(auto a=dArg(0)) if(auto b=dArg(1)) return fromD(std::copysign(*a,*b)); }
+        if (opname=="fast_sqrt" && n==1) { if(auto v=dArg(0)) return fromD(std::sqrt(*v)); }
         return std::nullopt;
     }
 
@@ -2769,7 +2891,10 @@ void CTEngine::runPass(const Program* program) {
         "bool","int","uint"
     };
     // iN/uN type-cast names (for N in [1..256]) are always pure.
+    // Also __tw_* (width-specific integer intrinsics) and __tf_* (f32 intrinsics).
     auto isIntWidthCastNamePure = [](const std::string& nm) -> bool {
+        if (nm.size() > 5 && (nm.substr(0,5)=="__tw_" || nm.substr(0,5)=="__tf_"))
+            return true;
         if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
         int bw = 0;
         for (size_t j = 1; j < nm.size(); ++j) {

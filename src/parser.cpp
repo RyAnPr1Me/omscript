@@ -3161,7 +3161,28 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                             else if (mname=="precise_div") kind="C:precise_div";
                         }
                         // ── Int-only methods ─────────────────────────────────────
+                        // For typed integers (i8/i16/i32/u8/u16/u32), width-specific
+                        // bit ops use kind "W:op" which generates __tw_<op>_<width>
+                        // so codegen emits the narrower LLVM intrinsic directly.
+                        // For generic int/i64/u64 the plain "C:op" path is used.
                         if (isInt && kind.empty()) {
+                            // Parse the declared bit-width from the type name (e.g. 32 from "i32").
+                            // Width 0 means "use generic path".
+                            int declaredWidth = 0;
+                            if (tname.size() >= 2 && (tname[0]=='i'||tname[0]=='u')) {
+                                int w = 0; bool ok = true;
+                                for (size_t j = 1; j < tname.size(); ++j) {
+                                    if (!std::isdigit(static_cast<unsigned char>(tname[j]))) { ok=false; break; }
+                                    w = w*10 + (tname[j]-'0');
+                                }
+                                if (ok && w>=1 && w<=64 && w!=64) declaredWidth = w;
+                            }
+                            // Helpers: use width-specific path only when a sub-64-bit width is known.
+                            auto widthKind = [&](const char* op) -> std::string {
+                                if (declaredWidth > 0)
+                                    return std::string("W:") + op;
+                                return std::string("C:") + op;
+                            };
                             if      (mname=="mod")              kind="B:%";
                             else if (mname=="sign")             kind="C:sign";
                             else if (mname=="is_even")          kind="C:is_even";
@@ -3173,18 +3194,18 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                             else if (mname=="bitnot")           kind="U:~";
                             else if (mname=="shl")              kind="B:<<";
                             else if (mname=="shr")              kind="B:>>";
-                            // Bit-counting hardware intrinsics
-                            else if (mname=="popcount")         kind="C:popcount";
-                            else if (mname=="clz")              kind="C:clz";
-                            else if (mname=="ctz")              kind="C:ctz";
-                            else if (mname=="bitreverse")       kind="C:bitreverse";
-                            else if (mname=="bswap")            kind="C:bswap";
-                            // Bit rotation
-                            else if (mname=="rotl"  || mname=="rotate_left")  kind="C:rotate_left";
-                            else if (mname=="rotr"  || mname=="rotate_right") kind="C:rotate_right";
-                            // Overflow-safe arithmetic
-                            else if (mname=="saturating_add")   kind="C:saturating_add";
-                            else if (mname=="saturating_sub")   kind="C:saturating_sub";
+                            // Bit-counting: emit width-specific LLVM intrinsic for iN types
+                            else if (mname=="popcount")         kind=widthKind("popcount");
+                            else if (mname=="clz")              kind=widthKind("clz");
+                            else if (mname=="ctz")              kind=widthKind("ctz");
+                            else if (mname=="bitreverse")       kind=widthKind("bitreverse");
+                            else if (mname=="bswap")            kind=widthKind("bswap");
+                            // Bit rotation (width-specific avoids masking to 63)
+                            else if (mname=="rotl"  || mname=="rotate_left")  kind=widthKind("rotate_left");
+                            else if (mname=="rotr"  || mname=="rotate_right") kind=widthKind("rotate_right");
+                            // Overflow-safe arithmetic (width-specific uses iN sat intrinsics)
+                            else if (mname=="saturating_add")   kind=widthKind("saturating_add");
+                            else if (mname=="saturating_sub")   kind=widthKind("saturating_sub");
                             // Number-theory helpers
                             else if (mname=="is_power_of_2")    kind="C:is_power_of_2";
                             else if (mname=="gcd")              kind="C:gcd";
@@ -3196,35 +3217,46 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                             else if (mname=="mulhi")            kind="C:mulhi";
                             else if (mname=="mulhi_u")          kind="C:mulhi_u";
                             else if (mname=="absdiff")          kind="C:absdiff";
+                            // Store width in kind for W: dispatch.
+                            if (kind.size()>=2 && kind[0]=='W' && declaredWidth>0)
+                                kind += ":" + std::to_string(declaredWidth);
                         }
                         // ── Float-only methods ───────────────────────────────────
+                        // For f32, use kind "F:op" to emit 32-bit LLVM intrinsics,
+                        // avoiding f32↔f64 conversions entirely.
                         if (isFloat && kind.empty()) {
-                            if      (mname=="sqrt")             kind="C:sqrt";
+                            const bool isF32 = (tname == "f32" || tname == "float32");
+                            auto floatKind = [&](const char* op) -> std::string {
+                                return isF32
+                                    ? std::string("F:") + op
+                                    : std::string("C:") + op;
+                            };
+                            if      (mname=="sqrt")             kind=floatKind("sqrt");
                             else if (mname=="floor")            kind="C:floor";
                             else if (mname=="ceil")             kind="C:ceil";
                             else if (mname=="round")            kind="C:round";
                             else if (mname=="to_int")           kind="C:to_int";
-                            // Trigonometry
-                            else if (mname=="sin")              kind="C:sin";
-                            else if (mname=="cos")              kind="C:cos";
-                            else if (mname=="tan")              kind="C:tan";
-                            else if (mname=="asin")             kind="C:asin";
-                            else if (mname=="acos")             kind="C:acos";
-                            else if (mname=="atan")             kind="C:atan";
-                            else if (mname=="atan2")            kind="C:atan2";
+                            // Trigonometry (f32 uses 32-bit LLVM intrinsics)
+                            else if (mname=="sin")              kind=floatKind("sin");
+                            else if (mname=="cos")              kind=floatKind("cos");
+                            else if (mname=="tan")              kind=floatKind("tan");
+                            else if (mname=="asin")             kind=floatKind("asin");
+                            else if (mname=="acos")             kind=floatKind("acos");
+                            else if (mname=="atan")             kind=floatKind("atan");
+                            else if (mname=="atan2")            kind=floatKind("atan2");
                             // Transcendentals
-                            else if (mname=="log")              kind="C:log";
-                            else if (mname=="log2")             kind="C:log2";
-                            else if (mname=="log10")            kind="C:log10";
-                            else if (mname=="exp")              kind="C:exp";
-                            else if (mname=="exp2")             kind="C:exp2";
-                            else if (mname=="cbrt")             kind="C:cbrt";
+                            else if (mname=="log")              kind=floatKind("log");
+                            else if (mname=="log2")             kind=floatKind("log2");
+                            else if (mname=="log10")            kind=floatKind("log10");
+                            else if (mname=="exp")              kind=floatKind("exp");
+                            else if (mname=="exp2")             kind=floatKind("exp2");
+                            else if (mname=="cbrt")             kind=floatKind("cbrt");
                             // Multi-arg float ops
-                            else if (mname=="hypot")            kind="C:hypot";
-                            else if (mname=="fma")              kind="C:fma";
-                            else if (mname=="copysign")         kind="C:copysign";
+                            else if (mname=="hypot")            kind=floatKind("hypot");
+                            else if (mname=="fma")              kind=floatKind("fma");
+                            else if (mname=="copysign")         kind=floatKind("copysign");
                             // Fast/approximate float intrinsics
-                            else if (mname=="fast_sqrt")        kind="C:fast_sqrt";
+                            else if (mname=="fast_sqrt")        kind=floatKind("fast_sqrt");
                             // Predicates
                             else if (mname=="is_nan")           kind="C:is_nan";
                             else if (mname=="is_inf")           kind="C:is_inf";
@@ -3320,7 +3352,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                             consume(TokenType::RPAREN,
                                     "Expected ')' after '" + tname + "::" + mname + "' arguments");
 
-                            const char   kp  = kind[0];       // 'B', 'U', or 'C'
+                            const char   kp  = kind[0];       // 'B', 'U', 'C', 'W', or 'F'
                             const std::string  val = kind.substr(2); // op / function name
 
                             if (kp == 'B') {
@@ -3338,6 +3370,28 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                                           "' requires exactly 1 argument");
                                 auto e = std::make_unique<UnaryExpr>(
                                     val, std::move(args[0]));
+                                e->line = token.line; e->column = token.column;
+                                return e;
+                            }
+                            // kp == 'W': width-typed integer intrinsic.
+                            // val = "popcount:32"  →  callee "__tw_popcount_32"
+                            if (kp == 'W') {
+                                const auto colon = val.find(':');
+                                const std::string opName = (colon != std::string::npos)
+                                    ? val.substr(0, colon) : val;
+                                const std::string widthStr = (colon != std::string::npos)
+                                    ? val.substr(colon + 1) : "";
+                                const std::string callee = "__tw_" + opName +
+                                    (widthStr.empty() ? "" : "_" + widthStr);
+                                auto e = std::make_unique<CallExpr>(callee, std::move(args));
+                                e->line = token.line; e->column = token.column;
+                                return e;
+                            }
+                            // kp == 'F': f32-typed float intrinsic.
+                            // val = "sin"  →  callee "__tf_sin"
+                            if (kp == 'F') {
+                                const std::string callee = "__tf_" + val;
+                                auto e = std::make_unique<CallExpr>(callee, std::move(args));
                                 e->line = token.line; e->column = token.column;
                                 return e;
                             }
