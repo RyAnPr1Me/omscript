@@ -915,7 +915,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         // int/uint/bool: type casts handled by evalTypeCast; iN/uN handled dynamically
         "int","uint","bool",
         // Program synthesis stdlib function (flat-name form of std::synthesize)
-        "std__synthesize","std_synthesize"
+        "std__synthesize","std_synthesize",
+        // Type-specific fast builtins
+        "mulhi","mulhi_u","absdiff","fast_sqrt","is_nan","is_inf"
     };
     // Also accept iN/uN type-cast names (handled by evalTypeCast via evalCall).
     auto isIntWidthCastName = [](const std::string& nm) -> bool {
@@ -1768,6 +1770,71 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         auto result = eng.synthesize(static_cast<int>(nInputs), examples, cfg);
         if (!result) return std::nullopt;
         return CTValue::fromI64(result->firstOutput);
+    }
+
+    // ── mulhi(a, b) — signed high 64 bits of 128-bit product ─────────────────
+    if (name == "mulhi" && n == 2) {
+        if (auto a = intArg(0))
+            if (auto b = intArg(1)) {
+                using I128 = __int128;
+                I128 product = static_cast<I128>(*a) * static_cast<I128>(*b);
+                return CTValue::fromI64(static_cast<int64_t>(product >> 64));
+            }
+        return std::nullopt;
+    }
+
+    // ── mulhi_u(a, b) — unsigned high 64 bits of 128-bit product ─────────────
+    if (name == "mulhi_u" && n == 2) {
+        if (auto a = intArg(0))
+            if (auto b = intArg(1)) {
+                using U128 = unsigned __int128;
+                U128 product = static_cast<U128>(static_cast<uint64_t>(*a))
+                             * static_cast<U128>(static_cast<uint64_t>(*b));
+                return CTValue::fromI64(static_cast<int64_t>(
+                    static_cast<uint64_t>(product >> 64)));
+            }
+        return std::nullopt;
+    }
+
+    // ── absdiff(a, b) — |a - b| without overflow ─────────────────────────────
+    if (name == "absdiff" && n == 2) {
+        if (auto a = intArg(0))
+            if (auto b = intArg(1)) {
+                using I128 = __int128;
+                I128 diff = static_cast<I128>(*a) - static_cast<I128>(*b);
+                if (diff < 0) diff = -diff;
+                return CTValue::fromI64(static_cast<int64_t>(diff));
+            }
+        return std::nullopt;
+    }
+
+    // ── fast_sqrt(x) — sqrt with fast-math (comptime: exact sqrt) ────────────
+    if (name == "fast_sqrt" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::sqrt(static_cast<double>(*v))));
+        return std::nullopt;
+    }
+
+    // ── is_nan(x) — 1 if x reinterpreted as f64 is NaN ───────────────────────
+    if (name == "is_nan" && n == 1) {
+        if (auto v = intArg(0)) {
+            double d;
+            uint64_t bits = static_cast<uint64_t>(*v);
+            std::memcpy(&d, &bits, 8);
+            return CTValue::fromI64(std::isnan(d) ? 1 : 0);
+        }
+        return std::nullopt;
+    }
+
+    // ── is_inf(x) — 1 if x reinterpreted as f64 is ±Inf ─────────────────────
+    if (name == "is_inf" && n == 1) {
+        if (auto v = intArg(0)) {
+            double d;
+            uint64_t bits = static_cast<uint64_t>(*v);
+            std::memcpy(&d, &bits, 8);
+            return CTValue::fromI64(std::isinf(d) ? 1 : 0);
+        }
+        return std::nullopt;
     }
 
     return std::nullopt;

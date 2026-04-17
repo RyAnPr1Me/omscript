@@ -181,6 +181,13 @@ void Parser::registerStdNamespace() {
         // Resolves to the internal name "std__synthesize" so that the CF-CTRE
         // builtin evaluator and the synthesis pre-codegen pass can identify it.
         {"synthesize", "std__synthesize"},
+        // ── Type-specific fast builtins ───────────────────────────────────────
+        {"mulhi",      "mulhi"},
+        {"mulhi_u",    "mulhi_u"},
+        {"absdiff",    "absdiff"},
+        {"fast_sqrt",  "fast_sqrt"},
+        {"is_nan",     "is_nan"},
+        {"is_inf",     "is_inf"},
     };
 
     auto& stdNS = importNamespaces_["std"];
@@ -3142,62 +3149,156 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                             else if (mname=="gt")        kind="B:>";
                             else if (mname=="ge")        kind="B:>=";
                             else if (mname=="to_string") kind="C:to_string";
+                            // Fast-math arithmetic (float-biased, reassoc/nnan)
+                            else if (mname=="fast_add")  kind="C:fast_add";
+                            else if (mname=="fast_sub")  kind="C:fast_sub";
+                            else if (mname=="fast_mul")  kind="C:fast_mul";
+                            else if (mname=="fast_div")  kind="C:fast_div";
+                            // Precise/strict IEEE arithmetic
+                            else if (mname=="precise_add") kind="C:precise_add";
+                            else if (mname=="precise_sub") kind="C:precise_sub";
+                            else if (mname=="precise_mul") kind="C:precise_mul";
+                            else if (mname=="precise_div") kind="C:precise_div";
                         }
                         // ── Int-only methods ─────────────────────────────────────
                         if (isInt && kind.empty()) {
-                            if      (mname=="mod")       kind="B:%";
-                            else if (mname=="sign")      kind="C:sign";
-                            else if (mname=="is_even")   kind="C:is_even";
-                            else if (mname=="is_odd")    kind="C:is_odd";
-                            else if (mname=="to_float")  kind="C:to_float";
-                            else if (mname=="bitand")    kind="B:&";
-                            else if (mname=="bitor")     kind="B:|";
-                            else if (mname=="bitxor")    kind="B:^";
-                            else if (mname=="bitnot")    kind="U:~";
-                            else if (mname=="shl")       kind="B:<<";
-                            else if (mname=="shr")       kind="B:>>";
+                            if      (mname=="mod")              kind="B:%";
+                            else if (mname=="sign")             kind="C:sign";
+                            else if (mname=="is_even")          kind="C:is_even";
+                            else if (mname=="is_odd")           kind="C:is_odd";
+                            else if (mname=="to_float")         kind="C:to_float";
+                            else if (mname=="bitand")           kind="B:&";
+                            else if (mname=="bitor")            kind="B:|";
+                            else if (mname=="bitxor")           kind="B:^";
+                            else if (mname=="bitnot")           kind="U:~";
+                            else if (mname=="shl")              kind="B:<<";
+                            else if (mname=="shr")              kind="B:>>";
+                            // Bit-counting hardware intrinsics
+                            else if (mname=="popcount")         kind="C:popcount";
+                            else if (mname=="clz")              kind="C:clz";
+                            else if (mname=="ctz")              kind="C:ctz";
+                            else if (mname=="bitreverse")       kind="C:bitreverse";
+                            else if (mname=="bswap")            kind="C:bswap";
+                            // Bit rotation
+                            else if (mname=="rotl"  || mname=="rotate_left")  kind="C:rotate_left";
+                            else if (mname=="rotr"  || mname=="rotate_right") kind="C:rotate_right";
+                            // Overflow-safe arithmetic
+                            else if (mname=="saturating_add")   kind="C:saturating_add";
+                            else if (mname=="saturating_sub")   kind="C:saturating_sub";
+                            // Number-theory helpers
+                            else if (mname=="is_power_of_2")    kind="C:is_power_of_2";
+                            else if (mname=="gcd")              kind="C:gcd";
+                            else if (mname=="lcm")              kind="C:lcm";
+                            // Conversions
+                            else if (mname=="to_char")          kind="C:to_char";
+                            else if (mname=="char_code")        kind="C:char_code";
+                            // High-performance integer arithmetic
+                            else if (mname=="mulhi")            kind="C:mulhi";
+                            else if (mname=="mulhi_u")          kind="C:mulhi_u";
+                            else if (mname=="absdiff")          kind="C:absdiff";
                         }
                         // ── Float-only methods ───────────────────────────────────
                         if (isFloat && kind.empty()) {
-                            if      (mname=="sqrt")      kind="C:sqrt";
-                            else if (mname=="floor")     kind="C:floor";
-                            else if (mname=="ceil")      kind="C:ceil";
-                            else if (mname=="round")     kind="C:round";
-                            else if (mname=="to_int")    kind="C:to_int";
+                            if      (mname=="sqrt")             kind="C:sqrt";
+                            else if (mname=="floor")            kind="C:floor";
+                            else if (mname=="ceil")             kind="C:ceil";
+                            else if (mname=="round")            kind="C:round";
+                            else if (mname=="to_int")           kind="C:to_int";
+                            // Trigonometry
+                            else if (mname=="sin")              kind="C:sin";
+                            else if (mname=="cos")              kind="C:cos";
+                            else if (mname=="tan")              kind="C:tan";
+                            else if (mname=="asin")             kind="C:asin";
+                            else if (mname=="acos")             kind="C:acos";
+                            else if (mname=="atan")             kind="C:atan";
+                            else if (mname=="atan2")            kind="C:atan2";
+                            // Transcendentals
+                            else if (mname=="log")              kind="C:log";
+                            else if (mname=="log2")             kind="C:log2";
+                            else if (mname=="log10")            kind="C:log10";
+                            else if (mname=="exp")              kind="C:exp";
+                            else if (mname=="exp2")             kind="C:exp2";
+                            else if (mname=="cbrt")             kind="C:cbrt";
+                            // Multi-arg float ops
+                            else if (mname=="hypot")            kind="C:hypot";
+                            else if (mname=="fma")              kind="C:fma";
+                            else if (mname=="copysign")         kind="C:copysign";
+                            // Fast/approximate float intrinsics
+                            else if (mname=="fast_sqrt")        kind="C:fast_sqrt";
+                            // Predicates
+                            else if (mname=="is_nan")           kind="C:is_nan";
+                            else if (mname=="is_inf")           kind="C:is_inf";
+                            else if (mname=="min_float")        kind="C:min_float";
+                            else if (mname=="max_float")        kind="C:max_float";
                         }
                         // ── String methods ───────────────────────────────────────
                         if (isStr) {
-                            if      (mname=="len")          kind="C:len";
-                            else if (mname=="concat")       kind="B:+";
-                            else if (mname=="eq")           kind="C:str_eq";
-                            else if (mname=="contains")     kind="C:str_contains";
-                            else if (mname=="starts_with")  kind="C:str_starts_with";
-                            else if (mname=="ends_with")    kind="C:str_ends_with";
-                            else if (mname=="index_of")     kind="C:str_index_of";
-                            else if (mname=="replace")      kind="C:str_replace";
-                            else if (mname=="repeat")       kind="C:str_repeat";
-                            else if (mname=="char_at")      kind="C:char_at";
-                            else if (mname=="to_upper")     kind="C:to_upper";
-                            else if (mname=="to_lower")     kind="C:to_lower";
-                            else if (mname=="trim")         kind="C:str_trim";
-                            else if (mname=="split")        kind="C:str_split";
-                            else if (mname=="to_int")       kind="C:to_int";
-                            else if (mname=="to_float")     kind="C:to_float";
-                            else if (mname=="is_alpha")     kind="C:is_alpha";
-                            else if (mname=="is_digit")     kind="C:is_digit";
-                            else if (mname=="to_string")    kind="C:to_string";
+                            if      (mname=="len")              kind="C:len";
+                            else if (mname=="concat")           kind="B:+";
+                            else if (mname=="eq")               kind="C:str_eq";
+                            else if (mname=="contains")         kind="C:str_contains";
+                            else if (mname=="starts_with")      kind="C:str_starts_with";
+                            else if (mname=="ends_with")        kind="C:str_ends_with";
+                            else if (mname=="index_of")         kind="C:str_index_of";
+                            else if (mname=="replace")          kind="C:str_replace";
+                            else if (mname=="repeat")           kind="C:str_repeat";
+                            else if (mname=="char_at")          kind="C:char_at";
+                            else if (mname=="to_upper"||mname=="upper") kind="C:str_upper";
+                            else if (mname=="to_lower"||mname=="lower") kind="C:str_lower";
+                            else if (mname=="trim")             kind="C:str_trim";
+                            else if (mname=="lstrip")           kind="C:str_lstrip";
+                            else if (mname=="rstrip")           kind="C:str_rstrip";
+                            else if (mname=="split")            kind="C:str_split";
+                            else if (mname=="substr")           kind="C:str_substr";
+                            else if (mname=="reverse")          kind="C:str_reverse";
+                            else if (mname=="pad_left")         kind="C:str_pad_left";
+                            else if (mname=="pad_right")        kind="C:str_pad_right";
+                            else if (mname=="count")            kind="C:str_count";
+                            else if (mname=="find")             kind="C:str_find";
+                            else if (mname=="format")           kind="C:str_format";
+                            else if (mname=="chars")            kind="C:str_chars";
+                            else if (mname=="remove")           kind="C:str_remove";
+                            else if (mname=="join")             kind="C:str_join";
+                            else if (mname=="to_int")           kind="C:to_int";
+                            else if (mname=="to_float")         kind="C:to_float";
+                            else if (mname=="is_alpha")         kind="C:is_alpha";
+                            else if (mname=="is_digit")         kind="C:is_digit";
+                            else if (mname=="to_string")        kind="C:to_string";
+                            else if (mname=="filter")           kind="C:str_filter";
                         }
                         // ── Array methods ────────────────────────────────────────
                         if (isArr) {
-                            if      (mname=="len")          kind="C:len";
-                            else if (mname=="fill")         kind="C:array_fill";
-                            else if (mname=="contains")     kind="C:array_contains";
-                            else if (mname=="pop")          kind="C:pop";
-                            else if (mname=="push")         kind="C:push";
-                            else if (mname=="remove")       kind="C:array_remove";
-                            else if (mname=="sort")         kind="C:sort";
-                            else if (mname=="min")          kind="C:array_min";
-                            else if (mname=="max")          kind="C:array_max";
+                            if      (mname=="len")              kind="C:len";
+                            else if (mname=="fill")             kind="C:array_fill";
+                            else if (mname=="contains")         kind="C:array_contains";
+                            else if (mname=="pop")              kind="C:pop";
+                            else if (mname=="push")             kind="C:push";
+                            else if (mname=="remove")           kind="C:array_remove";
+                            else if (mname=="sort")             kind="C:sort";
+                            else if (mname=="min")              kind="C:array_min";
+                            else if (mname=="max")              kind="C:array_max";
+                            else if (mname=="sum")              kind="C:sum";
+                            else if (mname=="product")          kind="C:array_product";
+                            else if (mname=="mean")             kind="C:array_mean";
+                            else if (mname=="reverse")          kind="C:reverse";
+                            else if (mname=="index_of")         kind="C:index_of";
+                            else if (mname=="last")             kind="C:array_last";
+                            else if (mname=="unique")           kind="C:array_unique";
+                            else if (mname=="zip")              kind="C:array_zip";
+                            else if (mname=="filter")           kind="C:array_filter";
+                            else if (mname=="map")              kind="C:array_map";
+                            else if (mname=="reduce")           kind="C:array_reduce";
+                            else if (mname=="any")              kind="C:array_any";
+                            else if (mname=="every")            kind="C:array_every";
+                            else if (mname=="count")            kind="C:array_count";
+                            else if (mname=="take")             kind="C:array_take";
+                            else if (mname=="drop")             kind="C:array_drop";
+                            else if (mname=="rotate")           kind="C:array_rotate";
+                            else if (mname=="insert")           kind="C:array_insert";
+                            else if (mname=="find")             kind="C:array_find";
+                            else if (mname=="concat")           kind="C:array_concat";
+                            else if (mname=="slice")            kind="C:array_slice";
+                            else if (mname=="copy")             kind="C:array_copy";
                         }
                         // ── Bool methods ─────────────────────────────────────────
                         if (isBool) {

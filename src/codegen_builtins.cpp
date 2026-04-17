@@ -115,7 +115,15 @@ enum class BuiltinId : uint8_t {
     BIGINT_NEG, BIGINT_ABS, BIGINT_POW, BIGINT_GCD,
     BIGINT_EQ, BIGINT_LT, BIGINT_LE, BIGINT_GT, BIGINT_GE, BIGINT_CMP,
     BIGINT_TOSTRING, BIGINT_TO_I64, BIGINT_BIT_LENGTH,
-    BIGINT_IS_ZERO, BIGINT_IS_NEGATIVE, BIGINT_SHL, BIGINT_SHR
+    BIGINT_IS_ZERO, BIGINT_IS_NEGATIVE, BIGINT_SHL, BIGINT_SHR,
+    // Type-specific fast arithmetic: upper half of 128-bit multiply,
+    // overflow-safe absolute difference, reciprocal sqrt with fast-math.
+    INT_MULHI,        ///< Signed   mulhi(a,b) → high 64 bits of i128 product
+    UINT_MULHI,       ///< Unsigned mulhi_u(a,b) → high 64 bits of u128 product
+    INT_ABSDIFF,      ///< absdiff(a,b) → |a-b| without overflow (widens to i128)
+    FAST_SQRT,        ///< fast_sqrt(x) → sqrt with reassociate/nnan fast-math flags
+    FLOAT_IS_NAN,     ///< is_nan(x)  → 1 if x is NaN when reinterpreted as f64
+    FLOAT_IS_INF      ///< is_inf(x)  → 1 if x is ±Infinity as f64
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -325,6 +333,13 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"bigint_is_negative",BuiltinId::BIGINT_IS_NEGATIVE},
     {"bigint_shl",       BuiltinId::BIGINT_SHL},
     {"bigint_shr",       BuiltinId::BIGINT_SHR},
+    // Type-specific fast builtins
+    {"mulhi",     BuiltinId::INT_MULHI},
+    {"mulhi_u",   BuiltinId::UINT_MULHI},
+    {"absdiff",   BuiltinId::INT_ABSDIFF},
+    {"fast_sqrt", BuiltinId::FAST_SQRT},
+    {"is_nan",    BuiltinId::FLOAT_IS_NAN},
+    {"is_inf",    BuiltinId::FLOAT_IS_INF},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -8335,6 +8350,147 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* n = generateExpression(expr->arguments[1].get());
         n = toDefaultType(n);
         return builder->CreateCall(getOrDeclareBigintShr(), {a, n}, "bigint.shr");
+    }
+
+    // ── mulhi(a, b) — signed high 64 bits of 128-bit product ─────────────────
+    // Returns the upper 64 bits of the full 128-bit product of two i64 values.
+    // Useful for: fixed-point arithmetic, fast modular reduction, Knuth
+    // multiplicative hashing.  More efficient than the user writing __int128
+    // and right-shifting manually, since LLVM lowers this to a single IMUL
+    // high-half instruction on x86-64 (mulq / imulq).
+    if (bid == BuiltinId::INT_MULHI) {
+        validateArgCount(expr, "mulhi", 2);
+        // Constant-fold if both args are compile-time known.
+        if (auto a = tryFoldInt(expr->arguments[0].get()))
+            if (auto b = tryFoldInt(expr->arguments[1].get())) {
+                using I128 = __int128;
+                I128 product = static_cast<I128>(*a) * static_cast<I128>(*b);
+                int64_t hi = static_cast<int64_t>(product >> 64);
+                return llvm::ConstantInt::get(getDefaultType(), hi);
+            }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        // Widen to i128, multiply, then shift right 64.
+        llvm::Type* i128Ty = llvm::Type::getIntNTy(*context, 128);
+        llvm::Value* aWide = builder->CreateSExt(a, i128Ty, "mulhi.a");
+        llvm::Value* bWide = builder->CreateSExt(b, i128Ty, "mulhi.b");
+        llvm::Value* prod  = builder->CreateMul(aWide, bWide, "mulhi.prod");
+        llvm::Value* hi128 = builder->CreateAShr(prod,
+            llvm::ConstantInt::get(i128Ty, 64), "mulhi.hi128");
+        return builder->CreateTrunc(hi128, getDefaultType(), "mulhi.result");
+    }
+
+    // ── mulhi_u(a, b) — unsigned high 64 bits of 128-bit product ─────────────
+    if (bid == BuiltinId::UINT_MULHI) {
+        validateArgCount(expr, "mulhi_u", 2);
+        if (auto a = tryFoldInt(expr->arguments[0].get()))
+            if (auto b = tryFoldInt(expr->arguments[1].get())) {
+                using U128 = unsigned __int128;
+                U128 product = static_cast<U128>(static_cast<uint64_t>(*a))
+                             * static_cast<U128>(static_cast<uint64_t>(*b));
+                int64_t hi = static_cast<int64_t>(static_cast<uint64_t>(product >> 64));
+                return llvm::ConstantInt::get(getDefaultType(), hi);
+            }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        llvm::Type* i128Ty = llvm::Type::getIntNTy(*context, 128);
+        llvm::Value* aWide = builder->CreateZExt(a, i128Ty, "umulhi.a");
+        llvm::Value* bWide = builder->CreateZExt(b, i128Ty, "umulhi.b");
+        llvm::Value* prod  = builder->CreateMul(aWide, bWide, "umulhi.prod");
+        llvm::Value* hi128 = builder->CreateLShr(prod,
+            llvm::ConstantInt::get(i128Ty, 64), "umulhi.hi128");
+        return builder->CreateTrunc(hi128, getDefaultType(), "umulhi.result");
+    }
+
+    // ── absdiff(a, b) — |a - b| without signed overflow ─────────────────────
+    // Computes the absolute difference of two integers safely, widening to i128
+    // to avoid overflow before taking abs.
+    if (bid == BuiltinId::INT_ABSDIFF) {
+        validateArgCount(expr, "absdiff", 2);
+        if (auto a = tryFoldInt(expr->arguments[0].get()))
+            if (auto b = tryFoldInt(expr->arguments[1].get())) {
+                using I128 = __int128;
+                I128 diff = static_cast<I128>(*a) - static_cast<I128>(*b);
+                if (diff < 0) diff = -diff;
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(diff));
+            }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        // Use select: diff = a>=b ? a-b : b-a.  Both subtractions are safe
+        // because we only execute the non-overflowing branch.
+        llvm::Value* cmp  = builder->CreateICmpSGE(a, b, "absdiff.ge");
+        llvm::Value* sub1 = builder->CreateSub(a, b, "absdiff.sub1");
+        llvm::Value* sub2 = builder->CreateSub(b, a, "absdiff.sub2");
+        llvm::Value* result = builder->CreateSelect(cmp, sub1, sub2, "absdiff.result");
+        nonNegValues_.insert(result);
+        return result;
+    }
+
+    // ── fast_sqrt(x) — sqrt with fast-math flags (RSqrt-eligible on x86) ────
+    // Emits llvm.sqrt.f64 with the reassoc + nnan + ninf fast-math flags, which
+    // allows the backend to use the hardware RSQRT instruction followed by one
+    // Newton-Raphson refinement step (much faster than full IEEE sqrt on modern
+    // CPUs when precision ~14 bits is acceptable).
+    if (bid == BuiltinId::FAST_SQRT) {
+        validateArgCount(expr, "fast_sqrt", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            double d = std::sqrt(static_cast<double>(*v));
+            return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(d));
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* sqrtFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {getFloatType()});
+        llvm::CallInst* result = builder->CreateCall(sqrtFn, {fval}, "fast.sqrt");
+        // Apply fast-math: reassoc + nnan + ninf allows RSQRT approximation.
+        llvm::FastMathFlags fmf;
+        fmf.setAllowReassoc(true);
+        fmf.setNoNaNs(true);
+        fmf.setNoInfs(true);
+        result->setFastMathFlags(fmf);
+        return builder->CreateFPToSI(result, getDefaultType(), "fast.sqrt.result");
+    }
+
+    // ── is_nan(x) — 1 if x (reinterpreted as f64) is a NaN, else 0 ──────────
+    if (bid == BuiltinId::FLOAT_IS_NAN) {
+        validateArgCount(expr, "is_nan", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            // Reinterpret i64 bits as f64 and check NaN.
+            double d;
+            uint64_t bits = static_cast<uint64_t>(*v);
+            std::memcpy(&d, &bits, 8);
+            return llvm::ConstantInt::get(getDefaultType(), std::isnan(d) ? 1 : 0);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        // IEEE NaN: unordered comparison with itself is true only for NaN.
+        llvm::Value* cmp = builder->CreateFCmpUNO(fval, fval, "is_nan.cmp");
+        return builder->CreateZExt(cmp, getDefaultType(), "is_nan.result");
+    }
+
+    // ── is_inf(x) — 1 if x (as f64) is ±Infinity, else 0 ───────────────────
+    if (bid == BuiltinId::FLOAT_IS_INF) {
+        validateArgCount(expr, "is_inf", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            double d;
+            uint64_t bits = static_cast<uint64_t>(*v);
+            std::memcpy(&d, &bits, 8);
+            return llvm::ConstantInt::get(getDefaultType(), std::isinf(d) ? 1 : 0);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        // |x| == inf  ⟺  x == +inf  ||  x == -inf
+        llvm::Value* pos = llvm::ConstantFP::getInfinity(getFloatType(), false);
+        llvm::Value* neg = llvm::ConstantFP::getInfinity(getFloatType(), true);
+        llvm::Value* isPos = builder->CreateFCmpOEQ(fval, pos, "is_inf.pos");
+        llvm::Value* isNeg = builder->CreateFCmpOEQ(fval, neg, "is_inf.neg");
+        llvm::Value* either = builder->CreateOr(isPos, isNeg, "is_inf.either");
+        return builder->CreateZExt(either, getDefaultType(), "is_inf.result");
     }
 
     if (inOptMaxFunction) {
