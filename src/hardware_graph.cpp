@@ -1491,10 +1491,15 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         return 0;
 
     // ── Type conversions ────────────────────────────────────────────────────
+    // ZExt/SExt/Trunc latency: on x86-64 and AArch64, narrowing truncations
+    // and zero-extensions between integer widths are typically implemented
+    // as MOV with register-renaming (zero latency for ABI-safe cases) or a
+    // single ALU cycle.  We model them as 1-cycle operations (not full ALU
+    // pipeline latency) because they never stall the issue slot.
     case llvm::Instruction::Trunc:
     case llvm::Instruction::ZExt:
     case llvm::Instruction::SExt:
-        return profile.latIntAdd; // requires ALU
+        return 1u; // single-cycle move / rename, cheaper than latIntAdd (may be 3)
     case llvm::Instruction::FPToUI:
     case llvm::Instruction::FPToSI:
     case llvm::Instruction::UIToFP:
@@ -1905,6 +1910,21 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
 static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& profile) {
     unsigned count = 0;
 
+    // Compute a latency-driven prefetch distance.  To hide a full memory-
+    // level miss (L3 → DRAM), we need to prefetch far enough ahead so the
+    // hardware fetch completes before the data is needed.  A rough model:
+    //
+    //   prefetch_distance_bytes = (L3_latency_cycles / 2) * cache_line_size
+    //
+    // The /2 accounts for a typical loop throughput of ≈0.5 iterations/cycle
+    // (a conservative assumption that avoids over-prefetching on fast loops).
+    // We clamp to [2, 64] cache lines so we never insert a useless prefetch
+    // for a tiny latency or an enormous one that thrashes the cache.
+    unsigned prefetchLines = (profile.l3Latency > 0)
+        ? std::max(2u, std::min(64u, profile.l3Latency / (2 * profile.pipelineDepth + 1)))
+        : 8u;
+    unsigned prefetchBytes = prefetchLines * profile.cacheLineSize;
+
     for (auto& bb : func) {
         // Look for basic blocks that are likely loop bodies (have a backedge).
         auto* term = bb.getTerminator();
@@ -1929,18 +1949,47 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
             }
         }
 
-        // Insert prefetch for each load (prefetch the next cache line).
+        // Cap prefetches per function to avoid significant instruction-count
+        // overhead (each prefetch is a call-like instruction).
         for (auto* load : loads) {
-            if (count >= 4) break; // Limit prefetches to avoid overhead
+            if (count >= 8) break;
+
+            llvm::Value* ptr = load->getPointerOperand();
+            llvm::Type* ptrTy = ptr->getType();
+
+            // Determine the prefetch offset.
+            // If the pointer is a GEP with a constant stride, prefetch
+            // strideBytes * prefetchLines ahead.  This is more accurate than
+            // always using the element-agnostic prefetchBytes heuristic.
+            unsigned offsetBytes = prefetchBytes;
+            if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+                // Single-index GEP: stride is the element type's byte size.
+                if (gep->getNumIndices() == 1) {
+                    llvm::Type* elemTy = gep->getSourceElementType();
+                    const llvm::DataLayout* dl = nullptr;
+                    if (auto* mod = func.getParent())
+                        dl = &mod->getDataLayout();
+                    if (dl && elemTy->isSized()) {
+                        uint64_t elemBytes = dl->getTypeAllocSize(elemTy);
+                        if (elemBytes > 0 && elemBytes <= 32) {
+                            // prefetch_offset = prefetchLines cache lines
+                            // expressed in element units.
+                            unsigned elemLinesPerPrefetch =
+                                (prefetchLines * profile.cacheLineSize
+                                 + static_cast<unsigned>(elemBytes) - 1)
+                                / static_cast<unsigned>(elemBytes);
+                            offsetBytes = elemLinesPerPrefetch
+                                          * static_cast<unsigned>(elemBytes);
+                        }
+                    }
+                }
+            }
 
             llvm::IRBuilder<> builder(load);
             llvm::Module* mod = func.getParent();
 
-            // Compute address + cache_line_size for prefetch (opaque ptr).
-            llvm::Value* ptr = load->getPointerOperand();
-            llvm::Type* ptrTy = ptr->getType(); // opaque ptr in LLVM 18+
             llvm::Value* offset = llvm::ConstantInt::get(
-                builder.getInt64Ty(), profile.cacheLineSize);
+                builder.getInt64Ty(), offsetBytes);
             llvm::Value* prefetchAddr = builder.CreateGEP(
                 builder.getInt8Ty(), ptr, offset, "prefetch_addr");
 
@@ -1948,11 +1997,13 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
             llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
                 mod, llvm::Intrinsic::prefetch, {ptrTy});
 
-            // Args: ptr, rw (0=read), locality (3=high), cache_type (1=data)
+            // Args: ptr, rw (0=read), locality (2=medium — L2/L3, not L1),
+            // cache_type (1=data).  Use locality=2 so the prefetch warms L2
+            // and L3 without polluting L1 with data that may not be used soon.
             builder.CreateCall(prefetchFn, {
                 prefetchAddr,
                 builder.getInt32(0),  // read
-                builder.getInt32(3),  // high locality
+                builder.getInt32(2),  // medium locality (L2/L3)
                 builder.getInt32(1)   // data cache
             });
             count++;
@@ -1963,11 +2014,23 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
 }
 
 /// Optimise branch layout for the hardware's branch predictor.
-/// Ensures the fall-through path is the most likely one.
+/// Ensures the fall-through path is the most likely one, and annotates
+/// branches with profile weights when the outcome is predictable from
+/// structural information:
+///   • Exit-block detection: successor with ret/unreachable → unlikely
+///   • Null-pointer checks: ICmp(ptr, null) → null is rare → non-null path hot
+///   • Loop-closing back-edges: the latch branch is taken on most iterations
 /// Returns the number of branches optimized.
 static unsigned optimizeBranchLayout(llvm::Function& func,
                                       const MicroarchProfile& /*profile*/) {
     unsigned count = 0;
+
+    // Pre-compute a linear order for back-edge detection.
+    std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
+    {
+        unsigned ord = 0;
+        for (auto& bb : func) bbOrder[&bb] = ord++;
+    }
 
     for (auto& bb : func) {
         auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator());
@@ -2015,6 +2078,71 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
                 auto* brWeights = mdBuilder.createBranchWeights(1, 99);
                 br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
                 count++;
+            }
+            continue;
+        }
+
+        // ── Null-pointer check: ICmp(ptr, null) ──────────────────────────────
+        // Null dereferences are rare in correct programs.  When a branch
+        // checks whether a pointer is null, the non-null path is hot.
+        //   ICmp EQ  ptr, null  → branch to trueBB if null  → trueBB is cold
+        //   ICmp NE  ptr, null  → branch to trueBB if !null → trueBB is hot
+        // Skip if already annotated with branch weights.
+        if (!br->getMetadata(llvm::LLVMContext::MD_prof)) {
+            if (auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(br->getCondition())) {
+                llvm::Value* op0 = icmp->getOperand(0);
+                llvm::Value* op1 = icmp->getOperand(1);
+                bool isNullCheck =
+                    (op0->getType()->isPointerTy() || op1->getType()->isPointerTy()) &&
+                    (llvm::isa<llvm::ConstantPointerNull>(op1) ||
+                     llvm::isa<llvm::ConstantPointerNull>(op0));
+                if (isNullCheck) {
+                    llvm::MDBuilder mdBuilder(func.getContext());
+                    llvm::MDNode* weights;
+                    if (icmp->getPredicate() == llvm::ICmpInst::ICMP_EQ) {
+                        // EQ null → true branch is the null (rare) path
+                        weights = mdBuilder.createBranchWeights(1, 99);
+                    } else if (icmp->getPredicate() == llvm::ICmpInst::ICMP_NE) {
+                        // NE null → true branch is the non-null (common) path
+                        weights = mdBuilder.createBranchWeights(99, 1);
+                    } else {
+                        weights = nullptr;
+                    }
+                    if (weights) {
+                        br->setMetadata(llvm::LLVMContext::MD_prof, weights);
+                        count++;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // ── Loop-closing back-edge: branch target precedes current BB ────────
+        // If the true successor has a smaller linear order than the current BB,
+        // the true branch is a back-edge (loop-closing).  Back-edges are taken
+        // on every iteration except the last, so they are highly likely to be
+        // taken (weight ≈ 90%).  Annotate with branch weights if not already set.
+        if (!br->getMetadata(llvm::LLVMContext::MD_prof)) {
+            auto itCur  = bbOrder.find(&bb);
+            auto itTrue = bbOrder.find(trueBB);
+            auto itFalse= bbOrder.find(falseBB);
+            if (itCur != bbOrder.end() && itTrue != bbOrder.end()
+                    && itFalse != bbOrder.end()) {
+                bool trueIsBackEdge  = (itTrue->second  < itCur->second);
+                bool falseIsBackEdge = (itFalse->second < itCur->second);
+                if (trueIsBackEdge && !falseIsBackEdge) {
+                    // true = loop continue (hot), false = loop exit (cold)
+                    llvm::MDBuilder mdBuilder(func.getContext());
+                    br->setMetadata(llvm::LLVMContext::MD_prof,
+                        mdBuilder.createBranchWeights(9, 1));
+                    count++;
+                } else if (falseIsBackEdge && !trueIsBackEdge) {
+                    // false = loop continue (hot), true = loop exit (cold)
+                    llvm::MDBuilder mdBuilder(func.getContext());
+                    br->setMetadata(llvm::LLVMContext::MD_prof,
+                        mdBuilder.createBranchWeights(1, 9));
+                    count++;
+                }
             }
         }
     }
@@ -2216,12 +2344,19 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
 /// Detect adjacent scalar load pairs that can be annotated for hardware
 /// load pairing / memory access coalescing.  Marks paired loads with
 /// llvm.access.group metadata to hint the backend's load-store unit.
+///
+/// Detects two patterns:
+///   1. Consecutive GEP indices (diff == 1): classic adjacent elements.
+///   2. GEP indices whose byte-offset difference is within one cache line:
+///      covers non-unit strides (e.g. struct fields) that share a cache line.
 /// Returns the number of load pairs identified.
 static unsigned markLoadStorePairs(llvm::Function& func,
                                     const MicroarchProfile& profile) {
     if (profile.loadPorts < 2) return 0;
 
     unsigned count = 0;
+    const llvm::DataLayout* dl = nullptr;
+    if (auto* mod = func.getParent()) dl = &mod->getDataLayout();
 
     for (auto& bb : func) {
         std::vector<llvm::LoadInst*> loads;
@@ -2231,14 +2366,13 @@ static unsigned markLoadStorePairs(llvm::Function& func,
             }
         }
 
-        // Look for consecutive GEP-based loads from the same base pointer.
+        // Look for loads from the same base pointer that access addresses
+        // within the same cache line (distance < cacheLineSize bytes).
         for (size_t i = 0; i + 1 < loads.size(); ++i) {
             llvm::LoadInst* ld0 = loads[i];
             llvm::LoadInst* ld1 = loads[i + 1];
 
-            // Both loads must have the same type and be from GEP instructions.
-            if (ld0->getType() != ld1->getType()) continue;
-
+            // Both loads must be from GEP instructions off the same base.
             auto* gep0 = llvm::dyn_cast<llvm::GetElementPtrInst>(ld0->getPointerOperand());
             auto* gep1 = llvm::dyn_cast<llvm::GetElementPtrInst>(ld1->getPointerOperand());
             if (!gep0 || !gep1) continue;
@@ -2249,17 +2383,40 @@ static unsigned markLoadStorePairs(llvm::Function& func,
             auto* idx1 = llvm::dyn_cast<llvm::ConstantInt>(gep1->getOperand(1));
             if (!idx0 || !idx1) continue;
 
-            int64_t diff = idx1->getSExtValue() - idx0->getSExtValue();
-            if (diff != 1) continue;
+            int64_t idxDiff = idx1->getSExtValue() - idx0->getSExtValue();
+            if (idxDiff < 0) idxDiff = -idxDiff; // absolute difference
 
-            // Consecutive indices — annotate with access.group metadata to hint
-            // the backend's load-store unit about pairing.
+            // Compute the byte-offset difference using the GEP element type
+            // and the data layout.  Fall back to index difference if no DL.
+            bool pairOk = false;
+            if (dl) {
+                llvm::Type* elemTy = gep0->getSourceElementType();
+                if (elemTy && elemTy->isSized()) {
+                    uint64_t elemBytes = dl->getTypeAllocSize(elemTy);
+                    if (elemBytes > 0) {
+                        uint64_t byteDiff = static_cast<uint64_t>(idxDiff) * elemBytes;
+                        // Pair if the byte distance is strictly within one cache line.
+                        pairOk = (byteDiff > 0 && byteDiff < profile.cacheLineSize);
+                    }
+                }
+            } else {
+                // No data layout: use the classic consecutive-index heuristic.
+                pairOk = (idxDiff == 1);
+            }
+
+            if (!pairOk) continue;
+
+            // Both loads must have the same result type for the backend to
+            // treat them as a coalescing candidate.
+            if (ld0->getType() != ld1->getType()) continue;
+
+            // Annotate with access.group metadata to hint the backend.
             llvm::LLVMContext& ctx = func.getContext();
             llvm::MDNode* agMD = llvm::MDNode::get(ctx, {});
             ld0->setMetadata(llvm::LLVMContext::MD_access_group, agMD);
             ld1->setMetadata(llvm::LLVMContext::MD_access_group, agMD);
             count++;
-            ++i; // skip ld1 in outer loop
+            ++i; // skip ld1 in outer loop (already paired)
         }
     }
     return count;
@@ -2341,12 +2498,80 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         checkRT(ResourceType::StoreUnit);
         checkRT(ResourceType::DividerUnit);
 
+        // ── Compute Recurrence MII (RecMII) ────────────────────────────────
+        // For loops with loop-carried dependencies (e.g. reduction: acc += a[i]),
+        // the hardware-imposed minimum is not just resource pressure but also
+        // the latency of the recurrence cycle.  RecMII = max over all PHI-based
+        // recurrences of the latency of the dependency chain from the PHI's
+        // back-edge value back to the PHI itself.
+        //
+        // We detect simple single-PHI recurrences using a depth-limited walk:
+        //   phi → inst1 → inst2 → ... → back_edge_value → (back to phi)
+        unsigned recMII = 1;
+        {
+            // Build a local index of instructions in this BB and the latch.
+            std::unordered_map<const llvm::Instruction*, unsigned> bbInstIdx;
+            unsigned ord = 0;
+            for (auto& inst : bb)    bbInstIdx[&inst] = ord++;
+            if (latch != &bb)
+                for (auto& inst : *latch) bbInstIdx[&inst] = ord++;
+
+            for (auto& phiInst : bb) {
+                auto* phi = llvm::dyn_cast<llvm::PHINode>(&phiInst);
+                if (!phi) break; // PHIs are always first in a BB
+
+                // Find the back-edge incoming value (value coming from the latch).
+                llvm::Value* backVal = nullptr;
+                for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
+                    if (phi->getIncomingBlock(i) == latch) {
+                        backVal = phi->getIncomingValue(i);
+                        break;
+                    }
+                }
+                if (!backVal) continue;
+
+                // Walk the dependency chain from backVal toward phi, accumulating
+                // instruction latencies.  Limit depth to avoid quadratic blow-up.
+                unsigned chainLat = 0;
+                constexpr unsigned kMaxWalkDepth = 20;
+                llvm::Value* cur = backVal;
+                std::unordered_set<const llvm::Value*> visited;
+                for (unsigned depth = 0; depth < kMaxWalkDepth; ++depth) {
+                    auto* curInst = llvm::dyn_cast<llvm::Instruction>(cur);
+                    if (!curInst) break;
+                    if (curInst == phi) break; // closed the cycle
+                    if (visited.count(curInst)) break; // cycle guard
+                    visited.insert(curInst);
+                    // Only include instructions in this loop body.
+                    if (bbInstIdx.find(curInst) == bbInstIdx.end()) break;
+                    chainLat += getOpcodeLatency(curInst, profile);
+                    // Follow the first operand that is also in the loop body
+                    // and traces back toward the phi.
+                    bool found = false;
+                    for (auto& op : curInst->operands()) {
+                        auto* opInst = llvm::dyn_cast<llvm::Instruction>(op.get());
+                        if (!opInst) continue;
+                        if (bbInstIdx.find(opInst) == bbInstIdx.end()) continue;
+                        if (visited.count(opInst)) continue;
+                        cur = opInst;
+                        found = true;
+                        break;
+                    }
+                    if (!found) break;
+                }
+                if (chainLat > recMII) recMII = chainLat;
+            }
+        }
+
+        // True MII is the max of resource-constrained and recurrence-constrained.
+        unsigned mii = std::max(resMII, recMII);
+
         // Unroll count: expose enough iterations to fill the pipeline.
         // Upper-bound prevents excessive code-size growth from very deep pipelines
         // combined with very short MII (e.g. a 14-stage pipeline with MII=1 would
         // otherwise produce 14 unrolled copies).
         constexpr unsigned kMaxUnrollCount = 8;
-        unsigned unroll = (profile.pipelineDepth + resMII - 1) / resMII;
+        unsigned unroll = (profile.pipelineDepth + mii - 1) / mii;
         unroll = std::max(unroll, 2u);
         unroll = std::min(unroll, kMaxUnrollCount);
 
@@ -2745,6 +2970,39 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
     return false;
 }
 
+/// Returns true when the instruction's result lives in the vector/FP register
+/// file rather than the integer general-purpose register file.
+/// Used by the scheduler to track register pressure per physical register file.
+static bool producesVecOrFP(const llvm::Instruction* inst) {
+    if (!inst) return false;
+    llvm::Type* ty = inst->getType();
+    if (ty->isFloatingPointTy() || ty->isVectorTy()) return true;
+    // FP conversions: int→FP or FP→int consume the FP register file.
+    switch (inst->getOpcode()) {
+    case llvm::Instruction::UIToFP:
+    case llvm::Instruction::SIToFP:
+    case llvm::Instruction::FPExt:
+    case llvm::Instruction::FPTrunc:
+        return true;
+    case llvm::Instruction::Call:
+        if (const auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(inst)) {
+            switch (ii->getIntrinsicID()) {
+            case llvm::Intrinsic::fma:
+            case llvm::Intrinsic::fmuladd:
+            case llvm::Intrinsic::sqrt:
+            case llvm::Intrinsic::minnum:
+            case llvm::Intrinsic::maxnum:
+                return true;
+            default:
+                return ty->isFloatingPointTy() || ty->isVectorTy();
+            }
+        }
+        return false;
+    default:
+        return false;
+    }
+}
+
 /// Per-basic-block list scheduler driven by the detailed hardware graph.
 ///
 /// Algorithm:
@@ -3064,17 +3322,22 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
     }
 
     // ── 6c. Register pressure model ──────────────────────────────────────────
-    // Track approximate live-value count during scheduling to penalise
-    // schedules that spike register pressure beyond the physical register
-    // file.  Each instruction that produces a non-void, non-zero-latency
-    // result adds to liveValues; when ALL consumers of a value are scheduled,
-    // the value dies and liveValues decreases.
+    // Track live-value count per physical register file independently.
+    // Modern CPUs have completely separate integer and vector/FP register files
+    // (e.g. x86: 16 GPRs and 16/32 XMM/YMM/ZMM registers), so pressure in
+    // one file does not affect the other.  Using a single shared counter
+    // over-penalises code that mixes int and FP operations — splitting the
+    // budget eliminates false pressure signals and improves IPC for such code.
     //
-    // The register budget excludes stack pointer and frame pointer.
-    unsigned regBudget = (profile.isa == ISAFamily::AArch64)
-        ? std::max(profile.intRegisters, 16u) - 2
-        : std::max(profile.intRegisters, 16u) - 2;
-    unsigned currentLive = 0;
+    // Integer register budget: total GPRs minus SP and FP.
+    unsigned intRegBudget = (profile.intRegisters > 2)
+        ? profile.intRegisters - 2 : 14u;
+    // Vector/FP register budget: total SIMD/FP registers (no SP/FP equiv.).
+    unsigned vecRegBudget = (profile.vecRegisters > 0)
+        ? profile.vecRegisters : 16u;
+
+    unsigned intLive = 0;   // current live integer register values
+    unsigned vecLive = 0;   // current live vector/FP register values
 
     // Count how many not-yet-scheduled users each producer has.
     std::vector<unsigned> remainingUsers(n, 0);
@@ -3083,24 +3346,28 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
     }
 
     // Pre-count values live-in from outside the BB (function args, cross-BB defs).
-    unsigned liveInCount = 0;
+    // Split by register file type so each budget is initialized correctly.
     {
-        std::unordered_set<const llvm::Value*> externalDefs;
+        std::unordered_set<const llvm::Value*> externalIntDefs;
+        std::unordered_set<const llvm::Value*> externalVecDefs;
         for (unsigned i = 0; i < n; ++i) {
             for (auto& use : moveable[i]->operands()) {
                 auto* val = use.get();
                 if (llvm::isa<llvm::Constant>(val)) continue;
-                if (auto* arg = llvm::dyn_cast<llvm::Argument>(val))
-                    externalDefs.insert(arg);
-                else if (auto* defInst = llvm::dyn_cast<llvm::Instruction>(val)) {
-                    if (idx.find(defInst) == idx.end()) // defined outside BB
-                        externalDefs.insert(defInst);
+                bool isVec = val->getType()->isFloatingPointTy()
+                          || val->getType()->isVectorTy();
+                if (auto* arg = llvm::dyn_cast<llvm::Argument>(val)) {
+                    (isVec ? externalVecDefs : externalIntDefs).insert(arg);
+                } else if (auto* defInst = llvm::dyn_cast<llvm::Instruction>(val)) {
+                    if (idx.find(defInst) == idx.end()) {
+                        (isVec ? externalVecDefs : externalIntDefs).insert(defInst);
+                    }
                 }
             }
         }
-        liveInCount = static_cast<unsigned>(externalDefs.size());
+        intLive = static_cast<unsigned>(externalIntDefs.size());
+        vecLive = static_cast<unsigned>(externalVecDefs.size());
     }
-    currentLive = liveInCount;
 
     // ── 6e. Reorder buffer pressure tracking ─────────────────────────────────
     // Modern out-of-order CPUs retire instructions in order from a reorder
@@ -3155,7 +3422,7 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
         //   4. Stall distance (consumer work remaining — more = better hiding)
         //   5. Fusion affinity (schedule fusion partners adjacently)
         //   6. Port pressure (schedule bottleneck resource first)
-        //   7. Register pressure penalty (penalise if over budget)
+        //   7. Register pressure penalty (per register file — int vs vec/FP)
         //   8. Register-freeing score (reduce live values)
         //   9. Instruction index (deterministic tie-break)
         //
@@ -3202,22 +3469,26 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
             return done[it->second]; // partner already scheduled
         };
 
-        // Register pressure penalty: returns a higher value when scheduling
-        // this instruction would push live values over the register budget.
-        // Instructions that produce a result (non-void) increase pressure.
+        // Register pressure penalty — per physical register file.
+        // On all major architectures, integer and vector/FP registers are
+        // completely independent files.  A penalty only applies when scheduling
+        // this instruction would push the *appropriate* file over its budget.
+        // This eliminates false penalties when mixing int and FP operations:
+        // e.g. being over integer budget should not penalise an FP instruction.
         auto regPressurePenalty = [&](unsigned id) -> unsigned {
             if (moveable[id]->getType()->isVoidTy()) return 0;
             if (lat[id] == 0) return 0; // free ops (bitcast, phi) don't need regs
-            // If we're already over budget, penalise instructions that add live values
-            // unless they also free values (via regFreeScore).
+            bool isVec = producesVecOrFP(moveable[id]);
+            unsigned live   = isVec ? vecLive   : intLive;
+            unsigned budget = isVec ? vecRegBudget : intRegBudget;
             unsigned rfs = regFreeScore(id);
-            if (currentLive + 1 - rfs > regBudget) {
-                unsigned penalty = currentLive + 1 - rfs - regBudget;
+            // Net delta: +1 produced, rfs freed.  Only penalise if net is positive
+            // and pushes past budget.
+            if (live + 1 > budget + rfs) {
+                unsigned penalty = (live + 1 - rfs > budget) ? (live + 1 - rfs - budget) : 0;
                 // Dampen penalty for instructions with slack — they can be
-                // delayed to a point with lower pressure without extending
-                // the critical path.
-                // Divisor grows with slack; /4 chosen so slack of 4 halves
-                // the penalty — empirically a good balance on Skylake/Zen.
+                // delayed to a lower-pressure point without extending the
+                // critical path.  /4 chosen so slack of 4 halves the penalty.
                 if (slack[id] > 0)
                     penalty = std::max(1u, penalty / (1 + slack[id] / 4));
                 return penalty;
@@ -3390,18 +3661,26 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
                 issuedPortsThisCycle.insert(rtKey);
                 issuedChainsThisCycle.insert(chainId[id]);
 
-                // ── Register pressure tracking ──────────────────────────────
-                // Instruction produces a value → increase live count.
-                if (!moveable[id]->getType()->isVoidTy() && lat[id] > 0)
-                    ++currentLive;
+                // ── Register pressure tracking (per register file) ──────────
+                // Instruction produces a value → increase live count in the
+                // appropriate register file (int or vector/FP).
+                if (!moveable[id]->getType()->isVoidTy() && lat[id] > 0) {
+                    if (producesVecOrFP(moveable[id])) ++vecLive;
+                    else ++intLive;
+                }
                 // Check if scheduling this instruction kills any predecessor's
-                // last use, decreasing the live count.
+                // last use, decreasing the live count in the correct file.
                 for (unsigned p : pred[id]) {
                     if (!done[p]) continue;
                     if (moveable[p]->getType()->isVoidTy()) continue;
                     if (remainingUsers[p] > 0) --remainingUsers[p];
-                    if (remainingUsers[p] == 0 && currentLive > 0)
-                        --currentLive;
+                    if (remainingUsers[p] == 0) {
+                        if (producesVecOrFP(moveable[p])) {
+                            if (vecLive > 0) --vecLive;
+                        } else {
+                            if (intLive > 0) --intLive;
+                        }
+                    }
                 }
 
                 // Decrement in-degrees of successors.
