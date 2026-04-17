@@ -2257,6 +2257,158 @@ var result = sudo_command("apt update", "s3cr3t");// runs as root
 | `unreachable()` | Mark code as unreachable (UB if reached) |
 | `expect(val, expected)` | Branch prediction hint: `val` is likely `expected` |
 
+### 19.8 String Formatting
+
+| Function | Signature | Description |
+|---|---|---|
+| `str_format` | `str_format(fmt, v1[, v2[, ...]])` | Printf-style formatting via `snprintf`. `fmt` is a C-style format string; supports `%d`, `%i`, `%u`, `%ld`, `%s`, `%f`, `%e`, `%g`, `%x`, `%X`, `%o`, `%c`, `%%`, and width/precision specifiers. Returns a new heap-allocated string. |
+| `str_filter` | `str_filter(s, fn)` | Return a new string containing only the characters of `s` for which `fn(char_code)` returns non-zero. |
+| `filter` | `filter(x, fn)` | Generic filter — dispatches to `array_filter`, `str_filter`, or `map_filter` based on the runtime type of `x`. |
+
+```omscript
+var s = str_format("x=%d, y=%.3f, name=%s", 42, 3.14159, "hello");
+// s == "x=42, y=3.142, name=hello"
+
+var hex = str_format("0x%016llX", 0xDEADBEEF);
+// hex == "0x00000000DEADBEEF"
+
+var digits_only = str_filter("abc123def456", |c| c >= 48 && c <= 57);
+// digits_only == "123456"
+
+var evens = filter([1,2,3,4,5,6], |x| x % 2 == 0);
+// evens == [2, 4, 6]
+```
+
+### 19.9 Environment Variables
+
+| Function | Description |
+|---|---|
+| `env_get(name)` | Read environment variable `name`; returns the value as a string, or `""` if not set |
+| `env_set(name, value)` | Set environment variable `name` to `value` (wraps `setenv(3)`); returns 0 on success, -1 on error |
+
+```omscript
+var home = env_get("HOME");         // e.g. "/home/user"
+var path = env_get("PATH");
+env_set("MY_APP_MODE", "release");
+var mode = env_get("MY_APP_MODE");  // "release"
+```
+
+### 19.10 Array Interleave
+
+| Function | Description |
+|---|---|
+| `array_zip(a, b)` | Interleave two arrays: result is `[a[0], b[0], a[1], b[1], …]`. Length is `2 * min(len(a), len(b))`. |
+
+```omscript
+var keys   = [1, 2, 3];
+var values = [10, 20, 30];
+var zipped = array_zip(keys, values);  // [1, 10, 2, 20, 3, 30]
+```
+
+### 19.11 High-Precision Integer Arithmetic
+
+These builtins expose 128-bit intermediate results for operations that would overflow 64 bits. They are particularly useful in cryptographic and hashing code.
+
+| Function | Description |
+|---|---|
+| `mulhi(a, b)` | Signed 128-bit multiply of `a` and `b`; returns the **high 64 bits** of the 128-bit signed product (also: `std::mulhi`) |
+| `mulhi_u(a, b)` | Unsigned 128-bit multiply; returns the **high 64 bits** of the unsigned 128-bit product (also: `std::mulhi_u`) |
+| `absdiff(a, b)` | `|a - b|` computed without overflow by widening to i128 before subtracting; always non-negative (also: `std::absdiff`) |
+| `fast_sqrt(x)` | `sqrt(x)` with `reassociate` and `nnan` fast-math flags — slightly less precise than `sqrt` but faster on some microarchitectures |
+| `is_nan(x)` | Reinterpret `x` as `f64` and return 1 if it is NaN, 0 otherwise |
+| `is_inf(x)` | Reinterpret `x` as `f64` and return 1 if it is ±Infinity, 0 otherwise |
+
+```omscript
+// High-32-bit multiply (useful for fixed-point and hash mixing):
+var lo = a * b;                     // lower 64 bits
+var hi = mulhi(a, b);               // upper 64 bits of 128-bit signed product
+
+// Overflow-safe absolute difference:
+var d = absdiff(INT64_MIN, INT64_MAX);  // 18446744073709551615 (correct)
+
+// Fast NaN/Inf detection on raw bit patterns:
+var x = 0x7FF8000000000000;   // NaN bit pattern
+var nan = is_nan(x);          // 1
+var inf = is_inf(x);          // 0
+```
+
+### 19.12 Arbitrary-Precision Integers (bigint)
+
+`bigint` values are heap-allocated arbitrary-precision integers. All operations return new bigint values; the inputs are not mutated.
+
+| Function | Signature | Description |
+|---|---|---|
+| `bigint` | `bigint(x)` | Create bigint from integer or string `x` (also: `std::bigint`) |
+| `bigint_add` | `bigint_add(a, b)` | Add |
+| `bigint_sub` | `bigint_sub(a, b)` | Subtract |
+| `bigint_mul` | `bigint_mul(a, b)` | Multiply |
+| `bigint_div` | `bigint_div(a, b)` | Integer divide (truncation toward zero) |
+| `bigint_mod` | `bigint_mod(a, b)` | Remainder |
+| `bigint_neg` | `bigint_neg(a)` | Negate |
+| `bigint_abs` | `bigint_abs(a)` | Absolute value |
+| `bigint_pow` | `bigint_pow(a, n)` | `a` to the power `n` (n ≥ 0) |
+| `bigint_gcd` | `bigint_gcd(a, b)` | Greatest common divisor |
+| `bigint_eq` | `bigint_eq(a, b)` | 1 if equal |
+| `bigint_lt` | `bigint_lt(a, b)` | 1 if a < b |
+| `bigint_le` | `bigint_le(a, b)` | 1 if a ≤ b |
+| `bigint_gt` | `bigint_gt(a, b)` | 1 if a > b |
+| `bigint_ge` | `bigint_ge(a, b)` | 1 if a ≥ b |
+| `bigint_cmp` | `bigint_cmp(a, b)` | -1 / 0 / 1 (like strcmp) |
+| `bigint_tostring` | `bigint_tostring(a)` | Decimal string representation |
+| `bigint_to_i64` | `bigint_to_i64(a)` | Truncate to signed 64-bit integer |
+| `bigint_bit_length` | `bigint_bit_length(a)` | Number of bits needed to represent `|a|` |
+| `bigint_is_zero` | `bigint_is_zero(a)` | 1 if a == 0 |
+| `bigint_is_negative` | `bigint_is_negative(a)` | 1 if a < 0 |
+| `bigint_shl` | `bigint_shl(a, n)` | Left shift by n bits |
+| `bigint_shr` | `bigint_shr(a, n)` | Right shift by n bits (arithmetic) |
+
+```omscript
+// Compute 100! (factorial of 100)
+fn factorial(n:int) {
+    var result = bigint(1);
+    for (i:int in 2...n+1) {
+        result = bigint_mul(result, bigint(i));
+    }
+    return bigint_tostring(result);
+}
+
+var f100 = factorial(100);
+// f100 == "933262154439441526816992388562667004907159682643816214685929638952175999932299156089414639761565182862536979208272237582511852109168640000..."
+
+// Modular exponentiation:
+fn mod_pow(base, exp, m) {
+    var b = bigint_new(base);
+    var e = bigint_new(exp);
+    var mod = bigint_new(m);
+    var result = bigint(1);
+    while (!bigint_is_zero(e)) {
+        if (bigint_mod(e, bigint(2)) |> bigint_is_zero |> !_) {
+            result = bigint_mod(bigint_mul(result, b), mod);
+        }
+        b = bigint_mod(bigint_mul(b, b), mod);
+        e = bigint_shr(e, 1);
+    }
+    return bigint_to_i64(result);
+}
+```
+
+### 19.13 The `std::` Namespace
+
+Every built-in function is also accessible via the `std::` prefix — no import is required. This is a purely syntactic mechanism: `std::funcname(args)` is desugared at parse time to `funcname(args)`.
+
+```omscript
+// All of these are equivalent:
+var n = len(arr);
+var n = std::len(arr);
+
+var x = sqrt(2.0);
+var x = std::sqrt(2.0);
+
+var result = std::synthesize([[1,2,3],[5,3,8]], ["+", "*"]);
+```
+
+The `std` namespace is built-in and always available. It does **not** need to be imported.  The only function exclusive to the `std::` form is `std::synthesize` (the program synthesis engine — see §30); there is no bare `synthesize()` call.
+
 ---
 
 ## 20. Concurrency
@@ -2543,11 +2695,105 @@ The transformation fires when both arms have no side effects and contain at most
 ### 25.3 Hardware Graph Optimization Engine (HGOE)
 
 Activated at O2+ when `-march` or `-mtune` is provided (including `native`). When neither flag is set the pass is a complete no-op. Builds a structural model of the target CPU microarchitecture and:
-- Maps operations to hardware execution units
+
+- Maps every LLVM instruction to a hardware execution unit using a per-opcode classification table
+- Computes per-opcode latencies from the target's hardware profile (not a coarse opclass estimate)
 - Inserts FMA (fused multiply-add) instructions where profitable
 - Applies hardware-specific strength reductions (`imul` → shift+add for constant multipliers)
-- Performs cycle-accurate instruction scheduling using real port models
+- Performs **O(N+E) cycle-accurate instruction scheduling** using real port occupancy models
 - Sets `target-cpu` and `target-features` on every function for proper ISA selection
+- Runs instruction selection passes for patterns that LLVM's own ISel misses
+
+#### Operation Classification (v4.2.0+)
+
+Each LLVM opcode is classified into an execution unit category:
+
+| Category | Opcodes | Execution Unit |
+|---|---|---|
+| `IntArith` | `Add`, `Sub`, `Mul`, `SDiv`, `UDiv`, `SRem`, `URem`, `Neg` | Integer ALU / multiplier |
+| `FPArith` | `FAdd`, `FSub`, `FMul`, `FDiv`, `FRem`, `FNeg` | FP unit |
+| `VectorOp` | `ExtractElement`, `InsertElement`, `ShuffleVector` | SIMD/vector unit |
+| `Load` | `Load` | Load pipeline |
+| `Store` | `Store` | Store pipeline |
+| `Branch` | `Br`, `IndirectBr`, `Switch` | Branch unit |
+| `Comparison` | `ICmp`, `FCmp` | Compare unit |
+| `Conversion` | `ZExt`, `SExt`, `Trunc`, `FPToSI`, `SIToFP`, `FPTrunc`, `FPExt`, `BitCast`, `PtrToInt`, `IntToPtr` | Conversion unit |
+| `Phi` | `PHI`, `Select`, `ExtractValue`, `InsertValue`, `Alloca` | Zero-latency (register rename / compile-time) |
+
+`FNeg` was previously misclassified as `Other` (unknown latency); it is now correctly classified as `FPArith` (1 cycle on x86 — a sign-bit XOR; matches `latFPAdd` on AArch64). `Alloca`, `ExtractValue`, and `InsertValue` are classified as `Phi` (zero latency) since they are prolog bookkeeping, not runtime operations.
+
+#### Per-Opcode Latency Model (v4.2.0+)
+
+The HGOE no longer uses the coarse `getLatency(opClass, profile)` function for scheduling. Instead it queries `getOpcodeLatency(inst, profile)` which dispatches on the exact LLVM opcode:
+
+| Opcode | x86-64 latency | AArch64 latency |
+|---|---|---|
+| `FNeg` | 1 cycle | `latFPAdd` cycles |
+| `ExtractElement`, `InsertElement` | `latFPAdd` | `latFPAdd` |
+| `ShuffleVector` | `latFPAdd × 2` | `latFPAdd × 2` |
+| `Alloca`, `ExtractValue`, `InsertValue` | 0 | 0 |
+| `FAdd`, `FSub` | `latFPAdd` | `latFPAdd` |
+| `FMul` | `latFPMul` | `latFPMul` |
+| `FDiv` | `latFPDiv` | `latFPDiv` |
+| Integer `Mul` | `latIMul` | `latIMul` |
+| Integer `SDiv`/`UDiv`/`SRem`/`URem` | `latIntDiv` | `latIntDiv` |
+| `Load` | `latLoad` | `latLoad` |
+
+#### O(N+E) Scheduling Algorithm (v4.2.0+)
+
+The scheduler runs in two phases:
+
+**Phase 1 — Priority assignment (O(N+E)):**
+Previously used a recursive DFS that was O(N²) in the worst case for deep data-dependence chains. Now uses iterative Kahn topological sort + a bottom-up critical-path pass over adjacency lists:
+
+```
+1. Build in-degree counts and adjacency lists from the ProgramGraph edges
+2. Initialize a queue with all zero-in-degree nodes
+3. Process nodes in topological order, assigning priority =
+       max(priority of all successors) + latency(node→successor edge)
+4. The priority of a node is its critical-path length to any root
+```
+
+**Phase 2 — List scheduling (O(N+E)):**
+Previously scanned all graph edges per node (O(N×E)). Now:
+- Pre-built adjacency lists enable O(degree) successor lookup per node
+- The ready queue is a max-heap ordered by priority
+- Port occupancy tracks when each execution unit next becomes free
+- Non-pipelined units (integer and FP dividers) block for their **full latency** (not 1 cycle): the port's `free_cycle` is advanced by `latIntDiv` / `latFPDiv` when a division is issued
+
+#### New Instruction Selection Passes (v4.2.0+)
+
+**Integer absolute value (`generateIntegerAbs`)**
+
+Detects the pattern:
+```
+select (icmp slt x, 0) (sub 0, x) x    // select(x < 0, -x, x)
+select (icmp sgt x, 0) x (sub 0, x)    // select(x > 0, x, -x)
+```
+and replaces it with `llvm.abs(x, /*is_int_min_poison=*/true)`.
+
+On x86 AVX2 this lowers to a branchless sequence; on AArch64 it lowers to the `ABS` instruction. This eliminates a conditional branch with potential misprediction.
+
+**FAdd + FNeg canonicalization (`canonicalizeFaddFneg`)**
+
+Detects `fadd fast x (fneg y)` and replaces it with `fsub fast x y`. This:
+1. Reduces instruction count by one (eliminates the `fneg`)
+2. Exposes a `fmul + fsub` pattern that the FMA fusion pass can then fuse into a single `fma` instruction
+
+#### Vectorize-Width Analysis (v4.2.0+)
+
+`annotateLoopsForTargetInFunc` previously computed `vectorWidth / 64` — this always yielded 1 for 64-bit targets, meaning the reference always treated 64 bits as one "lane", regardless of the actual element type in the loop.
+
+Now the pass performs **dominant-element-width analysis** (the same approach as `softwarePipelineLoops`): it scans the loop body for integer and float element types and selects the vector width based on the most frequently occurring element bit-width:
+
+| Element type | Vector width chosen |
+|---|---|
+| `i8` / `u8` | 256 lanes (256-bit AVX2 byte vector) |
+| `i16` / `u16` | 128 lanes |
+| `i32` / `u32` / `f32` | 32 lanes (256-bit AVX2 float vector) |
+| `i64` / `u64` / `f64` | 16 lanes (256-bit AVX2 double vector) |
+
+See §31 for the complete HGOE deep dive with hardware profile tables, RecMII scheduling, and software pipeline details.
 
 ### 25.4 OPTMAX Blocks
 
@@ -4659,3 +4905,170 @@ fn compact(a: int, b: int) -> int {
 - Integer division and modulo by zero return `0` (safe evaluation).
 - `INT64_MIN / -1` and `INT64_MIN % -1` are handled safely.
 - The synthesized function is automatically marked `@pure` and `@const_eval`, enabling CF-CTRE to fold all calls to it when arguments are compile-time constants.
+
+
+---
+
+## 31. HGOE Deep Dive
+
+See §25.3 for the full HGOE overview. This section provides the algorithmic and implementation details.
+
+### 31.1 Pass Order
+
+1. annotateLoopsForTargetInFunc -- vectorize/unroll/interleave hints
+2. generateIntegerAbs -- select+icmp -> llvm.abs
+3. canonicalizeFaddFneg -- fadd(x,fneg y) -> fsub(x,y)
+4. scanForFMAOpportunities -- fmul+fadd -> llvm.fma
+5. softwarePipelineLoops -- RecMII pipelining
+6. mapProgramToHardware -- O(N+E) list scheduler
+7. Set target-cpu/target-features on every function
+
+### 31.2 Hardware Profiles
+
+Profiles keyed by -march/-mtune: Haswell, Skylake, IceLake, SapphireRapids, ArrowLake, Zen3, Zen4, CortexA55, CortexA76, AppleM1, Generic. Each stores: latFPAdd, latFPMul, latFPDiv, latIMul, latIntDiv, latLoad, vectorWidth, numPorts, hasFMA, hasAVX2, hasAVX512.
+
+### 31.3 Operation Classes
+
+| OpClass | Opcodes |
+|---|---|
+| IntArith | add, sub, mul, sdiv, udiv, srem, urem |
+| FPArith | fadd, fsub, fmul, fdiv, frem, fneg |
+| VectorOp | extractelement, insertelement, shufflevector |
+| Load/Store | load / store |
+| Branch | br, indirectbr, switch |
+| Comparison | icmp, fcmp |
+| Conversion | zext, sext, trunc, fp-cast, bitcast |
+| Phi (zero-latency) | phi, select, extractvalue, insertvalue, alloca |
+
+### 31.4 Per-Opcode Latency
+
+| Opcode | x86 | AArch64 |
+|---|---|---|
+| fneg | 1 | latFPAdd |
+| extractelement, insertelement | latFPAdd | latFPAdd |
+| shufflevector | latFPAdd*2 | latFPAdd*2 |
+| alloca, extractvalue, insertvalue, phi, select | 0 | 0 |
+| fptrunc, fpext | 1 | 1 |
+
+### 31.5 Priority (O(N+E) Kahn Sort)
+
+Iterative Kahn topological sort + bottom-up critical-path pass.
+priority[n] = longest latency-weighted path from n to any leaf.
+
+### 31.6 List Scheduling
+
+Ready-heap (max-priority). On each pop: issue_cycle = max(cycle, port.free_cycle, latest pred finish). Non-pipelined units (dividers) set port.free_cycle += full_latency instead of 1.
+
+### 31.7 Instruction Selection
+
+Integer abs: select(icmp slt x,0, neg(x), x) -> llvm.abs(x,true)
+FAdd+FNeg: fadd fast x (fneg y) -> fsub fast x y (exposes FMA patterns)
+FMA fusion: (fmul fast a,b) fadd fast c -> llvm.fma(a,b,c) when hasFMA
+
+### 31.8 Vectorize-Width
+
+lanes = profile.vectorWidth / dominant_element_bitwidth_in_loop
+
+### 31.9 RecMII
+
+MII = max(ceil(L/D) for loop-carried deps, ResourceMII)
+Emits: llvm.loop.pipeline.initiationinterval(MII)
+
+---
+
+## 32. Quick-Start Cheat Sheet
+
+### 32.1 Variables
+
+    var x = 42                  // mutable i64
+    var y:float = 3.14          // typed
+    const MAX:int = 1000        // immutable
+    register var r:int = 0      // register hint
+    var [a,b,c] = arr           // destructuring
+    var K = comptime { 1<<20; };
+
+### 32.2 Functions
+
+    fn add(a:int, b:int) -> int { return a + b; }
+    fn sq(x:int) -> int = x * x;
+    fn greet(name, times=1) { ... }
+    @hot @pure fn fast(x:int) -> int { ... }
+
+### 32.3 Control Flow
+
+    if (x>0) {...} elif (x==0) {...} else {...}
+    unless (done) {...}
+    likely if (hot) {...}
+    switch (v) { case 1:{...} default:{...} }
+    when (v) { 1=>{...}, _=>{...} }
+    guard (x>0) else { return -1; }
+    defer cleanup();
+    with (var f = open()) { ... }
+
+### 32.4 Loops
+
+    while (c) {...}     do {...} while (c);
+    for (i in 0...n) {...}     for (i in n...0...-1) {...}
+    foreach (x in arr) {...}
+    10 times {...}     repeat(n) {...}     until (done) {...}
+    forever {...}      loop {...}
+    parallel for (i in 0...n) {...}
+    @loop(vectorize=true, unroll=4) for (i in 0...n) {...}
+
+### 32.5 Operators
+
+    **  * / %  + -  << >>  &  ^  |  == != < <= > >=  &&  ||  !  ~
+    x ?? d    x ?: d    c ? t : f    val |> fn    0...n    ...arr
+    u8(x) i8(x) u16(x) i16(x) u32(x) i32(x) u64(x) bool(x)
+
+### 32.6 Arrays and Strings
+
+    var a = [1,2,3]; a[0]; a[1...3]
+    push(a,4); pop(a); sort(a); len(a); sum(a)
+    array_fill(n,v)  range(lo,hi)  range_step(lo,hi,step)
+    array_map(a,|x| x*2)  array_filter(a,|x| x>0)
+    array_zip(a,b)  array_take(a,n)  array_drop(a,n)
+    str_format("n=%d",n)  str_split(s,sep)  str_join(arr,sep)
+
+### 32.7 Memory Ownership
+
+    var b = move a       borrow r = x      borrow mut w = x
+    freeze v             reborrow e = &arr[i]      invalidate tmp
+
+### 32.8 Compile-Time
+
+    var K = comptime { 1<<20; };
+    const T = comptime { build_table(256); };
+    #define SIZE 64
+    #if SIZE > 32 ... #endif
+    #assert SIZE > 0 "must be positive"
+
+### 32.9 OPTMAX
+
+    OPTMAX=: fn compute(a:int[], n:int) -> int {
+        var s:int = 0;
+        for (i:int in 0...n) { s += a[i]; }
+        return s;
+    }
+
+### 32.10 CLI
+
+    omsc file.om                         # compile + link
+    omsc -o out -O3 -march=native f.om
+    omsc --emit-llvm -O2 f.om
+    omsc -V -O3 -march=native f.om       # verbose opt-report
+    omsc run f.om                        # compile + run
+    omsc check f.om                      # syntax check
+    omsc -fsuperopt-level=2 f.om
+    omsc -fno-egraph f.om
+
+### 32.11 std::synthesize
+
+    fn mul_add(a:int, b:int, c:int) -> int {
+        return std::synthesize([
+            [1, 2, 3, 5],
+            [2, 3, 4, 10],
+            [0, 5, 1, 1],
+        ]);
+    }
+    // Compiler replaces body with: return (a * b) + c;
