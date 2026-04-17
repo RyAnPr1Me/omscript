@@ -123,6 +123,7 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
 
     case llvm::Instruction::FAdd:
     case llvm::Instruction::FSub:
+    case llvm::Instruction::FNeg:   // bit-flip on sign; uses FP pipeline
         return OpClass::FPArith;
 
     case llvm::Instruction::FMul:
@@ -162,9 +163,21 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
     case llvm::Instruction::BitCast:
     case llvm::Instruction::IntToPtr:
     case llvm::Instruction::PtrToInt:
+    case llvm::Instruction::FPTrunc:
+    case llvm::Instruction::FPExt:
         return OpClass::Conversion;
 
+    // SIMD / vector instructions map to the vector execution units.
+    case llvm::Instruction::ExtractElement:
+    case llvm::Instruction::InsertElement:
+    case llvm::Instruction::ShuffleVector:
+        return OpClass::VectorOp;
+
+    // Zero-latency / register-file bookkeeping ops.
     case llvm::Instruction::PHI:
+    case llvm::Instruction::ExtractValue:
+    case llvm::Instruction::InsertValue:
+    case llvm::Instruction::Alloca:   // stack allocation done in function prolog
         return OpClass::Phi;
 
     case llvm::Instruction::Call: {
@@ -237,9 +250,47 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     }
 
     // Phase 2: Add data-dependency edges based on def-use chains.
-    // Use OpClass-level latency estimate for the PRODUCER instruction instead
-    // of a flat "1" — this makes the dependency graph's critical-path
-    // computation much more accurate (e.g. mul ≈ 3 cycles, div ≈ 20 cycles).
+    // Use per-opcode default latency estimates for edge weights so that
+    // the critical-path computation in the abstract ProgramGraph is accurate
+    // even without a MicroarchProfile (which is not available here).
+    //
+    // These defaults are calibrated to modern OOO CPUs (Skylake-class x86,
+    // Apple M-series AArch64).  The per-opcode scheduler in scheduleBasicBlock
+    // uses the exact profile values; these defaults only affect the abstract
+    // ProgramGraph used by mapProgramToHardware and criticalPathLength.
+    auto defaultLatency = [](const llvm::Instruction* inst) -> unsigned {
+        if (!inst) return 1;
+        switch (inst->getOpcode()) {
+        case llvm::Instruction::Mul:        return 3;
+        case llvm::Instruction::SDiv:
+        case llvm::Instruction::UDiv:
+        case llvm::Instruction::SRem:
+        case llvm::Instruction::URem:       return 20;
+        case llvm::Instruction::FMul:       return 4;
+        case llvm::Instruction::FDiv:
+        case llvm::Instruction::FRem:       return 15;
+        case llvm::Instruction::FAdd:
+        case llvm::Instruction::FSub:       return 4;
+        case llvm::Instruction::FNeg:       return 1;  // bit-flip on sign
+        case llvm::Instruction::Load:       return 4;
+        case llvm::Instruction::Store:      return 4;
+        case llvm::Instruction::Call:
+            if (llvm::isa<llvm::IntrinsicInst>(inst)) return 4;
+            return 10;
+        case llvm::Instruction::ExtractElement:
+        case llvm::Instruction::InsertElement:
+        case llvm::Instruction::ShuffleVector: return 2;
+        case llvm::Instruction::PHI:
+        case llvm::Instruction::ExtractValue:
+        case llvm::Instruction::InsertValue:
+        case llvm::Instruction::Alloca:
+        case llvm::Instruction::BitCast:
+        case llvm::Instruction::IntToPtr:
+        case llvm::Instruction::PtrToInt:   return 0;
+        default:                            return 1;
+        }
+    };
+
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto consIt = instToNode_.find(&inst);
@@ -250,22 +301,7 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                 if (auto* opInst = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(i))) {
                     auto prodIt = instToNode_.find(opInst);
                     if (prodIt != instToNode_.end()) {
-                        // Use the producer's OpClass for a rough latency.
-                        unsigned prodLat = 1;
-                        const auto* prodNode = getNode(prodIt->second);
-                        if (prodNode) {
-                            switch (prodNode->opClass) {
-                            case OpClass::IntMul:   prodLat = 3;  break;
-                            case OpClass::IntDiv:   prodLat = 20; break;
-                            case OpClass::FPMul:
-                            case OpClass::FMA:
-                            case OpClass::Load:
-                            case OpClass::FPArith:  prodLat = 4;  break;
-                            case OpClass::FPDiv:    prodLat = 15; break;
-                            case OpClass::Phi:      prodLat = 0;  break;
-                            default:                prodLat = 1;  break;
-                            }
-                        }
+                        unsigned prodLat = defaultLatency(opInst);
                         addEdge(prodIt->second, consId, DepType::Data, prodLat);
                     }
                 }
@@ -1525,13 +1561,17 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     case llvm::Instruction::FSub:
     case llvm::Instruction::FCmp:
         return profile.latFPAdd;
+    case llvm::Instruction::FNeg:
+        // FNeg is a sign-bit flip: VXORPS/VANDNPS on x86 (1 cycle),
+        // FNEG on AArch64 (2 cycles, same as latFPAdd on most ARM profiles).
+        // Use the minimum of 1 and latFPAdd so fast CPUs (x86 vectorized) get
+        // the accurate 1-cycle model, while ARM profiles use their own latency.
+        return (profile.isa == ISAFamily::X86_64) ? 1u : profile.latFPAdd;
     case llvm::Instruction::FMul:
         return profile.latFPMul;
     case llvm::Instruction::FDiv:
     case llvm::Instruction::FRem:
         return profile.latFPDiv;
-    case llvm::Instruction::FNeg:
-        return profile.latFPAdd;
 
     // ── Memory ──────────────────────────────────────────────────────────────
     case llvm::Instruction::Load:
@@ -1540,6 +1580,23 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         return profile.latStore;
     case llvm::Instruction::GetElementPtr:
         return profile.latIntAdd; // address arithmetic
+
+    // ── SIMD / vector element operations ────────────────────────────────────
+    // These go through the vector execution units; use latFPAdd as a proxy
+    // since on most CPUs they share the same pipeline.
+    case llvm::Instruction::ExtractElement:
+    case llvm::Instruction::InsertElement:
+        return profile.latFPAdd;
+    case llvm::Instruction::ShuffleVector:
+        // On x86, cross-lane shuffles are 3-5 cycles; within-lane are 1 cycle.
+        // Use latFPAdd * 2 as a conservative estimate that stays proportional.
+        return profile.latFPAdd * 2;
+
+    // ── Zero-latency structural / bookkeeping ops ────────────────────────────
+    case llvm::Instruction::ExtractValue:
+    case llvm::Instruction::InsertValue:
+    case llvm::Instruction::Alloca:   // stack allocation done in function prolog
+        return 0u;
 
     // ── Control flow ────────────────────────────────────────────────────────
     case llvm::Instruction::Br:
@@ -1644,59 +1701,97 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     MappingResult result;
     if (pg.nodeCount() == 0) return result;
 
-    // Use the hardware graph to verify port counts are consistent.
-    // (The profile is the primary source, but the graph provides validation.)
     (void)hw; // Graph structure used for validation in debug builds
 
     const size_t n = pg.nodeCount();
 
-    // Annotate program nodes with hardware latencies.
+    // ── Annotate nodes with per-opcode latencies ──────────────────────────────
+    // Use `getOpcodeLatency` when the node has an instruction pointer (always
+    // for code built via buildFromFunction).  Fall back to the coarser
+    // OpClass-based latency for synthetic nodes.
     for (unsigned i = 0; i < n; ++i) {
         ProgramNode* node = pg.getNodeMut(i);
-        if (node) {
-            node->estimatedLatency = static_cast<double>(getLatency(node->opClass, profile));
+        if (!node) continue;
+        unsigned lat = node->inst
+            ? getOpcodeLatency(node->inst, profile)
+            : getLatency(node->opClass, profile);
+        node->estimatedLatency = static_cast<double>(lat);
+    }
+
+    // ── Build adjacency lists for O(N+E) operations ───────────────────────────
+    // succList[u] = {(v, edge_latency)}  (outgoing edges)
+    // predList[v] = {(u, edge_latency)}  (incoming edges)
+    std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n), predList(n);
+    std::vector<unsigned> inDeg(n, 0);
+    for (const auto& e : pg.edges()) {
+        if (e.srcId < n && e.dstId < n) {
+            succList[e.srcId].emplace_back(e.dstId, e.latency);
+            predList[e.dstId].emplace_back(e.srcId, e.latency);
+            ++inDeg[e.dstId];
         }
     }
 
-    // Compute in-degree for topological scheduling.
-    std::vector<unsigned> inDeg(n, 0);
-    for (const auto& e : pg.edges()) {
-        if (e.dstId < n) inDeg[e.dstId]++;
-    }
-
-    // Ready queue: nodes with all predecessors scheduled.
-    // Priority: higher critical-path priority first (longest path to exit).
+    // ── Compute priority (longest latency-weighted path to any sink) ──────────
+    // Iterative bottom-up Kahn traversal: process nodes in reverse topological
+    // order (sinks first) to propagate critical-path distances.
     std::vector<unsigned> priority(n, 0);
     {
-        // Compute bottom-up priority (longest path from node to any sink).
-        std::vector<bool> visited(n, false);
-        std::function<unsigned(unsigned)> computePriority = [&](unsigned id) -> unsigned {
-            if (visited[id]) return priority[id];
-            visited[id] = true;
-            unsigned maxSucc = 0;
-            for (const auto& e : pg.edges()) {
-                if (e.srcId == id) {
-                    unsigned sp = computePriority(e.dstId) + e.latency;
-                    if (sp > maxSucc) maxSucc = sp;
-                }
+        // Kahn's algorithm to get topological order.
+        std::vector<unsigned> topoOrder;
+        topoOrder.reserve(n);
+        std::vector<unsigned> deg(inDeg);  // copy
+        std::queue<unsigned> q;
+        for (unsigned i = 0; i < n; ++i)
+            if (deg[i] == 0) q.push(i);
+        while (!q.empty()) {
+            unsigned u = q.front(); q.pop();
+            topoOrder.push_back(u);
+            for (auto& [v, lat] : succList[u])
+                if (--deg[v] == 0) q.push(v);
+        }
+        // Process in reverse topological order (sinks → sources).
+        for (auto it = topoOrder.rbegin(); it != topoOrder.rend(); ++it) {
+            unsigned u = *it;
+            unsigned nodeLat = static_cast<unsigned>(
+                pg.getNode(u) ? pg.getNode(u)->estimatedLatency : 1);
+            unsigned maxSuccDist = 0;
+            for (auto& [v, edgeLat] : succList[u]) {
+                unsigned dist = priority[v] + edgeLat;
+                if (dist > maxSuccDist) maxSuccDist = dist;
             }
-            priority[id] = maxSucc + static_cast<unsigned>(
-                pg.getNode(id) ? pg.getNode(id)->estimatedLatency : 1);
-            return priority[id];
-        };
-        for (unsigned i = 0; i < n; ++i) computePriority(i);
+            priority[u] = nodeLat + maxSuccDist;
+        }
     }
+
+    // ── Per-port-type throughput budget ──────────────────────────────────────
+    // busy_cycles[rt] = how many cycles a port of this type is occupied per op.
+    // For pipelined units (ALU, FMA) this is 1.
+    // For non-pipelined units (divider on most CPUs) this is the full latency.
+    auto portBusyCycles = [&](ResourceType rt) -> unsigned {
+        switch (rt) {
+        case ResourceType::IntegerALU:  return 1;
+        case ResourceType::VectorALU:   return 1;
+        case ResourceType::FMAUnit:     return 1;
+        case ResourceType::LoadUnit:    return 1;
+        case ResourceType::StoreUnit:   return 1;
+        case ResourceType::BranchUnit:  return 1;
+        case ResourceType::DividerUnit:
+            // Divider is typically non-pipelined; occupy it for the full latency
+            // divided by the number of divider units.
+            return profile.latIntDiv;
+        default:                        return 1;
+        }
+    };
 
     // Scheduled cycle for each node.
     std::vector<unsigned> scheduledCycle(n, 0);
     std::vector<bool> scheduled(n, false);
 
-    // Resource availability: next free cycle for each port type.
-    // We track per-port-instance availability.
+    // Resource availability: next free cycle for each port instance.
     std::unordered_map<int, std::vector<unsigned>> portAvail;
     auto initPort = [&](ResourceType rt) {
-        unsigned count = getPortCount(rt, profile);
-        portAvail[static_cast<int>(rt)].assign(count, 0);
+        unsigned cnt = getPortCount(rt, profile);
+        portAvail[static_cast<int>(rt)].assign(cnt, 0u);
     };
     initPort(ResourceType::IntegerALU);
     initPort(ResourceType::VectorALU);
@@ -1706,78 +1801,77 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     initPort(ResourceType::BranchUnit);
     initPort(ResourceType::DividerUnit);
 
+    // Working in-degree (decremented as predecessors complete).
+    std::vector<unsigned> workInDeg(inDeg);
+    std::queue<unsigned> readyQ;
+    for (unsigned i = 0; i < n; ++i)
+        if (workInDeg[i] == 0) readyQ.push(i);
+
     unsigned totalScheduled = 0;
     unsigned maxCycle = 0;
     unsigned stallCycles = 0;
 
     while (totalScheduled < n) {
-        // Collect ready nodes.
+        // Collect ready nodes and sort by descending priority.
         std::vector<unsigned> ready;
-        for (unsigned i = 0; i < n; ++i) {
-            if (!scheduled[i] && inDeg[i] == 0) {
-                ready.push_back(i);
-            }
+        while (!readyQ.empty()) {
+            ready.push_back(readyQ.front());
+            readyQ.pop();
         }
 
         if (ready.empty()) {
-            // Cycle with unresolved dependencies — break deadlock for
-            // graphs with cycles (shouldn't happen in SSA form).
-            for (unsigned i = 0; i < n; ++i) {
+            // Deadlock guard: should not happen for valid DAGs.
+            for (unsigned i = 0; i < n; ++i)
                 if (!scheduled[i]) { ready.push_back(i); break; }
-            }
             if (ready.empty()) break;
         }
 
-        // Sort by priority (higher = more critical, schedule first).
         std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
             return priority[a] > priority[b];
         });
 
-        // Limit to issue width per cycle.
         unsigned issued = 0;
         for (unsigned nodeId : ready) {
             if (issued >= profile.issueWidth) break;
+            if (scheduled[nodeId]) continue;
 
-            const ProgramNode* node = pg.getNode(nodeId);
-            if (!node) continue;
-
-            // Compute earliest cycle from dependencies.
+            // Earliest start: max over all predecessors of (sched_cycle + latency).
             unsigned earliest = 0;
-            for (const auto& e : pg.edges()) {
-                if (e.dstId == nodeId && scheduled[e.srcId]) {
-                    auto lat = static_cast<unsigned>(
-                        pg.getNode(e.srcId) ? pg.getNode(e.srcId)->estimatedLatency : 1);
-                    unsigned predEnd = scheduledCycle[e.srcId] + lat;
+            for (auto& [pred, edgeLat] : predList[nodeId]) {
+                if (scheduled[pred]) {
+                    unsigned predLat = static_cast<unsigned>(
+                        pg.getNode(pred) ? pg.getNode(pred)->estimatedLatency : 1);
+                    unsigned predEnd = scheduledCycle[pred] + predLat;
                     if (predEnd > earliest) earliest = predEnd;
                 }
             }
 
-            // Find a free port for this operation.
-            ResourceType rt = mapOpToResource(node->opClass);
+            // Find earliest-free port for this operation.
+            ResourceType rt = mapOpToResource(
+                pg.getNode(nodeId) ? pg.getNode(nodeId)->opClass : OpClass::Other);
             auto& ports = portAvail[static_cast<int>(rt)];
-            if (ports.empty()) {
-                // No dedicated port — use default timing.
-                scheduledCycle[nodeId] = earliest;
-            } else {
-                // Find the port with the earliest availability.
-                unsigned bestPort = 0;
+            unsigned startCycle = earliest;
+            unsigned bestPort = 0;
+            if (!ports.empty()) {
                 unsigned bestTime = ports[0];
                 for (unsigned p = 1; p < ports.size(); ++p) {
-                    if (ports[p] < bestTime) {
-                        bestTime = ports[p];
-                        bestPort = p;
-                    }
+                    if (ports[p] < bestTime) { bestTime = ports[p]; bestPort = p; }
                 }
+                startCycle = std::max(earliest, bestTime);
+                unsigned busy = portBusyCycles(rt);
+                ports[bestPort] = startCycle + busy;
+            }
+            if (startCycle > earliest) stallCycles += (startCycle - earliest);
 
-                unsigned startCycle = std::max(earliest, bestTime);
-                ports[bestPort] = startCycle + 1; // Port busy for 1 cycle (pipelined)
+            scheduledCycle[nodeId] = startCycle;
 
-                scheduledCycle[nodeId] = startCycle;
-                if (startCycle > earliest) {
-                    stallCycles += (startCycle - earliest);
-                }
+            // Update program node.
+            ProgramNode* mutableNode = pg.getNodeMut(nodeId);
+            if (mutableNode) {
+                mutableNode->scheduledCycle = startCycle;
+                mutableNode->assignedPort = bestPort;
 
-                // Record schedule entry.
+                // Record a ScheduleEntry for consumers of the result.
                 ScheduleEntry entry;
                 entry.nodeId = nodeId;
                 entry.cycle = startCycle;
@@ -1786,26 +1880,18 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
                 result.schedule.push_back(entry);
             }
 
-            // Update program node.
-            ProgramNode* mutableNode = pg.getNodeMut(nodeId);
-            if (mutableNode) {
-                mutableNode->scheduledCycle = scheduledCycle[nodeId];
-                mutableNode->assignedPort = 0;
-            }
-
-            unsigned endCycle = scheduledCycle[nodeId] +
-                static_cast<unsigned>(node->estimatedLatency);
+            unsigned endCycle = startCycle + static_cast<unsigned>(
+                pg.getNode(nodeId) ? pg.getNode(nodeId)->estimatedLatency : 1);
             if (endCycle > maxCycle) maxCycle = endCycle;
 
             scheduled[nodeId] = true;
-            totalScheduled++;
-            issued++;
+            ++totalScheduled;
+            ++issued;
 
-            // Release successors.
-            for (const auto& e : pg.edges()) {
-                if (e.srcId == nodeId) {
-                    if (e.dstId < n) inDeg[e.dstId]--;
-                }
+            // Release successors whose all predecessors are now scheduled.
+            for (auto& [succ, succLat] : succList[nodeId]) {
+                if (--workInDeg[succ] == 0)
+                    readyQ.push(succ);
             }
         }
     }
@@ -1813,11 +1899,9 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     result.totalCycles = maxCycle;
     result.stallCycles = stallCycles;
 
-    // Compute port utilization.
-    if (maxCycle > 0 && profile.issueWidth > 0) {
+    if (maxCycle > 0 && profile.issueWidth > 0)
         result.portUtilization = static_cast<double>(totalScheduled) /
             (static_cast<double>(maxCycle) * profile.issueWidth);
-    }
 
     return result;
 }
@@ -2875,6 +2959,142 @@ static void applyTargetAttributes(llvm::Function& func,
         func.addFnAttr("target-features", features);
 }
 
+/// Detect `select(icmp slt x 0, sub(0, x), x)` and similar patterns and
+/// replace with `llvm.abs(x, false)`.
+/// Returns the number of abs patterns replaced.
+static unsigned generateIntegerAbs(llvm::Function& func,
+                                    const MicroarchProfile& profile) {
+    // llvm.abs is beneficial on all architectures that have a native abs-like
+    // instruction (x86 VABS* in AVX2, AArch64 ABS, RISC-V). Even without a
+    // native instruction the backend can emit `neg + cmov` which is 2 µops
+    // instead of 3 (cmp + neg + conditional move).
+    if (profile.intALUs == 0) return 0;
+
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+            if (!sel->getType()->isIntegerTy()) continue;
+
+            // Pattern: select(icmp_slt(x, 0), sub(0, x), x)
+            //    or:   select(icmp_sgt(x, 0), x, sub(0, x))
+            auto* cond = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition());
+            if (!cond) continue;
+
+            llvm::Value* x = nullptr;
+            llvm::Value* negX = nullptr;
+
+            auto matchNeg = [](llvm::Value* v, llvm::Value* base) -> bool {
+                // sub(0, base) or sub(0, x) with constant zero LHS
+                if (auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(v)) {
+                    if (sub->getOpcode() == llvm::Instruction::Sub) {
+                        if (auto* lhs = llvm::dyn_cast<llvm::ConstantInt>(sub->getOperand(0)))
+                            if (lhs->isZero() && sub->getOperand(1) == base)
+                                return true;
+                    }
+                }
+                return false;
+            };
+
+            if (cond->getPredicate() == llvm::ICmpInst::ICMP_SLT) {
+                // select(icmp slt x 0, neg(x), x)  →  abs(x)
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(cond->getOperand(1))) {
+                    if (ci->isZero()) {
+                        x    = cond->getOperand(0);
+                        negX = sel->getTrueValue();
+                        if (!matchNeg(negX, x) || sel->getFalseValue() != x)
+                            x = nullptr;
+                    }
+                }
+            } else if (cond->getPredicate() == llvm::ICmpInst::ICMP_SGT) {
+                // select(icmp sgt x 0, x, neg(x))  →  abs(x)
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(cond->getOperand(1))) {
+                    if (ci->isZero()) {
+                        x    = cond->getOperand(0);
+                        negX = sel->getFalseValue();
+                        if (!matchNeg(negX, x) || sel->getTrueValue() != x)
+                            x = nullptr;
+                    }
+                }
+            }
+
+            if (!x) continue;
+
+            llvm::IRBuilder<> builder(sel);
+            llvm::Module* mod = func.getParent();
+            llvm::Type* ty = sel->getType();
+            llvm::Function* absFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::abs, {ty});
+            // `false` = result may NOT be poison if the input is INT_MIN
+            // (the safe/conservative version).
+            llvm::Value* absVal = builder.CreateCall(
+                absFn, {x, builder.getInt1(false)}, "abs");
+            replacements.emplace_back(sel, absVal);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Canonicalise `fadd fast x (fneg y)` → `fsub fast x y`.
+/// This avoids an extra FNeg instruction on CPUs that lack a native FNMADD,
+/// since the FP subtract maps directly to FSUBSS/FSUBD/VFNMADD on many arches.
+/// The transformation is only applied when the fadd has `nsz` or `reassoc`
+/// fast-math flags, or when the fneg result is only used by this fadd (so we
+/// know the fneg can be folded away).
+/// Returns the number of patterns replaced.
+static unsigned canonicalizeFaddFneg(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Instruction*>> work;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FAdd) continue;
+            auto* fadd = llvm::cast<llvm::BinaryOperator>(&inst);
+
+            // Only canonicalize when the fadd is "fast" (no strict FP semantics).
+            // This guards against changing NaN/Inf behaviour.
+            if (!fadd->isFast() && !fadd->hasNoNaNs()) continue;
+
+            // Try both operands: fadd(x, fneg(y)) or fadd(fneg(y), x).
+            for (int side = 0; side < 2; ++side) {
+                llvm::Value* candidate = fadd->getOperand(side);
+                auto* fneg = llvm::dyn_cast<llvm::UnaryOperator>(candidate);
+                if (!fneg || fneg->getOpcode() != llvm::Instruction::FNeg) continue;
+                // Only fold when the fneg result is used solely by this fadd,
+                // OR when the fadd has reassoc — in that case a separate fneg
+                // consumer can re-emit its own fneg.
+                if (!fneg->hasOneUse() && !fadd->hasAllowReassoc()) continue;
+
+                work.emplace_back(fadd, fneg);
+                break;
+            }
+        }
+    }
+
+    for (auto& [fadd, fneg] : work) {
+        // Determine which operand is the fneg and which is the other addend.
+        llvm::Value* other = (fadd->getOperand(0) == fneg)
+                             ? fadd->getOperand(1) : fadd->getOperand(0);
+        llvm::Value* negated = fneg->getOperand(0);
+
+        llvm::IRBuilder<> builder(fadd);
+        llvm::Value* fsub = builder.CreateFSubFMF(other, negated, fadd, "fsub_canon");
+        fadd->replaceAllUsesWith(fsub);
+        fadd->eraseFromParent();
+        if (fneg->use_empty()) fneg->eraseFromParent();
+        ++count;
+    }
+    return count;
+}
+
 TransformStats applyHardwareTransforms(llvm::Function& func,
                                         const MicroarchProfile& profile,
                                         bool enableLoopAnnotation) {
@@ -2884,6 +3104,9 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.fmaGenerated     = generateFMA(func, profile);
     stats.fmaGenerated    += generateFMASub(func, profile);
     stats.fmaGenerated    += generateFMAChain(func, profile);
+    // Canonicalize fadd(x, fneg(y)) → fsub(x, y) before FMA scan so the
+    // FMA pass can recognise the resulting fsub patterns.
+    stats.fmaGenerated    += canonicalizeFaddFneg(func);
     stats.prefetchesInserted = insertPrefetches(func, profile);
     stats.branchesOptimized  = optimizeBranchLayout(func, profile);
     stats.loadsStorePaired   = markLoadStorePairs(func, profile);
@@ -2896,6 +3119,9 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
     stats.intStrengthReduced = integerStrengthReduce(func, profile);
+    // Integer abs detection: replace select+icmp+sub patterns with llvm.abs.
+    // Runs after strength reduction so we don't accidentally undo any reductions.
+    stats.intStrengthReduced += generateIntegerAbs(func, profile);
 
     return stats;
 }
@@ -4344,16 +4570,36 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
                     }
                 }
             }
-            if (!hasVecMD && profile.vectorWidth >= 64) {
-                // vectorWidth is in bits (128/256/512); divide by 64 for i64 lane count.
-                // All known profiles have vectorWidth >= 128 (SSE2 minimum),
-                // but clamp to at least 2 for safety.
-                unsigned vecWidth = std::max(profile.vectorWidth / 64, 2u);
-                mds.push_back(llvm::MDNode::get(ctx, {
-                    llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
-                    llvm::ConstantAsMetadata::get(
-                        llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), vecWidth))
-                }));
+            if (!hasVecMD && profile.vectorWidth >= 128 && profile.vecUnits > 0) {
+                // Determine the dominant element bit-width in the loop body
+                // (same approach as softwarePipelineLoops) so the vectorize width
+                // is expressed in lane count rather than always assuming 64-bit.
+                std::unordered_map<unsigned, unsigned> widthFreq;
+                for (auto& loopInst : bb) {
+                    if (llvm::isa<llvm::PHINode>(loopInst) || loopInst.isTerminator())
+                        continue;
+                    llvm::Type* ty = loopInst.getType();
+                    unsigned bits = 0;
+                    if (ty->isIntegerTy())       bits = ty->getIntegerBitWidth();
+                    else if (ty->isFloatTy())    bits = 32;
+                    else if (ty->isDoubleTy())   bits = 64;
+                    else if (ty->isHalfTy())     bits = 16;
+                    if (bits >= 8 && bits <= 64) widthFreq[bits]++;
+                }
+                unsigned domBits = 64; // default: OmScript's native int is i64
+                unsigned domCount = 0;
+                for (auto& [bits, cnt] : widthFreq)
+                    if (cnt > domCount) { domBits = bits; domCount = cnt; }
+
+                unsigned lanes = profile.vectorWidth / domBits;
+                if (lanes >= 2) {
+                    unsigned vecWidth = std::min(lanes, 16u);
+                    mds.push_back(llvm::MDNode::get(ctx, {
+                        llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
+                        llvm::ConstantAsMetadata::get(
+                            llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), vecWidth))
+                    }));
+                }
             }
         }
 
