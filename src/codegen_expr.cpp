@@ -802,7 +802,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             llvm::Value* right = generateExpression(expr->right.get());
             return toDefaultType(right);
         }
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* zero = llvm::ConstantInt::get(left->getType(), 0);
         llvm::Value* isNonZero = builder->CreateICmpNE(left, zero, "coalesce.nz");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* nonZeroBB = llvm::BasicBlock::Create(*context, "coalesce.nonzero", function);
@@ -1254,9 +1254,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* allocSz =
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
-        // Null-terminate first byte so strcat works from empty buffer
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
-        // Loop countVal times, strcat'ing strPtr each iteration.
+        // Use memcpy loop with a tracked write pointer — O(totalLen) instead of
+        // the previous strcat loop which was O(totalLen²/2) because strcat must
+        // scan the growing destination buffer on every iteration.
+        // writePtr starts at buf and advances by strLen on each copy.
+        // After the loop we null-terminate manually.
         llvm::BasicBlock* preHdr = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "strmul.body", curFn);
@@ -1264,15 +1266,49 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         builder->CreateBr(loopBB);
         builder->SetInsertPoint(loopBB);
-        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "strmul.idx");
+        llvm::PHINode* idx     = builder->CreatePHI(getDefaultType(), 2, "strmul.idx");
+        llvm::PHINode* writePtr = builder->CreatePHI(
+            llvm::PointerType::getUnqual(*context), 2, "strmul.wptr");
         idx->addIncoming(zero, preHdr);
+        writePtr->addIncoming(buf, preHdr);
         builder->CreateCondBr(builder->CreateICmpSLT(idx, countVal, "strmul.cond"), bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
-        builder->CreateCall(getOrDeclareStrcat(), {buf, strPtr});
+        // memcpy(writePtr, strPtr, strLen)  — no null terminator yet.
+        // Guard: skip memcpy for zero-length strings (strLen==0 produces an empty
+        // result regardless of count; the null-terminator in doneBB handles it).
+        // For non-zero lengths ≤ ~8, the C runtime typically inlines the copy.
+        if (auto* strLenCI = llvm::dyn_cast<llvm::ConstantInt>(strLen)) {
+            if (strLenCI->getZExtValue() > 0) {
+                builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strPtr, strLen});
+            }
+            // else: zero-length string — no copy needed; writePtr stays unchanged
+        } else {
+            // Dynamic length: guard with a runtime check so we don't call
+            // memcpy(dst, src, 0) on every iteration when the string is empty.
+            llvm::BasicBlock* copyBB = llvm::BasicBlock::Create(*context, "strmul.copy", curFn);
+            llvm::BasicBlock* skipBB = llvm::BasicBlock::Create(*context, "strmul.skip", curFn);
+            builder->CreateCondBr(
+                builder->CreateICmpNE(strLen, llvm::ConstantInt::get(getDefaultType(), 0), "strmul.nonempty"),
+                copyBB, skipBB);
+            builder->SetInsertPoint(copyBB);
+            builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strPtr, strLen});
+            builder->CreateBr(skipBB);
+            builder->SetInsertPoint(skipBB);
+        }
+        // Advance the write pointer by strLen bytes (nuw+nsw: no wrap possible)
+        llvm::Value* nextWrite = builder->CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context), writePtr, strLen, "strmul.nwptr");
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next", /*HasNUW=*/true, /*HasNSW=*/true);
-        idx->addIncoming(nextIdx, bodyBB);
+        // Use GetInsertBlock() — not bodyBB — because the dynamic strLen guard above
+        // may have moved the insert point to a new 'skip' block.
+        llvm::BasicBlock* latchBB = builder->GetInsertBlock();
+        idx->addIncoming(nextIdx, latchBB);
+        writePtr->addIncoming(nextWrite, latchBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(doneBB);
+        // Null-terminate: when doneBB is reached from loopBB, writePtr holds
+        // buf (count==0, no iterations) or the position one past the last copy.
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), writePtr);
         return buf;
     }
 
@@ -1362,14 +1398,22 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // Normalize integer widths: when operands have different integer bit widths
     // (e.g. i8 from u8, i32 from u32, i64 from default), extend both to the
     // wider of the two types so that LLVM binary instructions see matching types.
+    // Use ZExt for unsigned-annotated values and SExt for signed-annotated values
+    // so that e.g. u8(200) + u8(100) → 300, not -156 (which SExt would give).
     if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() &&
         left->getType() != right->getType()) {
         const unsigned leftBits = left->getType()->getIntegerBitWidth();
         const unsigned rightBits = right->getType()->getIntegerBitWidth();
+        const bool leftUnsigned  = isUnsignedValue(left);
+        const bool rightUnsigned = isUnsignedValue(right);
         if (leftBits < rightBits) {
-            left = builder->CreateSExt(left, right->getType(), "sext");
+            left = leftUnsigned
+                ? builder->CreateZExt(left, right->getType(), "zext")
+                : builder->CreateSExt(left, right->getType(), "sext");
         } else {
-            right = builder->CreateSExt(right, left->getType(), "sext");
+            right = rightUnsigned
+                ? builder->CreateZExt(right, left->getType(), "zext")
+                : builder->CreateSExt(right, left->getType(), "sext");
         }
     }
 
@@ -3397,6 +3441,43 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";
 
+        // If either operand is explicitly declared unsigned (u8, u32, etc.), use unsigned ops.
+        if (isUnsignedValue(left) || isUnsignedValue(right)) {
+            // For unsigned division by a power-of-2 constant, strength-reduce to
+            // lshr (exact when divisor is pow2 and dividend is exactly divisible —
+            // omit exact since we can't prove that; LLVM will add it when safe).
+            if (isDivision) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                    const int64_t rv = ci->getSExtValue();
+                    if (rv > 0) {
+                        const int s = log2IfPowerOf2(rv);
+                        if (s > 0) {
+                            auto* result = builder->CreateLShr(left,
+                                llvm::ConstantInt::get(left->getType(), s), "udiv.lshr");
+                            nonNegValues_.insert(result);
+                            return result;
+                        }
+                    }
+                }
+                return builder->CreateUDiv(left, right, "udivtmp");
+            } else {
+                // Unsigned modulo by power-of-2 → AND mask
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                    const int64_t rv = ci->getSExtValue();
+                    if (rv > 0) {
+                        const int s = log2IfPowerOf2(rv);
+                        if (s > 0) {
+                            auto* result = builder->CreateAnd(left,
+                                llvm::ConstantInt::get(left->getType(), (1LL << s) - 1), "umod.and");
+                            nonNegValues_.insert(result);
+                            return result;
+                        }
+                    }
+                }
+                return builder->CreateURem(left, right, "uremtmp");
+            }
+        }
+
         // Strength reduction: unsigned-compatible division/modulo by power of 2.
         // For signed division by a positive power of 2, we can use an
         // arithmetic right shift with sign-correction for correct rounding
@@ -3423,12 +3504,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                         // mod: x & (2^s - 1)
                         if (isDivision) {
                             auto* result = builder->CreateLShr(left,
-                                llvm::ConstantInt::get(getDefaultType(), s), "div.lshr");
+                                llvm::ConstantInt::get(left->getType(), s), "div.lshr");
                             nonNegValues_.insert(result);
                             return result;
                         } else {
                             auto* result = builder->CreateAnd(left,
-                                llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "mod.and");
+                                llvm::ConstantInt::get(left->getType(), (1LL << s) - 1), "mod.and");
                             nonNegValues_.insert(result);
                             return result;
                         }
@@ -3531,7 +3612,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bodyHasNonPow2ModuloValue_ = true;
         }
 
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* zero = llvm::ConstantInt::get(right->getType(), 0);
         llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         const char* zeroName = isDivision ? "div.zero" : "mod.zero";
@@ -3602,6 +3683,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // enable better vectorization — LLVM's loop vectorizer can widen
         // unsigned comparisons without sign-correction in each lane.
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        // Explicit unsigned type annotation always selects unsigned comparison.
+        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             // Also check for non-negative constant operands.
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
@@ -3623,6 +3706,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == "<=") {
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
@@ -3642,6 +3726,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == ">") {
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
@@ -3661,6 +3746,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == ">=") {
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();

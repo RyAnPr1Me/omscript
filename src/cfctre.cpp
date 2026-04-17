@@ -14,6 +14,7 @@
 
 #include "cfctre.h"
 #include "ast.h"
+#include "synthesize.h"
 
 #include <algorithm>
 #include <cassert>
@@ -363,8 +364,11 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
     frame.fn   = fn;
     frame.heap = &heap_;
     if (fn->parameters.size() != args.size()) return std::nullopt;
-    for (size_t i = 0; i < args.size(); ++i)
+    bool hasSymbolic = false;
+    for (size_t i = 0; i < args.size(); ++i) {
         frame.locals[fn->parameters[i].name] = args[i];
+        if (args[i].isSymbolic()) hasSymbolic = true;
+    }
 
     // Execute.
     ++currentDepth_;
@@ -379,11 +383,27 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
     else if (frame.hasLastBare) result = frame.lastBareExpr;
     else                    return std::nullopt;
 
-    // Snapshot array results before storing in cache (so cache is stable).
-    CTValue cached = result;
-    if (cached.isArray() && cached.arr != CT_NULL_HANDLE)
-        cached.arr = snapshotArray(cached.arr);
-    memoCache_[key] = cached;
+    // SYMBOLIC result means we couldn't fully evaluate — don't fold to constant.
+    if (result.isSymbolic()) return std::nullopt;
+
+    // Don't cache results produced with symbolic args: the result is only
+    // valid for the specific combination of concrete args that drove the
+    // evaluation; other callers with different concrete values for the same
+    // args might produce a different result.
+    if (!hasSymbolic) {
+        // Snapshot array results before storing in cache (so cache is stable).
+        CTValue cached = result;
+        if (cached.isArray() && cached.arr != CT_NULL_HANDLE)
+            cached.arr = snapshotArray(cached.arr);
+        memoCache_[key] = cached;
+        // Record this function as CF-CTRE-foldable: it produced a concrete
+        // result for at least one set of concrete arguments.  The codegen will
+        // use this to apply InlineHint so LLVM preferentially inlines the
+        // function, exposing the same folding opportunities at remaining runtime
+        // call sites where arguments aren't compile-time constants.
+        if (!result.isSymbolic() && !fn->parameters.empty())
+            foldableCallees_.insert(fn->name);
+    }
 
     // Record call graph edge.
     if (currentDepth_ > 0) {
@@ -473,18 +493,32 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         // Short-circuit logical ops first.
         if (bin->op == "&&") {
             const CTValue lv = evalExpr(frame, bin->left.get());
+            if (lv.isSymbolic()) {
+                // SYMBOLIC && x: can only short-circuit if right is known false.
+                const CTValue rv = evalExpr(frame, bin->right.get());
+                if (rv.isConcrete() && !rv.isTruthy()) return CTValue::fromI64(0); // false && anything = false
+                return CTValue::symbolic();
+            }
             if (!lv.isKnown()) return CTValue::uninit();
             if (!lv.isTruthy()) return CTValue::fromI64(0);
             const CTValue rv = evalExpr(frame, bin->right.get());
             if (!rv.isKnown()) return CTValue::uninit();
+            if (rv.isSymbolic()) return CTValue::symbolic();
             return CTValue::fromI64(rv.isTruthy() ? 1 : 0);
         }
         if (bin->op == "||") {
             const CTValue lv = evalExpr(frame, bin->left.get());
+            if (lv.isSymbolic()) {
+                // SYMBOLIC || x: can only short-circuit if right is known true.
+                const CTValue rv = evalExpr(frame, bin->right.get());
+                if (rv.isConcrete() && rv.isTruthy()) return CTValue::fromI64(1); // true || anything = true
+                return CTValue::symbolic();
+            }
             if (!lv.isKnown()) return CTValue::uninit();
             if (lv.isTruthy()) return CTValue::fromI64(1);
             const CTValue rv = evalExpr(frame, bin->right.get());
             if (!rv.isKnown()) return CTValue::uninit();
+            if (rv.isSymbolic()) return CTValue::symbolic();
             return CTValue::fromI64(rv.isTruthy() ? 1 : 0);
         }
         // Null-coalescing (??)
@@ -536,6 +570,18 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         auto* tern = static_cast<const TernaryExpr*>(e);
         const CTValue cond = evalExpr(frame, tern->condition.get());
         if (!cond.isKnown()) return CTValue::uninit();
+        if (cond.isSymbolic()) {
+            // Path-sensitive: evaluate both arms.  If they agree on a concrete
+            // non-array value the condition cannot affect the result — fold.
+            const CTValue tv = evalExpr(frame, tern->thenExpr.get());
+            const CTValue ev = evalExpr(frame, tern->elseExpr.get());
+            if (tv.isConcrete() && !tv.isArray() &&
+                ev.isConcrete() && !ev.isArray() && tv == ev) {
+                ++stats_.ternaryMerges;
+                return tv;
+            }
+            return CTValue::symbolic();
+        }
         return cond.isTruthy() ? evalExpr(frame, tern->thenExpr.get())
                                 : evalExpr(frame, tern->elseExpr.get());
     }
@@ -642,6 +688,40 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
 CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const CTValue& rhs) {
     if (!lhs.isKnown() || !rhs.isKnown()) return CTValue::uninit();
 
+    // Partial-evaluation: propagate SYMBOLIC through binary ops.
+    // For most ops, one SYMBOLIC operand makes the result SYMBOLIC.
+    // Exceptions (absorbers that yield CONCRETE regardless of the other operand):
+    //   x * 0  = 0,   0 * x  = 0
+    //   x & 0  = 0,   0 & x  = 0
+    //   x ** 0 = 1   (anything to the 0th power = 1)
+    //   x && false = false  (already handled by short-circuit in evalExpr for "&&")
+    //   x || true  = true   (already handled by short-circuit in evalExpr for "||")
+    if (lhs.isSymbolic() || rhs.isSymbolic()) {
+        if (op == "*") {
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
+        }
+        if (op == "&") {
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
+        }
+        if (op == "**") {
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(1);
+        }
+        // Bitwise OR with all-ones annihilates the other operand → -1.
+        if (op == "|") {
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == -1) return CTValue::fromI64(-1);
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == -1) return CTValue::fromI64(-1);
+        }
+        // Modulo by ±1 is always 0, regardless of the dividend.
+        if (op == "%" || op == "mod") {
+            if (rhs.isConcrete() && rhs.isInt() &&
+                (rhs.asI64() == 1 || rhs.asI64() == -1))
+                return CTValue::fromI64(0);
+        }
+        return CTValue::symbolic();
+    }
+
     // String concatenation.
     if (op == "+" && lhs.isString() && rhs.isString())
         return CTValue::fromString(lhs.asStr() + rhs.asStr());
@@ -741,6 +821,7 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
 
 CTValue CTEngine::evalUnaryOp(const std::string& op, const CTValue& val) {
     if (!val.isKnown()) return CTValue::uninit();
+    if (val.isSymbolic()) return CTValue::symbolic(); // propagate symbolic
     if (val.isFloat()) {
         if (op == "-")  return CTValue::fromF64(-val.asF64());
         if (op == "+")  return val;
@@ -764,24 +845,32 @@ CTValue CTEngine::evalUnaryOp(const std::string& op, const CTValue& val) {
 
 CTValue CTEngine::evalTypeCast(const std::string& name, const CTValue& val) {
     if (!val.isKnown()) return CTValue::uninit();
+    if (val.isSymbolic()) return CTValue::symbolic(); // propagate symbolic
     if (val.isInt()) {
         const int64_t v = val.asI64();
-        if (name == "u64" || name == "i64" || name == "int" || name == "uint")
-            return CTValue::fromI64(v);
-        if (name == "u32")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<uint32_t>(v)));
-        if (name == "i32")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<int32_t>(v)));
-        if (name == "u16")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<uint16_t>(v)));
-        if (name == "i16")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<int16_t>(v)));
-        if (name == "u8")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<uint8_t>(v)));
-        if (name == "i8")
-            return CTValue::fromI64(static_cast<int64_t>(static_cast<int8_t>(v)));
-        if (name == "bool")
-            return CTValue::fromI64(v != 0 ? 1 : 0);
+        // General iN/uN handler for N in [1..256]
+        unsigned castBits = 0; bool castUnsigned = false;
+        if (name == "int")  { castBits = 64; castUnsigned = false; }
+        else if (name == "uint") { castBits = 64; castUnsigned = true; }
+        else if (name == "bool") { castBits = 1;  castUnsigned = true; }
+        else if (name.size() >= 2 && (name[0] == 'i' || name[0] == 'u')) {
+            bool allDigits = true; int bw = 0;
+            for (size_t j = 1; j < name.size(); ++j) {
+                if (!std::isdigit(static_cast<unsigned char>(name[j]))) { allDigits = false; break; }
+                bw = bw * 10 + (name[j] - '0'); if (bw > 256) { allDigits = false; break; }
+            }
+            if (allDigits && bw >= 1 && bw <= 256) { castBits = static_cast<unsigned>(bw); castUnsigned = (name[0] == 'u'); }
+        }
+        if (castBits >= 1) {
+            if (castBits == 1) return CTValue::fromI64(v != 0 ? 1 : 0);
+            if (castBits >= 64) return CTValue::fromI64(v);
+            const uint64_t mask = (UINT64_C(1) << castBits) - 1u;
+            if (castUnsigned) return CTValue::fromI64(static_cast<int64_t>(static_cast<uint64_t>(v) & mask));
+            uint64_t uv = static_cast<uint64_t>(v) & mask;
+            const uint64_t signBit = UINT64_C(1) << (castBits - 1);
+            if (uv & signBit) uv |= ~mask;
+            return CTValue::fromI64(static_cast<int64_t>(uv));
+        }
     }
     return CTValue::uninit();
 }
@@ -793,11 +882,19 @@ CTValue CTEngine::evalTypeCast(const std::string& name, const CTValue& val) {
 CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
                             const std::string& fnName,
                             const std::vector<CTValue>& args) {
-    // 1. Type-cast builtins.
-    static const std::unordered_set<std::string> kTypeCasts = {
-        "u64","i64","int","uint","u32","i32","u16","i16","u8","i8","bool"
+    // 1. Type-cast builtins — iN/uN for N in [1..256], plus int/uint/bool.
+    auto isTypeCastName = [](const std::string& nm) -> bool {
+        if (nm == "int" || nm == "uint" || nm == "bool") return true;
+        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
+        int bw = 0;
+        for (size_t j = 1; j < nm.size(); ++j) {
+            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
+            bw = bw * 10 + (nm[j] - '0');
+            if (bw > 256) return false;
+        }
+        return bw >= 1 && bw <= 256;
     };
-    if (kTypeCasts.count(fnName) && args.size() == 1)
+    if (isTypeCastName(fnName) && args.size() == 1)
         return evalTypeCast(fnName, args[0]);
 
     // 2. Pure built-in functions.
@@ -845,12 +942,31 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         "reverse","sort","array_remove","array_insert",
         "array_any","array_every","array_count",
         "str_split","str_join",
-        // Type casts are handled by evalTypeCast, not here, but include for
-        // completeness if they reach evalBuiltin via the fallback path:
-        "u64","i64","int","uint","u32","i32","u16","i16","u8","i8","bool"
+        // int/uint/bool: type casts handled by evalTypeCast; iN/uN handled dynamically
+        "int","uint","bool",
+        // Program synthesis stdlib function (flat-name form of std::synthesize)
+        "std__synthesize","std_synthesize",
+        // Type-specific fast builtins
+        "mulhi","mulhi_u","absdiff","fast_sqrt","is_nan","is_inf"
     };
-    if (kKnownBuiltins.find(name) == kKnownBuiltins.end())
-        return std::nullopt;
+    // Also accept iN/uN type-cast names (handled by evalTypeCast via evalCall).
+    auto isIntWidthCastName = [](const std::string& nm) -> bool {
+        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
+        int bw = 0;
+        for (size_t j = 1; j < nm.size(); ++j) {
+            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
+            bw = bw * 10 + (nm[j] - '0');
+            if (bw > 256) return false;
+        }
+        return bw >= 1 && bw <= 256;
+    };
+    if (kKnownBuiltins.find(name) == kKnownBuiltins.end() && !isIntWidthCastName(name)) {
+        // Accept __tw_* and __tf_* width/type-specific builtins for comptime eval.
+        const bool isTW = name.size()>5 && name.substr(0,5)=="__tw_";
+        const bool isTF = name.size()>5 && name.substr(0,5)=="__tf_";
+        if (!isTW && !isTF)
+            return std::nullopt;
+    }
 
     const size_t n = args.size();
 
@@ -1620,11 +1736,261 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (name == "bool")return CTValue::fromI64(v != 0 ? 1 : 0);
     }
 
+    // ── std::synthesize (program synthesis stdlib function) ──────────────
+    // Recognized as "std__synthesize" (scope-resolved flat name from the
+    // `std::` namespace lowering) or "std_synthesize" (legacy flat name).
+    // Signature: std::synthesize(examples, [ops], [max_depth], [cost_hint])
+    //   examples  : int[][]  — each inner array = [in0,in1,...,inN-1,expected]
+    //   ops       : string[] — allowed operators (optional)
+    //   max_depth : int      — expression depth limit (optional, default 4)
+    //   cost_hint : string   — "size"|"speed" (optional, default "speed")
+    // Returns the synthesized expression's value on the first example's inputs.
+    if ((name == "std__synthesize" || name == "std_synthesize") && n >= 1) {
+        // Argument 0: examples must be a concrete array of arrays.
+        CTArrayHandle examplesH = arrArg(0);
+        if (examplesH == CT_NULL_HANDLE) return std::nullopt;
+        const auto* outerArr = heap_.get(examplesH);
+        if (!outerArr || outerArr->data.empty()) return std::nullopt;
+
+        std::vector<omscript::SynthExample> examples;
+        size_t nInputs = 0;
+        for (const auto& inner : outerArr->data) {
+            if (!inner.isArray()) return std::nullopt;
+            const auto* innerArr = heap_.get(inner.asArr());
+            if (!innerArr || innerArr->data.size() < 2) return std::nullopt;
+            if (nInputs == 0) nInputs = innerArr->data.size() - 1;
+            if (innerArr->data.size() - 1 != nInputs) return std::nullopt; // mismatched widths
+
+            omscript::SynthExample ex;
+            ex.inputs.reserve(nInputs);
+            for (size_t i = 0; i < innerArr->data.size(); ++i) {
+                if (!innerArr->data[i].isInt()) return std::nullopt;
+                if (i < nInputs)
+                    ex.inputs.push_back(innerArr->data[i].asI64());
+                else
+                    ex.output = innerArr->data[i].asI64();
+            }
+            examples.push_back(std::move(ex));
+        }
+        if (examples.empty()) return std::nullopt;
+
+        omscript::SynthConfig cfg;
+        cfg.maxCandidates = 200000;
+
+        // Argument 1 (optional): ops array.
+        if (n >= 2) {
+            CTArrayHandle opsH = arrArg(1);
+            if (opsH != CT_NULL_HANDLE) {
+                const auto* opsArr = heap_.get(opsH);
+                if (opsArr) {
+                    for (const auto& opV : opsArr->data) {
+                        if (opV.isString()) cfg.ops.push_back(opV.asStr());
+                    }
+                }
+            }
+        }
+
+        // Argument 2 (optional): max_depth.
+        if (n >= 3 && args[2].isInt()) {
+            int d = static_cast<int>(args[2].asI64());
+            cfg.maxDepth = std::min(std::max(d, 1), 8);
+        }
+
+        // Argument 3 (optional): cost_hint.
+        if (n >= 4 && args[3].isString()) {
+            cfg.preferSize = (args[3].asStr() == "size");
+        }
+
+        omscript::SynthesisEngine eng;
+        auto result = eng.synthesize(static_cast<int>(nInputs), examples, cfg);
+        if (!result) return std::nullopt;
+        return CTValue::fromI64(result->firstOutput);
+    }
+
+    // ── mulhi(a, b) — signed high 64 bits of 128-bit product ─────────────────
+    if (name == "mulhi" && n == 2) {
+        if (auto a = intArg(0))
+            if (auto b = intArg(1)) {
+                using I128 = __int128;
+                I128 product = static_cast<I128>(*a) * static_cast<I128>(*b);
+                return CTValue::fromI64(static_cast<int64_t>(product >> 64));
+            }
+        return std::nullopt;
+    }
+
+    // ── mulhi_u(a, b) — unsigned high 64 bits of 128-bit product ─────────────
+    if (name == "mulhi_u" && n == 2) {
+        if (auto a = intArg(0))
+            if (auto b = intArg(1)) {
+                using U128 = unsigned __int128;
+                U128 product = static_cast<U128>(static_cast<uint64_t>(*a))
+                             * static_cast<U128>(static_cast<uint64_t>(*b));
+                return CTValue::fromI64(static_cast<int64_t>(
+                    static_cast<uint64_t>(product >> 64)));
+            }
+        return std::nullopt;
+    }
+
+    // ── absdiff(a, b) — |a - b| without overflow ─────────────────────────────
+    if (name == "absdiff" && n == 2) {
+        if (auto a = intArg(0))
+            if (auto b = intArg(1)) {
+                using I128 = __int128;
+                I128 diff = static_cast<I128>(*a) - static_cast<I128>(*b);
+                if (diff < 0) diff = -diff;
+                return CTValue::fromI64(static_cast<int64_t>(diff));
+            }
+        return std::nullopt;
+    }
+
+    // ── fast_sqrt(x) — sqrt with fast-math (comptime: exact sqrt) ────────────
+    if (name == "fast_sqrt" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::sqrt(static_cast<double>(*v))));
+        return std::nullopt;
+    }
+
+    // ── is_nan(x) — 1 if x reinterpreted as f64 is NaN ───────────────────────
+    if (name == "is_nan" && n == 1) {
+        if (auto v = intArg(0)) {
+            double d;
+            uint64_t bits = static_cast<uint64_t>(*v);
+            std::memcpy(&d, &bits, 8);
+            return CTValue::fromI64(std::isnan(d) ? 1 : 0);
+        }
+        return std::nullopt;
+    }
+
+    // ── is_inf(x) — 1 if x reinterpreted as f64 is ±Inf ─────────────────────
+    if (name == "is_inf" && n == 1) {
+        if (auto v = intArg(0)) {
+            double d;
+            uint64_t bits = static_cast<uint64_t>(*v);
+            std::memcpy(&d, &bits, 8);
+            return CTValue::fromI64(std::isinf(d) ? 1 : 0);
+        }
+        return std::nullopt;
+    }
+
+    // ── __tw_<op>_<N> — width-specific integer comptime evaluation ───────────
+    if (name.size() > 5 && name.substr(0,5) == "__tw_") {
+        const std::string suffix = name.substr(5);
+        const auto uscore = suffix.rfind('_');
+        if (uscore == std::string::npos) return std::nullopt;
+        const std::string opname   = suffix.substr(0, uscore);
+        const std::string widthStr = suffix.substr(uscore+1);
+        int bw = 0;
+        for (char c : widthStr) {
+            if (!std::isdigit(static_cast<unsigned char>(c))) return std::nullopt;
+            bw = bw*10+(c-'0');
+        }
+        if (bw<1 || bw>64) return std::nullopt;
+        const uint64_t mask = (bw<64) ? ((1ULL<<bw)-1) : ~0ULL;
+
+        if (opname=="popcount" && n==1) {
+            if (auto v = intArg(0))
+                return CTValue::fromI64(static_cast<int64_t>(__builtin_popcountll(static_cast<uint64_t>(*v) & mask)));
+        }
+        if (opname=="clz" && n==1) {
+            if (auto v = intArg(0)) {
+                uint64_t bits = static_cast<uint64_t>(*v) & mask;
+                int64_t r = bits==0 ? bw : static_cast<int64_t>(__builtin_clzll(bits)-(64-bw));
+                return CTValue::fromI64(r);
+            }
+        }
+        if (opname=="ctz" && n==1) {
+            if (auto v = intArg(0)) {
+                uint64_t bits = static_cast<uint64_t>(*v) & mask;
+                int64_t r = bits==0 ? bw : static_cast<int64_t>(__builtin_ctzll(bits));
+                return CTValue::fromI64(r);
+            }
+        }
+        if (opname=="bitreverse" && n==1) {
+            if (auto v = intArg(0)) {
+                uint64_t bits = static_cast<uint64_t>(*v) & mask;
+                uint64_t rev = 0;
+                for (int i=0;i<bw;++i) rev|=((bits>>i)&1ULL)<<(bw-1-i);
+                return CTValue::fromI64(static_cast<int64_t>(rev));
+            }
+        }
+        if (opname=="bswap" && n==1 && bw>=16 && (bw%8)==0) {
+            if (auto v = intArg(0)) {
+                uint64_t bits = static_cast<uint64_t>(*v) & mask;
+                uint64_t sw = 0; int bytes=bw/8;
+                for (int i=0;i<bytes;++i) sw|=((bits>>(i*8))&0xFF)<<((bytes-1-i)*8);
+                return CTValue::fromI64(static_cast<int64_t>(sw));
+            }
+        }
+        if ((opname=="rotate_left"||opname=="rotl") && n==2) {
+            if (auto v=intArg(0)) if (auto a=intArg(1)) {
+                uint64_t bits=static_cast<uint64_t>(*v)&mask;
+                int amt=static_cast<int>(*a)%bw; if(amt<0) amt+=bw;
+                uint64_t r=(bits<<amt)|(bits>>(bw-amt));
+                return CTValue::fromI64(static_cast<int64_t>(r&mask));
+            }
+        }
+        if ((opname=="rotate_right"||opname=="rotr") && n==2) {
+            if (auto v=intArg(0)) if (auto a=intArg(1)) {
+                uint64_t bits=static_cast<uint64_t>(*v)&mask;
+                int amt=static_cast<int>(*a)%bw; if(amt<0) amt+=bw;
+                uint64_t r=(bits>>amt)|(bits<<(bw-amt));
+                return CTValue::fromI64(static_cast<int64_t>(r&mask));
+            }
+        }
+        if (opname=="saturating_add" && n==2) {
+            if (auto a=intArg(0)) if (auto b=intArg(1)) {
+                using I128=__int128;
+                I128 res=static_cast<I128>(*a)+static_cast<I128>(*b);
+                int64_t lo=-(int64_t(1)<<(bw-1)), hi=(int64_t(1)<<(bw-1))-1;
+                if(res<lo) res=lo; if(res>hi) res=hi;
+                return CTValue::fromI64(static_cast<int64_t>(res));
+            }
+        }
+        if (opname=="saturating_sub" && n==2) {
+            if (auto a=intArg(0)) if (auto b=intArg(1)) {
+                using I128=__int128;
+                I128 res=static_cast<I128>(*a)-static_cast<I128>(*b);
+                int64_t lo=-(int64_t(1)<<(bw-1)), hi=(int64_t(1)<<(bw-1))-1;
+                if(res<lo) res=lo; if(res>hi) res=hi;
+                return CTValue::fromI64(static_cast<int64_t>(res));
+            }
+        }
+        return std::nullopt;
+    }
+
+    // ── __tf_<op> — f32-typed float comptime evaluation ──────────────────────
+    if (name.size() > 5 && name.substr(0,5) == "__tf_") {
+        const std::string opname = name.substr(5);
+        // For comptime eval, just compute with double precision and return.
+        auto dArg = [&](size_t i) -> std::optional<double> {
+            if (i>=n) return std::nullopt;
+            if (auto v = intArg(i)) return static_cast<double>(*v);
+            return std::nullopt;
+        };
+        auto fromD = [](double d) { return CTValue::fromI64(static_cast<int64_t>(d)); };
+        if (opname=="sqrt"  && n==1) { if(auto v=dArg(0)) return fromD(std::sqrt(*v)); }
+        if (opname=="sin"   && n==1) { if(auto v=dArg(0)) return fromD(std::sin(*v)); }
+        if (opname=="cos"   && n==1) { if(auto v=dArg(0)) return fromD(std::cos(*v)); }
+        if (opname=="tan"   && n==1) { if(auto v=dArg(0)) return fromD(std::tan(*v)); }
+        if (opname=="asin"  && n==1) { if(auto v=dArg(0)) return fromD(std::asin(*v)); }
+        if (opname=="acos"  && n==1) { if(auto v=dArg(0)) return fromD(std::acos(*v)); }
+        if (opname=="atan"  && n==1) { if(auto v=dArg(0)) return fromD(std::atan(*v)); }
+        if (opname=="atan2" && n==2) { if(auto a=dArg(0)) if(auto b=dArg(1)) return fromD(std::atan2(*a,*b)); }
+        if (opname=="log"   && n==1) { if(auto v=dArg(0)) return fromD(std::log(*v)); }
+        if (opname=="log2"  && n==1) { if(auto v=dArg(0)) return fromD(std::log2(*v)); }
+        if (opname=="log10" && n==1) { if(auto v=dArg(0)) return fromD(std::log10(*v)); }
+        if (opname=="exp"   && n==1) { if(auto v=dArg(0)) return fromD(std::exp(*v)); }
+        if (opname=="exp2"  && n==1) { if(auto v=dArg(0)) return fromD(std::exp2(*v)); }
+        if (opname=="cbrt"  && n==1) { if(auto v=dArg(0)) return fromD(std::cbrt(*v)); }
+        if (opname=="hypot" && n==2) { if(auto a=dArg(0)) if(auto b=dArg(1)) return fromD(std::hypot(*a,*b)); }
+        if (opname=="fma"   && n==3) { if(auto a=dArg(0)) if(auto b=dArg(1)) if(auto c=dArg(2)) return fromD(std::fma(*a,*b,*c)); }
+        if (opname=="copysign" && n==2) { if(auto a=dArg(0)) if(auto b=dArg(1)) return fromD(std::copysign(*a,*b)); }
+        if (opname=="fast_sqrt" && n==1) { if(auto v=dArg(0)) return fromD(std::sqrt(*v)); }
+        return std::nullopt;
+    }
+
     return std::nullopt;
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Loop Reasoning Engine
 //
 // When a for-range loop body consists only of simple scalar accumulations
 // (x += delta, x -= delta, x *= c, x ^= c, x &= c, x |= c, x = expr,
@@ -2119,7 +2485,9 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
         auto* ret = static_cast<const ReturnStmt*>(s);
         if (!ret->value) { frame.returnValue = CTValue::fromI64(0); frame.hasReturned = true; return true; }
         CTValue v = evalExpr(frame, ret->value.get());
-        if (!v.isKnown()) return false;
+        // Propagate SYMBOLIC returns — caller (executeFunction) will check and
+        // discard them rather than baking a symbolic value into the IR.
+        if (!v.isKnown() && !v.isSymbolic()) return false;
         frame.returnValue = std::move(v);
         frame.hasReturned = true;
         return true;
@@ -2131,7 +2499,9 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
         CTValue v = decl->initializer
                     ? evalExpr(frame, decl->initializer.get())
                     : CTValue::fromI64(0);
-        if (!v.isKnown()) return false;
+        // Allow SYMBOLIC to be stored — it propagates through subsequent uses
+        // of this variable.  UNINITIALIZED (truly unknown expr) still aborts.
+        if (!v.isKnown() && !v.isSymbolic()) return false;
         frame.locals[decl->name] = std::move(v);
         return true;
     }
@@ -2143,7 +2513,8 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
         if (es->expression->type == ASTNodeType::ASSIGN_EXPR) {
             auto* assign = static_cast<const AssignExpr*>(es->expression.get());
             CTValue v = evalExpr(frame, assign->value.get());
-            if (!v.isKnown()) return false;
+            // Allow SYMBOLIC assignments — propagates unknown value into variable.
+            if (!v.isKnown() && !v.isSymbolic()) return false;
             frame.locals[assign->name] = std::move(v);
             return true;
         }
@@ -2154,21 +2525,104 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             CTValue idxVal = evalExpr(frame, ia->index.get());
             CTValue newVal = evalExpr(frame, ia->value.get());
             if (!arrVal.isKnown() || !idxVal.isKnown() || !newVal.isKnown()) return false;
+            if (arrVal.isSymbolic() || idxVal.isSymbolic()) return false;
             if (!arrVal.isArray() || !idxVal.isInt()) return false;
             heap_.store(arrVal.asArr(), idxVal.asI64(), std::move(newVal));
             return true;
         }
         // General expression (++/-- / function call with side effects / etc.)
         CTValue v = evalExpr(frame, es->expression.get());
-        if (v.isKnown()) { frame.lastBareExpr = v; frame.hasLastBare = true; }
-        return v.isKnown();
+        if (v.isConcrete()) { frame.lastBareExpr = v; frame.hasLastBare = true; }
+        return v.isKnown(); // includes SYMBOLIC (just don't set lastBare)
     }
 
     // ── If / else ─────────────────────────────────────────────────────────
     case ASTNodeType::IF_STMT: {
         auto* ifs = static_cast<const IfStmt*>(s);
         CTValue cond = evalExpr(frame, ifs->condition.get());
-        if (!cond.isKnown()) return false;
+
+        // ── Path-sensitive branch merge ───────────────────────────────────
+        // When the condition is symbolic, evaluate both branches independently
+        // on frame forks.  If they agree (same return value, or same local
+        // variable state), fold to the agreed result without needing to know
+        // which branch would actually be taken at runtime.
+        //
+        // Safety notes:
+        //   • Frame locals are deep-copied per branch; the heap pointer is
+        //     shared.  Any array allocations made by abandoned branches leave
+        //     dangling handles in the heap (no future reference → harmless
+        //     memory waste, not a correctness issue).
+        //   • fuel_ is saved/restored per branch and set to max(both) so
+        //     we charge fairly for the more expensive branch.
+        //   • We only fold Case 1 (both return non-array concrete values) or
+        //     Case 2 (both fall through, locals agree or diverge → symbolic),
+        //     not any state where break/continue signals differ.
+        if (cond.isSymbolic() && fuel_ + 2 <= kMaxInstructions) {
+            const int64_t savedFuel = fuel_;
+
+            // Fork A: then-branch.
+            CTFrame thenF = frame;
+            thenF.hasReturned = false; thenF.didBreak = false; thenF.didContinue = false;
+            bool thenOk = evalStmt(thenF, ifs->thenBranch.get());
+            const int64_t fuelAfterThen = fuel_;
+
+            // Fork B: else-branch (or identity if absent).
+            CTFrame elseF = frame;
+            elseF.hasReturned = false; elseF.didBreak = false; elseF.didContinue = false;
+            fuel_ = savedFuel;
+            bool elseOk = true;
+            if (ifs->elseBranch)
+                elseOk = evalStmt(elseF, ifs->elseBranch.get());
+            const int64_t fuelAfterElse = fuel_;
+            fuel_ = std::max(fuelAfterThen, fuelAfterElse);
+
+            // Case 1: both branches return the same concrete non-array value.
+            // The result is independent of the condition → constant fold.
+            // Helper: branch returned a concrete scalar/string value we can merge.
+            auto isConcreteScalarReturn = [](const CTFrame& f) {
+                return f.hasReturned &&
+                       !f.returnValue.isArray() &&
+                       !f.returnValue.isSymbolic();
+            };
+            if (thenOk && elseOk &&
+                isConcreteScalarReturn(thenF) && isConcreteScalarReturn(elseF) &&
+                thenF.returnValue == elseF.returnValue) {
+                frame.returnValue = thenF.returnValue;
+                frame.hasReturned = true;
+                ++stats_.branchMerges;
+                return true;
+            }
+
+            // Case 2: neither branch returns or breaks — merge locals.
+            // Variables that agree across both branches keep their value;
+            // variables that diverge are marked symbolic so downstream code
+            // can still proceed (conservatively) without aborting.
+            if (thenOk && !thenF.hasReturned && !thenF.didBreak &&
+                elseOk && !elseF.hasReturned && !elseF.didBreak) {
+                // Apply merged state: iterate over all keys in both branches.
+                for (auto& [k, v] : thenF.locals) {
+                    auto eit = elseF.locals.find(k);
+                    if (eit != elseF.locals.end()) {
+                        frame.locals[k] = (v == eit->second) ? v : CTValue::symbolic();
+                    } else {
+                        // Present in then-branch only → conditionally defined → symbolic.
+                        frame.locals[k] = CTValue::symbolic();
+                    }
+                }
+                for (auto& [k, v] : elseF.locals) {
+                    if (!thenF.locals.count(k))
+                        frame.locals[k] = CTValue::symbolic();
+                }
+                ++stats_.branchMerges;
+                return true;
+            }
+
+            // Merge failed — locals are unchanged (heap may have new dangling
+            // handles, but they won't be referenced by anyone).
+            return false;
+        }
+
+        if (!cond.isKnown() || cond.isSymbolic()) return false;
         if (cond.isTruthy()) return evalStmt(frame, ifs->thenBranch.get());
         if (ifs->elseBranch) return evalStmt(frame, ifs->elseBranch.get());
         return true;
@@ -2544,7 +2998,22 @@ void CTEngine::runPass(const Program* program) {
         "array_fill","range","range_step","array_concat","array_slice",
         "array_copy","sum","array_product","array_min","array_max",
         "array_last","array_contains","index_of","array_find",
-        "u64","u32","u16","u8","i64","i32","i16","i8","bool","int","uint"
+        // int/uint/bool type casts; iN/uN handled dynamically below
+        "bool","int","uint"
+    };
+    // iN/uN type-cast names (for N in [1..256]) are always pure.
+    // Also __tw_* (width-specific integer intrinsics) and __tf_* (f32 intrinsics).
+    auto isIntWidthCastNamePure = [](const std::string& nm) -> bool {
+        if (nm.size() > 5 && (nm.substr(0,5)=="__tw_" || nm.substr(0,5)=="__tf_"))
+            return true;
+        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
+        int bw = 0;
+        for (size_t j = 1; j < nm.size(); ++j) {
+            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
+            bw = bw * 10 + (nm[j] - '0');
+            if (bw > 256) return false;
+        }
+        return bw >= 1 && bw <= 256;
     };
 
     // Detect whether a function body is pure (no I/O, no mutations of globals).
@@ -2552,7 +3021,7 @@ void CTEngine::runPass(const Program* program) {
     std::function<bool(const FunctionDecl*, std::unordered_set<std::string>&)> isPureBody;
     isPureBody = [&](const FunctionDecl* fn, std::unordered_set<std::string>& visiting) -> bool {
         if (!fn || !fn->body) return false;
-        if (kBuiltinPure.count(fn->name)) return true;
+        if (kBuiltinPure.count(fn->name) || isIntWidthCastNamePure(fn->name)) return true;
         if (pureFunctions_.count(fn->name)) return true;
         if (visiting.count(fn->name)) return false; // conservatively not pure (recursion)
         visiting.insert(fn->name);
@@ -2573,7 +3042,7 @@ void CTEngine::runPass(const Program* program) {
             if (ex->type == ASTNodeType::CALL_EXPR) {
                 auto* call = static_cast<const CallExpr*>(ex);
                 if (kImpure.count(call->callee)) return false;
-                if (!kBuiltinPure.count(call->callee)) {
+                if (!kBuiltinPure.count(call->callee) && !isIntWidthCastNamePure(call->callee)) {
                     auto it = functions_.find(call->callee);
                     if (it != functions_.end()) {
                         if (!isPureBody(it->second, visiting)) return false;

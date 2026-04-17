@@ -51,6 +51,7 @@ enum class CTValueKind : uint8_t {
     CONCRETE_STRING,  ///< Heap-owned UTF-8 string
     CONCRETE_ARRAY,   ///< Array stored in CTHeap; value holds handle
     UNINITIALIZED,    ///< Placeholder / missing value
+    SYMBOLIC,         ///< Unknown value for partial evaluation (path-sensitive folding)
 };
 
 // ─── CTValue ─────────────────────────────────────────────────────────────────
@@ -79,10 +80,13 @@ struct CTValue {
     static CTValue fromBool(bool    v)    noexcept;
     static CTValue fromString(std::string s);
     static CTValue fromArray(CTArrayHandle h) noexcept;
-    static CTValue uninit()               noexcept { return CTValue{}; }
+    static CTValue uninit()    noexcept { return CTValue{}; }
+    static CTValue symbolic()  noexcept { CTValue r; r.kind = CTValueKind::SYMBOLIC; return r; }
 
     // ── Kind predicates ───────────────────────────────────────────────────
-    bool isKnown()  const noexcept { return kind != CTValueKind::UNINITIALIZED; }
+    bool isKnown()     const noexcept { return kind != CTValueKind::UNINITIALIZED; }
+    bool isSymbolic()  const noexcept { return kind == CTValueKind::SYMBOLIC; }
+    bool isConcrete()  const noexcept { return isKnown() && !isSymbolic(); }
     bool isInt()    const noexcept {
         return kind == CTValueKind::CONCRETE_I64 || kind == CTValueKind::CONCRETE_U64;
     }
@@ -333,10 +337,21 @@ public:
         int64_t pipelineTilesExecuted{0};
         int64_t functionsRegistered{0};
         int64_t pureFunctionsDetected{0};
-        int64_t loopsReasoned{0};  ///< For-loops handled by closed-form symbolic analysis
+        int64_t loopsReasoned{0};    ///< For-loops handled by closed-form symbolic analysis
+        int64_t branchMerges{0};     ///< Symbolic-IF diamond eliminations (path-sensitive folding)
+        int64_t ternaryMerges{0};    ///< Symbolic-ternary both-arm agreement folds
     };
     const Stats& stats()      const noexcept { return stats_; }
     void         resetStats()       noexcept { stats_ = {}; }
+
+    /// Set of user functions that produced ≥1 concrete fold result (i.e., they
+    /// were successfully CT-evaluated with concrete arguments).  The codegen
+    /// uses this to apply InlineHint to these functions so LLVM will prefer to
+    /// inline them, exposing the same constant-folding opportunities at
+    /// remaining runtime call sites.
+    const std::unordered_set<std::string>& foldableCallees() const noexcept {
+        return foldableCallees_;
+    }
 
     /// Interprocedural call graph built during runPass.
     const CTGraph& graph() const noexcept { return graph_; }
@@ -375,6 +390,10 @@ private:
     std::unordered_map<std::string, CTValue>             globalConsts_;
     std::unordered_map<std::string, int64_t>             enumConsts_;
     std::unordered_set<std::string>                      pureFunctions_;
+
+    /// Functions that produced ≥1 concrete fold (memoised with concrete args).
+    /// Populated in executeFunction; read by codegen to apply InlineHint.
+    std::unordered_set<std::string>                      foldableCallees_;
 
     /// Memoisation cache: CTMemoKey → snapshot CTValue.
     std::unordered_map<CTMemoKey, CTValue, CTMemoKeyHash> memoCache_;

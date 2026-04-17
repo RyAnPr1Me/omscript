@@ -193,8 +193,13 @@ Token Lexer::scanNumber() {
             }
             while (!isAtEnd() && (isHexDigit(peek()) || peek() == '_')) {
                 const char c = advance();
-                if (c != '_')
-                    num += c;
+                if (c == '_') {
+                    if (!isHexDigit(peek())) {
+                        lexError("Invalid underscore placement in numeric literal", line, column);
+                    }
+                    continue;
+                }
+                num += c;
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
@@ -212,8 +217,13 @@ Token Lexer::scanNumber() {
             }
             while (!isAtEnd() && ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
                 const char c = advance();
-                if (c != '_')
-                    num += c;
+                if (c == '_') {
+                    if (peek() < '0' || peek() > '7') {
+                        lexError("Invalid underscore placement in numeric literal", line, column);
+                    }
+                    continue;
+                }
+                num += c;
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
@@ -231,8 +241,13 @@ Token Lexer::scanNumber() {
             }
             while (!isAtEnd() && (peek() == '0' || peek() == '1' || peek() == '_')) {
                 const char c = advance();
-                if (c != '_')
-                    num += c;
+                if (c == '_') {
+                    if (peek() != '0' && peek() != '1') {
+                        lexError("Invalid underscore placement in numeric literal", line, column);
+                    }
+                    continue;
+                }
+                num += c;
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
@@ -268,6 +283,16 @@ Token Lexer::scanNumber() {
             isFloat = true;
         }
         advance();
+    }
+
+    for (size_t i = numStart; i < pos; i++) {
+        if (source[i] != '_') {
+            continue;
+        }
+        if (i == numStart || i + 1 >= pos ||
+            !isDigit(source[i - 1]) || !isDigit(source[i + 1])) {
+            lexError("Invalid underscore placement in numeric literal", line, column);
+        }
     }
 
     if (!hasUnderscore) {

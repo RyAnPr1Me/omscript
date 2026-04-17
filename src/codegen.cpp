@@ -1,6 +1,7 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "egraph.h"
+#include "synthesize.h"
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -630,6 +631,18 @@ void optimizeOptMaxStatement(Statement* stmt) {
 
 namespace omscript {
 
+/// Returns true if a type-annotation string represents an unsigned integer
+/// (uint, or any uN for N in [1..256]).
+static bool isUnsignedAnnotation(const std::string& tn) {
+    if (tn == "uint") return true;
+    if (tn.size() >= 2 && tn[0] == 'u') {
+        for (size_t j = 1; j < tn.size(); ++j)
+            if (!std::isdigit(static_cast<unsigned char>(tn[j]))) return false;
+        return true; // u1, u2, ..., u256, u64, etc.
+    }
+    return false;
+}
+
 // Canonical set of all stdlib built-in function names.
 // These functions are always compiled to native machine code via LLVM IR.
 static const std::unordered_set<std::string> stdlibFunctions = {"abs",
@@ -998,6 +1011,9 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     // -----------------------------------------------------------------------
     if (ann == "string")
         return llvm::PointerType::getUnqual(*context);
+    // bigint: heap-allocated arbitrary-precision integer — opaque pointer
+    if (ann == "bigint")
+        return llvm::PointerType::getUnqual(*context);
     // Array types: int[], string[], float[], etc.
     if (ann.size() >= 2 && ann.compare(ann.size() - 2, 2, "[]") == 0)
         return llvm::PointerType::getUnqual(*context);
@@ -1008,7 +1024,27 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (structDefs_.count(ann))
         return llvm::PointerType::getUnqual(*context);
 
-    // "int", "i64", "u64", generics, and empty annotations map to i64.
+    // General iN/uN handler for arbitrary bit widths [1..256].
+    // Handles i2, i3, ..., i128, u128, i256, u256, etc.
+    // Must come AFTER the specific i8/u8, i16/u16, i32/u32 checks above.
+    // i64/u64 and others also fall through to here (returning i64 as before).
+    {
+        const std::string& a = ann;
+        if (a.size() >= 2 && (a[0] == 'i' || a[0] == 'u')) {
+            bool allDigits = true;
+            int n = 0;
+            for (size_t j = 1; j < a.size(); ++j) {
+                if (!std::isdigit(static_cast<unsigned char>(a[j]))) { allDigits = false; break; }
+                n = n * 10 + (a[j] - '0');
+                if (n > 256) { allDigits = false; break; }
+            }
+            if (allDigits && n >= 1 && n <= 256) {
+                return llvm::IntegerType::get(*context, static_cast<unsigned>(n));
+            }
+        }
+    }
+
+    // "int", "uint", generics, and empty annotations map to i64.
     return getDefaultType();
 }
 
@@ -1071,7 +1107,14 @@ llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
     if (v->getType()->isPointerTy()) {
         return builder->CreatePtrToInt(v, getDefaultType(), "ptoi");
     }
-    if (v->getType()->isIntegerTy() && v->getType() != getDefaultType()) {
+    if (v->getType()->isIntegerTy()) {
+        const unsigned srcBits = v->getType()->getIntegerBitWidth();
+        if (srcBits > 64) {
+            // Wide integers (i65–i256): keep at native width; callers that
+            // need i64 must truncate explicitly with convertTo().
+            return v;
+        }
+        // Narrow integers (i1–i63): zero-extend to i64.
         return builder->CreateZExt(v, getDefaultType(), "zext");
     }
     return v;
@@ -1153,6 +1196,7 @@ void CodeGenerator::endScope() {
             namedValues[entry.first] = entry.second;
         } else {
             namedValues.erase(entry.first);
+            varTypeAnnotations_.erase(entry.first);
         }
     }
     for (const auto& entry : constScope) {
@@ -1231,6 +1275,51 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
         constFloatFolds_.erase(name);
         constStringFolds_.erase(name);
     }
+}
+
+void CodeGenerator::bindVariableAnnotated(const std::string& name, llvm::Value* value,
+                                          const std::string& typeAnnot, bool isConst) {
+    bindVariable(name, value, isConst);
+    if (!typeAnnot.empty())
+        varTypeAnnotations_[name] = typeAnnot;
+    else
+        varTypeAnnotations_.erase(name);
+}
+
+bool CodeGenerator::isUnsignedAnnot(const std::string& annot) {
+    if (annot == "uint") return true;
+    if (annot.size() >= 2 && annot[0] == 'u') {
+        for (size_t j = 1; j < annot.size(); ++j)
+            if (!std::isdigit(static_cast<unsigned char>(annot[j]))) return false;
+        return true;
+    }
+    return false;
+}
+
+bool CodeGenerator::isUnsignedValue(llvm::Value* v) const {
+    llvm::Value* base = v;
+    // Trace through loads and zero-extending casts to find the alloca name.
+    while (base) {
+        if (auto* li = llvm::dyn_cast<llvm::LoadInst>(base)) {
+            base = li->getPointerOperand();
+            continue;
+        }
+        if (auto* cast = llvm::dyn_cast<llvm::CastInst>(base)) {
+            if (cast->getOpcode() == llvm::Instruction::ZExt ||
+                cast->getOpcode() == llvm::Instruction::BitCast) {
+                base = cast->getOperand(0);
+                continue;
+            }
+        }
+        break;
+    }
+    if (!base) return false;
+    const llvm::StringRef name = base->getName();
+    if (name.empty()) return false;
+    auto it = varTypeAnnotations_.find(name);
+    if (it != varTypeAnnotations_.end())
+        return isUnsignedAnnot(it->second);
+    return false;
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
@@ -2266,6 +2355,202 @@ llvm::Function* CodeGenerator::getOrDeclareSetenv() {
     fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     OMSC_ADD_NOCAPTURE(fn, 1);
+    return fn;
+}
+// ── BigInt runtime helper declarations ──────────────────────────────────────
+// All bigint* functions take/return opaque pointers to heap-allocated OmBigInt
+// objects.  The convention matches bigint_runtime.h (C ABI).
+
+namespace {
+/// Shorthand: (ptr) -> ptr — the most common bigint binary-op signature.
+static llvm::FunctionType* bigintBinaryTy(llvm::LLVMContext& ctx) {
+    auto* p = llvm::PointerType::getUnqual(ctx);
+    return llvm::FunctionType::get(p, {p, p}, false);
+}
+/// Shorthand: (ptr) -> ptr — the unary signature.
+static llvm::FunctionType* bigintUnaryTy(llvm::LLVMContext& ctx) {
+    auto* p = llvm::PointerType::getUnqual(ctx);
+    return llvm::FunctionType::get(p, {p}, false);
+}
+/// Shorthand: (ptr, ptr) -> i32 — comparison returning int.
+static llvm::FunctionType* bigintCmpTy(llvm::LLVMContext& ctx) {
+    auto* p = llvm::PointerType::getUnqual(ctx);
+    return llvm::FunctionType::get(llvm::Type::getInt32Ty(ctx), {p, p}, false);
+}
+} // namespace
+
+llvm::Function* CodeGenerator::getOrDeclareBigintNewI64() {
+    if (auto* fn = module->getFunction("omsc_bigint_new_i64")) return fn;
+    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {i64Ty}, false);
+    auto* fn = declareExternalFn("omsc_bigint_new_i64", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree); // allocates
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareBigintNewStr() {
+    if (auto* fn = module->getFunction("omsc_bigint_new_str")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_bigint_new_str", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareBigintFree() {
+    if (auto* fn = module->getFunction("omsc_bigint_free")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {ptrTy}, false);
+    auto* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage,
+                                      "omsc_bigint_free", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareBigintAdd() {
+    if (auto* fn = module->getFunction("omsc_bigint_add")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_add", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintSub() {
+    if (auto* fn = module->getFunction("omsc_bigint_sub")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_sub", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintMul() {
+    if (auto* fn = module->getFunction("omsc_bigint_mul")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_mul", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintDiv() {
+    if (auto* fn = module->getFunction("omsc_bigint_div")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_div", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintMod() {
+    if (auto* fn = module->getFunction("omsc_bigint_mod")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_mod", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintNeg() {
+    if (auto* fn = module->getFunction("omsc_bigint_neg")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_neg", bigintUnaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintAbs() {
+    if (auto* fn = module->getFunction("omsc_bigint_abs")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_abs", bigintUnaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintPow() {
+    if (auto* fn = module->getFunction("omsc_bigint_pow")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_pow", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintGcd() {
+    if (auto* fn = module->getFunction("omsc_bigint_gcd")) return fn;
+    auto* fn = declareExternalFn("omsc_bigint_gcd", bigintBinaryTy(*context));
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintEq() {
+    if (auto* fn = module->getFunction("omsc_bigint_eq")) return fn;
+    return declareExternalFn("omsc_bigint_eq", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintLt() {
+    if (auto* fn = module->getFunction("omsc_bigint_lt")) return fn;
+    return declareExternalFn("omsc_bigint_lt", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintLe() {
+    if (auto* fn = module->getFunction("omsc_bigint_le")) return fn;
+    return declareExternalFn("omsc_bigint_le", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintGt() {
+    if (auto* fn = module->getFunction("omsc_bigint_gt")) return fn;
+    return declareExternalFn("omsc_bigint_gt", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintGe() {
+    if (auto* fn = module->getFunction("omsc_bigint_ge")) return fn;
+    return declareExternalFn("omsc_bigint_ge", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintCmp() {
+    if (auto* fn = module->getFunction("omsc_bigint_cmp")) return fn;
+    return declareExternalFn("omsc_bigint_cmp", bigintCmpTy(*context));
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintTostring() {
+    if (auto* fn = module->getFunction("omsc_bigint_tostring")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_bigint_tostring", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintToI64() {
+    if (auto* fn = module->getFunction("omsc_bigint_to_i64")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt64Ty(*context), {ptrTy}, false);
+    return declareExternalFn("omsc_bigint_to_i64", ty);
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintBitLength() {
+    if (auto* fn = module->getFunction("omsc_bigint_bit_length")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt64Ty(*context), {ptrTy}, false);
+    return declareExternalFn("omsc_bigint_bit_length", ty);
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintIsZero() {
+    if (auto* fn = module->getFunction("omsc_bigint_is_zero")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy}, false);
+    return declareExternalFn("omsc_bigint_is_zero", ty);
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintIsNegative() {
+    if (auto* fn = module->getFunction("omsc_bigint_is_negative")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy}, false);
+    return declareExternalFn("omsc_bigint_is_negative", ty);
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintShl() {
+    if (auto* fn = module->getFunction("omsc_bigint_shl")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false);
+    auto* fn = declareExternalFn("omsc_bigint_shl", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+llvm::Function* CodeGenerator::getOrDeclareBigintShr() {
+    if (auto* fn = module->getFunction("omsc_bigint_shr")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false);
+    auto* fn = declareExternalFn("omsc_bigint_shr", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     return fn;
 }
 // ---------------------------------------------------------------------------
@@ -3883,7 +4168,7 @@ void CodeGenerator::generate(Program* program) {
             function->addParamAttr(i, llvm::Attribute::NoUndef);
             if (paramTypes[i]->isIntegerTy()) {
                 const auto& tn = func->parameters[i].typeName;
-                if (tn == "u8" || tn == "u16" || tn == "u32" || tn == "u64")
+                if (isUnsignedAnnotation(tn))
                     function->addParamAttr(i, llvm::Attribute::ZExt);
                 else
                     function->addParamAttr(i, llvm::Attribute::SExt);
@@ -3891,8 +4176,7 @@ void CodeGenerator::generate(Program* program) {
         }
         function->addRetAttr(llvm::Attribute::NoUndef);
         if (retType->isIntegerTy()) {
-            if (func->returnType == "u8" || func->returnType == "u16" ||
-                func->returnType == "u32" || func->returnType == "u64")
+            if (isUnsignedAnnotation(func->returnType))
                 function->addRetAttr(llvm::Attribute::ZExt);
             else
                 function->addRetAttr(llvm::Attribute::SExt);
@@ -4028,6 +4312,13 @@ void CodeGenerator::generate(Program* program) {
     // reads/writes, or observable mutation.  Must run after autoDetectConstEvalFunctions
     // so that the constEvalFunctions_ set is already populated (those are pure).
     inferFunctionEffects(program);
+
+    // std::synthesize body synthesis: detect functions whose entire body is
+    //   return std__synthesize(examples_literal[, ops[, depth[, hint]]]);
+    // and replace that body with a synthesized expression tree.  Must run
+    // before CF-CTRE so the synthesized body is visible to the constant
+    // folder and purity analysis.
+    runSynthesisPass(program, verbose_);
 
     // CF-CTRE (Cross-Function Compile-Time Reasoning Engine): execute pure
     // functions across call boundaries at compile time.  Populates the
@@ -4936,6 +5227,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name, argIt->getType());
         builder->CreateStore(&(*argIt), alloca);
         bindVariable(param.name, alloca);
+        // Annotate parameter with its declared type for signed/unsigned tracking.
+        if (!param.typeName.empty())
+            varTypeAnnotations_[param.name] = param.typeName;
 
         if (paramStrIt != funcParamStringTypes_.end() && paramStrIt->second.count(paramIdx))
             stringVars_.insert(param.name);
@@ -5598,9 +5892,21 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         "fma","copysign","min_float","max_float",
         "reverse","sort","array_remove","array_insert",
         "array_any","array_every","array_count",
-        "u64","i64","int","uint","u32","i32","u16","i16","u8","i8","bool"
+        // int/uint/bool kept here; iN/uN are handled by isIntWidthCastName below
+        "int","uint","bool"
     };
-    if (kKnownBuiltins.find(name) == kKnownBuiltins.end())
+    // Check if name is in the known-builtins set OR is an iN/uN type-cast name.
+    auto isIntWidthCastName = [](const std::string& nm) -> bool {
+        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
+        int bw = 0;
+        for (size_t j = 1; j < nm.size(); ++j) {
+            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
+            bw = bw * 10 + (nm[j] - '0');
+            if (bw > 256) return false;
+        }
+        return bw >= 1 && bw <= 256;
+    };
+    if (kKnownBuiltins.find(name) == kKnownBuiltins.end() && !isIntWidthCastName(name))
         return std::nullopt;
 
     const size_t n = args.size();
@@ -6336,31 +6642,40 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     // ── String: str_split (returns array of strings), str_join ───────────
     // str_split not easily representable in ConstValue (array of strings)
     // str_join requires array of strings — skip for ConstValue evaluator.
-    // ── Integer type cast builtins ─────────────────────────────────────────
+    // ── General iN/uN constant cast (for comptime evaluation) ─────────────────
     // u64(x), i64(x), int(x), uint(x) — identity; all OmScript integers are i64.
     // u32(x), i32(x) — truncate to 32 bits (zero/sign extend back to i64).
     // u16(x), i16(x) — truncate to 16 bits.
     // u8(x),  i8(x)  — truncate to 8 bits.
     // bool(x)        — normalise to 0 or 1.
-    // These match the runtime behaviour so comptime and runtime agree.
-    if (n == 1 && args[0].kind == CV::Kind::Integer) {
-        const int64_t v = args[0].intVal;
-        if (name == "u64" || name == "i64" || name == "int" || name == "uint")
-            return CV::fromInt(v);
-        if (name == "u32")
-            return CV::fromInt(static_cast<int64_t>(static_cast<uint32_t>(v)));
-        if (name == "i32")
-            return CV::fromInt(static_cast<int64_t>(static_cast<int32_t>(v)));
-        if (name == "u16")
-            return CV::fromInt(static_cast<int64_t>(static_cast<uint16_t>(v)));
-        if (name == "i16")
-            return CV::fromInt(static_cast<int64_t>(static_cast<int16_t>(v)));
-        if (name == "u8")
-            return CV::fromInt(static_cast<int64_t>(static_cast<uint8_t>(v)));
-        if (name == "i8")
-            return CV::fromInt(static_cast<int64_t>(static_cast<int8_t>(v)));
-        if (name == "bool")
-            return CV::fromInt(v != 0 ? 1 : 0);
+    // Arbitrary uN(x)/iN(x) for N in [1..256] — mask/sign-extend as appropriate.
+    // For N > 64, ConstValue only holds i64, so upper bits are truncated.
+    {
+        const std::string& nm = name;
+        unsigned castBits = 0; bool castUnsigned = false;
+        if (nm == "int")  { castBits = 64; castUnsigned = false; }
+        else if (nm == "uint") { castBits = 64; castUnsigned = true; }
+        else if (nm == "bool") { castBits = 1;  castUnsigned = true; }
+        else if (nm.size() >= 2 && (nm[0] == 'i' || nm[0] == 'u')) {
+            bool allDigits = true; int bw = 0;
+            for (size_t j = 1; j < nm.size(); ++j) {
+                if (!std::isdigit(static_cast<unsigned char>(nm[j]))) { allDigits = false; break; }
+                bw = bw * 10 + (nm[j] - '0'); if (bw > 256) { allDigits = false; break; }
+            }
+            if (allDigits && bw >= 1 && bw <= 256) { castBits = static_cast<unsigned>(bw); castUnsigned = (nm[0] == 'u'); }
+        }
+        if (castBits >= 1 && n == 1 && args[0].kind == CV::Kind::Integer) {
+            const int64_t v = args[0].intVal;
+            if (castBits == 1) return CV::fromInt(v != 0 ? 1 : 0);
+            if (castBits >= 64) return CV::fromInt(v); // identity for i64/u64/wider
+            const uint64_t mask = (UINT64_C(1) << castBits) - 1u;
+            if (castUnsigned) return CV::fromInt(static_cast<int64_t>(static_cast<uint64_t>(v) & mask));
+            // Signed: mask then sign-extend
+            uint64_t uv = static_cast<uint64_t>(v) & mask;
+            const uint64_t signBit = UINT64_C(1) << (castBits - 1);
+            if (uv & signBit) uv |= ~mask; // sign-extend
+            return CV::fromInt(static_cast<int64_t>(uv));
+        }
     }
     return std::nullopt;
 }
@@ -7363,7 +7678,34 @@ void CodeGenerator::runCFCTRE(Program* program) {
                   << s.pureFunctionsDetected << " pure, "
                   << s.functionCallsMemoized << " calls memoised, "
                   << s.arraysAllocated       << " arrays allocated, "
-                  << s.loopsReasoned         << " loops reasoned" << '\n';
+                  << s.loopsReasoned         << " loops reasoned, "
+                  << s.branchMerges          << " branch merges, "
+                  << s.ternaryMerges         << " ternary merges" << '\n';
+    }
+
+    // ── CF-CTRE-guided inline hints ────────────────────────────────────────
+    // Functions that CF-CTRE successfully evaluated (with concrete arguments)
+    // are prime candidates for inlining at the remaining runtime call sites:
+    // once inlined, LLVM's IPSCCP pass can propagate the same constants and
+    // produce the same constant-folded output for statically-known arguments.
+    //
+    // We apply InlineHint (not AlwaysInline) so LLVM's cost model still gates
+    // excessively-large callees — the hint is advisory, not mandatory.
+    //
+    // Skipped for: @noinline functions (explicit user opt-out), zero-parameter
+    // functions (already folded to global constants above), and functions not
+    // in the foldable set (no evidence that inlining would expose folding).
+    if (ctEngine_ && optimizationLevel >= OptimizationLevel::O2) {
+        const auto& foldable = ctEngine_->foldableCallees();
+        for (auto& fn : program->functions) {
+            if (fn->hintNoInline) continue;
+            if (fn->parameters.empty()) continue;   // zero-arg already folded
+            if (!foldable.count(fn->name)) continue;
+            // Only upgrade to hintInline if the function isn't already more
+            // aggressively annotated (@flatten / alwaysInline).
+            if (!fn->hintInline)
+                fn->hintInline = true;
+        }
     }
 }
 

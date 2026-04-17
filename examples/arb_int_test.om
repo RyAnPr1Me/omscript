@@ -1,0 +1,52 @@
+// arb_int_test.om — Tests for arbitrary-width integer types
+// Demonstrates i3, u7, i128, u128, u256 type annotations and casts.
+
+fn test_narrow_types() -> int {
+    // i3 holds values -4..3; u7 holds 0..127
+    var a:i3 = i3(-4)
+    var b:u7 = u7(100)
+    var c:i3 = i3(3)
+
+    // Cast arithmetic: mask/truncate semantics
+    var x:i64 = i3(7)    // 7 in i3 wraps to -1 (0b111 = -1 signed)
+    var y:i64 = u7(200)  // 200 & 0x7F = 72
+
+    return x + y   // -1 + 72 = 71
+}
+
+fn test_medium_types() -> int {
+    // i16 and u16 through cast syntax
+    var a:i16 = i16(32767)
+    var b:i16 = i16(1)
+    var sum:i64 = a + b  // i16 arithmetic overflow: 32767 + 1 = -32768
+    var masked:i64 = u16(sum)  // zero-extend: 32768
+
+    return masked   // 32768
+}
+
+fn test_i32_roundtrip() -> int {
+    var v:i32 = i32(-1)
+    return v   // Should be -1 (sign-extended to i64)
+}
+
+fn main() {
+    println(test_narrow_types())   // 71
+    println(test_medium_types())   // 32768
+    println(test_i32_roundtrip())  // -1
+
+    // Inline cast expressions
+    println(u7(255))   // 127 (255 & 0x7F)
+    println(i8(-128))  // -128
+    println(u8(-1))    // 255
+
+    // i128/u128 as type annotations
+    var big:i128 = 9223372036854775807  // max i64
+    println(big)
+
+    // Boolean cast
+    println(bool(42))  // 1
+    println(bool(0))   // 0
+
+    // Bit-width type methods  
+    println(i32::max_val())   // uses int methods
+}

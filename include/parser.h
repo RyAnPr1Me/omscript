@@ -157,8 +157,13 @@ class Parser {
     /// Tries longest-prefix namespace matching.  Returns the resolved function
     /// name on success.  Calls error() if a namespace is found but the function
     /// is absent.  Returns an empty string when no namespace prefix matches
-    /// (caller falls back to flat name mangling for backward compatibility).
+    /// (caller emits a hard error for unrecognised namespaces).
     std::string resolveNamespacedPath(const std::vector<std::string>& segments);
+
+    /// Pre-register the built-in `std` namespace in importNamespaces_.
+    /// Called from both constructors so every Parser instance has `std::` available
+    /// without requiring an explicit import statement.
+    void registerStdNamespace();
 
     std::unique_ptr<Expression> parseExpression();
     std::unique_ptr<Expression> parseAssignment();

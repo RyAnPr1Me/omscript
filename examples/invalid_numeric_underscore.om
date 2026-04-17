@@ -1,0 +1,5 @@
+// Invalid numeric literal underscore placement
+fn main() {
+    var x = 1_;
+    return x;
+}

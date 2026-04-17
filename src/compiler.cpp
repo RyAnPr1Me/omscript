@@ -4,6 +4,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "preprocessor.h"
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -67,14 +68,22 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         }
     }
 
+    using Clock = std::chrono::steady_clock;
+    const auto compileStart = Clock::now();
+    // Helper: milliseconds elapsed since a reference point.
+    auto elapsedMs = [&](Clock::time_point ref) -> double {
+        return std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - ref).count() / 1000.0;
+    };
+
     if (verbose_) {
-        std::cout << "Compiling " << sourceFile << "..." << std::endl;
+        std::cout << "Compiling " << sourceFile << "...\n";
     }
 
     // Read source code
     std::string source = readFile(sourceFile);
 
     // Preprocessor pass
+    const auto ppStart = Clock::now();
     Preprocessor pp(sourceFile);
     source = pp.process(source);
     for (const auto& w : pp.warnings()) {
@@ -83,10 +92,13 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
 
     // Lexical analysis
     if (verbose_) {
-        std::cout << "  Lexing..." << std::endl;
+        std::cout << "  Preprocessing done [+" << elapsedMs(compileStart) << "ms]: "
+                  << pp.macroMap().size() << " macros defined\n";
+        std::cout << "  Lexing...\n";
     }
     Lexer lexer(std::move(source));
     std::vector<Token> tokens;
+    const auto lexStart = Clock::now();
     try {
         tokens = lexer.tokenize();
     } catch (const DiagnosticError&) {
@@ -94,11 +106,18 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     } catch (const std::exception& e) {
         throw FileError(sourceFile + ": " + e.what());
     }
+    if (verbose_) {
+        std::cout << "  Lex done [+" << elapsedMs(compileStart) << "ms, "
+                  << elapsedMs(lexStart) << "ms]: "
+                  << tokens.size() << " tokens\n";
+    }
+    (void)ppStart; // reserved for future per-pp timing
 
     // Syntax analysis
     if (verbose_) {
-        std::cout << "  Parsing..." << std::endl;
+        std::cout << "  Parsing...\n";
     }
+    const auto parseStart = Clock::now();
     Parser parser(std::move(tokens));
     parser.setBaseDir(std::filesystem::path(sourceFile).parent_path().string());
     std::unique_ptr<Program> program;
@@ -114,11 +133,17 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     for (const auto& w : parser.warnings()) {
         std::cerr << w << "\n";
     }
+    if (verbose_) {
+        std::cout << "  Parse done [+" << elapsedMs(compileStart) << "ms, "
+                  << elapsedMs(parseStart) << "ms]: "
+                  << program->functions.size() << " function(s)\n";
+    }
 
     // Code generation
     if (verbose_) {
-        std::cout << "  Generating code..." << std::endl;
+        std::cout << "  Generating code...\n";
     }
+    const auto codegenStart = Clock::now();
     CodeGenerator codegen(optLevel_);
     codegen.setVerbose(verbose_);
     codegen.setMarch(march_);
@@ -147,19 +172,36 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         throw FileError(sourceFile + ": " + e.what());
     }
 
+    if (verbose_) {
+        // Count functions and total instructions in the generated module.
+        unsigned irFunctions = 0, irInstructions = 0;
+        for (const auto& F : *codegen.getModule()) {
+            if (!F.isDeclaration()) {
+                ++irFunctions;
+                irInstructions += F.getInstructionCount();
+            }
+        }
+        std::cout << "  Codegen done [+" << elapsedMs(compileStart) << "ms, "
+                  << elapsedMs(codegenStart) << "ms]: "
+                  << irFunctions << " function(s), "
+                  << irInstructions << " IR instruction(s)\n";
+    }
+
     // Print LLVM IR only in verbose mode
     if (verbose_) {
-        std::cout << "  LLVM IR:" << std::endl;
+        std::cout << "  LLVM IR:\n";
+        std::cout.flush(); // synchronize before llvm::outs() writes to the same fd
         codegen.getModule()->print(llvm::outs(), nullptr);
+        llvm::outs().flush(); // ensure IR is fully written before std::cout resumes
     }
 
     // Write object file (or bitcode for FLTO)
     std::string objFile = outputFile + (lto_ ? ".bc" : ".o");
     if (verbose_) {
         if (lto_) {
-            std::cout << "  Writing bitcode to " << objFile << " (FLTO enabled)..." << std::endl;
+            std::cout << "  Writing bitcode to " << objFile << " (FLTO enabled)...\n";
         } else {
-            std::cout << "  Writing object file to " << objFile << "..." << std::endl;
+            std::cout << "  Writing object file to " << objFile << "...\n";
         }
     }
     bool objectFileCreated = false;
@@ -184,7 +226,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
 
         // Link to create executable
         if (verbose_) {
-            std::cout << "  Linking..." << std::endl;
+            std::cout << "  Linking...\n";
         }
         // When LTO is enabled, prefer clang which can link LLVM bitcode files.
         // Otherwise try gcc first, then cc (POSIX standard), then clang.
@@ -243,6 +285,18 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         linkArgs.push_back("-lm");
         // Link against pthreads for concurrency primitives.
         linkArgs.push_back("-lpthread");
+        // Link the BigInt runtime library if it exists alongside the compiler binary.
+        // OMSC_BIGINT_LIB_PATH is set at build time to the location of libomsc_bigint.a.
+#ifdef OMSC_BIGINT_LIB_PATH
+        {
+            const std::string bigintLib = OMSC_BIGINT_LIB_PATH;
+            if (!bigintLib.empty() && std::filesystem::exists(bigintLib)) {
+                linkArgs.push_back(bigintLib);
+            }
+        }
+#endif
+        // Also link C++ standard library (bigint runtime is C++ internally).
+        linkArgs.push_back("-lstdc++");
         llvm::SmallVector<llvm::StringRef, 8> argRefs;
         argRefs.push_back(linkerProgram);
         for (const auto& arg : linkArgs) {
@@ -265,8 +319,12 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         throw;
     }
 
+    if (verbose_) {
+        std::cout << "  Total compile time: " << elapsedMs(compileStart) << "ms\n";
+    }
+
     if (!quiet_) {
-        std::cout << "compiled " << outputFile << std::endl;
+        std::cout << "compiled " << outputFile << "\n";
     }
 }
 

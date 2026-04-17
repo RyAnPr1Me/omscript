@@ -225,7 +225,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             arrayVars_.erase(stmt->name);
     }
 
-    bindVariable(stmt->name, alloca, stmt->isConst);
+    bindVariableAnnotated(stmt->name, alloca, stmt->typeName, stmt->isConst);
 
     // If the initializer was a borrow expression, register the alias mapping
     // now that we know the ref variable's name.  This enables scope-based
@@ -1999,6 +1999,17 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+            // vectorize.predicate.enable: allow predicated (masked) vectorization
+            // for loops whose trip count is not a compile-time multiple of the
+            // vector width.  Without this hint LLVM emits a scalar epilogue loop
+            // for the last partial vector; with it, the loop body runs entirely in
+            // vector mode using masked instructions — one fewer loop structure and
+            // better utilisation of predication hardware (AVX-512, ARM SVE).
+            // Only meaningful when vectorize.enable=1 is already set.
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.predicate.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         // Interleaving: @hot+@vectorize at O3 → 4 iterations; plain O3
         // auto-vectorized loops → 2 iterations (balances register pressure
@@ -3074,7 +3085,7 @@ void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
     }
 
     llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
-    bindVariable(stmt->name, alloca);
+    bindVariableAnnotated(stmt->name, alloca, stmt->typeName);
 
     if (initValue) {
         builder->CreateStore(initValue, alloca);
