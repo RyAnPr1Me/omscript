@@ -776,8 +776,8 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
         auto callExpr = std::make_unique<CallExpr>(resolvedTarget, std::move(callArgs));
         callExpr->line = name.line;
         callExpr->column = name.column;
+        callExpr->fromStdNamespace = true; // compiler-generated wrapper
         auto retStmt = std::make_unique<ReturnStmt>(std::move(callExpr));
-        retStmt->line = name.line;
         retStmt->column = name.column;
         std::vector<std::unique_ptr<Statement>> stmts;
         stmts.push_back(std::move(retStmt));
@@ -1453,6 +1453,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         std::vector<std::unique_ptr<Expression>> lenArgs;
         lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
         auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
+        lenCall->fromStdNamespace = true; // compiler-generated
         auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(zero), std::move(lenCall),
                                                   nullptr, std::move(innerBlock));
         forStmt->line = varName.line;
@@ -1870,6 +1871,7 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
         std::vector<std::unique_ptr<Expression>> lenArgs;
         lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
         auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
+        lenCall->fromStdNamespace = true; // compiler-generated
         auto forStmt = std::make_unique<ForStmt>(firstName.lexeme, std::move(zero), std::move(lenCall),
                                                   nullptr, std::move(innerBlock));
         forStmt->line = firstName.line;
@@ -2766,6 +2768,7 @@ check_in:
         args.push_back(std::move(container)); // array is first arg
         args.push_back(std::move(left));      // value is second arg
         auto callExpr = std::make_unique<CallExpr>("array_contains", std::move(args));
+        callExpr->fromStdNamespace = true; // compiler-generated (in operator desugaring)
         callExpr->line = inToken.line;
         callExpr->column = inToken.column;
         return callExpr;
@@ -2898,6 +2901,7 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                 args.push_back(std::move(zeroLit));
                 args.push_back(std::move(endIdx));
                 auto callExpr = std::make_unique<CallExpr>("array_slice", std::move(args));
+                callExpr->fromStdNamespace = true; // compiler-generated (slice syntax)
                 callExpr->line = bracketToken.line;
                 callExpr->column = bracketToken.column;
                 expr = std::move(callExpr);
@@ -2912,6 +2916,7 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                     args.push_back(std::move(index));
                     args.push_back(std::move(endIdx));
                     auto callExpr = std::make_unique<CallExpr>("array_slice", std::move(args));
+                    callExpr->fromStdNamespace = true; // compiler-generated (slice syntax)
                     callExpr->line = bracketToken.line;
                     callExpr->column = bracketToken.column;
                     expr = std::move(callExpr);
@@ -2940,6 +2945,7 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                 }
                 consume(TokenType::RPAREN, "Expected ')' after method call arguments");
                 auto callExpr = std::make_unique<CallExpr>(fieldToken.lexeme, std::move(arguments));
+                callExpr->fromStdNamespace = true; // method-call syntax desugaring
                 callExpr->line = dotToken.line;
                 callExpr->column = dotToken.column;
                 expr = std::move(callExpr);
@@ -2977,6 +2983,11 @@ std::unique_ptr<Expression> Parser::parseCall() {
             auto callExpr = std::make_unique<CallExpr>(idExpr->name, std::move(arguments));
             callExpr->line = expr->line;
             callExpr->column = expr->column;
+            // Consume and apply the namespace-resolution flag set by parsePrimary.
+            if (lastCallWasNsResolved_) {
+                callExpr->fromStdNamespace = true;
+                lastCallWasNsResolved_ = false;
+            }
             return callExpr;
         } else {
             error("Invalid function call");
@@ -3384,6 +3395,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                                 const std::string callee = "__tw_" + opName +
                                     (widthStr.empty() ? "" : "_" + widthStr);
                                 auto e = std::make_unique<CallExpr>(callee, std::move(args));
+                                e->fromStdNamespace = true; // type-method desugaring
                                 e->line = token.line; e->column = token.column;
                                 return e;
                             }
@@ -3392,11 +3404,13 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                             if (kp == 'F') {
                                 const std::string callee = "__tf_" + val;
                                 auto e = std::make_unique<CallExpr>(callee, std::move(args));
+                                e->fromStdNamespace = true; // type-method desugaring
                                 e->line = token.line; e->column = token.column;
                                 return e;
                             }
                             // kp == 'C': named builtin call
                             auto e = std::make_unique<CallExpr>(val, std::move(args));
+                            e->fromStdNamespace = true; // type-method desugaring
                             e->line = token.line; e->column = token.column;
                             return e;
                         }
@@ -3408,6 +3422,9 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 // ── Priority 2: namespace registry resolution ───────────────────
                 const std::string resolved = resolveNamespacedPath(segments);
                 if (!resolved.empty()) {
+                    // Signal parseCall() that the resulting CallExpr was reached
+                    // via a namespace-qualified path (e.g. std::abs).
+                    lastCallWasNsResolved_ = true;
                     auto e = std::make_unique<IdentifierExpr>(resolved);
                     e->line = token.line;
                     e->column = token.column;

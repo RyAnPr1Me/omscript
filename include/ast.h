@@ -140,6 +140,11 @@ class CallExpr : public Expression {
   public:
     std::string callee;
     std::vector<std::unique_ptr<Expression>> arguments;
+    /// True when this call was written as std::funcname(...) or was
+    /// generated internally by the compiler (desugaring, synthesizer, etc.).
+    /// False for bare user-written calls like funcname(...).
+    /// The codegen rejects bare calls to known built-in functions.
+    bool fromStdNamespace = false;
 
     CallExpr(const std::string& c, std::vector<std::unique_ptr<Expression>> args)
         : Expression(ASTNodeType::CALL_EXPR), callee(c), arguments(std::move(args)) {}

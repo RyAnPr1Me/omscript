@@ -5550,6 +5550,7 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         std::vector<std::unique_ptr<Expression>> args;
         args.push_back(std::move(pipe->left));
         auto callExpr = std::make_unique<CallExpr>(pipe->functionName, std::move(args));
+        callExpr->fromStdNamespace = true; // pipe-forward desugaring
         callExpr->line = pipe->line;
         callExpr->column = pipe->column;
         return generateCall(callExpr.get());
