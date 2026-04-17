@@ -202,7 +202,7 @@ Compatibility rules used by this project:
 Implemented and tested language surface includes:
 
 - Declarations: `fn`, `var`, `const`, `enum`, `struct`, `import`
-- Control flow: `if`/`elif`/`else`, `unless`, `when`, `guard`, `switch`, `try`/`catch`/`throw`
+- Control flow: `if`/`elif`/`else`, `unless`, `when`, `guard`, `switch`, `throw`/`catch`
 - Loops: `while`, `do ... while`, range `for`, `foreach`, `repeat`, `times`, `until`, `forever`, `loop`
 - Control forms: `defer`, `with`, `pipeline`/`stage`
 - Ownership forms: `move`, `borrow`, `borrow mut`, `freeze`, `reborrow`, `invalidate`
@@ -281,6 +281,7 @@ comptime  pipeline  stage
 - `in` is both a loop keyword and expression operator keyword.
 - `true`, `false`, and `null` are reserved literal keywords.
 - `likely`, `unlikely`, and `prefetch` are keyworded optimization hints in supported contexts.
+- `try` is a **reserved keyword** recognized by the lexer but has no associated statement form in the parser — `try { }` is not valid syntax. Use `throw`/`catch(N)` for error handling (see §16).
 
 ### 3.2.2 Statement keyword quick reference
 
@@ -301,7 +302,7 @@ This is a compact implementation-aligned map of keyword-led statement forms:
 | Forever | `forever { ... }` |
 | Loop | `loop { ... }` |
 | Switch | `switch (expr) { case K: ... default: ... }` |
-| Error handling | `try { ... } catch (name) { ... }`, `throw expr;` |
+| Error handling | `throw expr;` followed by `catch(N) { ... }` |
 | Lifetime ops | `move x;`, `freeze x;`, `invalidate x;`, `borrow x;`, `reborrow x;` |
 | Deferred execution | `defer { ... }` |
 | Guard | `guard (cond) { ... }` |
@@ -1093,7 +1094,7 @@ Optional `count=M` specifies that the total allocation size is `param[N] * param
 
 ### 7.10 Method Call Syntax
 
-Any call of the form `receiver.method(args...)` is desugared at parse time to `method(receiver, args...)`, with `fromStdNamespace` set to `true` — meaning the resulting call is **exempt** from the `std::` prefix requirement. This makes dot-notation always valid for built-in functions without requiring the `std::` prefix:
+Any call of the form `receiver.method(args...)` is desugared at parse time to `method(receiver, args...)`. This makes dot-notation always valid for built-in functions — it calls the bare built-in name directly:
 
 ```omscript
 var arr = [3, 1, 2];
@@ -2042,12 +2043,12 @@ var tier = score >= 90 ? "A" : (score >= 80 ? "B" : "C");
 ### 10.7 Pipe Forward
 
 ```omscript
-value |> function_name    // equivalent to function_name(value), exempt from std:: rule
+value |> function_name    // equivalent to function_name(value)
 [1,2,3] |> sort |> reverse   // sort([1,2,3]) then reverse(result)
 x |> str_upper |> println     // composed pipeline
 ```
 
-The function name after `|>` is a **bare identifier** — do not write `std::` after `|>`. The compiler desugars `x |> fname` into a call marked `fromStdNamespace = true`, so no `std::` prefix is needed or allowed here.
+The function name after `|>` is a **bare identifier** — do not write `std::` after `|>`. The compiler desugars `x |> fname` into a bare built-in call; the `std::` prefix is not needed and not allowed here.
 
 ### 10.8 Range
 
@@ -2139,9 +2140,9 @@ fn zero_out(p: &int) { *p = 0; }  // reference parameter (conceptual)
 
 ### 10.13 Type-Namespace Method Dispatch
 
-The `::` operator supports calling built-in operations using a type name as a namespace. This is parsed as **Priority 1** — the desugaring happens entirely at parse time before namespace-registry lookup, so no import is needed and no `std::` prefix is required.
+The `::` operator supports calling built-in operations using a type name as a namespace. This is parsed as **Priority 1** — the desugaring happens entirely at parse time before namespace-registry lookup, so no import is needed.
 
-All desugared calls set `fromStdNamespace = true`, making them exempt from the `std::` prefix requirement.
+All desugared calls go through the standard built-in dispatch, accepting bare names as usual.
 
 ---
 
@@ -2577,7 +2578,7 @@ var parts = s.str_split(", "); // ["Hello", "World!"]
 | `std::str_repeat(s, n)` | Repeat string `n` times |
 | `std::str_reverse(s)` | Reverse string |
 | `std::str_split(s, delim)` | Split by delimiter, returns array |
-| `std::str_chars(s)` | Split into array of single-character strings |
+| `std::str_chars(s)` | Split into array of **integer character codes** (one `i64` byte value per character); use `std::to_char()` to convert back to single-character strings |
 | `std::str_join(arr, delim)` | Join array with delimiter |
 | `std::str_count(s, sub)` | Count non-overlapping occurrences of `sub` |
 | `std::str_pad_left(s, n, ch)` | Pad string on left to width `n` with character `ch` |
@@ -2836,79 +2837,100 @@ var can_read = perm & Flags::READ;       // 1 (true)
 
 ## 16. Error Handling
 
-### 16.1 try / catch / throw
+### 16.1 throw / catch
+
+OmScript error handling uses a **jump-table dispatch** model. There is **no `try { }` block** — instead, a `throw` statement jumps forward to the nearest matching `catch(N)` clause in the current function.
+
+> **Note:** `try` is a reserved keyword in the lexer but has no associated statement form. Do not use `try { }`.
+
+**Syntax:**
 
 ```omscript
-try {
-    // ...
-    throw "something went wrong";
-} catch (e) {
-    std::println(e);
-}
+throw <expr>;          // throw an integer error code
+catch(<N>) { ... }     // catch a specific integer literal code
+catch("msg") { ... }   // catch a specific string literal code (compile-time matching)
 ```
 
-`throw` accepts any expression — a string, integer, or any value. `catch (e)` binds the thrown value to `e`.
+- `throw expr;` — evaluates `expr` to an integer (or value coerced to integer) and jumps to the nearest matching `catch` in the same function.
+- `catch(N) { ... }` — matches when the most recent `throw` had the integer value `N`. `N` must be a **non-negative integer literal**.
+- `catch("str") { ... }` — compile-time string code; the string literal is mapped to a unique integer ID at compile time. Matching `throw "str"` is not reliable at runtime (use integer codes for portability).
+- After a `catch` block executes, execution continues normally with the statement after the `catch` block.
+- If no `throw` precedes a `catch`, the `catch` block is **skipped entirely** — this is the "bypass" behavior.
+- If a `throw` occurs with no matching `catch` in the current function, the program **aborts** with a runtime error message.
+
+**Examples:**
+
+```omscript
+// Basic throw + catch:
+throw 42;
+catch(42) {
+    println("caught error 42");
+}
+// execution continues here normally
+
+// Catch bypass — no throw, catch block is skipped:
+var result = 5;
+catch(999) {
+    result = 1000;  // never executed
+}
+// result is still 5
+
+// Throw + catch + continuation:
+throw 7;
+catch(7) {
+    result = result + 7;
+}
+result = result + 1;   // this runs after the catch block
+
+// Sequential throws (each throw matches its own catch):
+throw 10;
+catch(10) { result = result + 10; }
+throw 20;
+catch(20) { result = result + 20; }
+```
 
 **Detailed rules:**
-- The `try` block runs normally until a `throw` is encountered (or an internal error is triggered).
-- When `throw val` is executed, control transfers immediately to the nearest enclosing `catch` block.
-- `catch (e)` binds the thrown value to the variable `e` — the type is dynamic.
-- `throw` inside a `catch` re-throws (or throws a new value).
-- If no `try/catch` is present and a `throw` occurs, the program terminates with a runtime error.
-- OmScript has a single catch clause (no typed `catch` — all exceptions are caught by the one `catch`).
+- `catch(N)` requires a **literal** integer or string as the match value — it cannot be a variable or expression.
+- `catch(N)` blocks must be at **function top-level** — they cannot be nested inside `if`, `for`, `while`, or other blocks.
+- Duplicate `catch(N)` codes in the same function are a **compile error**.
+- When `throw N` executes, the runtime dispatches via a switch over all `catch` blocks registered in the function.
+- Control flow after a matched `catch` block continues normally — there is no "exception unwind".
+- `throw` and `catch` are sequential statements, not nested blocks like `try/catch`.
+- Using a `throw` code that no `catch` in the function handles will **abort** the program with a runtime error message.
 
 ```omscript
 fn divide(a:int, b:int) -> int {
     if (b == 0) {
-        throw "DivisionByZero: cannot divide by zero";
+        throw 1;   // error code 1 = division by zero
     }
     return a / b;
 }
 
 fn safe_divide(a:int, b:int) -> int {
-    try {
-        return divide(a, b);
-    } catch (e) {
-        std::println("Error: " + e);
-        return 0;
+    var result = divide(a, b);
+    catch(1) {
+        println("Error: division by zero");
+        result = 0;
     }
-}
-
-// Throw and catch integers:
-try {
-    throw 404;
-} catch (code) {
-    std::println("Error code: " + std::to_string(code));
-}
-
-// Nested try:
-try {
-    try {
-        throw "inner";
-    } catch (e) {
-        std::println("Inner caught: " + e);
-        throw "outer";   // re-throw as a different value
-    }
-} catch (e) {
-    std::println("Outer caught: " + e);
+    return result;
 }
 ```
 
 ### 16.2 assert
 
 ```omscript
-std::assert(x > 0);             // runtime assertion; aborts on failure
-std::assert(n < max_size);      // program terminates if n >= max_size
+assert(x > 0);             // runtime assertion; aborts on failure
+assert(n < max_size);      // program terminates if n >= max_size
 ```
 
-`std::assert(cond)` checks a condition at runtime. If the condition is zero (false), the program immediately terminates with an error message indicating the assertion failure location.
+`assert(cond)` checks a condition at runtime. If the condition is zero (false), the program immediately terminates with an error message indicating the assertion failure location.
 
 **Note:** For compile-time assertions, use the `#assert` preprocessor directive (see §4.3).
 
-**`std::expect` for prediction without termination:**
+**`expect` for branch prediction without termination:**
 ```omscript
 // hint: branch is likely to go left (val is expected to equal 1)
-var x = std::expect(val, 1);   // returns val unchanged; provides branch hint to LLVM
+var x = expect(val, 1);   // returns val unchanged; provides branch hint to LLVM
 ```
 
 ---
@@ -3159,40 +3181,40 @@ fn fast_fn(arr:int[], n:int) -> int { ... }
 
 ## 19. Built-in Functions
 
+> **Naming note:** The `std::` prefix is **optional** for all built-in functions. `std::len(arr)` and `len(arr)` are identical — the compiler accepts both forms (see §19.13). The function tables in this section show functions with the `std::` prefix for reference; bare names work equally.
+
 ### 19.1 I/O
 
 | Function | Description |
 |---|---|
-| `std::print(val)` | Print value followed by a newline |
-| `std::println(val)` | Print value followed by a newline (identical behavior to `print`) |
-| `std::write(val)` | Print value **without** a trailing newline |
-| `std::print_char(c)` | Print a single character by ASCII/Unicode code (integer code point) |
-| `std::input()` | Read a whitespace-delimited word from stdin; returns the word as a string |
-| `std::input_line()` | Read a full line from stdin (including spaces); returns the line without a trailing newline |
-| `std::exit(code)` / `std::exit_program(code)` | Exit the process with the given integer exit code |
+| `print(val)` | Print value followed by a newline |
+| `println(val)` | Print value followed by a newline (identical behavior to `print`) |
+| `write(val)` | Print value **without** a trailing newline |
+| `print_char(c)` | Print a single character by ASCII/Unicode code (integer code point) |
+| `input()` | Read a whitespace-delimited word from stdin; returns the word as a string |
+| `input_line()` | Read a full line from stdin (including spaces); returns the line without a trailing newline |
+| `exit(code)` / `exit_program(code)` | Exit the process with the given integer exit code |
 
-> **Note:** Both `std::print()` and `std::println()` always append a newline. Use `std::write()` when you need output without a trailing newline.
+> **Note:** Both `print()` and `println()` always append a newline. Use `write()` when you need output without a trailing newline. All these functions can be called with or without the `std::` prefix (see §19.13).
 
 **Type handling:**
-- `std::print` / `std::println` / `std::write` convert the argument to a string automatically for integers, floats, and strings. For other types, pass `std::to_string(val)` explicitly.
-- `std::print_char(c)` accepts an integer code point and prints the corresponding character. This is the inverse of the character code returned by `s[i]`.
-- `std::input_line()` returns the entire line including leading/trailing whitespace; the trailing newline (`
+- `print` / `println` / `write` convert the argument to a string automatically for integers, floats, and strings. For other types, pass `to_string(val)` explicitly.
+- `print_char(c)` accepts an integer code point and prints the corresponding character. This is the inverse of the character code returned by `s[i]`.
+- `input_line()` returns the entire line including leading/trailing whitespace; the trailing newline (`
 `) is **not** included in the returned string.
 
 ```omscript
-std::print("Hello");          // prints "Hello
-"
-std::write("Hello, ");
-std::write("World");
-std::println("!");            // prints "Hello, World!
-"
-std::print_char(65);          // prints "A"
+print("Hello");          // prints "Hello\n"
+write("Hello, ");
+write("World");
+println("!");            // prints "!\n" (result on screen: Hello, World!)
+print_char(65);          // prints "A"
 
-var word = std::input();          // reads one whitespace-delimited token
-var line = std::input_line();     // reads entire line
-std::println("You typed: " + line);
+var word = input();          // reads one whitespace-delimited token
+var line = input_line();     // reads entire line
+println("You typed: " + line);
 
-std::exit(0);   // clean exit
+exit(0);   // clean exit
 ```
 
 ### 19.2 Math
@@ -3534,24 +3556,33 @@ fn mod_pow(base, exp, m) {
 
 ### 19.13 The `std::` Namespace
 
-All built-in functions **must** be called with the `std::` prefix — bare calls such as `len(arr)` or `print(x)` are a **compile error**. No import is required; the `std` namespace is always available.
-
-`std::funcname(args)` is desugared at parse time into the corresponding built-in call.
-
-The following call forms are **exempt** from the `std::` requirement because the compiler generates the underlying calls internally:
-- Method call syntax: `obj.method()` → desugars to a built-in
-- Pipe-forward operator: `x |> funcname` → desugars internally
-- `foreach (x in arr)` → compiler generates `std::len()` internally
-- `x in container` → compiler generates `std::array_contains()` internally
-- Slice syntax `arr[1...3]` → compiler generates `std::array_slice()` internally
+Built-in functions can be called **with or without** the `std::` prefix — both forms are accepted by the compiler. The `std::` prefix is optional and is supported for clarity and compatibility:
 
 ```omscript
-var n = std::len(arr);
-var x = std::sqrt(2.0);
+// Both of these are equivalent:
+var n = std::len(arr);    // with std:: prefix
+var n = len(arr);         // bare call — also valid
+
+std::println("hello");    // with prefix
+println("hello");         // bare — also valid
+```
+
+`std::funcname(args)` is desugared at parse time into the same underlying built-in call as bare `funcname(args)`. There is **no runtime difference** between the two forms.
+
+The following call forms are always available without any prefix because the compiler generates the underlying calls internally:
+- Method call syntax: `obj.method()` → desugars to a built-in
+- Pipe-forward operator: `x |> funcname` → desugars internally
+- `foreach (x in arr)` → compiler generates `len()` internally
+- `x in container` → compiler generates `array_contains()` internally
+- Slice syntax `arr[1...3]` → compiler generates `array_slice()` internally
+
+```omscript
+var n = len(arr);
+var x = sqrt(2.0);
 var result = std::synthesize([[1,2,3],[5,3,8]], ["+", "*"]);
 ```
 
-The `std` namespace is built-in and always available. It does **not** need to be imported. All standard library functions require the `std::` prefix — including `std::synthesize` (the program synthesis engine — see §30).
+The `std` namespace is built-in and always available. No import is required. The `std::synthesize` function (program synthesis engine — see §30) likewise accepts both `synthesize(...)` and `std::synthesize(...)`.
 
 ---
 
