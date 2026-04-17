@@ -548,7 +548,7 @@ See §27 for the complete type-cast reference with all edge cases documented.
 var x = 42                // mutable, no annotation
 var x:int = 42            // mutable, annotated
 var arr = [1, 2, 3]       // array
-var d = map_new()         // dictionary
+var d = std::map_new()         // dictionary
 var a = 1, b = 2, c = 3   // multiple variables in one declaration
 const x = 10, y = 20      // also works with const
 ```
@@ -706,7 +706,7 @@ A `comptime` block is **guaranteed to evaluate at compile time**. If the body re
 - I/O operations (`print`, `input`, etc.)
 - File operations (`file_read`, etc.)
 - Threading operations
-- Random number generation (`random()`)
+- Random number generation (`std::random()`)
 - Any function with observable side effects
 
 **Example — comptime block with control flow:**
@@ -809,7 +809,7 @@ Parameter defaults must be literal values:
 
 ```
 fn greet(name, times = 1) {
-    repeat times { println(name); }
+    repeat times { std::println(name); }
 }
 ```
 
@@ -906,17 +906,17 @@ Optional `count=M` specifies that the total allocation size is `param[N] * param
 
 ### 7.10 Method Call Syntax
 
-Any call of the form `receiver.method(args...)` is desugared at parse time to `method(receiver, args...)`. This works for all user-defined functions and all built-in functions, making it easy to write object-oriented style code:
+Any call of the form `receiver.method(args...)` is desugared at parse time to `method(receiver, args...)`, with `fromStdNamespace` set to `true` — meaning the resulting call is **exempt** from the `std::` prefix requirement. This makes dot-notation always valid for built-in functions without requiring the `std::` prefix:
 
-```
+```omscript
 var arr = [3, 1, 2];
-arr.sort();                // sort(arr)
-var n = arr.len();         // len(arr)
-var m = arr.array_max();   // array_max(arr)
+arr.sort();                // desugars to std::sort(arr)
+var n = arr.len();         // desugars to std::len(arr)
+var m = arr.array_max();   // desugars to std::array_max(arr)
 
 var s = "Hello World";
-var u = s.str_upper();     // str_upper(s) → "HELLO WORLD"
-var l = s.len();           // len(s) → 11
+var u = s.str_upper();     // desugars to std::str_upper(s) → "HELLO WORLD"
+var l = s.len();           // desugars to std::len(s) → 11
 
 struct Vec2 { x, y }
 fn dot(u, v) { return u.x * v.x + u.y * v.y; }
@@ -998,9 +998,9 @@ Pattern-matching style switch with `=>` syntax:
 
 ```
 when (value) {
-    1 => { println("one"); },
-    2, 3 => { println("two or three"); },
-    _ => { println("other"); }
+    1 => { std::println("one"); },
+    2, 3 => { std::println("two or three"); },
+    _ => { std::println("other"); }
 }
 ```
 
@@ -1012,8 +1012,8 @@ Defers execution of a statement to the end of the enclosing block. Multiple `def
 
 ```
 fn open_file() {
-    defer println("second");  // runs second
-    defer println("first");   // runs first (LIFO)
+    defer std::println("second");  // runs second
+    defer std::println("first");   // runs first (LIFO)
     // ... work ...
     // deferred statements execute here, at block exit
 }
@@ -1109,7 +1109,7 @@ for (c in "abc") {
 }
 ```
 
-Use `to_char(c)` to convert a character code back to a single-character string.
+Use `std::to_char(c)` to convert a character code back to a single-character string.
 
 ### 9.7 foreach
 
@@ -1343,7 +1343,7 @@ For identifiers and literals this desugars to `x ? x : default_val`. For complex
 
 ### 10.5.2 `in` Operator
 
-The `in` operator tests whether a value exists in an array (desugars to `array_contains(arr, val)`). It has comparison-level precedence:
+The `in` operator tests whether a value exists in an array (desugars to `std::array_contains(arr, val)`). It has comparison-level precedence:
 
 ```
 if (x in arr) { ... }         // 1 if arr contains x
@@ -1358,10 +1358,13 @@ condition ? then_value : else_value
 
 ### 10.7 Pipe Forward
 
+```omscript
+value |> function_name    // equivalent to function_name(value), exempt from std:: rule
+[1,2,3] |> sort |> reverse   // sort([1,2,3]) then reverse(result)
+x |> str_upper |> println     // composed pipeline
 ```
-value |> function_name    // equivalent to function_name(value)
-[1,2,3] |> sort |> reverse
-```
+
+The function name after `|>` is a **bare identifier** — do not write `std::` after `|>`. The compiler desugars `x |> fname` into a call marked `fromStdNamespace = true`, so no `std::` prefix is needed or allowed here.
 
 ### 10.8 Range
 
@@ -1413,62 +1416,62 @@ The `::` operator supports calling built-in operations using a type name as a na
 
 **Integer namespace** (`int`, `i64`, `i32`, `i16`, `i8`, `u64`, `u32`, `u16`, `u8`, `uint`):
 ```
-int::abs(x)         // abs(x)
-int::min(a, b)      // min(a, b)
-int::max(a, b)      // max(a, b)
-int::sign(x)        // sign(x)
-int::clamp(x,lo,hi) // clamp(x, lo, hi)
+int::abs(x)         // std::abs(x)
+int::min(a, b)      // std::min(a, b)
+int::max(a, b)      // std::max(a, b)
+int::sign(x)        // std::sign(x)
+int::clamp(x,lo,hi) // std::clamp(x, lo, hi)
 int::mod(a, b)      // a % b
-int::is_even(x)     // is_even(x)
-int::is_odd(x)      // is_odd(x)
-int::to_float(x)    // to_float(x)
+int::is_even(x)     // std::is_even(x)
+int::is_odd(x)      // std::is_odd(x)
+int::to_float(x)    // std::to_float(x)
 int::bitand(a, b)   // a & b
 int::bitor(a, b)    // a | b
 int::bitxor(a, b)   // a ^ b
 int::shl(a, n)      // a << n
 int::shr(a, n)      // a >> n
-int::pow(a, b)      // pow(a, b)
-int::gcd(a, b)      // gcd(a, b)
-int::lcm(a, b)      // lcm(a, b)
+int::pow(a, b)      // std::pow(a, b)
+int::gcd(a, b)      // std::gcd(a, b)
+int::lcm(a, b)      // std::lcm(a, b)
 ```
 
 **Float namespace** (`float`, `f64`, `f32`, `double`):
 ```
-float::sqrt(x)      // sqrt(x)
-float::floor(x)     // floor(x)
-float::ceil(x)      // ceil(x)
-float::round(x)     // round(x)
-float::abs(x)       // abs(x)
-float::sin(x)       // sin(x)
-float::cos(x)       // cos(x)
-float::to_int(x)    // to_int(x)
-float::min(a, b)    // min_float(a, b)
-float::max(a, b)    // max_float(a, b)
+float::sqrt(x)      // std::sqrt(x)
+float::floor(x)     // std::floor(x)
+float::ceil(x)      // std::ceil(x)
+float::round(x)     // std::round(x)
+float::abs(x)       // std::abs(x)
+float::sin(x)       // std::sin(x)
+float::cos(x)       // std::cos(x)
+float::to_int(x)    // std::to_int(x)
+float::min(a, b)    // std::min_float(a, b)
+float::max(a, b)    // std::max_float(a, b)
 ```
 
 **String namespace** (`string`, `str`):
 ```
-string::len(s)              // len(s)
-string::contains(s, sub)    // str_contains(s, sub)
-string::replace(s, old, new) // str_replace(s, old, new)
-string::str_upper(s)        // str_upper(s)
-string::str_lower(s)        // str_lower(s)
-string::trim(s)             // str_trim(s)
-string::split(s, delim)     // str_split(s, delim)
-string::to_int(s)           // str_to_int(s)
-string::to_float(s)         // str_to_float(s)
+string::len(s)              // std::len(s)
+string::contains(s, sub)    // std::str_contains(s, sub)
+string::replace(s, old, new) // std::str_replace(s, old, new)
+string::str_upper(s)        // std::str_upper(s)
+string::str_lower(s)        // std::str_lower(s)
+string::trim(s)             // std::str_trim(s)
+string::split(s, delim)     // std::str_split(s, delim)
+string::to_int(s)           // std::str_to_int(s)
+string::to_float(s)         // std::str_to_float(s)
 ```
 
 **Array namespace** (`array`, `arr`):
 ```
-array::len(a)           // len(a)
-array::push(a, v)       // push(a, v)
-array::pop(a)           // pop(a)
-array::sort(a)          // sort(a)
-array::reverse(a)       // reverse(a)
-array::sum(a)           // sum(a)
-array::min(a)           // array_min(a)
-array::max(a)           // array_max(a)
+array::len(a)           // std::len(a)
+array::push(a, v)       // std::push(a, v)
+array::pop(a)           // std::pop(a)
+array::sort(a)          // std::sort(a)
+array::reverse(a)       // std::reverse(a)
+array::sum(a)           // std::sum(a)
+array::min(a)           // std::array_min(a)
+array::max(a)           // std::array_max(a)
 ```
 
 **Bool namespace** (`bool`):
@@ -1583,8 +1586,8 @@ s[i] = code     // string byte assignment: writes a single byte (integer) at ind
 
 **Slice syntax** — extracts a sub-array using `start:end` notation (end is exclusive):
 ```
-arr[1:4]    // sub-array [arr[1], arr[2], arr[3]] — desugars to array_slice(arr, 1, 4)
-arr[:4]     // from index 0 to 3 — desugars to array_slice(arr, 0, 4)
+arr[1:4]    // sub-array [arr[1], arr[2], arr[3]] — desugars to std::array_slice(arr, 1, 4)
+arr[:4]     // from index 0 to 3 — desugars to std::array_slice(arr, 0, 4)
 ```
 
 Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and when the compiler can statically prove safety.
@@ -1593,39 +1596,39 @@ Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and whe
 
 | Function | Description |
 |---|---|
-| `len(arr)` | Number of elements |
-| `push(arr, val)` | Append element |
-| `pop(arr)` | Remove and return last element |
-| `sort(arr)` | Sort in place |
-| `reverse(arr)` | Reverse in place |
-| `index_of(arr, val)` | First index of value (-1 if not found) |
-| `array_contains(arr, val)` | Returns 1 if found, 0 otherwise |
-| `array_fill(size, val)` | Create array of `size` copies of `val` |
-| `array_concat(a, b)` | Concatenate two arrays |
-| `array_slice(arr, start, end)` | Sub-array `[start, end)` |
-| `array_copy(arr)` | Shallow copy |
-| `array_remove(arr, i)` | Remove element at index `i` |
-| `array_map(arr, fn)` | Apply function to each element, return new array |
-| `array_filter(arr, fn)` | Keep elements for which `fn` returns true |
-| `array_reduce(arr, fn, init)` | Reduce array to single value |
-| `array_min(arr)` | Minimum value |
-| `array_max(arr)` | Maximum value |
-| `array_any(arr, fn)` | True if any element satisfies `fn` |
-| `array_every(arr, fn)` | True if all elements satisfy `fn` |
-| `array_find(arr, fn)` | First element satisfying `fn` |
-| `array_count(arr, fn)` | Count elements satisfying `fn` |
-| `array_product(arr)` | Product of all elements |
-| `array_last(arr)` | Last element |
-| `array_insert(arr, i, val)` | Insert `val` at index `i` |
-| `swap(arr, i, j)` | Swap elements at indices `i` and `j` in place (bounds-checked) |
-| `sum(arr)` | Sum of all elements |
-| `array_mean(arr)` | Arithmetic mean of elements (integer division); returns 0 for empty array |
-| `array_take(arr, n)` | First `n` elements (clamped; equivalent to `array_slice(arr, 0, n)`) |
-| `array_drop(arr, n)` | All elements after the first `n` (clamped) |
-| `array_unique(arr)` | Remove consecutive duplicate elements (like Unix `uniq`; sort first for full dedup) |
-| `array_rotate(arr, n)` | Rotate array left by `n` positions (negative = rotate right) |
-| `range(start, end)` | Create array `[start, start+1, ..., end-1]` |
-| `range_step(start, end, step)` | Create array with step |
+| `std::len(arr)` | Number of elements |
+| `std::push(arr, val)` | Append element |
+| `std::pop(arr)` | Remove and return last element |
+| `std::sort(arr)` | Sort in place |
+| `std::reverse(arr)` | Reverse in place |
+| `std::index_of(arr, val)` | First index of value (-1 if not found) |
+| `std::array_contains(arr, val)` | Returns 1 if found, 0 otherwise |
+| `std::array_fill(size, val)` | Create array of `size` copies of `val` |
+| `std::array_concat(a, b)` | Concatenate two arrays |
+| `std::array_slice(arr, start, end)` | Sub-array `[start, end)` |
+| `std::array_copy(arr)` | Shallow copy |
+| `std::array_remove(arr, i)` | Remove element at index `i` |
+| `std::array_map(arr, fn)` | Apply function to each element, return new array |
+| `std::array_filter(arr, fn)` | Keep elements for which `fn` returns true |
+| `std::array_reduce(arr, fn, init)` | Reduce array to single value |
+| `std::array_min(arr)` | Minimum value |
+| `std::array_max(arr)` | Maximum value |
+| `std::array_any(arr, fn)` | True if any element satisfies `fn` |
+| `std::array_every(arr, fn)` | True if all elements satisfy `fn` |
+| `std::array_find(arr, fn)` | First element satisfying `fn` |
+| `std::array_count(arr, fn)` | Count elements satisfying `fn` |
+| `std::array_product(arr)` | Product of all elements |
+| `std::array_last(arr)` | Last element |
+| `std::array_insert(arr, i, val)` | Insert `val` at index `i` |
+| `std::swap(arr, i, j)` | Swap elements at indices `i` and `j` in place (bounds-checked) |
+| `std::sum(arr)` | Sum of all elements |
+| `std::array_mean(arr)` | Arithmetic mean of elements (integer division); returns 0 for empty array |
+| `std::array_take(arr, n)` | First `n` elements (clamped; equivalent to `std::array_slice(arr, 0, n)`) |
+| `std::array_drop(arr, n)` | All elements after the first `n` (clamped) |
+| `std::array_unique(arr)` | Remove consecutive duplicate elements (like Unix `uniq`; sort first for full dedup) |
+| `std::array_rotate(arr, n)` | Rotate array left by `n` positions (negative = rotate right) |
+| `std::range(start, end)` | Create array `[start, start+1, ..., end-1]` |
+| `std::range_step(start, end, step)` | Create array with step |
 
 ---
 
@@ -1637,42 +1640,42 @@ Strings are heap-allocated and NUL-terminated. String indexing and concatenation
 
 | Function | Description |
 |---|---|
-| `len(s)` / `str_len(s)` | Length in characters |
-| `char_at(s, i)` | Character code at index `i` (returns an **integer**, the byte value; use `to_char()` to get a string) |
-| `str_eq(s1, s2)` | String equality (returns 1/0) |
-| `str_concat(s1, s2)` | Concatenate two strings |
-| `str_substr(s, start, len)` | Substring of length `len` starting at `start` |
-| `str_upper(s)` | Uppercase |
-| `str_lower(s)` | Lowercase |
-| `str_find(s, c)` | Find first occurrence of character code `c` (integer) in `s`; returns index or -1 |
-| `str_contains(s, sub)` | Contains substring (1/0) |
-| `str_index_of(s, sub)` | First index of substring `sub` (-1 if not found) |
-| `str_replace(s, old, new)` | Replace all occurrences of `old` with `new` |
-| `str_remove(s, sub)` | Remove all occurrences of `sub` (equivalent to `str_replace(s, sub, "")`) |
-| `str_trim(s)` | Strip leading **and** trailing whitespace |
-| `str_lstrip(s)` | Strip leading (left) whitespace only |
-| `str_rstrip(s)` | Strip trailing (right) whitespace only |
-| `str_starts_with(s, prefix)` | Starts with prefix (1/0) |
-| `str_ends_with(s, suffix)` | Ends with suffix (1/0) |
-| `str_repeat(s, n)` | Repeat string `n` times |
-| `str_reverse(s)` | Reverse string |
-| `str_split(s, delim)` | Split by delimiter, returns array |
-| `str_chars(s)` | Split into array of single-character strings |
-| `str_join(arr, delim)` | Join array with delimiter |
-| `str_count(s, sub)` | Count non-overlapping occurrences of `sub` |
-| `str_pad_left(s, n, ch)` | Pad string on left to width `n` with character `ch` |
-| `str_pad_right(s, n, ch)` | Pad string on right to width `n` with character `ch` |
-| `to_string(x)` | Convert number to string |
-| `number_to_string(x)` | Convert number to string |
-| `string_to_number(s)` | Parse string as number |
-| `str_to_int(s)` | Parse string as integer |
-| `str_to_float(s)` | Parse string as float |
-| `to_int(x)` | Convert to integer |
-| `to_float(x)` | Convert to float |
-| `to_char(code)` | Integer code point to single-character string |
-| `char_code(c)` | Character to integer code point |
-| `is_alpha(c)` | Is alphabetic (1/0) |
-| `is_digit(c)` | Is decimal digit (1/0) |
+| `std::len(s)` / `std::str_len(s)` | Length in characters |
+| `std::char_at(s, i)` | Character code at index `i` (returns an **integer**, the byte value; use `std::to_char()` to get a string) |
+| `std::str_eq(s1, s2)` | String equality (returns 1/0) |
+| `std::str_concat(s1, s2)` | Concatenate two strings |
+| `std::str_substr(s, start, len)` | Substring of length `len` starting at `start` |
+| `std::str_upper(s)` | Uppercase |
+| `std::str_lower(s)` | Lowercase |
+| `std::str_find(s, c)` | Find first occurrence of character code `c` (integer) in `s`; returns index or -1 |
+| `std::str_contains(s, sub)` | Contains substring (1/0) |
+| `std::str_index_of(s, sub)` | First index of substring `sub` (-1 if not found) |
+| `std::str_replace(s, old, new)` | Replace all occurrences of `old` with `new` |
+| `std::str_remove(s, sub)` | Remove all occurrences of `sub` (equivalent to `std::str_replace(s, sub, "")`) |
+| `std::str_trim(s)` | Strip leading **and** trailing whitespace |
+| `std::str_lstrip(s)` | Strip leading (left) whitespace only |
+| `std::str_rstrip(s)` | Strip trailing (right) whitespace only |
+| `std::str_starts_with(s, prefix)` | Starts with prefix (1/0) |
+| `std::str_ends_with(s, suffix)` | Ends with suffix (1/0) |
+| `std::str_repeat(s, n)` | Repeat string `n` times |
+| `std::str_reverse(s)` | Reverse string |
+| `std::str_split(s, delim)` | Split by delimiter, returns array |
+| `std::str_chars(s)` | Split into array of single-character strings |
+| `std::str_join(arr, delim)` | Join array with delimiter |
+| `std::str_count(s, sub)` | Count non-overlapping occurrences of `sub` |
+| `std::str_pad_left(s, n, ch)` | Pad string on left to width `n` with character `ch` |
+| `std::str_pad_right(s, n, ch)` | Pad string on right to width `n` with character `ch` |
+| `std::to_string(x)` | Convert number to string |
+| `std::number_to_string(x)` | Convert number to string |
+| `std::string_to_number(s)` | Parse string as number |
+| `std::str_to_int(s)` | Parse string as integer |
+| `std::str_to_float(s)` | Parse string as float |
+| `std::to_int(x)` | Convert to integer |
+| `std::to_float(x)` | Convert to float |
+| `std::to_char(code)` | Integer code point to single-character string |
+| `std::char_code(c)` | Character to integer code point |
+| `std::is_alpha(c)` | Is alphabetic (1/0) |
+| `std::is_digit(c)` | Is decimal digit (1/0) |
 
 ---
 
@@ -1682,7 +1685,7 @@ Dictionaries (maps) are hash maps mapping string keys to integer/pointer values.
 
 ### 13.0 Dict Literals
 
-Dict literals create a map inline without calling `map_new()`:
+Dict literals create a map inline without calling `std::map_new()`:
 
 ```
 var d = {"key1": 100, "key2": 200}
@@ -1690,23 +1693,23 @@ var e = {}                              // empty dict
 var counts = {"a": 1, "b": 2, "c": 3}
 ```
 
-Dict literals are expressions and can be used anywhere a dict value is expected. They are equivalent to calling `map_new()` followed by a series of `map_set()` calls.
+Dict literals are expressions and can be used anywhere a dict value is expected. They are equivalent to calling `std::map_new()` followed by a series of `std::map_set()` calls.
 
 ### 13.1 Map Built-ins
 
 | Function | Description |
 |---|---|
-| `map_new()` | Create new empty map |
-| `map_set(m, key, val)` | Set key to value |
-| `map_get(m, key, default)` | Get value for key; returns `default` if key is absent |
-| `map_has(m, key)` | Check if key exists (1/0) |
-| `map_remove(m, key)` | Remove key |
-| `map_keys(m)` | Array of all keys |
-| `map_values(m)` | Array of all values |
-| `map_size(m)` | Number of entries |
-| `map_merge(a, b)` | Create new map with all entries from both `a` and `b`; `b`'s values win on conflict |
-| `map_invert(m)` | Create new map with keys and values swapped |
-| `map_filter(m, fn)` | Create new map keeping entries where `fn(key) != 0` |
+| `std::map_new()` | Create new empty map |
+| `std::map_set(m, key, val)` | Set key to value |
+| `std::map_get(m, key, default)` | Get value for key; returns `default` if key is absent |
+| `std::map_has(m, key)` | Check if key exists (1/0) |
+| `std::map_remove(m, key)` | Remove key |
+| `std::map_keys(m)` | Array of all keys |
+| `std::map_values(m)` | Array of all values |
+| `std::map_size(m)` | Number of entries |
+| `std::map_merge(a, b)` | Create new map with all entries from both `a` and `b`; `b`'s values win on conflict |
+| `std::map_invert(m)` | Create new map with keys and values swapped |
+| `std::map_filter(m, fn)` | Create new map keeping entries where `fn(key) != 0` |
 
 ---
 
@@ -1732,7 +1735,7 @@ struct Buffer {
     noalias ptr: int,        // pointer does not alias other fields
     immut size: int,         // immutable after construction
     align(16) data: float,   // alignment requirement
-    range(0, 100) percent: int,  // value range hint
+    std::range(0, 100) percent: int,  // value range hint
     move payload: int        // field carries move semantics
 }
 ```
@@ -1799,12 +1802,12 @@ Enum values are integer constants and can be used in any arithmetic or switch ex
 enum Status { OK = 0, ERROR = 1, PENDING = 2 }
 
 var s = Status::ERROR;
-if (s == Status::ERROR) { println("error"); }
+if (s == Status::ERROR) { std::println("error"); }
 
 switch (s) {
-    case 0: { println("ok"); break; }
-    case 1: { println("error"); break; }
-    default: { println("pending"); }
+    case 0: { std::println("ok"); break; }
+    case 1: { std::println("error"); break; }
+    default: { std::println("pending"); }
 }
 ```
 
@@ -1819,7 +1822,7 @@ try {
     // ...
     throw "something went wrong";
 } catch (e) {
-    println(e);
+    std::println(e);
 }
 ```
 
@@ -1828,7 +1831,7 @@ try {
 ### 16.2 assert
 
 ```
-assert(x > 0);             // runtime assertion; aborts on failure
+std::assert(x > 0);             // runtime assertion; aborts on failure
 ```
 
 ---
@@ -2083,69 +2086,69 @@ fn fast_fn(arr:int[], n:int) -> int { ... }
 
 | Function | Description |
 |---|---|
-| `print(val)` | Print value followed by a newline |
-| `println(val)` | Print value followed by a newline (identical behavior to `print`) |
-| `write(val)` | Print value **without** a trailing newline |
-| `print_char(c)` | Print a single character by ASCII/Unicode code |
-| `input()` | Read a whitespace-delimited word from stdin |
-| `input_line()` | Read a full line from stdin |
-| `exit(code)` / `exit_program(code)` | Exit with given code |
+| `std::print(val)` | Print value followed by a newline |
+| `std::println(val)` | Print value followed by a newline (identical behavior to `print`) |
+| `std::write(val)` | Print value **without** a trailing newline |
+| `std::print_char(c)` | Print a single character by ASCII/Unicode code |
+| `std::input()` | Read a whitespace-delimited word from stdin |
+| `std::input_line()` | Read a full line from stdin |
+| `std::exit(code)` / `std::exit_program(code)` | Exit with given code |
 
-> **Note:** Both `print()` and `println()` always append a newline. Use `write()` when you need output without a trailing newline.
+> **Note:** Both `std::print()` and `std::println()` always append a newline. Use `std::write()` when you need output without a trailing newline.
 
 ### 19.2 Math
 
 | Function | Description | Compile-Time Folds? |
 |---|---|---|
-| `abs(x)` | Absolute value | ✓ with literal arg |
-| `pow(x, y)` | x to the power y (integer exponentiation) | ✓ with literal args |
-| `sqrt(x)` | Integer square root | ✓ with literal arg |
-| `cbrt(x)` | Cube root (float result) | — |
-| `exp(x)` | e^x (float result) | — |
-| `exp2(x)` | 2^x | ✓ with literal arg |
-| `log(x)` | Natural logarithm (float result) | — |
-| `log2(x)` | Base-2 logarithm | ✓ with literal arg |
-| `log10(x)` | Base-10 logarithm (float result) | — |
-| `floor(x)` | Floor | ✓ with literal arg |
-| `ceil(x)` | Ceiling | ✓ with literal arg |
-| `round(x)` | Round to nearest integer | ✓ with literal arg |
-| `sin(x)` | Sine (float result) | — |
-| `cos(x)` | Cosine (float result) | — |
-| `tan(x)` | Tangent (float result) | — |
-| `asin(x)` | Arc sine (float result) | — |
-| `acos(x)` | Arc cosine (float result) | — |
-| `atan(x)` | Arc tangent (float result) | — |
-| `atan2(y, x)` | Two-argument arc tangent (float result) | — |
-| `hypot(x, y)` | sqrt(x² + y²) (float result) | — |
-| `min(a, b)` | Minimum of two values | ✓ with literal args |
-| `max(a, b)` | Maximum of two values | ✓ with literal args |
-| `min_float(a, b)` | Floating-point minimum (NaN-aware) | — |
-| `max_float(a, b)` | Floating-point maximum (NaN-aware) | — |
-| `sign(x)` | Sign: -1, 0, or 1 | ✓ with literal arg |
-| `clamp(x, lo, hi)` | Clamp x to [lo, hi] | ✓ with literal args |
-| `gcd(a, b)` | Greatest common divisor | ✓ with literal args |
-| `lcm(a, b)` | Least common multiple | ✓ with literal args |
-| `is_even(x)` | 1 if even, 0 otherwise | ✓ with literal arg |
-| `is_odd(x)` | 1 if odd, 0 otherwise | ✓ with literal arg |
-| `is_power_of_2(x)` | 1 if x is a power of 2, 0 otherwise | ✓ with literal arg |
-| `fma(a, b, c)` | Fused multiply-add: a*b+c | — |
-| `copysign(x, y)` | Magnitude of x with sign of y | — |
-| `random()` | Random float in [0.0, 1.0) | — (side-effectful) |
+| `std::abs(x)` | Absolute value | ✓ with literal arg |
+| `std::pow(x, y)` | x to the power y (integer exponentiation) | ✓ with literal args |
+| `std::sqrt(x)` | Integer square root | ✓ with literal arg |
+| `std::cbrt(x)` | Cube root (float result) | — |
+| `std::exp(x)` | e^x (float result) | — |
+| `std::exp2(x)` | 2^x | ✓ with literal arg |
+| `std::log(x)` | Natural logarithm (float result) | — |
+| `std::log2(x)` | Base-2 logarithm | ✓ with literal arg |
+| `std::log10(x)` | Base-10 logarithm (float result) | — |
+| `std::floor(x)` | Floor | ✓ with literal arg |
+| `std::ceil(x)` | Ceiling | ✓ with literal arg |
+| `std::round(x)` | Round to nearest integer | ✓ with literal arg |
+| `std::sin(x)` | Sine (float result) | — |
+| `std::cos(x)` | Cosine (float result) | — |
+| `std::tan(x)` | Tangent (float result) | — |
+| `std::asin(x)` | Arc sine (float result) | — |
+| `std::acos(x)` | Arc cosine (float result) | — |
+| `std::atan(x)` | Arc tangent (float result) | — |
+| `std::atan2(y, x)` | Two-argument arc tangent (float result) | — |
+| `std::hypot(x, y)` | sqrt(x² + y²) (float result) | — |
+| `std::min(a, b)` | Minimum of two values | ✓ with literal args |
+| `std::max(a, b)` | Maximum of two values | ✓ with literal args |
+| `std::min_float(a, b)` | Floating-point minimum (NaN-aware) | — |
+| `std::max_float(a, b)` | Floating-point maximum (NaN-aware) | — |
+| `std::sign(x)` | Sign: -1, 0, or 1 | ✓ with literal arg |
+| `std::clamp(x, lo, hi)` | Clamp x to [lo, hi] | ✓ with literal args |
+| `std::gcd(a, b)` | Greatest common divisor | ✓ with literal args |
+| `std::lcm(a, b)` | Least common multiple | ✓ with literal args |
+| `std::is_even(x)` | 1 if even, 0 otherwise | ✓ with literal arg |
+| `std::is_odd(x)` | 1 if odd, 0 otherwise | ✓ with literal arg |
+| `std::is_power_of_2(x)` | 1 if x is a power of 2, 0 otherwise | ✓ with literal arg |
+| `std::fma(a, b, c)` | Fused multiply-add: a*b+c | — |
+| `std::copysign(x, y)` | Magnitude of x with sign of y | — |
+| `std::random()` | Random float in [0.0, 1.0) | — (side-effectful) |
 
 ### 19.3 Arithmetic with Explicit Overflow/Precision Mode
 
 | Function | Description | Compile-Time Folds? |
 |---|---|---|
-| `fast_add(a, b)` | Addition with `nsw` (no signed wrap) flag | — |
-| `fast_sub(a, b)` | Subtraction with `nsw` flag | — |
-| `fast_mul(a, b)` | Multiplication with `nsw` flag | — |
-| `fast_div(a, b)` | Division (exact, no remainder) | — |
-| `precise_add(a, b)` | Addition without unsafe flags | — |
-| `precise_sub(a, b)` | Subtraction without unsafe flags | — |
-| `precise_mul(a, b)` | Multiplication without unsafe flags | — |
-| `precise_div(a, b)` | Division without unsafe flags | — |
-| `saturating_add(a, b)` | Saturating addition (clamps at INT64_MAX) | ✓ with literal args |
-| `saturating_sub(a, b)` | Saturating subtraction (clamps at INT64_MIN) | ✓ with literal args |
+| `std::fast_add(a, b)` | Addition with `nsw` (no signed wrap) flag | — |
+| `std::fast_sub(a, b)` | Subtraction with `nsw` flag | — |
+| `std::fast_mul(a, b)` | Multiplication with `nsw` flag | — |
+| `std::fast_div(a, b)` | Division (exact, no remainder) | — |
+| `std::precise_add(a, b)` | Addition without unsafe flags | — |
+| `std::precise_sub(a, b)` | Subtraction without unsafe flags | — |
+| `std::precise_mul(a, b)` | Multiplication without unsafe flags | — |
+| `std::precise_div(a, b)` | Division without unsafe flags | — |
+| `std::saturating_add(a, b)` | Saturating addition (clamps at INT64_MAX) | ✓ with literal args |
+| `std::saturating_sub(a, b)` | Saturating subtraction (clamps at INT64_MIN) | ✓ with literal args |
 
 The `fast_*` variants emit the `nsw` (no signed wrap) flag on the LLVM instruction, which tells LLVM that signed overflow is undefined behavior — enabling stronger optimizations like loop-carried IV rewriting. Use these only when you have proven no overflow can occur.
 
@@ -2161,13 +2164,13 @@ const MIN_MINUS_1 = std::saturating_sub(-9223372036854775808, 1); // -9223372036
 
 | Function | Description | Compile-Time Folds? |
 |---|---|---|
-| `popcount(x)` | Count set bits (maps to POPCNT instruction on x86) | ✓ with literal arg |
-| `clz(x)` | Count leading zeros (maps to LZCNT/BSR) | ✓ with literal arg |
-| `ctz(x)` | Count trailing zeros (maps to TZCNT/BSF) | ✓ with literal arg |
-| `bitreverse(x)` | Reverse all bit positions | ✓ with literal arg |
-| `bswap(x)` | Byte-swap / endianness swap | ✓ with literal arg |
-| `rotate_left(x, n)` | Rotate bits left by n positions | ✓ with literal args |
-| `rotate_right(x, n)` | Rotate bits right by n positions | ✓ with literal args |
+| `std::popcount(x)` | Count set bits (maps to POPCNT instruction on x86) | ✓ with literal arg |
+| `std::clz(x)` | Count leading zeros (maps to LZCNT/BSR) | ✓ with literal arg |
+| `std::ctz(x)` | Count trailing zeros (maps to TZCNT/BSF) | ✓ with literal arg |
+| `std::bitreverse(x)` | Reverse all bit positions | ✓ with literal arg |
+| `std::bswap(x)` | Byte-swap / endianness swap | ✓ with literal arg |
+| `std::rotate_left(x, n)` | Rotate bits left by n positions | ✓ with literal args |
+| `std::rotate_right(x, n)` | Rotate bits right by n positions | ✓ with literal args |
 
 ```omscript
 // All compile-time folds:
@@ -2183,12 +2186,12 @@ const ROT   = std::rotate_left(1, 3);     // 8
 
 | Function | Description |
 |---|---|
-| `typeof(x)` | Returns an integer type tag: 1 = integer, 2 = float, 3 = string |
-| `len(x)` | Length of array or string |
-| `to_int(x)` | Convert to integer |
-| `to_float(x)` | Convert to float |
-| `to_string(x)` | Convert number to string |
-| `assert(cond)` | Runtime assertion (aborts on failure) |
+| `std::typeof(x)` | Returns an integer type tag: 1 = integer, 2 = float, 3 = string |
+| `std::len(x)` | Length of array or string |
+| `std::to_int(x)` | Convert to integer |
+| `std::to_float(x)` | Convert to float |
+| `std::to_string(x)` | Convert number to string |
+| `std::assert(cond)` | Runtime assertion (aborts on failure) |
 
 ### 19.5.1 Integer Type-Cast Functions
 
@@ -2223,16 +2226,16 @@ var f = i32(-1);     // -1 (sign-preserved)
 
 | Function | Description |
 |---|---|
-| `time()` | Current Unix timestamp in seconds (integer) |
-| `sleep(ms)` | Sleep for `ms` milliseconds |
+| `std::time()` | Current Unix timestamp in seconds (integer) |
+| `std::sleep(ms)` | Sleep for `ms` milliseconds |
 
 ### 19.6.1 Shell / Process
 
 | Function | Description |
 |---|---|
-| `command(cmd)` | Run shell command `cmd` via `popen(3)` and return its stdout as a string. Returns `""` on failure. Also available as `std::command(cmd)`. |
-| `shell(cmd)` | Alias for `command(cmd)`. |
-| `sudo_command(cmd, password)` | Run `cmd` as root via `sudo -S`, supplying `password` on stdin. Returns combined stdout+stderr as a string, or `""` if `popen` fails. Single-quote characters in the password are automatically escaped. |
+| `std::command(cmd)` | Run shell command `cmd` via `popen(3)` and return its stdout as a string. Returns `""` on failure. |
+| `std::shell(cmd)` | Alias for `std::command(cmd)`. |
+| `std::sudo_command(cmd, password)` | Run `cmd` as root via `sudo -S`, supplying `password` on stdin. Returns combined stdout+stderr as a string, or `""` if `popen` fails. Single-quote characters in the password are automatically escaped. |
 
 ```omscript
 var output = std::command("echo hello");               // "hello\n"
@@ -2246,24 +2249,24 @@ var result = std::sudo_command("apt update", "s3cr3t");// runs as root
 > However, the full pipeline string (including the escaped password) is
 > visible in `/proc/<pid>/cmdline` and in `popen`'s shell invocation on
 > some operating systems.  For production use, prefer passwordless sudo
-> rules (`NOPASSWD` in `/etc/sudoers`) and call `command("sudo cmd")`
+> rules (`NOPASSWD` in `/etc/sudoers`) and call `std::command("sudo cmd")`
 > instead.
 
 ### 19.7 Optimizer Hints
 
 | Function | Description |
 |---|---|
-| `assume(cond)` | Assert to optimizer that `cond` is always true (LLVM `llvm.assume`) |
-| `unreachable()` | Mark code as unreachable (UB if reached) |
-| `expect(val, expected)` | Branch prediction hint: `val` is likely `expected` |
+| `std::assume(cond)` | Assert to optimizer that `cond` is always true (LLVM `llvm.assume`) |
+| `std::unreachable()` | Mark code as unreachable (UB if reached) |
+| `std::expect(val, expected)` | Branch prediction hint: `val` is likely `expected` |
 
 ### 19.8 String Formatting
 
 | Function | Signature | Description |
 |---|---|---|
-| `str_format` | `str_format(fmt, v1[, v2[, ...]])` | Printf-style formatting via `snprintf`. `fmt` is a C-style format string; supports `%d`, `%i`, `%u`, `%ld`, `%s`, `%f`, `%e`, `%g`, `%x`, `%X`, `%o`, `%c`, `%%`, and width/precision specifiers. Returns a new heap-allocated string. |
-| `str_filter` | `str_filter(s, fn)` | Return a new string containing only the characters of `s` for which `fn(char_code)` returns non-zero. |
-| `filter` | `filter(x, fn)` | Generic filter — dispatches to `array_filter`, `str_filter`, or `map_filter` based on the runtime type of `x`. |
+| `str_format` | `std::str_format(fmt, v1[, v2[, ...]])` | Printf-style formatting via `snprintf`. `fmt` is a C-style format string; supports `%d`, `%i`, `%u`, `%ld`, `%s`, `%f`, `%e`, `%g`, `%x`, `%X`, `%o`, `%c`, `%%`, and width/precision specifiers. Returns a new heap-allocated string. |
+| `str_filter` | `std::str_filter(s, fn)` | Return a new string containing only the characters of `s` for which `fn(char_code)` returns non-zero. |
+| `filter` | `std::filter(x, fn)` | Generic filter — dispatches to `array_filter`, `str_filter`, or `map_filter` based on the runtime type of `x`. |
 
 ```omscript
 var s = std::str_format("x=%d, y=%.3f, name=%s", 42, 3.14159, "hello");
@@ -2283,8 +2286,8 @@ var evens = std::filter([1,2,3,4,5,6], |x| x % 2 == 0);
 
 | Function | Description |
 |---|---|
-| `env_get(name)` | Read environment variable `name`; returns the value as a string, or `""` if not set |
-| `env_set(name, value)` | Set environment variable `name` to `value` (wraps `setenv(3)`); returns 0 on success, -1 on error |
+| `std::env_get(name)` | Read environment variable `name`; returns the value as a string, or `""` if not set |
+| `std::env_set(name, value)` | Set environment variable `name` to `value` (wraps `setenv(3)`); returns 0 on success, -1 on error |
 
 ```omscript
 var home = std::env_get("HOME");         // e.g. "/home/user"
@@ -2297,7 +2300,7 @@ var mode = std::env_get("MY_APP_MODE");  // "release"
 
 | Function | Description |
 |---|---|
-| `array_zip(a, b)` | Interleave two arrays: result is `[a[0], b[0], a[1], b[1], …]`. Length is `2 * min(len(a), len(b))`. |
+| `std::array_zip(a, b)` | Interleave two arrays: result is `[a[0], b[0], a[1], b[1], …]`. Length is `2 * min(len(a), len(b))`. |
 
 ```omscript
 var keys   = [1, 2, 3];
@@ -2311,12 +2314,12 @@ These builtins expose 128-bit intermediate results for operations that would ove
 
 | Function | Description |
 |---|---|
-| `mulhi(a, b)` | Signed 128-bit multiply of `a` and `b`; returns the **high 64 bits** of the 128-bit signed product (also: `std::mulhi`) |
-| `mulhi_u(a, b)` | Unsigned 128-bit multiply; returns the **high 64 bits** of the unsigned 128-bit product (also: `std::mulhi_u`) |
-| `absdiff(a, b)` | `|a - b|` computed without overflow by widening to i128 before subtracting; always non-negative (also: `std::absdiff`) |
-| `fast_sqrt(x)` | `sqrt(x)` with `reassociate` and `nnan` fast-math flags — slightly less precise than `sqrt` but faster on some microarchitectures |
-| `is_nan(x)` | Reinterpret `x` as `f64` and return 1 if it is NaN, 0 otherwise |
-| `is_inf(x)` | Reinterpret `x` as `f64` and return 1 if it is ±Infinity, 0 otherwise |
+| `std::mulhi(a, b)` | Signed 128-bit multiply of `a` and `b`; returns the **high 64 bits** of the 128-bit signed product (also: `std::mulhi`) |
+| `std::mulhi_u(a, b)` | Unsigned 128-bit multiply; returns the **high 64 bits** of the unsigned 128-bit product (also: `std::mulhi_u`) |
+| `std::absdiff(a, b)` | `|a - b|` computed without overflow by widening to i128 before subtracting; always non-negative (also: `std::absdiff`) |
+| `std::fast_sqrt(x)` | `std::sqrt(x)` with `reassociate` and `nnan` fast-math flags — slightly less precise than `sqrt` but faster on some microarchitectures |
+| `std::is_nan(x)` | Reinterpret `x` as `f64` and return 1 if it is NaN, 0 otherwise |
+| `std::is_inf(x)` | Reinterpret `x` as `f64` and return 1 if it is ±Infinity, 0 otherwise |
 
 ```omscript
 // High-32-bit multiply (useful for fixed-point and hash mixing):
@@ -2338,29 +2341,29 @@ var inf = std::is_inf(x);          // 0
 
 | Function | Signature | Description |
 |---|---|---|
-| `bigint` | `bigint(x)` | Create bigint from integer or string `x` (also: `std::bigint`) |
-| `bigint_add` | `bigint_add(a, b)` | Add |
-| `bigint_sub` | `bigint_sub(a, b)` | Subtract |
-| `bigint_mul` | `bigint_mul(a, b)` | Multiply |
-| `bigint_div` | `bigint_div(a, b)` | Integer divide (truncation toward zero) |
-| `bigint_mod` | `bigint_mod(a, b)` | Remainder |
-| `bigint_neg` | `bigint_neg(a)` | Negate |
-| `bigint_abs` | `bigint_abs(a)` | Absolute value |
-| `bigint_pow` | `bigint_pow(a, n)` | `a` to the power `n` (n ≥ 0) |
-| `bigint_gcd` | `bigint_gcd(a, b)` | Greatest common divisor |
-| `bigint_eq` | `bigint_eq(a, b)` | 1 if equal |
-| `bigint_lt` | `bigint_lt(a, b)` | 1 if a < b |
-| `bigint_le` | `bigint_le(a, b)` | 1 if a ≤ b |
-| `bigint_gt` | `bigint_gt(a, b)` | 1 if a > b |
-| `bigint_ge` | `bigint_ge(a, b)` | 1 if a ≥ b |
-| `bigint_cmp` | `bigint_cmp(a, b)` | -1 / 0 / 1 (like strcmp) |
-| `bigint_tostring` | `bigint_tostring(a)` | Decimal string representation |
-| `bigint_to_i64` | `bigint_to_i64(a)` | Truncate to signed 64-bit integer |
-| `bigint_bit_length` | `bigint_bit_length(a)` | Number of bits needed to represent `|a|` |
-| `bigint_is_zero` | `bigint_is_zero(a)` | 1 if a == 0 |
-| `bigint_is_negative` | `bigint_is_negative(a)` | 1 if a < 0 |
-| `bigint_shl` | `bigint_shl(a, n)` | Left shift by n bits |
-| `bigint_shr` | `bigint_shr(a, n)` | Right shift by n bits (arithmetic) |
+| `bigint` | `std::bigint(x)` | Create bigint from integer or string `x` (also: `std::bigint`) |
+| `bigint_add` | `std::bigint_add(a, b)` | Add |
+| `bigint_sub` | `std::bigint_sub(a, b)` | Subtract |
+| `bigint_mul` | `std::bigint_mul(a, b)` | Multiply |
+| `bigint_div` | `std::bigint_div(a, b)` | Integer divide (truncation toward zero) |
+| `bigint_mod` | `std::bigint_mod(a, b)` | Remainder |
+| `bigint_neg` | `std::bigint_neg(a)` | Negate |
+| `bigint_abs` | `std::bigint_abs(a)` | Absolute value |
+| `bigint_pow` | `std::bigint_pow(a, n)` | `a` to the power `n` (n ≥ 0) |
+| `bigint_gcd` | `std::bigint_gcd(a, b)` | Greatest common divisor |
+| `bigint_eq` | `std::bigint_eq(a, b)` | 1 if equal |
+| `bigint_lt` | `std::bigint_lt(a, b)` | 1 if a < b |
+| `bigint_le` | `std::bigint_le(a, b)` | 1 if a ≤ b |
+| `bigint_gt` | `std::bigint_gt(a, b)` | 1 if a > b |
+| `bigint_ge` | `std::bigint_ge(a, b)` | 1 if a ≥ b |
+| `bigint_cmp` | `std::bigint_cmp(a, b)` | -1 / 0 / 1 (like strcmp) |
+| `bigint_tostring` | `std::bigint_tostring(a)` | Decimal string representation |
+| `bigint_to_i64` | `std::bigint_to_i64(a)` | Truncate to signed 64-bit integer |
+| `bigint_bit_length` | `std::bigint_bit_length(a)` | Number of bits needed to represent `|a|` |
+| `bigint_is_zero` | `std::bigint_is_zero(a)` | 1 if a == 0 |
+| `bigint_is_negative` | `std::bigint_is_negative(a)` | 1 if a < 0 |
+| `bigint_shl` | `std::bigint_shl(a, n)` | Left shift by n bits |
+| `bigint_shr` | `std::bigint_shr(a, n)` | Right shift by n bits (arithmetic) |
 
 ```omscript
 // Compute 100! (factorial of 100)
@@ -2394,16 +2397,16 @@ fn mod_pow(base, exp, m) {
 
 ### 19.13 The `std::` Namespace
 
-All built-in functions **must** be called with the `std::` prefix — bare calls such as `len(arr)` or `print(x)` are a **compile error**. No import is required; the `std` namespace is always available.
+All built-in functions **must** be called with the `std::` prefix — bare calls such as `std::len(arr)` or `std::print(x)` are a **compile error**. No import is required; the `std` namespace is always available.
 
 `std::funcname(args)` is desugared at parse time into the corresponding built-in call.
 
 The following call forms are **exempt** from the `std::` requirement because the compiler generates the underlying calls internally:
 - Method call syntax: `obj.method()` → desugars to a built-in
 - Pipe-forward operator: `x |> funcname` → desugars internally
-- `foreach (x in arr)` → compiler generates `len()` internally
-- `x in container` → compiler generates `array_contains()` internally
-- Slice syntax `arr[1...3]` → compiler generates `array_slice()` internally
+- `foreach (x in arr)` → compiler generates `std::len()` internally
+- `x in container` → compiler generates `std::array_contains()` internally
+- Slice syntax `arr[1...3]` → compiler generates `std::array_slice()` internally
 
 ```omscript
 var n = std::len(arr);
@@ -2423,17 +2426,17 @@ OmScript provides low-level threading and mutex primitives.
 
 | Function | Description |
 |---|---|
-| `thread_create("func_name")` | Create a new thread running the named zero-argument function; returns a thread handle |
-| `thread_join(t)` | Wait for thread `t` to finish |
+| `std::thread_create("func_name")` | Create a new thread running the named zero-argument function; returns a thread handle |
+| `std::thread_join(t)` | Wait for thread `t` to finish |
 
 ### 20.2 Mutex Functions
 
 | Function | Description |
 |---|---|
-| `mutex_new()` | Create a new mutex |
-| `mutex_lock(m)` | Lock mutex `m` |
-| `mutex_unlock(m)` | Unlock mutex `m` |
-| `mutex_destroy(m)` | Destroy mutex `m` |
+| `std::mutex_new()` | Create a new mutex |
+| `std::mutex_lock(m)` | Lock mutex `m` |
+| `std::mutex_unlock(m)` | Unlock mutex `m` |
+| `std::mutex_destroy(m)` | Destroy mutex `m` |
 
 ---
 
@@ -2441,10 +2444,10 @@ OmScript provides low-level threading and mutex primitives.
 
 | Function | Description |
 |---|---|
-| `file_read(path)` | Read entire file as string |
-| `file_write(path, content)` | Write string to file (overwrite) |
-| `file_append(path, content)` | Append string to file |
-| `file_exists(path)` | Returns 1 if file exists, 0 otherwise |
+| `std::file_read(path)` | Read entire file as string |
+| `std::file_write(path, content)` | Write string to file (overwrite) |
+| `std::file_append(path, content)` | Append string to file |
+| `std::file_exists(path)` | Returns 1 if file exists, 0 otherwise |
 
 ---
 
@@ -2462,9 +2465,9 @@ Lambdas create anonymous functions. They are desugared to named functions at par
 Lambdas are first-class values and can be passed to higher-order functions:
 
 ```
-var doubled = array_map([1, 2, 3], |x| x * 2)
-var evens = array_filter([1, 2, 3, 4], |x| x % 2 == 0)
-var total = array_reduce([1, 2, 3, 4], |acc, x| acc + x, 0)
+var doubled = std::array_map([1, 2, 3], |x| x * 2)
+var evens = std::array_filter([1, 2, 3, 4], |x| x % 2 == 0)
+var total = std::array_reduce([1, 2, 3, 4], |acc, x| acc + x, 0)
 ```
 
 ---
@@ -2754,7 +2757,7 @@ Previously used a recursive DFS that was O(N²) in the worst case for deep data-
 1. Build in-degree counts and adjacency lists from the ProgramGraph edges
 2. Initialize a queue with all zero-in-degree nodes
 3. Process nodes in topological order, assigning priority =
-       max(priority of all successors) + latency(node→successor edge)
+       std::max(priority of all successors) + latency(node→successor edge)
 4. The priority of a node is its critical-path length to any root
 ```
 
@@ -2931,7 +2934,7 @@ All OmScript arrays — both heap-allocated at runtime and compile-time constant
 The first `i64` word is the **length** of the array. The remaining `N` words are the elements. This means:
 - `arr[0]` is stored at `base + 8` (offset 1 × 8 bytes)
 - `arr[i]` is stored at `base + 8*(i+1)`
-- `len(arr)` reads `*(base + 0)`
+- `std::len(arr)` reads `*(base + 0)`
 
 For a compile-time array of 3 elements `[10, 20, 30]`, the global is:
 ```llvm
@@ -2956,7 +2959,7 @@ The function:
 4. Creates a `GlobalVariable` with `private` linkage, `unnamed_addr`, and `constant` storage class.
 5. Returns a `bitcast` of the global pointer to `i64*`, matching OmScript's array-pointer type.
 
-The generated variable is also stored in the compiler's internal constant table so that subsequent `len()` calls on it fold immediately to the literal length without reading from the global.
+The generated variable is also stored in the compiler's internal constant table so that subsequent `std::len()` calls on it fold immediately to the literal length without reading from the global.
 
 #### 25.12.3 Constant Folding Chains for Arrays
 
@@ -2964,23 +2967,23 @@ Many array builtins participate in a **folding chain** — when their argument i
 
 | Builtin call | Folds when | Result |
 |---|---|---|
-| `len(array_fill(N, v))` | `N` is a literal integer | Literal `N` |
-| `len(range(a, b))` | `a`, `b` are literals | Literal `b - a` |
-| `len(range_step(a, b, s))` | all literal | Literal `(b-a)/s` |
-| `len(str_chars(s))` | `s` is a string literal | Literal `strlen(s)` |
-| `len(array_concat(a, b))` | both `a`, `b` are constant arrays | Literal `len(a)+len(b)` |
-| `sum([1,2,3])` | all elements are literals | Literal sum |
-| `sum(array_fill(n, v))` | `n`, `v` are literals | Literal `n*v` |
-| `sum(range(a, b))` | `a`, `b` are literals | Literal `(a+b-1)*(b-a)/2` |
-| `array_min([...])` | all elements are literals | Literal minimum |
-| `array_max([...])` | all elements are literals | Literal maximum |
-| `array_product([...])` | all elements are literals | Literal product |
-| `array_last([...])` | all elements are literals | Literal last element |
-| `array_contains([...], v)` | all elements and `v` are literals | Literal 0 or 1 |
-| `array_find([...], v)` | all elements and `v` are literals | Literal index or -1 |
-| `index_of([...], v)` | all elements and `v` are literals | Literal index or -1 |
+| `std::len(array_fill(N, v))` | `N` is a literal integer | Literal `N` |
+| `std::len(range(a, b))` | `a`, `b` are literals | Literal `b - a` |
+| `std::len(range_step(a, b, s))` | all literal | Literal `(b-a)/s` |
+| `std::len(str_chars(s))` | `s` is a string literal | Literal `strlen(s)` |
+| `std::len(array_concat(a, b))` | both `a`, `b` are constant arrays | Literal `std::len(a)+len(b)` |
+| `std::sum([1,2,3])` | all elements are literals | Literal sum |
+| `std::sum(array_fill(n, v))` | `n`, `v` are literals | Literal `n*v` |
+| `std::sum(range(a, b))` | `a`, `b` are literals | Literal `(a+b-1)*(b-a)/2` |
+| `std::array_min([...])` | all elements are literals | Literal minimum |
+| `std::array_max([...])` | all elements are literals | Literal maximum |
+| `std::array_product([...])` | all elements are literals | Literal product |
+| `std::array_last([...])` | all elements are literals | Literal last element |
+| `std::array_contains([...], v)` | all elements and `v` are literals | Literal 0 or 1 |
+| `std::array_find([...], v)` | all elements and `v` are literals | Literal index or -1 |
+| `std::index_of([...], v)` | all elements and `v` are literals | Literal index or -1 |
 
-These chains compose: `sum(range(1, 101))` folds to `5050` without allocating an array or computing a loop.
+These chains compose: `std::sum(range(1, 101))` folds to `5050` without allocating an array or computing a loop.
 
 #### 25.12.4 The `str_to_u64_fast` Pattern in Detail
 
@@ -2992,16 +2995,16 @@ The canonical use case for comptime array evaluation is encoding a string as an 
 2. It looks up `str_to_u64_fast` in the function table and finds it is a pure function (no side effects).
 3. It registers `str_to_u64_fast` in `arrayReturningFunctions_` since its return type is `u64[]`.
 4. It executes the function body step by step:
-   - `len("hello")` → 5 (constant-folds immediately)
+   - `std::len("hello")` → 5 (constant-folds immediately)
    - `(5 + 7) >> 3` → 1 (one 8-byte block covers 5 bytes)
-   - `array_fill(1, 0)` → constant array `[0]`
+   - `std::array_fill(1, 0)` → constant array `[0]`
    - Loop `i in 0...1`: `base = 0`, then processes bytes at indices 0–4
    - `u64(s[0])` → `u64('h')` → `u64(104)` → 104
    - `104 << 0` → 104; `u64(s[1]) << 8` → `101 << 8` = 25856; etc.
    - Final `x` = `0x6F6C6C6568` (little-endian encoding of "hello\0\0\0")
 5. `emitComptimeArray` is called with `[1, 0x6F6C6C6568]`.
 6. The global `@M = private unnamed_addr constant [2 x i64] [i64 1, i64 478560413544]` is emitted.
-7. The variable `M` is bound to this global; `len(M)` folds to `1`.
+7. The variable `M` is bound to this global; `std::len(M)` folds to `1`.
 
 **Full function listing with annotation:**
 ```omscript
@@ -3055,7 +3058,7 @@ Functions that call other user functions are supported as long as those callee f
 When the compiler encounters a function being called in a comptime context and determines that function returns an array, it registers the function name in the `arrayReturningFunctions_` set (a `std::unordered_set<std::string>` inside `CodeGenerator`). This registration serves several purposes:
 
 1. **Type inference** — subsequent uses of the variable at call sites are typed as array, not integer. This affects which LLVM getelementptr offsets are generated for element access.
-2. **len() folding** — if the comptime result is a known-size array, `len()` calls on the variable can fold to the constant length immediately.
+2. **len() folding** — if the comptime result is a known-size array, `std::len()` calls on the variable can fold to the constant length immediately.
 3. **Downstream comptime propagation** — if the array variable is passed to another pure function in another comptime block, the evaluator knows to treat it as a constant array, not a runtime pointer.
 
 ---
@@ -3543,7 +3546,7 @@ CF-CTRE is OmScript's **deterministic SSA-semantics compile-time interpreter**. 
 
 #### 28.1.1 Goals
 
-CF-CTRE solves a fundamental limitation of classical constant folding: it is stopped by function calls.  Classical folding can evaluate `abs(min(3, 7))` but not:
+CF-CTRE solves a fundamental limitation of classical constant folding: it is stopped by function calls.  Classical folding can evaluate `std::abs(min(3, 7))` but not:
 
 ```omscript
 fn encode(x:int) -> int { return x * 6364136223846793005 + 1442695040888963407; }
@@ -3713,7 +3716,7 @@ A function is eligible for CF-CTRE execution if **all** of the following hold:
 | Annotated `@pure` **or** auto-detected as pure | Fixed-point purity analysis (see §28.3.2) |
 | All call-site arguments are CT-known | Each arg reduces to a `CTValue` (not `UNINITIALIZED`) |
 | No external I/O | No `print`, `println`, `input_line`, file operations in body |
-| No non-deterministic operations | No `rand()`, `time()`, `srand()` |
+| No non-deterministic operations | No `rand()`, `std::time()`, `srand()` |
 | No unsafe pointer escape | No raw pointer arithmetic, no FFI calls |
 | Recursion depth ≤ 128 | `kMaxDepth` limit |
 | Total instruction budget not exceeded | `kMaxInstructions` = 10 000 000 per compilation unit |
@@ -3756,7 +3759,7 @@ Phase 3: Pure operations in a function body:
     NOT pure:
     - print / println / input_line
     - file open / read / write / close / append
-    - rand() / srand() / time()
+    - rand() / srand() / std::time()
     - try / catch (potential runtime error with exit side-effect)
     - Calls to unknown or impure functions
 ```
@@ -4406,7 +4409,7 @@ OmScript emits a rich set of LLVM loop metadata to guide the auto-vectorizer:
 
 **Predicated vectorization (`predicate.enable`)** is especially valuable for loops with variable trip counts that are not a multiple of the vector width.  Without it, LLVM emits:
 ```
-main_vector_loop:  processes floor(N/W) * W elements
+main_vector_loop:  processes std::floor(N/W) * W elements
 scalar_epilogue:   processes remaining N % W elements
 ```
 With it, the scalar epilogue is replaced by a masked vector iteration — one code path, full SIMD throughput.
@@ -4679,7 +4682,7 @@ The compiler annotates iterator loads with tight `!range` metadata:
 
 - Iterator at loop body: `!range [0, end)` — exact range for ascending loops
 - Iterator at condition check: `!range [0, end+1)` — includes the final failing check value
-- `len()` return values: `!range [0, INT64_MAX)` — non-negative guarantee
+- `std::len()` return values: `!range [0, INT64_MAX)` — non-negative guarantee
 
 These ranges allow LLVM's Correlated Value Propagation and SCEV passes to prove tighter bounds on derived expressions (e.g. `i * k`, `i % m`), often enabling signed→unsigned conversions that reduce instruction count.
 
@@ -4688,8 +4691,8 @@ These ranges allow LLVM's Correlated Value Propagation and SCEV passes to prove 
 For ascending for-loops starting at a non-negative constant, the compiler emits `@llvm.assume` intrinsics:
 
 ```llvm
-call void @llvm.assume(i1 %iter.nonneg)   ; iter >= 0
-call void @llvm.assume(i1 %iter.lt.end)   ; iter < end
+call void @llvm.std::assume(i1 %iter.nonneg)   ; iter >= 0
+call void @llvm.std::assume(i1 %iter.lt.end)   ; iter < end
 ```
 
 These assumptions propagate through the LLVM pass pipeline and allow:
