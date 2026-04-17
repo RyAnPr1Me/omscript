@@ -2867,7 +2867,7 @@ catch("msg") { ... }   // catch a specific string literal code (compile-time mat
 
 - `throw expr;` — evaluates `expr` to an integer (or value coerced to integer) and jumps to the nearest matching `catch` in the same function.
 - `catch(N) { ... }` — matches when the most recent `throw` had the integer value `N`. `N` must be a **non-negative integer literal**.
-- `catch("str") { ... }` — the string literal is assigned a unique sequential integer ID at compile time. **This can never match a `throw` of a string expression at runtime:** `throw "str"` coerces the string's heap pointer to an integer (a large address), which will never equal the small compile-time ID. Use `catch("str")` only as a readable alias for the compile-time integer it represents, or use integer codes directly for portability.
+- `catch("str") { ... }` — the string literal is assigned a unique sequential integer ID at compile time. **This can never match a `throw` of a string expression at runtime:** `throw "str"` coerces the string's heap pointer to an integer (a large address), which will never equal the small compile-time ID. **Avoid `catch("str")` for runtime matching.** Its only practical use is as a human-readable label: `catch("div_by_zero")` compiles identically to `catch(1)` (or whichever ID the compiler assigns), letting you name error codes in the source without defining numeric constants. For any runtime `throw`/`catch` pairing, use integer codes.
 - After a `catch` block executes, execution continues normally with the statement after the `catch` block.
 - If no `throw` precedes a `catch`, the `catch` block is **skipped entirely** — this is the "bypass" behavior.
 - If a `throw` occurs with no matching `catch` in the current function, the program **aborts** with a runtime error message.
@@ -3439,7 +3439,7 @@ fn check_flag(flags:int, bit:int) -> int {
 |---|---|---|
 | `str_format` | `std::str_format(fmt, v1[, v2[, ...]])` | Printf-style formatting via `snprintf`. `fmt` is a C-style format string; supports `%d`, `%i`, `%u`, `%ld`, `%s`, `%f`, `%e`, `%g`, `%x`, `%X`, `%o`, `%c`, `%%`, and width/precision specifiers. Returns a new heap-allocated string. |
 | `str_filter` | `std::str_filter(s, fn)` | Return a new string containing only the characters of `s` for which `fn(char_code)` returns non-zero. |
-| `filter` | `std::filter(x, fn)` | Generic filter — dispatches to `array_filter` or `str_filter` based on a **compile-time** type analysis of `x`. Pass an array for `array_filter`, a string for `str_filter`. Passing a dict falls through to `array_filter` (no map branch exists). |
+| `filter` | `std::filter(x, fn)` | Generic filter — dispatches to `array_filter` or `str_filter` based on a **compile-time** type analysis of `x`. Pass an array for `array_filter`, a string for `str_filter`. Passing a dict is not supported: no map branch exists, and the dict pointer falls through to `array_filter` (producing undefined behavior). |
 
 ```omscript
 var s = std::str_format("x=%d, y=%.3f, name=%s", 42, 3.14159, "hello");
