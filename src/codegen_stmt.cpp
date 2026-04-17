@@ -1999,6 +1999,17 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+            // vectorize.predicate.enable: allow predicated (masked) vectorization
+            // for loops whose trip count is not a compile-time multiple of the
+            // vector width.  Without this hint LLVM emits a scalar epilogue loop
+            // for the last partial vector; with it, the loop body runs entirely in
+            // vector mode using masked instructions — one fewer loop structure and
+            // better utilisation of predication hardware (AVX-512, ARM SVE).
+            // Only meaningful when vectorize.enable=1 is already set.
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.predicate.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         // Interleaving: @hot+@vectorize at O3 → 4 iterations; plain O3
         // auto-vectorized loops → 2 iterations (balances register pressure

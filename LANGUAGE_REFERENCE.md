@@ -1,6 +1,6 @@
 # OmScript Language Reference
 
-> **Version:** 4.1.1
+> **Version:** 4.2.0
 > **Compiler:** `omsc` — OmScript Compiler
 > **Backend:** LLVM 18+ · Ahead-of-Time Compilation
 > **License:** See repository root
@@ -123,6 +123,18 @@
     - 28.10 Performance Characteristics
     - 28.11 Programmer-Visible Effects
     - 28.12 Worked Examples
+    - 28.13 Partial Evaluation with Symbolic Values (v4.2.0)
+29. [Compiler Optimization Internals](#29-compiler-optimization-internals)
+    - 29.1 CF-CTRE Partial Evaluation
+    - 29.2 Auto-Vectorization and Predicated Execution
+    - 29.3 Alias Analysis and NoAlias Metadata
+    - 29.4 Loop Transformations Deep Dive
+    - 29.5 Constant-Data Specialization
+    - 29.6 Profile-Guided Optimization Deep Dive
+    - 29.7 Superoptimizer Pattern Database
+    - 29.8 Register Allocation Hints
+    - 29.9 CF-CTRE-Aware Inlining
+    - 29.10 Data Layout Optimization
 
 ---
 
@@ -138,6 +150,7 @@ OmScript is a statically-compiled, dynamically-typed language with optional type
 - **`comptime {}` blocks** — arbitrary expressions evaluated entirely at compile time and substituted as constants
 - **`parallel` loops** — assert iteration independence for auto-parallelization
 - **Loop annotations** — `@loop(independent=true)`, `@loop(fuse=true)`, `@loop(unroll=N)`, `@loop(vectorize=true/false)`, `@loop(tile=N)`
+- **CF-CTRE partial evaluation** — path-sensitive folding with symbolic inputs: functions with early-exit guards fold to constants even when some arguments are runtime values (v4.2.0+)
 
 ---
 
@@ -3199,6 +3212,7 @@ A tagged union representing any scalar or compound value that CF-CTRE can comput
 | `CONCRETE_STRING` | `std::string` | Compile-time string value |
 | `CONCRETE_ARRAY` | `CTArrayHandle` (uint64) | Opaque handle into CTHeap |
 | `UNINITIALIZED` | — | Sentinel (not yet computed) |
+| `SYMBOLIC` | — | Unknown runtime value used in partial evaluation (v4.2.0+) |
 
 Key constructors:
 
@@ -3210,6 +3224,7 @@ CTValue::fromBool(bool)          // boolean
 CTValue::fromString(std::string) // string
 CTValue::fromArray(CTArrayHandle)// array handle
 CTValue::uninit()                // UNINITIALIZED sentinel
+CTValue::symbolic()              // SYMBOLIC placeholder for partial evaluation
 ```
 
 Key accessors:
@@ -3882,3 +3897,501 @@ const H3 = comptime { hash_string("hello", 42); }
 
 ---
 
+### 28.13 Partial Evaluation with Symbolic Values (v4.2.0)
+
+> **New in v4.2.0.**  CF-CTRE previously required **all** function arguments to be compile-time constants.  From v4.2.0 onward it performs **path-sensitive partial evaluation**: unknown runtime arguments are modelled as `SYMBOLIC` placeholders and propagated through the function body.  If the function reaches a `return` statement before touching the symbolic value — typically via an early-exit guard — the concrete return value is folded to a constant.
+
+#### 28.13.1 How It Works
+
+When the compiler encounters a call to a pure function where only some arguments are compile-time constants:
+
+1. Known arguments are passed as `CONCRETE_*` CTValues.
+2. Unknown arguments are passed as `CTValue::symbolic()` — a tagged placeholder with kind `SYMBOLIC`.
+3. CF-CTRE executes the function body.  Symbolic values propagate through expressions according to these rules:
+
+   | Operation | Rule |
+   |---|---|
+   | `SYMBOLIC op CONCRETE` | → `SYMBOLIC` (generic propagation) |
+   | `SYMBOLIC * 0` or `0 * SYMBOLIC` | → `0` (absorber) |
+   | `SYMBOLIC & 0` or `0 & SYMBOLIC` | → `0` (absorber) |
+   | `SYMBOLIC ** 0` | → `1` (zero-exponent absorber) |
+   | `SYMBOLIC && false` | → `false` (logical absorber) |
+   | `SYMBOLIC \|\| true` | → `true` (logical absorber) |
+   | `if (SYMBOLIC)` | → abort partial eval (can't determine branch) |
+   | `if (CONCRETE)` | → evaluate taken branch normally |
+   | `return CONCRETE` | → fold the call to that constant |
+   | `return SYMBOLIC` | → can't fold; return `nullopt` |
+
+4. Variable assignments of SYMBOLIC are allowed — the local stores the placeholder and propagates it further.
+5. If the function returns a `CONCRETE` value (symbolic inputs were never needed), the call site is folded.
+6. Results from partial evaluation are **not** cached in the memoisation table — caching would be incorrect because a different combination of concrete arguments might reach the same cache key but produce a different result.
+
+#### 28.13.2 Common Patterns That Benefit
+
+**Early-exit guards on known arguments:**
+
+```omscript
+@pure
+fn safe_divide(n: int, d: int) -> int {
+    if (d == 0) { return 0; }    // guard on d
+    return n / d;
+}
+
+// d = 0 is known → the guard fires, returns 0 regardless of n
+var x = safe_divide(runtime_n, 0);  // ← folded to 0 at compile time
+```
+
+**Boundary checks and clamping:**
+
+```omscript
+@pure
+fn clamp_index(i: int, size: int) -> int {
+    if (i < 0)    { return 0; }
+    if (i >= size) { return size - 1; }
+    return i;
+}
+
+// i = -5 is known → first guard fires, returns 0
+var idx = clamp_index(-5, runtime_size);  // ← folded to 0
+```
+
+**Null / sentinel value checks:**
+
+```omscript
+@pure
+fn encode(val: int, key: int) -> int {
+    if (val == 0) { return 0; }   // sentinel pass-through
+    return val ^ key ^ 0x5A5A5A5A;
+}
+
+// val = 0 → sentinel fires, returns 0 without touching key
+var out = encode(0, runtime_key);   // ← folded to 0
+```
+
+#### 28.13.3 What It Cannot Fold
+
+- Functions whose result depends on the symbolic argument before any early exit.
+- Loops whose bounds (`start` or `end`) are symbolic — loop iteration requires known bounds.
+- Branches conditioned on the symbolic value.
+- Any path that reads the symbolic variable before returning.
+
+#### 28.13.4 Interaction with Memoisation
+
+Full evaluations (all args concrete) continue to be memoised as before.  Partial evaluations (some args symbolic) produce the same result as the full evaluation would for those concrete args, but are **not stored** in the memo cache.  This is conservative: if the compiler encounters the same call with fully-concrete args later, it will run a normal (cacheable) evaluation.
+
+---
+
+## 29. Compiler Optimization Internals
+
+This section documents the internal optimizer passes, their trigger conditions, and how OmScript's code generation interacts with LLVM's optimization infrastructure.  It is aimed at contributors and advanced users who want to understand why the compiler emits specific IR patterns.
+
+---
+
+### 29.1 CF-CTRE Partial Evaluation
+
+*See §28.13 for the complete specification.*
+
+**Implementation:** `include/cfctre.h`, `src/cfctre.cpp`, `src/codegen_builtins.cpp`
+
+**Trigger:** O1+, pure functions (auto-detected or annotated `@pure` / `@const_eval`), at least one argument is a compile-time constant and the function has early-exit paths.
+
+**How to expose more folding opportunities:**  
+- Place type/boundary guards early in pure functions.
+- Avoid mixing guard logic and computation in the same expression.
+- Use `@pure` on helper functions to opt them in to CF-CTRE.
+
+```
+Benefit: eliminates entire call sites; downstream code sees only constants.
+Cost:    ~O(function_body_size) extra compile-time work per call site.
+```
+
+---
+
+### 29.2 Auto-Vectorization and Predicated Execution
+
+OmScript emits a rich set of LLVM loop metadata to guide the auto-vectorizer:
+
+| Metadata key | Emitted when | Effect |
+|---|---|---|
+| `llvm.loop.vectorize.enable(1)` | O3+, ascending non-nested for-loop | Force-enables the loop vectorizer |
+| `llvm.loop.vectorize.predicate.enable(1)` | Same as above (v4.2.0+) | Use masked/predicated tail instead of scalar epilogue |
+| `llvm.loop.interleave.count(2)` | O3, non-nested, non-modulo | 2× software pipeline interleaving |
+| `llvm.loop.interleave.count(4)` | O3, `@hot` + `@vectorize` | Aggressive 4× interleaving for latency-bound loops |
+| `llvm.loop.distribute.enable(1)` | O3+, non-nested ascending loop | Loop distribution (split into vectorizable sub-loops) |
+| `llvm.loop.parallel_accesses` | O3+, `@parallel` / `@independent` | Assert cross-iteration independence |
+| `llvm.loop.trip.count.multiple` | O3, constant trip count divisible by power-of-2 | Eliminate scalar epilogue by aligning vector width |
+| `llvm.loop.pipeline.disable(0)` | O3, `@vectorize` | Enable software pipelining for latency hiding |
+
+**Predicated vectorization (`predicate.enable`)** is especially valuable for loops with variable trip counts that are not a multiple of the vector width.  Without it, LLVM emits:
+```
+main_vector_loop:  processes floor(N/W) * W elements
+scalar_epilogue:   processes remaining N % W elements
+```
+With it, the scalar epilogue is replaced by a masked vector iteration — one code path, full SIMD throughput.
+
+**To force vectorization** on a specific loop, annotate the enclosing function:
+
+```omscript
+@vectorize
+fn process(arr: int[], n: int) {
+    for (i: int in 0...n) {
+        arr[i] = arr[i] * 2 + 1;
+    }
+}
+```
+
+**To assert no cross-iteration dependencies** (unlock parallel reductions):
+
+```omscript
+fn fill(@independent arr: int[], n: int) {
+    for (i: int in 0...n) {
+        arr[i] = i * i;
+    }
+}
+```
+
+---
+
+### 29.3 Alias Analysis and NoAlias Metadata
+
+OmScript provides LLVM with richer alias information than typical compiled languages:
+
+**Heap allocation attributes (malloc / calloc):**
+- `noalias` return: every heap allocation is a fresh, non-aliasing pointer
+- `allocsize(N)`: tells LLVM the exact buffer size for bounds reasoning
+- `allockind(alloc,uninitialized)` / `allockind(alloc,zeroed)`: classifies allocation purpose
+- `align(16)`: guarantees 16-byte alignment → enables aligned vector loads/stores without runtime checks
+- `inaccessiblememonly`: allows LICM to hoist allocations out of loops
+
+**Local variable (alloca) metadata:**
+- `!range [0, MAX)` on iterator loads: proves non-negativity → enables `urem` / `udiv` optimizations
+- `@noalias` parameter annotation: function parameter does not alias any other pointer
+- Ownership keywords (`freeze`, `borrow`): generate LLVM `noalias` scope intrinsics
+
+**TBAA (Type-Based Alias Analysis):**
+- Struct fields with different names get distinct TBAA descriptors
+- Array element stores get generic scalar TBAA
+- Dict internal buffers get a separate TBAA domain from user arrays
+
+**Practical advice:**  
+For maximum alias-analysis precision, use `@noalias` on pointer parameters that are guaranteed to be independent:
+
+```omscript
+fn vector_add(@noalias dst: int[], @noalias src1: int[], @noalias src2: int[], n: int) {
+    for (i: int in 0...n) {
+        dst[i] = src1[i] + src2[i];
+    }
+}
+```
+
+Without `@noalias`, LLVM conservatively assumes `dst` might alias `src1` or `src2` and cannot vectorize the loop.
+
+---
+
+### 29.4 Loop Transformations Deep Dive
+
+#### 29.4.1 Loop Unrolling
+
+OmScript's unroller emits different hints depending on context:
+
+| Situation | Hint emitted | Rationale |
+|---|---|---|
+| Constant trip count ≤ 8 | `llvm.loop.unroll.full` | Eliminate loop overhead entirely |
+| Constant trip count 9–255 | `llvm.loop.unroll.count(N)` | Exact unroll factor |
+| `@unroll` function, OPTMAX | `llvm.loop.unroll.count(16)` | Maximum ILP for compute-heavy loops |
+| `@unroll` function, regular | `llvm.loop.unroll.count(4)` | Balanced ILP vs I-cache |
+| Loop with backward array ref | No explicit hint | Let LLVM cost model decide |
+| Loop nesting depth ≥ 2 | `llvm.loop.unroll.disable` | Prevent exponential code growth |
+
+#### 29.4.2 Loop Fusion
+
+Two adjacent loops over the same range can be merged with `@loop(fuse=true)`:
+
+```omscript
+@loop(fuse=true)
+for (i: int in 0...n) { a[i] = i * 2; }
+@loop(fuse=true)
+for (i: int in 0...n) { b[i] = a[i] + 1; }
+// → merged into one loop, eliminating a full pass over memory
+```
+
+Fusion is performed at the AST level before codegen; the result is a single for-loop containing both bodies.
+
+#### 29.4.3 Loop Tiling
+
+Use `@loop(tile=B)` to tile a loop for cache locality:
+
+```omscript
+@loop(tile=64)
+for (i: int in 0...n) {
+    process(arr[i]);
+}
+```
+
+The compiler generates an outer loop over tiles of size B and an inner loop over elements within each tile.
+
+#### 29.4.4 Loop Distribution
+
+At O3, the compiler emits `llvm.loop.distribute.enable(1)` on non-nested ascending for-loops.  LLVM's LoopDistribute pass can then split a loop with mixed vectorizable and non-vectorizable parts into multiple simpler loops:
+
+```omscript
+// Original loop with two independent parts:
+for (i: int in 0...n) {
+    arr[i] = i * 2;         // vectorizable
+    total = total + arr[i]; // reduction — not independently vectorizable
+}
+
+// After distribution (LLVM decides):
+// Loop 1: arr[i] = i * 2          (fully vectorizable)
+// Loop 2: total = total + arr[i]  (reduction — handled separately)
+```
+
+#### 29.4.5 Software Pipelining
+
+For `@vectorize`-annotated functions at O3, the compiler emits:
+```
+llvm.loop.pipeline.disable(false)
+llvm.loop.pipeline.initiationinterval(1)
+```
+This requests instruction-level pipelining with initiation interval 1 (one new iteration starts each cycle).  Particularly effective for loops with long-latency operations (FP multiply, memory loads from L2/L3).
+
+---
+
+### 29.5 Constant-Data Specialization
+
+#### 29.5.1 Known Array Size Optimization
+
+When a for-loop has a constant trip count (both start and end are literals), the compiler:
+
+1. Records the exact trip count.
+2. If count ≤ 8: emits `llvm.loop.unroll.full` to eliminate the loop entirely.
+3. If count is a power-of-2 multiple ≥ 8: emits `llvm.loop.trip.count.multiple(P)` so the vectorizer can use a vector width that divides the count exactly (no scalar epilogue).
+4. Emits exact branch weights `(trip_count : 1)` for the condition branch so the block layout pass places the loop body physically adjacent for I-cache efficiency.
+
+Example: a loop over a compile-time constant-size array:
+
+```omscript
+const SIZE = 16;
+var arr: int[] = array_fill(SIZE, 0);
+
+// Loop trip count = 16. Compiler emits:
+//   - unroll.full (16 ≤ threshold) at O3, OR
+//   - trip.count.multiple(16), enabling 16-wide AVX-512 vectorization
+for (i: int in 0...SIZE) {
+    arr[i] = i * i;
+}
+```
+
+#### 29.5.2 CF-CTRE + Specialization
+
+CF-CTRE's specialization key is `(function_name, arg_hash_1 | arg_hash_2 | ...)`.  When the compiler detects that a pure function is called with the same concrete arguments at multiple call sites, all but the first call are served from the memo cache — O(1) compile-time cost.
+
+Partial evaluation results (§28.13) are **not** stored in the specialization cache since they depend on which concrete args happen to trigger the early exit — a different call with different concrete args for the same parameters might not take the same path.
+
+---
+
+### 29.6 Profile-Guided Optimization Deep Dive
+
+OmScript supports PGO via two complementary mechanisms:
+
+#### 29.6.1 Static Hints
+
+Annotation-based static hints propagate through codegen:
+
+| Annotation | IR effect | Benefit |
+|---|---|---|
+| `@hot` | `hot` function attribute; aggressive branch weights on loop back-edge | Better block placement; loop unrolled more aggressively |
+| `@cold` | `cold` + `minsize` function attributes | Small code, low register pressure |
+| `@likely` / `@unlikely` (branch) | `MDBuilder::createBranchWeights` | CPU branch predictor hint; block reordering |
+| `@vectorize` | `llvm.loop.vectorize.enable(1)` + `predicate.enable(1)` | Force SIMD for hot loop |
+
+#### 29.6.2 Instrumentation PGO (`-fprofile-generate` / `-fprofile-use`)
+
+OmScript integrates with LLVM's standard PGO infrastructure:
+
+```sh
+# Step 1: compile with instrumentation
+omsc compile myprogram.om -o myprogram_instr -fprofile-generate
+
+# Step 2: run representative workload
+./myprogram_instr < representative_input.txt
+
+# Step 3: recompile with profile data
+omsc compile myprogram.om -o myprogram_opt -fprofile-use=myprogram.profdata -O3
+```
+
+With profile data, LLVM:
+- Inlines hot call sites more aggressively (size threshold raised by profile count).
+- Marks cold paths with `unlikely` weights for branch predictor.
+- Reorders basic blocks to maximise I-cache hit rate.
+- Specializes call sites that are nearly always taken with the same target.
+
+#### 29.6.3 Value Profiling
+
+LLVM's instrumented PGO also performs value profiling: it records the distribution of values at indirect calls and integer loads.  When a single value dominates (e.g. 90% of calls to a function use `x == 0`), the recompiled binary emits:
+
+```
+if (x == 0) {
+    // fast path: generated with constant folding applied
+} else {
+    // slow generic path
+}
+```
+
+This is the "speculative optimization with fallback" pattern that allows the binary to have both safety and peak performance.
+
+---
+
+### 29.7 Superoptimizer Pattern Database
+
+The OmScript superoptimizer (`src/superopt.cpp`) operates as a **peephole rewriter** on the LLVM IR after the main optimization passes.  It recognizes idioms that LLVM's generic passes miss and replaces them with target-optimized equivalents.
+
+#### 29.7.1 Strength Reductions (Multiply-by-Constant)
+
+The compiler replaces `x * C` with shift-and-add sequences for hundreds of common constants:
+
+| Constant | Emitted IR | Cycles (x86-64) |
+|---|---|---|
+| `3` | `(x << 1) + x` | 1 (lea) |
+| `5` | `(x << 2) + x` | 1 (lea) |
+| `10` | `(x << 3) + (x << 1)` | 2 |
+| `255` | `(x << 8) - x` | 2 |
+| `1024` | `x << 10` | 1 |
+
+The table covers constants up to 8192 with optimal shift-add representations.  Multiplications by larger constants are left for LLVM's own strength reduction.
+
+#### 29.7.2 Division Strength Reduction
+
+Integer division by constant powers of 2 is strength-reduced:
+- `x / 2^k` → `x >> k` (arithmetic shift for signed, logical shift for unsigned)
+- `x % 2^k` → `x & (2^k - 1)` (bitwise AND for unsigned)
+
+For unsigned variables (declared with `u8`, `u16`, `u32`, `u64` type annotations), the compiler uses zero-extension (`zext`) for mixed-width operands, enabling the unsigned shift optimizations that signed values cannot use.
+
+#### 29.7.3 Branch-to-Select
+
+The superoptimizer recognizes patterns like:
+
+```
+if (cond) { result = a; } else { result = b; }
+```
+
+and replaces them with a single `select` instruction when `a` and `b` are simple values.  This eliminates the branch and improves both branch predictor efficiency and out-of-order execution throughput.
+
+---
+
+### 29.8 Register Allocation Hints
+
+OmScript helps LLVM's register allocator in several ways:
+
+#### 29.8.1 SSA Form and Alloca Placement
+
+All local variable allocas are placed in the function entry block (`createEntryBlockAlloca`).  LLVM's `mem2reg` pass converts them to SSA φ-nodes.  Placing all allocas in the entry block ensures:
+- Single definition points for mem2reg.
+- Predictable stack frame layout.
+- Minimal register pressure from spill slots.
+
+#### 29.8.2 Value Range Metadata (`!range`)
+
+The compiler annotates iterator loads with tight `!range` metadata:
+
+- Iterator at loop body: `!range [0, end)` — exact range for ascending loops
+- Iterator at condition check: `!range [0, end+1)` — includes the final failing check value
+- `len()` return values: `!range [0, INT64_MAX)` — non-negative guarantee
+
+These ranges allow LLVM's Correlated Value Propagation and SCEV passes to prove tighter bounds on derived expressions (e.g. `i * k`, `i % m`), often enabling signed→unsigned conversions that reduce instruction count.
+
+#### 29.8.3 `llvm.assume` for Iterator Bounds
+
+For ascending for-loops starting at a non-negative constant, the compiler emits `@llvm.assume` intrinsics:
+
+```llvm
+call void @llvm.assume(i1 %iter.nonneg)   ; iter >= 0
+call void @llvm.assume(i1 %iter.lt.end)   ; iter < end
+```
+
+These assumptions propagate through the LLVM pass pipeline and allow:
+- `srem` → `urem` for expressions like `iter % N` (cheaper on hardware)
+- `sdiv` → `udiv` for `iter / N`
+- Bounds check elimination for `arr[iter]`
+
+#### 29.8.4 NSW / NUW Flags
+
+The loop increment uses both `nsw` (no signed wrap) **and** `nuw` (no unsigned wrap) flags when the loop starts at a non-negative value.  The `nuw` flag is critical for LLVM's loop unroller: it propagates into unrolled copies and enables non-negativity proofs on the unrolled iteration variables, which in turn allows `srem→urem` in every unrolled copy.
+
+C compilers typically set only `nsw` (because C signed overflow is UB); OmScript's loop semantics allow `nuw` as well because the iterator is proven to stay within `[0, 2^63-1]`.
+
+---
+
+### 29.9 CF-CTRE-Aware Inlining
+
+OmScript's inlining heuristic (implemented in the code generator before LLVM IR emission) considers CF-CTRE results:
+
+**`alwaysinline` on zero-argument pure functions that were fully evaluated:**  
+After `runCFCTRE()` collects all zero-argument pure function results, any function that produced a constant gets its call sites replaced with the constant directly — this is stronger than inlining, it's complete elimination.
+
+**Size-based inlining threshold scales with optimization level:**
+
+| Level | Max inline hint stmts | `alwaysinline` threshold |
+|---|---|---|
+| O1 | 10 | 5 |
+| O2 | 20 | 10 |
+| O3 | 40 | 20 |
+
+**CF-CTRE exposure heuristic:**  
+A call site where at least one argument is a compile-time constant, and the callee is pure and contains early-exit guards, is a candidate for partial evaluation (§28.13).  The compiler attempts partial evaluation before falling back to normal inlining.  If partial evaluation succeeds (returns a constant), no IR is emitted for the call at all — more powerful than inlining.
+
+**When partial evaluation fails**, the compiler falls through to the existing `tryConstEvalFull` path (which works on fully-concrete args), and if that also fails, emits a normal call with standard LLVM inlining metadata.
+
+---
+
+### 29.10 Data Layout Optimization
+
+#### 29.10.1 Struct Field Ordering
+
+OmScript structs lay out fields in declaration order.  For hot structs accessed in tight loops, consider reordering fields so the most-frequently-read fields come first (fits in a single cache line):
+
+```omscript
+// Cold fields first — bad for cache
+struct Particle {
+    var name: string;    // cold: 8 bytes
+    var id: int;         // cold: 8 bytes
+    var x: float;        // hot
+    var y: float;        // hot
+    var vx: float;       // hot
+    var vy: float;       // hot
+}
+
+// Hot fields first — better cache behavior
+struct Particle {
+    var x: float;        // hot — cache line 0
+    var y: float;        // hot
+    var vx: float;       // hot
+    var vy: float;       // hot
+    var id: int;         // cold — cache line 1+
+    var name: string;    // cold
+}
+```
+
+#### 29.10.2 Array of Structs vs Struct of Arrays
+
+For SIMD-vectorized loops, a Struct-of-Arrays (SoA) layout is significantly more efficient than an Array-of-Structs (AoS) layout, because SIMD loads require contiguous data:
+
+```omscript
+// AoS — poor vectorization: SIMD needs to gather non-contiguous x values
+var particles: Particle[];
+
+// SoA — excellent vectorization: x values are contiguous
+var xs: float[];
+var ys: float[];
+var vxs: float[];
+var vys: float[];
+```
+
+For memory-bound workloads, SoA can yield 2–5× speedups by maximising cache line utilisation per SIMD instruction.
+
+#### 29.10.3 Heap Allocation Alignment
+
+All OmScript heap allocations (via `malloc` / `calloc`) are tagged with `align(16)` in the LLVM IR.  This tells the auto-vectorizer that every array base pointer is 16-byte aligned, enabling aligned SSE/AVX loads (`vmovaps`, `vmovdqa`) instead of unaligned variants (`vmovups`, `vmovdqu`).  Aligned loads are 1–3 cycles faster on cache-miss paths and avoid potential stalls from crossing cache-line boundaries.
+
+---
