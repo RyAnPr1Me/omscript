@@ -1,8 +1,8 @@
 # OmScript Language Reference
 
-> **Version:** 4.2.0
+> **Version:** 4.1.1
 > **Compiler:** `omsc` — OmScript Compiler
-> **Backend:** LLVM 18+ · Ahead-of-Time Compilation
+> **Backend:** LLVM 18+ · Ahead-of-Time compilation with runtime adaptive execution paths
 > **License:** See repository root
 
 ---
@@ -12,6 +12,12 @@
 1. [Overview](#1-overview)
 2. [Compilation Pipeline](#2-compilation-pipeline)
 3. [Lexical Structure](#3-lexical-structure)
+    - 3.1 Comments
+    - 3.2 Keywords
+    - 3.2.1 Keyword notes
+    - 3.2.2 Statement keyword quick reference
+    - 3.3 Literals
+    - 3.4 Identifiers
 4. [Preprocessor](#4-preprocessor)
 5. [Types and Values](#5-types-and-values)
     - 5.1 Type Annotations
@@ -150,7 +156,37 @@ OmScript is a statically-compiled, dynamically-typed language with optional type
 - **`comptime {}` blocks** — arbitrary expressions evaluated entirely at compile time and substituted as constants
 - **`parallel` loops** — assert iteration independence for auto-parallelization
 - **Loop annotations** — `@loop(independent=true)`, `@loop(fuse=true)`, `@loop(unroll=N)`, `@loop(vectorize=true/false)`, `@loop(tile=N)`
-- **CF-CTRE partial evaluation** — path-sensitive folding with symbolic inputs: functions with early-exit guards fold to constants even when some arguments are runtime values (v4.2.0+)
+- **CF-CTRE partial evaluation** — path-sensitive compile-time folding across function boundaries for pure code paths
+
+### 1.1 Accuracy, Compatibility, and Source of Truth
+
+This reference is aligned to the compiler implementation in:
+
+- `src/lexer.cpp` (token acceptance and keyword inventory)
+- `src/parser.cpp` (grammar and syntax acceptance)
+- `run_tests.sh` + `examples/*` (observable behavior)
+
+When historical snippets or old docs conflict with this file, prefer current compiler behavior and this reference.
+
+Compatibility rules used by this project:
+
+1. **Lex/parse acceptance is authoritative** for syntax support.
+2. **Integration tests are authoritative** for runtime-facing behavior.
+3. **Optimization details are non-guaranteed internals** unless explicitly documented as guarantees.
+4. **This file tracks OmScript 4.1.1** and may lag future parser additions until updated.
+
+### 1.2 High-Level Syntax Coverage Map (Implemented)
+
+Implemented and tested language surface includes:
+
+- Declarations: `fn`, `var`, `const`, `enum`, `struct`, `import`
+- Control flow: `if`/`elif`/`else`, `unless`, `when`, `guard`, `switch`, `try`/`catch`/`throw`
+- Loops: `while`, `do ... while`, range `for`, `foreach`, `repeat`, `times`, `until`, `forever`, `loop`
+- Control forms: `defer`, `with`, `pipeline`/`stage`
+- Ownership forms: `move`, `borrow`, `borrow mut`, `freeze`, `reborrow`, `invalidate`
+- Expressions: arithmetic/comparison/logical/bitwise, ternary `?:`, null-coalesce `??`, pipe-forward `|>`, ranges, lambdas
+- Literals: integer/float/string/bytes/null/bool/array/map/struct
+- Compile-time forms: `comptime {}`, `OPTMAX=:` / `OPTMAX!:`, compile-time builtin folding
 
 ---
 
@@ -204,11 +240,45 @@ repeat    until     times     with      var       const
 register  break     continue  in        true      false
 null      switch    case      default   try       catch
 throw     enum      struct    import    move      invalidate
-borrow    freeze    reborrow  prefetch  likely    unlikely
-when      guard     defer     swap      parallel  comptime
+borrow    mut       freeze    reborrow  prefetch  likely
+unlikely  when      guard     defer     swap      parallel
+comptime  pipeline  stage
 ```
 
-**v4.0.0 additions:** `freeze`, `reborrow`, `parallel`, `comptime`
+### 3.2.1 Keyword notes
+
+- `mut` is part of ownership-aware borrow syntax (`borrow mut x`) and is tokenized as a keyword.
+- `pipeline` and `stage` are language keywords for staged software-pipelined loops.
+- `in` is both a loop keyword and expression operator keyword.
+- `true`, `false`, and `null` are reserved literal keywords.
+- `likely`, `unlikely`, and `prefetch` are keyworded optimization hints in supported contexts.
+
+### 3.2.2 Statement keyword quick reference
+
+This is a compact implementation-aligned map of keyword-led statement forms:
+
+| Form | Canonical shape |
+|---|---|
+| Variable declaration | `var name = expr;` / `const name = expr;` |
+| Conditional | `if (cond) { ... } elif (cond) { ... } else { ... }` |
+| Unless | `unless (cond) { ... }` |
+| While | `while (cond) { ... }` |
+| Do-while | `do { ... } while (cond);` |
+| Range for | `for (i in start...end)` / `for (i in start...end...step)` |
+| Foreach | `foreach (item in arrayOrString) { ... }` |
+| Repeat | `repeat (N) { ... }` |
+| Times | `N times { ... }` |
+| Until | `until (cond) { ... }` |
+| Forever | `forever { ... }` |
+| Loop | `loop { ... }` |
+| Switch | `switch (expr) { case K: ... default: ... }` |
+| Error handling | `try { ... } catch (name) { ... }`, `throw expr;` |
+| Lifetime ops | `move x;`, `freeze x;`, `invalidate x;`, `borrow x;`, `reborrow x;` |
+| Deferred execution | `defer { ... }` |
+| Guard | `guard (cond) { ... }` |
+| With | `with (expr) { ... }` |
+| Pipeline | `pipeline (...) { stage { ... } ... }` |
+| Compile-time block | `comptime { ... }` |
 
 ### 3.3 Literals
 
@@ -293,7 +363,7 @@ The preprocessor runs before lexing. All directives begin with `#`.
 
 | Macro | Value |
 |---|---|
-| `__VERSION__` | Compiler version string (e.g., `"3.7.0"`) |
+| `__VERSION__` | Compiler version string (e.g., `"4.1.1"`) |
 | `__OS__` | `"linux"`, `"macos"`, or `"windows"` |
 | `__ARCH__` | `"x86_64"`, `"aarch64"`, `"arm"`, or `"unknown"` |
 | `__FILE__` | Current filename |

@@ -808,11 +808,26 @@ Types are determined at runtime; LLVM compiles each operation to native instruct
 ## Testing
 
 ```bash
-# Unit tests (requires libgtest-dev)
+# Unit tests (GTest via CTest; requires libgtest-dev)
 cd build && ctest --output-on-failure
 
-# Integration tests (~330 example programs)
+# Integration tests (full CLI + language suite)
 bash run_tests.sh
+```
+
+### Coverage (full production-source instrumentation)
+
+```bash
+# Build with coverage instrumentation
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCOVERAGE=ON -DLLVM_DIR=/usr/lib/llvm-18/cmake
+cmake --build build --parallel $(nproc)
+
+# Run unit + integration tests to collect counters
+cd build && ctest --output-on-failure && cd ..
+bash run_tests.sh
+
+# Report coverage for production code
+gcovr -r . --filter 'src/' --filter 'runtime/' --exclude 'build/' --print-summary
 ```
 
 ## Project Structure

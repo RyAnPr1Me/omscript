@@ -24,6 +24,7 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(CTest)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -374,3 +375,60 @@ install(CODE "
     get_filename_component(OMSC_BIN \"\${CMAKE_INSTALL_PREFIX}/bin/omsc\" ABSOLUTE)
     message(STATUS \"BigInt runtime installed to \${CMAKE_INSTALL_PREFIX}/lib/omscript/libomsc_bigint.a\")
 ")
+
+# ── Unit tests (GTest + CTest discovery) ──────────────────────────────────────
+if(BUILD_TESTING)
+    find_package(GTest QUIET)
+    if(NOT GTest_FOUND)
+        message(WARNING "GTest not found; C++ unit tests will be skipped. Install libgtest-dev to enable them.")
+    else()
+        include(GoogleTest)
+
+        file(GLOB OMSC_UNIT_TEST_SOURCES CONFIGURE_DEPENDS
+            "${CMAKE_SOURCE_DIR}/tests/*_test.cpp"
+        )
+
+        set(OMSC_TEST_RUNTIME_SOURCES ${SRC})
+        list(REMOVE_ITEM OMSC_TEST_RUNTIME_SOURCES src/main.cpp)
+
+        add_executable(omsc_tests
+            ${OMSC_UNIT_TEST_SOURCES}
+            ${OMSC_TEST_RUNTIME_SOURCES}
+        )
+
+        target_include_directories(omsc_tests PRIVATE
+            ${CMAKE_SOURCE_DIR}/include
+            ${CMAKE_SOURCE_DIR}/runtime
+        )
+
+        target_compile_definitions(omsc_tests PRIVATE
+            OMSC_VERSION=\"${OMSC_VERSION}\"
+            OMSC_BIGINT_LIB_PATH=\"${CMAKE_CURRENT_BINARY_DIR}/libomsc_bigint.a\"
+        )
+
+        target_compile_options(omsc_tests PRIVATE -Wall -Wextra -Wpedantic)
+
+        if(SANITIZE)
+            target_compile_options(omsc_tests PRIVATE -fsanitize=${SANITIZE} -fno-omit-frame-pointer)
+            target_link_options(omsc_tests PRIVATE -fsanitize=${SANITIZE})
+        endif()
+
+        if(COVERAGE)
+            target_compile_options(omsc_tests PRIVATE --coverage -fno-inline)
+            target_link_options(omsc_tests PRIVATE --coverage)
+        endif()
+
+        target_link_libraries(omsc_tests PRIVATE
+            GTest::gtest
+            GTest::gtest_main
+            Threads::Threads
+            ${llvm_libs}
+        )
+
+        if(WITH_OPENMP AND OpenMP_CXX_FOUND)
+            target_link_libraries(omsc_tests PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+
+        gtest_discover_tests(omsc_tests DISCOVERY_TIMEOUT 60)
+    endif()
+endif()
