@@ -148,17 +148,37 @@
 
 ## 1. Overview
 
-OmScript is a statically-compiled, dynamically-typed language with optional type annotations. It compiles through LLVM to native machine code. Key features:
+OmScript is a **statically-compiled, dynamically-typed** language with optional type annotations. It compiles to native machine code via the LLVM backend. Key design goals are C-class performance with high-level syntax, aggressive compile-time computation, and a rich static optimizer.
 
-- **Dynamic typing with optional annotations** — variables are untyped by default; annotations enable advanced optimizations and SIMD types
-- **LLVM backend** — ahead-of-time compilation to native binaries
-- **Four-stage optimizer** — AST pre-passes (comptime evaluation, loop fusion, escape analysis), e-graph equality saturation, superoptimizer, and hardware graph optimization engine (HGOE)
-- **C-compatible performance** — designed to match C performance with high-level syntax
-- **Compile-time ownership system** — `move`, `borrow`, `borrow mut`, `freeze`, `reborrow`, and `invalidate` keywords for static lifetime tracking and aggressive alias optimizations
-- **`comptime {}` blocks** — arbitrary expressions evaluated entirely at compile time and substituted as constants
-- **`parallel` loops** — assert iteration independence for auto-parallelization
-- **Loop annotations** — `@loop(independent=true)`, `@loop(fuse=true)`, `@loop(unroll=N)`, `@loop(vectorize=true/false)`, `@loop(tile=N)`
-- **CF-CTRE partial evaluation** — path-sensitive compile-time folding across function boundaries for pure code paths
+### Core Features
+
+- **Dynamic typing with optional annotations** — variables are untyped by default (`i64` representation); type annotations enable advanced code generation, SIMD types, and OPTMAX optimization.
+- **LLVM backend** — all programs compile to native machine code (ELF, Mach-O, PE) via LLVM 18+. No JIT, no bytecode interpreter.
+- **Five-stage optimizer:**
+  1. AST pre-passes (`comptime` eval, loop fusion, escape analysis, constant propagation)
+  2. CF-CTRE — cross-function compile-time reasoning engine (O1+)
+  3. E-graph equality saturation with 1,500+ algebraic rewrite rules (O2+)
+  4. Superoptimizer — idiom recognition, branch-to-select, strength reductions (O2+)
+  5. HGOE — hardware graph optimization engine with per-opcode latency and O(N+E) scheduling
+- **C-compatible performance** — designed to emit LLVM IR that is equivalent to or better than hand-written C for numerical code.
+- **Compile-time ownership system** — `move`, `borrow`, `borrow mut`, `freeze`, `reborrow`, and `invalidate` keywords for compile-time lifetime tracking and automatic `noalias`/`nonnull`/`dereferenceable` LLVM attributes.
+- **`comptime {}` blocks** — arbitrary expressions (including loops, function calls, and array construction) evaluated entirely at compile time and substituted as constants in the IR.
+- **OPTMAX blocks** — annotated code regions where all variables must be type-annotated; enables aggressive SIMD, vectorization, and bounds-check elimination.
+- **`parallel` loops** — assert iteration independence for auto-parallelization via LLVM `llvm.loop.parallel_accesses` metadata.
+- **Loop annotations** — `@loop(independent=true)`, `@loop(fuse=true)`, `@loop(unroll=N)`, `@loop(vectorize=true/false)`, `@loop(tile=N)`.
+- **CF-CTRE partial evaluation** — path-sensitive compile-time folding across function boundaries for pure code paths; memoises results and handles SIMD tile semantics.
+- **`std::synthesize`** — compile-time program synthesis: given an input/output specification, the compiler synthesizes a minimal function body using enumerative search.
+- **Preprocessor** — `#define`, `#ifdef`, `#ifndef`, `#if`, `#error`, `#warning`, `#assert`, `#require` with full macro parameter support.
+
+### Design Philosophy
+
+OmScript prioritizes **predictable performance**: the programmer should always be able to reason about what machine code will be emitted. The type system is deliberately simple (all integers share `i64` storage) to minimize abstraction overhead while still providing enough static information for aggressive optimization via annotations.
+
+The language does not have:
+- Garbage collection (memory is managed manually or via ownership annotations)
+- A class hierarchy or vtable-based polymorphism
+- An async/await runtime
+- Reflection or runtime type introspection beyond `std::typeof`
 
 ### 1.1 Accuracy, Compatibility, and Source of Truth
 
@@ -196,29 +216,36 @@ Implemented and tested language surface includes:
 
 ```
 Source (.om)
-  → Preprocessor      (macro expansion, conditional compilation)
-  → Lexer             (tokenization)
-  → Parser            (AST construction)
+  → Preprocessor      (macro expansion, conditional compilation, #include)
+  → Lexer             (tokenization, keyword recognition)
+  → Parser            (AST construction, import merging, lambda desugaring)
   → AST Pre-passes    (comptime eval, loop fusion, constant propagation)
   → CF-CTRE           (cross-function compile-time reasoning engine, O1+)
-  → Code Generator    (LLVM IR generation, escape analysis, freeze/reborrow)
+  → Code Generator    (LLVM IR generation, escape analysis, freeze/reborrow/move)
   → E-Graph           (equality saturation, algebraic identities, O2+)
-  → Superoptimizer    (idiom recognition, branch-to-select, O2+)
-  → HGOE              (hardware-aware scheduling, FMA fusion, -march/-mtune)
-  → LLVM              (standard optimization passes: SROA, mem2reg, GVN, …)
-  → Native Binary
+  → Superoptimizer    (idiom recognition, branch-to-select, strength reductions, O2+)
+  → HGOE              (hardware-aware scheduling, FMA fusion, vectorize-width analysis)
+  → LLVM              (standard optimization passes: SROA, mem2reg, GVN, instcombine, …)
+  → Native Binary / Object File
 ```
 
-**AST pre-passes** run before LLVM IR generation and include:
+**Stage details:**
 
-| Pass | Trigger | Effect |
+| Stage | Trigger | Key Actions |
 |---|---|---|
-| `comptime {}` evaluation | Always | Evaluates constant blocks, substitutes result as literal |
-| Cross-function const propagation | O1+ | Inlines pure zero-arg function results as constants |
-| **CF-CTRE** | O1+ | Interprocedural compile-time interpreter; evaluates pure functions across call boundaries, memoises results, provides pipeline SIMD tile semantics |
-| Loop fusion | `@loop(fuse=true)` | Merges adjacent same-range loops into one |
-| Escape analysis | O1+ | Stack-allocates non-escaping small arrays |
-| Constant folding | Always | Folds arithmetic, builtins, string ops with literal args |
+| **Preprocessor** | Always | `#define`/`#undef` macro expansion, `#ifdef`/`#ifndef`/`#if`/`#elif`/`#else`/`#endif`, `#error`/`#warning`/`#assert`/`#require`, counter macros |
+| **Lexer** | Always | Converts source text to tokens; recognizes keywords, operators, literals, and string escapes |
+| **Parser** | Always | Builds AST; resolves imports (recursively), desugars lambdas, type-namespace dispatch, pipe-forward, method calls, downto/until/repeat |
+| **comptime eval** | Always | Evaluates `comptime {}` blocks, folds constant expressions, propagates compile-time constants |
+| **Cross-fn const prop** | O1+ | Propagates zero-argument `@pure` function results as constants |
+| **CF-CTRE** | O1+ | Interprocedural compile-time interpreter; evaluates pure functions across call boundaries, memoises results, symbolic partial evaluation |
+| **Loop fusion** | `@loop(fuse=true)` | Merges adjacent same-range loops annotated `@loop(fuse=true)` into a single loop body |
+| **Escape analysis** | O1+ | Determines whether array allocations escape the function; stack-allocates non-escaping ones |
+| **Code Generator** | Always | Emits LLVM IR; applies `noalias`/`nonnull`/`dereferenceable` from ownership annotations; handles `freeze`, `reborrow`, `move`, `borrow` |
+| **E-Graph** | O2+ | Equality-saturates the IR with 1,500+ algebraic rules; extracts minimum-cost form |
+| **Superoptimizer** | O2+ | Recognizes idioms (multiply-by-constant, division, branch-to-select); applies from pattern database |
+| **HGOE** | O2+ with `-march` | Per-opcode latency scheduling, FMA fusion, instruction selection, vectorize-width analysis |
+| **LLVM passes** | All | Standard pipeline: SROA → mem2reg → instcombine → GVN → LICM → loop unrolling → vectorizer → backend |
 
 ---
 
@@ -331,17 +358,43 @@ line two
 """
 ```
 
-**Boolean literals:** `true`, `false`
+**Boolean literals:** `true` (maps to integer `1`) and `false` (maps to integer `0`). Both are resolved at parse time to their integer equivalents.
 
-**Null literal:** `null`
+**Null literal:** `null` — maps to integer `0`. Used to represent absence of a value.
+
+**Array literals:** Comma-separated elements inside `[...]` — see §11.1.
+
+**Struct literals:** `StructName { field: value, ... }` — see §14.3.
+
+**Dict literals:** `{"key": value, ...}` — see §13.0.
+
+**String escape sequences:**
+
+| Escape | Meaning |
+|---|---|
+| `\n` | Newline (LF) |
+| `\r` | Carriage return (CR) |
+| `\t` | Tab |
+| `\\` | Literal backslash |
+| `\"` | Literal double-quote |
+| `\0` | Null byte (0x00) |
+| `\xHH` | Byte with hex value HH |
 
 **Bytes literals:** A hex byte-array literal creates an array of integer byte values at parse time:
-```
+```omscript
 var data = 0x"DEADBEEF";    // [0xDE, 0xAD, 0xBE, 0xEF]  (4 integers)
 var b2   = 0x"01 02 03";    // [1, 2, 3] — spaces between byte pairs are allowed
 var b3   = 0x"ff00ff";      // [255, 0, 255]  — lowercase hex also works
 ```
-The literal is desugared to an array literal at parse time; `len(data) == 4`.
+The literal is desugared to an array literal at parse time; `std::len(data) == 4`.
+
+**String interpolation (`$"..."`)** — desugars at parse time to a concatenation chain:
+```omscript
+var n = 42;
+var s = $"value is {n}!";
+// equivalent to: "value is " + std::to_string(n) + "!"
+```
+Each `{expr}` is automatically converted to a string. No runtime template mechanism is used — the concatenation happens at parse time for literal expressions.
 
 ### 3.4 Identifiers
 
@@ -351,11 +404,16 @@ Identifiers begin with a letter or underscore and may contain letters, digits, a
 
 ## 4. Preprocessor
 
-The preprocessor runs before lexing. All directives begin with `#`.
+The **preprocessor** runs before the lexer, performing textual transformation on the source code. All directives begin with `#` at the start of a line. Preprocessed output is then fed to the lexer.
+
+**Key properties:**
+- Macro expansion is textual substitution — macros are not type-checked.
+- Conditional compilation blocks are included or excluded before tokenization.
+- `#include` is **not** supported — use the `import` statement (see §23) for module inclusion.
 
 ### 4.1 Macro Definition
 
-```
+```omscript
 #define NAME value
 #define NAME(param1, param2) body_with_params
 #undef NAME
@@ -368,9 +426,24 @@ The preprocessor runs before lexing. All directives begin with `#`.
 | `__VERSION__` | Compiler version string (e.g., `"4.1.1"`) |
 | `__OS__` | `"linux"`, `"macos"`, or `"windows"` |
 | `__ARCH__` | `"x86_64"`, `"aarch64"`, `"arm"`, or `"unknown"` |
-| `__FILE__` | Current filename |
-| `__LINE__` | Current line number |
-| `__COUNTER__` | Auto-incrementing integer (unique per use) |
+| `__FILE__` | Current filename (as a string) |
+| `__LINE__` | Current line number (as an integer) |
+| `__COUNTER__` | Auto-incrementing integer (unique per use; starts at 0) |
+
+**Macro expansion rules:**
+- Macros are expanded recursively — a macro body can reference other macros.
+- Parametric macros: `#define ADD(a, b) ((a) + (b))` — parentheses around parameters are recommended to avoid operator-precedence surprises.
+- `#undef NAME` removes a macro from the macro table; later uses of `NAME` are treated as regular identifiers.
+
+```
+#define PI 3141592653589793
+#define SQUARE(x) ((x) * (x))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+var area = PI;             // expands to: var area = 3141592653589793
+var s4 = SQUARE(4);        // expands to: var s4 = ((4) * (4))
+var m = MAX(x + 1, y);     // expands to: ((x + 1) > (y) ? (x + 1) : (y))
+```
 
 ### 4.2 Conditional Compilation
 
@@ -450,40 +523,65 @@ var s:string = "hello"
 
 ### 5.3 Array Types
 
+```omscript
+var arr:int[]       // array of int
+var mat:float[][]   // 2D array of float (array of arrays)
+var strs:string[]   // array of strings
 ```
-var arr:int[]     // array of int
-var mat:float[][] // 2D array of float
-```
+
+**Rules:**
+- Array type annotations inform OPTMAX and the code generator about element types.
+- Multi-dimensional arrays are arrays-of-arrays; `mat[i][j]` accesses element at row `i`, column `j`.
+- Array type annotations do not enforce element types at runtime — they are optimization hints.
+- In OPTMAX blocks, array type annotations are **required** for vectorization.
 
 ### 5.4 Dictionary Type
 
+```omscript
+var d:dict                    // untyped dict annotation
+var d:dict[string, int]       // generic annotation (informational)
+var d = std::map_new()        // explicit construction
+var d = {"key": 1, "key2": 2} // dict literal
 ```
-var d:dict
-var d:dict[string, int]   // generic annotation (informational)
-```
+
+**Rules:**
+- The `dict` type annotation is informational — all dicts share the same underlying hash map.
+- `dict[K, V]` documents expected key/value types but is not enforced at runtime.
+- Use `std::map_new()` to create an empty map programmatically.
+- Use dict literals for inline initialization (see §13.0).
 
 ### 5.5 SIMD Vector Types
 
 Used with type annotations for explicit SIMD programming:
 
-| Annotation | Description |
-|---|---|
-| `f32x4` | 4 × f32 vector (128-bit SSE) |
-| `f32x8` | 8 × f32 vector (256-bit AVX) |
-| `f64x2` | 2 × f64 vector (128-bit SSE) |
-| `f64x4` | 4 × f64 vector (256-bit AVX) |
-| `i32x4` | 4 × i32 vector (128-bit SSE) |
-| `i32x8` | 8 × i32 vector (256-bit AVX) |
-| `i64x2` | 2 × i64 vector (128-bit SSE) |
-| `i64x4` | 4 × i64 vector (256-bit AVX) |
+| Annotation | Description | Instruction Set |
+|---|---|---|
+| `f32x4` | 4 x f32 vector (128-bit) | SSE/SSE2 |
+| `f32x8` | 8 x f32 vector (256-bit) | AVX/AVX2 |
+| `f64x2` | 2 x f64 vector (128-bit) | SSE2 |
+| `f64x4` | 4 x f64 vector (256-bit) | AVX/AVX2 |
+| `i32x4` | 4 x i32 vector (128-bit) | SSE2 |
+| `i32x8` | 8 x i32 vector (256-bit) | AVX2 |
+| `i64x2` | 2 x i64 vector (128-bit) | SSE2 |
+| `i64x4` | 4 x i64 vector (256-bit) | AVX2 |
+
+**Rules:**
+- SIMD types are used in OPTMAX blocks and `@optmax`-annotated functions for explicit vector programming.
+- Annotating a variable with a SIMD type (e.g. `var v:f32x4`) hints to the compiler to keep the value in a SIMD register.
+- SIMD types require a compatible target architecture (`-march=skylake`, `-march=znver3`, `-march=native`, etc.).
+- The HGOE vectorize-width analysis pass automatically selects vector widths from `-march`, but explicit SIMD annotations allow manual override.
 
 ### 5.6 Reference Types
 
-```
-var x:&i32     // reference to i32 (same underlying storage)
+```omscript
+var x:&i32     // reference to i32 (same underlying storage, affects alias analysis)
+var p:&string  // reference to a string
 ```
 
-Reference types share the same LLVM representation as their base type; the annotation affects alias analysis.
+Reference types (`&T`) share the same LLVM representation as their base type — there is no pointer dereference overhead. The annotation:
+1. Affects **alias analysis**: the compiler knows this variable is a reference to a `T`.
+2. Interacts with the **ownership system** (§17): `borrow r = &x` creates a reference with ownership tracking.
+3. Allows the code generator to emit `nonnull` and `dereferenceable` LLVM attributes.
 
 ### 5.7 Integer Type-Cast Syntax
 
@@ -781,47 +879,136 @@ x ||= rhs  // x = x || rhs  (logical OR assignment)
 
 ### 7.1 Basic Syntax
 
-```
+```omscript
 fn name(param1, param2) {
     // body
 }
-```
 
-### 7.2 Type-Annotated Parameters and Return Type
+fn greet(name) {
+    std::println("Hello, " + name + "!");
+}
 
-```
-fn add(a:int, b:int) -> int {
+fn add(a, b) {
     return a + b;
 }
 ```
 
+**Rules:**
+- Function names are identifiers (see §3.4).
+- Parameters are comma-separated identifiers (optionally type-annotated — see §7.2).
+- The function body is a block `{ ... }`.
+- A `return` statement exits the function and optionally provides a value.
+- Functions without a `return` return `0` (integer zero) by default.
+- A function can `return` at any point, including inside loops and conditionals.
+- Trailing semicolon on the closing `}` is **not** required.
+
+### 7.2 Type-Annotated Parameters and Return Type
+
+```omscript
+fn add(a:int, b:int) -> int {
+    return a + b;
+}
+
+fn scale(v:float, factor:float) -> float {
+    return v * factor;
+}
+
+fn describe(s:string) -> string {
+    return "Value: " + s;
+}
+```
+
+**Rules:**
+- Parameter types are written as `name:type` — the colon separates name and type.
+- The return type follows `->` after the parameter list.
+- Type annotations are **optional** in ordinary functions; they are **required** in `OPTMAX` blocks (see §18) and enable stronger code generation.
+- Annotated parameters receive LLVM `nonnull`, `noalias`, `dereferenceable`, and `nocapture` attributes on pointer types automatically (see §17.7).
+- Multiple parameters of the same type can be written as `a:int, b:int` (no shorthand like `a, b:int`).
+- Reference type annotation: `param:&i32` indicates the parameter is a pointer/reference to `i32`.
+
 ### 7.3 Expression-Body Functions
 
-A function with a single-expression body can use `=` syntax:
+A function with a single-expression body can use `=` syntax instead of `{ return ...; }`:
 
-```
+```omscript
 fn square(x:int) -> int = x * x;
+fn negate(x:int) -> int = -x;
+fn greet(name) = "Hello, " + name + "!";
+fn always_42() -> int = 42;
+fn sum3(a, b, c) = a + b + c;
 ```
+
+**Rules:**
+- The `=` form is exactly equivalent to `{ return <expr>; }`.
+- A type annotation on the return type is optional but recommended for clarity.
+- The expression after `=` is evaluated as-is — any valid expression is allowed, including function calls, operators, and ternary expressions.
+- The function may still have annotations (e.g. `@pure fn double(x) = x * 2;`).
+- No semicolon is needed before the `=` body, but a semicolon **is** required to end the statement:
+  ```omscript
+  fn abs(x:int) -> int = x < 0 ? -x : x;   // ← semicolon required
+  ```
 
 ### 7.4 Default Parameter Values
 
-Parameter defaults must be literal values:
+Parameter defaults must be **literal values** (integer, float, string, or boolean literals):
 
-```
+```omscript
 fn greet(name, times = 1) {
     repeat times { std::println(name); }
 }
-```
 
-### 7.5 Generic (Type-Parameterized) Functions
+fn power(base, exp = 2) {
+    return std::pow(base, exp);
+}
 
-```
-fn identity<T>(x:T) -> T {
-    return x;
+fn connect(host = "localhost", port = 8080) {
+    std::println("Connecting to " + host + ":" + std::to_string(port));
 }
 ```
 
-Type parameters are declared in `<...>` after the function name and are mainly informational.
+**Rules:**
+- Default values must be compile-time literals — not expressions or other variables.
+- Only trailing parameters can have defaults; you cannot have a parameter with a default followed by one without.
+- At call sites, trailing parameters with defaults can be omitted:
+  ```omscript
+  greet("Alice");           // times = 1
+  greet("Bob", 3);          // times = 3
+  connect();                // host = "localhost", port = 8080
+  connect("example.com");   // port = 8080
+  ```
+- Named (keyword) argument syntax is **not** supported — defaults only work by positional omission.
+- Type annotations can be combined with defaults:
+  ```omscript
+  fn clamp(x:int, lo:int = 0, hi:int = 100) -> int {
+      return std::clamp(x, lo, hi);
+  }
+  ```
+
+### 7.5 Generic (Type-Parameterized) Functions
+
+```omscript
+fn identity<T>(x:T) -> T {
+    return x;
+}
+
+fn swap_pair<A, B>(a:A, b:B) {
+    var tmp = a;
+    a = b;
+    b = tmp;
+}
+
+fn max_of<T>(a:T, b:T) -> T {
+    return a > b ? a : b;
+}
+```
+
+**Rules:**
+- Type parameters are declared in `<...>` after the function name and before `(`.
+- Multiple type parameters are comma-separated: `<A, B, C>`.
+- Type parameters are **informational only** — they do not generate actual template specializations in the LLVM backend (all values are `i64`/`ptr` under the hood). Their primary purpose is:
+  1. **Documentation** — making it clear what types are expected.
+  2. **CF-CTRE reasoning** — the compile-time engine can use type annotations from generic parameters to specialize evaluation.
+- Generic functions work the same as untyped functions at runtime; the `<T>` syntax is a marker, not a monomorphization trigger.
 
 ### 7.6 Function Annotations
 
@@ -933,70 +1120,170 @@ The desugaring is purely syntactic — there is no runtime dispatch or vtable lo
 
 ### 8.1 if / else / elif
 
-```
+```omscript
 if (condition) {
     // ...
-} elif (other) {
+} elif (other_condition) {
     // ...
 } else {
     // ...
 }
 ```
 
-`elif` is a first-class keyword (not `else if`).
+`elif` is a first-class keyword (not `else if`). There is no `else if` — use `elif`.
+
+**Detailed rules:**
+- The condition expression must be wrapped in parentheses.
+- Any number of `elif` branches can follow the `if`.
+- The `else` branch is optional.
+- Branches evaluate the first condition that is non-zero (truthy) and execute only that branch.
+- `if` can appear as a standalone statement or nested inside any other statement.
+- Single-statement bodies do not need braces, but braces are strongly recommended:
+  ```omscript
+  if (x > 0) std::println("positive");   // valid but discouraged
+  if (x > 0) { std::println("positive"); }  // recommended
+  ```
+- Conditions can be any expression, including comparisons, function calls, logical combinations, and chained comparisons (e.g. `1 < x < 10`).
+
+**Example — multi-branch:**
+```omscript
+fn classify(n:int) -> string {
+    if (n < 0) {
+        return "negative";
+    } elif (n == 0) {
+        return "zero";
+    } elif (n < 10) {
+        return "small";
+    } else {
+        return "large";
+    }
+}
+```
 
 ### 8.2 unless
 
 Inverted `if` — executes the body when the condition is **false**:
 
-```
+```omscript
 unless (x == 0) {
     // runs when x != 0
 }
 ```
 
-Desugars to `if (!condition)`.
+Desugars to `if (!condition)`. It cannot be combined with `else` or `elif` — add those to the desugared `if` form instead.
+
+**Use case:** `unless` reads more naturally when you want to express "do this unless a condition holds", avoiding a double negation:
+
+```omscript
+// Without unless:
+if (!(arr.len() == 0)) { process(arr); }
+
+// With unless:
+unless (arr.len() == 0) { process(arr); }
+```
 
 ### 8.3 Branch Prediction Hints
 
-```
+```omscript
 likely if (condition) { ... }
 unlikely if (condition) { ... }
 ```
 
-Attaches branch-weight metadata to the conditional branch.
+Attaches branch-weight metadata to the conditional branch instruction in LLVM IR, allowing the CPU's branch predictor and LLVM's code generator to lay out the hot path in the fall-through direction.
+
+- `likely if`: the branch is expected to be taken most of the time. LLVM sets the branch weight to `1000:1` (taken vs not-taken).
+- `unlikely if`: the branch is expected to be taken rarely. LLVM sets the weight to `1:1000`.
+
+**Example:**
+```omscript
+fn safe_div(a:int, b:int) -> int {
+    unlikely if (b == 0) {
+        std::println("Division by zero!");
+        return 0;
+    }
+    return a / b;
+}
+```
+
+These are equivalent to calling `std::expect(condition, 1)` / `std::expect(condition, 0)` but expressed as structured syntax rather than a function call.
 
 ### 8.4 guard
 
 Early-exit pattern — executes the body when the condition is **false**:
 
-```
+```omscript
 guard (x > 0) else {
     return -1;
 }
 ```
 
-Desugars to `if (!condition) { body }`.
+Desugars to `if (!condition) { body }`. The `else` keyword is required — `guard` always has an explicit failure body.
 
-### 8.5 switch
+**Use cases:**
 
-```
-switch (value) {
-    case 1: { ... }
-    case 2, 3: { ... }    // multi-value case: matches 2 or 3
-    default: { ... }
+```omscript
+// Precondition check — bail out early if preconditions aren't met
+fn process(arr, n:int) {
+    guard (n > 0) else {
+        return 0;  // empty input
+    }
+    guard (n < 1000) else {
+        std::println("Input too large");
+        return -1;
+    }
+    // ... rest of function knows n is in (0, 1000)
+}
+
+// Input validation pattern
+fn parse_header(s:string) {
+    guard (s.len() >= 4) else { throw "header too short"; }
+    guard (s.str_starts_with("OMS")) else { throw "invalid magic"; }
+    // ...
 }
 ```
 
-Multiple comma-separated values in one `case` arm map to the same body. OmScript has **no C-style fallthrough** — an empty case body simply exits the switch without executing the next case's body. To match multiple values, use comma syntax (`case 2, 3:`).
+**Difference from `if`:** `guard` is idiomatically used to validate preconditions and return/throw early. The else body should always exit the current scope (return, throw, break, continue). The compiler does not enforce this, but it is a strong convention.
 
-`break` inside any case arm exits the switch (same as a loop `break`).
+### 8.5 switch
+
+```omscript
+switch (value) {
+    case 1: { std::println("one"); }
+    case 2, 3: { std::println("two or three"); }  // multi-value case
+    default: { std::println("other"); }
+}
+```
+
+**Detailed rules:**
+- The switch expression is evaluated once.
+- `case K:` matches when the expression equals the integer constant `K`.
+- Multiple comma-separated values in one `case` arm all map to the same body: `case 2, 3, 7:`.
+- OmScript has **no C-style fallthrough** — control exits the switch after the matching case body executes, regardless of whether a `break` is present. To match multiple values with the same body, use comma syntax.
+- `default:` handles any value not matched by a `case`. It is optional; without it, unmatched values are silently skipped.
+- `break` inside a case arm exits the switch immediately (and also works for loop-break in nested loops).
+- Case values must be integer constants or enum members — expressions are not allowed in case labels.
+
+**Example — enum switch:**
+```omscript
+enum Direction { NORTH, SOUTH, EAST, WEST }
+
+fn describe(d:int) {
+    switch (d) {
+        case Direction::NORTH: { std::println("Going north"); }
+        case Direction::SOUTH: { std::println("Going south"); }
+        case Direction::EAST, Direction::WEST: {
+            std::println("Going east or west");
+        }
+        default: { std::println("Unknown direction"); }
+    }
+}
+```
 
 ### 8.6 when
 
 Pattern-matching style switch with `=>` syntax:
 
-```
+```omscript
 when (value) {
     1 => { std::println("one"); },
     2, 3 => { std::println("two or three"); },
@@ -1004,13 +1291,36 @@ when (value) {
 }
 ```
 
-Desugars to a switch statement.
+Desugars to a switch statement. The `_` wildcard is the `when` equivalent of `default`.
+
+**Detailed rules:**
+- Each arm is `value => body` or `v1, v2 => body` for multi-value arms.
+- Arms are separated by commas (the trailing comma on the last arm is optional).
+- `_` is the wildcard arm — it matches any value not covered by earlier arms.
+- The body of each arm is a single statement (which can be a block `{ ... }`).
+- Arms are evaluated in source order; the first matching arm is executed.
+- There is no fallthrough between `when` arms.
+- `when` compiles to the same switch IR as `switch`; it is purely syntactic sugar.
+
+**Difference from `switch`:** `when` uses `=>` instead of `:`, uses `_` instead of `default`, and requires arm separating commas. Use `when` for readable pattern-match-style dispatch; use `switch` when the C-style format is more familiar.
+
+```omscript
+// when can handle expressions in arm conditions:
+fn http_status(code:int) -> string {
+    when (code) {
+        200 => { return "OK"; },
+        404 => { return "Not Found"; },
+        500, 503 => { return "Server Error"; },
+        _ => { return "Unknown"; }
+    }
+}
+```
 
 ### 8.7 defer
 
 Defers execution of a statement to the end of the enclosing block. Multiple `defer`s in the same block execute in **LIFO order** (last `defer` runs first):
 
-```
+```omscript
 fn open_file() {
     defer std::println("second");  // runs second
     defer std::println("first");   // runs first (LIFO)
@@ -1019,11 +1329,40 @@ fn open_file() {
 }
 ```
 
+**Detailed rules:**
+- The deferred statement runs when control leaves the enclosing **block** (not the function) — this includes normal exit, early `return`, `break`, or `continue`.
+- `defer` can defer any statement — a single expression, a block `{ ... }`, or a function call.
+- Multiple defers in the same block form a stack (LIFO): the last `defer` encountered runs first.
+- `defer` is processed at the **block level**, not the function level. A `defer` inside an inner block runs when that inner block exits, not when the function exits.
+
+**Common patterns:**
+```omscript
+// Cleanup pattern — resource released regardless of exit path
+fn process_file(path:string) {
+    var handle = open(path);
+    defer close(handle);  // always runs when process_file returns
+    // ... use handle ...
+    if (error) { return; }  // defer still runs!
+    // ...
+}
+
+// Multiple cleanups in reverse order:
+fn connect() {
+    open_connection();
+    defer close_connection();    // runs 3rd
+    allocate_buffer();
+    defer free_buffer();         // runs 2nd
+    lock_mutex();
+    defer unlock_mutex();        // runs 1st (LIFO)
+    // ...
+}
+```
+
 ### 8.8 with
 
 Scoped variable bindings lexically scoped to a block. Supports `var` and `const` bindings, and multiple comma-separated bindings in one `with`:
 
-```
+```omscript
 with (var f = open_file()) {
     // f is available here
 }
@@ -1037,7 +1376,32 @@ with (const factor = 7) {
 }
 ```
 
-Desugars to a block with the variable declarations prepended to the body.
+Desugars to a block with the variable declarations prepended to the body:
+```omscript
+// with (var x = expr) { body }  desugars to:
+{
+    var x = expr;
+    body
+}
+```
+
+**Detailed rules:**
+- Bindings are scoped to the `with` block — they are **not** visible after the closing `}`.
+- `const` bindings inside `with` are read-only within the block.
+- Multiple comma-separated bindings are declared in order; earlier bindings are visible when later bindings are initialized.
+- Type annotations are supported: `with (var x:int = compute()) { ... }`.
+- `with` is primarily a clarity tool — it explicitly marks the scope of a value and avoids polluting the outer scope.
+
+**Use case — scoped computation result:**
+```omscript
+fn compute_result(data) {
+    with (var n = std::len(data), var total = std::sum(data)) {
+        var avg = total / n;
+        std::println("avg = " + std::to_string(avg));
+    }
+    // n and total are no longer in scope here
+}
+```
 
 ---
 
@@ -1045,15 +1409,33 @@ Desugars to a block with the variable declarations prepended to the body.
 
 ### 9.1 while
 
-```
+```omscript
 while (condition) {
     // ...
 }
 ```
 
+**Detailed rules:**
+- The condition is evaluated before every iteration. If it is zero (false) on first entry, the body never executes.
+- The condition can be any expression (comparison, function call, complex boolean).
+- `break` exits the loop immediately; `continue` jumps to the condition re-evaluation.
+- Loop annotations (`@loop(...)`) can be placed between the closing `)` and the `{`:
+  ```omscript
+  while (condition) @loop(unroll=4) { ... }
+  ```
+
+**Example:**
+```omscript
+var i = 0;
+while (i < 10) {
+    std::println(std::to_string(i));
+    i += 1;
+}
+```
+
 ### 9.2 do...while / do...until
 
-```
+```omscript
 do {
     // ...
 } while (condition);
@@ -1061,49 +1443,115 @@ do {
 
 `do...until` is also supported — stops when the condition becomes **true** (desugars to `do { ... } while (!condition)`):
 
-```
+```omscript
 do {
     i += 1;
 } until (i >= limit);   // equivalent to: do { i += 1; } while (!(i >= limit))
+```
+
+**Key distinction from `while`:** The body always executes **at least once** because the condition is checked after the body, not before.
+
+**Rules:**
+- The `while (condition)` or `until (condition)` clause comes after the closing `}` of the body.
+- A semicolon `;` is required after the closing condition parenthesis.
+- `break` exits the loop; `continue` re-checks the condition.
+- Loop annotations go between the `do` keyword and the `{`: `do @loop(...) { ... } while (...);`
+
+```omscript
+// Classic "read until done" pattern:
+var line = "";
+do {
+    line = std::input_line();
+    process(line);
+} until (line == "quit");
 ```
 
 ### 9.3 until
 
 Loop while condition is **false** — desugars to `while (!condition)`:
 
-```
+```omscript
 until (x == 0) {
     x -= 1;
 }
 ```
 
+**Rules:**
+- `until (cond) { body }` is exactly `while (!cond) { body }`.
+- The condition is checked before each iteration — if already true on entry, the body never runs.
+- Avoids a double negation when the stopping condition is more naturally stated positively:
+  ```omscript
+  // Instead of: while (!(found || exhausted)) { ... }
+  until (found || exhausted) { ... }
+  ```
+
 ### 9.4 for — Range-Based
 
-```
-for (i in 0...10) { ... }          // 0, 1, ..., 9
+```omscript
+for (i in 0...10) { ... }          // 0, 1, ..., 9  (end exclusive)
 for (i in 0...10...2) { ... }      // 0, 2, 4, 6, 8 (step 2)
-for (i in 0...10 step 2) { ... }   // same as above
+for (i in 0...10 step 2) { ... }   // same as above (keyword step)
+for (i in 1...n) { ... }           // variable bounds
 ```
 
-`...` is the range operator (exclusive end). `..` is also accepted.
+`...` is the range operator (exclusive end). `..` is also accepted as an alternate form.
+
+**Detailed rules:**
+- The range `start...end` iterates `i = start, start+1, ..., end-1` (end is **exclusive**).
+- A step can be specified as a third `...` argument or with the `step` keyword: `start...end...step` or `start...end step s`.
+- The step value is evaluated once at loop entry; it can be any integer expression.
+- A negative step produces a counting-down loop: `for (i in 10...0...-1)` iterates 10, 9, …, 1.
+- When `start == end`, the body never executes.
+- The iterator variable `i` is scoped to the loop body; it is not accessible after the loop.
+- Type annotation on the iterator is supported (required in OPTMAX blocks): `for (i:int in 0...n)`.
+
+**Examples:**
+```omscript
+// Sum 1..100:
+var s = 0;
+for (i in 1...101) { s += i; }
+
+// Every third index:
+for (i in 0...30...3) { process(arr[i]); }
+
+// Reverse iteration (step -1):
+for (i in 9...−1...-1) { std::println(std::to_string(i)); }
+```
 
 ### 9.5 for — Downto
 
-```
+```omscript
 for (i in 10 downto 0) { ... }         // 10, 9, ..., 1 (step -1)
 for (i in 10 downto 0 step 2) { ... }  // 10, 8, 6, 4, 2
 ```
 
+`downto` is syntactic sugar that desugars to a range loop with a negative step:
+- `for (i in S downto E)` → `for (i in S...E...-1)` — iterates from S down to E+1.
+- `for (i in S downto E step K)` → `for (i in S...E...-K)` — iterates with step K downward.
+
+**Rules:**
+- The user-supplied `step K` is positive; `downto` automatically negates it.
+- The end value `E` is **exclusive** (the loop stops before reaching E): `10 downto 0` gives 10, 9, …, 1 (not including 0).
+- If `S == E`, the body never executes.
+
+```omscript
+// Countdown from 5 to 1:
+for (i in 5 downto 0) {
+    std::println(std::to_string(i));
+}
+// output: 5  4  3  2  1
+```
+
 ### 9.6 for — Collection Iteration (for-each)
 
-```
+```omscript
 for (item in collection) { ... }
 for (i, item in collection) { ... }   // indexed: i = index, item = element
 ```
 
 When the collection is a **string**, the iterator variable holds the **integer character code** (byte value) of each character, not a single-character string:
 
-```
+```omscript
 for (c in "abc") {
     // c = 97, then 98, then 99  (ASCII codes)
 }
@@ -1111,20 +1559,42 @@ for (c in "abc") {
 
 Use `std::to_char(c)` to convert a character code back to a single-character string.
 
+**Indexed form:**
+- `for (i, item in collection)` binds both the index `i` (0-based) and the element `item`.
+- Useful for when you need both the position and the value:
+  ```omscript
+  for (i, val in [10, 20, 30]) {
+      std::println(std::to_string(i) + ": " + std::to_string(val));
+  }
+  // output: 0: 10   1: 20   2: 30
+  ```
+
+**Rules:**
+- The collection can be an array or a string.
+- For arrays, `item` holds the element value.
+- For strings, `item` holds the integer byte value (character code).
+- The iterator variables are scoped to the loop body.
+- `break` and `continue` work normally inside collection for loops.
+
 ### 9.7 foreach
 
-```
+```omscript
 foreach item in collection { ... }
 foreach (i, item in collection) { ... }   // indexed variant
 ```
 
-Desugars to a `for` loop.
+Desugars to a `for` loop. `foreach` is an alternative spelling of the collection `for` loop:
+
+- `foreach item in arr` is exactly equivalent to `for (item in arr)`.
+- `foreach (i, item in arr)` is exactly equivalent to `for (i, item in arr)`.
+
+**Note:** The parentheses are optional in the non-indexed form but required in the indexed form. Both spellings are idiomatic; use whichever reads better in context.
 
 ### 9.8 loop
 
 Infinite loop (desugars to `while (true)`):
 
-```
+```omscript
 loop {
     // infinite
 }
@@ -1132,35 +1602,89 @@ loop {
 
 Counted loop:
 
+```omscript
+loop 5 { ... }      // run body 5 times (literal count)
+loop (n) { ... }    // run body n times (expression count)
 ```
-loop 5 { ... }      // run body 5 times
-loop (n) { ... }    // run body n times
+
+**Desugaring:**
+- `loop { body }` → `while (1) { body }`
+- `loop N { body }` → `for (__loop_k in 0...N) { body }` (internal variable `__loop_k`)
+- `loop (expr) { body }` → same as above with an expression bound
+
+**Rules:**
+- The infinite form requires an explicit `break` to exit.
+- The counted form runs exactly N times; `break` and `continue` work normally.
+- The counted form does not expose the iteration counter — use `for` if you need it.
+- Literal and expression counts are both supported: `loop 3 { ... }`, `loop (arr.len()) { ... }`.
+
+```omscript
+// Retry pattern:
+loop {
+    var result = try_operation();
+    if (result != null) { break; }
+}
+
+// Repeat exactly 4 times:
+loop 4 {
+    std::println("tick");
+}
 ```
 
 ### 9.9 repeat
 
 Counted loop:
 
-```
-repeat 5 { ... }      // run body 5 times
-repeat (n) { ... }    // run body n times
+```omscript
+repeat 5 { ... }      // run body 5 times (literal count)
+repeat (n) { ... }    // run body n times (expression count)
 ```
 
-Post-test loop (desugars to `do...while`):
+Post-test loop (desugars to `do...while (!condition)`):
 
-```
+```omscript
 repeat {
     // ...
-} until (condition);
+} until (condition);   // semicolon required
+```
+
+**Desugaring:**
+- `repeat N { body }` → `for (__repeat_k in 0...N) { body }`
+- `repeat (expr) { body }` → same with expression bound
+- `repeat { body } until (cond);` → `do { body } while (!cond);`
+
+**Difference from `loop`:** `repeat` and `loop` desugar identically for the counted form. `repeat ... until` is the unique post-test form. Use `repeat` when the counted-loop intent is clearer, and `repeat ... until` for do-while semantics.
+
+```omscript
+// Poll until ready:
+repeat {
+    var status = check_status();
+} until (status == "ready");
+
+// Initialize 10 slots:
+repeat 10 {
+    std::push(queue, make_item());
+}
 ```
 
 ### 9.10 forever
 
 Infinite loop:
 
-```
+```omscript
 forever {
     // infinite, same as loop { }
+}
+```
+
+Desugars to `while (true) { ... }`. Requires an explicit `break` to exit. Identical to `loop { }` — use whichever reads more naturally.
+
+```omscript
+// Event loop:
+forever {
+    var event = next_event();
+    if (event == null) { break; }
+    handle(event);
 }
 ```
 
@@ -1168,33 +1692,98 @@ forever {
 
 Counted loop:
 
+```omscript
+times 3 { ... }     // run body 3 times (literal count)
+times (n) { ... }   // run body n times (expression count)
+N times { ... }     // alternate syntax: N first (N can be any expression)
 ```
-times 3 { ... }     // run body 3 times
-times (n) { ... }   // run body n times
+
+**Desugaring:** `N times { body }` → `for (__times_k in 0...N) { body }`.
+
+**Notes:**
+- The iteration counter is not exposed — use `for` if you need it.
+- The count expression can be a variable or any integer expression.
+- `break` and `continue` work normally inside `times` loops.
+
+```omscript
+// Print a separator N times:
+var width = 40;
+width times { std::write("-"); }
+std::println("");
+
+// Or equivalently:
+times width { std::write("-"); }
 ```
 
 ### 9.12 OPTMAX Loop Variables
 
-Inside `OPTMAX` blocks, loop variables require type annotations:
+Inside `OPTMAX` blocks, loop variables **require** type annotations:
 
+```omscript
+OPTMAX=: {
+    for (i:int in 0...n) { ... }
+    for (j:int in 0...m) { ... }
+}
 ```
-for (i:int in 0...n) { ... }
+
+This requirement applies to all loop forms inside `OPTMAX` — `for`, `while`, `repeat`, `loop`, `times`, and `foreach`. The type annotations allow the OPTMAX optimizer to generate SIMD and vectorized code for the loop body.
+
+**Error without annotation:**
+```omscript
+OPTMAX=: {
+    for (i in 0...n) { ... }   // ERROR: OPTMAX loop variables must include type annotations
+}
 ```
 
 ### 9.13 break / continue
 
-```
+```omscript
 break;
 continue;
 ```
+
+**`break`:** Exits the innermost enclosing loop or `switch` statement immediately. Execution continues at the first statement after the loop/switch.
+
+**`continue`:** Skips the rest of the current loop body and jumps to the next iteration. For `while`/`until` loops this means re-evaluating the condition; for `for` loops this means incrementing the iterator and checking the bound.
+
+**Rules:**
+- Both `break` and `continue` require a trailing semicolon.
+- They apply to the **innermost** enclosing loop or switch — there is no labeled break/continue to outer loops.
+- `break` inside a `switch` case exits the switch; it is not a loop break in that context.
+- `break` inside a nested `if` inside a loop still exits the loop (the `if` is not a loop/switch):
+  ```omscript
+  for (i in 0...100) {
+      if (arr[i] == target) {
+          found_at = i;
+          break;   // exits the for loop
+      }
+  }
+  ```
 
 ### 9.14 swap
 
 Rotates values among two or more variables atomically:
 
+```omscript
+swap a, b;         // exchange a and b: a←b, b←a
+swap a, b, c;      // left rotation: a←b, b←c, c←a
+swap a, b, c, d;   // a←b, b←c, c←d, d←a
 ```
-swap a, b;         // exchange a and b
-swap a, b, c;      // a←b, b←c, c←a (rotation)
+
+**Rules:**
+- With two variables: classic exchange — equivalent to `var tmp = a; a = b; b = tmp;`.
+- With three or more variables: **left rotation** — each variable gets the value of the next one, and the last gets the original first.
+- The swap is logically atomic at the statement level (all old values are read before any writes).
+- `swap` can be used on array elements too: `swap arr[i], arr[j];`.
+- All variables in the swap must already be declared.
+
+```omscript
+// Sort two values:
+if (a > b) { swap a, b; }
+
+// Rotate three registers:
+var x = 1, y = 2, z = 3;
+swap x, y, z;    // x=2, y=3, z=1
 ```
 
 ### 9.15 `parallel` Loops
@@ -1288,48 +1877,127 @@ for (i in 0...n) {
 
 ### 10.1 Arithmetic
 
+```omscript
+a + b    // addition
+a - b    // subtraction
+a * b    // multiplication
+a / b    // division (integer division when both operands are integers)
+a % b    // modulo (remainder)
+a ** b   // exponentiation: a to the power of b
+-a       // unary negation
 ```
-a + b    a - b    a * b    a / b    a % b
-a ** b             // exponentiation (a to the power of b)
--a                 // unary negation
+
+**Semantics:**
+- All arithmetic operates on 64-bit integers (`i64`) or 64-bit floats (`f64`) depending on the values.
+- Integer division truncates toward zero: `7 / 2 == 3`, `-7 / 2 == -3`.
+- Integer modulo follows C semantics: result has the same sign as the dividend: `7 % 3 == 1`, `-7 % 3 == -1`.
+- `**` desugars to `std::pow(a, b)` — integer exponentiation.
+- There is no implicit promotion between integers and floats — if you mix them in arithmetic the result is implementation-defined.
+- Use `std::fast_add`, `std::fast_mul` etc. for `nsw`-flagged operations (see §19.3).
+- Overflow of 64-bit signed integers is **undefined behavior** (same as C `signed int`), unless you use `std::saturating_add` / `std::saturating_sub`.
+
+```omscript
+var a = 10 + 3;    // 13
+var b = 10 - 3;    // 7
+var c = 10 * 3;    // 30
+var d = 10 / 3;    // 3  (integer division)
+var e = 10 % 3;    // 1
+var f = 2 ** 10;   // 1024
+var g = -5;        // -5
 ```
 
 ### 10.2 Comparison
 
+```omscript
+a == b    // equal
+a != b    // not equal
+a < b     // less than
+a <= b    // less than or equal
+a > b     // greater than
+a >= b    // greater than or equal
 ```
-a == b    a != b    a < b    a <= b    a > b    a >= b
-```
+
+**Semantics:**
+- All comparisons return `1` (true) or `0` (false) as integers.
+- String equality should use `std::str_eq(s1, s2)` — the `==` operator compares pointer addresses for strings, not content.
+- Float comparisons follow IEEE 754 semantics — `NaN != NaN`.
 
 **Chained comparisons:** A chain of `<`, `<=`, `>`, or `>=` operators is automatically desugared to a conjunction. Middle operands that are identifiers or literals are evaluated only once:
 
-```
+```omscript
 1 < x < 10           // (1 < x) && (x < 10)
 1 <= a <= b <= 100   // (1 <= a) && (a <= b) && (b <= 100)
+0 < index < std::len(arr)  // safe bounds check
 ```
+
+**Note:** `==` and `!=` do not participate in chaining — `a == b == c` is not valid syntax. Use `a == b && b == c`.
 
 ### 10.3 Logical
 
+```omscript
+a && b   // logical AND — short-circuit: evaluates b only if a is truthy
+a || b   // logical OR  — short-circuit: evaluates b only if a is falsy
+!a       // logical NOT — returns 1 if a is 0, returns 0 otherwise
 ```
-a && b    a || b    !a
+
+**Semantics:**
+- OmScript uses integer truth: any non-zero value is truthy, zero is falsy.
+- `&&` returns `a` if `a` is falsy, otherwise returns `b` (short-circuit evaluation).
+- `||` returns `a` if `a` is truthy, otherwise returns `b` (short-circuit evaluation).
+- `!a` returns `1` if `a == 0`, and `0` otherwise.
+- Logical operators produce integer results (`0` or `1`), not booleans (there is no separate boolean type except `bool`, which is also an integer).
+
+```omscript
+var x = 5;
+var y = 0;
+var r1 = x > 0 && y > 0;   // 0 (false — y is 0)
+var r2 = x > 0 || y > 0;   // 1 (true — x > 0)
+var r3 = !(x == y);         // 1
 ```
 
 ### 10.4 Bitwise
 
+```omscript
+a & b     // bitwise AND
+a | b     // bitwise OR
+a ^ b     // bitwise XOR
+~a        // bitwise NOT (complement all bits)
+a << n    // left shift  by n bits (fills with 0s on the right)
+a >> n    // right shift by n bits (arithmetic: fills with sign bit on the left)
 ```
-a & b     // AND
-a | b     // OR
-a ^ b     // XOR
-~a        // NOT (bitwise complement)
-a << n    // left shift
-a >> n    // right shift
+
+**Semantics:**
+- All bitwise operations work on the full 64-bit integer representation.
+- Right shift (`>>`) is **arithmetic** (sign-extending) for signed values.
+- Shift amount `n` must be in `[0, 63]`; shifts by ≥ 64 are undefined behavior.
+- Compound forms: `a &= b`, `a |= b`, `a ^= b`, `a <<= n`, `a >>= n` (see §6.6).
+
+```omscript
+var flags = 0b1010 | 0b0101;   // 0b1111 = 15
+var mask  = 0xFF & 0xAB;       // 0xAB = 171
+var flip  = ~0;                // -1 (all bits set)
+var hi    = 0x01 << 8;         // 256
+var lo    = 0x1000 >> 4;       // 256
 ```
+
+**Use `std::popcount`, `std::clz`, `std::ctz`, `std::rotate_left`, `std::rotate_right`, `std::bswap`, `std::bitreverse` for bit-counting and rotation — see §19.4.**
 
 ### 10.5 Null Coalescing
 
+```omscript
+a ?? b           // if a != null/0, yields a; otherwise yields b
+x ??= default_val  // compound null-coalescing assignment: x = x ?? default_val
 ```
-a ?? b    // if a != null/0, yields a; otherwise yields b
-x ??= default_val  // compound null-coalescing assignment
-```
+
+**Semantics:**
+- `a ?? b` evaluates `a`; if `a` is non-zero and non-null, it returns `a`; otherwise it returns `b`.
+- `??=` is the compound form: `x ??= v` is equivalent to `x = x ?? v` — assigns `v` to `x` only if `x` is currently null/zero.
+- This is commonly used for providing defaults:
+  ```omscript
+  var config = user_config ?? default_config;
+  var port = opts_port ?? 8080;
+  ```
+- Difference from `||`: both return a default when the left side is falsy, but `??` is conventionally used for null-checking, while `||` for general falsy checks.
 
 ### 10.5.1 Elvis Operator
 
@@ -1352,8 +2020,23 @@ val = (42 in collection);     // expression context
 
 ### 10.6 Ternary
 
-```
+```omscript
 condition ? then_value : else_value
+```
+
+**Semantics:**
+- If `condition` is non-zero (truthy), evaluates and returns `then_value`.
+- Otherwise evaluates and returns `else_value`.
+- Both branches can be any expression.
+- Unlike C, both branches are type-agnostic — the result type depends on which branch is taken at runtime.
+
+```omscript
+var abs_x = x >= 0 ? x : -x;
+var label  = n == 1 ? "item" : "items";
+var result = cond ? f(x) : g(x);
+
+// Nested ternary (use parentheses for clarity):
+var tier = score >= 90 ? "A" : (score >= 80 ? "B" : "C");
 ```
 
 ### 10.7 Pipe Forward
@@ -1368,27 +2051,71 @@ The function name after `|>` is a **bare identifier** — do not write `std::` a
 
 ### 10.8 Range
 
+```omscript
+0...10      // exclusive range from 0 to 9 (three dots)
+0..10       // same — two dots also accepted
+a...b       // range from a to b-1 (both can be expressions)
 ```
-0...10      // exclusive range from 0 to 9
-0..10       // also supported
-```
+
+Range expressions are used in `for` loops (see §9.4) and by `std::range` / `std::range_step`. As a standalone expression, a range cannot be stored in a variable — ranges only have meaning in the context of a `for` loop header or as an argument to built-in functions that accept ranges.
 
 ### 10.9 Spread
 
-```
+```omscript
 ...array    // spread array elements into a call or array literal
+```
+
+The spread operator `...` prefix expands an array into individual elements at the call site:
+
+```omscript
+fn sum3(a, b, c) { return a + b + c; }
+
+var args = [1, 2, 3];
+var result = sum3(...args);   // same as sum3(1, 2, 3)
+
+// Spread into an array literal:
+var a = [1, 2, 3];
+var b = [0, ...a, 4];   // [0, 1, 2, 3, 4]
 ```
 
 ### 10.10 Increment / Decrement
 
+```omscript
+x++    // post-increment: returns old value of x, then x += 1
+x--    // post-decrement: returns old value of x, then x -= 1
+++x    // pre-increment:  x += 1, then returns new value of x
+--x    // pre-decrement:  x -= 1, then returns new value of x
 ```
-x++    x--    ++x    --x
+
+**Semantics:**
+- Increment/decrement can be applied to variables, struct fields, and array elements.
+- Post-fix forms (`x++`, `x--`) return the **old** value before modification.
+- Pre-fix forms (`++x`, `--x`) return the **new** value after modification.
+- These are shorthand for `x += 1` and `x -= 1`.
+
+```omscript
+var i = 5;
+var a = i++;   // a = 5, i = 6
+var b = ++i;   // b = 7, i = 7
+var c = i--;   // c = 7, i = 6
+var d = --i;   // d = 5, i = 5
 ```
 
 ### 10.11 Address / Reference
 
-```
+```omscript
 &variable   // take address / borrow reference
+```
+
+The `&` prefix operator takes the address of a variable and is used with the ownership system (see §17):
+- Used when passing a value by reference to a function or borrow binding.
+- Combined with `borrow`: `borrow r = &x;` creates a shared borrow of `x`.
+- In LLVM IR terms, `&x` generates a pointer to the underlying `alloca` for `x`.
+
+```omscript
+borrow r = &x;          // r is a shared borrow of x
+borrow mut w = &x;      // w is a mutable borrow of x
+fn zero_out(p: &int) { *p = 0; }  // reference parameter (conceptual)
 ```
 
 ### 10.12 Operator Precedence (high to low)
@@ -1717,10 +2444,29 @@ fn pack_bytes(a:int, b:int, c:int, d:int) -> u64 {
 
 ### 11.1 Array Literals
 
+```omscript
+var arr = [1, 2, 3]          // array of 3 integers
+var empty = []                // empty array
+var typed:int[] = [10, 20, 30]  // type-annotated array
+var nested = [[1, 2], [3, 4]]   // 2D array (array of arrays)
+var mixed = [1, "two", 3.0]     // mixed-type array (dynamic typing)
 ```
-var arr = [1, 2, 3]
-var empty = []
-var typed:int[] = [10, 20, 30]
+
+**Rules:**
+- Array literals create a heap-allocated dynamic array.
+- Elements can be of any type (OmScript is dynamically typed by default).
+- An empty array `[]` can have elements `push`ed into it later.
+- Type annotations (`int[]`, `float[]`, etc.) are informational and affect OPTMAX/code generation.
+- Arrays are 0-indexed.
+- Array literals are expressions — they can be passed as arguments, returned from functions, and assigned to variables.
+
+```omscript
+// Passing an array literal directly:
+var total = std::sum([1, 2, 3, 4, 5]);  // 15
+
+// Nested access:
+var matrix = [[1, 2, 3], [4, 5, 6]];
+var val = matrix[1][2];   // 6
 ```
 
 ### 11.2 Indexing and Slicing
@@ -1741,6 +2487,10 @@ arr[:4]     // from index 0 to 3 — desugars to std::array_slice(arr, 0, 4)
 ```
 
 Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and when the compiler can statically prove safety.
+
+**Out-of-bounds behavior:** At O0/O1, array index bounds are checked at runtime and the program terminates with an error on violation. At O2+ in `@hot` functions and inside OPTMAX blocks, bounds checks are omitted — accessing out-of-bounds is **undefined behavior**.
+
+**Negative indices:** Negative indices are **not** automatically wrapped to "from the end" (unlike Python). `arr[-1]` is an out-of-bounds access. Use `arr[std::len(arr) - 1]` to access the last element (or `std::array_last(arr)`).
 
 ### 11.3 Array Built-ins
 
@@ -1784,7 +2534,24 @@ Bounds checks are elided in `OPTMAX` functions, `@hot` functions at O2+, and whe
 
 ## 12. Strings
 
-Strings are heap-allocated and NUL-terminated. String indexing and concatenation are built-in.
+Strings are **heap-allocated** and **NUL-terminated**. They are represented as `ptr` (i8*) in LLVM IR. String literals are interned as global constants; operations that produce new strings (concatenation, substring, etc.) allocate on the heap.
+
+**Key properties:**
+- String concatenation uses `+`: `"hello" + " " + "world"` → `"hello world"`.
+- String subscript `s[i]` returns the **integer byte value** (character code) at index `i`, not a single-character string. Use `std::to_char(s[i])` to get a string.
+- String length is in **bytes** (not Unicode code points).
+- Strings are **mutable** when heap-allocated (returned by string functions); string literals stored as globals are read-only.
+- There is no character type — characters are represented as integers.
+
+```omscript
+var s = "Hello, World!";
+var n = s.len();              // 13
+var c = s[0];                 // 72 (ASCII 'H')
+var ch = std::to_char(c);     // "H"
+var upper = s.str_upper();    // "HELLO, WORLD!"
+var sub = s.str_substr(0, 5); // "Hello"
+var parts = s.str_split(", "); // ["Hello", "World!"]
+```
 
 ### 12.1 String Built-ins
 
@@ -1835,7 +2602,20 @@ Strings are heap-allocated and NUL-terminated. String indexing and concatenation
 
 ## 13. Dictionaries / Maps
 
-Dictionaries (maps) are hash maps mapping string keys to integer/pointer values.
+Dictionaries (maps) are **hash maps** mapping **string keys** to integer or pointer values. They are heap-allocated reference types.
+
+**Key properties:**
+- Keys are always strings; values are dynamically typed (integer, string, or pointer).
+- All operations return the map itself on modification operations (for consistency) or a value on read operations.
+- Dictionaries do not have a fixed schema — keys can be added at any time.
+- The order of keys is not guaranteed when iterating with `std::map_keys()` or `std::map_values()`.
+
+```omscript
+var scores = {"alice": 95, "bob": 87, "carol": 92};
+std::map_set(scores, "dave", 78);
+var bob_score = std::map_get(scores, "bob", 0);    // 87
+var all_keys = std::map_keys(scores);              // ["alice","bob","carol","dave"]
+```
 
 ### 13.0 Dict Literals
 
@@ -1871,12 +2651,33 @@ Dict literals are expressions and can be used anywhere a dict value is expected.
 
 ### 14.1 Definition
 
-```
+```omscript
 struct Point {
     x: int,
     y: int
 }
+
+struct Person {
+    name: string,
+    age: int,
+    score: float
+}
+
+struct Node {
+    value: int,
+    left: int,   // pointer/index to left child
+    right: int   // pointer/index to right child
+}
 ```
+
+**Rules:**
+- Fields are declared as `name: type`, separated by commas.
+- The trailing comma after the last field is optional.
+- All standard scalar types, array types, and other struct types can be used as field types.
+- Structs are **value types** — they are allocated inline (not heap-allocated by default), though they can escape to the heap through assignment.
+- Field names must be unique within a struct.
+- Structs can define operator overloads (see §14.5) and the `fn` keyword to define methods.
+- Struct names are registered in the parser's struct namespace so they can be used in type annotations.
 
 ### 14.2 Field Attributes
 
@@ -1896,16 +2697,50 @@ struct Buffer {
 
 ### 14.3 Struct Literals
 
-```
+```omscript
 var p = Point { x: 10, y: 20 }
+var person = Person { name: "Alice", age: 30, score: 9.5 }
+```
+
+**Rules:**
+- Struct literal syntax: `StructName { field1: value1, field2: value2, ... }`.
+- All fields must be provided in the literal (there are no default field values).
+- Fields can be specified in any order (they do not have to match the struct declaration order).
+- The trailing comma after the last field is optional.
+- Struct literals are expressions — they can be passed as arguments and returned from functions.
+
+```omscript
+fn make_point(x:int, y:int) -> Point {
+    return Point { x: x, y: y };
+}
+
+var origin = Point { x: 0, y: 0 };
+var points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
 ```
 
 ### 14.4 Field Access and Assignment
 
+```omscript
+var v = p.x           // read field
+p.y = 30              // write field
+p.x += 5              // compound assignment on struct fields
+p.x++                 // increment struct field
 ```
-var v = p.x
-p.y = 30
-p.x += 5    // compound assignment on struct fields supported
+
+**Rules:**
+- Field access uses `.` notation.
+- All compound assignment operators work on struct fields (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`).
+- Increment/decrement operators also work on struct fields.
+- Nested struct field access: `obj.inner.field`.
+- Array of structs indexing + field access: `arr[i].field`.
+
+```omscript
+struct Vec3 { x: float, y: float, z: float }
+
+var v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+v.x += 10.0;
+v.z *= 2.0;
+var length_sq = v.x * v.x + v.y * v.y + v.z * v.z;
 ```
 
 ### 14.5 Operator Overloading
@@ -1931,38 +2766,70 @@ Operator overload functions are automatically inlined.
 
 ## 15. Enums
 
-```
+```omscript
 enum Color {
     RED,
     GREEN = 10,
     BLUE
 }
 
-var c = Color::RED   // scope resolution (preferred)
-var g = Color::GREEN // 10
+var c = Color::RED    // 0 (scope resolution — preferred)
+var g = Color::GREEN  // 10
+var b = Color::BLUE   // 11 (previous explicit value + 1)
 ```
 
-Enum members without explicit values are auto-numbered from 0 (or from the previous explicit value + 1).
+**Auto-numbering rules:**
+- Members without explicit values are numbered starting from 0, or from (previous explicit value + 1).
+- Explicit values can be any integer literal.
+- `RED = 0`, `GREEN = 10`, `BLUE = 11` in the example above.
 
 **Access forms:**
 - `EnumName::MEMBER` — scope-resolution syntax (preferred)
-- `EnumName_MEMBER` — underscore-separated flat name (also valid; generated internally)
+- `EnumName_MEMBER` — underscore-separated flat name (also valid; generated internally by the parser)
 
 > **Note:** `Color.Red` (dot-access syntax) is **not** valid — dot notation applies to struct field access on variable instances, not to enum type names. Use `Color::RED` or `Color_RED`.
 
-Enum values are integer constants and can be used in any arithmetic or switch expression:
+**Properties:**
+- Enum values are **integer constants** and can be used in any arithmetic expression, comparison, or switch/when arm.
+- Enums have no runtime tag — they are pure integer aliases.
+- Enum names are registered in the parser's enum namespace for error-checking on `::` access.
 
-```
+```omscript
 enum Status { OK = 0, ERROR = 1, PENDING = 2 }
 
 var s = Status::ERROR;
 if (s == Status::ERROR) { std::println("error"); }
 
+// Using enum in switch:
 switch (s) {
-    case 0: { std::println("ok"); break; }
-    case 1: { std::println("error"); break; }
-    default: { std::println("pending"); }
+    case Status::OK:      { std::println("ok"); }
+    case Status::ERROR:   { std::println("error"); }
+    case Status::PENDING: { std::println("pending"); }
 }
+
+// Using enum in when:
+when (s) {
+    Status::OK      => { std::println("ok"); },
+    Status::ERROR   => { std::println("error"); },
+    Status::PENDING => { std::println("pending"); }
+}
+
+// Arithmetic with enum values:
+var next = s + 1;
+var range = Status::PENDING - Status::OK;  // 2
+```
+
+**Defining enums with flags pattern:**
+```omscript
+enum Flags {
+    NONE  = 0,
+    READ  = 1,
+    WRITE = 2,
+    EXEC  = 4
+}
+
+var perm = Flags::READ | Flags::WRITE;   // 3
+var can_read = perm & Flags::READ;       // 1 (true)
 ```
 
 ---
@@ -1971,7 +2838,7 @@ switch (s) {
 
 ### 16.1 try / catch / throw
 
-```
+```omscript
 try {
     // ...
     throw "something went wrong";
@@ -1980,12 +2847,68 @@ try {
 }
 ```
 
-`throw` accepts any expression. `catch (e)` binds the thrown value to `e`.
+`throw` accepts any expression — a string, integer, or any value. `catch (e)` binds the thrown value to `e`.
+
+**Detailed rules:**
+- The `try` block runs normally until a `throw` is encountered (or an internal error is triggered).
+- When `throw val` is executed, control transfers immediately to the nearest enclosing `catch` block.
+- `catch (e)` binds the thrown value to the variable `e` — the type is dynamic.
+- `throw` inside a `catch` re-throws (or throws a new value).
+- If no `try/catch` is present and a `throw` occurs, the program terminates with a runtime error.
+- OmScript has a single catch clause (no typed `catch` — all exceptions are caught by the one `catch`).
+
+```omscript
+fn divide(a:int, b:int) -> int {
+    if (b == 0) {
+        throw "DivisionByZero: cannot divide by zero";
+    }
+    return a / b;
+}
+
+fn safe_divide(a:int, b:int) -> int {
+    try {
+        return divide(a, b);
+    } catch (e) {
+        std::println("Error: " + e);
+        return 0;
+    }
+}
+
+// Throw and catch integers:
+try {
+    throw 404;
+} catch (code) {
+    std::println("Error code: " + std::to_string(code));
+}
+
+// Nested try:
+try {
+    try {
+        throw "inner";
+    } catch (e) {
+        std::println("Inner caught: " + e);
+        throw "outer";   // re-throw as a different value
+    }
+} catch (e) {
+    std::println("Outer caught: " + e);
+}
+```
 
 ### 16.2 assert
 
-```
+```omscript
 std::assert(x > 0);             // runtime assertion; aborts on failure
+std::assert(n < max_size);      // program terminates if n >= max_size
+```
+
+`std::assert(cond)` checks a condition at runtime. If the condition is zero (false), the program immediately terminates with an error message indicating the assertion failure location.
+
+**Note:** For compile-time assertions, use the `#assert` preprocessor directive (see §4.3).
+
+**`std::expect` for prediction without termination:**
+```omscript
+// hint: branch is likely to go left (val is expected to equal 1)
+var x = std::expect(val, 1);   // returns val unchanged; provides branch hint to LLVM
 ```
 
 ---
@@ -2243,12 +3166,34 @@ fn fast_fn(arr:int[], n:int) -> int { ... }
 | `std::print(val)` | Print value followed by a newline |
 | `std::println(val)` | Print value followed by a newline (identical behavior to `print`) |
 | `std::write(val)` | Print value **without** a trailing newline |
-| `std::print_char(c)` | Print a single character by ASCII/Unicode code |
-| `std::input()` | Read a whitespace-delimited word from stdin |
-| `std::input_line()` | Read a full line from stdin |
-| `std::exit(code)` / `std::exit_program(code)` | Exit with given code |
+| `std::print_char(c)` | Print a single character by ASCII/Unicode code (integer code point) |
+| `std::input()` | Read a whitespace-delimited word from stdin; returns the word as a string |
+| `std::input_line()` | Read a full line from stdin (including spaces); returns the line without a trailing newline |
+| `std::exit(code)` / `std::exit_program(code)` | Exit the process with the given integer exit code |
 
 > **Note:** Both `std::print()` and `std::println()` always append a newline. Use `std::write()` when you need output without a trailing newline.
+
+**Type handling:**
+- `std::print` / `std::println` / `std::write` convert the argument to a string automatically for integers, floats, and strings. For other types, pass `std::to_string(val)` explicitly.
+- `std::print_char(c)` accepts an integer code point and prints the corresponding character. This is the inverse of the character code returned by `s[i]`.
+- `std::input_line()` returns the entire line including leading/trailing whitespace; the trailing newline (`
+`) is **not** included in the returned string.
+
+```omscript
+std::print("Hello");          // prints "Hello
+"
+std::write("Hello, ");
+std::write("World");
+std::println("!");            // prints "Hello, World!
+"
+std::print_char(65);          // prints "A"
+
+var word = std::input();          // reads one whitespace-delimited token
+var line = std::input_line();     // reads entire line
+std::println("You typed: " + line);
+
+std::exit(0);   // clean exit
+```
 
 ### 19.2 Math
 
@@ -2341,11 +3286,25 @@ const ROT   = std::rotate_left(1, 3);     // 8
 | Function | Description |
 |---|---|
 | `std::typeof(x)` | Returns an integer type tag: 1 = integer, 2 = float, 3 = string |
-| `std::len(x)` | Length of array or string |
-| `std::to_int(x)` | Convert to integer |
-| `std::to_float(x)` | Convert to float |
-| `std::to_string(x)` | Convert number to string |
-| `std::assert(cond)` | Runtime assertion (aborts on failure) |
+| `std::len(x)` | Length of array or string (in elements / bytes) |
+| `std::to_int(x)` | Convert string or float to integer |
+| `std::to_float(x)` | Convert string or integer to float |
+| `std::to_string(x)` | Convert integer, float, or bool to string representation |
+| `std::assert(cond)` | Runtime assertion — aborts process if `cond` is zero |
+
+**`std::typeof` tags:**
+- `1` — integer (default numeric type)
+- `2` — float (IEEE 754 double)
+- `3` — string (heap-allocated)
+
+**`std::len` rules:**
+- For arrays: returns the number of elements.
+- For strings: returns the number of bytes (not Unicode code points).
+
+**Conversion rules:**
+- `std::to_int("42")` → `42`, `std::to_int(3.7)` → `3` (truncates toward zero)
+- `std::to_float("3.14")` → `3.14`, `std::to_float(42)` → `42.0`
+- `std::to_string(42)` → `"42"`, `std::to_string(3.14)` → `"3.14"`
 
 ### 19.5.1 Integer Type-Cast Functions
 
@@ -2410,9 +3369,33 @@ var result = std::sudo_command("apt update", "s3cr3t");// runs as root
 
 | Function | Description |
 |---|---|
-| `std::assume(cond)` | Assert to optimizer that `cond` is always true (LLVM `llvm.assume`) |
-| `std::unreachable()` | Mark code as unreachable (UB if reached) |
-| `std::expect(val, expected)` | Branch prediction hint: `val` is likely `expected` |
+| `std::assume(cond)` | Assert to optimizer that `cond` is always true (LLVM `llvm.assume`); UB if false |
+| `std::unreachable()` | Mark code as unreachable — if actually reached, behavior is undefined |
+| `std::expect(val, expected)` | Branch prediction hint: `val` is likely `expected`; returns `val` unchanged |
+
+**Detailed semantics:**
+
+- **`std::assume(cond)`**: Emits `llvm.assume(cond)`. The optimizer is allowed to use this as a proven fact — for example, `std::assume(x > 0)` allows strength-reducing signed modulo to unsigned modulo. If the assumption is actually false at runtime, the program produces undefined behavior (similar to C's `__builtin_assume`).
+- **`std::unreachable()`**: Emits `llvm.unreachable()`. Tells the optimizer that control will never reach this point — enables elimination of dead code paths and improves code generation for preceding branches. If the unreachable is actually reached, the behavior is undefined (may produce wrong results, crash, or silently continue).
+- **`std::expect(val, expected)`**: Emits a conditional branch weight hint equivalent to `__builtin_expect` in GCC/Clang. Returns `val` unchanged; the `expected` argument is only used for the hint.
+
+```omscript
+fn fast_log2(x:int) -> int {
+    std::assume(x > 0);           // optimizer knows x is positive; no sign check needed
+    return 63 - std::clz(x);
+}
+
+fn parse_header(buf:string, len:int) {
+    if (len < 4) {
+        std::unreachable();        // caller guarantees len >= 4
+    }
+    // ...
+}
+
+fn check_flag(flags:int, bit:int) -> int {
+    return std::expect(flags & bit, 0);  // hint: bit is usually 0 (unlikely set)
+}
+```
 
 ### 19.8 String Formatting
 
@@ -2574,23 +3557,69 @@ The `std` namespace is built-in and always available. It does **not** need to be
 
 ## 20. Concurrency
 
-OmScript provides low-level threading and mutex primitives.
+OmScript provides **low-level threading and mutex primitives** wrapping the platform's POSIX thread (pthread) API. There is no high-level task scheduler or async/await — concurrency is expressed directly through threads and mutexes.
 
 ### 20.1 Thread Functions
 
 | Function | Description |
 |---|---|
-| `std::thread_create("func_name")` | Create a new thread running the named zero-argument function; returns a thread handle |
-| `std::thread_join(t)` | Wait for thread `t` to finish |
+| `std::thread_create("func_name")` | Create a new thread running the named zero-argument function; returns an opaque thread handle |
+| `std::thread_join(t)` | Block until thread `t` finishes; frees the thread handle |
+
+**Rules:**
+- The function passed to `std::thread_create` must be a **zero-argument** function defined in the same program.
+- The function name is passed as a **string literal** (the name is looked up at runtime).
+- The returned thread handle must be joined with `std::thread_join` to avoid resource leaks.
+- Communication between threads must be done through shared global variables or shared arrays — there is no built-in channel or message-passing mechanism.
+- Thread safety is the programmer's responsibility — use mutexes to protect shared state.
+
+```omscript
+fn worker() {
+    std::println("running in thread");
+}
+
+fn main() {
+    var t1 = std::thread_create("worker");
+    var t2 = std::thread_create("worker");
+    std::thread_join(t1);
+    std::thread_join(t2);
+    std::println("both threads done");
+}
+```
 
 ### 20.2 Mutex Functions
 
 | Function | Description |
 |---|---|
-| `std::mutex_new()` | Create a new mutex |
-| `std::mutex_lock(m)` | Lock mutex `m` |
-| `std::mutex_unlock(m)` | Unlock mutex `m` |
-| `std::mutex_destroy(m)` | Destroy mutex `m` |
+| `std::mutex_new()` | Create a new mutex; returns an opaque mutex handle |
+| `std::mutex_lock(m)` | Acquire lock on mutex `m` (blocks if already locked) |
+| `std::mutex_unlock(m)` | Release lock on mutex `m` |
+| `std::mutex_destroy(m)` | Destroy and free mutex `m`; must not be locked when destroyed |
+
+**Rules:**
+- Always pair `mutex_lock` with `mutex_unlock` in the same thread — failure to unlock causes a deadlock.
+- `std::mutex_destroy` should only be called after the mutex is unlocked and no threads are waiting on it.
+- Use `defer` to ensure unlocking even on early returns:
+
+```omscript
+var counter = 0;
+var mtx = std::mutex_new();
+
+fn increment() {
+    std::mutex_lock(mtx);
+    defer std::mutex_unlock(mtx);  // always unlocks, even on early return
+    counter += 1;
+}
+
+fn main() {
+    var t1 = std::thread_create("increment");
+    var t2 = std::thread_create("increment");
+    std::thread_join(t1);
+    std::thread_join(t2);
+    std::println("counter = " + std::to_string(counter));
+    std::mutex_destroy(mtx);
+}
+```
 
 ---
 
@@ -2598,55 +3627,161 @@ OmScript provides low-level threading and mutex primitives.
 
 | Function | Description |
 |---|---|
-| `std::file_read(path)` | Read entire file as string |
-| `std::file_write(path, content)` | Write string to file (overwrite) |
-| `std::file_append(path, content)` | Append string to file |
-| `std::file_exists(path)` | Returns 1 if file exists, 0 otherwise |
+| `std::file_read(path)` | Read entire file as a string; returns `""` on error |
+| `std::file_write(path, content)` | Write string to file (creates or overwrites); returns 0 on success, -1 on error |
+| `std::file_append(path, content)` | Append string to file (creates if not present); returns 0 on success, -1 on error |
+| `std::file_exists(path)` | Returns 1 if file exists and is accessible, 0 otherwise |
+
+**Detailed behavior:**
+- `std::file_read` reads the entire file into a heap-allocated string. On failure (file not found, permission error), it returns an empty string `""`. There is no separate error value — check `std::file_exists` first if you need to distinguish between "empty file" and "read error".
+- `std::file_write` opens the file for writing (truncating existing content) and writes `content`. Creates the file if it does not exist.
+- `std::file_append` opens the file in append mode and writes `content` at the end. Creates the file if it does not exist.
+- All path arguments are platform-native paths (absolute or relative to the process working directory).
+
+```omscript
+// Read a config file:
+var config = std::file_read("config.txt");
+var lines = std::str_split(config, "
+");
+for (line in lines) {
+    std::println(line);
+}
+
+// Write results to a file:
+var output = "result: " + std::to_string(42) + "
+";
+std::file_write("output.txt", output);
+
+// Append a log entry:
+std::file_append("log.txt", "[INFO] started
+");
+
+// Check before reading:
+if (std::file_exists("data.bin")) {
+    var data = std::file_read("data.bin");
+    process(data);
+} else {
+    std::println("data.bin not found");
+}
+```
+
+**Note:** OmScript does not have a seek/read-partial API. For large files, read the whole file and use string operations to extract the needed portions.
 
 ---
 
 ## 22. Lambda Expressions
 
-Lambdas create anonymous functions. They are desugared to named functions at parse time.
+Lambdas create anonymous single-expression functions. At parse time they are **desugared** to a named function `__lambda_N` (where N is an auto-incrementing counter) and the lambda is replaced by a string literal holding that generated name. This means lambdas are passed to higher-order functions as **function name strings**.
 
-```
+```omscript
 |x| x * 2                     // single parameter
 |x, y| x + y                  // two parameters
 || 42                          // no parameters
 |x:int| x * 2                 // annotated parameter
+|x:int, y:int| x + y          // multiple annotated parameters
+```
+
+**Desugaring:**
+```omscript
+// Source:
+var doubled = std::array_map([1, 2, 3], |x| x * 2)
+
+// Desugars to (conceptually):
+fn __lambda_0(x) { return x * 2; }
+var doubled = std::array_map([1, 2, 3], "__lambda_0")
 ```
 
 Lambdas are first-class values and can be passed to higher-order functions:
 
+```omscript
+var doubled = std::array_map([1, 2, 3], |x| x * 2)         // [2, 4, 6]
+var evens   = std::array_filter([1, 2, 3, 4], |x| x % 2 == 0)  // [2, 4]
+var total   = std::array_reduce([1, 2, 3, 4], |acc, x| acc + x, 0)  // 10
+var sorted  = std::sort_with([3,1,2], |a, b| a - b)
+var mapped  = std::array_map(strings, |s| s.str_upper())    // uppercase each
+var checked = std::array_any([1,2,3], |x| x > 2)           // 1 (true)
+var all_pos = std::array_every([1,2,3], |x| x > 0)         // 1 (true)
+var count   = std::array_count([1,2,3,4], |x| x % 2 == 0)  // 2
+var found   = std::array_find([10,20,30], |x| x > 15)      // 20
 ```
-var doubled = std::array_map([1, 2, 3], |x| x * 2)
-var evens = std::array_filter([1, 2, 3, 4], |x| x % 2 == 0)
-var total = std::array_reduce([1, 2, 3, 4], |acc, x| acc + x, 0)
+
+**Rules:**
+- Lambda body is a **single expression** — for multi-statement lambdas, define a named function.
+- Parameters can optionally have type annotations: `|x:int, y:float|`.
+- The body expression can be any valid expression (arithmetic, function calls, ternary, etc.).
+- Lambdas do not capture variables from the enclosing scope (no closures) — they are stateless functions.
+- Because lambdas desugar to top-level functions, they cannot reference local variables defined outside them. Pass all needed values as parameters.
+- Each lambda gets a unique `__lambda_N` name in the generated program; names are sequential within a file.
+
+```omscript
+// Combining lambdas:
+var result = std::array_reduce(
+    std::array_filter([1,2,3,4,5,6], |x| x % 2 == 0),  // [2,4,6]
+    |acc, x| acc + x,                                    // sum
+    0                                                    // initial
+);
+// result = 12
 ```
 
 ---
 
 ## 23. Import System
 
-```
+```omscript
 import "filename";
-import "path/to/module";   // .om extension added automatically
+import "path/to/module";   // .om extension added automatically if missing
+import "lib/utils.om";     // explicit extension also accepted
 ```
 
-- Circular imports are detected and silently skipped
-- Paths are resolved relative to the importing file's directory
-- Imports merge all functions, structs, and enums from the imported file
+**Detailed behavior:**
+- The `.om` extension is appended automatically if the path does not end in `.om`.
+- Paths are resolved **relative to the importing file's directory**, not the compiler's working directory.
+- **Circular imports** are detected using canonical path normalization and silently skipped — re-importing a file that is already in the import chain does nothing.
+- Imports **merge** all functions, structs, and enums from the imported file into the current program's symbol table. This happens at parse time before code generation.
+- Warning and diagnostic messages from imported files propagate back to the importing file.
+- The imported file is itself preprocessed (macros expanded) and lexed independently.
+
+**Merge semantics:**
+- All top-level functions, enums, and structs from the imported file become available as if they were declared in the importing file.
+- There is no namespacing by default — if two imported modules define a function with the same name, the later import wins (the earlier is overwritten in the function table).
+- Use aliases to avoid name collisions (see §23.1).
 
 ### 23.1 Import Aliases
 
 An imported module can be given a namespace alias using `as`:
 
-```
+```omscript
 import "utils" as utils;        // functions accessible as utils::funcname()
 import "math/fast" as fast;     // fast::dot(), fast::norm(), etc.
+import "core" as core;          // core::parse(), core::format(), etc.
 ```
 
 With an alias, the imported symbols are accessed via `::` scope resolution. Without an alias, all symbols are imported into the current scope directly.
+
+**Multi-level aliases:**
+
+Aliases can use `::` for hierarchical namespacing:
+
+```omscript
+import "geo" as shapes::geo;
+// → functions accessible as shapes::geo::funcname()
+```
+
+**Detailed behavior with aliases:**
+- Every function from the imported module is registered in an internal namespace map under the alias.
+- The original unqualified function name is also kept in the symbol table (for internal calls within the imported module to work correctly).
+- At call sites, `alias::funcname(args)` is resolved directly to the original function name — no forwarding wrapper is emitted, so there is no overhead vs. a direct call.
+- If a function name does not exist in the namespace, the compiler emits an error at parse time: "Function 'X' not found in namespace 'Y'".
+
+```omscript
+import "math" as math;
+
+fn main() {
+    var r = math::sqrt(2.0);           // calls sqrt from math module
+    var g = math::gcd(48, 18);         // calls gcd from math module
+    std::println(std::to_string(r));
+}
+```
 
 ---
 
@@ -2658,13 +3793,19 @@ With an alias, the imported symbols are accessed via `::` scope resolution. With
 omsc <file.om>                  # compile to executable (default: a.out)
 omsc compile <file.om>          # same as above
 omsc build <file.om>            # same as above
-omsc run <file.om>              # compile and run
-omsc check <file.om>            # validate syntax only
-omsc emit-ir <file.om>          # print LLVM IR
-omsc --emit-obj <file.om>       # emit object file only
-omsc clean                      # remove build artifacts
-omsc pkg <subcommand>           # package manager
+omsc run <file.om>              # compile and run immediately (no output file kept)
+omsc check <file.om>            # parse and type-check only (no code generation)
+omsc emit-ir <file.om>          # compile and print LLVM IR to stdout (before LLVM optimization)
+omsc --emit-obj <file.om>       # compile and emit object file (.o) only; does not link
+omsc clean                      # remove build artifacts (object files, intermediate IR)
+omsc pkg <subcommand>           # package manager (see §24.8)
 ```
+
+**Notes:**
+- `omsc run` compiles the program to a temporary file, runs it, and removes the temporary file. The exit code of the OmScript program is forwarded as the exit code of `omsc run`.
+- `omsc check` does a full parse pass including import resolution and type annotation checking, but does not run LLVM. Useful for CI syntax validation.
+- `omsc emit-ir` prints the LLVM IR **after** all AST-level optimizations (comptime, CF-CTRE, loop fusion) but **before** the LLVM optimization pipeline runs. For post-LLVM IR, use `omsc -O2 --emit-obj` and then disassemble the object file.
+- All commands accept the same flags (`-O`, `-march`, `-f*`, etc.) described in §24.3–§24.7.
 
 ### 24.2 Output
 
@@ -2958,11 +4099,41 @@ See §31 for the complete HGOE deep dive with hardware profile tables, RecMII sc
 
 ### 25.4 OPTMAX Blocks
 
-See [Section 18](#18-optmax-blocks).
+OPTMAX blocks are regions of code marked for **maximum optimization**. There are two forms:
+
+- `OPTMAX=: { ... }` — "equals" form: the block's value is the last expression's value (used as an expression)
+- `OPTMAX!: { ... }` — "bang" form: the block is a statement; result is discarded
+
+See [Section 18](#18-optmax-blocks) for the full OPTMAX reference.
+
+**Quick summary of guarantees OPTMAX enables:**
+- All variables must have type annotations — the optimizer can assume exact integer widths.
+- Bounds checks are completely eliminated within the block.
+- SIMD auto-vectorization is enabled for all array loops.
+- The block is treated as a `@hot` region with `@restrict` on all pointer arguments.
+- The `@optmax(...)` function annotation (§18.1) applies these same guarantees to a whole function.
 
 ### 25.5 Profile Guidance (PGO)
 
 The build system includes `benchmark_pgo.sh` for profile-guided optimization runs. PGO is coordinated externally via the build scripts — there is no language-level PGO syntax.
+
+**PGO workflow (external):**
+
+```sh
+# Step 1: compile with instrumentation
+omsc -O2 -fprofile-generate -o prog_instr my_program.om
+
+# Step 2: run representative workload
+./prog_instr < workload.txt
+
+# Step 3: recompile with profile data
+omsc -O2 -fprofile-use=default.profdata -o prog my_program.om
+```
+
+At the language level, PGO interacts with:
+- `likely if` / `unlikely if` — static branch prediction hints that are superseded by PGO profile data when available.
+- `std::expect(val, expected)` — branch prediction hint, analogous to `__builtin_expect` in GCC/Clang.
+- `@hot` / `@cold` function annotations — coarse-grained hints that are refined by PGO.
 
 ### 25.6 Escape Analysis (Stack Allocation)
 
