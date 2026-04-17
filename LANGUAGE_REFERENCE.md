@@ -868,9 +868,10 @@ All four variables become compile-time constants — no division, subtraction, o
 
 ```
 register var x:int = 0    // hint to force variable into CPU register
+register const x:int = 1  // same hint for a constant
 ```
 
-Instructs the compiler to promote the variable to an SSA register via LLVM's `mem2reg` pass. Only works for types that fit in a register (integers, floats, bools).
+Instructs the compiler to promote the variable to an SSA register via LLVM's `mem2reg` pass. Both `var` and `const` are accepted after `register`. Only works for types that fit in a register (integers, floats, bools).
 
 ### 6.5 Assignment
 
@@ -1906,7 +1907,7 @@ a ** b   // exponentiation: a to the power of b
 - All arithmetic operates on 64-bit integers (`i64`) or 64-bit floats (`f64`) depending on the values.
 - Integer division truncates toward zero: `7 / 2 == 3`, `-7 / 2 == -3`.
 - Integer modulo follows C semantics: result has the same sign as the dividend: `7 % 3 == 1`, `-7 % 3 == -1`.
-- `**` desugars to `std::pow(a, b)` — integer exponentiation.
+- `**` (power operator) generates inline LLVM IR — it does **not** call `std::pow`. For **integer** operands the compiler emits constant-exponent straight-line multiplications for exponents 2–64, and an O(log n) binary-exponentiation loop for variable exponents. For **float** operands the compiler emits the `llvm.pow.f64` intrinsic, with constant-exponent shortcuts (e.g. `x**0.5 → sqrt(x)`, `x**2.0 → x*x`, `x**(-1.0) → 1.0/x`). Constant expressions are folded at compile time regardless of type.
 - There is no implicit promotion between integers and floats — if you mix them in arithmetic the result is implementation-defined.
 - Use `std::fast_add`, `std::fast_mul` etc. for `nsw`-flagged operations (see §19.3).
 - Overflow of 64-bit signed integers is **undefined behavior** (same as C `signed int`), unless you use `std::saturating_add` / `std::saturating_sub`.
@@ -2103,7 +2104,7 @@ x--    // post-decrement: returns old value of x, then x -= 1
 ```
 
 **Semantics:**
-- Increment/decrement can be applied to variables, struct fields, and array elements.
+- Increment/decrement can be applied to **plain variables** and **array elements** only. Struct fields (`p.x++`) are **not** supported — the parser rejects them with a hard error ("Prefix/Postfix ++ requires an lvalue operand"). Use `p.x += 1` instead.
 - Post-fix forms (`x++`, `x--`) return the **old** value before modification.
 - Pre-fix forms (`++x`, `--x`) return the **new** value after modification.
 - These are shorthand for `x += 1` and `x -= 1`.
@@ -2147,8 +2148,8 @@ fn zero_out(p: &int) { *p = 0; }  // reference parameter (conceptual)
 10. `==`, `!=`, `<`, `<=`, `>`, `>=`, `in` — comparisons also support chaining (`a < b < c`)
 11. `&&`
 12. `||`
-13. `??`, `?:`
-14. `? :` (ternary)
+13. `??` (null-coalesce)
+14. `? :` (ternary) and `?:` (Elvis — shorthand ternary; same precedence as `? :`)
 15. `|>` (pipe forward)
 16. Assignment (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `??=`, `&&=`, `||=`)
 
@@ -2739,13 +2740,13 @@ var points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
 var v = p.x           // read field
 p.y = 30              // write field
 p.x += 5              // compound assignment on struct fields
-p.x++                 // increment struct field
+p.x = p.x + 1        // increment struct field (p.x++ is NOT valid; use += 1)
 ```
 
 **Rules:**
 - Field access uses `.` notation.
 - All compound assignment operators work on struct fields (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`).
-- Increment/decrement operators also work on struct fields.
+- `++` and `--` do **not** work on struct fields — the parser rejects `p.x++` with a hard error. Use `p.x += 1` instead.
 - Nested struct field access: `obj.inner.field`.
 - Array of structs indexing + field access: `arr[i].field`.
 
@@ -3787,8 +3788,7 @@ import "lib/utils.om";     // explicit extension also accepted
 
 **Merge semantics:**
 - All top-level functions, enums, and structs from the imported file become available as if they were declared in the importing file.
-- There is no namespacing by default — if two imported modules define a function with the same name, the later import wins (the earlier is overwritten in the function table).
-- Use aliases to avoid name collisions (see §23.1).
+- There is no namespacing by default — if two imported modules define a function with the same name, the compiler emits a **hard compile error** ("Duplicate function definition"). Use import aliases (`import "mod" as alias;`) to avoid name collisions (see §23.1).
 
 ### 23.1 Import Aliases
 
@@ -3838,16 +3838,21 @@ omsc <file.om>                  # compile to executable (default: a.out)
 omsc compile <file.om>          # same as above
 omsc build <file.om>            # same as above
 omsc run <file.om>              # compile and run immediately (no output file kept)
-omsc check <file.om>            # parse and type-check only (no code generation)
+omsc check <file.om>            # parse-only syntax check (no code generation)
 omsc emit-ir <file.om>          # compile and print LLVM IR to stdout (before LLVM optimization)
 omsc --emit-obj <file.om>       # compile and emit object file (.o) only; does not link
 omsc clean                      # remove build artifacts (object files, intermediate IR)
+omsc lex <file.om>              # print token stream (aliases: tokens, --dump-tokens)
+omsc parse <file.om>            # print parsed AST (aliases: emit-ast, --ast, --emit-ast)
+omsc install                    # install compiler binary to PATH
+omsc update                     # update compiler binary
+omsc uninstall                  # remove compiler from PATH
 omsc pkg <subcommand>           # package manager (see §24.8)
 ```
 
 **Notes:**
 - `omsc run` compiles the program to a temporary file, runs it, and removes the temporary file. The exit code of the OmScript program is forwarded as the exit code of `omsc run`.
-- `omsc check` does a full parse pass including import resolution and type annotation checking, but does not run LLVM. Useful for CI syntax validation.
+- `omsc check` runs the preprocessor, lexer, and parser, then prints `<file>: OK (N function(s))`. It does **not** run type checking or LLVM — it is a fast syntax-only validation pass. Useful for CI syntax validation.
 - `omsc emit-ir` prints the LLVM IR **after** all AST-level optimizations (comptime, CF-CTRE, loop fusion) but **before** the LLVM optimization pipeline runs. For post-LLVM IR, use `omsc -O2 --emit-obj` and then disassemble the object file.
 - All commands accept the same flags (`-O`, `-march`, `-f*`, etc.) described in §24.3–§24.7.
 
@@ -3864,7 +3869,7 @@ omsc pkg <subcommand>           # package manager (see §24.8)
 -O1            Basic optimizations
 -O2            Standard optimizations (default)
 -O3            Aggressive optimizations
--Ofast         -O3 + fast-math
+-Ofast         alias for -O3 (does NOT enable fast-math; use -ffast-math separately for that)
 ```
 
 ### 24.4 Target
@@ -3894,7 +3899,6 @@ All `-f` flags have a `-fno-` counterpart to disable:
 | `-fegraph` | on | E-graph equality saturation (active at O2+) |
 | `-fsuperopt` | on | Superoptimizer pass (active at O2+) |
 | `-fhgoe` | on | Hardware Graph Optimization Engine (active at O2+ with -march/-mtune) |
-| `-fescape-analysis` | on | Stack-allocate non-escaping small arrays (O1+) |
 
 ### 24.6 Superoptimizer Level
 
@@ -3910,6 +3914,10 @@ All `-f` flags have a `-fno-` counterpart to disable:
 ```
 -g / --debug   Emit debug information
 -V / --verbose Verbose compiler output (also prints OptStats counters)
+-q / --quiet   Suppress all non-error output
+--time         Print per-phase timing to stderr (lex / parse / codegen)
+--dump-ast     Print a full AST dump instead of the summary from `omsc parse`
+--dry-run      Lex, parse, and run codegen but do not write any output files
 -static        Link statically
 -s / --strip   Strip debug symbols from output
 ```
@@ -3919,13 +3927,15 @@ All `-f` flags have a `-fno-` counterpart to disable:
 ```
 [opt-report] Optimization statistics:
   const-folded expressions : 127
-  calls inlined            :  22
+  calls inlined            :   0   ← always 0 (counter declared but not yet incremented)
   stack allocs (escape)    :   9
   loops fused              :   4
   borrows frozen           :   3
   independent loops        :   7
   allocator wrappers       :   2
 ```
+
+> **Note:** The `calls inlined` counter is declared in the opt-stats structure and printed, but is never incremented by any code path. It will always display `0`.
 
 ### 24.8 Package Manager
 
@@ -4161,23 +4171,12 @@ See [Section 18](#18-optmax-blocks) for the full OPTMAX reference.
 
 The build system includes `benchmark_pgo.sh` for profile-guided optimization runs. PGO is coordinated externally via the build scripts — there is no language-level PGO syntax.
 
-**PGO workflow (external):**
+> **Note:** `-fprofile-generate` and `-fprofile-use=...` are **not yet parsed** by the `omsc` argument parser. The underlying `Compiler::setPGOGen()` / `setPGOUse()` methods exist internally but are not wired to any CLI flag. Use the `benchmark_pgo.sh` script or a custom build pipeline to apply PGO.
 
-```sh
-# Step 1: compile with instrumentation
-omsc -O2 -fprofile-generate -o prog_instr my_program.om
-
-# Step 2: run representative workload
-./prog_instr < workload.txt
-
-# Step 3: recompile with profile data
-omsc -O2 -fprofile-use=default.profdata -o prog my_program.om
-```
-
-At the language level, PGO interacts with:
-- `likely if` / `unlikely if` — static branch prediction hints that are superseded by PGO profile data when available.
+At the language level, static prediction hints interact with PGO when applied externally:
+- `likely if` / `unlikely if` — static branch prediction hints.
 - `std::expect(val, expected)` — branch prediction hint, analogous to `__builtin_expect` in GCC/Clang.
-- `@hot` / `@cold` function annotations — coarse-grained hints that are refined by PGO.
+- `@hot` / `@cold` function annotations — coarse-grained hints.
 
 ### 25.6 Escape Analysis (Stack Allocation)
 
@@ -4204,7 +4203,7 @@ fn sum_small() -> int {
 
 The OptStats counter `Stack allocs (escape)` reports how many arrays were successfully stack-allocated.
 
-**Disable:** `-fno-escape-analysis`
+**Note:** There is no `-fescape-analysis` / `-fno-escape-analysis` CLI flag. The escape analysis pass runs unconditionally at O1+ and cannot be disabled via the command line.
 
 ### 25.7 Bounds Check Hoisting
 
@@ -4269,7 +4268,7 @@ When the compiler is run with `-V` / `--verbose`, it prints an **opt-report** su
 | Counter | What it counts |
 |---|---|
 | `const-folded expressions` | Total AST-level arithmetic, string, and builtin folds |
-| `calls inlined` | Call sites replaced with inlined constants via cross-function propagation |
+| `calls inlined` | Call sites replaced with inlined constants via cross-function propagation (**always 0** — counter is declared but never incremented) |
 | `stack allocs (escape)` | Arrays stack-allocated by escape analysis |
 | `loops fused` | Pairs of loops merged by `@loop(fuse=true)` |
 | `borrows frozen` | Variables frozen by `freeze` + their propagated borrow aliases |
@@ -4280,7 +4279,7 @@ Example output:
 ```
 [opt-report] Optimization statistics:
   const-folded expressions : 127
-  calls inlined            :  22
+  calls inlined            :   0   ← always 0 (see above)
   stack allocs (escape)    :   9
   loops fused              :   4
   borrows frozen           :   3
@@ -4532,7 +4531,7 @@ for (i in 0...n) {
 | **Count evaluation** | `<expr>` is evaluated once before any stage runs. |
 | **Zero count** | A count ≤ 0 means the body never executes (same as `times 0`). |
 | **Auto-prefetch** | At `-O1` or above, the compiler identifies every `arr[__pipeline_i]` access and emits `llvm.prefetch` for `arr[__pipeline_i + D]` where `D = max(8, 2 × number_of_stages)`. |
-| **Loop metadata** | The loop back-edge carries `llvm.loop.mustprogress`, `llvm.loop.vectorize.enable`, `llvm.loop.interleave.count(nstages)`, and `llvm.loop.pipeline.initiationinterval=1`. |
+| **Loop metadata** | The loop back-edge carries `llvm.loop.mustprogress`, `llvm.loop.vectorize.enable`, `llvm.loop.interleave.count(max(2, nstages))`, and `llvm.loop.pipeline.initiationinterval=1`. |
 | **Iterator type** | `__pipeline_i` is `i64` (the default integer type). |
 
 ### 26.5 When to use `pipeline` vs `times` / `for`
@@ -4553,7 +4552,7 @@ for (i in 0...n) {
 
 ## 27. Integer Type-Cast Reference
 
-This appendix provides a complete, unambiguous reference for all 9 integer type-cast functions introduced in OmScript 4.1.1. These are function-call-style coercions handled specially by the compiler — they are not user-callable functions in the normal sense, and they produce no runtime overhead for identity casts. See §5.7 and §10.14 for the conceptual introduction.
+This appendix provides a complete reference for the named integer type-cast builtins. The table below covers the **11 named variants** (`u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `int`, `uint`, `bool`). Additionally, the compiler accepts **any `iN` or `uN`** where N is an integer in [1, 256] — for example `i128(x)`, `u24(x)`, `i3(x)` — following the same sign/zero-extension rules. These are function-call-style coercions handled specially by the compiler — they are not user-callable functions in the normal sense, and they produce no runtime overhead for identity casts. See §5.7 and §10.14 for the conceptual introduction.
 
 ### 27.1 Overview Table
 
@@ -4801,7 +4800,7 @@ The following rules govern when a type-cast expression is folded at compile time
 
 1. **Literal argument:** Any call like `u8(255)`, `i32(-1)`, `bool(0)` with a literal integer argument is **always folded** by the constant evaluator, regardless of context.
 
-2. **Inside `comptime {}` blocks:** All 9 casts are recognized by `evalConstBuiltin` and fold immediately when the argument is a known constant (which inside `comptime`, all variables are).
+2. **Inside `comptime {}` blocks:** All named casts (and any `iN`/`uN` variant) are recognized by `evalConstBuiltin` and fold immediately when the argument is a known constant (which inside `comptime`, all variables are).
 
 3. **After `const` declaration:** When the argument is a `const` variable, downstream uses may also fold:
    ```omscript
@@ -5969,20 +5968,9 @@ Annotation-based static hints propagate through codegen:
 
 #### 29.6.2 Instrumentation PGO (`-fprofile-generate` / `-fprofile-use`)
 
-OmScript integrates with LLVM's standard PGO infrastructure:
+> **Current status:** `-fprofile-generate` and `-fprofile-use=...` are **not yet parsed** by the `omsc` CLI. The underlying `setPGOGen()`/`setPGOUse()` methods exist in the `Compiler` class but are not wired to any command-line flag. PGO must be applied through a custom wrapper or build script that calls into the compiler API directly.
 
-```sh
-# Step 1: compile with instrumentation
-omsc compile myprogram.om -o myprogram_instr -fprofile-generate
-
-# Step 2: run representative workload
-./myprogram_instr < representative_input.txt
-
-# Step 3: recompile with profile data
-omsc compile myprogram.om -o myprogram_opt -fprofile-use=myprogram.profdata -O3
-```
-
-With profile data, LLVM:
+When PGO is applied (e.g., via the `benchmark_pgo.sh` script), LLVM:
 - Inlines hot call sites more aggressively (size threshold raised by profile count).
 - Marks cold paths with `unlikely` weights for branch predictor.
 - Reorders basic blocks to maximise I-cache hit rate.
