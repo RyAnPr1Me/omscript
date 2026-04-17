@@ -1,8 +1,10 @@
 # OmScript Language Reference
 
-> **Version:** 4.1.1
+> **Version:** 4.2.0
 > **Compiler:** `omsc` — OmScript Compiler
 > **Backend:** LLVM 18+ · Ahead-of-Time compilation with runtime adaptive execution paths
+> **HGOE:** Hardware Graph Optimization Engine with per-opcode latency, O(N+E) scheduling, port-accurate occupancy
+> **E-Graph:** Equality saturation with 1,500+ algebraic rewrite rules including generalized power-of-2 and FP negation
 > **License:** See repository root
 
 ---
@@ -2443,9 +2445,69 @@ omsc pkg info <package>      # Show package details
 
 ### 25.1 E-Graph Equality Saturation
 
-The e-graph pass applies algebraic identities and constant folding to LLVM IR before the standard optimization pipeline. It uses union-find with path compression and cost-based extraction to find the lowest-cost equivalent expression.
+The e-graph pass applies algebraic identities and constant folding to LLVM IR before the standard optimization pipeline. It uses a **union-find e-graph** with path compression and rank-based union, saturates it with 1,500+ rewrite rules across nine rule families, then extracts the **minimum-cost** expression from the saturated graph using a bottom-up cost model.
 
 Enabled by default at O2+; disable with `-fno-egraph`.
+
+#### Rule Families
+
+| Rule set | Examples | Count |
+|---|---|---|
+| Algebraic | `x+0→x`, `x*1→x`, `x-x→0`, `0-x→-x` | ~120 |
+| Advanced Algebraic | associativity, commutativity, factoring, Horner form | ~80 |
+| Comparison | `x<x→false`, chained comparisons, `eq_self`, `ne_self` | ~40 |
+| Advanced Comparison | range checks, comparison chains, overflow-safe comparisons | ~30 |
+| Bitwise | `x&x→x`, `x^x→0`, `x|(-1)→-1`, De Morgan, absorption | ~80 |
+| Advanced Bitwise | XOR–OR/AND identities, boolean↔bitwise, shift combining | ~120 |
+| Relational | const-fold chains, `mul_pow2_to_shl_general`, range-check strength reduction | ~60 |
+| Floating Point | FP identities, negation distribution, `x+(-y)→x-y`, `(-x)+x→0.0` | ~80 |
+| Strength Reduction | mul-by-constant→shift+add for 3–1023, div/mod pow2, abs, Horner | ~900 |
+
+#### Generalized Power-of-2 Multiply (v4.2.0+)
+
+A guarded rule `mul_pow2_to_shl_general` handles `x * 2^n → x << n` for **any** power-of-2 constant, covering cases not addressed by the ~30 hardcoded specific rules:
+
+```omscript
+x * 65536    // → x << 16  (via generalized rule)
+x * (1<<32)  // → x << 32  (via generalized rule)
+```
+
+The guard evaluates `isClassPowerOfTwo(c)` — a fast O(1) check on the e-class metadata — so the rule fires only when the multiplier is provably a power of two.
+
+#### FP Negation Rules (v4.2.0+)
+
+Several new floating-point rules enable the cost model to pick between additive and subtractive forms:
+
+| Rule | Transformation |
+|---|---|
+| `fp_add_neg_to_sub` | `x + (-y) → x - y` |
+| `fp_neg_add_to_sub` | `(-x) + y → y - x` |
+| `fp_add_neg_self` | `x + (-x) → 0.0` |
+| `fp_neg_add_self` | `(-x) + x → 0.0` |
+| `fp_sub_to_add_neg` | `x - y → x + (-y)` (reverse; lets cost model compare) |
+| `fp_mul_neg1_to_neg` | `x * -1.0 → -x` |
+| `fp_neg1_mul_to_neg` | `-1.0 * x → -x` |
+
+These rules allow the FMA fusion pass in HGOE to see cleaner patterns: after `fp_add_neg_to_sub`, a `fmul + fsub` chain is visible and fuses to a single FMA instruction.
+
+#### Cost Model
+
+The extractor uses a simple additive cost model over ENodes:
+
+| Operation | Cost |
+|---|---|
+| Const | 0 |
+| Shl, Shr, BitAnd, BitOr, BitXor, BitNot | 1 |
+| Add, Sub, Neg | 1 |
+| Mul | 3 |
+| Div, Mod | 10 |
+| FAdd, FSub, FNeg | 1 |
+| FMul | 2 |
+| FDiv | 8 |
+| Comparison, Logical | 1 |
+| Ternary | 2 |
+
+The cost of a tree is the sum of all ENode costs. When two representations are in the same e-class, the lower-cost one is extracted. The generalized power-of-2 rule means that even if `x * 2^n` is not covered by a specific hardcoded rule, the cost model still sees a `Shl` (cost 1) as an alternative to `Mul` (cost 3), and picks the shift.
 
 ### 25.2 Superoptimizer
 
