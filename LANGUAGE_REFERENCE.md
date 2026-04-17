@@ -2578,7 +2578,7 @@ var parts = s.str_split(", "); // ["Hello", "World!"]
 | `std::str_repeat(s, n)` | Repeat string `n` times |
 | `std::str_reverse(s)` | Reverse string |
 | `std::str_split(s, delim)` | Split by delimiter, returns array |
-| `std::str_chars(s)` | Split into array of **integer character codes** (one `i64` byte value per character); use `std::to_char()` to convert back to single-character strings |
+| `std::str_chars(s)` | Split into array of **integer character codes** (one `i64` integer per character, holding the byte value 0–255); use `std::to_char()` to convert back to single-character strings |
 | `std::str_join(arr, delim)` | Join array with delimiter |
 | `std::str_count(s, sub)` | Count non-overlapping occurrences of `sub` |
 | `std::str_pad_left(s, n, ch)` | Pad string on left to width `n` with character `ch` |
@@ -3205,9 +3205,9 @@ fn fast_fn(arr:int[], n:int) -> int { ... }
 
 ```omscript
 print("Hello");          // prints "Hello\n"
-write("Hello, ");
-write("World");
-println("!");            // prints "!\n" (result on screen: Hello, World!)
+write("Hello, ");        // prints "Hello, " (no newline)
+write("World");          // prints "World" (no newline)
+println("!");            // prints "!\n"  (on screen, the three lines above together show: Hello, World!)
 print_char(65);          // prints "A"
 
 var word = input();          // reads one whitespace-delimited token
