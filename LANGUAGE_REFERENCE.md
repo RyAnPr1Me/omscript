@@ -175,7 +175,7 @@ Compatibility rules used by this project:
 1. **Lex/parse acceptance is authoritative** for syntax support.
 2. **Integration tests are authoritative** for runtime-facing behavior.
 3. **Optimization details are non-guaranteed internals** unless explicitly documented as guarantees.
-4. **This file tracks OmScript 4.1.1** and may lag future parser additions until updated.
+4. **This file tracks OmScript 4.2.0** and may lag future parser additions until updated.
 
 ### 1.2 High-Level Syntax Coverage Map (Implemented)
 
@@ -581,7 +581,7 @@ A `comptime {}` block is executed **entirely at compile time** by the constant e
 ```omscript
 var a = comptime { return 6 * 7; };           // a = 42
 var b = comptime { var n = 5; return n * n; }; // b = 25
-const c = comptime { return min(10, 20); };    // c = 10
+const c = comptime { return std::min(10, 20); };    // c = 10
 ```
 
 #### 6.3.2 Implicit Return (v4.1.1+)
@@ -625,8 +625,8 @@ Many built-in functions are recognized as **pure** and evaluated at compile time
 `u64`, `i64`, `int`, `uint`, `u32`, `i32`, `u16`, `i16`, `u8`, `i8`, `bool`
 
 ```omscript
-const HASH_BITS = comptime { popcount(0xDEADBEEF); };  // 24
-const KEY_LEN   = comptime { str_len("hello");        };  // 5
+const HASH_BITS = comptime { std::popcount(0xDEADBEEF); };  // 24
+const KEY_LEN   = comptime { std::str_len("hello");        };  // 5
 const MASK      = comptime { u32(0xFFFFFFFF);         };  // 4294967295
 const FLAG      = comptime { bool(42);                };  // 1
 ```
@@ -640,7 +640,7 @@ This is the most powerful feature of `comptime` blocks and enables zero-cost com
 ```omscript
 // Build a lookup table at compile time
 fn make_sin_table(n:int) -> float[] {
-    var out:float[] = array_fill(n, 0);
+    var out:float[] = std::array_fill(n, 0);
     for (i:int in 0...n) {
         // Approximate sin with integer math for comptime compatibility
         out[i] = i;  // placeholder — real use would be pure integer math
@@ -656,9 +656,9 @@ var SIN_TABLE:float[] = comptime { make_sin_table(256); };
 
 ```omscript
 fn str_to_u64_fast(s:string) -> u64[] {
-    var n:int = len(s);
+    var n:int = std::len(s);
     var blocks:int = (n + 7) >> 3;
-    var out:u64[] = array_fill(blocks, 0);
+    var out:u64[] = std::array_fill(blocks, 0);
     for (i:int in 0...blocks) {
         var base:int = i << 3;
         var x:u64 = 0;
@@ -712,7 +712,7 @@ A `comptime` block is **guaranteed to evaluate at compile time**. If the body re
 **Example — comptime block with control flow:**
 ```omscript
 const LOOKUP:int[] = comptime {
-    var table:int[] = array_fill(16, 0);
+    var table:int[] = std::array_fill(16, 0);
     for (i:int in 0...16) {
         table[i] = i * i;   // squares: 0, 1, 4, 9, 16, ...
     }
@@ -1536,7 +1536,7 @@ var NORMALIZED:int = comptime { bool(42); };       // 1
 
 // Used in a loop inside comptime:
 fn build_byte_table(n:int) -> u8[] {
-    var t:u8[] = array_fill(n, 0);
+    var t:u8[] = std::array_fill(n, 0);
     for (i:int in 0...n) {
         t[i] = u8(i * 17);   // comptime-folds: u8(0), u8(17), u8(34), ...
     }
@@ -2171,11 +2171,11 @@ const MIN_MINUS_1 = saturating_sub(-9223372036854775808, 1); // -922337203685477
 
 ```omscript
 // All compile-time folds:
-const BITS  = popcount(0xFF00FF00);  // 16
-const LEAD  = clz(0x0001000000000000); // 15
-const TRAIL = ctz(0x0010);           // 4
+const BITS  = std::popcount(0xFF00FF00);  // 16
+const LEAD  = std::clz(0x0001000000000000); // 15
+const TRAIL = std::ctz(0x0010);           // 4
 const REV   = bitreverse(0x0F0F0F0F); // 0xF0F0F0F000000000 (as u64)
-const SWAP  = bswap(0x0102030405060708); // 0x0807060504030201
+const SWAP  = std::bswap(0x0102030405060708); // 0x0807060504030201
 const ROT   = rotate_left(1, 3);     // 8
 ```
 
@@ -2377,9 +2377,9 @@ var f100 = factorial(100);
 
 // Modular exponentiation:
 fn mod_pow(base, exp, m) {
-    var b = bigint_new(base);
-    var e = bigint_new(exp);
-    var mod = bigint_new(m);
+    var b = bigint(base);
+    var e = bigint(exp);
+    var mod = bigint(m);
     var result = bigint(1);
     while (!bigint_is_zero(e)) {
         if (bigint_mod(e, bigint(2)) |> bigint_is_zero |> !_) {
@@ -2394,20 +2394,24 @@ fn mod_pow(base, exp, m) {
 
 ### 19.13 The `std::` Namespace
 
-Every built-in function is also accessible via the `std::` prefix — no import is required. This is a purely syntactic mechanism: `std::funcname(args)` is desugared at parse time to `funcname(args)`.
+All built-in functions **must** be called with the `std::` prefix — bare calls such as `len(arr)` or `print(x)` are a **compile error**. No import is required; the `std` namespace is always available.
+
+`std::funcname(args)` is desugared at parse time into the corresponding built-in call.
+
+The following call forms are **exempt** from the `std::` requirement because the compiler generates the underlying calls internally:
+- Method call syntax: `obj.method()` → desugars to a built-in
+- Pipe-forward operator: `x |> funcname` → desugars internally
+- `foreach (x in arr)` → compiler generates `len()` internally
+- `x in container` → compiler generates `array_contains()` internally
+- Slice syntax `arr[1...3]` → compiler generates `array_slice()` internally
 
 ```omscript
-// All of these are equivalent:
-var n = len(arr);
 var n = std::len(arr);
-
-var x = sqrt(2.0);
 var x = std::sqrt(2.0);
-
 var result = std::synthesize([[1,2,3],[5,3,8]], ["+", "*"]);
 ```
 
-The `std` namespace is built-in and always available. It does **not** need to be imported.  The only function exclusive to the `std::` form is `std::synthesize` (the program synthesis engine — see §30); there is no bare `synthesize()` call.
+The `std` namespace is built-in and always available. It does **not** need to be imported. All standard library functions require the `std::` prefix — including `std::synthesize` (the program synthesis engine — see §30).
 
 ---
 
@@ -3521,7 +3525,7 @@ const WHITE = comptime { pack_rgb(255, 255, 255); }; // 0xFFFFFF
 
 ---
 
-*End of OmScript Language Reference — Version 4.1.1*
+*End of OmScript Language Reference — Version 4.2.0*
 
 ---
 
