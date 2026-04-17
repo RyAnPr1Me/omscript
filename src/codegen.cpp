@@ -7678,7 +7678,34 @@ void CodeGenerator::runCFCTRE(Program* program) {
                   << s.pureFunctionsDetected << " pure, "
                   << s.functionCallsMemoized << " calls memoised, "
                   << s.arraysAllocated       << " arrays allocated, "
-                  << s.loopsReasoned         << " loops reasoned" << '\n';
+                  << s.loopsReasoned         << " loops reasoned, "
+                  << s.branchMerges          << " branch merges, "
+                  << s.ternaryMerges         << " ternary merges" << '\n';
+    }
+
+    // ── CF-CTRE-guided inline hints ────────────────────────────────────────
+    // Functions that CF-CTRE successfully evaluated (with concrete arguments)
+    // are prime candidates for inlining at the remaining runtime call sites:
+    // once inlined, LLVM's IPSCCP pass can propagate the same constants and
+    // produce the same constant-folded output for statically-known arguments.
+    //
+    // We apply InlineHint (not AlwaysInline) so LLVM's cost model still gates
+    // excessively-large callees — the hint is advisory, not mandatory.
+    //
+    // Skipped for: @noinline functions (explicit user opt-out), zero-parameter
+    // functions (already folded to global constants above), and functions not
+    // in the foldable set (no evidence that inlining would expose folding).
+    if (ctEngine_ && optimizationLevel >= OptimizationLevel::O2) {
+        const auto& foldable = ctEngine_->foldableCallees();
+        for (auto& fn : program->functions) {
+            if (fn->hintNoInline) continue;
+            if (fn->parameters.empty()) continue;   // zero-arg already folded
+            if (!foldable.count(fn->name)) continue;
+            // Only upgrade to hintInline if the function isn't already more
+            // aggressively annotated (@flatten / alwaysInline).
+            if (!fn->hintInline)
+                fn->hintInline = true;
+        }
     }
 }
 

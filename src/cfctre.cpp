@@ -396,6 +396,13 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
         if (cached.isArray() && cached.arr != CT_NULL_HANDLE)
             cached.arr = snapshotArray(cached.arr);
         memoCache_[key] = cached;
+        // Record this function as CF-CTRE-foldable: it produced a concrete
+        // result for at least one set of concrete arguments.  The codegen will
+        // use this to apply InlineHint so LLVM preferentially inlines the
+        // function, exposing the same folding opportunities at remaining runtime
+        // call sites where arguments aren't compile-time constants.
+        if (!result.isSymbolic() && !fn->parameters.empty())
+            foldableCallees_.insert(fn->name);
     }
 
     // Record call graph edge.
@@ -563,6 +570,18 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         auto* tern = static_cast<const TernaryExpr*>(e);
         const CTValue cond = evalExpr(frame, tern->condition.get());
         if (!cond.isKnown()) return CTValue::uninit();
+        if (cond.isSymbolic()) {
+            // Path-sensitive: evaluate both arms.  If they agree on a concrete
+            // non-array value the condition cannot affect the result — fold.
+            const CTValue tv = evalExpr(frame, tern->thenExpr.get());
+            const CTValue ev = evalExpr(frame, tern->elseExpr.get());
+            if (tv.isConcrete() && !tv.isArray() &&
+                ev.isConcrete() && !ev.isArray() && tv == ev) {
+                ++stats_.ternaryMerges;
+                return tv;
+            }
+            return CTValue::symbolic();
+        }
         return cond.isTruthy() ? evalExpr(frame, tern->thenExpr.get())
                                 : evalExpr(frame, tern->elseExpr.get());
     }
@@ -688,6 +707,17 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
         }
         if (op == "**") {
             if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(1);
+        }
+        // Bitwise OR with all-ones annihilates the other operand → -1.
+        if (op == "|") {
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == -1) return CTValue::fromI64(-1);
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == -1) return CTValue::fromI64(-1);
+        }
+        // Modulo by ±1 is always 0, regardless of the dividend.
+        if (op == "%" || op == "mod") {
+            if (rhs.isConcrete() && rhs.isInt() &&
+                (rhs.asI64() == 1 || rhs.asI64() == -1))
+                return CTValue::fromI64(0);
         }
         return CTValue::symbolic();
     }
@@ -2510,7 +2540,84 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
     case ASTNodeType::IF_STMT: {
         auto* ifs = static_cast<const IfStmt*>(s);
         CTValue cond = evalExpr(frame, ifs->condition.get());
-        // SYMBOLIC condition: we don't know which branch to take → abort.
+
+        // ── Path-sensitive branch merge ───────────────────────────────────
+        // When the condition is symbolic, evaluate both branches independently
+        // on frame forks.  If they agree (same return value, or same local
+        // variable state), fold to the agreed result without needing to know
+        // which branch would actually be taken at runtime.
+        //
+        // Safety notes:
+        //   • Frame locals are deep-copied per branch; the heap pointer is
+        //     shared.  Any array allocations made by abandoned branches leave
+        //     dangling handles in the heap (no future reference → harmless
+        //     memory waste, not a correctness issue).
+        //   • fuel_ is saved/restored per branch and set to max(both) so
+        //     we charge fairly for the more expensive branch.
+        //   • We only fold Case 1 (both return non-array concrete values) or
+        //     Case 2 (both fall through, locals agree or diverge → symbolic),
+        //     not any state where break/continue signals differ.
+        if (cond.isSymbolic() && fuel_ + 2 <= kMaxInstructions) {
+            const int64_t savedFuel = fuel_;
+
+            // Fork A: then-branch.
+            CTFrame thenF = frame;
+            thenF.hasReturned = false; thenF.didBreak = false; thenF.didContinue = false;
+            bool thenOk = evalStmt(thenF, ifs->thenBranch.get());
+            const int64_t fuelAfterThen = fuel_;
+
+            // Fork B: else-branch (or identity if absent).
+            CTFrame elseF = frame;
+            elseF.hasReturned = false; elseF.didBreak = false; elseF.didContinue = false;
+            fuel_ = savedFuel;
+            bool elseOk = true;
+            if (ifs->elseBranch)
+                elseOk = evalStmt(elseF, ifs->elseBranch.get());
+            const int64_t fuelAfterElse = fuel_;
+            fuel_ = std::max(fuelAfterThen, fuelAfterElse);
+
+            // Case 1: both branches return the same concrete non-array value.
+            // The result is independent of the condition → constant fold.
+            if (thenOk && thenF.hasReturned &&
+                !thenF.returnValue.isArray() && !thenF.returnValue.isSymbolic() &&
+                elseOk && elseF.hasReturned &&
+                !elseF.returnValue.isArray() && !elseF.returnValue.isSymbolic() &&
+                thenF.returnValue == elseF.returnValue) {
+                frame.returnValue = thenF.returnValue;
+                frame.hasReturned = true;
+                ++stats_.branchMerges;
+                return true;
+            }
+
+            // Case 2: neither branch returns or breaks — merge locals.
+            // Variables that agree across both branches keep their value;
+            // variables that diverge are marked symbolic so downstream code
+            // can still proceed (conservatively) without aborting.
+            if (thenOk && !thenF.hasReturned && !thenF.didBreak &&
+                elseOk && !elseF.hasReturned && !elseF.didBreak) {
+                // Apply merged state: iterate over all keys in both branches.
+                for (auto& [k, v] : thenF.locals) {
+                    auto eit = elseF.locals.find(k);
+                    if (eit != elseF.locals.end()) {
+                        frame.locals[k] = (v == eit->second) ? v : CTValue::symbolic();
+                    } else {
+                        // Present in then-branch only → conditionally defined → symbolic.
+                        frame.locals[k] = CTValue::symbolic();
+                    }
+                }
+                for (auto& [k, v] : elseF.locals) {
+                    if (!thenF.locals.count(k))
+                        frame.locals[k] = CTValue::symbolic();
+                }
+                ++stats_.branchMerges;
+                return true;
+            }
+
+            // Merge failed — locals are unchanged (heap may have new dangling
+            // handles, but they won't be referenced by anyone).
+            return false;
+        }
+
         if (!cond.isKnown() || cond.isSymbolic()) return false;
         if (cond.isTruthy()) return evalStmt(frame, ifs->thenBranch.get());
         if (ifs->elseBranch) return evalStmt(frame, ifs->elseBranch.get());

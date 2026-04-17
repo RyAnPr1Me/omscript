@@ -337,10 +337,21 @@ public:
         int64_t pipelineTilesExecuted{0};
         int64_t functionsRegistered{0};
         int64_t pureFunctionsDetected{0};
-        int64_t loopsReasoned{0};  ///< For-loops handled by closed-form symbolic analysis
+        int64_t loopsReasoned{0};    ///< For-loops handled by closed-form symbolic analysis
+        int64_t branchMerges{0};     ///< Symbolic-IF diamond eliminations (path-sensitive folding)
+        int64_t ternaryMerges{0};    ///< Symbolic-ternary both-arm agreement folds
     };
     const Stats& stats()      const noexcept { return stats_; }
     void         resetStats()       noexcept { stats_ = {}; }
+
+    /// Set of user functions that produced ≥1 concrete fold result (i.e., they
+    /// were successfully CT-evaluated with concrete arguments).  The codegen
+    /// uses this to apply InlineHint to these functions so LLVM will prefer to
+    /// inline them, exposing the same constant-folding opportunities at
+    /// remaining runtime call sites.
+    const std::unordered_set<std::string>& foldableCallees() const noexcept {
+        return foldableCallees_;
+    }
 
     /// Interprocedural call graph built during runPass.
     const CTGraph& graph() const noexcept { return graph_; }
@@ -379,6 +390,10 @@ private:
     std::unordered_map<std::string, CTValue>             globalConsts_;
     std::unordered_map<std::string, int64_t>             enumConsts_;
     std::unordered_set<std::string>                      pureFunctions_;
+
+    /// Functions that produced ≥1 concrete fold (memoised with concrete args).
+    /// Populated in executeFunction; read by codegen to apply InlineHint.
+    std::unordered_set<std::string>                      foldableCallees_;
 
     /// Memoisation cache: CTMemoKey → snapshot CTValue.
     std::unordered_map<CTMemoKey, CTValue, CTMemoKeyHash> memoCache_;

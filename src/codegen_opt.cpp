@@ -770,6 +770,20 @@ void CodeGenerator::runOptimizationPasses() {
             // enabling vectorization of loops that would otherwise be rejected
             // due to conservative overflow assumptions.
             FPM.addPass(llvm::CorrelatedValuePropagationPass());
+            // ConstraintElimination uses a system of linear constraints derived
+            // from branch conditions to prove or disprove comparisons.  Running
+            // it here (before the vectorizer) lets it eliminate induction-variable
+            // bounds checks that CVP left behind, giving the vectorizer a cleaner
+            // loop body — no scalar epilogue is needed for checks that are proven
+            // always-true.  It also runs later in ScalarOptimizerLateEPCallback
+            // for post-vectorization cleanup; the two placements are complementary.
+            FPM.addPass(llvm::ConstraintEliminationPass());
+            // InductiveRangeCheckElimination removes bounds checks inside loops
+            // with provably bounded induction variables.  After CVP + CE have
+            // narrowed value ranges, IRCE can eliminate per-iteration array-index
+            // guards, allowing the vectorizer to produce tighter vectorised loops
+            // without fallback scalar paths.
+            FPM.addPass(llvm::IRCEPass());
             // SimplifyCFG merges trivially-redundant blocks and eliminates
             // unreachable code before the vectorizer.  Cleaner CFG structure
             // helps the vectorizer's control-flow analysis and reduces the
