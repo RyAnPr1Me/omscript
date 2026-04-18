@@ -4723,6 +4723,231 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
 
+            // ── x - (x - y) → y  [double-subtraction cancellation] ──────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* innerSub = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (innerSub && innerSub->getOpcode() == llvm::Instruction::Sub &&
+                    innerSub->getOperand(0) == inst.getOperand(0) && hasOneUse(innerSub)) {
+                    simplified = innerSub->getOperand(1);  // y
+                }
+            }
+
+            // ── ~(x | y) → ~x & ~y  [De Morgan] ─────────────────────────────
+            // xor(or(x,y), -1) → and(xor(x,-1), xor(y,-1))
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->isMinusOne()) {
+                        if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                            if (inner->getOpcode() == llvm::Instruction::Or &&
+                                hasOneUse(inner)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* notA = builder.CreateNot(inner->getOperand(0), "demorgan.nota");
+                                llvm::Value* notB = builder.CreateNot(inner->getOperand(1), "demorgan.notb");
+                                simplified = builder.CreateAnd(notA, notB, "demorgan.and");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── ~(x & y) → ~x | ~y  [De Morgan] ─────────────────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->isMinusOne()) {
+                        if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                            if (inner->getOpcode() == llvm::Instruction::And &&
+                                hasOneUse(inner)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* notA = builder.CreateNot(inner->getOperand(0), "demorgan.nota");
+                                llvm::Value* notB = builder.CreateNot(inner->getOperand(1), "demorgan.notb");
+                                simplified = builder.CreateOr(notA, notB, "demorgan.or");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── (x & C1) | (x & C2) → x & (C1 | C2)  [bitwise distributivity] ─
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* andA = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* andB = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (andA && andB &&
+                    andA->getOpcode() == llvm::Instruction::And &&
+                    andB->getOpcode() == llvm::Instruction::And &&
+                    andA->getOperand(0) == andB->getOperand(0) &&
+                    hasOneUse(andA) && hasOneUse(andB)) {
+                    auto cA = getConstIntValue(andA->getOperand(1));
+                    auto cB = getConstIntValue(andB->getOperand(1));
+                    if (cA && cB && cA != cB) {  // skip if already handled by complement case
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateAnd(
+                            andA->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), *cA | *cB),
+                            "or_and_distrib");
+                    }
+                }
+            }
+
+            // ── (x | C1) & (x | C2) → x | (C1 & C2)  [bitwise distributivity] ─
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                auto* orA = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* orB = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (orA && orB &&
+                    orA->getOpcode() == llvm::Instruction::Or &&
+                    orB->getOpcode() == llvm::Instruction::Or &&
+                    orA->getOperand(0) == orB->getOperand(0) &&
+                    hasOneUse(orA) && hasOneUse(orB)) {
+                    auto cA = getConstIntValue(orA->getOperand(1));
+                    auto cB = getConstIntValue(orB->getOperand(1));
+                    if (cA && cB) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateOr(
+                            orA->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), *cA & *cB),
+                            "and_or_distrib");
+                    }
+                }
+            }
+
+            // ── mul(x, C) + x → mul(x, C+1)  [merge linear terms] ────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                for (unsigned op = 0; op < 2 && !simplified; ++op) {
+                    auto* mulInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(op));
+                    llvm::Value* xv = inst.getOperand(1 - op);
+                    if (mulInst && mulInst->getOpcode() == llvm::Instruction::Mul &&
+                        hasOneUse(mulInst)) {
+                        llvm::Value* mulX = nullptr;
+                        auto cOpt = getConstIntValue(mulInst->getOperand(1));
+                        if (cOpt && mulInst->getOperand(0) == xv)
+                            mulX = xv;
+                        else {
+                            cOpt = getConstIntValue(mulInst->getOperand(0));
+                            if (cOpt && mulInst->getOperand(1) == xv)
+                                mulX = xv;
+                        }
+                        if (mulX && cOpt) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateMul(
+                                mulX,
+                                llvm::ConstantInt::get(inst.getType(), *cOpt + 1),
+                                "mul_merge_add", /*HasNUW=*/false, /*HasNSW=*/true);
+                        }
+                    }
+                }
+            }
+
+            // ── mul(x, C) - x → mul(x, C-1)  [merge linear terms] ────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* mulInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                llvm::Value* xv = inst.getOperand(1);
+                if (mulInst && mulInst->getOpcode() == llvm::Instruction::Mul &&
+                    hasOneUse(mulInst)) {
+                    llvm::Value* mulX = nullptr;
+                    auto cOpt = getConstIntValue(mulInst->getOperand(1));
+                    if (cOpt && mulInst->getOperand(0) == xv)
+                        mulX = xv;
+                    else {
+                        cOpt = getConstIntValue(mulInst->getOperand(0));
+                        if (cOpt && mulInst->getOperand(1) == xv)
+                            mulX = xv;
+                    }
+                    if (mulX && cOpt && *cOpt > 1) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateMul(
+                            mulX,
+                            llvm::ConstantInt::get(inst.getType(), *cOpt - 1),
+                            "mul_merge_sub", /*HasNUW=*/false, /*HasNSW=*/true);
+                    }
+                }
+            }
+
+            // ── x - mul(x, C) → mul(x, 1-C)  (when C >= 1) ──────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* mulInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                llvm::Value* xv = inst.getOperand(0);
+                if (mulInst && mulInst->getOpcode() == llvm::Instruction::Mul &&
+                    hasOneUse(mulInst)) {
+                    llvm::Value* mulX = nullptr;
+                    auto cOpt = getConstIntValue(mulInst->getOperand(1));
+                    if (cOpt && mulInst->getOperand(0) == xv)
+                        mulX = xv;
+                    else {
+                        cOpt = getConstIntValue(mulInst->getOperand(0));
+                        if (cOpt && mulInst->getOperand(1) == xv)
+                            mulX = xv;
+                    }
+                    if (mulX && cOpt && *cOpt >= 2) {
+                        llvm::IRBuilder<> builder(&inst);
+                        // x - mul(x,C) = mul(x, 1-C)  — this is negative for C>1,
+                        // so emit as sub(0, mul(x, C-1)) to keep nonneg values safe.
+                        llvm::Value* inner = builder.CreateMul(
+                            mulX,
+                            llvm::ConstantInt::get(inst.getType(), *cOpt - 1),
+                            "mul_merge_rsub_inner");
+                        simplified = builder.CreateNeg(inner, "mul_merge_rsub");
+                    }
+                }
+            }
+
+            // ── mul(x, C1) + mul(x, C2) → mul(x, C1+C2) ─────────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                auto* mulA = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* mulB = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (mulA && mulB &&
+                    mulA->getOpcode() == llvm::Instruction::Mul &&
+                    mulB->getOpcode() == llvm::Instruction::Mul &&
+                    hasOneUse(mulA) && hasOneUse(mulB)) {
+                    // Find shared base in either operand order
+                    llvm::Value* sharedBase = nullptr;
+                    auto cA = getConstIntValue(mulA->getOperand(1));
+                    auto cB = getConstIntValue(mulB->getOperand(1));
+                    if (cA && cB && mulA->getOperand(0) == mulB->getOperand(0))
+                        sharedBase = mulA->getOperand(0);
+                    if (!sharedBase) {
+                        cA = getConstIntValue(mulA->getOperand(0));
+                        cB = getConstIntValue(mulB->getOperand(0));
+                        if (cA && cB && mulA->getOperand(1) == mulB->getOperand(1))
+                            sharedBase = mulA->getOperand(1);
+                    }
+                    if (sharedBase && cA && cB) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateMul(
+                            sharedBase,
+                            llvm::ConstantInt::get(inst.getType(), *cA + *cB),
+                            "mul_add_merge");
+                    }
+                }
+            }
+
+            // ── mul(x, C1) - mul(x, C2) → mul(x, C1-C2) ─────────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* mulA = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* mulB = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (mulA && mulB &&
+                    mulA->getOpcode() == llvm::Instruction::Mul &&
+                    mulB->getOpcode() == llvm::Instruction::Mul &&
+                    hasOneUse(mulA) && hasOneUse(mulB)) {
+                    llvm::Value* sharedBase = nullptr;
+                    auto cA = getConstIntValue(mulA->getOperand(1));
+                    auto cB = getConstIntValue(mulB->getOperand(1));
+                    if (cA && cB && mulA->getOperand(0) == mulB->getOperand(0))
+                        sharedBase = mulA->getOperand(0);
+                    if (!sharedBase) {
+                        cA = getConstIntValue(mulA->getOperand(0));
+                        cB = getConstIntValue(mulB->getOperand(0));
+                        if (cA && cB && mulA->getOperand(1) == mulB->getOperand(1))
+                            sharedBase = mulA->getOperand(1);
+                    }
+                    if (sharedBase && cA && cB) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateMul(
+                            sharedBase,
+                            llvm::ConstantInt::get(inst.getType(), *cA - *cB),
+                            "mul_sub_merge");
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);
@@ -4737,6 +4962,178 @@ static bool replaceIdiom(IdiomMatch& match) {
         }
     }
 
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Comparison canonicalization
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Canonicalize integer comparisons to simplify downstream analyses.
+///
+/// Transformations:
+///   icmp ult x, C+1  →  icmp ule x, C   (strict→non-strict with C-1)
+///   icmp ugt x, C-1  →  icmp uge x, C   (strict→non-strict with C+1)
+///   icmp slt x, C+1  →  icmp sle x, C
+///   icmp sgt x, C-1  →  icmp sge x, C
+///   icmp eq  (zext x), 0  →  icmp eq x, 0   (narrowing)
+///   icmp ne  (zext x), 0  →  icmp ne x, 0
+///   icmp ult (and x, C), 1 →  icmp eq (and x, C), 0  (test == 0)
+///   icmp ugt (and x, C), 0 →  icmp ne (and x, C), 0  (test != 0)
+///
+/// These help LLVM's CVP and SimplifyCFG produce tighter value ranges
+/// and more efficient branch layout.
+[[gnu::hot]] static unsigned applyComparisonCanonicalization(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::ICmpInst*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst);
+            if (!cmp) continue;
+
+            llvm::Value* lhs = cmp->getOperand(0);
+            llvm::Value* rhs = cmp->getOperand(1);
+            const llvm::CmpInst::Predicate pred = cmp->getPredicate();
+
+            // ── icmp ult x, C+1 → icmp ule x, C ─────────────────────────────
+            // ── icmp slt x, C+1 → icmp sle x, C ─────────────────────────────
+            if (pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_SLT) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(rhs)) {
+                    int64_t val = ci->getSExtValue();
+                    // Only fold when C ≥ 1 (so C+1-1 = C makes sense and
+                    // the new constant C-1 is representable as a non-negative imm).
+                    if (val >= 1) {
+                        llvm::IRBuilder<> builder(cmp);
+                        auto newPred = (pred == llvm::CmpInst::ICMP_ULT)
+                            ? llvm::CmpInst::ICMP_ULE : llvm::CmpInst::ICMP_SLE;
+                        llvm::Value* newRhs = llvm::ConstantInt::get(rhs->getType(), val - 1);
+                        llvm::Value* newCmp = builder.CreateICmp(newPred, lhs, newRhs, "cmp.canon");
+                        replacements.push_back({cmp, newCmp});
+                        count++;
+                        continue;
+                    }
+                }
+            }
+
+            // ── icmp ugt x, C-1 → icmp uge x, C ─────────────────────────────
+            // ── icmp sgt x, C-1 → icmp sge x, C ─────────────────────────────
+            if (pred == llvm::CmpInst::ICMP_UGT || pred == llvm::CmpInst::ICMP_SGT) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(rhs)) {
+                    int64_t val = ci->getSExtValue();
+                    // Only when C+1 won't overflow in the comparison's type.
+                    unsigned bw = ci->getType()->getIntegerBitWidth();
+                    int64_t maxVal = (bw >= 64) ? INT64_MAX : ((int64_t(1) << (bw - 1)) - 1);
+                    if (val < maxVal) {
+                        llvm::IRBuilder<> builder(cmp);
+                        auto newPred = (pred == llvm::CmpInst::ICMP_UGT)
+                            ? llvm::CmpInst::ICMP_UGE : llvm::CmpInst::ICMP_SGE;
+                        llvm::Value* newRhs = llvm::ConstantInt::get(rhs->getType(), val + 1);
+                        llvm::Value* newCmp = builder.CreateICmp(newPred, lhs, newRhs, "cmp.canon");
+                        replacements.push_back({cmp, newCmp});
+                        count++;
+                        continue;
+                    }
+                }
+            }
+
+            // ── icmp eq/ne (zext x → i64), 0 → icmp eq/ne x, 0 ─────────────
+            // Narrows the comparison to the original type, eliminating the zext.
+            if ((pred == llvm::CmpInst::ICMP_EQ || pred == llvm::CmpInst::ICMP_NE) &&
+                isConstInt(rhs, 0)) {
+                if (auto* zext = llvm::dyn_cast<llvm::ZExtInst>(lhs)) {
+                    llvm::IRBuilder<> builder(cmp);
+                    llvm::Value* zero = llvm::ConstantInt::get(zext->getOperand(0)->getType(), 0);
+                    llvm::Value* newCmp = builder.CreateICmp(pred, zext->getOperand(0), zero, "cmp.narrow");
+                    replacements.push_back({cmp, newCmp});
+                    count++;
+                    continue;
+                }
+            }
+
+            // ── icmp ult x, 1 → icmp eq x, 0 ────────────────────────────────
+            // ── icmp ugt x, 0 → icmp ne x, 0 ────────────────────────────────
+            if (pred == llvm::CmpInst::ICMP_ULT && isConstInt(rhs, 1)) {
+                llvm::IRBuilder<> builder(cmp);
+                llvm::Value* zero = llvm::ConstantInt::get(rhs->getType(), 0);
+                llvm::Value* newCmp = builder.CreateICmpEQ(lhs, zero, "cmp.ult1");
+                replacements.push_back({cmp, newCmp});
+                count++;
+                continue;
+            }
+            if (pred == llvm::CmpInst::ICMP_UGT && isConstInt(rhs, 0)) {
+                llvm::IRBuilder<> builder(cmp);
+                llvm::Value* zero = llvm::ConstantInt::get(rhs->getType(), 0);
+                llvm::Value* newCmp = builder.CreateICmpNE(lhs, zero, "cmp.ugt0");
+                replacements.push_back({cmp, newCmp});
+                count++;
+                continue;
+            }
+        }
+    }
+
+    for (auto& [cmp, newVal] : replacements) {
+        cmp->replaceAllUsesWith(newVal);
+        if (cmp->use_empty())
+            cmp->eraseFromParent();
+    }
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHI constant propagation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fold PHI nodes where all incoming values are the same constant or value.
+/// Also fold select instructions with a constant condition.
+///
+/// These patterns arise after earlier simplification passes reduce branches
+/// and constants propagate through the IR, leaving trivial PHI nodes.
+///
+/// Transformations:
+///   phi [C, B0], [C, B1], ... → C  (all-same incoming)
+///   select(true, A, B)  → A
+///   select(false, A, B) → B
+[[gnu::hot]] static unsigned propagatePhiConstants(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Value*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            // ── PHI with all identical incoming values → replace with that value ─
+            if (auto* phi = llvm::dyn_cast<llvm::PHINode>(&inst)) {
+                if (phi->getNumIncomingValues() == 0) continue;
+                llvm::Value* first = phi->getIncomingValue(0);
+                bool allSame = true;
+                for (unsigned i = 1; i < phi->getNumIncomingValues(); ++i) {
+                    if (phi->getIncomingValue(i) != first) { allSame = false; break; }
+                }
+                if (allSame && first != phi) {  // avoid self-referential phi
+                    replacements.push_back({phi, first});
+                    count++;
+                }
+                continue;
+            }
+
+            // ── select(constant cond, A, B) → A or B ─────────────────────────
+            if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst)) {
+                if (auto* condCI = llvm::dyn_cast<llvm::ConstantInt>(sel->getCondition())) {
+                    llvm::Value* result = condCI->isOne()
+                        ? sel->getTrueValue() : sel->getFalseValue();
+                    replacements.push_back({sel, result});
+                    count++;
+                }
+            }
+        }
+    }
+
+    for (auto& [orig, rep] : replacements) {
+        orig->replaceAllUsesWith(rep);
+        if (auto* inst = llvm::dyn_cast<llvm::Instruction>(orig)) {
+            if (inst->use_empty())
+                inst->eraseFromParent();
+        }
+    }
     return count;
 }
 
@@ -6962,9 +7359,30 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
         }
     }
 
-    // Phase 2: Algebraic simplification
+    // Phase 2: Algebraic simplification — multi-pass until fixed point.
+    // Each iteration may expose new patterns (e.g. De Morgan laws produce
+    // new bitwise ops that the subsequent iteration can fold further).
+    // Cap at 3 iterations to keep compile time bounded.
     if (config.enableAlgebraic) {
-        stats.algebraicSimplified = applyAlgebraicSimplifications(func);
+        static constexpr int kAlgMaxPasses = 3;
+        for (int pass = 0; pass < kAlgMaxPasses; ++pass) {
+            unsigned n = applyAlgebraicSimplifications(func);
+            stats.algebraicSimplified += n;
+            if (n == 0) break;  // fixed-point reached
+        }
+    }
+
+    // Phase 2.4: Comparison canonicalization — normalize icmp predicates
+    // so that downstream passes (CVP, SimplifyCFG, ConstantPropagation) see
+    // a consistent form.
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += applyComparisonCanonicalization(func);
+    }
+
+    // Phase 2.45: PHI / select constant propagation — fold trivial PHI nodes
+    // and constant-condition selects that earlier phases may have created.
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += propagatePhiConstants(func);
     }
 
     // Phase 2.5: Loop strength reduction — convert i*C to additive IVs

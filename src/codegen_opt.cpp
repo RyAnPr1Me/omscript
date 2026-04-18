@@ -1297,6 +1297,16 @@ void CodeGenerator::runOptimizationPasses() {
         }
         MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
     }
+    // At O1+, prepend AlwaysInlinerPass before the module pipeline so that
+    // @optmax functions marked alwaysinline (set in optimizeOptMaxFunctions)
+    // are force-inlined at their call sites before the main pipeline's inliner
+    // runs.  The main inliner skips alwaysinline functions when their body is
+    // larger than the cost threshold; AlwaysInlinerPass does unconditional
+    // inlining regardless of size, matching the user's explicit intent.
+    if (optimizationLevel >= OptimizationLevel::O1 && !optMaxFunctions.empty()) {
+        MPM.addPass(llvm::AlwaysInlinerPass());
+    }
+
     // At O2+, append GlobalOptPass after the standard pipeline to constant-fold
     // and internalize global variables, propagate initial values, and eliminate
     // globals that are only stored but never read.  This cleans up patterns the
@@ -1661,6 +1671,25 @@ void CodeGenerator::runOptimizationPasses() {
                 postSuperFPM.run(func);
             }
             postSuperFPM.doFinalization();
+
+            // At O3, run a second superoptimizer pass after the cleanup.
+            // The first pass's simplifications (idiom replacement, algebraic
+            // folds, select merging) expose new patterns — e.g. a De Morgan
+            // transform followed by absorption, or a strength-reduced multiply
+            // that becomes a power-of-2 shift the second pass can recognize.
+            // The second pass is lighter (no synthesis to avoid compile-time
+            // blowup) but picks up the incremental wins from the first pass.
+            if (optimizationLevel >= OptimizationLevel::O3) {
+                superopt::SuperoptimizerConfig superConfig2 = superConfig;
+                superConfig2.enableSynthesis = false;  // skip expensive synthesis on pass 2
+                auto stats2 = superopt::superoptimizeModule(*module, superConfig2);
+                const unsigned total2 = stats2.idiomsReplaced + stats2.algebraicSimplified +
+                                        stats2.branchesSimplified + stats2.deadCodeEliminated;
+                if (verbose_ && total2 > 0) {
+                    std::cout << "    Superoptimizer pass 2: "
+                              << total2 << " additional optimizations" << '\n';
+                }
+            }
         }
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSuperopt_) {
         std::cout << "    Superoptimizer disabled (-fno-superopt)" << '\n';
