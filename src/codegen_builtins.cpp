@@ -840,10 +840,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arg = toDefaultType(arg);
         llvm::Value* arrPtr =
             arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "arrptr");
-        auto* arrlenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "arrlen");
-        arrlenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        arrlenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        nonNegValues_.insert(arrlenLoad);
+                llvm::Value* arrlenLoad = emitLoadArrayLen(arrPtr, "arrlen");
         return arrlenLoad;
     }
 
@@ -1436,9 +1433,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Array layout: [length, elem0, elem1, ...]
         llvm::Value* arrPtr =
             arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "sum.arrptr");
-        auto* sumLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "sum.len");
-        sumLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        sumLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* sumLenLoad = emitLoadArrayLen(arrPtr, "sum.len");
         llvm::Value* length = sumLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -1470,8 +1465,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Element is at offset (idx + 1) from array base
         llvm::Value* offset = builder->CreateAdd(idx, llvm::ConstantInt::get(getDefaultType(), 1), "sum.offset", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "sum.elemptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "sum.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(elemPtr, "sum.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -1521,9 +1515,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Value* arrPtr =
             arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "swap.arrptr");
-        auto* swapLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "swap.len");
-        swapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        swapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* swapLenLoad = emitLoadArrayLen(arrPtr, "swap.len");
         llvm::Value* length = swapLenLoad;
 
         // Bounds check both indices: 0 <= i < length and 0 <= j < length
@@ -1560,14 +1552,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* offJ = builder->CreateAdd(j, one, "swap.offj", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* ptrI = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offI, "swap.ptri");
         llvm::Value* ptrJ = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offJ, "swap.ptrj");
-        llvm::Value* valI = builder->CreateAlignedLoad(getDefaultType(), ptrI, llvm::MaybeAlign(8), "swap.vali");
-        llvm::Value* valJ = builder->CreateAlignedLoad(getDefaultType(), ptrJ, llvm::MaybeAlign(8), "swap.valj");
-        llvm::cast<llvm::Instruction>(valI)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        llvm::cast<llvm::Instruction>(valJ)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        auto* stI = builder->CreateAlignedStore(valJ, ptrI, llvm::MaybeAlign(8));
-        auto* stJ = builder->CreateAlignedStore(valI, ptrJ, llvm::MaybeAlign(8));
-        stI->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        stJ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* valI = emitLoadArrayElem(ptrI, "swap.vali");
+        llvm::Value* valJ = emitLoadArrayElem(ptrJ, "swap.valj");
+        emitStoreArrayElem(valJ, ptrI);
+        emitStoreArrayElem(valI, ptrJ);
         return llvm::ConstantInt::get(getDefaultType(), 0);
     }
 
@@ -1576,9 +1564,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* arrPtr =
             arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "rev.arrptr");
-        auto* revLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "rev.len");
-        revLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        revLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* revLenLoad = emitLoadArrayLen(arrPtr, "rev.len");
         llvm::Value* length = revLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -1606,20 +1592,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* offHi = builder->CreateAdd(hi, one, "rev.offhi", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* ptrLo = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offLo, "rev.ptrlo");
         llvm::Value* ptrHi = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offHi, "rev.ptrhi");
-        llvm::Value* valLo = builder->CreateAlignedLoad(getDefaultType(), ptrLo, llvm::MaybeAlign(8), "rev.vallo");
-        llvm::Value* valHi = builder->CreateAlignedLoad(getDefaultType(), ptrHi, llvm::MaybeAlign(8), "rev.valhi");
-        llvm::cast<llvm::Instruction>(valLo)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        llvm::cast<llvm::Instruction>(valHi)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* valLo = emitLoadArrayElem(ptrLo, "rev.vallo");
+        llvm::Value* valHi = emitLoadArrayElem(ptrHi, "rev.valhi");
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::cast<llvm::Instruction>(valLo)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
             llvm::cast<llvm::Instruction>(valHi)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
         }
-        auto* stLo = builder->CreateAlignedStore(valHi, ptrLo, llvm::MaybeAlign(8));
-        auto* stHi = builder->CreateAlignedStore(valLo, ptrHi, llvm::MaybeAlign(8));
-        stLo->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        stHi->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        emitStoreArrayElem(valHi, ptrLo);
+        emitStoreArrayElem(valLo, ptrHi);
         llvm::Value* newLo = builder->CreateAdd(lo, one, "rev.newlo", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* newHi = builder->CreateSub(hi, one, "rev.newhi", /*HasNUW=*/true, /*HasNSW=*/true);
         lo->addIncoming(newLo, bodyBB);
@@ -3484,9 +3466,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Array layout: [length, elem0, elem1, ...]
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "push.arrptr");
-        auto* pushLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "push.oldlen");
-        pushLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        pushLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* pushLenLoad = emitLoadArrayLen(arrPtr, "push.oldlen");
         llvm::Value* oldLen = pushLenLoad;
         llvm::Value* newLen = builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
         // Only call realloc when the new slot count crosses a power-of-2
@@ -3554,14 +3534,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         newBuf->addIncoming(arrPtr, nogrowBB);
 
         // Update length
-        auto* pushLenSt = builder->CreateAlignedStore(newLen, newBuf, llvm::MaybeAlign(8));
-        pushLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        emitStoreArrayLen(newLen, newBuf);
         // Store new value at index oldLen + 1 (after header)
         llvm::Value* newElemIdx =
             builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* newElemPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, newElemIdx, "push.elemptr");
-        auto* pushElemSt = builder->CreateAlignedStore(valArg, newElemPtr, llvm::MaybeAlign(8));
-        pushElemSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        emitStoreArrayElem(valArg, newElemPtr);
         // Return new array pointer as i64
         return builder->CreatePtrToInt(newBuf, getDefaultType(), "push.result");
     }
@@ -3572,9 +3550,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "pop.arrptr");
-        auto* popLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "pop.oldlen");
-        popLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        popLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* popLenLoad = emitLoadArrayLen(arrPtr, "pop.oldlen");
         llvm::Value* oldLen = popLenLoad;
 
         // Guard against popping from an empty array.
@@ -3603,9 +3579,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateAdd(builder->CreateSub(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "pop.lastoff", /*HasNUW=*/true, /*HasNSW=*/true),
                                llvm::ConstantInt::get(getDefaultType(), 1), "pop.lastidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* lastPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, lastIdx, "pop.lastptr");
-        llvm::Value* lastVal = builder->CreateAlignedLoad(getDefaultType(), lastPtr, llvm::MaybeAlign(8), "pop.lastval");
-        if (auto* load = llvm::dyn_cast<llvm::LoadInst>(lastVal))
-            load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* lastVal = emitLoadArrayElem(lastPtr, "pop.lastval");
         // Decrease length in-place
         llvm::Value* newLen = builder->CreateSub(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "pop.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
         auto* popLenSt = builder->CreateAlignedStore(newLen, arrPtr, llvm::MaybeAlign(8));
@@ -3637,9 +3611,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         valArg = toDefaultType(valArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "indexof.arrptr");
-        auto* idxofLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "indexof.len");
-        idxofLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        idxofLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* idxofLenLoad = emitLoadArrayLen(arrPtr, "indexof.len");
         llvm::Value* arrLen = idxofLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -3662,8 +3634,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "indexof.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "indexof.elemptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "indexof.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(elemPtr, "indexof.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -3705,9 +3676,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         valArg = toDefaultType(valArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "contains.arrptr");
-        auto* containsLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "contains.len");
-        containsLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        containsLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* containsLenLoad = emitLoadArrayLen(arrPtr, "contains.len");
         llvm::Value* arrLen = containsLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -3728,8 +3697,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "contains.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "contains.elemptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "contains.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(elemPtr, "contains.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -3753,9 +3721,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "sort.arrptr");
-        auto* sortLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "sort.len");
-        sortLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        sortLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* sortLenLoad = emitLoadArrayLen(arrPtr, "sort.len");
         llvm::Value* arrLen = sortLenLoad;
 
         // Early exit: skip qsort for arrays with 0 or 1 elements (already sorted).
@@ -3889,15 +3855,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::cast<llvm::CallInst>(buf)->addRetAttr(
                 llvm::Attribute::getWithDereferenceableBytes(*context, 8));
             // Store length in header (calloc zeroed it; overwrite with actual size)
-            auto* fillLenSt = builder->CreateStore(sizeArg, buf);
-            fillLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            emitStoreArrayLen(sizeArg, buf);
         } else {
             llvm::Value* bytes = builder->CreateMul(slots, eight, "fill.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
             buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "fill.buf");
             llvm::cast<llvm::CallInst>(buf)->addRetAttr(
                 llvm::Attribute::getWithDereferenceableBytes(*context, 8));
-            auto* fillLenSt2 = builder->CreateStore(sizeArg, buf);
-            fillLenSt2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            emitStoreArrayLen(sizeArg, buf);
             // Fill loop
             llvm::Function* function = builder->GetInsertBlock()->getParent();
             llvm::BasicBlock* preheader = builder->GetInsertBlock();
@@ -3954,13 +3918,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arr2Arg = toDefaultType(arr2Arg);
         llvm::Value* arr1Ptr = builder->CreateIntToPtr(arr1Arg, llvm::PointerType::getUnqual(*context), "aconcat.ptr1");
         llvm::Value* arr2Ptr = builder->CreateIntToPtr(arr2Arg, llvm::PointerType::getUnqual(*context), "aconcat.ptr2");
-        auto* acatLen1Load = builder->CreateAlignedLoad(getDefaultType(), arr1Ptr, llvm::MaybeAlign(8), "aconcat.len1");
-        acatLen1Load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        acatLen1Load->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* acatLen1Load = emitLoadArrayLen(arr1Ptr, "aconcat.len1");
         llvm::Value* len1 = acatLen1Load;
-        auto* acatLen2Load = builder->CreateAlignedLoad(getDefaultType(), arr2Ptr, llvm::MaybeAlign(8), "aconcat.len2");
-        acatLen2Load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        acatLen2Load->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* acatLen2Load = emitLoadArrayLen(arr2Ptr, "aconcat.len2");
         llvm::Value* len2 = acatLen2Load;
         llvm::Value* totalLen = builder->CreateAdd(len1, len2, "aconcat.total", /*HasNUW=*/true, /*HasNSW=*/true);
         // Allocate: (totalLen + 1) * 8
@@ -3969,8 +3929,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "aconcat.buf");
         llvm::cast<llvm::CallInst>(buf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, 8));
-        auto* aconcatLenSt = builder->CreateStore(totalLen, buf);
-        aconcatLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        emitStoreArrayLen(totalLen, buf);
         // Copy arr1 elements (len1 * 8 bytes starting at arr1[1])
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
@@ -3997,9 +3956,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         endArg = toDefaultType(endArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "slice.arrptr");
-        auto* sliceLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "slice.arrlen");
-        sliceLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        sliceLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* sliceLenLoad = emitLoadArrayLen(arrPtr, "slice.arrlen");
         llvm::Value* arrLen = sliceLenLoad;
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         // Clamp start: max(0, min(start, arrLen))
@@ -4017,13 +3974,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Allocate: (sliceLen + 1) * 8
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
-        llvm::Value* slots = builder->CreateAdd(sliceLen, one, "slice.slots", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* bytes = builder->CreateMul(slots, eight, "slice.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "slice.buf");
-        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
-            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
-        auto* sliceLenSt = builder->CreateStore(sliceLen, buf);
-        sliceLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        llvm::Value* buf = emitAllocArray(sliceLen, "slice");
         // Copy elements: arr[start+1..end+1) to buf[1..)
         llvm::Value* srcIdx = builder->CreateAdd(startArg, one, "slice.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* src = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, srcIdx, "slice.src");
@@ -4039,9 +3990,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acopy.arrptr");
-        auto* acopyLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "acopy.len");
-        acopyLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        acopyLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* acopyLenLoad = emitLoadArrayLen(arrPtr, "acopy.len");
         llvm::Value* arrLen = acopyLenLoad;
         // Allocate: (length + 1) * 8 bytes
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
@@ -4063,9 +4012,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         idxArg = toDefaultType(idxArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aremove.arrptr");
-        auto* aremLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "aremove.len");
-        aremLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        aremLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* aremLenLoad = emitLoadArrayLen(arrPtr, "aremove.len");
         llvm::Value* arrLen = aremLenLoad;
         // Bounds check: 0 <= idx < length
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -4110,8 +4057,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclareMemmove(), {elemPtr, srcPtr, shiftBytes});
         // Decrement length
         llvm::Value* newLen = builder->CreateSub(arrLen, one, "aremove.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
-        auto* newLenSt = builder->CreateStore(newLen, arrPtr);
-        newLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        emitStoreArrayLen(newLen, arrPtr);
         return removedVal;
     }
 
@@ -4140,9 +4086,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "amap.arrptr");
-        auto* amapLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "amap.len");
-        amapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        amapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* amapLenLoad = emitLoadArrayLen(arrPtr, "amap.len");
         llvm::Value* arrLen = amapLenLoad;
 
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -4150,13 +4094,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
 
         // Allocate result array: (arrLen + 1) * 8
-        llvm::Value* slots = builder->CreateAdd(arrLen, one, "amap.slots", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* bytes = builder->CreateMul(slots, eight, "amap.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "amap.buf");
-        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
-            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
-        auto* amapLenSt = builder->CreateStore(arrLen, buf);
-        amapLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        llvm::Value* buf = emitAllocArray(arrLen, "amap");
 
         // Loop: for each element, call mapFn and store result
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -4175,8 +4113,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Load element from source: arrPtr[idx + 1]
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "amap.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "amap.srcptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), srcPtr, llvm::MaybeAlign(8), "amap.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(srcPtr, "amap.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -4217,9 +4154,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "afilt.arrptr");
-        auto* afiltLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "afilt.len");
-        afiltLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        afiltLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* afiltLenLoad = emitLoadArrayLen(arrPtr, "afilt.len");
         llvm::Value* arrLen = afiltLenLoad;
 
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -4233,8 +4168,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::cast<llvm::CallInst>(buf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, 8));
         // Initialize length to 0 (will be updated as we add elements)
-        auto* afiltInitSt = builder->CreateStore(zero, buf);
-        afiltInitSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        emitStoreArrayLen(zero, buf);
 
         // Loop: for each element, call filterFn; if non-zero, add to result
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -4259,8 +4193,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Load element from source
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "afilt.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "afilt.srcptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), srcPtr, llvm::MaybeAlign(8), "afilt.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(srcPtr, "afilt.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -4291,8 +4224,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Done: store final length
         builder->SetInsertPoint(doneBB);
-        auto* afiltLenSt = builder->CreateStore(outIdx, buf);
-        afiltLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        emitStoreArrayLen(outIdx, buf);
         return builder->CreatePtrToInt(buf, getDefaultType(), "afilt.result");
     }
 
@@ -4324,9 +4256,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         initVal = toDefaultType(initVal);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "areduce.arrptr");
-        auto* aredLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "areduce.len");
-        aredLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        aredLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* aredLenLoad = emitLoadArrayLen(arrPtr, "areduce.len");
         llvm::Value* arrLen = aredLenLoad;
 
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -4353,8 +4283,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Load element from source: arrPtr[idx + 1]
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "areduce.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "areduce.srcptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), srcPtr, llvm::MaybeAlign(8), "areduce.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(srcPtr, "areduce.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -4397,9 +4326,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "amin.arrptr");
-        auto* aminLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "amin.len");
-        aminLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        aminLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* aminLenLoad = emitLoadArrayLen(arrPtr, "amin.len");
         llvm::Value* length = aminLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -4424,8 +4351,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Init: load first element as initial min
         builder->SetInsertPoint(initBB);
         llvm::Value* firstPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "amin.firstptr");
-        llvm::Value* firstElem = builder->CreateAlignedLoad(getDefaultType(), firstPtr, llvm::MaybeAlign(8), "amin.first");
-        llvm::cast<llvm::Instruction>(firstElem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* firstElem = emitLoadArrayElem(firstPtr, "amin.first");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(firstElem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -4447,8 +4373,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "amin.offset", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "amin.elemptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "amin.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(elemPtr, "amin.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -4524,9 +4449,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "amax.arrptr");
-        auto* amaxLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "amax.len");
-        amaxLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        amaxLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* amaxLenLoad = emitLoadArrayLen(arrPtr, "amax.len");
         llvm::Value* length = amaxLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -4550,8 +4473,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Init: load first element as initial max
         builder->SetInsertPoint(initBB);
         llvm::Value* firstPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "amax.firstptr");
-        llvm::Value* firstElem = builder->CreateAlignedLoad(getDefaultType(), firstPtr, llvm::MaybeAlign(8), "amax.first");
-        llvm::cast<llvm::Instruction>(firstElem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* firstElem = emitLoadArrayElem(firstPtr, "amax.first");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(firstElem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -4572,8 +4494,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "amax.offset", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "amax.elemptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "amax.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(elemPtr, "amax.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -4639,9 +4560,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aany.arrptr");
-        auto* aanyLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "aany.len");
-        aanyLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        aanyLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* aanyLenLoad = emitLoadArrayLen(arrPtr, "aany.len");
         llvm::Value* length = aanyLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -4666,8 +4585,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "aany.offset", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "aany.elemptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "aany.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(elemPtr, "aany.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -4712,9 +4630,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aevery.arrptr");
-        auto* aeveryLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "aevery.len");
-        aeveryLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        aeveryLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* aeveryLenLoad = emitLoadArrayLen(arrPtr, "aevery.len");
         llvm::Value* length = aeveryLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -4739,8 +4655,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "aevery.offset", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "aevery.elemptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "aevery.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(elemPtr, "aevery.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -4786,9 +4701,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* target = generateExpression(expr->arguments[1].get());
         target = toDefaultType(target);
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "afind.arrptr");
-        auto* afindLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "afind.len");
-        afindLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        afindLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* afindLenLoad = emitLoadArrayLen(arrPtr, "afind.len");
         llvm::Value* length = afindLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -4815,8 +4728,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "afind.offset", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "afind.elemptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "afind.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(elemPtr, "afind.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -4858,9 +4770,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acnt.arrptr");
-        auto* acntLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "acnt.len");
-        acntLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        acntLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* acntLenLoad = emitLoadArrayLen(arrPtr, "acnt.len");
         llvm::Value* length = acntLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -4886,8 +4796,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "acnt.offset", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "acnt.elemptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "acnt.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(elemPtr, "acnt.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -5375,9 +5284,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* i8zero = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0);
 
-        auto* joinLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "join.len");
-        joinLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        joinLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* joinLenLoad = emitLoadArrayLen(arrPtr, "join.len");
         llvm::Value* arrLen = joinLenLoad;
         llvm::Value* delimLen = builder->CreateCall(getOrDeclareStrlen(), {delimPtr}, "join.delimlen");
         nonNegValues_.insert(delimLen);
@@ -5407,8 +5314,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Load string pointer from array slot (index li + 1)
         llvm::Value* lslot = builder->CreateAdd(li, one, "join.lslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* lslotPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, lslot, "join.lslotptr");
-        llvm::Value* elemInt = builder->CreateAlignedLoad(getDefaultType(), lslotPtr, llvm::MaybeAlign(8), "join.elemint");
-        llvm::cast<llvm::Instruction>(elemInt)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elemInt = emitLoadArrayElem(lslotPtr, "join.elemint");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elemInt)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -5462,8 +5368,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Load and copy element
         llvm::Value* cslot = builder->CreateAdd(ci, one, "join.cslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* cslotPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, cslot, "join.cslotptr");
-        llvm::Value* celemInt = builder->CreateAlignedLoad(getDefaultType(), cslotPtr, llvm::MaybeAlign(8), "join.celemint");
-        llvm::cast<llvm::Instruction>(celemInt)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* celemInt = emitLoadArrayElem(cslotPtr, "join.celemint");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(celemInt)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -6198,9 +6103,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::MUTEX_LOCK) {
         validateArgCount(expr, "mutex_lock", 1);
         llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
-        mutexVal = toDefaultType(mutexVal);
-        auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mutexPtr = builder->CreateIntToPtr(mutexVal, ptrTy, "mutex.ptr");
+                llvm::Value* mutexPtr = emitToArrayPtr(mutexVal, "mutex.ptr");
         builder->CreateCall(getOrDeclarePthreadMutexLock(), {mutexPtr});
         return llvm::ConstantInt::get(getDefaultType(), 0);
     }
@@ -6208,9 +6111,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::MUTEX_UNLOCK) {
         validateArgCount(expr, "mutex_unlock", 1);
         llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
-        mutexVal = toDefaultType(mutexVal);
-        auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mutexPtr = builder->CreateIntToPtr(mutexVal, ptrTy, "mutex.ptr");
+                llvm::Value* mutexPtr = emitToArrayPtr(mutexVal, "mutex.ptr");
         builder->CreateCall(getOrDeclarePthreadMutexUnlock(), {mutexPtr});
         return llvm::ConstantInt::get(getDefaultType(), 0);
     }
@@ -6218,9 +6119,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::MUTEX_DESTROY) {
         validateArgCount(expr, "mutex_destroy", 1);
         llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
-        mutexVal = toDefaultType(mutexVal);
-        auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mutexPtr = builder->CreateIntToPtr(mutexVal, ptrTy, "mutex.ptr");
+                llvm::Value* mutexPtr = emitToArrayPtr(mutexVal, "mutex.ptr");
         builder->CreateCall(getOrDeclarePthreadMutexDestroy(), {mutexPtr});
         builder->CreateCall(getOrDeclareFree(), {mutexPtr});
         return llvm::ConstantInt::get(getDefaultType(), 0);
@@ -6620,9 +6519,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* arrPtr =
             arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "aprod.arrptr");
-        auto* aprodLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "aprod.len");
-        aprodLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        aprodLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* aprodLenLoad = emitLoadArrayLen(arrPtr, "aprod.len");
         llvm::Value* length = aprodLenLoad;
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -6651,8 +6548,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "aprod.offset", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "aprod.elemptr");
-        llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "aprod.elem");
-        llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* elem = emitLoadArrayElem(elemPtr, "aprod.elem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -6717,9 +6613,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "alast.arrptr");
-        auto* alastLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "alast.len");
-        alastLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        alastLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* alastLenLoad = emitLoadArrayLen(arrPtr, "alast.len");
         llvm::Value* arrLen = alastLenLoad;
 
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -6744,8 +6638,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(okBB);
         // Last element is at offset arrLen (1-based: header is at [0], elements at [1..arrLen])
         llvm::Value* lastPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, arrLen, "alast.ptr");
-        auto* lastLoad = builder->CreateAlignedLoad(getDefaultType(), lastPtr, llvm::MaybeAlign(8), "alast.val");
-        lastLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        auto* lastLoad = emitLoadArrayElem(lastPtr, "alast.val");
         if (optimizationLevel >= OptimizationLevel::O1) {
             lastLoad->setMetadata(llvm::LLVMContext::MD_noundef,
                 llvm::MDNode::get(*context, {}));
@@ -6769,9 +6662,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "ains.arrptr");
-        auto* ainsLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "ains.len");
-        ainsLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        ainsLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* ainsLenLoad = emitLoadArrayLen(arrPtr, "ains.len");
         llvm::Value* arrLen = ainsLenLoad;
 
         // Bounds check: 0 <= idx <= length (insert at end is allowed)
@@ -6806,8 +6697,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "ains.buf");
 
         // Store new length header
-        auto* ainsLenSt = builder->CreateStore(newLen, buf);
-        ainsLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        emitStoreArrayLen(newLen, buf);
 
         // Copy elements before insertion point: arr[1..idx+1) → buf[1..idx+1)
         llvm::Value* preSrc = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "ains.presrc");
@@ -7192,9 +7082,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* mfPredFn = mfCalleeIt->second;
 
         llvm::Value* mfSrcMap = generateExpression(expr->arguments[0].get());
-        mfSrcMap = toDefaultType(mfSrcMap);
+                llvm::Value* mfMapPtr = emitToArrayPtr(mfSrcMap, "mf.mapptr");
         auto* mfPtrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mfMapPtr = builder->CreateIntToPtr(mfSrcMap, mfPtrTy, "mf.mapptr");
 
         // Read cap and count from map header [cap:i64, count:i64, buckets...]
         // Each bucket = [hash:i64, key:i64, val:i64]
@@ -7607,10 +7496,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         adN = toDefaultType(adN);
         auto* adPtrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* adArrPtr = builder->CreateIntToPtr(adArr, adPtrTy, "adrop.arrptr");
-        auto* adLenLoad = builder->CreateAlignedLoad(getDefaultType(), adArrPtr, llvm::MaybeAlign(8), "adrop.len");
-        adLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        adLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        nonNegValues_.insert(adLenLoad);
+                llvm::Value* adLenLoad = emitLoadArrayLen(adArrPtr, "adrop.len");
         // Clamp n: max(0, min(n, len))
         llvm::Value* adZero    = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* adNNeg    = builder->CreateICmpSLT(adN, adZero, "adrop.nneg");
@@ -7626,8 +7512,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* adBuf    = builder->CreateCall(getOrDeclareMalloc(), {adBytes}, "adrop.buf");
         llvm::cast<llvm::CallInst>(adBuf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, 8));
-        auto* adLenSt = builder->CreateStore(adSliceLen, adBuf);
-        adLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        emitStoreArrayLen(adSliceLen, adBuf);
         llvm::Value* adSrcIdx = builder->CreateAdd(adStart, adOne, "adrop.srcidx", true, true);
         llvm::Value* adSrc    = builder->CreateInBoundsGEP(getDefaultType(), adArrPtr, adSrcIdx, "adrop.src");
         llvm::Value* adDst    = builder->CreateInBoundsGEP(getDefaultType(), adBuf, adOne, "adrop.dst");
@@ -7643,13 +7528,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::ARRAY_UNIQUE) {
         validateArgCount(expr, "array_unique", 1);
         llvm::Value* auArr = generateExpression(expr->arguments[0].get());
-        auArr = toDefaultType(auArr);
-        auto* auPtrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* auArrPtr = builder->CreateIntToPtr(auArr, auPtrTy, "auniq.arrptr");
-        auto* auLenLoad = builder->CreateAlignedLoad(getDefaultType(), auArrPtr, llvm::MaybeAlign(8), "auniq.len");
-        auLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        auLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        nonNegValues_.insert(auLenLoad);
+                llvm::Value* auArrPtr = emitToArrayPtr(auArr, "auniq.arrptr");
+                llvm::Value* auLenLoad = emitLoadArrayLen(auArrPtr, "auniq.len");
         llvm::Value* auZero  = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* auOne   = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* auEight = llvm::ConstantInt::get(getDefaultType(), 8);
@@ -7681,16 +7561,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(auBodyBB);
         llvm::Value* auElemIdx  = builder->CreateAdd(auI, auOne, "auniq.ei", true, true);
         llvm::Value* auElemPtr  = builder->CreateInBoundsGEP(getDefaultType(), auArrPtr, auElemIdx, "auniq.ep");
-        auto* auElemLoad = builder->CreateAlignedLoad(getDefaultType(), auElemPtr, llvm::MaybeAlign(8), "auniq.elem");
-        auElemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* auElemLoad = emitLoadArrayElem(auElemPtr, "auniq.elem");
         // Check: is this the first element (i==0) or different from the previous?
         llvm::Value* auIsFirst = builder->CreateICmpEQ(auI, auZero, "auniq.isfirst");
         llvm::Value* auPrevIdx = builder->CreateSub(auI, auOne, "auniq.prevei");
         // auPrevIdx is only valid when i>0; PHI select doesn't evaluate
         llvm::Value* auPrevElemIdx = builder->CreateAdd(auPrevIdx, auOne, "auniq.pei", true, true);
         llvm::Value* auPrevElemPtr = builder->CreateInBoundsGEP(getDefaultType(), auArrPtr, auPrevElemIdx, "auniq.pep");
-        auto* auPrevLoad = builder->CreateAlignedLoad(getDefaultType(), auPrevElemPtr, llvm::MaybeAlign(8), "auniq.prev");
-        auPrevLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* auPrevLoad = emitLoadArrayElem(auPrevElemPtr, "auniq.prev");
         llvm::Value* auDiff = builder->CreateICmpNE(auElemLoad, auPrevLoad, "auniq.diff");
         llvm::Value* auKeep = builder->CreateOr(auIsFirst, auDiff, "auniq.keep");
         builder->CreateCondBr(auKeep, auDedBB, auIncBB);
@@ -7699,8 +7577,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* auOutLen  = builder->CreateAlignedLoad(getDefaultType(), auOutLenA, llvm::MaybeAlign(8), "auniq.ol");
         llvm::Value* auDstIdx  = builder->CreateAdd(auOutLen, auOne, "auniq.di", true, true);
         llvm::Value* auDstPtr  = builder->CreateInBoundsGEP(getDefaultType(), auBuf, auDstIdx, "auniq.dp");
-        auto* auDstSt = builder->CreateAlignedStore(auElemLoad, auDstPtr, llvm::MaybeAlign(8));
-        auDstSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        emitStoreArrayElem(auElemLoad, auDstPtr);
         builder->CreateStore(
             builder->CreateAdd(auOutLen, auOne, "auniq.ol1", true, true), auOutLenA);
         builder->CreateBr(auIncBB);
@@ -7712,8 +7589,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(auDoneBB);
         llvm::Value* auFinalLen = builder->CreateAlignedLoad(getDefaultType(), auOutLenA, llvm::MaybeAlign(8), "auniq.fl");
-        auto* auFinalLenSt = builder->CreateStore(auFinalLen, auBuf);
-        auFinalLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        emitStoreArrayLen(auFinalLen, auBuf);
         return builder->CreatePtrToInt(auBuf, getDefaultType(), "auniq.result");
     }
 
@@ -7731,10 +7607,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arN   = toDefaultType(arN);
         auto* arPtrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* arArrPtr = builder->CreateIntToPtr(arArr, arPtrTy, "arot.arrptr");
-        auto* arLenLoad = builder->CreateAlignedLoad(getDefaultType(), arArrPtr, llvm::MaybeAlign(8), "arot.len");
-        arLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        arLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        nonNegValues_.insert(arLenLoad);
+                llvm::Value* arLenLoad = emitLoadArrayLen(arArrPtr, "arot.len");
         llvm::Value* arZero  = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* arOne   = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* arEight = llvm::ConstantInt::get(getDefaultType(), 8);
@@ -7744,8 +7617,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arBuf   = builder->CreateCall(getOrDeclareMalloc(), {arBytes}, "arot.buf");
         llvm::cast<llvm::CallInst>(arBuf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, 8));
-        auto* arLenSt = builder->CreateStore(arLenLoad, arBuf);
-        arLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        emitStoreArrayLen(arLenLoad, arBuf);
         // Handle empty array
         llvm::Function* arParentFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* arPreBB  = builder->GetInsertBlock();
@@ -7775,12 +7647,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateAdd(arI, arK, "arot.ik"), arLenLoad, "arot.srci");
         llvm::Value* arSrcIdx = builder->CreateAdd(arSrcI, arOne, "arot.srcidx", true, true);
         llvm::Value* arSrcPtr = builder->CreateInBoundsGEP(getDefaultType(), arArrPtr, arSrcIdx, "arot.sp");
-        auto* arSrcLoad = builder->CreateAlignedLoad(getDefaultType(), arSrcPtr, llvm::MaybeAlign(8), "arot.sv");
-        arSrcLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* arSrcLoad = emitLoadArrayElem(arSrcPtr, "arot.sv");
         llvm::Value* arDstIdx = builder->CreateAdd(arI, arOne, "arot.dstidx", true, true);
         llvm::Value* arDstPtr = builder->CreateInBoundsGEP(getDefaultType(), arBuf, arDstIdx, "arot.dp");
-        auto* arDstSt = builder->CreateAlignedStore(arSrcLoad, arDstPtr, llvm::MaybeAlign(8));
-        arDstSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        emitStoreArrayElem(arSrcLoad, arDstPtr);
         llvm::Value* arI1 = builder->CreateAdd(arI, arOne, "arot.i1", true, true);
         arI->addIncoming(arI1, arBodyBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(arLoopBB)));
@@ -7832,13 +7702,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             }
         }
         llvm::Value* amArr = generateExpression(expr->arguments[0].get());
-        amArr = toDefaultType(amArr);
-        auto* amPtrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* amArrPtr = builder->CreateIntToPtr(amArr, amPtrTy, "amean.arrptr");
-        auto* amLenLoad = builder->CreateAlignedLoad(getDefaultType(), amArrPtr, llvm::MaybeAlign(8), "amean.len");
-        amLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        amLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        nonNegValues_.insert(amLenLoad);
+                llvm::Value* amArrPtr = emitToArrayPtr(amArr, "amean.arrptr");
+                llvm::Value* amLenLoad = emitLoadArrayLen(amArrPtr, "amean.len");
         llvm::Value* amZero  = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* amOne   = llvm::ConstantInt::get(getDefaultType(), 1);
         // If empty, return 0
@@ -7859,8 +7724,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(amBodyBB);
         llvm::Value* amElemIdx = builder->CreateAdd(amI, amOne, "amean.ei", true, true);
         llvm::Value* amElemPtr = builder->CreateInBoundsGEP(getDefaultType(), amArrPtr, amElemIdx, "amean.ep");
-        auto* amElemLoad = builder->CreateAlignedLoad(getDefaultType(), amElemPtr, llvm::MaybeAlign(8), "amean.elem");
-        amElemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* amElemLoad = emitLoadArrayElem(amElemPtr, "amean.elem");
         llvm::Value* amOldSum = builder->CreateAlignedLoad(getDefaultType(), amSumA, llvm::MaybeAlign(8), "amean.os");
         builder->CreateStore(builder->CreateAdd(amOldSum, amElemLoad, "amean.ns"), amSumA);
         llvm::Value* amI1 = builder->CreateAdd(amI, amOne, "amean.i1", true, true);
@@ -7969,9 +7833,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::MAP_INVERT) {
         validateArgCount(expr, "map_invert", 1);
         llvm::Value* miM = generateExpression(expr->arguments[0].get());
-        miM = toDefaultType(miM);
+                llvm::Value* miMPtr = emitToArrayPtr(miM, "minv.mptr");
         auto* miPtrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* miMPtr = builder->CreateIntToPtr(miM, miPtrTy, "minv.mptr");
         llvm::Value* miCap  = builder->CreateAlignedLoad(getDefaultType(), miMPtr,
             llvm::MaybeAlign(8), "minv.cap");
         llvm::Value* miZero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -8500,15 +8363,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* aPtr = builder->CreateIntToPtr(a, ptrTy, "azip.aptr");
         llvm::Value* bPtr = builder->CreateIntToPtr(b, ptrTy, "azip.bptr");
 
-        auto* aLenLoad = builder->CreateAlignedLoad(getDefaultType(), aPtr, llvm::MaybeAlign(8), "azip.alen");
-        aLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        aLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        nonNegValues_.insert(aLenLoad);
+                llvm::Value* aLenLoad = emitLoadArrayLen(aPtr, "azip.alen");
 
-        auto* bLenLoad = builder->CreateAlignedLoad(getDefaultType(), bPtr, llvm::MaybeAlign(8), "azip.blen");
-        bLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        bLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        nonNegValues_.insert(bLenLoad);
+                llvm::Value* bLenLoad = emitLoadArrayLen(bPtr, "azip.blen");
 
         // m = min(len(a), len(b))
         llvm::Value* aLtB = builder->CreateICmpSLT(aLenLoad, bLenLoad, "azip.altb");
@@ -8530,8 +8387,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Attribute::getWithDereferenceableBytes(*context, 8));
 
         // Store length header
-        auto* lenSt = builder->CreateStore(outLen, buf);
-        lenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        emitStoreArrayLen(outLen, buf);
 
         // Emit loop: for i in 0...m: buf[2*i+1] = a[i+1]; buf[2*i+2] = b[i+1]
         llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
@@ -8567,12 +8423,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Load a[i] and b[i] (element at srcIdx in the header+data layout)
         llvm::Value* aElemPtr = builder->CreateInBoundsGEP(getDefaultType(), aPtr, srcIdx, "azip.aelemptr");
-        auto* aElemLoad = builder->CreateAlignedLoad(getDefaultType(), aElemPtr, llvm::MaybeAlign(8), "azip.aelem");
-        aElemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* aElemLoad = emitLoadArrayElem(aElemPtr, "azip.aelem");
 
         llvm::Value* bElemPtr = builder->CreateInBoundsGEP(getDefaultType(), bPtr, srcIdx, "azip.belemptr");
-        auto* bElemLoad = builder->CreateAlignedLoad(getDefaultType(), bElemPtr, llvm::MaybeAlign(8), "azip.belem");
-        bElemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                llvm::Value* bElemLoad = emitLoadArrayElem(bElemPtr, "azip.belem");
 
         // Store into output buf at interleaved positions
         llvm::Value* dstPtrA = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdxA, "azip.dstptra");

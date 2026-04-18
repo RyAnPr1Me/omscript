@@ -1416,6 +1416,62 @@ void CodeGenerator::attachLoopMetadata(llvm::BranchInst* backEdgeBr) {
     backEdgeBr->setMetadata(llvm::LLVMContext::MD_loop, md);
 }
 
+// ── IR emit helpers ───────────────────────────────────────────────────────────
+// These helpers collapse the 3-4 line TBAA metadata + load/store/alloc
+// patterns that appear 200+ times across the codegen files into single calls.
+
+llvm::Value* CodeGenerator::emitLoadArrayLen(llvm::Value* arrPtr,
+                                              const llvm::Twine& name) {
+    auto* load = builder->CreateAlignedLoad(getDefaultType(), arrPtr,
+                                             llvm::MaybeAlign(8), name);
+    load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+    load->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+    nonNegValues_.insert(load);
+    return load;
+}
+
+llvm::LoadInst* CodeGenerator::emitLoadArrayElem(llvm::Value* elemPtr,
+                                               const llvm::Twine& name) {
+    auto* load = builder->CreateAlignedLoad(getDefaultType(), elemPtr,
+                                             llvm::MaybeAlign(8), name);
+    load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    return load;
+}
+
+void CodeGenerator::emitStoreArrayLen(llvm::Value* len, llvm::Value* arrPtr) {
+    auto* st = builder->CreateStore(len, arrPtr);
+    st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+}
+
+llvm::StoreInst* CodeGenerator::emitStoreArrayElem(llvm::Value* val, llvm::Value* elemPtr) {
+    auto* st = builder->CreateAlignedStore(val, elemPtr, llvm::MaybeAlign(8));
+    st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    return st;
+}
+
+llvm::Value* CodeGenerator::emitAllocArray(llvm::Value* len,
+                                            const llvm::Twine& name) {
+    llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+    llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+    llvm::Value* slots = builder->CreateAdd(len, one,   name + ".slots",
+                                             /*NUW=*/true, /*NSW=*/true);
+    llvm::Value* bytes = builder->CreateMul(slots, eight, name + ".bytes",
+                                             /*NUW=*/true, /*NSW=*/true);
+    llvm::Value* buf   = builder->CreateCall(getOrDeclareMalloc(), {bytes},
+                                              name + ".buf");
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+        llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+    emitStoreArrayLen(len, buf);
+    return buf;
+}
+
+llvm::Value* CodeGenerator::emitToArrayPtr(llvm::Value* val,
+                                            const llvm::Twine& name) {
+    val = toDefaultType(val);
+    return builder->CreateIntToPtr(val, llvm::PointerType::getUnqual(*context),
+                                   name);
+}
+
 llvm::Function* CodeGenerator::getOrDeclareStrlen() {
     if (auto* fn = module->getFunction("strlen"))
         return fn;

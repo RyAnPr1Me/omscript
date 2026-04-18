@@ -967,6 +967,42 @@ class CodeGenerator {
     /// metadata construction pattern used by 50+ builtin and statement loops.
     void attachLoopMetadata(llvm::BranchInst* backEdgeBr);
 
+    // ── IR emit helpers — eliminate the 3-4 line TBAA/malloc patterns ────────
+    // Each helper performs a single logical operation (load-len, store-elem,
+    // allocate array, etc.) and attaches all required metadata in one call.
+    // This removes ~200 duplicated metadata-attachment sequences scattered
+    // across codegen_builtins.cpp, codegen_expr.cpp and codegen_stmt.cpp.
+
+    /// Load the length word from an OmScript array header.
+    /// Emits a MaybeAlign(8) load, attaches tbaaArrayLen_ + arrayLenRangeMD_,
+    /// and marks the result non-negative in nonNegValues_.
+    llvm::Value* emitLoadArrayLen(llvm::Value* arrPtr, const llvm::Twine& name = "arrlen");
+
+    /// Load one element from an OmScript array body (slot index already adjusted).
+    /// Emits a MaybeAlign(8) load and attaches tbaaArrayElem_.
+    llvm::LoadInst* emitLoadArrayElem(llvm::Value* elemPtr, const llvm::Twine& name = "arrelem");
+
+    /// Store the length word into an OmScript array header.
+    /// Attaches tbaaArrayLen_ to the resulting StoreInst.
+    void emitStoreArrayLen(llvm::Value* len, llvm::Value* arrPtr);
+
+    /// Store one element into an OmScript array body (slot index already adjusted).
+    /// Emits a MaybeAlign(8) aligned store and attaches tbaaArrayElem_.
+    /// Returns the StoreInst so callers can attach additional metadata (e.g. access_group).
+    llvm::StoreInst* emitStoreArrayElem(llvm::Value* val, llvm::Value* elemPtr);
+
+    /// Allocate a new OmScript array with `len` elements.
+    /// Computes bytes = (len+1)*8, calls malloc, attaches dereferenceable(8),
+    /// stores the length in slot 0 with tbaaArrayLen_, and returns the raw
+    /// buffer pointer (i8*/ptr type, NOT yet converted to i64).
+    llvm::Value* emitAllocArray(llvm::Value* len, const llvm::Twine& name = "arr");
+
+    /// Convert an i64 OmScript array handle to a typed pointer.
+    /// Calls toDefaultType(val) then CreateIntToPtr.  The common
+    /// "val = generateExpression(); val = toDefaultType(val); ptr = intToPtr(val)"
+    /// 3-liner is reduced to a single call.
+    llvm::Value* emitToArrayPtr(llvm::Value* val, const llvm::Twine& name = "arrptr");
+
     /// RAII guard that calls beginScope() on construction and endScope()
     /// on destruction, ensuring scope stacks are always balanced even
     /// when exceptions interrupt code generation.

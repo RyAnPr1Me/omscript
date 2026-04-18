@@ -2226,9 +2226,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // TBAA distinguishes the length slot from element loads (slots 1+), enabling
         // LICM to hoist this load out of the loop body.  range communicates
         // lenVal ∈ [0, INT64_MAX) to SCEV for exact trip-count analysis.
-        auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "foreach.len");
-        lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* lenLoad = emitLoadArrayLen(basePtr, "foreach.len");
         lenVal = lenLoad;
     }
 

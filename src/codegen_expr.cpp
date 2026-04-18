@@ -4626,8 +4626,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* updated =
             (op == "++") ? builder->CreateAdd(current, delta, "inc", /*HasNUW=*/false, /*HasNSW=*/true)
                          : builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
-        auto* elemStore = builder->CreateAlignedStore(updated, elemPtr, llvm::MaybeAlign(8));
-        elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        emitStoreArrayElem(updated, elemPtr);
         return isPostfix ? current : updated;
     }
 
@@ -5117,8 +5116,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                 llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
                                                           llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
                 // AlignedStore(8) + tbaaArrayElem_: element slots are 8-byte aligned.
-                auto* st = builder->CreateAlignedStore(elemVal, elemPtr, llvm::MaybeAlign(8));
-                st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                emitStoreArrayElem(elemVal, elemPtr);
             }
         }
 
@@ -5153,9 +5151,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                 arrVal = toDefaultType(arrVal);
                 arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
             }
-            auto* spreadLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "spread.len");
-            spreadLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-            spreadLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                        llvm::Value* spreadLenLoad = emitLoadArrayLen(arrPtr, "spread.len");
             llvm::Value* arrLen = spreadLenLoad;
             totalLen = builder->CreateAdd(totalLen, arrLen, "spread.addlen");
             evalElems.push_back({arrVal, true, arrLen});
@@ -5213,8 +5209,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
-            auto* spreadSt = builder->CreateAlignedStore(elem, dstPtr, llvm::MaybeAlign(8));
-            spreadSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            emitStoreArrayElem(elem, dstPtr);
             // Increment write index (reuse dstIdx = curIdx+1, nsw+nuw)
             builder->CreateStore(dstIdx, writeIdx);
             // Increment loop counter (reuse srcIdx = i+1, nsw+nuw)
@@ -5447,8 +5442,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
         llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
-    auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
-    elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        auto* elemLoad = emitLoadArrayElem(elemPtr, "idx.elem");
     // OmScript arrays are always initialized: array literals set every element,
     // array_fill zero-initializes via calloc.  The !noundef metadata tells LLVM
     // the loaded value is never poison/undef, enabling more aggressive
@@ -5556,8 +5550,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
-        auto* elemStore = builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
-        elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        auto* elemStore = emitStoreArrayElem(newVal, elemPtr);
         // When inside a parallel loop, attach the access group metadata so
         // LLVM's vectorizer and Polly know this store is iteration-independent.
         if (currentLoopAccessGroup_)
