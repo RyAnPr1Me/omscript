@@ -4756,6 +4756,66 @@ void CodeGenerator::generate(Program* program) {
         optimizeOptMaxFunctions();
     }
 
+    // Mark all constant global variables with unnamed_addr at O2+.
+    // unnamed_addr tells LLVM that the address of the global is not
+    // significant — only its value matters — allowing:
+    //   1. ConstantMerge to merge identical globals regardless of address.
+    //   2. The linker to merge constants from different TUs (when LTO is used).
+    //   3. Backend to place the constant in a read-only section closer to
+    //      the code that uses it, improving I-cache locality.
+    //
+    // We apply this to all constant (isConstant=true) globals except those
+    // already marked unnamed_addr or local_unnamed_addr, and except
+    // externally-visible globals (which may be referenced by address from
+    // other TUs, though OmScript programs are single-TU).
+    //
+    // This is a cheap pre-optimizer annotation pass — O(globals) time.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        for (auto& gv : module->globals()) {
+            if (!gv.isConstant()) continue;
+            if (gv.getUnnamedAddr() != llvm::GlobalValue::UnnamedAddr::None) continue;
+            // Don't annotate externally-visible globals with addresses that
+            // external code might rely on (e.g. exported string constants).
+            if (gv.hasExternalLinkage()) continue;
+            // Skip globals that are address-taken in non-load instructions
+            // (i.e. their pointer escapes beyond simple loads).  A simple
+            // heuristic: if all uses are loads or GEP-then-loads, unnamed_addr
+            // is safe.  We check this conservatively: only mark if no use is
+            // a store, call (with the global as a pointer arg), or phi.
+            bool addrTakenAsValue = false;
+            for (auto* user : gv.users()) {
+                if (llvm::isa<llvm::LoadInst>(user)) continue;
+                if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(user)) {
+                    // GEP is fine if all GEP users are loads.
+                    bool gepAllLoads = true;
+                    for (auto* gepUser : gep->users()) {
+                        if (!llvm::isa<llvm::LoadInst>(gepUser)) {
+                            gepAllLoads = false;
+                            break;
+                        }
+                    }
+                    if (gepAllLoads) continue;
+                }
+                if (auto* constExpr = llvm::dyn_cast<llvm::ConstantExpr>(user)) {
+                    // GEP constant expr: also fine if only loaded from.
+                    bool ceAllLoads = true;
+                    for (auto* ceUser : constExpr->users()) {
+                        if (!llvm::isa<llvm::LoadInst>(ceUser)) {
+                            ceAllLoads = false;
+                            break;
+                        }
+                    }
+                    if (ceAllLoads) continue;
+                }
+                addrTakenAsValue = true;
+                break;
+            }
+            if (!addrTakenAsValue) {
+                gv.setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+            }
+        }
+    }
+
     if (verbose_) {
         std::cout << "  [opt] Running LLVM optimization pipeline..." << '\n';
     }

@@ -548,9 +548,20 @@ void CodeGenerator::runOptimizationPasses() {
     // this early — before inlining and other IPO passes — gives alias analysis
     // and LICM accurate function-level memory effects, which propagates to
     // more precise results for every downstream function-level optimisation.
+    //
+    // Also run PostOrderFunctionAttrsPass (bottom-up direction) alongside the
+    // top-down ReversePostOrder pass.  Together they form a bidirectional
+    // attribute inference: PostOrder propagates readnone/readonly up through
+    // callees first (a callee with no memory accesses makes its caller
+    // eligible for readonly if the caller only calls it and other readonly
+    // functions), while ReversePostOrder propagates constraints top-down.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerEarlyEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
+            // Bottom-up: propagate readnone/readonly from leaves to callers.
+            MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+                llvm::PostOrderFunctionAttrsPass()));
+            // Top-down: propagate constraints from callers to callees.
             MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
         });
     }
@@ -731,9 +742,18 @@ void CodeGenerator::runOptimizationPasses() {
     // guarantees many of these attributes, but Attributor can infer
     // additional ones (e.g. readnone for pure functions, nocapture for
     // non-escaping parameters) that the manual codegen annotations miss.
+    //
+    // PostOrderFunctionAttrsPass (bottom-up SCC traversal) runs in the same
+    // CGSCC callback to infer readnone/readonly/nosync/nounwind from the IR
+    // of each SCC.  Unlike Attributor (which uses a fixpoint lattice),
+    // PostOrderFunctionAttrsPass is fast and directly marks functions based
+    // on whether they contain load/store/call instructions.  Running it
+    // alongside Attributor provides a complementary signal that helps the
+    // inliner's cost model even when Attributor can't converge.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerCGSCCOptimizerLateEPCallback(
             [](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel /*Level*/) {
+            CGPM.addPass(llvm::PostOrderFunctionAttrsPass());
             CGPM.addPass(llvm::AttributorCGSCCPass());
         });
     }
@@ -1152,6 +1172,24 @@ void CodeGenerator::runOptimizationPasses() {
                 IPO2FPM.addPass(llvm::ADCEPass());
                 MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(IPO2FPM)));
                 MPM.addPass(llvm::DeadArgumentEliminationPass());
+
+                // After the second IPSCCP + constant folding round, re-run
+                // function attribute inference in both directions.  IPSCCP
+                // may have specialized functions (making callees smaller /
+                // simpler), enabling new readnone/readonly proofs that
+                // weren't visible earlier.  Running PostOrder (bottom-up)
+                // first propagates leaf-function purity upward, then
+                // ReversePostOrder (top-down) propagates constraints from
+                // the call sites that IPSCCP simplified.
+                MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+                    llvm::PostOrderFunctionAttrsPass()));
+                MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+                // InferFunctionAttrsPass re-annotates library functions whose
+                // attributes may have been stripped by earlier passes (e.g.
+                // MergedLoadStoreMotion can strip memory attributes on
+                // library calls).  Re-running it is cheap and ensures we
+                // don't lose malloc/free/memcpy noalias annotations.
+                MPM.addPass(llvm::InferFunctionAttrsPass());
             }
 
             // EliminateAvailableExternallyPass removes bodies of externally-
@@ -1253,6 +1291,15 @@ void CodeGenerator::runOptimizationPasses() {
                 // different type instantiations.
                 MPM.addPass(llvm::MergeFunctionsPass());
             }
+
+            // At O2+, run AlwaysInlinerPass at the very end of the main
+            // pipeline.  PartialInlinerPass can create new alwaysinline
+            // wrapper stubs for hot-path copies, and function specialization
+            // (see below) produces clones that are sometimes small enough to
+            // receive alwaysinline.  Inlining these at the end of the main
+            // pipeline means the final code-generation stage sees fully
+            // inlined call graphs without residual call overhead.
+            MPM.addPass(llvm::AlwaysInlinerPass());
         });
     }
 
