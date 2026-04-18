@@ -10,9 +10,11 @@ set -eu
 #  are idiomatic and use the same algorithm.
 #
 #  Comparison modes:
-#    - BENCH_MODE=omsc-fast (default): maximize OM runtime performance and
-#      compare against a conservative C baseline
-#    - BENCH_MODE=fair: use symmetric aggressive flags for both OM and C
+#    - BENCH_MODE=fair (default): symmetric aggressive flags for both OM and C,
+#      both compiled with clang (same LLVM backend) — OM wins through better
+#      IR quality (OPTMAX annotations, superoptimizer, srem→urem, etc.)
+#    - BENCH_MODE=omsc-fast: conservative C baseline for demonstrating OM's
+#      ceiling performance
 #    - Override compiler with BENCH_CC=<cc>
 #
 #  Methodology:
