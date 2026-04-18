@@ -1612,6 +1612,23 @@ void CodeGenerator::runOptimizationPasses() {
             superConfig.synthesis.maxInstructions = 5;
             superConfig.synthesis.costThreshold = 0.9;
         }
+        // Unified cost model: when a hardware profile is available, wire the
+        // hardware-accurate latency data into the superoptimizer so that all
+        // cost-driven decisions (synthesis candidate selection, idiom cost
+        // comparison, replacement gating) use the same source as the HGOE.
+        if (hgoe::shouldActivate(hgoe::HGOEConfig{marchCpu_, mtuneCpu_})) {
+            std::string resolvedCpu = marchCpu_.empty() ? mtuneCpu_ : marchCpu_;
+            if (resolvedCpu == "native")
+                resolvedCpu = llvm::sys::getHostCPUName().str();
+            auto profileOpt = hgoe::lookupMicroarch(resolvedCpu);
+            if (profileOpt) {
+                // Capture profile by value — no lifetime dependency on any graph.
+                hgoe::MicroarchProfile capturedProfile = *profileOpt;
+                superConfig.costFn = [capturedProfile](const llvm::Instruction* i) {
+                    return hgoe::instrCostFromProfile(i, capturedProfile);
+                };
+            }
+        }
         auto superStats = superopt::superoptimizeModule(*module, superConfig);
         const unsigned totalSuperOpts = superStats.idiomsReplaced + superStats.synthReplacements +
                                  superStats.algebraicSimplified + superStats.branchesSimplified +
@@ -2013,10 +2030,14 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // values) and hyperblocks (via aggressive if-conversion with a high
     // speculation threshold) to create larger basic blocks that improve
     // instruction scheduling and reduce branch overhead.
+    // FlattenCFGPass is intentionally omitted: it collapses all if-else
+    // chains into sequential code without TTI guidance, which increases
+    // register pressure and can lengthen critical dependency chains on
+    // out-of-order CPUs.  SimplifyCFG with hyperblockCFGOpts already
+    // performs targeted if-conversion where profitable.
     fpm.add(llvm::createGVNPass());
     fpm.add(llvm::createSpeculativeExecutionPass());
     fpm.add(llvm::createCFGSimplificationPass(hyperblockCFGOpts()));
-    fpm.add(llvm::createFlattenCFGPass());
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
 
@@ -2036,7 +2057,6 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // (sqrt, etc.) with their inline fast-path + slow-path branch, avoiding
     // the overhead of a full function call when the fast path applies.
     fpm.add(llvm::createPartiallyInlineLibCallsPass());
-    fpm.add(llvm::createFlattenCFGPass());
 
     // Phase 3.5: Aggressive cleanup passes for maximal optimization.
     fpm.add(llvm::createDeadCodeEliminationPass());

@@ -424,6 +424,12 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName);
 /// Build a HardwareGraph from a microarchitecture profile.
 HardwareGraph buildHardwareGraph(const MicroarchProfile& profile);
 
+/// Compute instruction latency cost directly from a microarchitecture profile.
+/// Lightweight alternative to HardwareCostModel::instructionCost that does not
+/// require a full HardwareGraph to be constructed.  Returns latency in cycles.
+/// Used by the superoptimizer's unified cost model when hardware info is available.
+double instrCostFromProfile(const llvm::Instruction* inst, const MicroarchProfile& profile);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Step 3 & 4 — Graph mapping optimizer and transformations
 // ─────────────────────────────────────────────────────────────────────────────

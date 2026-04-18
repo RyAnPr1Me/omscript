@@ -57,8 +57,21 @@ using namespace llvm::PatternMatch;
 // Cost model
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Thread-local cost override.  Set by superoptimizeFunction/superoptimizeModule
+// when the caller provides a hardware-profile-driven cost function via
+// SuperoptimizerConfig::costFn.  This ensures a single authoritative cost
+// source is used for all synthesis, idiom, and candidate-selection decisions.
+static thread_local const std::function<double(const llvm::Instruction*)>*
+    g_costFn = nullptr;
+
 double instructionCost(const llvm::Instruction* inst) {
     if (__builtin_expect(!inst, 0)) return 0.0;
+
+    // Delegate to hardware-profile-driven cost when available.
+    if (__builtin_expect(g_costFn != nullptr, 0)) {
+        double cost = (*g_costFn)(inst);
+        if (cost >= 0.0) return cost;
+    }
 
     switch (inst->getOpcode()) {
     // Near-free: these are typically eliminated or folded by the backend
@@ -6955,6 +6968,16 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     SuperoptimizerStats stats;
     if (func.isDeclaration()) return stats;
 
+    // Install the hardware cost model for this function's optimization session.
+    // g_costFn is thread-local so parallel superoptimizeModule calls are safe.
+    const auto* prevFn = g_costFn;
+    g_costFn = config.costFn ? &config.costFn : nullptr;
+    struct CostGuard {
+        const std::function<double(const llvm::Instruction*)>** slot;
+        const std::function<double(const llvm::Instruction*)>* prev;
+        ~CostGuard() { *slot = prev; }
+    } costGuard{&g_costFn, prevFn};
+
     // Phase 0.5: Loop idiom recognition — replace common loop patterns with
     // single hardware instructions:
     //   popcount loop: while(x){c+=x&1;x>>=1} → llvm.ctpop(x_init)
@@ -7070,8 +7093,13 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
         stats.algebraicSimplified += eliminateRedundantBoundsChecks(func);
     }
 
-    // Phase 4: Enumerative synthesis on remaining expensive instructions
-    if (config.enableSynthesis) {
+    // Phase 4: Enumerative synthesis on remaining expensive instructions.
+    // Adaptive: skip synthesis for large functions to keep compile times bounded.
+    // Synthesis is O(N × templates) and provides diminishing returns on large
+    // functions that are already partially optimized by LLVM's own strength-
+    // reduction passes.  Threshold matches the post-superoptimizer cleanup
+    // limit in codegen_opt.cpp (2000 instructions) for consistency.
+    if (config.enableSynthesis && func.getInstructionCount() <= 2000) {
         std::vector<llvm::Instruction*> candidates;
         for (auto& bb : func) {
             for (auto& inst : bb) {

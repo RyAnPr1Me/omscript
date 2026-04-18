@@ -556,23 +556,116 @@ double HardwareCostModel::instructionCost(const llvm::Instruction* inst) const {
 }
 
 double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
-    if (pg.nodeCount() == 0) return 0.0;
-
-    // Build adjacency lists (O(N+E)) to avoid O(N×E) inner-loop edge scans.
     const size_t n = pg.nodeCount();
-    std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n); // (dst, lat)
+    if (n == 0) return 0.0;
+
+    // ── 1. Derive port capacities from the hardware graph ───────────────────────
+    // Helper: sum the 'count' field of all nodes of a given resource type.
+    auto portCapacity = [this](ResourceType rt) -> unsigned {
+        unsigned total = 0;
+        for (auto* nd : hw_.findNodes(rt)) total += nd->count;
+        return total ? total : 1u;
+    };
+
+    // Classify each OpClass into a small number of port groups so we can
+    // efficiently track port availability.  Each group maps to one capacity.
+    enum PClass : unsigned {
+        PC_IntArith = 0, // IntArith, Shift, Comparison, Conversion
+        PC_IntMul   = 1, // IntMul (subset of ALU ports on most µarchs)
+        PC_Div      = 2, // IntDiv, FPDiv — shares the divider unit
+        PC_FP       = 3, // FPArith, FPMul, FMA
+        PC_Load     = 4, // Load
+        PC_Store    = 5, // Store
+        PC_Branch   = 6, // Branch
+        PC_Free     = 7, // PHI, Other — no port constraint (rename / free)
+        PC_COUNT    = 8
+    };
+
+    const unsigned cap[PC_COUNT] = {
+        portCapacity(ResourceType::IntegerALU),        // PC_IntArith
+        std::max(1u, portCapacity(ResourceType::IntegerALU) / 2u), // PC_IntMul
+        portCapacity(ResourceType::DividerUnit),       // PC_Div
+        portCapacity(ResourceType::FMAUnit),           // PC_FP
+        portCapacity(ResourceType::LoadUnit),          // PC_Load
+        portCapacity(ResourceType::StoreUnit),         // PC_Store
+        portCapacity(ResourceType::BranchUnit),        // PC_Branch
+        ~0u,                                           // PC_Free (unlimited)
+    };
+
+    const unsigned issueWidth = static_cast<unsigned>(issueWidth_);
+
+    // Map OpClass → PClass.
+    auto toPClass = [](OpClass cls) -> unsigned {
+        switch (cls) {
+        case OpClass::IntArith:
+        case OpClass::Shift:
+        case OpClass::Comparison:
+        case OpClass::Conversion:   return PC_IntArith;
+        case OpClass::IntMul:       return PC_IntMul;
+        case OpClass::IntDiv:       return PC_Div;
+        case OpClass::FPArith:
+        case OpClass::FPMul:
+        case OpClass::FMA:          return PC_FP;
+        case OpClass::FPDiv:        return PC_Div;
+        case OpClass::Load:         return PC_Load;
+        case OpClass::Store:        return PC_Store;
+        case OpClass::Branch:       return PC_Branch;
+        default:                    return PC_Free;
+        }
+    };
+
+    // ── 2. Build adjacency lists (O(N+E)) ───────────────────────────────────────
+    std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n); // (dst, edge_lat)
+    std::vector<std::vector<std::pair<unsigned,unsigned>>> predList(n); // (src, edge_lat)
     std::vector<unsigned> inDeg(n, 0);
 
     for (const auto& e : pg.edges()) {
         if (e.srcId < n && e.dstId < n) {
             succList[e.srcId].emplace_back(e.dstId, e.latency);
-            inDeg[e.dstId]++;
+            predList[e.dstId].emplace_back(e.srcId, e.latency);
+            ++inDeg[e.dstId];
         }
     }
 
-    // Cycle-accurate simulation: assign each node to the earliest cycle where
-    // all dependencies are satisfied and a port is available.
-    std::vector<unsigned> scheduledCycle(n, 0);
+    // ── 3. Per-node execution latency ──────────────────────────────────────────
+    std::vector<unsigned> nodeLat(n, 1);
+    for (unsigned i = 0; i < n; ++i) {
+        const ProgramNode* node = pg.getNode(i);
+        if (node) {
+            unsigned lat = static_cast<unsigned>(
+                std::max(0.0, node->estimatedLatency));
+            nodeLat[i] = lat;
+        }
+    }
+
+    // ── 4. Port/issue occupancy tracking (sparse, per cycle) ──────────────────
+    // Using unordered_map for O(1) average access; realistic programs have
+    // bounded cycle spread so map memory stays small.
+    //
+    // portUsed[cycle][pc] = number of ops of port class pc already issued at cycle.
+    // issueUsed[cycle]    = total ops issued at cycle (≤ issueWidth).
+    //
+    // For unordered_map<K, unsigned>::operator[], the inserted value is
+    // value-initialised to 0 (confirmed by the C++ standard), so incrementing
+    // a freshly inserted entry is well-defined.
+    // For unordered_map<K, std::array<unsigned, N>>::operator[], the array is
+    // also value-initialised (zero-filled) on first insertion.
+    std::unordered_map<unsigned, std::array<unsigned, PC_COUNT>> portUsed;
+    std::unordered_map<unsigned, unsigned> issueUsed;
+    portUsed.reserve(n);
+    issueUsed.reserve(n);
+
+    // ── 5. Forward list scheduling (topological BFS) ──────────────────────────
+    // Process nodes in topological order.  For each node, compute the earliest
+    // cycle where (a) all predecessors have completed, (b) an issue slot is
+    // free, and (c) a port of the required class is free.
+    //
+    // Note: BFS topological order does not guarantee that the critical-path
+    // node is scheduled first when multiple nodes are ready simultaneously.
+    // For a cost-estimation use-case this is an acceptable approximation;
+    // the result may slightly over-count cycles compared to an optimal list
+    // schedule but never under-counts.
+    std::vector<unsigned> completedAt(n, 0);
 
     std::queue<unsigned> ready;
     for (unsigned i = 0; i < n; ++i)
@@ -581,32 +674,59 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     unsigned maxCycle = 0;
 
     while (!ready.empty()) {
-        unsigned u = ready.front();
+        const unsigned u = ready.front();
         ready.pop();
 
-        // Compute earliest start cycle from predecessors.  Because we build
-        // scheduledCycle in topological order, predecessors are already set.
-        unsigned earliest = 0;
-        // Re-scan edges for incoming latency (predecessors are set already).
-        // This is still O(E) total across all iterations in the outer loop.
-        for (const auto& e : pg.edges()) {
-            if (e.dstId == u && e.srcId < n) {
-                unsigned predEnd = scheduledCycle[e.srcId] + e.latency;
-                if (predEnd > earliest) earliest = predEnd;
-            }
+        // Earliest cycle when all data dependencies are satisfied.
+        unsigned readyCycle = 0;
+        for (const auto& [pred, edgeLat] : predList[u]) {
+            // completedAt[pred] already includes the producer's own latency.
+            if (completedAt[pred] > readyCycle)
+                readyCycle = completedAt[pred];
         }
-        scheduledCycle[u] = earliest;
 
-        // Add instruction latency.
+        // Port class for this instruction.
         const ProgramNode* node = pg.getNode(u);
-        if (node) {
-            unsigned endCycle = earliest + static_cast<unsigned>(node->estimatedLatency);
-            if (endCycle > maxCycle) maxCycle = endCycle;
+        const unsigned pc = toPClass(node ? node->opClass : OpClass::Other);
+
+        // Find the earliest cycle ≥ readyCycle where both the issue slot and
+        // the port slot for this op class are available.
+        // We cap the search at readyCycle + 500 to avoid pathological loops
+        // (in practice 1-10 iterations suffice for typical port utilisation).
+        unsigned scheduleCycle = readyCycle;
+        for (unsigned tries = 0; tries < 500; ++tries, ++scheduleCycle) {
+            // Check global issue-width constraint.
+            {
+                auto iit = issueUsed.find(scheduleCycle);
+                if (iit != issueUsed.end() && iit->second >= issueWidth)
+                    continue;
+            }
+            // Check port-capacity constraint.
+            if (pc != PC_Free) {
+                auto pit = portUsed.find(scheduleCycle);
+                if (pit != portUsed.end() && pit->second[pc] >= cap[pc])
+                    continue;
+            }
+            break; // valid cycle found
         }
 
-        // Release successors (latency not needed here; only topology matters).
+        // Commit the scheduling decision.
+        ++issueUsed[scheduleCycle]; // value-initialises to 0 on first access
+        if (pc != PC_Free) {
+            // try_emplace zero-initialises the array on first insertion.
+            auto& row = portUsed.try_emplace(scheduleCycle,
+                std::array<unsigned, PC_COUNT>{}).first->second;
+            ++row[pc];
+        }
+
+        completedAt[u] = scheduleCycle + nodeLat[u];
+        if (completedAt[u] > maxCycle)
+            maxCycle = completedAt[u];
+
+        // Release successors whose in-degree drops to zero.
         for (auto& [v, ignored] : succList[u]) {
-            if (--inDeg[v] == 0) ready.push(v);
+            if (--inDeg[v] == 0)
+                ready.push(v);
         }
     }
 
@@ -1694,6 +1814,11 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     default:
         return 1;
     }
+}
+
+double instrCostFromProfile(const llvm::Instruction* inst,
+                            const MicroarchProfile& profile) {
+    return static_cast<double>(getOpcodeLatency(inst, profile));
 }
 
 MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
