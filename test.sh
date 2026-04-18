@@ -63,7 +63,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=53
+NUM_BENCHMARKS=54
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -119,6 +119,7 @@ BENCH_NAME=(
     "str_process"        # 50 — str_reverse + str_count + str_upper chain
     "swap_sort"          # 51 — selection sort using native swap a, b
     "array_predicates"   # 52 — array_any / array_every / array_count with lambdas
+    "op_overload"        # 53 — struct operator overloading + creation (<=>, **, |>)
 )
 
 BENCH_DESC=(
@@ -175,6 +176,7 @@ BENCH_DESC=(
     "str_reverse+str_upper+str_count chain on 48-char string, N iterations"
     "Selection sort of 32-elem array with native swap a,b; repeated N/32 times"
     "array_any/array_every/array_count lambdas on 128-elem array; N/128 outer iters"
+    "Vec2 operator overloading (+,-,==) and creation (<=>,**,|>) — N iterations"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -232,6 +234,7 @@ BENCH_N=(
     500000    # 50  str_process
     500000    # 51  swap_sort
     2000000   # 52  array_predicates
+    5000000   # 53  op_overload
 )
 
 BOTTLENECK_LABELS=(
@@ -288,6 +291,7 @@ BOTTLENECK_LABELS=(
     "str_reverse + str_upper + str_count on a fixed string, N iterations"
     "Selection sort of small array using native swap a,b; repeated N/m times"
     "array_any + array_every + array_count with lambdas on a fixed array, N outer iters"
+    "struct operator overloading (+,-,==) and creation (<=>,**,|>) dispatch overhead"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -305,6 +309,28 @@ echo ""
 cat > bench.om << 'OMEOF'
 @noalias
 struct Point { hot int x, hot int y }
+
+// Vec2 struct used by bench 53 (op_overload).
+// Demonstrates operator overloading (redefine existing symbols) and
+// operator creation (define brand-new symbols not in the base language).
+struct Vec2 {
+    hot int x,
+    hot int y,
+    // Overloaded operators — same syntax as standard arithmetic
+    fn operator+(other: Vec2) -> Vec2  { return Vec2 { x: self.x + other.x, y: self.y + other.y }; }
+    fn operator-(other: Vec2) -> Vec2  { return Vec2 { x: self.x - other.x, y: self.y - other.y }; }
+    fn operator==(other: Vec2) -> int  { return (self.x == other.x) && (self.y == other.y); }
+    // Created operators — new symbols never before in the base language
+    fn operator**(other: Vec2) -> int  { return self.x * other.x + self.y * other.y; }
+    fn operator<=>(other: Vec2) -> int {
+        var la:int = self.x * self.x + self.y * self.y;
+        var lb:int = other.x * other.x + other.y * other.y;
+        if (la < lb) { return -1; }
+        if (la > lb) { return  1; }
+        return 0;
+    }
+    fn operator|>(other: Vec2) -> Vec2 { return Vec2 { x: self.x + other.x * 2, y: self.y + other.y * 2 }; }
+}
 
 OPTMAX=:
 
@@ -335,7 +361,7 @@ fn bench_floatmath(@prefetch n:int) -> int {
 }
 
 // ── 2. array_push ────────────────────────────────────────────
-@hot @static @nounwind
+@hot @flatten @static @nounwind
 fn bench_push(@prefetch n:int) -> int {
     var arr:int[] = [];
     prefetch arr;
@@ -395,7 +421,7 @@ fn bench_strops(@prefetch n:int) -> int {
 }
 
 // ── 6. struct_access ─────────────────────────────────────────
-@hot @flatten @pure @unroll @vectorize @static
+@hot @flatten @pure @unroll @vectorize @static @nounwind
 fn bench_struct(@prefetch n:int) -> int {
     prefetch var p:struct = Point { x: 1, y: 2 };
     var sum:int = 0;
@@ -519,7 +545,7 @@ fn bench_calls(@prefetch n:int) -> int {
 }
 
 // ── 14. bitwise_ops ──────────────────────────────────────────
-@hot @flatten @vectorize @unroll @static 
+@hot @flatten @vectorize @unroll @static @nounwind
 fn bench_bitwise(@prefetch n:int) -> int {
     var a:int = 0;
     var b:int = 0;
@@ -747,7 +773,7 @@ fn bench_collatz(@prefetch n:int) -> int {
 }
 
 // ── 24. binary_search ────────────────────────────────────────
-@flatten @unroll @static @nounwind
+@hot @flatten @unroll @static @nounwind
 fn bench_bsearch(@prefetch n:int) -> int {
     const sz:int = 100000;
     var arr:int[] = array_fill(sz, 0);
@@ -1020,7 +1046,7 @@ fn bench_ringbuf(@prefetch n:int) -> int {
 // so the iterator is non-negative and the loop condition can use
 // ICmpULT.  wsum + data[i] - data[i-WIN] exercises the NSW-Sub pass
 // since wsum and data[i] are both provably non-negative.
-@hot @flatten @unroll @vectorize
+@hot @flatten @unroll @vectorize @static @nounwind
 fn bench_slidingwin(@prefetch n:int) -> int {
     const WIN:int = 64;
     var data:int[] = array_fill(n, 0);
@@ -1064,7 +1090,7 @@ fn bench_expchain(@prefetch n:int) -> int {
 // For-each over an integer array exercises the auto-vectorization
 // path that uses inbounds GEP and parallel_accesses metadata.
 // Distinct from indexed for-in, which uses explicit index arithmetic.
-@hot @flatten @vectorize @unroll
+@hot @flatten @vectorize @unroll @static @nounwind
 fn bench_foreach(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
     for (i:int in 0...n) {
@@ -1181,7 +1207,7 @@ fn bench_strprefix(@prefetch n:int) -> int {
 // Build a frequency map over N keys (mod 1000), then read back.
 // Exercises map_set / map_get in a tight loop; demonstrates OM's
 // built-in hash map vs a manual open-addressing table in C.
-@hot @static @nounwind
+@hot @flatten @static @nounwind
 fn bench_dictlookup(@prefetch n:int) -> int {
     var m = map_new();
     for (i:int in 0...n) {
@@ -1200,7 +1226,7 @@ fn bench_dictlookup(@prefetch n:int) -> int {
 // ── 46. array_sort_search ─────────────────────────────────────
 // Each iteration: reinitialize array with deterministic values, sort it,
 // then sum the upper half.  Tests sort() quality vs C qsort().
-@hot @static @nounwind
+@hot @flatten @static @nounwind
 fn bench_arrsortsearch(@prefetch n:int) -> int {
     var m:int = 1024;
     var arr:int[] = array_fill(m, 0);
@@ -1250,7 +1276,7 @@ fn bench_simdsaxpy(@prefetch n:int) -> int {
 // Only uses src[__pipeline_i] (no offset) — safe for all prefetch distances.
 // C equivalent is a plain loop.  Tests pipeline stage scheduling overhead
 // and software-prefetch benefit for sequential read patterns.
-@hot @static @nounwind
+@hot @flatten @static @nounwind
 fn bench_pipelinestencil(@prefetch n:int) -> int {
     var m:int = 8192;
     var src:int[] = array_fill(m, 0);
@@ -1293,7 +1319,7 @@ fn bench_timesloop(@prefetch n:int) -> int {
 // Chain of str_reverse + str_upper + str_count on a fixed string.
 // Tests OM's string processing builtins and compile-time known-
 // length optimizations.
-@hot @static @nounwind
+@hot @flatten @unroll @static @nounwind
 fn bench_strprocess(@prefetch n:int) -> int {
     var s:string = "Hello, OmScript World! Benchmarking string ops.";
     var acc:int = 0;
@@ -1312,7 +1338,7 @@ fn bench_strprocess(@prefetch n:int) -> int {
 // Selection sort of a small array (m=32) using native `swap a, b`.
 // Array is reinitialized each iteration from deterministic values.
 // Tests OM's swap statement vs explicit temp-variable swap in C.
-@hot @static @nounwind
+@hot @flatten @unroll @static @nounwind
 fn bench_swapsort(@prefetch n:int) -> int {
     var m:int = 32;
     var arr:int[] = array_fill(m, 0);
@@ -1348,7 +1374,7 @@ fn is_pos(x:int) -> int { return x > 0; }
 fn is_even_p(x:int) -> int { return x % 2 == 0; }
 fn is_big(x:int) -> int { return x > 500; }
 
-@hot @static @nounwind
+@hot @flatten @unroll @static @nounwind
 fn bench_arraypred(@prefetch n:int) -> int {
     var m:int = 128;
     var arr:int[] = array_fill(m, 0);
@@ -1361,6 +1387,29 @@ fn bench_arraypred(@prefetch n:int) -> int {
         acc += array_count(arr, "is_big");
     }
     invalidate arr; invalidate n;
+    return acc;
+}
+
+// ── 53. op_overload ──────────────────────────────────────────
+// Vec2 struct exercising both operator overloading (redefining +, -, ==)
+// and operator creation (new symbols <=>, ** for dot product, |> for
+// weighted-add).  N iterations accumulate results to prevent DCE.
+// Each iteration performs: add, subtract, dot-product (**), comparison
+// (<=>), and weighted-add (|>) on a pair of Vec2 values derived from i.
+@hot @flatten @unroll @pure @static @nounwind
+fn bench_opoverload(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        var a = Vec2 { x: (i * 3) % 1000, y: (i * 7 + 1) % 1000 };
+        var b = Vec2 { x: (i * 5 + 2) % 1000, y: (i * 11 + 3) % 1000 };
+        var s = a + b;
+        var d = a - b;
+        var dp:int = a ** b;
+        var cmp:int = a <=> b;
+        var w = a |> b;
+        acc += s.x + s.y + d.x + d.y + dp + cmp + w.x + w.y;
+    }
+    invalidate n;
     return acc;
 }
 
@@ -1423,6 +1472,7 @@ fn main() -> int {
         case 50: print(bench_strprocess(n));     break;
         case 51: print(bench_swapsort(n));       break;
         case 52: print(bench_arraypred(n));      break;
+        case 53: print(bench_opoverload(n));     break;
         default: print(0);
     }
     invalidate n;
@@ -2330,6 +2380,36 @@ static long bench_arraypred(long n) {
     return acc;
 }
 
+/* 53 ── op_overload ─────────────────────────────── */
+/* Vec2 arithmetic matching OM operator overload/creation bench.      */
+/* Implements +, -, dot (**), compare (<=>), weighted-add (|>) inline */
+/* as plain C struct operations — the C compiler sees identical IR to  */
+/* the OM operator-lowered form, making the benchmark a fair measure  */
+/* of operator dispatch overhead (OM should be equal or faster).      */
+typedef struct { long x, y; } Vec2;
+static inline Vec2 vec2_add(Vec2 a, Vec2 b) { return (Vec2){ a.x+b.x, a.y+b.y }; }
+static inline Vec2 vec2_sub(Vec2 a, Vec2 b) { return (Vec2){ a.x-b.x, a.y-b.y }; }
+static inline long vec2_dot(Vec2 a, Vec2 b)  { return a.x*b.x + a.y*b.y; }
+static inline long vec2_cmp(Vec2 a, Vec2 b)  {
+    long la = a.x*a.x + a.y*a.y, lb = b.x*b.x + b.y*b.y;
+    return (la > lb) - (la < lb);
+}
+static inline Vec2 vec2_wadd(Vec2 a, Vec2 b) { return (Vec2){ a.x+b.x*2, a.y+b.y*2 }; }
+static long bench_opoverload(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++) {
+        Vec2 a = { (i*3)%1000, (i*7+1)%1000 };
+        Vec2 b = { (i*5+2)%1000, (i*11+3)%1000 };
+        Vec2 s = vec2_add(a, b);
+        Vec2 d = vec2_sub(a, b);
+        long dp  = vec2_dot(a, b);
+        long cmp = vec2_cmp(a, b);
+        Vec2 w   = vec2_wadd(a, b);
+        acc += s.x + s.y + d.x + d.y + dp + cmp + w.x + w.y;
+    }
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -2388,6 +2468,7 @@ int main(void) {
         case 50: r = bench_strprocess(n);        break;
         case 51: r = bench_swapsort(n);          break;
         case 52: r = bench_arraypred(n);         break;
+        case 53: r = bench_opoverload(n);        break;
     }
     printf("%ld\n", r);
     return 0;
