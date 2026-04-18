@@ -683,8 +683,12 @@ void CodeGenerator::runOptimizationPasses() {
             // Phase 3: Hoist cheap instructions above remaining branches.
             SuperblockFPM.addPass(llvm::SpeculativeExecutionPass());
             // Phase 4: Hyperblock formation — convert branches to selects.
+            // FlattenCFGPass is intentionally omitted: it collapses all if-else
+            // chains into sequential code without TTI guidance, which increases
+            // register pressure and can lengthen critical dependency chains on
+            // out-of-order CPUs.  SimplifyCFG with hyperblockCFGOpts already
+            // performs targeted if-conversion where profitable.
             SuperblockFPM.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
-            SuperblockFPM.addPass(llvm::FlattenCFGPass());
             // Phase 5: Cleanup — combine and eliminate dead code.
             SuperblockFPM.addPass(llvm::InstCombinePass());
             SuperblockFPM.addPass(llvm::ADCEPass());

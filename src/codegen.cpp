@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
@@ -5714,11 +5715,19 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
             auto rv = evalExpr(bin->right.get());
             if (!lv || !rv) return std::nullopt;
             const int64_t a = *lv, b = *rv;
-            if (bin->op == "+") return a + b;
-            if (bin->op == "-") return a - b;
-            if (bin->op == "*") return a * b;
-            if (bin->op == "/" && b != 0) return a / b;
-            if (bin->op == "%" && b != 0) return a % b;
+            // Use wrapping arithmetic for +, -, * to match i64 runtime semantics.
+            if (bin->op == "+") return static_cast<int64_t>(static_cast<uint64_t>(a) + static_cast<uint64_t>(b));
+            if (bin->op == "-") return static_cast<int64_t>(static_cast<uint64_t>(a) - static_cast<uint64_t>(b));
+            if (bin->op == "*") return static_cast<int64_t>(static_cast<uint64_t>(a) * static_cast<uint64_t>(b));
+            // Guard against /0 and the INT64_MIN/-1 trap.
+            if (bin->op == "/" && b != 0) {
+                if (a == std::numeric_limits<int64_t>::min() && b == -1) return std::nullopt;
+                return a / b;
+            }
+            if (bin->op == "%" && b != 0) {
+                if (a == std::numeric_limits<int64_t>::min() && b == -1) return int64_t(0);
+                return a % b;
+            }
             if (bin->op == "&") return a & b;
             if (bin->op == "|") return a | b;
             if (bin->op == "^") return a ^ b;
@@ -5732,9 +5741,16 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
             if (bin->op == ">=") return int64_t(a >= b ? 1 : 0);
             if (bin->op == "**") {
                 if (b < 0) return (a == 1) ? int64_t(1) : (a == -1 ? (b & 1 ? int64_t(-1) : int64_t(1)) : int64_t(0));
-                int64_t result = 1;
-                for (int64_t i = 0; i < b; ++i) result *= a;
-                return result;
+                // Binary exponentiation O(log n) — avoids pathological compile times
+                // for expressions like 2**1000000 appearing in const-eval contexts.
+                uint64_t result = 1, base = static_cast<uint64_t>(a);
+                int64_t exp = b;
+                while (exp > 0) {
+                    if (exp & 1) result *= base;
+                    base *= base;
+                    exp >>= 1;
+                }
+                return static_cast<int64_t>(result);
             }
             return std::nullopt;
         }
@@ -6797,11 +6813,22 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
             rv->kind != ConstValue::Kind::Integer)
             return std::nullopt;
         int64_t a = lv->intVal, b = rv->intVal;
-        if (bin->op == "+")  return ConstValue::fromInt(a + b);
-        if (bin->op == "-")  return ConstValue::fromInt(a - b);
-        if (bin->op == "*")  return ConstValue::fromInt(a * b);
-        if (bin->op == "/" && b != 0) return ConstValue::fromInt(a / b);
-        if (bin->op == "%" && b != 0) return ConstValue::fromInt(a % b);
+        // Use wrapping arithmetic for +, -, * so compile-time evaluation
+        // matches the i64 two's-complement wrapping semantics at runtime.
+        if (bin->op == "+")  return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) + static_cast<uint64_t>(b)));
+        if (bin->op == "-")  return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) - static_cast<uint64_t>(b)));
+        if (bin->op == "*")  return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) * static_cast<uint64_t>(b)));
+        // Division/modulo: guard against division-by-zero AND the i64 overflow
+        // case INT64_MIN / -1 (which traps on x86 IDIV).  Return nullopt for
+        // both so the compiler falls back to runtime evaluation.
+        if (bin->op == "/" && b != 0) {
+            if (a == std::numeric_limits<int64_t>::min() && b == -1) return std::nullopt;
+            return ConstValue::fromInt(a / b);
+        }
+        if (bin->op == "%" && b != 0) {
+            if (a == std::numeric_limits<int64_t>::min() && b == -1) return ConstValue::fromInt(0);
+            return ConstValue::fromInt(a % b);
+        }
         if (bin->op == "&")  return ConstValue::fromInt(a & b);
         if (bin->op == "|")  return ConstValue::fromInt(a | b);
         if (bin->op == "^")  return ConstValue::fromInt(a ^ b);

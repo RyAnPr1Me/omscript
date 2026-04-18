@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <future>
 #include <random>
 #include <thread>
@@ -253,6 +254,97 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
             // Arithmetic shift right (sign-extending)
             auto signed_lhs = static_cast<int64_t>(*lhs);
             return static_cast<uint64_t>(signed_lhs >> *rhs);
+        }
+        break;
+    }
+    case llvm::Instruction::SDiv: {
+        auto lhs = getVal(inst->getOperand(0));
+        auto rhs = getVal(inst->getOperand(1));
+        if (lhs && rhs && *rhs != 0) {
+            auto sl = static_cast<int64_t>(*lhs), sr = static_cast<int64_t>(*rhs);
+            if (sl == std::numeric_limits<int64_t>::min() && sr == -1) break;
+            return static_cast<uint64_t>(sl / sr);
+        }
+        break;
+    }
+    case llvm::Instruction::UDiv: {
+        auto lhs = getVal(inst->getOperand(0));
+        auto rhs = getVal(inst->getOperand(1));
+        if (lhs && rhs && *rhs != 0) return *lhs / *rhs;
+        break;
+    }
+    case llvm::Instruction::SRem: {
+        auto lhs = getVal(inst->getOperand(0));
+        auto rhs = getVal(inst->getOperand(1));
+        if (lhs && rhs && *rhs != 0) {
+            auto sl = static_cast<int64_t>(*lhs), sr = static_cast<int64_t>(*rhs);
+            if (sl == std::numeric_limits<int64_t>::min() && sr == -1) return 0;
+            return static_cast<uint64_t>(sl % sr);
+        }
+        break;
+    }
+    case llvm::Instruction::URem: {
+        auto lhs = getVal(inst->getOperand(0));
+        auto rhs = getVal(inst->getOperand(1));
+        if (lhs && rhs && *rhs != 0) return *lhs % *rhs;
+        break;
+    }
+    case llvm::Instruction::ICmp: {
+        auto lhs = getVal(inst->getOperand(0));
+        auto rhs = getVal(inst->getOperand(1));
+        if (lhs && rhs) {
+            auto* icmp = llvm::cast<llvm::ICmpInst>(inst);
+            int64_t sl = static_cast<int64_t>(*lhs), sr = static_cast<int64_t>(*rhs);
+            bool result = false;
+            switch (icmp->getPredicate()) {
+            case llvm::ICmpInst::ICMP_EQ:  result = *lhs == *rhs; break;
+            case llvm::ICmpInst::ICMP_NE:  result = *lhs != *rhs; break;
+            case llvm::ICmpInst::ICMP_ULT: result = *lhs < *rhs;  break;
+            case llvm::ICmpInst::ICMP_ULE: result = *lhs <= *rhs; break;
+            case llvm::ICmpInst::ICMP_UGT: result = *lhs > *rhs;  break;
+            case llvm::ICmpInst::ICMP_UGE: result = *lhs >= *rhs; break;
+            case llvm::ICmpInst::ICMP_SLT: result = sl < sr;  break;
+            case llvm::ICmpInst::ICMP_SLE: result = sl <= sr; break;
+            case llvm::ICmpInst::ICMP_SGT: result = sl > sr;  break;
+            case llvm::ICmpInst::ICMP_SGE: result = sl >= sr; break;
+            default: break;
+            }
+            return result ? 1ULL : 0ULL;
+        }
+        break;
+    }
+    case llvm::Instruction::Select: {
+        auto cond = getVal(inst->getOperand(0));
+        if (cond) {
+            auto chosen = getVal(*cond ? inst->getOperand(1) : inst->getOperand(2));
+            if (chosen) return *chosen;
+        }
+        break;
+    }
+    case llvm::Instruction::ZExt: {
+        auto v = getVal(inst->getOperand(0));
+        if (v) return *v; // already stored as uint64_t, zero-extended
+        break;
+    }
+    case llvm::Instruction::SExt: {
+        auto v = getVal(inst->getOperand(0));
+        if (v) {
+            unsigned srcBits = inst->getOperand(0)->getType()->getIntegerBitWidth();
+            if (srcBits < 64) {
+                // Sign-extend by shifting up then arithmetic-shifting down
+                uint64_t shifted = *v << (64 - srcBits);
+                return static_cast<uint64_t>(static_cast<int64_t>(shifted) >> (64 - srcBits));
+            }
+            return *v;
+        }
+        break;
+    }
+    case llvm::Instruction::Trunc: {
+        auto v = getVal(inst->getOperand(0));
+        if (v) {
+            unsigned dstBits = inst->getType()->getIntegerBitWidth();
+            if (dstBits < 64) return *v & ((1ULL << dstBits) - 1ULL);
+            return *v;
         }
         break;
     }
