@@ -633,7 +633,8 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     root = find(root);
     std::unordered_map<ClassId, ExtractionResult> best;
 
-    // Collect only e-classes reachable from root to avoid wasted work.
+    // ── 1. Collect only reachable e-classes ──────────────────────────────────
+    std::vector<ClassId> reachableVec;
     std::unordered_set<ClassId> reachable;
     {
         std::vector<ClassId> worklist = {root};
@@ -641,57 +642,99 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
             ClassId cls = find(worklist.back());
             worklist.pop_back();
             if (!reachable.insert(cls).second) continue;
+            reachableVec.push_back(cls);
             for (const auto& node : classes_[cls].nodes)
                 for (auto child : node.children)
                     worklist.push_back(find(child));
         }
     }
 
-    // Iterative cost computation: repeat until stable.
-    // We use a simple fixed-point iteration (like Bellman-Ford).
-    // Each iteration, for each reachable class, we pick the node with the
-    // lowest total cost (node cost + sum of children's best costs).
-    bool changed = true;
-    for (int pass = 0; pass < 100 && changed; ++pass) {
-        changed = false;
-        for (ClassId cls : reachable) {
-
-            for (const auto& node : classes_[cls].nodes) {
-                Cost total = model.nodeCost(node);
-                bool feasible = true;
-
-                for (auto child : node.children) {
-                    child = find(child);
-                    auto it = best.find(child);
-                    if (it == best.end()) {
-                        feasible = false;
-                        break;
-                    }
-                    total += it->second.cost;
-                }
-
-                if (!feasible) {
-                    // Leaf nodes with no children are always feasible
-                    if (!node.children.empty()) continue;
-                }
-
-                auto it = best.find(cls);
-                if (it == best.end() || total < it->second.cost) {
-                    best[cls] = {total, node};
-                    changed = true;
-                }
+    // ── 2. Topological sort (children before parents) ────────────────────────
+    // Build direct child-sets for each e-class (only within reachable set).
+    std::unordered_map<ClassId, std::vector<ClassId>> children;
+    children.reserve(reachable.size());
+    for (ClassId cls : reachableVec) {
+        auto& c = children[cls];
+        for (const auto& node : classes_[cls].nodes)
+            for (auto child : node.children) {
+                child = find(child);
+                if (reachable.count(child) && child != cls)
+                    c.push_back(child);
             }
-        }
     }
 
-    // ── DAG sharing discount ────────────────────────────────────────────
+    // DFS-based post-order topological sort; back-edges (cycles from
+    // commutativity/associativity rewrites) are ignored — the follow-up
+    // passes below resolve any remaining unresolved classes.
+    std::vector<ClassId> topoOrder;
+    topoOrder.reserve(reachable.size());
+    {
+        enum class State : uint8_t { Unvisited, InProgress, Done };
+        std::unordered_map<ClassId, State> state;
+        state.reserve(reachable.size());
+        for (ClassId cls : reachableVec) state[cls] = State::Unvisited;
+
+        std::function<void(ClassId)> dfs = [&](ClassId cls) {
+            auto& s = state[cls];
+            if (s != State::Unvisited) return; // cycle or already done
+            s = State::InProgress;
+            for (ClassId dep : children[cls]) dfs(dep);
+            s = State::Done;
+            topoOrder.push_back(cls);
+        };
+        for (ClassId cls : reachableVec) dfs(cls);
+    }
+
+    // ── 3. Single-pass bottom-up extraction in topological order ─────────────
+    // In a DAG (no cycles), this single pass is sufficient: every child is
+    // resolved before its parent is visited.  For cyclic e-graphs the follow-up
+    // passes (section 4) handle residual unresolved classes.
+    auto tryUpdate = [&](ClassId cls) {
+        for (const auto& node : classes_[cls].nodes) {
+            Cost total = model.nodeCost(node);
+            unsigned depth = 0;
+            bool feasible = true;
+
+            for (auto child : node.children) {
+                child = find(child);
+                auto it = best.find(child);
+                if (it == best.end()) { feasible = false; break; }
+                total += it->second.cost;
+                depth = std::max(depth, it->second.depth + 1u);
+            }
+            if (!feasible && !node.children.empty()) continue;
+
+            auto it = best.find(cls);
+            bool better = (it == best.end())
+                       || (total < it->second.cost)
+                       || (total == it->second.cost && depth < it->second.depth);
+            if (better) best[cls] = {total, node, depth};
+        }
+    };
+
+    for (ClassId cls : topoOrder) tryUpdate(cls);
+
+    // ── 4. Follow-up passes for any cyclic residuals ──────────────────────────
+    // At most O(SCC size) passes are needed to resolve cyclic e-classes.
+    // In practice this loop almost never executes — it's a safety net only.
+    for (int pass = 0; pass < 10; ++pass) {
+        bool changed = false;
+        for (ClassId cls : topoOrder) {
+            auto before = best.count(cls) ? best[cls].cost
+                                          : std::numeric_limits<Cost>::infinity();
+            tryUpdate(cls);
+            if (!best.count(cls)) continue;
+            if (best[cls].cost < before) changed = true;
+        }
+        if (!changed) break;
+    }
+
+    // ── 5. DAG sharing discount ────────────────────────────────────────────
     // When the same sub-expression is used by multiple parent nodes, it is
     // computed once and reused.  Adjust costs of the already-selected best
     // nodes to reflect sharing, without changing which node is selected.
-    // This ensures extraction structure remains stable while costs become
-    // more accurate for DAG-aware comparisons.
     std::unordered_map<ClassId, unsigned> parentCount;
-    for (ClassId cls : reachable) {
+    for (ClassId cls : reachableVec) {
         auto it = best.find(cls);
         if (it == best.end()) continue;
         for (auto child : it->second.bestNode.children) {
@@ -700,11 +743,11 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
         }
     }
 
-    // Propagate sharing discounts bottom-up through the best map.
-    bool dagChanged = true;
-    for (int dagPass = 0; dagPass < 10 && dagChanged; ++dagPass) {
-        dagChanged = false;
-        for (ClassId cls : reachable) {
+    // Propagate sharing discounts in topological order (single pass suffices
+    // for a DAG; the small loop is for residual cycles, same as section 4).
+    for (int dagPass = 0; dagPass < 3; ++dagPass) {
+        bool dagChanged = false;
+        for (ClassId cls : topoOrder) {
             auto bestIt = best.find(cls);
             if (bestIt == best.end()) continue;
             const auto& node = bestIt->second.bestNode;
@@ -726,6 +769,7 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
                 dagChanged = true;
             }
         }
+        if (!dagChanged) break;
     }
 
     return best;

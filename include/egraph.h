@@ -427,6 +427,9 @@ private:
     struct ExtractionResult {
         Cost cost;
         ENode bestNode;
+        unsigned depth = 0; ///< Critical-path depth (0 = leaf). Used as tie-breaker:
+                             ///< when two options have equal cost, prefer the shallower
+                             ///< one to reduce register pressure and expose more ILP.
     };
     std::unordered_map<ClassId, ExtractionResult>
     extractAll(ClassId root, const CostModel& model);

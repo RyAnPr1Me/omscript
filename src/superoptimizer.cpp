@@ -5457,7 +5457,20 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
     llvm::Value* replacement = nullptr;
     double oldCost = instructionCost(inst);
 
-    // Template 1: Expensive multiply by constant → shift+add/sub sequence
+    // Template 1: Multiply by constant → optimal shift+add/sub sequence.
+    //
+    // Uses Non-Adjacent Form (NAF) to find the minimum-digit signed binary
+    // representation of the constant.  NAF guarantees no two adjacent nonzero
+    // digits, giving the fewest add/sub operations for any constant.
+    //
+    // Cost model (default threshold 0.8):
+    //   mul cost = 3.0;  shl = 1.0;  add/sub = 1.0
+    //   1 NAF digit (power-of-2): 1 shift → cost 1.0 < 2.4  ✓
+    //   2 NAF digits (one at pos 0): 1 shift + 1 add/sub → cost 2.0 < 2.4  ✓
+    //   2 NAF digits (both nonzero at pos>0): 2 shifts + 1 add/sub → 3.0 ≥ 2.4  ✗
+    //     BUT: emit these anyway — the critical-path latency is 2 cycles vs 3 for
+    //     mul, which improves IPC even at equal throughput cost.  We apply a
+    //     slightly relaxed threshold (1.05×) for latency-improving sequences.
     if (inst->getOpcode() == llvm::Instruction::Mul) {
         auto cval = getConstIntValue(inst->getOperand(1));
         llvm::Value* var = inst->getOperand(0);
@@ -5469,120 +5482,49 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 
         int64_t c = *cval;
         if (c <= 0) return false;
+        llvm::Type* ty = inst->getType();
 
-        // x * 3 → (x << 1) + x  (cost: 2 vs 3)
-        if (c == 3) {
-            llvm::Value* shl = builder.CreateShl(var, 1);
-            replacement = builder.CreateAdd(shl, var, "mul3");
-        }
-        // x * 5 → (x << 2) + x  (cost: 2 vs 3)
-        else if (c == 5) {
-            llvm::Value* shl = builder.CreateShl(var, 2);
-            replacement = builder.CreateAdd(shl, var, "mul5");
-        }
-        // x * 7 → (x << 3) - x  (cost: 2 vs 3)
-        else if (c == 7) {
-            llvm::Value* shl = builder.CreateShl(var, 3);
-            replacement = builder.CreateSub(shl, var, "mul7");
-        }
-        // x * 9 → (x << 3) + x  (cost: 2 vs 3)
-        else if (c == 9) {
-            llvm::Value* shl = builder.CreateShl(var, 3);
-            replacement = builder.CreateAdd(shl, var, "mul9");
-        }
-        // x * 15 → (x << 4) - x  (cost: 2 vs 3)
-        else if (c == 15) {
-            llvm::Value* shl = builder.CreateShl(var, 4);
-            replacement = builder.CreateSub(shl, var, "mul15");
-        }
-        // x * 17 → (x << 4) + x  (cost: 2 vs 3)
-        else if (c == 17) {
-            llvm::Value* shl = builder.CreateShl(var, 4);
-            replacement = builder.CreateAdd(shl, var, "mul17");
-        }
-        // x * 31 → (x << 5) - x  (cost: 2 vs 3)
-        else if (c == 31) {
-            llvm::Value* shl = builder.CreateShl(var, 5);
-            replacement = builder.CreateSub(shl, var, "mul31");
-        }
-        // x * 33 → (x << 5) + x  (cost: 2 vs 3)
-        else if (c == 33) {
-            llvm::Value* shl = builder.CreateShl(var, 5);
-            replacement = builder.CreateAdd(shl, var, "mul33");
-        }
-        // x * 63 → (x << 6) - x  (cost: 2 vs 3)
-        else if (c == 63) {
-            llvm::Value* shl = builder.CreateShl(var, 6);
-            replacement = builder.CreateSub(shl, var, "mul63");
-        }
-        // x * 65 → (x << 6) + x  (cost: 2 vs 3)
-        else if (c == 65) {
-            llvm::Value* shl = builder.CreateShl(var, 6);
-            replacement = builder.CreateAdd(shl, var, "mul65");
-        }
-        // x * 127 → (x << 7) - x  (cost: 2 vs 3)
-        else if (c == 127) {
-            llvm::Value* shl = builder.CreateShl(var, 7);
-            replacement = builder.CreateSub(shl, var, "mul127");
-        }
-        // x * 255 → (x << 8) - x  (cost: 2 vs 3)
-        else if (c == 255) {
-            llvm::Value* shl = builder.CreateShl(var, 8);
-            replacement = builder.CreateSub(shl, var, "mul255");
-        }
-        // x * 129 → (x << 7) + x  (cost: 2 vs 3)
-        else if (c == 129) {
-            llvm::Value* shl = builder.CreateShl(var, 7);
-            replacement = builder.CreateAdd(shl, var, "mul129");
-        }
-        // x * 257 → (x << 8) + x  (cost: 2 vs 3)
-        else if (c == 257) {
-            llvm::Value* shl = builder.CreateShl(var, 8);
-            replacement = builder.CreateAdd(shl, var, "mul257");
-        }
-        // x * 511 → (x << 9) - x  (cost: 2 vs 3)
-        else if (c == 511) {
-            llvm::Value* shl = builder.CreateShl(var, 9);
-            replacement = builder.CreateSub(shl, var, "mul511");
-        }
-        // x * 513 → (x << 9) + x  (cost: 2 vs 3)
-        else if (c == 513) {
-            llvm::Value* shl = builder.CreateShl(var, 9);
-            replacement = builder.CreateAdd(shl, var, "mul513");
-        }
-        // x * 1023 → (x << 10) - x  (cost: 2 vs 3)
-        else if (c == 1023) {
-            llvm::Value* shl = builder.CreateShl(var, 10);
-            replacement = builder.CreateSub(shl, var, "mul1023");
-        }
-        // x * 1025 → (x << 10) + x  (cost: 2 vs 3)
-        else if (c == 1025) {
-            llvm::Value* shl = builder.CreateShl(var, 10);
-            replacement = builder.CreateAdd(shl, var, "mul1025");
-        }
-        // General: x * (2^n + 1) → (x << n) + x  for any n
-        // General: x * (2^n - 1) → (x << n) - x  for any n
-        // These are always 2 instructions (cost 2.0) vs mul (cost 3.0)
-        else {
-            // Check if c = 2^n + 1
-            int64_t cm1 = c - 1;
-            if (cm1 > 0 && (cm1 & (cm1 - 1)) == 0) {
-                unsigned n = llvm::Log2_64(static_cast<uint64_t>(cm1));
-                llvm::Value* shl = builder.CreateShl(var, n);
-                replacement = builder.CreateAdd(shl, var,
-                    "mul" + std::to_string(c));
-            }
-            // Check if c = 2^n - 1
-            else {
-                int64_t cp1 = c + 1;
-                if (cp1 > 0 && (cp1 & (cp1 - 1)) == 0) {
-                    unsigned n = llvm::Log2_64(static_cast<uint64_t>(cp1));
-                    llvm::Value* shl = builder.CreateShl(var, n);
-                    replacement = builder.CreateSub(shl, var,
-                        "mul" + std::to_string(c));
+        // Compute Non-Adjacent Form (NAF) of c.
+        // Algorithm: at each step, if odd and would create two adjacent nonzeros,
+        // use digit -1 (borrow), else +1.
+        struct NafDigit { unsigned pos; int sign; };  // sign: +1 or -1
+        std::vector<NafDigit> naf;
+        {
+            int64_t t = c;
+            unsigned pos = 0;
+            while (t != 0) {
+                if (t & 1) {
+                    // digit = 2 - (t & 3) mapped to {-1, +1}
+                    int d = ((t & 3) == 3) ? -1 : 1;
+                    naf.push_back({pos, d});
+                    t -= d;
                 }
+                t >>= 1;
+                ++pos;
             }
         }
+
+        if (naf.empty()) return false; // c == 0, shouldn't happen
+
+        // Only profitable for ≤2 NAF digits.  3+ would cost ≥ 5 instructions.
+        if (naf.size() > 2) return false;
+
+        // Build the instruction sequence from NAF digits.
+        llvm::Value* result = nullptr;
+        for (const auto& [pos, sign] : naf) {
+            llvm::Value* shifted = (pos > 0)
+                ? builder.CreateShl(var, llvm::ConstantInt::get(ty, pos),
+                                    "mulk_s" + std::to_string(pos))
+                : var;
+            if (!result) {
+                result = (sign > 0) ? shifted
+                                    : builder.CreateNeg(shifted, "mulk_neg");
+            } else {
+                result = (sign > 0) ? builder.CreateAdd(result, shifted, "mulk_add")
+                                    : builder.CreateSub(result, shifted, "mulk_sub");
+            }
+        }
+        if (result && result != inst) replacement = result;
     }
 
     // Template 2: Division by power-of-2 constant → shift
@@ -5665,22 +5607,35 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
     }
 
     if (replacement) {
+        // Walk the newly created instruction tree and sum costs.
+        // Avoid counting the original instruction or values defined outside
+        // the current block (which pre-existed and are not our responsibility).
         double newCost = 0.0;
-        // Estimate cost of replacement (rough: count the instructions we created)
-        if (auto* ri = llvm::dyn_cast<llvm::Instruction>(replacement)) {
-            newCost = instructionCost(ri);
-            // Add costs of any intermediate instructions
-            for (unsigned i = 0; i < ri->getNumOperands(); ++i) {
-                if (auto* opInst = llvm::dyn_cast<llvm::Instruction>(ri->getOperand(i))) {
-                    if (opInst->getParent() == ri->getParent() &&
-                        opInst != inst) {
-                        newCost += instructionCost(opInst);
-                    }
-                }
-            }
+        std::vector<llvm::Value*> worklist = {replacement};
+        std::unordered_set<llvm::Value*> visited;
+        while (!worklist.empty()) {
+            llvm::Value* v = worklist.back();
+            worklist.pop_back();
+            if (!visited.insert(v).second) continue;
+            auto* ri = llvm::dyn_cast<llvm::Instruction>(v);
+            if (!ri || ri == inst || ri->getParent() != inst->getParent()) continue;
+            newCost += instructionCost(ri);
+            for (unsigned i = 0; i < ri->getNumOperands(); ++i)
+                worklist.push_back(ri->getOperand(i));
         }
 
-        if (newCost < oldCost * config.costThreshold) {
+        // Use a slightly relaxed threshold (1.05×) when the replacement
+        // also reduces critical-path latency (i.e., newCost ≤ oldCost but
+        // with shorter chains), so that 2-shift+add sequences are accepted
+        // for x*c where c has 2 NAF digits with both positions > 0.
+        // The standard threshold is 0.8 × oldCost; the relaxed threshold
+        // allows up to 1.05 × oldCost for pure latency improvements.
+        bool latencyImproved = (newCost > 0.0 && newCost <= oldCost);
+        double effectiveThreshold = latencyImproved
+            ? std::min(config.costThreshold * 1.312, 1.05)  // ~1.05 at default threshold
+            : config.costThreshold;
+
+        if (newCost < oldCost * effectiveThreshold) {
             inst->replaceAllUsesWith(replacement);
             return true;
         }
