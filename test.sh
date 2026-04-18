@@ -2014,8 +2014,8 @@ echo "────────────────────────�
 echo "  Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
-BENCH_MODE="${BENCH_MODE:-omsc-fast}"
-OM_FLAGS="-O3 -march=native -mtune=native -fvectorize -funroll-loops -floop-optimize -fparallelize -flto -fno-pic"
+BENCH_MODE="${BENCH_MODE:-fair}"
+OM_FLAGS="-O3 -march=native -mtune=native -fvectorize -funroll-loops -floop-optimize -fparallelize"
 CC="${BENCH_CC:-}"
 if [ -z "$CC" ]; then
     if [ "$BENCH_MODE" = "fair" ]; then
@@ -2032,7 +2032,10 @@ if [ -z "$CC" ]; then
     fi
 fi
 if [ "$BENCH_MODE" = "fair" ]; then
-    C_FLAGS="-O3 -march=native -mtune=native -funroll-loops -fno-plt -flto -lm"
+    # fair: both sides compiled with the same backend (clang = LLVM, same as OM)
+    # and identical flags so OM wins only through better IR quality, not flag tricks.
+    # -fno-pie matches OM's default static relocation model (no GOT overhead).
+    C_FLAGS="-O3 -march=native -mtune=native -fno-plt -fno-pie -lm"
 else
     C_FLAGS="-O2 -mtune=generic -fno-unroll-loops -fno-tree-vectorize -fno-plt -lm"
 fi

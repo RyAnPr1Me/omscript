@@ -2212,6 +2212,17 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // comparison chains in classify()-style functions.
     fpm.add(llvm::createMergeICmpsLegacyPass());
 
+    // Phase 3.7: Post-loop-canonicalization GVN.  LICM may have hoisted
+    // loop-invariant computations into the preheader, and LSR may have
+    // introduced new address-computation patterns.  A GVN pass here merges
+    // newly-hoisted values with identical computations elsewhere and catches
+    // load redundancies that LSR's induction variable substitution exposes.
+    // This is a direct OmScript IR-quality advantage: C compilers run GVN
+    // before LSR (in the main pipeline order), so post-LSR GVN is an
+    // extra cleanup step that the clang pipeline doesn't provide.
+    fpm.add(llvm::createGVNPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
+
     // Phase 4: Final cleanup — InstSimplify, InstCombine, CFGSimplification,
     // and DCE remove dead code and simplify patterns exposed by loop and
     // control-flow transformations above.
