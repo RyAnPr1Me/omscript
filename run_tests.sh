@@ -14,22 +14,31 @@ NC='\033[0m' # No Color
 FAILURES=0
 TOTAL=0
 
-# Build the compiler
-echo "Building compiler..."
+# Build the compiler (skippable when the binary is already built externally,
+# e.g. during a PGO/LTO release build where rebuilding would overwrite the
+# optimized binary.  Set OMSC_SKIP_BUILD=1 to skip the cmake+make step.)
 cd "$(dirname "$0")"
-mkdir -p build
-cd build
-cmake .. -DLLVM_DIR=$(/usr/lib/llvm-18/bin/llvm-config --cmakedir) > /dev/null 2>&1
-make -j$(nproc) > /dev/null 2>&1
+if [ "${OMSC_SKIP_BUILD:-0}" = "1" ]; then
+    if [ ! -x "./build/omsc" ]; then
+        echo -e "${RED}✗ OMSC_SKIP_BUILD=1 but ./build/omsc not found${NC}"
+        exit 1
+    fi
+    echo "Building compiler... (skipped — using existing ./build/omsc)"
+else
+    echo "Building compiler..."
+    mkdir -p build
+    cd build
+    cmake .. -DLLVM_DIR=$(/usr/lib/llvm-18/bin/llvm-config --cmakedir) > /dev/null 2>&1
+    make -j$(nproc) > /dev/null 2>&1
 
-if [ $? -ne 0 ]; then
-    echo -e "${RED}✗ Build failed${NC}"
-    exit 1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}✗ Build failed${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Build successful${NC}"
+    cd ..
 fi
-echo -e "${GREEN}✓ Build successful${NC}"
 echo ""
-
-cd ..
 
 # ── Parallel .om test infrastructure ──────────────────────────────────────────
 # ptest_program / ptest_compile_fail submit background compile+run jobs.

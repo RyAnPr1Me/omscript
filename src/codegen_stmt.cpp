@@ -875,8 +875,12 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         }
     }
 
-    // Merge block
+    // Merge block — if it has no predecessors (both then and else terminated
+    // without branching to it), insert an unreachable so the builder has a
+    // valid insert point without generating dead code.
     builder->SetInsertPoint(mergeBB);
+    if (llvm::pred_empty(mergeBB))
+        builder->CreateUnreachable();
 }
 
 void CodeGenerator::generateWhile(WhileStmt* stmt) {
@@ -1323,7 +1327,24 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         stepVal = convertTo(stepVal, iterType);
         if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(stepVal)) {
             stepKnownPositive = stepCI->getSExtValue() > 0;
-            stepKnownNonZero = stepCI->getSExtValue() != 0;
+            stepKnownNonZero  = stepCI->getSExtValue() != 0;
+
+            // Empty-loop elimination for constant wrong-direction step:
+            // a positive step on a range where start > end never iterates,
+            // and a negative step on a range where start < end never iterates.
+            // This avoids emitting the entire loop CFG for these dead ranges.
+            if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+                if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+                    int64_t sv = startCI->getSExtValue();
+                    int64_t ev = endCI->getSExtValue();
+                    int64_t step = stepCI->getSExtValue();
+                    // Ascending step but start > end → condition (i < end) fails immediately.
+                    // Descending step but start < end → condition (i > end) fails immediately.
+                    if ((step > 0 && sv > ev) || (step < 0 && sv < ev)) {
+                        return;
+                    }
+                }
+            }
         }
     } else {
         // Detect compile-time ascending ranges and emit simpler loop code.

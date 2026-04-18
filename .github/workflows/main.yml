@@ -22,11 +22,12 @@ jobs:
             llvm-18-dev \
             clang-18 \
             gcc \
+            libgtest-dev \
             mold \
 
       - name: Build omsc from source
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake -DLTO=ON
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake -DLTO=ON -DUSE_MOLD=ON
           cmake --build build --parallel $(nproc)
 
       - name: Run integration tests

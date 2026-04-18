@@ -935,7 +935,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isNeg = builder->CreateICmpSLT(x, zero, "signneg");
         llvm::Value* negOrZero = builder->CreateSelect(isNeg, neg, zero, "signNZ");
         llvm::Value* isPos = builder->CreateICmpSGT(x, zero, "signpos");
-        return builder->CreateSelect(isPos, pos, negOrZero, "signval");
+        auto* signVal = builder->CreateSelect(isPos, pos, negOrZero, "signval");
+        // !range [-1, 2): sign always returns -1, 0, or 1.  This lets CVP/LVI
+        // fold downstream comparisons like sign(x) == 2 → false.
+        auto* signRange = llvm::MDNode::get(*context, {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(-1), true)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(getDefaultType(), 2))});
+        if (auto* signInst = llvm::dyn_cast<llvm::Instruction>(signVal))
+            signInst->setMetadata(llvm::LLVMContext::MD_range, signRange);
+        return signVal;
     }
 
     if (bid == BuiltinId::CLAMP) {
@@ -1020,18 +1028,95 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         base = toDefaultType(base);
         exp  = toDefaultType(exp);
 
+        // Constant-exponent fast path: for small constant non-negative exponents
+        // emit an unrolled multiply chain instead of the binary-exp loop.
+        // This avoids 6 basic blocks and a loop for common cases like pow(x,2).
+        if (auto* expCI = llvm::dyn_cast<llvm::ConstantInt>(exp)) {
+            int64_t ev = expCI->getSExtValue();
+            bool baseNonNeg = nonNegValues_.count(base) > 0;
+            auto mkMulP = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                  : builder->CreateMul(a, b, nm);
+            };
+            if (ev == 0) {
+                auto* r = llvm::ConstantInt::get(getDefaultType(), 1);
+                nonNegValues_.insert(r);
+                return r;
+            }
+            if (ev == 1) return base;
+            if (ev == 2) {
+                auto* r = mkMulP(base, base, "powb.2");
+                if (baseNonNeg) nonNegValues_.insert(r);
+                return r;
+            }
+            if (ev == 3) {
+                auto* sq = mkMulP(base, base, "powb.3.sq");
+                auto* r  = mkMulP(sq, base, "powb.3");
+                if (baseNonNeg) nonNegValues_.insert(r);
+                return r;
+            }
+            if (ev == 4) {
+                auto* sq = mkMulP(base, base, "powb.4.sq");
+                auto* r  = mkMulP(sq, sq, "powb.4");
+                nonNegValues_.insert(r);  // even exponent → always non-neg
+                return r;
+            }
+            if (ev == 5) {
+                auto* sq = mkMulP(base, base, "powb.5.sq");
+                auto* q4 = mkMulP(sq, sq, "powb.5.q4");
+                auto* r  = mkMulP(q4, base, "powb.5");
+                if (baseNonNeg) nonNegValues_.insert(r);
+                return r;
+            }
+            if (ev == 6) {
+                auto* sq = mkMulP(base, base, "powb.6.sq");
+                auto* cb = mkMulP(sq, base, "powb.6.cb");
+                auto* r  = mkMulP(cb, cb, "powb.6");
+                nonNegValues_.insert(r);  // even exponent → always non-neg
+                return r;
+            }
+            if (ev == 7) {
+                auto* sq = mkMulP(base, base, "powb.7.sq");
+                auto* cb = mkMulP(sq, base, "powb.7.cb");
+                auto* p6 = mkMulP(cb, cb, "powb.7.p6");
+                auto* r  = mkMulP(p6, base, "powb.7");
+                if (baseNonNeg) nonNegValues_.insert(r);
+                return r;
+            }
+            if (ev == 8) {
+                auto* sq = mkMulP(base, base, "powb.8.sq");
+                auto* q4 = mkMulP(sq, sq, "powb.8.q4");
+                auto* r  = mkMulP(q4, q4, "powb.8");
+                nonNegValues_.insert(r);  // even exponent → always non-neg
+                return r;
+            }
+        }
+
         llvm::Function* function = builder->GetInsertBlock()->getParent();
 
         // Binary exponentiation (exponentiation by squaring): O(log n) in the exponent
-        llvm::BasicBlock* negExpBB = llvm::BasicBlock::Create(*context, "pow.negexp", function);
-        llvm::BasicBlock* posExpBB = llvm::BasicBlock::Create(*context, "pow.posexp", function);
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "pow.loop", function);
-        llvm::BasicBlock* oddBB = llvm::BasicBlock::Create(*context, "pow.odd", function);
-        llvm::BasicBlock* squareBB = llvm::BasicBlock::Create(*context, "pow.square", function);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "pow.done", function);
+        llvm::BasicBlock* negExpBB  = llvm::BasicBlock::Create(*context, "pow.negexp", function);
+        llvm::BasicBlock* zeroExpBB = llvm::BasicBlock::Create(*context, "pow.zeroexp", function);
+        llvm::BasicBlock* posExpBB  = llvm::BasicBlock::Create(*context, "pow.posexp", function);
+        llvm::BasicBlock* loopBB    = llvm::BasicBlock::Create(*context, "pow.loop", function);
+        llvm::BasicBlock* oddBB     = llvm::BasicBlock::Create(*context, "pow.odd", function);
+        llvm::BasicBlock* squareBB  = llvm::BasicBlock::Create(*context, "pow.square", function);
+        llvm::BasicBlock* doneBB    = llvm::BasicBlock::Create(*context, "pow.done", function);
 
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1, true);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1, true);
+
+        // pow(x, 0) == 1 always — handle before the negative/positive split to
+        // avoid entering the 6-BB loop structure for this common edge case.
+        llvm::Value* isZeroExp = builder->CreateICmpEQ(exp, zero, "pow.isz");
+        auto* zeroW = llvm::MDBuilder(*context).createBranchWeights(1, 200);
+        llvm::BasicBlock* checkSignBB = llvm::BasicBlock::Create(*context, "pow.chksign", function);
+        builder->CreateCondBr(isZeroExp, zeroExpBB, checkSignBB, zeroW);
+
+        builder->SetInsertPoint(zeroExpBB);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(checkSignBB);
         llvm::Value* isNegExp = builder->CreateICmpSLT(exp, zero, "pow.isneg");
         // Negative exponent is uncommon for integer pow(); favour the positive path.
         auto* negExpW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
@@ -1060,13 +1145,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(oddBB);
         llvm::Value* expBit = builder->CreateAnd(counter, one, "pow.bit");
         llvm::Value* isOdd = builder->CreateICmpNE(expBit, zero, "pow.isodd");
-        llvm::Value* newResult = builder->CreateMul(result, curBase, "pow.mul");
+        // Use NSWMul when the base is known non-negative.
+        bool powBaseNonNeg = nonNegValues_.count(base) > 0;
+        llvm::Value* newResult = powBaseNonNeg
+            ? builder->CreateNSWMul(result, curBase, "pow.mul")
+            : builder->CreateMul(result, curBase, "pow.mul");
         llvm::Value* resultSel = builder->CreateSelect(isOdd, newResult, result, "pow.rsel");
         builder->CreateBr(squareBB);
 
         // Square the base and halve the exponent
         builder->SetInsertPoint(squareBB);
-        llvm::Value* newBase = builder->CreateMul(curBase, curBase, "pow.sq");
+        llvm::Value* newBase = powBaseNonNeg
+            ? builder->CreateNSWMul(curBase, curBase, "pow.sq")
+            : builder->CreateMul(curBase, curBase, "pow.sq");
         llvm::Value* newCounter = builder->CreateAShr(counter, one, "pow.halve");
         result->addIncoming(resultSel, squareBB);
         curBase->addIncoming(newBase, squareBB);
@@ -1074,8 +1165,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
-        llvm::PHINode* finalResult = builder->CreatePHI(getDefaultType(), 2, "pow.final");
-        finalResult->addIncoming(zero, negExpBB);
+        llvm::PHINode* finalResult = builder->CreatePHI(getDefaultType(), 3, "pow.final");
+        finalResult->addIncoming(one,    zeroExpBB);  // pow(x, 0) == 1
+        finalResult->addIncoming(zero,   negExpBB);   // pow(x, neg) == 0
         finalResult->addIncoming(result, loopBB);
         return finalResult;
     }
@@ -2089,14 +2181,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
         b = toDefaultType(b);
-        // Use absolute values
+        // Use absolute values via llvm.abs intrinsic (single instruction on x86:
+        // neg + cmov, vs 3-instruction icmp+neg+select sequence).
+        llvm::Function* absFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
+        a = builder->CreateCall(absFn, {a, builder->getTrue()}, "gcd.aabs");
+        b = builder->CreateCall(absFn, {b, builder->getTrue()}, "gcd.babs");
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* aNeg = builder->CreateICmpSLT(a, zero, "gcd.aneg");
-        llvm::Value* aNegVal = builder->CreateNeg(a, "gcd.anegval");
-        a = builder->CreateSelect(aNeg, aNegVal, a, "gcd.aabs");
-        llvm::Value* bNeg = builder->CreateICmpSLT(b, zero, "gcd.bneg");
-        llvm::Value* bNegVal = builder->CreateNeg(b, "gcd.bnegval");
-        b = builder->CreateSelect(bNeg, bNegVal, b, "gcd.babs");
 
         // Binary GCD (Stein's algorithm): avoids expensive division by using
         // only ctz, shifts, comparisons, and subtraction.  On modern x86 CPUs
@@ -6264,42 +6354,66 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
         b = toDefaultType(b);
-        // Use absolute values
+        // Use absolute values via llvm.abs intrinsic (single neg+cmov on x86).
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* aNeg = builder->CreateICmpSLT(a, zero, "lcm.aneg");
-        llvm::Value* aNegVal = builder->CreateNeg(a, "lcm.anegval");
-        llvm::Value* aAbs = builder->CreateSelect(aNeg, aNegVal, a, "lcm.aabs");
-        llvm::Value* bNeg = builder->CreateICmpSLT(b, zero, "lcm.bneg");
-        llvm::Value* bNegVal = builder->CreateNeg(b, "lcm.bnegval");
-        llvm::Value* bAbs = builder->CreateSelect(bNeg, bNegVal, b, "lcm.babs");
+        llvm::Function* absFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
+        llvm::Value* aAbs = builder->CreateCall(absFn, {a, builder->getTrue()}, "lcm.aabs");
+        llvm::Value* bAbs = builder->CreateCall(absFn, {b, builder->getTrue()}, "lcm.babs");
 
-        // GCD via Euclidean algorithm: while (b != 0) { temp = b; b = a % b; a = temp; }
+        // GCD via Stein's binary algorithm: avoids expensive division (20-40
+        // cycles on x86) and uses only ctz, shifts, comparisons, and
+        // subtraction — all 1-cycle ops.  This matches the gcd() builtin.
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preheaderBB = builder->GetInsertBlock();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::Function* cttzFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::cttz, {getDefaultType()});
+
+        llvm::Value* aOrB = builder->CreateOr(aAbs, bAbs, "lcm.aorb");
+        llvm::Value* k = builder->CreateCall(cttzFn, {aOrB, builder->getFalse()}, "lcm.k");
+
+        llvm::BasicBlock* mainBB = llvm::BasicBlock::Create(*context, "lcm.gcd.main", function);
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "lcm.gcd.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "lcm.gcd.body", function);
+        llvm::BasicBlock* contBB = llvm::BasicBlock::Create(*context, "lcm.gcd.cont", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "lcm.gcd.done", function);
 
+        // Edge case: if a == 0 or b == 0, lcm = 0.
+        llvm::Value* edgeCase = builder->CreateOr(
+            builder->CreateICmpEQ(aAbs, zero, "lcm.a0"),
+            builder->CreateICmpEQ(bAbs, zero, "lcm.b0"), "lcm.edge");
+        auto* lcmEdgeW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(edgeCase, doneBB, mainBB, lcmEdgeW);
+
+        builder->SetInsertPoint(mainBB);
+        llvm::Value* ctzA = builder->CreateCall(cttzFn, {aAbs, builder->getTrue()}, "lcm.ctza");
+        llvm::Value* aOdd = builder->CreateLShr(aAbs, ctzA, "lcm.aodd");
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* phiA = builder->CreatePHI(getDefaultType(), 2, "lcm.gcd.a");
-        phiA->addIncoming(aAbs, preheaderBB);
+        phiA->addIncoming(aOdd, mainBB);
         llvm::PHINode* phiB = builder->CreatePHI(getDefaultType(), 2, "lcm.gcd.b");
-        phiB->addIncoming(bAbs, preheaderBB);
+        phiB->addIncoming(bAbs, mainBB);
 
-        llvm::Value* bIsZero = builder->CreateICmpEQ(phiB, zero, "lcm.gcd.bzero");
-        builder->CreateCondBr(bIsZero, doneBB, bodyBB);
+        llvm::Value* ctzB = builder->CreateCall(cttzFn, {phiB, builder->getTrue()}, "lcm.ctzb");
+        llvm::Value* bOdd = builder->CreateLShr(phiB, ctzB, "lcm.bodd");
+        llvm::Value* aGtB = builder->CreateICmpUGT(phiA, bOdd, "lcm.gt");
+        llvm::Value* lo = builder->CreateSelect(aGtB, bOdd, phiA, "lcm.lo");
+        llvm::Value* hi = builder->CreateSelect(aGtB, phiA, bOdd, "lcm.hi");
+        llvm::Value* diff = builder->CreateSub(hi, lo, "lcm.diff");
+        llvm::Value* gcdDone = builder->CreateICmpEQ(diff, zero, "lcm.dz");
+        phiA->addIncoming(lo, loopBB);
+        phiB->addIncoming(diff, loopBB);
+        builder->CreateCondBr(gcdDone, contBB, loopBB);
 
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* remainder = builder->CreateURem(phiA, phiB, "lcm.gcd.rem");
-        phiA->addIncoming(phiB, bodyBB);
-        phiB->addIncoming(remainder, bodyBB);
-        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        builder->SetInsertPoint(contBB);
+        llvm::Value* gcdShifted = builder->CreateShl(lo, k, "lcm.gcdval");
+        builder->CreateBr(doneBB);
 
         // lcm(a, b) = |a| / gcd(a, b) * |b|  (divide first to avoid overflow)
         builder->SetInsertPoint(doneBB);
-        llvm::Value* gcdVal = phiA;  // phiA holds gcd result
+        llvm::PHINode* gcdVal = builder->CreatePHI(getDefaultType(), 2, "lcm.gcd.result");
+        gcdVal->addIncoming(zero, entryBB);       // edge case: return 0
+        gcdVal->addIncoming(gcdShifted, contBB);
         // Handle gcd == 0 (when both inputs are 0): lcm(0, 0) = 0
         llvm::Value* gcdIsZero = builder->CreateICmpEQ(gcdVal, zero, "lcm.gcd.iszero");
         llvm::Value* divResult = builder->CreateUDiv(aAbs, gcdVal, "lcm.div");
