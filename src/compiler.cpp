@@ -259,6 +259,12 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         default:
             break;
         }
+        if (optLevel_ >= OptimizationLevel::O2) {
+            // Prefer faster PLT-less external calls and more aggressive linker
+            // layout in optimized builds.
+            linkArgs.push_back("-fno-plt");
+            linkArgs.push_back("-Wl,-O3");
+        }
         if (lto_) {
             linkArgs.push_back("-flto");
             // Pass -march to the linker so the LTO backend uses the

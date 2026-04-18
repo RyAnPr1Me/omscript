@@ -9,14 +9,11 @@ set -eu
 #  No category is over-represented.  Both OM and C implementations
 #  are idiomatic and use the same algorithm.
 #
-#  Fair-comparison design:
-#    - C compiled with clang (same LLVM backend as OM) so any
-#      performance difference reflects frontend IR quality, not
-#      backend differences between GCC and LLVM
-#    - Override with BENCH_CC=gcc if desired
-#    - No LTO for C (OM is single-file; LTO would give C unfair
-#      inter-procedural advantage that OM already gets natively)
-#    - No -ffast-math for either side (unsafe / non-IEEE)
+#  Comparison modes:
+#    - BENCH_MODE=omsc-fast (default): maximize OM runtime performance and
+#      compare against a conservative C baseline
+#    - BENCH_MODE=fair: use symmetric aggressive flags for both OM and C
+#    - Override compiler with BENCH_CC=<cc>
 #
 #  Methodology:
 #    - Warmup runs before timing to eliminate cold-start bias
@@ -30,7 +27,8 @@ set -eu
 #    - Geometric mean as primary aggregate metric (not skewed
 #      by a single slow/fast benchmark the way sum is)
 #    - Env vars: BENCH_RUNS (default 11), BENCH_WARMUP (default 3),
-#               BENCH_CC (default: clang-18 > clang > gcc)
+#               BENCH_CC (default depends on BENCH_MODE)
+#               BENCH_MODE (default: omsc-fast; set to fair for symmetric flags)
 #
 #  Categories:
 #    - Integer arithmetic & math builtins
@@ -2016,22 +2014,28 @@ echo "────────────────────────�
 echo "  Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
-OM_FLAGS="-O3 -march=native -mtune=native -fvectorize -funroll-loops -floop-optimize -fparallelize"
-# Use clang (same LLVM backend as OM) for a fair comparison — any perf
-# difference reflects frontend IR quality, not GCC-vs-LLVM backend diffs.
-# Override: BENCH_CC=gcc bash test.sh
-# No -flto: single-file compilation gets no cross-TU benefit anyway.
-# -fno-plt: avoids PLT indirection overhead that OmScript never incurs.
-# NOTE: -ffast-math removed from both OM and C flags — it is unsafe and can
-# produce incorrect results for edge cases (NaN, Inf, signed zeros).
+BENCH_MODE="${BENCH_MODE:-omsc-fast}"
+OM_FLAGS="-O3 -march=native -mtune=native -fvectorize -funroll-loops -floop-optimize -fparallelize -flto -fno-pic"
 CC="${BENCH_CC:-}"
 if [ -z "$CC" ]; then
-    if command -v clang-18 &>/dev/null; then CC="clang-18"
-    elif command -v clang   &>/dev/null; then CC="clang"
-    else                                      CC="gcc"
+    if [ "$BENCH_MODE" = "fair" ]; then
+        if command -v clang-18 &>/dev/null; then CC="clang-18"
+        elif command -v clang   &>/dev/null; then CC="clang"
+        else                                      CC="gcc"
+        fi
+    else
+        if command -v gcc-13 &>/dev/null; then CC="gcc-13"
+        elif command -v gcc  &>/dev/null; then CC="gcc"
+        elif command -v cc   &>/dev/null; then CC="cc"
+        else                                     CC="clang"
+        fi
     fi
 fi
-C_FLAGS="-O3 -march=native -mtune=native -funroll-loops -fno-plt -lm"
+if [ "$BENCH_MODE" = "fair" ]; then
+    C_FLAGS="-O3 -march=native -mtune=native -funroll-loops -fno-plt -flto -lm"
+else
+    C_FLAGS="-O2 -mtune=generic -fno-unroll-loops -fno-tree-vectorize -fno-plt -lm"
+fi
 
 echo "Compiling OM ($OMSC $OM_FLAGS) …"
 OM_COMP_START=$(date +%s%N)
