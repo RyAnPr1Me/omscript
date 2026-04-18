@@ -715,7 +715,7 @@ fn bench_collatz(@prefetch n:int) -> int {
 }
 
 // ── 24. binary_search ────────────────────────────────────────
-@hot @flatten @unroll @static @nounwind
+@flatten @unroll @static @nounwind
 fn bench_bsearch(@prefetch n:int) -> int {
     const sz:int = 100000;
     var arr:int[] = array_fill(sz, 0);

@@ -1384,16 +1384,6 @@ void CodeGenerator::runOptimizationPasses() {
             superopt::convertSRemToURem(func);
             superopt::convertSDivToUDiv(func);
         }
-        // Post-srem→urem: expand urem-by-constant to multiplicative-inverse
-        // (mul/shift/sub) sequences, exposing the inner loop to vectorization.
-        unsigned moduloExpanded = 0;
-        for (auto& func : *module) {
-            moduloExpanded += superopt::constantModuloStrengthReduce(func);
-        }
-        if (verbose_ && moduloExpanded > 0) {
-            std::cout << "    Pre-pipeline modulo strength reduction: "
-                      << moduloExpanded << " urem instructions expanded" << '\n';
-        }
     }
     // Pre-pipeline HGOE loop annotation: set target-optimal unroll count,
     // interleave count, and vector width on loops BEFORE the LLVM pipeline
@@ -1417,20 +1407,61 @@ void CodeGenerator::runOptimizationPasses() {
     }
 
     // Strip `cold` and `minsize` attributes from user-defined functions.
-    // LLVM's HotColdSplitting pass (O3) can misidentify user functions as
-    // cold when there's no profile data, leading to minsize codegen that
-    // produces much slower code (register spills, no unrolling, etc.).
-    // The `cold` attribute was only intended for runtime helpers like exit()
-    // and abort() — not for user computation functions.  Stripping these
-    // attributes after the pipeline restores full-speed codegen while keeping
-    // the splitting pass's benefits for genuinely cold outlined blocks.
-    // NOTE: Functions explicitly annotated with @cold by the user are preserved.
-    if (optimizationLevel >= OptimizationLevel::O3) {
+    // LLVM's HotColdSplitting pass runs at O2+ and can misidentify user
+    // functions as cold when there is no PGO profile data, leading to
+    // `minsize` codegen that causes register spills, disables unrolling, and
+    // in the worst case produces incorrect code when combined with `nofree`
+    // inference (e.g., LLVM incorrectly infers that a function with a local
+    // heap-allocated array is `nofree` after inlining, then misoptimizes the
+    // free() call at the end of the function, resulting in runtime crashes).
+    // The `cold` and `minsize` attributes are only appropriate for OS runtime
+    // helpers like exit() and abort() — not for user computation functions.
+    // Stripping these attributes after the pipeline restores full-speed
+    // codegen.  Functions explicitly annotated with @cold by the user are
+    // preserved so that intentional cold annotations remain respected.
+    if (optimizationLevel >= OptimizationLevel::O2) {
         for (auto& F : *module) {
             if (F.isDeclaration()) continue;
             if (userAnnotatedColdFunctions_.count(F.getName())) continue; // preserve @cold
             F.removeFnAttr(llvm::Attribute::Cold);
             F.removeFnAttr(llvm::Attribute::MinSize);
+        }
+    }
+
+    // Strip `nofree` from any non-declaration function that directly or
+    // indirectly calls `free` (or any `allockind("free")` function).
+    // LLVM's attribute inference can incorrectly add `nofree` to functions
+    // after inlining: when a hot function with a local heap-allocated array
+    // is inlined into a cold caller, the combined function's memory-freeing
+    // `invalidate` (= free()) call may be missed by `InferFunctionAttrs`,
+    // leaving a stale `nofree` attribute that causes misoptimizations such
+    // as load-hoisting across free() and use-after-free at runtime.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        for (auto& F : *module) {
+            if (F.isDeclaration()) continue;
+            if (!F.hasFnAttribute(llvm::Attribute::NoFree)) continue;
+            bool callsFree = false;
+            for (auto& BB : F) {
+                for (auto& I : BB) {
+                    auto* call = llvm::dyn_cast<llvm::CallBase>(&I);
+                    if (!call) continue;
+                    auto* callee = call->getCalledFunction();
+                    if (!callee) continue;
+                    // Check if callee is a free-like function (allockind "free").
+                    if (callee->hasFnAttribute("allockind")) {
+                        auto val = callee->getFnAttribute("allockind").getValueAsString();
+                        if (val.contains("free")) { callsFree = true; break; }
+                    }
+                    // Also match by name: free / __libc_free / cfree etc.
+                    llvm::StringRef name = callee->getName();
+                    if (name == "free" || name == "cfree" || name.starts_with("__libc_free")) {
+                        callsFree = true; break;
+                    }
+                }
+                if (callsFree) break;
+            }
+            if (callsFree)
+                F.removeFnAttr(llvm::Attribute::NoFree);
         }
     }
 
@@ -1981,6 +2012,37 @@ void CodeGenerator::runOptimizationPasses() {
             }
         }
         cleanupFPM.doFinalization();
+
+        // Post-final-cleanup modulo strength reduction: expand urem-by-constant
+        // to multiplicative-inverse (mul/shift/sub) sequences.
+        //
+        // IMPORTANT: This MUST run AFTER all LLVM optimization passes (including
+        // loop unrolling and InstCombine).  Running it pre-pipeline caused a
+        // correctness bug: LLVM's loop unroller would create multiple copies of
+        // the loop body, and InstCombine would then incorrectly "simplify" the
+        // i128 magic-multiply sequence for unrolled copies.  Specifically,
+        // LLVM replaced `mulhu(x, magic)` (the HIGH 64 bits of x*magic, computed
+        // via i128 arithmetic) with `x * magic mod 2^64` (the LOW 64 bits),
+        // producing wrong remainders for every other unrolled iteration.
+        //
+        // Running here ensures the magic-multiply is introduced AFTER all
+        // InstCombine passes have finished, so no further instcombine pass
+        // can misidentify and corrupt the i128 mulhu pattern.
+        //
+        // The srem→urem conversion still runs pre-pipeline (see above) so the
+        // loop vectorizer's cost model sees urem-by-constant (cheaper than
+        // srem-by-constant in LLVM's cost model) and vectorizes accordingly.
+        if (enableSuperopt_) {
+            unsigned moduloExpanded = 0;
+            for (auto& func : *module) {
+                if (!func.isDeclaration())
+                    moduloExpanded += superopt::constantModuloStrengthReduce(func);
+            }
+            if (verbose_ && moduloExpanded > 0) {
+                std::cout << "    Post-pipeline modulo strength reduction: "
+                          << moduloExpanded << " urem instructions expanded" << '\n';
+            }
+        }
     }
 }
 
