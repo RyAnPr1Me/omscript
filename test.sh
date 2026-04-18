@@ -335,6 +335,7 @@ struct Vec2 {
 OPTMAX=:
 
 // ── 0. integer_math ──────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @static @const_eval
 fn bench_math(@prefetch n:int) -> int {
     prefetch var acc:int = 0;
@@ -348,6 +349,7 @@ fn bench_math(@prefetch n:int) -> int {
 }
 
 // ── 1. float_math ────────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @static @nounwind
 fn bench_floatmath(@prefetch n:int) -> int {
     var acc:double = 1.0;
@@ -375,6 +377,7 @@ fn bench_push(@prefetch n:int) -> int {
 }
 
 // ── 3. array_hof ─────────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @pure  @vectorize @nounwind @const_eval @static
 fn bench_hof(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
@@ -421,6 +424,7 @@ fn bench_strops(@prefetch n:int) -> int {
 }
 
 // ── 6. struct_access ─────────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true}, safety=relaxed)
 @hot @flatten @pure @unroll @vectorize @static @nounwind
 fn bench_struct(@prefetch n:int) -> int {
     prefetch var p:struct = Point { x: 1, y: 2 };
@@ -471,6 +475,7 @@ fn bench_ifelse(@prefetch n:int) -> int {
 }
 
 // ── 9. while_loop ────────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true})
 @hot @flatten @vectorize @unroll @static @nounwind
 fn bench_while(@prefetch n:int) -> int {
     var i:int = 0;
@@ -484,6 +489,7 @@ fn bench_while(@prefetch n:int) -> int {
 }
 
 // ── 10. recursion_fib ────────────────────────────────────────
+@optmax(safety=relaxed)
 @hot @pure @static @nounwind
 fn fib(n:int) -> int {
     if (n <= 1) { return n; }
@@ -495,6 +501,7 @@ fn bench_recurse(n:int) -> int {
 }
 
 // ── 11. nested_loops ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true})
 @hot @flatten @pure @unroll @vectorize @static @nounwind
 fn bench_nested(@prefetch n:int) -> int {
     var sum:int = 0;
@@ -509,6 +516,7 @@ fn bench_nested(@prefetch n:int) -> int {
 }
 
 // ── 12. array_indexing ───────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @unroll @static @nounwind
 fn bench_arrindex(@prefetch n:int) -> int {
     const sz:int = 10000;
@@ -528,6 +536,7 @@ fn bench_arrindex(@prefetch n:int) -> int {
 }
 
 // ── 13. function_calls ───────────────────────────────────────
+@optmax(safety=relaxed)
 @hot @inline @static @nounwind @pure
 fn add_one(x:int) -> int { return x + 1; }
 @hot @inline @static @nounwind @pure
@@ -545,6 +554,7 @@ fn bench_calls(@prefetch n:int) -> int {
 }
 
 // ── 14. bitwise_ops ──────────────────────────────────────────
+@optmax(aggressive_vec=true, safety=relaxed)
 @hot @flatten @vectorize @unroll @static @nounwind
 fn bench_bitwise(@prefetch n:int) -> int {
     var a:int = 0;
@@ -560,6 +570,7 @@ fn bench_bitwise(@prefetch n:int) -> int {
 }
 
 // ── 15. bitwise_intrinsics ───────────────────────────────────
+@optmax(aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @static @nounwind @vectorize
 fn bench_bitintrinsics(@prefetch n:int) -> int {
     var acc:int = 0;
@@ -573,6 +584,7 @@ fn bench_bitintrinsics(@prefetch n:int) -> int {
 }
 
 // ── 16. polynomial_eval ──────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @pure @unroll @inline @vectorize @static
 fn poly_eval(x:int) -> int {
     var r:int = 3;
@@ -593,6 +605,7 @@ fn bench_poly(@prefetch n:int) -> int {
 }
 
 // ── 17. reduction ────────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @vectorize @unroll @pure @static @nounwind
 fn bench_reduction(@prefetch n:int) -> int {
     var sum:int = 0;
@@ -605,6 +618,7 @@ fn bench_reduction(@prefetch n:int) -> int {
 }
 
 // ── 18. combined ─────────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @vectorize @flatten @unroll @static @nounwind
 fn bench_combined(n:int) -> int {
     var total:int = 0;
@@ -663,6 +677,7 @@ fn bench_combined(n:int) -> int {
 }
 
 // ── 19. matrix_multiply ──────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true}, safety=relaxed)
 @hot @flatten @unroll @vectorize @static @nounwind
 fn bench_matmul(n:int) -> int {
     var a:int[] = array_fill(n * n, 0);
@@ -694,6 +709,7 @@ fn bench_matmul(n:int) -> int {
 }
 
 // ── 20. sieve ────────────────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @unroll @static @nounwind
 fn bench_sieve(n:int) -> int {
     var is_prime:int[] = array_fill(n, 1);
@@ -719,6 +735,7 @@ fn bench_sieve(n:int) -> int {
 }
 
 // ── 21. prefix_sum ───────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @unroll @vectorize @static @nounwind
 fn bench_prefix_sum(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
@@ -734,6 +751,7 @@ fn bench_prefix_sum(@prefetch n:int) -> int {
 }
 
 // ── 22. hash_compute ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @pure @static @nounwind
 fn bench_hash(@prefetch n:int) -> int {
     var hash:int = 5381;
@@ -745,6 +763,7 @@ fn bench_hash(@prefetch n:int) -> int {
 }
 
 // ── 23. collatz ──────────────────────────────────────────────
+@optmax(safety=relaxed)
 // Dual-counter ILP trick: two independent step counters (s1, s2) that
 // advance on alternating Collatz steps.  s1 and s2 have no dependency on
 // each other, so the CPU's OOO backend can retire their increments in the
@@ -773,6 +792,7 @@ fn bench_collatz(@prefetch n:int) -> int {
 }
 
 // ── 24. binary_search ────────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @unroll @static @nounwind
 fn bench_bsearch(@prefetch n:int) -> int {
     const sz:int = 100000;
@@ -802,6 +822,7 @@ fn bench_bsearch(@prefetch n:int) -> int {
 }
 
 // ── 25. dot_product ──────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @vectorize @unroll @pure @static @nounwind
 fn bench_dot(@prefetch n:int) -> int {
     var a:int[] = array_fill(n, 0);
@@ -820,6 +841,7 @@ fn bench_dot(@prefetch n:int) -> int {
 }
 
 // ── 26. fibonacci_iter ───────────────────────────────────────
+@optmax(fast_math=true, safety=relaxed)
 @hot @flatten @unroll @pure @static @nounwind
 fn bench_fib_iter(@prefetch n:int) -> int {
     var a:int = 0;
@@ -833,6 +855,7 @@ fn bench_fib_iter(@prefetch n:int) -> int {
 }
 
 // ── 27. histogram ────────────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @unroll @static @nounwind
 fn bench_histogram(@prefetch n:int) -> int {
     var bins:int[] = array_fill(256, 0);
@@ -849,6 +872,7 @@ fn bench_histogram(@prefetch n:int) -> int {
 }
 
 // ── 28. accumulator_chain ────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @pure @static @nounwind
 fn bench_accum(@prefetch n:int) -> int {
     var a:int = 1;
@@ -865,6 +889,7 @@ fn bench_accum(@prefetch n:int) -> int {
 }
 
 // ── 29. modular_exp ──────────────────────────────────────────
+@optmax(fast_math=true, safety=relaxed)
 @hot @flatten @unroll @pure @static @nounwind
 fn bench_modexp(@prefetch n:int) -> int {
     var result:int = 1;
@@ -879,6 +904,7 @@ fn bench_modexp(@prefetch n:int) -> int {
 }
 
 // ── 30. strength_reduce ──────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Tests e-graph strength reduction: multiply and divide by small
 // constants (3,5,7,10,12,100), modulo by powers of 2, and
 // mixed shift-add patterns that the e-graph rewrites to cheaper
@@ -904,6 +930,7 @@ fn bench_strength(@prefetch n:int) -> int {
 }
 
 // ── 31. idiom_patterns ───────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Tests superoptimizer idiom recognition: min, max, absolute value,
 // conditional negation, and power-of-2 test patterns.
 // Patterns are written inline to match the C version exactly.
@@ -932,6 +959,7 @@ fn bench_idioms(@prefetch n:int) -> int {
 }
 
 // ── 32. fma_compute ──────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Tests HGOE FMA generation: floating-point multiply-add chains
 // of the form a*b+c and a*b+c*d that the hardware graph optimizer
 // converts to fused multiply-add instructions.
@@ -953,6 +981,7 @@ fn bench_fma(@prefetch n:int) -> int {
 }
 
 // ── 33. negative_offset ──────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 // Tests negative-offset bounds check elision: arr[i-1] lookback
 // pattern inside a loop starting from 1.  The compiler should
 // prove that i-1 >= 0 because the loop starts at 1, and that
@@ -974,6 +1003,7 @@ fn bench_negoffset(@prefetch n:int) -> int {
 }
 
 // ── 34. const_array_size ─────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true})
 // Tests known-array-size bounds elision: array_fill with constant
 // size + bounded loop access.  The compiler should track that
 // the array has exactly 1024 elements and elide bounds checks
@@ -994,6 +1024,7 @@ fn bench_constarray(@prefetch n:int) -> int {
 }
 
 // ── 35. cond_arithmetic ──────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Tests superoptimizer conditional increment/decrement detection.
 // Patterns: if(cond) x++; else x; → x + zext(cond)
 // These arise from conditional counter updates in tight loops.
@@ -1018,6 +1049,7 @@ fn bench_condarith(@prefetch n:int) -> int {
 }
 
 // ── 36. ring_buffer ──────────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 // Circular ring buffer with prime capacity (non-power-of-2 = 509).
 // head and tail are provably non-negative, bounded to [0, CAP-1].
 // (tail + 1) % CAP exercises srem→urem for a non-constant-divisor
@@ -1042,6 +1074,7 @@ fn bench_ringbuf(@prefetch n:int) -> int {
 }
 
 // ── 37. sliding_window ───────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 // Sliding window sum.  Inner loop starts from positive constant WIN,
 // so the iterator is non-negative and the loop condition can use
 // ICmpULT.  wsum + data[i] - data[i-WIN] exercises the NSW-Sub pass
@@ -1068,6 +1101,7 @@ fn bench_slidingwin(@prefetch n:int) -> int {
 }
 
 // ── 38. exponent_chain ───────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Integer exponentiation x**2, x**3, x**4, x**5 in a tight loop.
 // Tests NSW-mul path: when base is non-negative, each squaring/cube
 // uses nsw multiply. Even exponents always produce non-negative results.
@@ -1087,6 +1121,7 @@ fn bench_expchain(@prefetch n:int) -> int {
 }
 
 // ── 39. for_each ─────────────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 // For-each over an integer array exercises the auto-vectorization
 // path that uses inbounds GEP and parallel_accesses metadata.
 // Distinct from indexed for-in, which uses explicit index arithmetic.
@@ -1106,6 +1141,7 @@ fn bench_foreach(@prefetch n:int) -> int {
 }
 
 // ── 40. lcm_gcd ──────────────────────────────────────────────
+@optmax(fast_math=true, safety=relaxed)
 // Repeated lcm() and gcd() calls in a tight loop.
 // lcm is provably non-negative (nonNeg tracking via abs of inputs),
 // so the compiler can use NUW/NSW on further arithmetic with the result.
@@ -1124,6 +1160,7 @@ fn bench_lcmgcd(@prefetch n:int) -> int {
 }
 
 // ── 41. zext_pattern ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Tests bool-to-int zero-extension strength reduction.
 // The pattern: if (cond) { acc += 1; } is lowered as
 // acc += zext(cond) by the superoptimizer rather than a branch.
@@ -1301,8 +1338,11 @@ fn bench_pipelinestencil(@prefetch n:int) -> int {
 // ── 49. times_loop ───────────────────────────────────────────
 // Accumulation using `times N { acc = acc*3 + __times_i; }`.
 // Demonstrates the OM `times` loop keyword vs a plain for-in.
+// Pure integer accumulation, no heap allocation — eligible for OPTMAX.
+OPTMAX=:
 // `times` does not expose an iterator variable, so a manual counter `i`
 // is maintained alongside it.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @static @nounwind @unroll
 fn bench_timesloop(@prefetch n:int) -> int {
     var acc:int = 0;
@@ -1314,6 +1354,8 @@ fn bench_timesloop(@prefetch n:int) -> int {
     invalidate n;
     return acc;
 }
+
+OPTMAX!:
 
 // ── 50. str_process ──────────────────────────────────────────
 // Chain of str_reverse + str_upper + str_count on a fixed string.
@@ -1394,6 +1436,7 @@ fn bench_arraypred(@prefetch n:int) -> int {
 // Vec2 struct exercising both operator overloading (redefining +, -, ==)
 // and operator creation (new symbols <=>, ** for dot product, |> for
 // weighted-add).  N iterations accumulate results to prevent DCE.
+// Uses struct heap-allocations so kept outside OPTMAX block.
 // Each iteration performs: add, subtract, dot-product (**), comparison
 // (<=>), and weighted-add (|>) on a pair of Vec2 values derived from i.
 @hot @flatten @unroll @pure @static @nounwind
