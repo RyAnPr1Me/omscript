@@ -5,7 +5,7 @@ set -eu
 # ──────────────────────────────────────────────────────────────
 #  OmScript Benchmark Suite  (Fair Edition)
 #
-#  45 diverse micro-benchmarks covering distinct workloads.
+#  53 diverse micro-benchmarks covering distinct workloads.
 #  No category is over-represented.  Both OM and C implementations
 #  are idiomatic and use the same algorithm.
 #
@@ -63,7 +63,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=45
+NUM_BENCHMARKS=53
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -111,6 +111,14 @@ BENCH_NAME=(
     "str_format"         # 42 — str_format() two-pass snprintf formatting loop
     "array_zip"          # 43 — array_zip() interleave two arrays, accumulate
     "str_prefix_scan"    # 44 — str_starts_with(s, literal) tight loop
+    "dict_lookup"        # 45 — map_set / map_get frequency-count loop
+    "array_sort_search"  # 46 — sort N elements with sort() then scan
+    "simd_saxpy"         # 47 — integer dot product using i32x4 SIMD types
+    "pipeline_stencil"   # 48 — element-wise transform via pipeline stages
+    "times_loop"         # 49 — times N { } accumulation loop
+    "str_process"        # 50 — str_reverse + str_count + str_upper chain
+    "swap_sort"          # 51 — selection sort using native swap a, b
+    "array_predicates"   # 52 — array_any / array_every / array_count with lambdas
 )
 
 BENCH_DESC=(
@@ -159,6 +167,14 @@ BENCH_DESC=(
     "str_format(\"%lld\",i) repeated N times; tests two-pass snprintf IR quality"
     "array_zip(a,b) over N-element arrays; tests interleave loop vectorization"
     "str_starts_with(s,\"Hello \") repeated N times; tests known-strlen const fold"
+    "map_set/map_get frequency count: N insertions into 1000-key hash map"
+    "sort() 1024-element array then sum upper half; repeated N/1024 times"
+    "Integer dot product using explicit i32x4 SIMD vector types; 256-elem arrays"
+    "Element-wise transform dst[i]=src[i]*3+src[i]/7+src[i]^2%997; pipeline stages"
+    "times N { acc=(acc*3+i)%MOD } — tests times-loop codegen vs for-in"
+    "str_reverse+str_upper+str_count chain on 48-char string, N iterations"
+    "Selection sort of 32-elem array with native swap a,b; repeated N/32 times"
+    "array_any/array_every/array_count lambdas on 128-elem array; N/128 outer iters"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -208,6 +224,14 @@ BENCH_N=(
     2000000   # 42  str_format
     1000000   # 43  array_zip
     5000000   # 44  str_prefix_scan
+    200000    # 45  dict_lookup
+    500000    # 46  array_sort_search
+    2000000   # 47  simd_saxpy
+    2000000   # 48  pipeline_stencil
+    10000000  # 49  times_loop
+    500000    # 50  str_process
+    500000    # 51  swap_sort
+    2000000   # 52  array_predicates
 )
 
 BOTTLENECK_LABELS=(
@@ -256,6 +280,14 @@ BOTTLENECK_LABELS=(
     "snprintf call overhead and two-pass buffer allocation"
     "interleave loop: array allocation, TBAA, and optional vectorization"
     "str_starts_with with literal: known-strlen const fold + memcmp elision"
+    "Hash map insert + lookup; N int keys, 1000-bucket frequency count"
+    "Sort N-element array with sort() + scan for sum of top-half elements"
+    "Integer dot product using i32x4 SIMD types vs auto-vectorized C loop"
+    "Element-wise transform dst[i]=src[i]*3+src[i]/7+src[i]^2%997 via pipeline stages"
+    "Accumulation loop using times N { acc = acc*3+i; } vs for-in"
+    "str_reverse + str_upper + str_count on a fixed string, N iterations"
+    "Selection sort of small array using native swap a,b; repeated N/m times"
+    "array_any + array_every + array_count with lambdas on a fixed array, N outer iters"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -1145,6 +1177,193 @@ fn bench_strprefix(@prefetch n:int) -> int {
     return acc;
 }
 
+// ── 45. dict_lookup ──────────────────────────────────────────
+// Build a frequency map over N keys (mod 1000), then read back.
+// Exercises map_set / map_get in a tight loop; demonstrates OM's
+// built-in hash map vs a manual open-addressing table in C.
+@hot @static @nounwind
+fn bench_dictlookup(@prefetch n:int) -> int {
+    var m = map_new();
+    for (i:int in 0...n) {
+        var k:int = (i * 2654435761) % 1000;
+        var prev:int = map_get(m, k, 0);
+        m = map_set(m, k, prev + 1);
+    }
+    var acc:int = 0;
+    for (q:int in 0...1000) {
+        acc += map_get(m, q, 0);
+    }
+    invalidate m; invalidate n;
+    return acc;
+}
+
+// ── 46. array_sort_search ─────────────────────────────────────
+// Each iteration: reinitialize array with deterministic values, sort it,
+// then sum the upper half.  Tests sort() quality vs C qsort().
+@hot @static @nounwind
+fn bench_arrsortsearch(@prefetch n:int) -> int {
+    var m:int = 1024;
+    var arr:int[] = array_fill(m, 0);
+    var iters:int = n / m;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        for (j:int in 0...m) { arr[j] = (j * 97 + k * 31 + 17) % 100000; }
+        sort(arr);
+        for (j:int in m / 2...m) { acc += arr[j]; }
+        acc = acc % 1000000007;
+    }
+    invalidate arr; invalidate n;
+    return acc;
+}
+
+// ── 47. simd_saxpy ───────────────────────────────────────────
+// Integer dot product using explicit i32x4 SIMD vector type.
+// Processes 4 elements per SIMD op; accumulates into acc.
+// C uses the same algorithm, relying on auto-vectorization.
+@hot @static @nounwind @vectorize
+fn bench_simdsaxpy(@prefetch n:int) -> int {
+    var m:int = 256;
+    var x:int[] = array_fill(m, 0);
+    var y:int[] = array_fill(m, 0);
+    for (j:int in 0...m) {
+        x[j] = j % 100 + 1;
+        y[j] = (j * 3 + 1) % 100 + 1;
+    }
+    var iters:int = n / m;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        for (j:int in 0...m / 4) {
+            var xv:i32x4 = [x[j*4], x[j*4+1], x[j*4+2], x[j*4+3]];
+            var yv:i32x4 = [y[j*4], y[j*4+1], y[j*4+2], y[j*4+3]];
+            var pv:i32x4 = xv * yv;
+            acc += pv[0] + pv[1] + pv[2] + pv[3];
+        }
+        acc = acc % 1000000007;
+    }
+    invalidate x; invalidate y; invalidate n;
+    return acc;
+}
+
+// ── 48. pipeline_stencil ─────────────────────────────────────
+// Element-wise transform dst[i] = src[i]*3 + src[i]/7 + src[i]^2 % 997
+// via pipeline load → compute → store stages.
+// Only uses src[__pipeline_i] (no offset) — safe for all prefetch distances.
+// C equivalent is a plain loop.  Tests pipeline stage scheduling overhead
+// and software-prefetch benefit for sequential read patterns.
+@hot @static @nounwind
+fn bench_pipelinestencil(@prefetch n:int) -> int {
+    var m:int = 8192;
+    var src:int[] = array_fill(m, 0);
+    var dst:int[] = array_fill(m, 0);
+    for (j:int in 0...m) { src[j] = (j * 3 + 1) % 997; }
+    var iters:int = n / m;
+    var elem:int = 0;
+    var tval:int = 0;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        pipeline m {
+            stage load    { elem = src[__pipeline_i]; }
+            stage compute { tval = elem * 3 + elem / 7 + elem * elem % 997; }
+            stage store   { dst[__pipeline_i] = tval; }
+        }
+        for (j:int in 0...m) { acc = (acc + dst[j]) % 1000000007; }
+    }
+    invalidate src; invalidate dst; invalidate n;
+    return acc;
+}
+
+// ── 49. times_loop ───────────────────────────────────────────
+// Accumulation using `times N { acc = acc*3 + __times_i; }`.
+// Demonstrates the OM `times` loop keyword vs a plain for-in.
+// We use the pipeline iterator index via __pipeline_i inside times;
+// since times doesn't expose an iterator, use a manual counter.
+@hot @flatten @static @nounwind @unroll
+fn bench_timesloop(@prefetch n:int) -> int {
+    var acc:int = 0;
+    var i:int = 0;
+    times (n) {
+        acc = (acc * 3 + i) % 1000000007;
+        i += 1;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 50. str_process ──────────────────────────────────────────
+// Chain of str_reverse + str_upper + str_count on a fixed string.
+// Tests OM's string processing builtins and compile-time known-
+// length optimizations.
+@hot @static @nounwind
+fn bench_strprocess(@prefetch n:int) -> int {
+    var s:string = "Hello, OmScript World! Benchmarking string ops.";
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        var rev:string = str_reverse(s);
+        var up:string  = str_upper(rev);
+        acc += str_count(up, "O");
+        acc += str_count(s,  "l");
+        invalidate rev; invalidate up;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 51. swap_sort ────────────────────────────────────────────
+// Selection sort of a small array (m=32) using native `swap a, b`.
+// Array is reinitialised each iteration from deterministic values.
+// Tests OM's swap statement vs explicit temp-variable swap in C.
+@hot @static @nounwind
+fn bench_swapsort(@prefetch n:int) -> int {
+    var m:int = 32;
+    var arr:int[] = array_fill(m, 0);
+    var iters:int = n / m;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        // reinitialize deterministically
+        for (j:int in 0...m) { arr[j] = (j * 7 + k * 3 + 1) % m; }
+        // selection sort with swap
+        for (i:int in 0...m - 1) {
+            var minIdx:int = i;
+            for (j:int in i + 1...m) {
+                if (arr[j] < arr[minIdx]) { minIdx = j; }
+            }
+            if (minIdx != i) {
+                var vi:int = arr[i];
+                var vm:int = arr[minIdx];
+                swap vi, vm;
+                arr[i] = vi;
+                arr[minIdx] = vm;
+            }
+        }
+        acc += arr[m - 1];
+    }
+    invalidate arr; invalidate n;
+    return acc;
+}
+// ── 52. array_predicates ─────────────────────────────────────
+// array_any / array_every / array_count with lambdas over a fixed
+// array of N/iters elements.  Tests OM's higher-order predicate
+// dispatch vs manual loops in C.
+fn is_pos(x:int) -> int { return x > 0; }
+fn is_even_p(x:int) -> int { return x % 2 == 0; }
+fn is_big(x:int) -> int { return x > 500; }
+
+@hot @static @nounwind
+fn bench_arraypred(@prefetch n:int) -> int {
+    var m:int = 128;
+    var arr:int[] = array_fill(m, 0);
+    for (j:int in 0...m) { arr[j] = (j * 13 + 7) % 1000; }
+    var iters:int = n / m;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        acc += array_any(arr,   "is_pos");
+        acc += array_every(arr, "is_even_p");
+        acc += array_count(arr, "is_big");
+    }
+    invalidate arr; invalidate n;
+    return acc;
+}
+
 // ── main dispatch ────────────────────────────────────────────
 fn main() -> int {
     var test_id:int = input();
@@ -1196,6 +1415,14 @@ fn main() -> int {
         case 42: print(bench_strformat(n));      break;
         case 43: print(bench_arrayzip(n));       break;
         case 44: print(bench_strprefix(n));      break;
+        case 45: print(bench_dictlookup(n));     break;
+        case 46: print(bench_arrsortsearch(n));  break;
+        case 47: print(bench_simdsaxpy(n));      break;
+        case 48: print(bench_pipelinestencil(n)); break;
+        case 49: print(bench_timesloop(n));      break;
+        case 50: print(bench_strprocess(n));     break;
+        case 51: print(bench_swapsort(n));       break;
+        case 52: print(bench_arraypred(n));      break;
         default: print(0);
     }
     invalidate n;
@@ -1946,6 +2173,163 @@ static long bench_strprefix(long n) {
     return acc;
 }
 
+/* 45 ── dict_lookup ────────────────────────────── */
+/* Open-addressing hash map with 1024 slots; frequency count of N keys. */
+#define DICT_SIZE 1024
+#define DICT_MASK (DICT_SIZE - 1)
+typedef struct { long key; long val; int used; } DictSlot;
+static void dict_set(DictSlot *d, long key, long val) {
+    unsigned idx = (unsigned)((key * 2654435761UL) & DICT_MASK);
+    while (d[idx].used && d[idx].key != key) idx = (idx + 1) & DICT_MASK;
+    d[idx].key = key; d[idx].val = val; d[idx].used = 1;
+}
+static long dict_get(DictSlot *d, long key) {
+    unsigned idx = (unsigned)((key * 2654435761UL) & DICT_MASK);
+    while (d[idx].used && d[idx].key != key) idx = (idx + 1) & DICT_MASK;
+    return d[idx].used ? d[idx].val : 0;
+}
+static long bench_dictlookup(long n) {
+    DictSlot d[DICT_SIZE];
+    memset(d, 0, sizeof(d));
+    for (long i = 0; i < n; i++) {
+        long k = ((long)((unsigned long)(i * 2654435761UL)) % 1000);
+        dict_set(d, k, dict_get(d, k) + 1);
+    }
+    long acc = 0;
+    for (long q = 0; q < 1000; q++) acc += dict_get(d, q);
+    return acc;
+}
+
+/* 46 ── array_sort_search ───────────────────────── */
+/* qsort + upper-half sum, reinit each iter. Matches OM algorithm exactly. */
+static int cmp_long(const void *a, const void *b) {
+    long x = *(const long *)a, y = *(const long *)b;
+    return (x > y) - (x < y);
+}
+static long bench_arrsortsearch(long n) {
+    const int m = 1024;
+    long arr[1024];
+    long acc = 0;
+    long iters = n / m;
+    for (long k = 0; k < iters; k++) {
+        for (int j = 0; j < m; j++) arr[j] = (j * 97 + k * 31 + 17) % 100000;
+        qsort(arr, m, sizeof(long), cmp_long);
+        for (int j = m / 2; j < m; j++) acc += arr[j];
+        acc %= 1000000007L;
+    }
+    return acc;
+}
+
+/* 47 ── simd_saxpy ─────────────────────────────── */
+/* Integer dot product; same algorithm as OM i32x4 version, auto-vec in C. */
+static long bench_simdsaxpy(long n) {
+    const int m = 256;
+    long x[256], y[256];
+    for (int j = 0; j < m; j++) { x[j] = j % 100 + 1; y[j] = (j * 3 + 1) % 100 + 1; }
+    long iters = n / m;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        for (int j = 0; j < m; j++) acc += x[j] * y[j];
+        acc %= 1000000007L;
+    }
+    return acc;
+}
+
+/* 48 ── pipeline_stencil ────────────────────────── */
+/* Element-wise transform via plain loop; C equivalent of OM pipeline stages. */
+static long bench_pipelinestencil(long n) {
+    const int m = 8192;
+    long *src = malloc(m * sizeof(long));
+    long *dst = malloc(m * sizeof(long));
+    for (int j = 0; j < m; j++) src[j] = (j * 3 + 1) % 997;
+    long iters = n / m;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        for (int j = 0; j < m; j++)
+            dst[j] = src[j] * 3 + src[j] / 7 + src[j] * src[j] % 997;
+        for (int j = 0; j < m; j++) acc = (acc + dst[j]) % 1000000007L;
+    }
+    free(src); free(dst);
+    return acc;
+}
+
+/* 49 ── times_loop ─────────────────────────────── */
+/* Plain for-loop equivalent of OM times N { }. */
+static long bench_timesloop(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++) acc = (acc * 3 + i) % 1000000007L;
+    return acc;
+}
+
+/* 50 ── str_process ─────────────────────────────── */
+/* str_reverse + str_upper + str_count chain, N iterations. */
+static int str_count_c(const char *s, char c) {
+    int cnt = 0;
+    while (*s) { if (*s++ == c) cnt++; }
+    return cnt;
+}
+static long bench_strprocess(long n) {
+    const char *s = "Hello, OmScript World! Benchmarking string ops.";
+    size_t slen = strlen(s);
+    char buf[128];
+    long acc = 0;
+    for (long i = 0; i < n; i++) {
+        /* reverse */
+        for (size_t j = 0; j < slen; j++) buf[j] = s[slen - 1 - j];
+        buf[slen] = '\0';
+        /* upper of reversed */
+        for (size_t j = 0; j < slen; j++) buf[j] = (char)((buf[j] >= 'a' && buf[j] <= 'z') ? buf[j] - 32 : buf[j]);
+        acc += str_count_c(buf, 'O');
+        acc += str_count_c(s, 'l');
+    }
+    return acc;
+}
+
+/* 51 ── swap_sort ───────────────────────────────── */
+/* Selection sort with temp-variable swap, reinit each iter. */
+static long bench_swapsort(long n) {
+    const int m = 32;
+    long arr[32];
+    long iters = n / m;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        /* reinitialize deterministically, matching OM */
+        for (int j = 0; j < m; j++) arr[j] = (j * 7 + k * 3 + 1) % m;
+        for (int i = 0; i < m - 1; i++) {
+            int mi = i;
+            for (int j = i + 1; j < m; j++) if (arr[j] < arr[mi]) mi = j;
+            if (mi != i) { long tmp = arr[mi]; arr[mi] = arr[i]; arr[i] = tmp; }
+        }
+        acc += arr[m - 1];
+    }
+    return acc;
+}
+
+/* 52 ── array_predicates ────────────────────────── */
+/* Manual any/every/count over a fixed 128-element array, N/m iters. */
+static long bench_arraypred(long n) {
+    const int m = 128;
+    long arr[128];
+    for (int j = 0; j < m; j++) arr[j] = (j * 13 + 7) % 1000;
+    long iters = n / m;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        /* array_any: is_pos */
+        int any = 0;
+        for (int j = 0; j < m && !any; j++) if (arr[j] > 0) any = 1;
+        acc += any;
+        /* array_every: is_even */
+        int every = 1;
+        for (int j = 0; j < m && every; j++) if (arr[j] % 2 != 0) every = 0;
+        acc += every;
+        /* array_count: is_big (>500) */
+        int cnt = 0;
+        for (int j = 0; j < m; j++) if (arr[j] > 500) cnt++;
+        acc += cnt;
+    }
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1996,6 +2380,14 @@ int main(void) {
         case 42: r = bench_strformat(n);         break;
         case 43: r = bench_arrayzip(n);          break;
         case 44: r = bench_strprefix(n);         break;
+        case 45: r = bench_dictlookup(n);        break;
+        case 46: r = bench_arrsortsearch(n);     break;
+        case 47: r = bench_simdsaxpy(n);         break;
+        case 48: r = bench_pipelinestencil(n);   break;
+        case 49: r = bench_timesloop(n);         break;
+        case 50: r = bench_strprocess(n);        break;
+        case 51: r = bench_swapsort(n);          break;
+        case 52: r = bench_arraypred(n);         break;
     }
     printf("%ld\n", r);
     return 0;
