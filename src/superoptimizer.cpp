@@ -5039,6 +5039,105 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
 
+            // ── (x ^ y) ^ y → x  [non-constant double XOR cancellation] ──────
+            // XOR is self-inverse: (x ^ y) ^ y = x ^ (y ^ y) = x ^ 0 = x.
+            // This is the non-constant-y extension of the existing
+            // `xor(xor(x, C), C) → x` constant pattern.  Arises after
+            // canonicalization passes rewrite comparisons like `swap ^ mask ^ mask`.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                llvm::Value* outerRhs = inst.getOperand(1);  // y
+                if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                    if (inner->getOpcode() == llvm::Instruction::Xor &&
+                        inner->getOperand(1) == outerRhs &&
+                        hasOneUse(inner)) {
+                        simplified = inner->getOperand(0);  // x
+                    }
+                }
+                // Commuted: y ^ (x ^ y) → x
+                if (!simplified) {
+                    llvm::Value* outerLhs = inst.getOperand(0);  // y
+                    if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1))) {
+                        if (inner->getOpcode() == llvm::Instruction::Xor &&
+                            inner->getOperand(1) == outerLhs &&
+                            hasOneUse(inner)) {
+                            simplified = inner->getOperand(0);  // x
+                        }
+                    }
+                }
+            }
+
+            // ── (a + b) - (a + c) → b - c  [cancel common addend] ────────────
+            // (a + b) - (a + c) = b - c.  Arises frequently in offset
+            // arithmetic (pointer + base - pointer + base = offset difference),
+            // loop index expressions, and address computation simplification.
+            // Only fires when the inner adds are single-use so we don't
+            // duplicate computations.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* addLhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* addRhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (addLhs && addRhs &&
+                    addLhs->getOpcode() == llvm::Instruction::Add &&
+                    addRhs->getOpcode() == llvm::Instruction::Add &&
+                    hasOneUse(addLhs) && hasOneUse(addRhs)) {
+                    llvm::Value* b = nullptr;
+                    llvm::Value* c = nullptr;
+                    // (a + b) - (a + c): match on first operand of each add
+                    if (addLhs->getOperand(0) == addRhs->getOperand(0)) {
+                        b = addLhs->getOperand(1);
+                        c = addRhs->getOperand(1);
+                    }
+                    // (b + a) - (a + c)
+                    else if (addLhs->getOperand(1) == addRhs->getOperand(0)) {
+                        b = addLhs->getOperand(0);
+                        c = addRhs->getOperand(1);
+                    }
+                    // (a + b) - (c + a)
+                    else if (addLhs->getOperand(0) == addRhs->getOperand(1)) {
+                        b = addLhs->getOperand(1);
+                        c = addRhs->getOperand(0);
+                    }
+                    // (b + a) - (c + a)
+                    else if (addLhs->getOperand(1) == addRhs->getOperand(1)) {
+                        b = addLhs->getOperand(0);
+                        c = addRhs->getOperand(0);
+                    }
+                    if (b && c) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateSub(b, c, "add_cancel");
+                    }
+                }
+            }
+
+            // ── and(or(x, C), C) → C  [absorption + collapse] ────────────────
+            // Since (x | C) forces all C-bits to 1, ANDing with C extracts
+            // exactly those C-bits, giving C regardless of x.
+            // Proof: (x | C) & C = C, since ∀bit: C[i]=1 → (x|C)[i]=1 → 1 & 1 = 1
+            //                                       C[i]=0 → result bit = 0 = C[i].
+            // Arises after De Morgan rewrites and select-to-bitwise conversions
+            // produce (val | bitmask) & bitmask patterns.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                        if (inner->getOpcode() == llvm::Instruction::Or &&
+                            hasOneUse(inner)) {
+                            // Check if either OR operand is the same constant C
+                            if (auto* innerCI = llvm::dyn_cast<llvm::ConstantInt>(inner->getOperand(1))) {
+                                if (innerCI->getValue() == ci->getValue()) {
+                                    simplified = ci;  // and(or(x, C), C) → C
+                                }
+                            }
+                            if (!simplified) {
+                                if (auto* innerCI = llvm::dyn_cast<llvm::ConstantInt>(inner->getOperand(0))) {
+                                    if (innerCI->getValue() == ci->getValue()) {
+                                        simplified = ci;  // and(or(C, x), C) → C
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);
@@ -5226,6 +5325,49 @@ static bool replaceIdiom(IdiomMatch& match) {
                     replacements.push_back({cmp, newCmp});
                     count++;
                     continue;
+                }
+            }
+
+            // ── icmp eq/ne (add x, C1), C2 → icmp eq/ne x, C2 - C1 ─────────
+            // For equality and inequality tests, modular arithmetic means:
+            //   (x + C1) == C2  iff  x == (C2 - C1)  (no overflow caveat needed)
+            // This folds a constant offset out of the comparison operand, making
+            // the comparison operand a plain value.  CVP and JumpThreading work
+            // better with plain-variable comparisons than offset ones.
+            // Also handles signed/unsigned ordered comparisons when the add has
+            // the corresponding no-wrap flag (nsw/nuw), ensuring the constant
+            // subtraction C2-C1 is valid for the comparison.
+            if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(lhs)) {
+                if (addInst->getOpcode() == llvm::Instruction::Add) {
+                    if (auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(addInst->getOperand(1))) {
+                        if (auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(rhs)) {
+                            llvm::APInt newRhsVal = c2->getValue() - c1->getValue();
+                            bool isEqNe = (pred == llvm::CmpInst::ICMP_EQ ||
+                                           pred == llvm::CmpInst::ICMP_NE);
+                            bool isSigned = (pred == llvm::CmpInst::ICMP_SLT ||
+                                             pred == llvm::CmpInst::ICMP_SLE ||
+                                             pred == llvm::CmpInst::ICMP_SGT ||
+                                             pred == llvm::CmpInst::ICMP_SGE);
+                            bool isUnsigned = (pred == llvm::CmpInst::ICMP_ULT ||
+                                               pred == llvm::CmpInst::ICMP_ULE ||
+                                               pred == llvm::CmpInst::ICMP_UGT ||
+                                               pred == llvm::CmpInst::ICMP_UGE);
+                            bool canFold = isEqNe ||
+                                           (isSigned  && addInst->hasNoSignedWrap()) ||
+                                           (isUnsigned && addInst->hasNoUnsignedWrap());
+                            if (canFold && hasOneUse(addInst)) {
+                                llvm::IRBuilder<> builder(cmp);
+                                llvm::Value* newRhs = llvm::ConstantInt::get(
+                                    c2->getType(), newRhsVal);
+                                llvm::Value* newCmp = builder.CreateICmp(
+                                    pred, addInst->getOperand(0), newRhs,
+                                    "cmp.addoffset");
+                                replacements.push_back({cmp, newCmp});
+                                count++;
+                                continue;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -5671,6 +5813,59 @@ static bool replaceIdiom(IdiomMatch& match) {
                             }
                         }
                     }
+                }
+            }
+
+            // ── add(X, Y) → or(X, Y) when bits are disjoint ─────────────────
+            // If KnownBits proves X and Y have no overlapping set bits
+            // (i.e., for every bit position, at most one of X or Y can have
+            // that bit set), then the carry-chain in the adder never fires and
+            // add(X, Y) = or(X, Y) = X | Y.  The OR form is cheaper to reason
+            // about (no overflow semantics), enables more KnownBits propagation,
+            // and allows the backend to fuse with bit-manipulation sequences.
+            // Disjointness condition: (~KnownZero(X)) & (~KnownZero(Y)) == 0,
+            // i.e., possibleBits(X) & possibleBits(Y) == 0.
+            if (inst.getOpcode() == llvm::Instruction::Add) {
+                auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
+                if (bo) {
+                    llvm::KnownBits kbX = llvm::computeKnownBits(bo->getOperand(0), DL);
+                    llvm::KnownBits kbY = llvm::computeKnownBits(bo->getOperand(1), DL);
+                    // possibleBits(X) = ~KnownZero(X), similarly for Y
+                    llvm::APInt possX = ~kbX.Zero;
+                    llvm::APInt possY = ~kbY.Zero;
+                    if ((possX & possY).isZero()) {
+                        llvm::IRBuilder<> builder(bo);
+                        llvm::Value* orVal = builder.CreateOr(
+                            bo->getOperand(0), bo->getOperand(1), "add_disjoint_or");
+                        bo->replaceAllUsesWith(orVal);
+                        count++;
+                        continue;
+                    }
+                }
+            }
+
+            // ── sext(x) → zext(x) when KnownBits shows sign bit is zero ─────
+            // Sign extension fills the new high bits with copies of the source
+            // sign bit.  When KnownBits proves the source's sign bit is always
+            // 0, sext and zext produce the same result.  Replacing sext with
+            // zext is semantically equivalent but gives downstream analyses a
+            // stronger signal: zext is known non-negative (sign bit = 0),
+            // which enables more NSW/NUW flag inference, SCEV range tightening,
+            // and unsigned comparison folding.  It also allows the backend to
+            // lower the extension with a cheaper zero-fill (e.g., movzx vs.
+            // movsx on x86-64).
+            if (auto* sextInst = llvm::dyn_cast<llvm::SExtInst>(&inst)) {
+                llvm::Value* src = sextInst->getOperand(0);
+                llvm::KnownBits kb = llvm::computeKnownBits(src, DL);
+                unsigned srcBits = src->getType()->getIntegerBitWidth();
+                if (srcBits > 0 && kb.Zero[srcBits - 1]) {
+                    // Sign bit is known zero → sext == zext
+                    llvm::IRBuilder<> builder(sextInst);
+                    llvm::Value* zextVal = builder.CreateZExt(
+                        src, sextInst->getType(), "sext_to_zext");
+                    sextInst->replaceAllUsesWith(zextVal);
+                    count++;
+                    continue;
                 }
             }
         }
