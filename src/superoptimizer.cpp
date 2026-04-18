@@ -5630,9 +5630,15 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
         // for x*c where c has 2 NAF digits with both positions > 0.
         // The standard threshold is 0.8 × oldCost; the relaxed threshold
         // allows up to 1.05 × oldCost for pure latency improvements.
+        // At the default threshold of 0.8, 1.05 / 0.8 ≈ 1.3125, so we
+        // clamp by min(threshold * 1.3125, 1.05) to generalise across
+        // custom threshold values while targeting 1.05 at the default.
+        static constexpr double kLatencyRelaxedTarget = 1.05;
+        static constexpr double kDefaultThresholdReciprocal = 1.0 / 0.8;  // ≈ 1.25
         bool latencyImproved = (newCost > 0.0 && newCost <= oldCost);
         double effectiveThreshold = latencyImproved
-            ? std::min(config.costThreshold * 1.312, 1.05)  // ~1.05 at default threshold
+            ? std::min(config.costThreshold * (kLatencyRelaxedTarget * kDefaultThresholdReciprocal),
+                       kLatencyRelaxedTarget)
             : config.costThreshold;
 
         if (newCost < oldCost * effectiveThreshold) {

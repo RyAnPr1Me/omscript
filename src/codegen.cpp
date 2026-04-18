@@ -5845,10 +5845,22 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
             auto rv = evalExpr(bin->right.get());
             if (!lv || !rv) return std::nullopt;
             const int64_t a = *lv, b = *rv;
+            // Wrapping arithmetic helper: cast to uint64_t to avoid signed
+            // overflow UB, then cast the bit-pattern back to int64_t.
+            auto wrap = [](int64_t x, int64_t y, char op) -> int64_t {
+                const auto ux = static_cast<uint64_t>(x);
+                const auto uy = static_cast<uint64_t>(y);
+                switch (op) {
+                case '+': return static_cast<int64_t>(ux + uy);
+                case '-': return static_cast<int64_t>(ux - uy);
+                case '*': return static_cast<int64_t>(ux * uy);
+                default:  return 0;
+                }
+            };
             // Use wrapping arithmetic for +, -, * to match i64 runtime semantics.
-            if (bin->op == "+") return static_cast<int64_t>(static_cast<uint64_t>(a) + static_cast<uint64_t>(b));
-            if (bin->op == "-") return static_cast<int64_t>(static_cast<uint64_t>(a) - static_cast<uint64_t>(b));
-            if (bin->op == "*") return static_cast<int64_t>(static_cast<uint64_t>(a) * static_cast<uint64_t>(b));
+            if (bin->op == "+") return wrap(a, b, '+');
+            if (bin->op == "-") return wrap(a, b, '-');
+            if (bin->op == "*") return wrap(a, b, '*');
             // Guard against /0 and the INT64_MIN/-1 trap.
             if (bin->op == "/" && b != 0) {
                 if (a == std::numeric_limits<int64_t>::min() && b == -1) return std::nullopt;

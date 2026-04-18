@@ -3311,34 +3311,31 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strrev.buf");
         llvm::cast<llvm::CallInst>(buf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, 1));
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preheader = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "strrev.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "strrev.body", function);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "strrev.done", function);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
-        builder->SetInsertPoint(loopBB);
-        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "strrev.idx");
-        idx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpULT(idx, strLen, "strrev.cond");
-        builder->CreateCondBr(cond, bodyBB, doneBB);
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* revIdx = builder->CreateSub(builder->CreateSub(strLen, one, "strrev.lenm1", /*HasNUW=*/true, /*HasNSW=*/true), idx, "strrev.revidx", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* srcPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, revIdx, "strrev.srcptr");
-        auto* revLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), srcPtr, "strrev.ch");
-        revLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* dstPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, idx, "strrev.dstptr");
-        auto* revStore = builder->CreateStore(revLoad, dstPtr);
-        revStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strrev.next", /*HasNUW=*/true, /*HasNSW=*/true);
-        idx->addIncoming(nextIdx, bodyBB);
-        {
-            attachLoopMetadataVec(
-                llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
-        }
-        builder->SetInsertPoint(doneBB);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* strrevBuf = buf;
+        llvm::Value* srStrLen = strLen;
+        llvm::Value* srStrPtr = strPtr;
+        emitCountingLoop("strrev", strLen, zero, 4,
+            [&](llvm::PHINode* idx, llvm::BasicBlock* loopBB) {
+                llvm::Value* revIdx = builder->CreateSub(
+                    builder->CreateSub(srStrLen, one, "strrev.lenm1", /*HasNUW=*/true, /*HasNSW=*/true),
+                    idx, "strrev.revidx", /*HasNUW=*/true, /*HasNSW=*/true);
+                llvm::Value* srcPtr2 = builder->CreateInBoundsGEP(
+                    llvm::Type::getInt8Ty(*context), srStrPtr, revIdx, "strrev.srcptr");
+                auto* revLoad = builder->CreateLoad(
+                    llvm::Type::getInt8Ty(*context), srcPtr2, "strrev.ch");
+                revLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+                llvm::Value* dstPtr = builder->CreateInBoundsGEP(
+                    llvm::Type::getInt8Ty(*context), strrevBuf, idx, "strrev.dstptr");
+                auto* revStore = builder->CreateStore(revLoad, dstPtr);
+                revStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+                llvm::Value* nextIdx = builder->CreateAdd(
+                    idx, one, "strrev.next", /*HasNUW=*/true, /*HasNSW=*/true);
+                idx->addIncoming(nextIdx, builder->GetInsertBlock());
+                attachLoopMetadataVec(
+                    llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+            });
         // Null-terminate
         llvm::Value* endPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, strLen, "strrev.endptr");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr);
@@ -3966,37 +3963,31 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* buf = emitAllocArray(arrLen, "amap");
 
         // Loop: for each element, call mapFn and store result
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preheader = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amap.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "amap.body", function);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "amap.done", function);
-        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
-        builder->SetInsertPoint(loopBB);
-        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "amap.idx");
-        idx->addIncoming(zero, preheader);
-        // Unsigned: idx starts at 0, arrLen ≥ 0 (range metadata).
-        llvm::Value* cond = builder->CreateICmpULT(idx, arrLen, "amap.cond");
-        builder->CreateCondBr(cond, bodyBB, doneBB);
-        builder->SetInsertPoint(bodyBB);
-        // Load element from source: arrPtr[idx + 1]
-        llvm::Value* elemIdx = builder->CreateAdd(idx, one, "amap.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "amap.srcptr");
+        llvm::Value* amapBuf = buf;
+        llvm::Value* amapArrPtr = arrPtr;
+        llvm::Value* amapArrLen = arrLen;
+        emitCountingLoop("amap", arrLen, zero, 4,
+            [&](llvm::PHINode* idx, llvm::BasicBlock* loopBB) {
+                llvm::Value* elemIdx = builder->CreateAdd(
+                    idx, one, "amap.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
+                llvm::Value* srcPtr = builder->CreateInBoundsGEP(
+                    getDefaultType(), amapArrPtr, elemIdx, "amap.srcptr");
                 llvm::Value* elem = emitLoadArrayElem(srcPtr, "amap.elem");
-        if (optimizationLevel >= OptimizationLevel::O1)
-            llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
-                llvm::MDNode::get(*context, {}));
-        // Call the map function with the element
-        llvm::Value* mapped = builder->CreateCall(mapFn, {elem}, "amap.mapped");
-        mapped = toDefaultType(mapped);
-        // Store into result: buf[idx + 1]
-        llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, elemIdx, "amap.dstptr");
-        auto* mappedStore = builder->CreateStore(mapped, dstPtr);
-        mappedStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "amap.next", /*HasNUW=*/true, /*HasNSW=*/true);
-        idx->addIncoming(nextIdx, bodyBB);
-        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
-        builder->SetInsertPoint(doneBB);
+                if (optimizationLevel >= OptimizationLevel::O1)
+                    llvm::cast<llvm::Instruction>(elem)->setMetadata(
+                        llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
+                llvm::Value* mapped = builder->CreateCall(mapFn, {elem}, "amap.mapped");
+                mapped = toDefaultType(mapped);
+                llvm::Value* dstPtr = builder->CreateInBoundsGEP(
+                    getDefaultType(), amapBuf, elemIdx, "amap.dstptr");
+                emitStoreArrayElem(mapped, dstPtr);
+                llvm::Value* nextIdx = builder->CreateAdd(
+                    idx, one, "amap.next", /*HasNUW=*/true, /*HasNSW=*/true);
+                idx->addIncoming(nextIdx, builder->GetInsertBlock());
+                attachLoopMetadata(
+                    llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+            });
+        (void)amapArrLen;
         return builder->CreatePtrToInt(buf, getDefaultType(), "amap.result");
     }
 
