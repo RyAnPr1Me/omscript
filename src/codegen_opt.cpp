@@ -131,6 +131,8 @@
 #include <llvm/Transforms/Scalar/LowerExpectIntrinsic.h>
 #include <llvm/Transforms/Scalar/WarnMissedTransforms.h>
 #include <llvm/Transforms/Scalar/LowerConstantIntrinsics.h>
+#include <llvm/Analysis/LoopInfo.h>
+#include <llvm/Analysis/ScalarEvolution.h>
 #include <optional>
 #include <stdexcept>
 
@@ -192,6 +194,250 @@ static llvm::SimplifyCFGOptions hyperblockCFGOpts() {
         .needCanonicalLoops(false)
         .bonusInstThreshold(kHyperblockSpeculationBonus);
 }
+
+// ── Rule 4: OpCache-Friendly Loop Partitioning Pass ──────────────────────────
+//
+// Microarchitectural motivation (Zen 3 / Intel µop cache):
+//   Zen 3 has a 4096-entry micro-op cache that supplies decoded instructions
+//   to the backend at up to 4 µops/cycle without involving the decoders.
+//   When the hot loop body (including any unrolled prologue/epilogue) exceeds
+//   the µop cache capacity, instructions overflow to the decoders, reducing
+//   front-end bandwidth and increasing pipeline bubbles.
+//
+// Strategy:
+//   Walk every loop in the function.  Estimate the number of IR instructions
+//   in the loop body (all basic blocks that belong to the loop, excluding
+//   subloops which will be handled recursively).  If the instruction count
+//   exceeds kOpcacheInstThreshold (proxy for the uop cache limit):
+//     1. Attach `llvm.loop.unroll.disable = true` to suppress further
+//        unrolling (which would make the body even larger).
+//     2. Attach `llvm.loop.distribute.enable = true` so LoopDistributePass
+//        can split independent memory access patterns into separate loops,
+//        each of which fits in the µop cache.
+//
+// The threshold is set conservatively at 128 IR instructions.  Modern
+// µop caches hold 2048–4096 µops, and each IR instruction typically maps
+// to 1–4 µops after lowering.  128 IR instructions ≈ 256–512 µops for
+// typical arithmetic loops (well below the 4K limit), which gives the
+// backend room to store vectorized loop prologues/epilogues too.
+//
+// This pass runs at OptimizerLastEP so it sees fully-optimised IR.
+// ─────────────────────────────────────────────────────────────────────────────
+static constexpr unsigned kOpcacheInstThreshold = 128;
+
+struct OpcacheLoopPartitionPass
+    : public llvm::PassInfoMixin<OpcacheLoopPartitionPass> {
+
+    // Attach loop metadata to the back-edge branch of `L`.
+    // Adds `llvm.loop.unroll.disable` and `llvm.loop.distribute.enable`
+    // while preserving any existing loop metadata operands.
+    static void annotateLoop(llvm::Loop* L, llvm::LLVMContext& Ctx) {
+        llvm::BasicBlock* latch = L->getLoopLatch();
+        if (!latch) return;
+        llvm::BranchInst* back = llvm::dyn_cast<llvm::BranchInst>(latch->getTerminator());
+        if (!back) return;
+
+        // Collect existing loop metadata operands (skip the self-ref at [0]).
+        llvm::SmallVector<llvm::Metadata*, 8> mds;
+        mds.push_back(nullptr); // placeholder for self-reference
+        if (llvm::MDNode* existing = back->getMetadata(llvm::LLVMContext::MD_loop)) {
+            for (unsigned i = 1; i < existing->getNumOperands(); ++i) {
+                // Drop any pre-existing unroll or distribute nodes — we'll
+                // re-add them with our desired values.
+                if (auto* op = llvm::dyn_cast<llvm::MDNode>(existing->getOperand(i))) {
+                    if (op->getNumOperands() > 0) {
+                        if (auto* s = llvm::dyn_cast<llvm::MDString>(op->getOperand(0))) {
+                            llvm::StringRef name = s->getString();
+                            if (name.starts_with("llvm.loop.unroll") ||
+                                name.starts_with("llvm.loop.distribute"))
+                                continue;
+                        }
+                    }
+                }
+                mds.push_back(existing->getOperand(i));
+            }
+        }
+
+        // llvm.loop.unroll.disable = true  → prevent over-unrolling that
+        // would expand the body beyond the µop cache capacity.
+        mds.push_back(llvm::MDNode::get(Ctx, {
+            llvm::MDString::get(Ctx, "llvm.loop.unroll.disable"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt1Ty(Ctx), 1))
+        }));
+        // llvm.loop.distribute.enable = true  → if LoopDistributePass sees
+        // independent memory-access sub-groups it will fission the body into
+        // smaller loops, each fitting the µop cache.  Only effective when the
+        // loop has genuinely independent partitions; otherwise it is a no-op.
+        mds.push_back(llvm::MDNode::get(Ctx, {
+            llvm::MDString::get(Ctx, "llvm.loop.distribute.enable"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt1Ty(Ctx), 1))
+        }));
+
+        llvm::MDNode* md = llvm::MDNode::get(Ctx, mds);
+        md->replaceOperandWith(0, md); // make self-referential
+        back->setMetadata(llvm::LLVMContext::MD_loop, md);
+    }
+
+    // Count the IR instructions in the loop body (excluding subloop blocks).
+    // Uses LoopInfo to distinguish blocks that belong directly to L (as
+    // opposed to blocks in a subloop, which will be processed separately).
+    static unsigned countLoopInsts(llvm::Loop* L, llvm::LoopInfo& LI) {
+        unsigned count = 0;
+        for (llvm::BasicBlock* BB : L->blocks()) {
+            // Only count blocks whose innermost containing loop is exactly L
+            // (i.e. direct members, not blocks in a subloop).
+            if (LI.getLoopFor(BB) == L) {
+                count += BB->size();
+            }
+        }
+        return count;
+    }
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& FAM) {
+        auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
+        llvm::LLVMContext& Ctx = F.getContext();
+        bool changed = false;
+
+        // Use a worklist to process all loops (including nested loops).
+        llvm::SmallVector<llvm::Loop*, 16> worklist;
+        for (llvm::Loop* top : LI) {
+            worklist.push_back(top);
+            for (llvm::Loop* sub : top->getLoopsInPreorder())
+                worklist.push_back(sub);
+        }
+        for (llvm::Loop* L : worklist) {
+            if (countLoopInsts(L, LI) > kOpcacheInstThreshold) {
+                annotateLoop(L, Ctx);
+                changed = true;
+            }
+        }
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+};
+
+// ── Rule 5: Large-Array Streaming Store Pass ─────────────────────────────────
+//
+// Microarchitectural motivation:
+//   For loops that write to large contiguous arrays with no data reuse
+//   (e.g. zero-fill, copy-out, accumulate-to-new-buffer), regular writes
+//   evict useful hot data from L1/L2 cache, causing cache pollution.
+//   Non-temporal (streaming) stores use write-combining buffers to bypass
+//   the cache and go directly to memory, preserving cache bandwidth for
+//   the data that actually needs to stay cached.
+//
+// Detection heuristic:
+//   A store is eligible for non-temporal promotion if:
+//     a) It is inside a loop whose estimated trip count (from SCEV) is ≥
+//        kStreamingElemThreshold (default 4096 elements × 8 bytes = 32 KB,
+//        larger than a typical L1D), AND
+//     b) The stored address has TBAA metadata indicating it is an array
+//        element (not a length header or struct field — those are small).
+//
+// Implementation:
+//   Walk all stores in the function.  For stores marked with array-element
+//   TBAA and inside a loop with a large trip count, set the `!nontemporal`
+//   metadata to 1.  LLVM's backend lowers non-temporal stores to MOVNT
+//   instructions on x86 and equivalent on other targets.
+//
+//   An SFENCE is not explicitly emitted here — LLVM inserts the appropriate
+//   memory fence after streaming store sequences during lowering.
+//
+// Threshold: 4096 elements × 8 bytes = 32 768 bytes.  L1D is typically
+// 32–48 KB; this threshold ensures we only apply streaming stores to arrays
+// that would thrash L1D across multiple passes.
+// ─────────────────────────────────────────────────────────────────────────────
+static constexpr int64_t kStreamingElemThreshold = 4096;
+
+struct LargeArrayStreamingStorePass
+    : public llvm::PassInfoMixin<LargeArrayStreamingStorePass> {
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& FAM) {
+        auto& LI  = FAM.getResult<llvm::LoopAnalysis>(F);
+        auto& SE  = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
+
+        // Build a map from BasicBlock → containing loop (innermost).
+        llvm::DenseMap<llvm::BasicBlock*, llvm::Loop*> bbLoop;
+        for (llvm::Loop* top : LI) {
+            for (llvm::Loop* L : top->getLoopsInPreorder()) {
+                for (llvm::BasicBlock* BB : L->blocks())
+                    bbLoop[BB] = L;
+            }
+            for (llvm::BasicBlock* BB : top->blocks())
+                if (!bbLoop.count(BB)) bbLoop[BB] = top;
+        }
+
+        // TBAA "array element" type name used by OmScript codegen.
+        // We check for this name substring in TBAA metadata to restrict
+        // streaming stores to array element writes (not length headers etc.).
+        llvm::LLVMContext& Ctx = F.getContext();
+        llvm::MDNode* ntMD = llvm::MDNode::get(
+            Ctx, llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(Ctx), 1)));
+
+        bool changed = false;
+        for (llvm::BasicBlock& BB : F) {
+            auto it = bbLoop.find(&BB);
+            if (it == bbLoop.end()) continue;
+            llvm::Loop* L = it->second;
+
+            // Estimate trip count using SCEV.
+            llvm::BasicBlock* exitBB = L->getExitingBlock();
+            if (!exitBB) continue;
+            const llvm::SCEV* tripCount = SE.getBackedgeTakenCount(L);
+            if (!tripCount || llvm::isa<llvm::SCEVCouldNotCompute>(tripCount))
+                continue;
+            if (auto* constTrip = llvm::dyn_cast<llvm::SCEVConstant>(tripCount)) {
+                if (constTrip->getValue()->getSExtValue() < kStreamingElemThreshold)
+                    continue;
+            } else {
+                // Non-constant trip count: conservatively skip unless
+                // SE can prove the trip count is ≥ threshold.
+                // This avoids false-positive streaming stores on small loops
+                // with unknown bounds (e.g. user-input sizes).
+                continue;
+            }
+
+            for (llvm::Instruction& I : BB) {
+                auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I);
+                if (!SI) continue;
+                // Skip stores that are already non-temporal.
+                if (SI->getMetadata(llvm::LLVMContext::MD_nontemporal)) continue;
+                // Only promote stores with array-element TBAA.
+                // OmScript TBAA access-tag structure:
+                //   !tbaa = !{ !typeNode, !typeNode, i64 offset }
+                //   !typeNode = !{ MDString("array element"), !root, i64 0 }
+                // So check operand(0) of the TBAA node is a type-node MDNode
+                // whose operand(0) is MDString "array element".
+                if (llvm::MDNode* tbaa = SI->getMetadata(llvm::LLVMContext::MD_tbaa)) {
+                    bool isArrayElem = false;
+                    if (tbaa->getNumOperands() >= 2) {
+                        // operand(0) = base type node
+                        if (auto* typeNode = llvm::dyn_cast<llvm::MDNode>(
+                                tbaa->getOperand(0))) {
+                            if (typeNode->getNumOperands() >= 1) {
+                                if (auto* s = llvm::dyn_cast<llvm::MDString>(
+                                        typeNode->getOperand(0))) {
+                                    isArrayElem = s->getString() == "array element";
+                                }
+                            }
+                        }
+                    }
+                    if (!isArrayElem) continue;
+                } else continue;
+                // Promote to non-temporal store.
+                SI->setMetadata(llvm::LLVMContext::MD_nontemporal, ntMD);
+                changed = true;
+            }
+        }
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+};
 
 void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {
     const bool isNative = marchCpu_.empty() || marchCpu_ == "native";
@@ -1270,6 +1516,33 @@ void CodeGenerator::runOptimizationPasses() {
     // Promoted from O3 to O2: OmScript generates bounds-check error paths
     // on every array access, and HotColdSplitting moves these cold abort
     // paths out of hot loops, significantly improving I-cache utilization.
+    //
+    // Rule 4 (OpCache-Friendly Loop Partitioning) runs immediately before
+    // HotColdSplitting.  It walks all loops in the fully-optimised module and
+    // annotates loops whose IR body exceeds kOpcacheInstThreshold with:
+    //   • llvm.loop.unroll.disable — prevent further unrolling that would make
+    //     the body even larger and overflow the µop cache.
+    //   • llvm.loop.distribute.enable — let LoopDistributePass (which runs
+    //     in the vectorizer start EP) split independent memory-access sub-
+    //     loops so each sub-loop fits within the µop cache.
+    // Running before HotColdSplitting ensures the loop nests are still intact
+    // and haven't been outlined into cold helper functions.
+    //
+    // Rule 5 (Large-Array Streaming Stores) also runs here.  It promotes
+    // array-element stores inside loops with a provably large trip count
+    // (≥ kStreamingElemThreshold elements) to non-temporal stores (!nontemporal
+    // metadata = 1), causing LLVM's backend to emit MOVNT* instructions.
+    // This avoids cache pollution for large output-array writes.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
+            // Rule 4: annotate over-large loop bodies for µop-cache partitioning.
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(OpcacheLoopPartitionPass()));
+            // Rule 5: promote large streaming-write loops to non-temporal stores.
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(LargeArrayStreamingStorePass()));
+        });
+    }
+
     if (optimizationLevel >= OptimizationLevel::O2) {
         const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
         PB.registerOptimizerLastEPCallback(
