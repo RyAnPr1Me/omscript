@@ -120,6 +120,7 @@ BENCH_NAME=(
     "swap_sort"          # 51 — selection sort using native swap a, b
     "array_predicates"   # 52 — array_any / array_every / array_count with lambdas
     "op_overload"        # 53 — struct operator overloading + creation (<=>, **, |>)
+    "matmul_cm"          # 54 — column-major matrix multiply via mat_new / mat_mul
 )
 
 BENCH_DESC=(
@@ -177,6 +178,7 @@ BENCH_DESC=(
     "Selection sort of 32-elem array with native swap a,b; repeated N/32 times"
     "array_any/array_every/array_count lambdas on 128-elem array; N/128 outer iters"
     "Vec2 operator overloading (+,-,==) and creation (<=>,**,|>) — N iterations"
+    "Column-major matrix multiply N×N via mat_new / mat_mul (column-saxpy inner loop)"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -235,6 +237,7 @@ BENCH_N=(
     500000    # 51  swap_sort
     2000000   # 52  array_predicates
     5000000   # 53  op_overload
+    250       # 54  matmul_cm (250x250 column-major mat_mul)
 )
 
 BOTTLENECK_LABELS=(
@@ -292,6 +295,7 @@ BOTTLENECK_LABELS=(
     "Selection sort of small array using native swap a,b; repeated N/m times"
     "array_any + array_every + array_count with lambdas on a fixed array, N outer iters"
     "struct operator overloading (+,-,==) and creation (<=>,**,|>) dispatch overhead"
+    "column-major mat_mul inner loop vectorization vs row-major C baseline"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -1456,7 +1460,34 @@ fn bench_opoverload(@prefetch n:int) -> int {
     return acc;
 }
 
-// ── main dispatch ────────────────────────────────────────────
+// ── 54. matmul_cm ────────────────────────────────────────────
+// N×N column-major matrix multiply using mat_new / mat_mul builtins.
+// Demonstrates column-major layout: element (i,j) at slot j*rows+i+2.
+// mat_mul uses the j→p→i loop order (column-saxpy) so the inner loop
+// over row index i accesses a full column of A and C — both contiguous
+// in memory, fully auto-vectorizable by LLVM SLP and loop vectorizer.
+@hot @flatten @vectorize @unroll @static @nounwind
+fn bench_matmul_cm(n:int) -> int {
+    var a:int = mat_new(n, n);
+    var b:int = mat_new(n, n);
+    for (i:int in 0...n) {
+        for (j:int in 0...n) {
+            mat_set(a, i, j, (i + j) % 97);
+            mat_set(b, i, j, (i * j + 1) % 53);
+        }
+    }
+    var c:int = mat_mul(a, b);
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        for (j:int in 0...n) {
+            sum += mat_get(c, i, j);
+        }
+    }
+    invalidate n;
+    return sum;
+}
+
+// ── main dispatch ─────────────────────────────────────────────
 fn main() -> int {
     var test_id:int = input();
     prefetch var n:int = input();
@@ -1516,6 +1547,7 @@ fn main() -> int {
         case 51: print(bench_swapsort(n));       break;
         case 52: print(bench_arraypred(n));      break;
         case 53: print(bench_opoverload(n));     break;
+        case 54: print(bench_matmul_cm(n));      break;
         default: print(0);
     }
     invalidate n;
@@ -2453,6 +2485,32 @@ static long bench_opoverload(long n) {
     return acc;
 }
 
+/* ── 54. matmul_cm ─────────────────────────────────────────────────────── */
+/* Row-major C baseline for column-major OM mat_mul.  Same algorithm but   */
+/* stored row-major (C default).  OM's column-major layout gives a         */
+/* vectorization advantage on the column-saxpy inner loop.                 */
+static long bench_matmul_cm(long n) {
+    long* a = (long*)calloc((size_t)(n*n), sizeof(long));
+    long* b = (long*)calloc((size_t)(n*n), sizeof(long));
+    long* c = (long*)calloc((size_t)(n*n), sizeof(long));
+    for (long i = 0; i < n; i++)
+        for (long j = 0; j < n; j++) {
+            a[i*n+j] = (i+j) % 97;
+            b[i*n+j] = (i*j+1) % 53;
+        }
+    /* j→p→i loop order (same as OM mat_mul) but row-major for C */
+    for (long j = 0; j < n; j++)
+        for (long p = 0; p < n; p++) {
+            long b_pj = b[p*n+j];
+            for (long i = 0; i < n; i++)
+                c[j*n+i] += b_pj * a[p*n+i];  /* C[j,i] += b_pj * A[p,i] */
+        }
+    long sum = 0;
+    for (long k = 0; k < n*n; k++) sum += c[k];
+    free(a); free(b); free(c);
+    return sum;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -2512,6 +2570,7 @@ int main(void) {
         case 51: r = bench_swapsort(n);          break;
         case 52: r = bench_arraypred(n);         break;
         case 53: r = bench_opoverload(n);        break;
+        case 54: r = bench_matmul_cm(n);         break;
     }
     printf("%ld\n", r);
     return 0;

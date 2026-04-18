@@ -123,7 +123,21 @@ enum class BuiltinId : uint8_t {
     INT_ABSDIFF,      ///< absdiff(a,b) → |a-b| without overflow (widens to i128)
     FAST_SQRT,        ///< fast_sqrt(x) → sqrt with reassociate/nnan fast-math flags
     FLOAT_IS_NAN,     ///< is_nan(x)  → 1 if x is NaN when reinterpreted as f64
-    FLOAT_IS_INF      ///< is_inf(x)  → 1 if x is ±Infinity as f64
+    FLOAT_IS_INF,     ///< is_inf(x)  → 1 if x is ±Infinity as f64
+    // ── 2D column-major matrix builtins ─────────────────────────────────────
+    // Layout: [rows, cols, A[0][0], A[1][0], ..., A[rows-1][0], A[0][1], ...]
+    // Element (i,j) is at slot index: j * rows + i + 2.
+    // This is Fortran-style column-major storage.  The inner dimension (i,
+    // the row index) is contiguous in memory, so loops over all rows of a
+    // given column auto-vectorize without gather/scatter.
+    MAT_NEW,      ///< mat_new(rows,cols)       → zero-filled column-major matrix
+    MAT_FILL,     ///< mat_fill(rows,cols,val)  → column-major matrix filled with val
+    MAT_GET,      ///< mat_get(m,i,j)           → element (i,j) of matrix m
+    MAT_SET,      ///< mat_set(m,i,j,val)       → set element (i,j); returns m
+    MAT_ROWS,     ///< mat_rows(m)              → number of rows
+    MAT_COLS,     ///< mat_cols(m)              → number of columns
+    MAT_MUL,      ///< mat_mul(a,b)             → C = A × B (column-major result)
+    MAT_TRANSP    ///< mat_transp(m)            → transpose of m (new allocation)
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -340,6 +354,15 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"fast_sqrt", BuiltinId::FAST_SQRT},
     {"is_nan",    BuiltinId::FLOAT_IS_NAN},
     {"is_inf",    BuiltinId::FLOAT_IS_INF},
+    // 2D column-major matrix builtins
+    {"mat_new",    BuiltinId::MAT_NEW},
+    {"mat_fill",   BuiltinId::MAT_FILL},
+    {"mat_get",    BuiltinId::MAT_GET},
+    {"mat_set",    BuiltinId::MAT_SET},
+    {"mat_rows",   BuiltinId::MAT_ROWS},
+    {"mat_cols",   BuiltinId::MAT_COLS},
+    {"mat_mul",    BuiltinId::MAT_MUL},
+    {"mat_transp", BuiltinId::MAT_TRANSP},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -8468,8 +8491,373 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateZExt(either, getDefaultType(), "is_inf.result");
     }
 
+    // ── 2D Column-Major Matrix Builtins ──────────────────────────────────────
+    //
+    // Memory layout (column-major, like Fortran/BLAS/LAPACK):
+    //
+    //   slot 0  : rows   (i64 header)
+    //   slot 1  : cols   (i64 header)
+    //   slot 2  : A[0,0]            ← start of column 0
+    //   slot 3  : A[1,0]
+    //   ...
+    //   slot 2+rows-1  : A[rows-1, 0]  ← end of column 0
+    //   slot 2+rows    : A[0,1]         ← start of column 1
+    //   ...
+    //   slot 2+cols*rows-1 : A[rows-1, cols-1]
+    //
+    // Element (i,j) is at byte offset: (2 + j*rows + i) * 8
+    //
+    // Column-major means the *row* index (i) is the fast-varying dimension.
+    // A full column of any matrix is a contiguous i64 array of length `rows`
+    // with stride 1 — ideal for auto-vectorization by LLVM's SLP and
+    // loop vectorizer without gather/scatter.
+    //
+    // Helper lambda: given a column-major matrix pointer and the pre-loaded
+    // `rows` value, compute the GEP to element (i, j).
+    auto matElemPtr = [&](llvm::Value* mPtr, llvm::Value* rowsV,
+                          llvm::Value* iV, llvm::Value* jV,
+                          const char* name) -> llvm::Value* {
+        // slot = 2 + j * rows + i  (all i64 arithmetic, NSW to aid SCEV)
+        llvm::Value* jRows  = builder->CreateMul(jV, rowsV,
+                                  (std::string(name) + ".jrows").c_str(),
+                                  /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* slot   = builder->CreateAdd(jRows, iV,
+                                  (std::string(name) + ".slot0").c_str(),
+                                  /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* slot2  = builder->CreateAdd(slot,
+                                  llvm::ConstantInt::get(getDefaultType(), 2),
+                                  (std::string(name) + ".slot2").c_str(),
+                                  /*HasNUW=*/true, /*HasNSW=*/true);
+        return builder->CreateInBoundsGEP(getDefaultType(), mPtr, slot2,
+                                          (std::string(name) + ".ptr").c_str());
+    };
+
+    // ── mat_new(rows, cols) ─────────────────────────────────────────────────
+    if (bid == BuiltinId::MAT_NEW) {
+        validateArgCount(expr, "mat_new", 2);
+        llvm::Value* rowsV = toDefaultType(generateExpression(expr->arguments[0].get()));
+        llvm::Value* colsV = toDefaultType(generateExpression(expr->arguments[1].get()));
+        // Clamp negative dimensions to 0 to prevent overflow in size calculation.
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        rowsV = builder->CreateSelect(
+            builder->CreateICmpSLT(rowsV, zero, "mat.rows.neg"), zero, rowsV, "mat.rows");
+        colsV = builder->CreateSelect(
+            builder->CreateICmpSLT(colsV, zero, "mat.cols.neg"), zero, colsV, "mat.cols");
+        // slots = rows * cols + 2  (two i64 header slots)
+        llvm::Value* elems = builder->CreateMul(rowsV, colsV, "mat.elems",
+                                                /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* slots = builder->CreateAdd(elems,
+                                llvm::ConstantInt::get(getDefaultType(), 2),
+                                "mat.slots", /*HasNUW=*/true, /*HasNSW=*/true);
+        // calloc(slots, 8) → zero-initialised; header must still be written.
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* buf   = builder->CreateCall(getOrDeclareCalloc(), {slots, eight}, "mat.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+        // Write header: buf[0] = rows, buf[1] = cols
+        llvm::Value* hdr0 = builder->CreateInBoundsGEP(getDefaultType(), buf,
+                                llvm::ConstantInt::get(getDefaultType(), 0), "mat.hdr0");
+        builder->CreateAlignedStore(rowsV, hdr0, llvm::MaybeAlign(8));
+        llvm::Value* hdr1 = builder->CreateInBoundsGEP(getDefaultType(), buf,
+                                llvm::ConstantInt::get(getDefaultType(), 1), "mat.hdr1");
+        builder->CreateAlignedStore(colsV, hdr1, llvm::MaybeAlign(8));
+        // mat_new returns a matrix handle — treat it like an array-returning function
+        // so the codegen knows its result is a heap pointer.
+        arrayReturningFunctions_.insert("mat_new");
+        return builder->CreatePtrToInt(buf, getDefaultType(), "mat.new.result");
+    }
+
+    // ── mat_fill(rows, cols, val) ───────────────────────────────────────────
+    if (bid == BuiltinId::MAT_FILL) {
+        validateArgCount(expr, "mat_fill", 3);
+        llvm::Value* rowsV = toDefaultType(generateExpression(expr->arguments[0].get()));
+        llvm::Value* colsV = toDefaultType(generateExpression(expr->arguments[1].get()));
+        llvm::Value* valV  = toDefaultType(generateExpression(expr->arguments[2].get()));
+        llvm::Value* zero  = llvm::ConstantInt::get(getDefaultType(), 0);
+        rowsV = builder->CreateSelect(
+            builder->CreateICmpSLT(rowsV, zero, "matf.rows.neg"), zero, rowsV, "matf.rows");
+        colsV = builder->CreateSelect(
+            builder->CreateICmpSLT(colsV, zero, "matf.cols.neg"), zero, colsV, "matf.cols");
+        llvm::Value* elems = builder->CreateMul(rowsV, colsV, "matf.elems",
+                                                /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* slots = builder->CreateAdd(elems,
+                                llvm::ConstantInt::get(getDefaultType(), 2),
+                                "matf.slots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "matf.bytes",
+                                                /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* buf   = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "matf.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+        // Write header
+        builder->CreateAlignedStore(rowsV,
+            builder->CreateInBoundsGEP(getDefaultType(), buf,
+                llvm::ConstantInt::get(getDefaultType(), 0), "matf.hdr0"),
+            llvm::MaybeAlign(8));
+        builder->CreateAlignedStore(colsV,
+            builder->CreateInBoundsGEP(getDefaultType(), buf,
+                llvm::ConstantInt::get(getDefaultType(), 1), "matf.hdr1"),
+            llvm::MaybeAlign(8));
+        // Fill loop over all elements (column-major order, stride-1 access).
+        // Use emitCountingLoop to get vectorized fill.
+        llvm::Value* fillBuf = buf;
+        llvm::Value* fillVal = valV;
+        emitCountingLoop("matf.fill", elems, zero, 4,
+            [&](llvm::PHINode* idx, llvm::BasicBlock* loopBB) {
+                // slot = idx + 2  (skip the two header slots)
+                llvm::Value* slot = builder->CreateAdd(idx,
+                    llvm::ConstantInt::get(getDefaultType(), 2),
+                    "matf.slot", /*HasNUW=*/true, /*HasNSW=*/true);
+                llvm::Value* ep = builder->CreateInBoundsGEP(getDefaultType(),
+                    fillBuf, slot, "matf.ep");
+                emitStoreArrayElem(fillVal, ep);
+                llvm::Value* next = builder->CreateAdd(idx,
+                    llvm::ConstantInt::get(getDefaultType(), 1),
+                    "matf.next", /*HasNUW=*/true, /*HasNSW=*/true);
+                idx->addIncoming(next, builder->GetInsertBlock());
+                attachLoopMetadataVec(
+                    llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+            });
+        arrayReturningFunctions_.insert("mat_fill");
+        return builder->CreatePtrToInt(buf, getDefaultType(), "matf.result");
+    }
+
+    // ── mat_rows(m) ─────────────────────────────────────────────────────────
+    if (bid == BuiltinId::MAT_ROWS) {
+        validateArgCount(expr, "mat_rows", 1);
+        llvm::Value* mVal = toDefaultType(generateExpression(expr->arguments[0].get()));
+        llvm::Value* mPtr = builder->CreateIntToPtr(mVal,
+            llvm::PointerType::getUnqual(*context), "matr.ptr");
+        llvm::Value* hdr0 = builder->CreateInBoundsGEP(getDefaultType(), mPtr,
+            llvm::ConstantInt::get(getDefaultType(), 0), "matr.hdr0");
+        return builder->CreateAlignedLoad(getDefaultType(), hdr0,
+            llvm::MaybeAlign(8), "mat.rows.val");
+    }
+
+    // ── mat_cols(m) ─────────────────────────────────────────────────────────
+    if (bid == BuiltinId::MAT_COLS) {
+        validateArgCount(expr, "mat_cols", 1);
+        llvm::Value* mVal = toDefaultType(generateExpression(expr->arguments[0].get()));
+        llvm::Value* mPtr = builder->CreateIntToPtr(mVal,
+            llvm::PointerType::getUnqual(*context), "matc.ptr");
+        llvm::Value* hdr1 = builder->CreateInBoundsGEP(getDefaultType(), mPtr,
+            llvm::ConstantInt::get(getDefaultType(), 1), "matc.hdr1");
+        return builder->CreateAlignedLoad(getDefaultType(), hdr1,
+            llvm::MaybeAlign(8), "mat.cols.val");
+    }
+
+    // ── mat_get(m, i, j) ────────────────────────────────────────────────────
+    if (bid == BuiltinId::MAT_GET) {
+        validateArgCount(expr, "mat_get", 3);
+        llvm::Value* mVal  = toDefaultType(generateExpression(expr->arguments[0].get()));
+        llvm::Value* iVal  = toDefaultType(generateExpression(expr->arguments[1].get()));
+        llvm::Value* jVal  = toDefaultType(generateExpression(expr->arguments[2].get()));
+        llvm::Value* mPtr  = builder->CreateIntToPtr(mVal,
+            llvm::PointerType::getUnqual(*context), "matg.ptr");
+        llvm::Value* rowsV = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mPtr,
+                llvm::ConstantInt::get(getDefaultType(), 0), "matg.hdr0"),
+            llvm::MaybeAlign(8), "matg.rows");
+        llvm::Value* ep    = matElemPtr(mPtr, rowsV, iVal, jVal, "matg");
+        auto* ld = builder->CreateAlignedLoad(getDefaultType(), ep,
+            llvm::MaybeAlign(8), "mat.get.val");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            ld->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
+        if (currentLoopAccessGroup_)
+            ld->setMetadata(llvm::LLVMContext::MD_access_group, currentLoopAccessGroup_);
+        return ld;
+    }
+
+    // ── mat_set(m, i, j, val) ───────────────────────────────────────────────
+    if (bid == BuiltinId::MAT_SET) {
+        validateArgCount(expr, "mat_set", 4);
+        llvm::Value* mVal  = toDefaultType(generateExpression(expr->arguments[0].get()));
+        llvm::Value* iVal  = toDefaultType(generateExpression(expr->arguments[1].get()));
+        llvm::Value* jVal  = toDefaultType(generateExpression(expr->arguments[2].get()));
+        llvm::Value* valV  = toDefaultType(generateExpression(expr->arguments[3].get()));
+        llvm::Value* mPtr  = builder->CreateIntToPtr(mVal,
+            llvm::PointerType::getUnqual(*context), "mats.ptr");
+        llvm::Value* rowsV = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mPtr,
+                llvm::ConstantInt::get(getDefaultType(), 0), "mats.hdr0"),
+            llvm::MaybeAlign(8), "mats.rows");
+        llvm::Value* ep    = matElemPtr(mPtr, rowsV, iVal, jVal, "mats");
+        auto* st = builder->CreateAlignedStore(valV, ep, llvm::MaybeAlign(8));
+        if (currentLoopAccessGroup_)
+            st->setMetadata(llvm::LLVMContext::MD_access_group, currentLoopAccessGroup_);
+        return mVal; // return the matrix pointer for chaining
+    }
+
+    // ── mat_transp(m) ────────────────────────────────────────────────────────
+    if (bid == BuiltinId::MAT_TRANSP) {
+        validateArgCount(expr, "mat_transp", 1);
+        llvm::Value* mVal   = toDefaultType(generateExpression(expr->arguments[0].get()));
+        llvm::Value* mPtr   = builder->CreateIntToPtr(mVal,
+            llvm::PointerType::getUnqual(*context), "matt.ptr");
+        llvm::Value* rowsV  = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mPtr,
+                llvm::ConstantInt::get(getDefaultType(), 0), "matt.hdr0"),
+            llvm::MaybeAlign(8), "matt.rows");
+        llvm::Value* colsV  = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mPtr,
+                llvm::ConstantInt::get(getDefaultType(), 1), "matt.hdr1"),
+            llvm::MaybeAlign(8), "matt.cols");
+        // Allocate transposed matrix: mat_new(cols, rows)
+        llvm::Value* elems  = builder->CreateMul(rowsV, colsV, "matt.elems",
+                                                  /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* slots  = builder->CreateAdd(elems,
+                                  llvm::ConstantInt::get(getDefaultType(), 2),
+                                  "matt.slots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* eight  = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* tBuf   = builder->CreateCall(getOrDeclareCalloc(),
+                                  {slots, eight}, "matt.buf");
+        llvm::cast<llvm::CallInst>(tBuf)->addRetAttr(llvm::Attribute::NonNull);
+        // Header of transpose: rows_T = cols, cols_T = rows
+        builder->CreateAlignedStore(colsV,
+            builder->CreateInBoundsGEP(getDefaultType(), tBuf,
+                llvm::ConstantInt::get(getDefaultType(), 0), "matt.thdr0"),
+            llvm::MaybeAlign(8));
+        builder->CreateAlignedStore(rowsV,
+            builder->CreateInBoundsGEP(getDefaultType(), tBuf,
+                llvm::ConstantInt::get(getDefaultType(), 1), "matt.thdr1"),
+            llvm::MaybeAlign(8));
+        // Copy loop: T[j, i] = A[i, j]  for all i in 0..rows, j in 0..cols
+        // Outer loop over columns j, inner over rows i (both contiguous in their
+        // respective matrices, so both the read and write are stride-1 by column).
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        emitCountingLoop("matt.j", colsV, zero, 1,
+            [&](llvm::PHINode* jIdx, llvm::BasicBlock* jLoopBB) {
+                llvm::Value* jIdxV = jIdx; // j column index
+                emitCountingLoop("matt.i", rowsV, zero, 4,
+                    [&](llvm::PHINode* iIdx, llvm::BasicBlock* iLoopBB) {
+                        // Load A[i, j] (column-major: slot = j*rows + i + 2)
+                        llvm::Value* epA = matElemPtr(mPtr, rowsV, iIdx, jIdxV, "matt.a");
+                        auto* aElem = builder->CreateAlignedLoad(getDefaultType(),
+                            epA, llvm::MaybeAlign(8), "matt.aval");
+                        // Store T[j, i]: T has rowsT=cols, so slot = i*cols + j + 2
+                        llvm::Value* epT = matElemPtr(tBuf, colsV, jIdxV, iIdx, "matt.t");
+                        builder->CreateAlignedStore(aElem, epT, llvm::MaybeAlign(8));
+                        llvm::Value* ni = builder->CreateAdd(iIdx,
+                            llvm::ConstantInt::get(getDefaultType(), 1), "matt.ni",
+                            /*HasNUW=*/true, /*HasNSW=*/true);
+                        iIdx->addIncoming(ni, builder->GetInsertBlock());
+                        attachLoopMetadataVec(
+                            llvm::cast<llvm::BranchInst>(builder->CreateBr(iLoopBB)));
+                    });
+                llvm::Value* nj = builder->CreateAdd(jIdx,
+                    llvm::ConstantInt::get(getDefaultType(), 1), "matt.nj",
+                    /*HasNUW=*/true, /*HasNSW=*/true);
+                jIdx->addIncoming(nj, builder->GetInsertBlock());
+                builder->CreateBr(jLoopBB);
+            });
+        arrayReturningFunctions_.insert("mat_transp");
+        return builder->CreatePtrToInt(tBuf, getDefaultType(), "matt.result");
+    }
+
+    // ── mat_mul(a, b) ────────────────────────────────────────────────────────
+    // Column-major matrix multiply: C = A × B
+    // A is (m × k), B is (k × n), C is (m × n)  — all column-major.
+    //
+    // Loop order: j (outer) → p (middle) → i (inner, SIMD-vectorizable)
+    //
+    //   for j in 0..n:          ← iterate over columns of B and C
+    //     for p in 0..k:        ← iterate over rows of B / cols of A
+    //       b_pj = B[p, j]      ← scalar load of B's element (contiguous in B's col j)
+    //       for i in 0..m:      ← vectorized: column j of C += b_pj * column p of A
+    //         C[i, j] += b_pj * A[i, p]
+    //
+    // The inner loop reads column p of A (contiguous, stride-1) and writes
+    // column j of C (contiguous, stride-1) — both are ideal for SIMD.
+    // This is the BLAS dgemm "column-saxpy" algorithm.
+    if (bid == BuiltinId::MAT_MUL) {
+        validateArgCount(expr, "mat_mul", 2);
+        llvm::Value* aVal  = toDefaultType(generateExpression(expr->arguments[0].get()));
+        llvm::Value* bVal  = toDefaultType(generateExpression(expr->arguments[1].get()));
+        llvm::Value* aPtr  = builder->CreateIntToPtr(aVal,
+            llvm::PointerType::getUnqual(*context), "matm.aptr");
+        llvm::Value* bPtr  = builder->CreateIntToPtr(bVal,
+            llvm::PointerType::getUnqual(*context), "matm.bptr");
+        // Dimension loads
+        llvm::Value* mDim  = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), aPtr,
+                llvm::ConstantInt::get(getDefaultType(), 0), "matm.a.hdr0"),
+            llvm::MaybeAlign(8), "matm.m");
+        llvm::Value* kDim  = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), aPtr,
+                llvm::ConstantInt::get(getDefaultType(), 1), "matm.a.hdr1"),
+            llvm::MaybeAlign(8), "matm.k");
+        llvm::Value* nDim  = builder->CreateAlignedLoad(getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), bPtr,
+                llvm::ConstantInt::get(getDefaultType(), 1), "matm.b.hdr1"),
+            llvm::MaybeAlign(8), "matm.n");
+        // Allocate result matrix C(m, n) — zero-initialised via calloc
+        llvm::Value* cElems = builder->CreateMul(mDim, nDim, "matm.celems",
+                                                  /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* cSlots = builder->CreateAdd(cElems,
+                                  llvm::ConstantInt::get(getDefaultType(), 2),
+                                  "matm.cslots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* eight  = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* cBuf   = builder->CreateCall(getOrDeclareCalloc(),
+                                  {cSlots, eight}, "matm.cbuf");
+        llvm::cast<llvm::CallInst>(cBuf)->addRetAttr(llvm::Attribute::NonNull);
+        // Write C header
+        builder->CreateAlignedStore(mDim,
+            builder->CreateInBoundsGEP(getDefaultType(), cBuf,
+                llvm::ConstantInt::get(getDefaultType(), 0), "matm.chdr0"),
+            llvm::MaybeAlign(8));
+        builder->CreateAlignedStore(nDim,
+            builder->CreateInBoundsGEP(getDefaultType(), cBuf,
+                llvm::ConstantInt::get(getDefaultType(), 1), "matm.chdr1"),
+            llvm::MaybeAlign(8));
+        // Triple loop: j (outer) → p (middle) → i (inner, vectorized)
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        emitCountingLoop("matm.j", nDim, zero, 1,
+            [&](llvm::PHINode* jIdx, llvm::BasicBlock* jLoopBB) {
+                emitCountingLoop("matm.p", kDim, zero, 1,
+                    [&](llvm::PHINode* pIdx, llvm::BasicBlock* pLoopBB) {
+                        // b_pj = B[p, j]  (scalar)
+                        llvm::Value* bEp   = matElemPtr(bPtr, kDim, pIdx, jIdx, "matm.b");
+                        llvm::Value* b_pj  = builder->CreateAlignedLoad(getDefaultType(),
+                            bEp, llvm::MaybeAlign(8), "matm.bpj");
+                        // Inner loop: C[i, j] += b_pj * A[i, p]  (vectorized)
+                        emitCountingLoop("matm.i", mDim, zero, 4,
+                            [&](llvm::PHINode* iIdx, llvm::BasicBlock* iLoopBB) {
+                                // A[i, p]: slot = p*m + i + 2
+                                llvm::Value* aEp  = matElemPtr(aPtr, mDim, iIdx, pIdx, "matm.a");
+                                llvm::Value* a_ip = builder->CreateAlignedLoad(getDefaultType(),
+                                    aEp, llvm::MaybeAlign(8), "matm.aip");
+                                // C[i, j]: slot = j*m + i + 2
+                                llvm::Value* cEp  = matElemPtr(cBuf, mDim, iIdx, jIdx, "matm.c");
+                                llvm::Value* c_ij = builder->CreateAlignedLoad(getDefaultType(),
+                                    cEp, llvm::MaybeAlign(8), "matm.cij");
+                                // c_ij += b_pj * a_ip
+                                llvm::Value* prod = builder->CreateMul(b_pj, a_ip, "matm.prod",
+                                    /*HasNUW=*/false, /*HasNSW=*/true);
+                                llvm::Value* sum  = builder->CreateAdd(c_ij, prod, "matm.sum",
+                                    /*HasNUW=*/false, /*HasNSW=*/true);
+                                builder->CreateAlignedStore(sum, cEp, llvm::MaybeAlign(8));
+                                llvm::Value* ni = builder->CreateAdd(iIdx,
+                                    llvm::ConstantInt::get(getDefaultType(), 1), "matm.ni",
+                                    /*HasNUW=*/true, /*HasNSW=*/true);
+                                iIdx->addIncoming(ni, builder->GetInsertBlock());
+                                attachLoopMetadataVec(
+                                    llvm::cast<llvm::BranchInst>(builder->CreateBr(iLoopBB)));
+                            });
+                        llvm::Value* np = builder->CreateAdd(pIdx,
+                            llvm::ConstantInt::get(getDefaultType(), 1), "matm.np",
+                            /*HasNUW=*/true, /*HasNSW=*/true);
+                        pIdx->addIncoming(np, builder->GetInsertBlock());
+                        builder->CreateBr(pLoopBB);
+                    });
+                llvm::Value* nj = builder->CreateAdd(jIdx,
+                    llvm::ConstantInt::get(getDefaultType(), 1), "matm.nj",
+                    /*HasNUW=*/true, /*HasNSW=*/true);
+                jIdx->addIncoming(nj, builder->GetInsertBlock());
+                builder->CreateBr(jLoopBB);
+            });
+        arrayReturningFunctions_.insert("mat_mul");
+        return builder->CreatePtrToInt(cBuf, getDefaultType(), "matm.result");
+    }
+
     if (inOptMaxFunction) {
-        // Stdlib functions are always native machine code, so they're safe to call from OPTMAX
         if (!isStdlibFunction(expr->callee) && optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
             std::string currentFunction = "<unknown>";
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent()) {
