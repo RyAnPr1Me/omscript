@@ -266,7 +266,47 @@ void Parser::synchronize() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pre-scan: collect all custom operator symbols before the main parse.
+// ---------------------------------------------------------------------------
+// Walks the token stream looking for the pattern:
+//   IDENTIFIER("operator")  [non-LPAREN tokens...]  LPAREN
+// and registers the concatenated lexemes of the non-LPAREN tokens as a
+// custom operator symbol.  This runs before the main parse so that any
+// operator used in expressions later in the file is already known.
+// ---------------------------------------------------------------------------
+void Parser::prescanCustomOperators() {
+    const size_t saved = current;
+    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+        if (tokens[i].type  == TokenType::IDENTIFIER &&
+            tokens[i].lexeme == "operator") {
+            // Collect tokens between 'operator' and the first '('
+            std::string opStr;
+            size_t j = i + 1;
+            while (j < tokens.size() &&
+                   tokens[j].type != TokenType::LPAREN &&
+                   tokens[j].type != TokenType::END_OF_FILE) {
+                // Skip quoted-string names — they are only callable via backtick.
+                // Raw token-sequence symbols (e.g. "<=>" from LE + GT) are what
+                // we register here for direct-infix usage.
+                if (tokens[j].type != TokenType::STRING)
+                    opStr += tokens[j].lexeme;
+                ++j;
+            }
+            if (!opStr.empty() && j < tokens.size() &&
+                tokens[j].type == TokenType::LPAREN) {
+                customOperatorSymbols_.insert(opStr);
+            }
+        }
+    }
+    current = saved;
+}
+
 std::unique_ptr<Program> Parser::parse() {
+    // Pre-scan to collect custom operator symbols so that multi-token infix
+    // operators (e.g. "<=>" or "^><") are recognisable during expression parsing.
+    prescanCustomOperators();
+
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
     std::vector<std::unique_ptr<StructDecl>> structs;
@@ -2151,6 +2191,10 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
     const Token nameToken = consume(TokenType::IDENTIFIER, "Expected struct name");
     consume(TokenType::LBRACE, "Expected '{' after struct name");
 
+    // Register the struct name early so that operator bodies defined inside
+    // this struct can form struct literals of this type (e.g., return Vec2 { x:…, y:…}).
+    structNames_.insert(nameToken.lexeme);
+
     std::vector<std::string> fields;
     std::vector<StructField> fieldDecls;
     std::vector<OperatorOverload> operators;
@@ -2163,21 +2207,52 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
             advance(); // consume 'fn'
             advance(); // consume 'operator'
 
-            // Parse the operator symbol: +, -, *, /, ==, !=, <, >, <=, >=
+                        // Parse the operator symbol.
+            //
+            // Three forms are accepted:
+            //
+            //   1. Any sequence of operator tokens up to `(` — allows any
+            //      symbol the user invents, e.g.:
+            //          fn operator<=>(other: T) -> int { ... }
+            //          fn operator^><(other: T) -> T   { ... }
+            //          fn operator|>(other: T) -> T    { ... }
+            //      These are usable directly in expressions: `v1 <=> v2`.
+            //
+            //   2. A quoted string name — e.g.:
+            //          fn operator "dot"(other: Vec2) -> int { ... }
+            //      Callable with backtick infix syntax: `v1 \`dot\` v2`.
+            //
+            //   3. A backtick-quoted name — e.g.:
+            //          fn operator `cross`(other: Vec3) -> Vec3 { ... }
+            //      Equivalent to form 2; also callable via `v1 \`cross\` v2`.
+            //
+            // Form 1 supports ALL standard operator symbols plus any novel
+            // combination, making both operator overloading (redefine an
+            // existing operator for a type) and operator creation (define an
+            // entirely new operator symbol) available with the same syntax.
+
             std::string opStr;
-            if (check(TokenType::PLUS)) { opStr = "+"; advance(); }
-            else if (check(TokenType::MINUS)) { opStr = "-"; advance(); }
-            else if (check(TokenType::STAR)) { opStr = "*"; advance(); }
-            else if (check(TokenType::SLASH)) { opStr = "/"; advance(); }
-            else if (check(TokenType::PERCENT)) { opStr = "%"; advance(); }
-            else if (check(TokenType::EQ)) { opStr = "=="; advance(); }
-            else if (check(TokenType::NE)) { opStr = "!="; advance(); }
-            else if (check(TokenType::LT)) { opStr = "<"; advance(); }
-            else if (check(TokenType::GT)) { opStr = ">"; advance(); }
-            else if (check(TokenType::LE)) { opStr = "<="; advance(); }
-            else if (check(TokenType::GE)) { opStr = ">="; advance(); }
-            else {
-                error("Expected operator symbol after 'operator' (e.g., +, -, *, /, ==, !=, <, >)");
+
+            if (check(TokenType::STRING)) {
+                // Form 2: quoted string name — backtick-callable only.
+                opStr = peek().lexeme;
+                advance();
+            } else if (check(TokenType::BACKTICK_IDENT)) {
+                // Form 3: backtick-quoted name — backtick-callable only.
+                opStr = peek().lexeme;
+                advance();
+            } else {
+                // Form 1: collect ALL non-LPAREN tokens and concatenate their
+                // lexemes.  This handles single-token operators (+, -, **, etc.)
+                // and arbitrary multi-token sequences (<=>, ^><, |>, …) uniformly.
+                while (!check(TokenType::LPAREN) && !check(TokenType::END_OF_FILE)) {
+                    opStr += peek().lexeme;
+                    advance();
+                }
+                if (opStr.empty()) {
+                    error("Expected operator symbol after 'operator' "
+                          "(e.g., +, -, *, <=>, ^><, or a quoted name like \"dot\")");
+                }
             }
 
             consume(TokenType::LPAREN, "Expected '(' after operator");
@@ -2272,7 +2347,7 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
     }
 
     consume(TokenType::RBRACE, "Expected '}' after struct body");
-    structNames_.insert(nameToken.lexeme);
+    // (structNames_ was already populated before the body was parsed)
     auto decl = std::make_unique<StructDecl>(nameToken.lexeme, std::move(fields), std::move(fieldDecls));
     decl->operators = std::move(operators);
     return decl;
@@ -2582,14 +2657,86 @@ std::unique_ptr<Expression> Parser::parseTernary() {
 }
 
 std::unique_ptr<Expression> Parser::parseNullCoalesce() {
-    auto left = parseLogicalOr();
+    auto left = parseCustomOp();
 
     while (match(TokenType::NULL_COALESCE)) {
-        auto right = parseLogicalOr();
+        auto right = parseCustomOp();
         // x ?? y  desugars to  x != 0 ? x : y  (ternary expression)
         // We clone the left expression by re-wrapping it
         auto node = std::make_unique<BinaryExpr>("??", std::move(left), std::move(right));
         left = std::move(node);
+    }
+
+    return left;
+}
+
+// ---------------------------------------------------------------------------
+// User-defined arbitrary-symbol operator parsing
+// ---------------------------------------------------------------------------
+// Provides two complementary calling conventions for custom operators:
+//
+//   1. Direct infix (any token sequence):
+//        v1 <=> v2    (if "<=>" is registered in customOperatorSymbols_)
+//        v1 ^>< v2    (if "^><" is registered)
+//
+//   2. Backtick infix (named operators, already handled in parseLogicalOr):
+//        v1 `dot` v2   (using any string as operator name)
+//
+// Custom operators defined with a quoted string name:
+//   fn operator "dot"(other: Vec2) -> int { ... }
+// are only reachable via backtick syntax.  Custom operators defined with a
+// raw token-sequence symbol are reachable via direct infix.
+//
+// Precedence: custom operators sit between null-coalesce (??) and
+// logical-or (||), i.e. lower than all arithmetic but higher than ternary.
+// ---------------------------------------------------------------------------
+
+std::string Parser::tryMatchCustomOperator() const {
+    std::string best;
+    for (const auto& opSym : customOperatorSymbols_) {
+        // Try to match opSym against consecutive token lexemes from current.
+        size_t tokIdx = current;
+        size_t symIdx = 0;
+        while (symIdx < opSym.size() && tokIdx < tokens.size()) {
+            const std::string& lex = tokens[tokIdx].lexeme;
+            if (opSym.compare(symIdx, lex.size(), lex) != 0) { symIdx = opSym.size() + 1; break; }
+            symIdx += lex.size();
+            ++tokIdx;
+        }
+        if (symIdx == opSym.size() && opSym.size() > best.size())
+            best = opSym;
+    }
+    return best;
+}
+
+size_t Parser::customOpTokenCount(const std::string& opSym) const {
+    size_t tokIdx = current;
+    size_t symIdx = 0;
+    size_t count  = 0;
+    while (symIdx < opSym.size() && tokIdx < tokens.size()) {
+        symIdx += tokens[tokIdx].lexeme.size();
+        ++tokIdx;
+        ++count;
+    }
+    return count;
+}
+
+bool Parser::isStartOfLongerCustomOp(size_t standardLen) const {
+    const std::string matched = tryMatchCustomOperator();
+    return !matched.empty() && matched.size() > standardLen;
+}
+
+std::unique_ptr<Expression> Parser::parseCustomOp() {
+    auto left = parseLogicalOr();
+
+    while (true) {
+        const std::string opSym = tryMatchCustomOperator();
+        if (opSym.empty()) break;
+        // Consume the tokens that spell out this custom operator.
+        const size_t tokCount = customOpTokenCount(opSym);
+        for (size_t i = 0; i < tokCount; ++i) advance();
+        auto right = parseLogicalOr();
+        left = std::make_unique<BinaryExpr>(opSym, std::move(left), std::move(right));
     }
 
     return left;
@@ -2602,6 +2749,17 @@ std::unique_ptr<Expression> Parser::parseLogicalOr() {
         const std::string op = tokens[current - 1].lexeme;
         auto right = parseLogicalAnd();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+
+    // Backtick infix operator: `name`  (operator creation / named operator call)
+    //   a `dot` b  ≡  BinaryExpr("dot", a, b)
+    // The codegen dispatches this via the operatorOverloads_ registry exactly
+    // like any other struct operator, so it works for both overloading and creation.
+    while (check(TokenType::BACKTICK_IDENT)) {
+        const std::string opName = peek().lexeme;
+        advance(); // consume the backtick token
+        auto right = parseLogicalAnd();
+        left = std::make_unique<BinaryExpr>(opName, std::move(left), std::move(right));
     }
 
     return left;
@@ -2622,7 +2780,8 @@ std::unique_ptr<Expression> Parser::parseLogicalAnd() {
 std::unique_ptr<Expression> Parser::parseBitwiseOr() {
     auto left = parseBitwiseXor();
 
-    while (match(TokenType::PIPE)) {
+    while (check(TokenType::PIPE) && !isStartOfLongerCustomOp(1)) {
+        advance();
         const std::string op = tokens[current - 1].lexeme;
         auto right = parseBitwiseXor();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -2634,7 +2793,8 @@ std::unique_ptr<Expression> Parser::parseBitwiseOr() {
 std::unique_ptr<Expression> Parser::parseBitwiseXor() {
     auto left = parseBitwiseAnd();
 
-    while (match(TokenType::CARET)) {
+    while (check(TokenType::CARET) && !isStartOfLongerCustomOp(1)) {
+        advance();
         const std::string op = tokens[current - 1].lexeme;
         auto right = parseBitwiseAnd();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -2646,7 +2806,8 @@ std::unique_ptr<Expression> Parser::parseBitwiseXor() {
 std::unique_ptr<Expression> Parser::parseBitwiseAnd() {
     auto left = parseEquality();
 
-    while (match(TokenType::AMPERSAND)) {
+    while (check(TokenType::AMPERSAND) && !isStartOfLongerCustomOp(1)) {
+        advance();
         const std::string op = tokens[current - 1].lexeme;
         auto right = parseEquality();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -2658,7 +2819,8 @@ std::unique_ptr<Expression> Parser::parseBitwiseAnd() {
 std::unique_ptr<Expression> Parser::parseEquality() {
     auto left = parseComparison();
 
-    while (match(TokenType::EQ) || match(TokenType::NE)) {
+    while ((check(TokenType::EQ) || check(TokenType::NE)) && !isStartOfLongerCustomOp(2)) {
+        advance();
         const std::string op = tokens[current - 1].lexeme;
         auto right = parseComparison();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -2672,14 +2834,24 @@ std::unique_ptr<Expression> Parser::parseComparison() {
 
     // Chained comparisons: a < b < c desugars to (a < b) && (b < c)
     // Supports arbitrary chains like a < b <= c > d.
-    if (check(TokenType::LT) || check(TokenType::LE) || check(TokenType::GT) || check(TokenType::GE)) {
+    // Guard: if the comparison token(s) are the start of a longer custom
+    // operator (e.g. `<=` is the prefix of registered `<=>`), yield to
+    // parseCustomOp() instead of consuming the token here.
+    auto isCompTok = [&]() {
+        return (check(TokenType::LT)  && !isStartOfLongerCustomOp(1)) ||
+               (check(TokenType::GT)  && !isStartOfLongerCustomOp(1)) ||
+               (check(TokenType::LE)  && !isStartOfLongerCustomOp(2)) ||
+               (check(TokenType::GE)  && !isStartOfLongerCustomOp(2));
+    };
+
+    if (isCompTok()) {
         const Token firstOp = peek();
         advance();
         const std::string op1 = firstOp.lexeme;
         auto mid = parseShift();
 
         // Check for chained comparison: if another comparison op follows
-        if (check(TokenType::LT) || check(TokenType::LE) || check(TokenType::GT) || check(TokenType::GE)) {
+        if (isCompTok()) {
             // We need to duplicate `mid` for the second comparison.
             // Clone mid by creating a fresh reference if it's an identifier or literal.
             std::unique_ptr<Expression> midClone;
@@ -2701,7 +2873,8 @@ std::unique_ptr<Expression> Parser::parseComparison() {
             } else {
                 // For complex expressions, fall back to non-chained behavior
                 left = std::make_unique<BinaryExpr>(op1, std::move(left), std::move(mid));
-                while (match(TokenType::LT) || match(TokenType::LE) || match(TokenType::GT) || match(TokenType::GE)) {
+                while (isCompTok()) {
+                    advance();
                     const std::string op = tokens[current - 1].lexeme;
                     auto right = parseShift();
                     left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -2718,13 +2891,14 @@ std::unique_ptr<Expression> Parser::parseComparison() {
 
             // Continue chaining: midClone op2 right ...
             left = std::move(midClone);
-            while (match(TokenType::LT) || match(TokenType::LE) || match(TokenType::GT) || match(TokenType::GE)) {
+            while (isCompTok()) {
+                advance();
                 const std::string opN = tokens[current - 1].lexeme;
                 auto right = parseShift();
 
                 // Clone right for potential further chaining
                 std::unique_ptr<Expression> rightClone;
-                if (check(TokenType::LT) || check(TokenType::LE) || check(TokenType::GT) || check(TokenType::GE)) {
+                if (isCompTok()) {
                     if (right->type == ASTNodeType::IDENTIFIER_EXPR) {
                         auto* id = static_cast<IdentifierExpr*>(right.get());
                         rightClone = std::make_unique<IdentifierExpr>(id->name);
@@ -2780,7 +2954,8 @@ check_in:
 std::unique_ptr<Expression> Parser::parseShift() {
     auto left = parseAddition();
 
-    while (match(TokenType::LSHIFT) || match(TokenType::RSHIFT)) {
+    while ((check(TokenType::LSHIFT) || check(TokenType::RSHIFT)) && !isStartOfLongerCustomOp(2)) {
+        advance();
         const std::string op = tokens[current - 1].lexeme;
         auto right = parseAddition();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));

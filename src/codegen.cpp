@@ -4239,6 +4239,18 @@ void CodeGenerator::generate(Program* program) {
 
     // Forward-declare all functions so that any function can reference any
     // other regardless of source-file ordering (enables mutual recursion).
+    // Operator overload functions must be appended to program->functions
+    // BEFORE this loop so they get forward-declared like any other function.
+    for (auto& structDecl : program->structs) {
+        for (auto& overload : structDecl->operators) {
+            if (overload.impl) {
+                const std::string key = structDecl->name + "::" + overload.op;
+                operatorOverloads_[key] = overload.impl->name;
+                program->functions.push_back(std::move(overload.impl));
+            }
+        }
+    }
+
     for (auto& func : program->functions) {
         // Resolve parameter types from annotations: "float" → double, else i64.
         std::vector<llvm::Type*> paramTypes;
@@ -4394,19 +4406,6 @@ void CodeGenerator::generate(Program* program) {
             }
         } else {
             structDefs_[structDecl->name] = structDecl->fields;
-        }
-    }
-
-    // Register operator overloads: generate implementation functions and store
-    // in the operatorOverloads_ registry for dispatch in generateBinary().
-    for (auto& structDecl : program->structs) {
-        for (auto& overload : structDecl->operators) {
-            const std::string key = structDecl->name + "::" + overload.op;
-            const std::string funcName = overload.impl->name;
-            operatorOverloads_[key] = funcName;
-            // Add the operator implementation function to the program's function
-            // list so it gets code-generated alongside other functions.
-            program->functions.push_back(std::move(overload.impl));
         }
     }
 

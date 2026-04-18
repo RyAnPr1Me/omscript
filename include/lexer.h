@@ -141,6 +141,7 @@ enum class TokenType {
 
     // Special
     AT,  // @ — used for function annotations (@inline, @noinline, @cold)
+    BACKTICK_IDENT, // `name` — backtick-quoted identifier for infix operator creation
     END_OF_FILE,
     INVALID
 };

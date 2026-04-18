@@ -13,6 +13,7 @@
 #include "ast.h"
 #include "lexer.h"
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -142,6 +143,27 @@ class Parser {
     /// Known struct names for parsing struct literals.
     std::unordered_set<std::string> structNames_;
 
+    /// Custom operator symbols registered from struct operator definitions.
+    /// Used by tryMatchCustomOperator() to recognize multi-token operators
+    /// (e.g. "<=>" defined as fn operator<=>(other: T)) at expression-parse time.
+    std::set<std::string> customOperatorSymbols_;
+
+    /// Pre-scan all tokens for `operator SYMBOL (` patterns and populate
+    /// customOperatorSymbols_ before the main parse pass.
+    void prescanCustomOperators();
+
+    /// Try to match a registered custom operator at the current token position.
+    /// Returns the longest matching operator symbol string, or "" if none match.
+    std::string tryMatchCustomOperator() const;
+
+    /// Return the number of tokens consumed by the given custom operator symbol
+    /// starting at the current position.
+    size_t customOpTokenCount(const std::string& opSym) const;
+
+    /// True when the token(s) at the current position form the start of a
+    /// custom operator that is strictly longer than `standardLen` chars.
+    bool isStartOfLongerCustomOp(size_t standardLen) const;
+
     /// Known enum names for scope resolution validation.
     std::unordered_set<std::string> enumNames_;
 
@@ -174,6 +196,7 @@ class Parser {
     std::unique_ptr<Expression> parseAssignment();
     std::unique_ptr<Expression> parseTernary();
     std::unique_ptr<Expression> parseNullCoalesce();
+    std::unique_ptr<Expression> parseCustomOp();  // user-defined arbitrary-symbol operators
     std::unique_ptr<Expression> parseLogicalOr();
     std::unique_ptr<Expression> parseLogicalAnd();
     std::unique_ptr<Expression> parseBitwiseOr();
