@@ -4948,6 +4948,97 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
 
+            // ── a & ~a → 0  [complement intersection is always empty] ─────────
+            // Pattern: and(x, not(x))  or  and(not(x), x)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                llvm::Value* lhs = inst.getOperand(0);
+                llvm::Value* rhs = inst.getOperand(1);
+                // Check if rhs = xor(lhs, -1)
+                auto isNot = [](llvm::Value* candidate, llvm::Value* base) -> bool {
+                    if (auto* xorI = llvm::dyn_cast<llvm::BinaryOperator>(candidate)) {
+                        if (xorI->getOpcode() == llvm::Instruction::Xor) {
+                            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(xorI->getOperand(1)))
+                                if (c->isMinusOne() && xorI->getOperand(0) == base) return true;
+                            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(xorI->getOperand(0)))
+                                if (c->isMinusOne() && xorI->getOperand(1) == base) return true;
+                        }
+                    }
+                    return false;
+                };
+                if (isNot(rhs, lhs) || isNot(lhs, rhs)) {
+                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                }
+            }
+
+            // ── a | ~a → -1  [complement union covers all bits] ──────────────
+            // Pattern: or(x, not(x))  or  or(not(x), x)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                llvm::Value* lhs = inst.getOperand(0);
+                llvm::Value* rhs = inst.getOperand(1);
+                auto isNot = [](llvm::Value* candidate, llvm::Value* base) -> bool {
+                    if (auto* xorI = llvm::dyn_cast<llvm::BinaryOperator>(candidate)) {
+                        if (xorI->getOpcode() == llvm::Instruction::Xor) {
+                            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(xorI->getOperand(1)))
+                                if (c->isMinusOne() && xorI->getOperand(0) == base) return true;
+                            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(xorI->getOperand(0)))
+                                if (c->isMinusOne() && xorI->getOperand(1) == base) return true;
+                        }
+                    }
+                    return false;
+                };
+                if (isNot(rhs, lhs) || isNot(lhs, rhs)) {
+                    simplified = llvm::ConstantInt::get(inst.getType(), -1);
+                }
+            }
+
+            // ── neg(x - y) → y - x  [negate of a difference] ────────────────
+            // Pattern: sub(0, sub(x, y)) → sub(y, x)
+            // This canonical form exposes (y - x) directly to downstream passes
+            // (SCEV, CSE, loop strength reduction) that look for `sub` patterns.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                if (isConstInt(inst.getOperand(0), 0)) {
+                    if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1))) {
+                        if (inner->getOpcode() == llvm::Instruction::Sub &&
+                            hasOneUse(inner)) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateSub(inner->getOperand(1),
+                                                           inner->getOperand(0),
+                                                           "neg_diff_flip");
+                        }
+                    }
+                }
+            }
+
+            // ── add(x, neg(y)) → sub(x, y)  [canonical add-of-negate] ────────
+            // Pattern: add(x, sub(0, y)) → sub(x, y)
+            // Helps LLVM CSE match `x - y` computed in two different styles.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                // Check rhs = sub(0, y)
+                if (auto* rhsOp = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1))) {
+                    if (rhsOp->getOpcode() == llvm::Instruction::Sub &&
+                        isConstInt(rhsOp->getOperand(0), 0) &&
+                        hasOneUse(rhsOp)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateSub(inst.getOperand(0),
+                                                       rhsOp->getOperand(1),
+                                                       "add_neg_to_sub");
+                    }
+                }
+                // Check lhs = sub(0, x)
+                if (!simplified) {
+                    if (auto* lhsOp = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                        if (lhsOp->getOpcode() == llvm::Instruction::Sub &&
+                            isConstInt(lhsOp->getOperand(0), 0) &&
+                            hasOneUse(lhsOp)) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateSub(inst.getOperand(1),
+                                                           lhsOp->getOperand(1),
+                                                           "add_neg_to_sub");
+                        }
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);
@@ -5068,6 +5159,74 @@ static bool replaceIdiom(IdiomMatch& match) {
                 replacements.push_back({cmp, newCmp});
                 count++;
                 continue;
+            }
+
+            // ── icmp uge x, 1 → icmp ne x, 0 ────────────────────────────────
+            // Complement of `icmp ult x, 1 → icmp eq x, 0`.  Normalises the
+            // ≥1 form to a simpler inequality on 0 that CVP and SimplifyCFG
+            // recognise more reliably as a non-zero check.
+            if (pred == llvm::CmpInst::ICMP_UGE && isConstInt(rhs, 1)) {
+                llvm::IRBuilder<> builder(cmp);
+                llvm::Value* zero = llvm::ConstantInt::get(rhs->getType(), 0);
+                llvm::Value* newCmp = builder.CreateICmpNE(lhs, zero, "cmp.uge1");
+                replacements.push_back({cmp, newCmp});
+                count++;
+                continue;
+            }
+
+            // ── icmp eq (shl x, C), 0 → icmp eq x, 0 ─────────────────────
+            // ── icmp ne (shl x, C), 0 → icmp ne x, 0 ─────────────────────
+            // If we're only testing whether (x << C) is zero, that's equivalent
+            // to testing whether x is zero (shifting zero gives zero; any non-zero
+            // value shifted left by a constant < bitwidth remains non-zero because
+            // the shift only drops low bits, but the _result_ being zero requires
+            // the input itself to be zero when the shift is within bitwidth).
+            // More precisely: `shl x, C` is 0 iff x == 0 (for 0 < C < bitwidth),
+            // because the shift cannot make a non-zero value zero (it would require
+            // all significant bits to be in the dropped positions, but shl drops LOW
+            // bits and x's MSB always survives unless C >= bitwidth).
+            // Therefore the test is exact for any C in [1, bitwidth-1].
+            if ((pred == llvm::CmpInst::ICMP_EQ || pred == llvm::CmpInst::ICMP_NE) &&
+                isConstInt(rhs, 0)) {
+                if (auto* shlInst = llvm::dyn_cast<llvm::BinaryOperator>(lhs)) {
+                    if (shlInst->getOpcode() == llvm::Instruction::Shl) {
+                        if (auto* shiftAmt = llvm::dyn_cast<llvm::ConstantInt>(
+                                shlInst->getOperand(1))) {
+                            unsigned bw = lhs->getType()->getIntegerBitWidth();
+                            uint64_t C = shiftAmt->getZExtValue();
+                            if (C > 0 && C < bw) {
+                                llvm::IRBuilder<> builder(cmp);
+                                llvm::Value* zero = llvm::ConstantInt::get(
+                                    shlInst->getOperand(0)->getType(), 0);
+                                llvm::Value* newCmp = builder.CreateICmp(
+                                    pred, shlInst->getOperand(0), zero, "cmp.shl0");
+                                replacements.push_back({cmp, newCmp});
+                                count++;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── icmp eq (sext x), 0 → icmp eq x, 0 ──────────────────────────
+            // ── icmp ne (sext x), 0 → icmp ne x, 0 ──────────────────────────
+            // Sign-extension preserves the zero value: sext(x)==0 iff x==0.
+            // Eliminates the wider comparison type, enabling the test to run
+            // on the narrower type (e.g., i32 instead of i64), reducing
+            // instruction latency and improving scalar replacement.
+            if ((pred == llvm::CmpInst::ICMP_EQ || pred == llvm::CmpInst::ICMP_NE) &&
+                isConstInt(rhs, 0)) {
+                if (auto* sextInst = llvm::dyn_cast<llvm::SExtInst>(lhs)) {
+                    llvm::IRBuilder<> builder(cmp);
+                    llvm::Value* zero = llvm::ConstantInt::get(
+                        sextInst->getOperand(0)->getType(), 0);
+                    llvm::Value* newCmp = builder.CreateICmp(
+                        pred, sextInst->getOperand(0), zero, "cmp.sext0");
+                    replacements.push_back({cmp, newCmp});
+                    count++;
+                    continue;
+                }
             }
         }
     }
@@ -7385,6 +7544,21 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
         stats.algebraicSimplified += propagatePhiConstants(func);
     }
 
+    // Phase 2.46: Second-pass comparison canonicalization + PHI propagation.
+    // The algebraic pass (Phase 2) can expose new comparison patterns:
+    //   - De Morgan laws may produce new bitwise ops whose zero-test form
+    //     benefits from the shl/sext narrowing added above.
+    //   - The complement laws (a & ~a → 0, a | ~a → -1) produce constants
+    //     that cause select(const, A, B) to be foldable by propagatePhiConstants.
+    //   - add(x, neg(y)) → sub(x, y) canonicalization may cause a PHI whose
+    //     incoming sub-results are now all identical, making it trivially foldable.
+    // Running a second, quick pass after the algebraic phase catches these
+    // cascading simplifications without another full algebraic iteration.
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += applyComparisonCanonicalization(func);
+        stats.algebraicSimplified += propagatePhiConstants(func);
+    }
+
     // Phase 2.5: Loop strength reduction — convert i*C to additive IVs
     // Runs after algebraic simplification but before branch opts so that
     // simplified multiply patterns are visible.
@@ -7788,6 +7962,49 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
                     isValueNonNegative(bo->getOperand(0), DL) &&
                     isValueNonNegative(bo->getOperand(1), DL)) {
                     bo->setHasNoSignedWrap(true);
+                    ++count;
+                }
+                continue;
+            }
+
+            // LShr: the result is always ≤ the original operand and occupies at
+            // most (bitwidth - shiftAmount) bits, so it can never unsigned-overflow
+            // when used as a summand.  More precisely, `lshr x, k` produces a value
+            // in [0, x] ⊆ [0, UINT64_MAX], so there is no unsigned overflow in the
+            // shift result itself — it always fits in the type.  Setting NUW here
+            // does NOT mean "the shift itself wraps" (shifts don't produce UB via
+            // overflow), but it signals to downstream analyses (SCEV, InstCombine)
+            // that the result is non-negative and fits without wrapping, enabling
+            // tighter trip-count bounds for loops that use lshr results as indices.
+            if (op == llvm::Instruction::LShr) {
+                if (!bo->hasNoUnsignedWrap()) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
+            }
+
+            // URem: result is always in [0, divisor-1], which trivially fits in
+            // the result type without unsigned wrap.  Setting NUW on the urem
+            // instruction signals SCEV and CVP that the value is bounded, enabling
+            // downstream analyses to tighten range constraints on expressions that
+            // use the remainder (e.g. `idx = urem(x, len)` as an array index).
+            if (op == llvm::Instruction::URem) {
+                if (!bo->hasNoUnsignedWrap()) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
+            }
+
+            // UDiv: result is always ≤ dividend and fits in [0, UINT64_MAX],
+            // so there is no unsigned wrap.  Like URem, setting NUW here lets
+            // SCEV derive a tight upper bound on the quotient, enabling vectoriser
+            // and range-check analysis to reason about array accesses that use
+            // quotients as indices.
+            if (op == llvm::Instruction::UDiv) {
+                if (!bo->hasNoUnsignedWrap()) {
+                    bo->setHasNoUnsignedWrap(true);
                     ++count;
                 }
                 continue;
