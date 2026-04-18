@@ -13,6 +13,7 @@
 #include "ast.h"
 #include "cfctre.h"
 #include "diagnostic.h"
+#include <functional>
 #include <iostream>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/StringMap.h>
@@ -967,6 +968,14 @@ class CodeGenerator {
     /// metadata construction pattern used by 50+ builtin and statement loops.
     void attachLoopMetadata(llvm::BranchInst* backEdgeBr);
 
+    /// Like attachLoopMetadata but also adds vectorize.enable=1 and
+    /// interleave.count=interleaveCount when optimizationLevel >= O2.
+    /// interleaveCount=0 means omit the interleave hint (only vectorize.enable).
+    /// This collapses the ~25 duplicated 12-line loop-metadata blocks in
+    /// codegen_builtins.cpp and codegen_expr.cpp into single-line calls.
+    void attachLoopMetadataVec(llvm::BranchInst* backEdgeBr,
+                               unsigned interleaveCount = 4);
+
     // ── IR emit helpers — eliminate the 3-4 line TBAA/malloc patterns ────────
     // Each helper performs a single logical operation (load-len, store-elem,
     // allocate array, etc.) and attaches all required metadata in one call.
@@ -1002,6 +1011,44 @@ class CodeGenerator {
     /// "val = generateExpression(); val = toDefaultType(val); ptr = intToPtr(val)"
     /// 3-liner is reduced to a single call.
     llvm::Value* emitToArrayPtr(llvm::Value* val, const llvm::Twine& name = "arrptr");
+
+    /// Information returned by emitCountingLoop.
+    struct CountingLoopInfo {
+        llvm::PHINode*    idx;    ///< The induction-variable PHI node inside loopBB.
+        llvm::BasicBlock* doneBB; ///< The exit block (insert point after the call returns).
+    };
+
+    /// Emit a standard index-counting loop:
+    ///   for (idx = start; idx < limit; ++idx) { bodyFn(idx, bodyBB); }
+    ///
+    /// Creates three basic blocks: prefix.loop, prefix.body, prefix.done.
+    /// Jumps from the current insert point into prefix.loop, sets up a PHI
+    /// for the induction variable, checks idx < limit (unsigned), and calls
+    /// bodyFn(idxPHI, bodyBB) to generate the loop body.  The caller is
+    /// responsible for incrementing the index and branching back — or, more
+    /// commonly, calling emitCountingLoopTail() to do so.
+    ///
+    /// Usage:
+    ///   auto [idx, doneBB] = emitCountingLoop("upper", strLen,
+    ///       zero, 4, [&](llvm::Value* i, llvm::BasicBlock* bodyBB) {
+    ///           // generate body using i
+    ///       });
+    ///   builder->SetInsertPoint(doneBB);
+    ///
+    /// Parameters:
+    ///   prefix        — used as the BasicBlock name prefix and PHI name prefix.
+    ///   limit         — the exclusive upper bound (loop runs while idx < limit).
+    ///   start         — initial value of idx (usually zero).
+    ///   interleaveCount — passed to attachLoopMetadataVec; 0 = plain mustprogress.
+    ///   bodyFn        — called with (idxPHI, bodyBB); should generate the body
+    ///                   AND close the iteration (increment + branch back to loopBB).
+    ///                   The function is called with the insert point in bodyBB.
+    CountingLoopInfo emitCountingLoop(
+        llvm::StringRef prefix,
+        llvm::Value* limit,
+        llvm::Value* start,
+        unsigned interleaveCount,
+        const std::function<void(llvm::PHINode* /*idx*/, llvm::BasicBlock* /*loopBB*/)>& bodyFn);
 
     /// RAII guard that calls beginScope() on construction and endScope()
     /// on destruction, ensuring scope stacks are always balanced even

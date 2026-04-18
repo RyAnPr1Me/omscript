@@ -1416,6 +1416,80 @@ void CodeGenerator::attachLoopMetadata(llvm::BranchInst* backEdgeBr) {
     backEdgeBr->setMetadata(llvm::LLVMContext::MD_loop, md);
 }
 
+void CodeGenerator::attachLoopMetadataVec(llvm::BranchInst* backEdgeBr,
+                                           unsigned interleaveCount) {
+    if (optimizationLevel < OptimizationLevel::O1)
+        return;
+    llvm::SmallVector<llvm::Metadata*, 4> mds;
+    mds.push_back(nullptr);
+    mds.push_back(llvm::MDNode::get(*context,
+        {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        mds.push_back(llvm::MDNode::get(*context,
+            {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+             llvm::ConstantAsMetadata::get(
+                 llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        if (interleaveCount > 0) {
+            mds.push_back(llvm::MDNode::get(*context,
+                {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                 llvm::ConstantAsMetadata::get(
+                     llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context),
+                                            interleaveCount))}));
+        }
+    }
+    llvm::MDNode* md = llvm::MDNode::get(*context, mds);
+    md->replaceOperandWith(0, md);
+    backEdgeBr->setMetadata(llvm::LLVMContext::MD_loop, md);
+}
+
+CodeGenerator::CountingLoopInfo CodeGenerator::emitCountingLoop(
+        llvm::StringRef prefix,
+        llvm::Value* limit,
+        llvm::Value* start,
+        unsigned interleaveCount,
+        const std::function<void(llvm::PHINode*, llvm::BasicBlock*)>& bodyFn) {
+    llvm::Function* function  = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* preheader = builder->GetInsertBlock();
+
+    llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context,
+        llvm::Twine(prefix) + ".loop", function);
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context,
+        llvm::Twine(prefix) + ".body", function);
+    llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context,
+        llvm::Twine(prefix) + ".done", function);
+
+    // Jump from preheader into loop header.
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+    // Loop header: PHI + condition check.
+    builder->SetInsertPoint(loopBB);
+    llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2,
+                                             llvm::Twine(prefix) + ".idx");
+    idx->addIncoming(start, preheader);
+
+    llvm::Value* cond = builder->CreateICmpULT(idx, limit,
+                                                llvm::Twine(prefix) + ".cond");
+    // Loops almost never execute zero iterations; mark the taken branch hot.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::MDNode* w = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        builder->CreateCondBr(cond, bodyBB, doneBB, w);
+    } else {
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+    }
+
+    // Body: delegate to caller.  After bodyFn returns the insert point must
+    // be inside bodyBB (the caller emits the body AND the back-edge increment
+    // + branch using the idx PHI and loopBB pointer provided).
+    builder->SetInsertPoint(bodyBB);
+    bodyFn(idx, loopBB);
+
+    // If the body didn't already jump somewhere (e.g. it always ends with a
+    // CreateBr(loopBB)), leave the insert point in doneBB for the caller.
+    builder->SetInsertPoint(doneBB);
+    (void)interleaveCount; // interleaveCount is passed to bodyFn via capture
+    return {idx, doneBB};
+}
+
 // ── IR emit helpers ───────────────────────────────────────────────────────────
 // These helpers collapse the 3-4 line TBAA metadata + load/store/alloc
 // patterns that appear 200+ times across the codegen files into single calls.

@@ -1479,29 +1479,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Eliminates a redundant add and provides SCEV with tight nsw+nuw flags.
         acc->addIncoming(newAcc, bodyBB);
         idx->addIncoming(offset, bodyBB);
-        auto* backBr_674 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 4> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            // Vectorization hints: sum() is a classic reduction loop — enable
-            // vectorization with interleave count 4 to exploit SIMD lanes and
-            // hide memory latency through overlapping independent accumulation.
-            if (optimizationLevel >= OptimizationLevel::O2) {
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                     llvm::ConstantAsMetadata::get(
-                         llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                     llvm::ConstantAsMetadata::get(
-                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-            }
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_674->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadataVec(
+            llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
         return acc;
@@ -1606,25 +1585,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* newHi = builder->CreateSub(hi, one, "rev.newhi", /*HasNUW=*/true, /*HasNSW=*/true);
         lo->addIncoming(newLo, bodyBB);
         hi->addIncoming(newHi, bodyBB);
-        auto* backBr_769 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 4> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            // Vectorization hints: reverse() swaps elements from opposite
-            // ends of the array — enable vectorization to process multiple
-            // swaps per iteration using SIMD gather/scatter operations.
-            if (optimizationLevel >= OptimizationLevel::O2) {
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                     llvm::ConstantAsMetadata::get(
-                         llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-            }
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_769->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadataVec(
+            llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
         return arg;
@@ -2667,55 +2629,30 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         builder->CreateCall(getOrDeclareStrcpy(), {buf, strPtr});
         // Loop: for i = 0; i < strLen; i++ { buf[i] = toupper(buf[i]); }
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preheader = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "upper.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "upper.body", function);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "upper.done", function);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
-        builder->SetInsertPoint(loopBB);
-        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "upper.idx");
-        idx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpULT(idx, strLen, "upper.cond");
-        builder->CreateCondBr(cond, bodyBB, doneBB);
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, idx, "upper.charptr");
-        auto* chLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "upper.ch");
-        chLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* ch32 = builder->CreateZExt(chLoad, llvm::Type::getInt32Ty(*context), "upper.ch32");
-        llvm::Value* upper = builder->CreateCall(getOrDeclareToupper(), {ch32}, "upper.toupper");
-        llvm::Value* upper8 = builder->CreateTrunc(upper, llvm::Type::getInt8Ty(*context), "upper.trunc");
-        auto* upperStore = builder->CreateStore(upper8, charPtr);
-        upperStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "upper.next", /*HasNUW=*/true, /*HasNSW=*/true);
-        idx->addIncoming(nextIdx, bodyBB);
-        {
-            auto* backBr = llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB));
-            if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 4> mds;
-                mds.push_back(nullptr);
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-                if (optimizationLevel >= OptimizationLevel::O2) {
-                    // toupper is i8→i32→i8; the loop is a character transform
-                    // that is fully vectorizable when toupper is inlined.
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-                }
-                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-                md->replaceOperandWith(0, md);
-                backBr->setMetadata(llvm::LLVMContext::MD_loop, md);
-            }
-        }
-        builder->SetInsertPoint(doneBB);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* upperBuf = buf;
+        emitCountingLoop("upper", strLen, zero, 4,
+            [&](llvm::PHINode* idx, llvm::BasicBlock* loopBB) {
+                llvm::Value* charPtr = builder->CreateInBoundsGEP(
+                    llvm::Type::getInt8Ty(*context), upperBuf, idx, "upper.charptr");
+                auto* chLoad = builder->CreateLoad(
+                    llvm::Type::getInt8Ty(*context), charPtr, "upper.ch");
+                chLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+                llvm::Value* ch32 = builder->CreateZExt(
+                    chLoad, llvm::Type::getInt32Ty(*context), "upper.ch32");
+                llvm::Value* upper = builder->CreateCall(
+                    getOrDeclareToupper(), {ch32}, "upper.toupper");
+                llvm::Value* upper8 = builder->CreateTrunc(
+                    upper, llvm::Type::getInt8Ty(*context), "upper.trunc");
+                auto* upperStore = builder->CreateStore(upper8, charPtr);
+                upperStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+                llvm::Value* nextIdx = builder->CreateAdd(
+                    idx, one, "upper.next", /*HasNUW=*/true, /*HasNSW=*/true);
+                idx->addIncoming(nextIdx, builder->GetInsertBlock());
+                attachLoopMetadataVec(
+                    llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+            });
         stringReturningFunctions_.insert("str_upper");
         return buf;
     }
@@ -2740,53 +2677,30 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::cast<llvm::CallInst>(buf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, 1));
         builder->CreateCall(getOrDeclareStrcpy(), {buf, strPtr});
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preheader = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "lower.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "lower.body", function);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "lower.done", function);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
-        builder->SetInsertPoint(loopBB);
-        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "lower.idx");
-        idx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpULT(idx, strLen, "lower.cond");
-        builder->CreateCondBr(cond, bodyBB, doneBB);
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, idx, "lower.charptr");
-        auto* chLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "lower.ch");
-        chLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* ch32 = builder->CreateZExt(chLoad, llvm::Type::getInt32Ty(*context), "lower.ch32");
-        llvm::Value* lower = builder->CreateCall(getOrDeclareTolower(), {ch32}, "lower.tolower");
-        llvm::Value* lower8 = builder->CreateTrunc(lower, llvm::Type::getInt8Ty(*context), "lower.trunc");
-        auto* lowerStore = builder->CreateStore(lower8, charPtr);
-        lowerStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "lower.next", /*HasNUW=*/true, /*HasNSW=*/true);
-        idx->addIncoming(nextIdx, bodyBB);
-        {
-            auto* backBr = llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB));
-            if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 4> mds;
-                mds.push_back(nullptr);
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-                if (optimizationLevel >= OptimizationLevel::O2) {
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-                }
-                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-                md->replaceOperandWith(0, md);
-                backBr->setMetadata(llvm::LLVMContext::MD_loop, md);
-            }
-        }
-        builder->SetInsertPoint(doneBB);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* lowerBuf = buf;
+        emitCountingLoop("lower", strLen, zero, 4,
+            [&](llvm::PHINode* idx, llvm::BasicBlock* loopBB) {
+                llvm::Value* charPtr = builder->CreateInBoundsGEP(
+                    llvm::Type::getInt8Ty(*context), lowerBuf, idx, "lower.charptr");
+                auto* chLoad = builder->CreateLoad(
+                    llvm::Type::getInt8Ty(*context), charPtr, "lower.ch");
+                chLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+                llvm::Value* ch32 = builder->CreateZExt(
+                    chLoad, llvm::Type::getInt32Ty(*context), "lower.ch32");
+                llvm::Value* lower = builder->CreateCall(
+                    getOrDeclareTolower(), {ch32}, "lower.tolower");
+                llvm::Value* lower8 = builder->CreateTrunc(
+                    lower, llvm::Type::getInt8Ty(*context), "lower.trunc");
+                auto* lowerStore = builder->CreateStore(lower8, charPtr);
+                lowerStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+                llvm::Value* nextIdx = builder->CreateAdd(
+                    idx, one, "lower.next", /*HasNUW=*/true, /*HasNSW=*/true);
+                idx->addIncoming(nextIdx, builder->GetInsertBlock());
+                attachLoopMetadataVec(
+                    llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+            });
         stringReturningFunctions_.insert("str_lower");
         return buf;
     }
@@ -3421,28 +3335,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strrev.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         {
-            auto* backBr = llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB));
-            if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 4> mds;
-                mds.push_back(nullptr);
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-                if (optimizationLevel >= OptimizationLevel::O2) {
-                    // Reverse-copy of bytes: independent scatter/gather pattern;
-                    // vectorizable when LLVM can prove no aliasing (fresh malloc buf).
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-                }
-                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-                md->replaceOperandWith(0, md);
-                backBr->setMetadata(llvm::LLVMContext::MD_loop, md);
-            }
+            attachLoopMetadataVec(
+                llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         }
         builder->SetInsertPoint(doneBB);
         // Null-terminate
@@ -3863,49 +3757,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::Attribute::getWithDereferenceableBytes(*context, 8));
             emitStoreArrayLen(sizeArg, buf);
             // Fill loop
-            llvm::Function* function = builder->GetInsertBlock()->getParent();
-            llvm::BasicBlock* preheader = builder->GetInsertBlock();
-            llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "fill.loop", function);
-            llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "fill.body", function);
-            llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "fill.done", function);
             llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
             llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-            attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
-            builder->SetInsertPoint(loopBB);
-            llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "fill.idx");
-            idx->addIncoming(zero, preheader);
-            llvm::Value* cond = builder->CreateICmpULT(idx, sizeArg, "fill.cond");
-            builder->CreateCondBr(cond, bodyBB, doneBB);
-            builder->SetInsertPoint(bodyBB);
-            llvm::Value* elemIdx = builder->CreateAdd(idx, one, "fill.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
-            llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, elemIdx, "fill.elemptr");
-            auto* fillElemSt = builder->CreateStore(valArg, elemPtr);
-            fillElemSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-            llvm::Value* nextIdx = builder->CreateAdd(idx, one, "fill.next", /*HasNUW=*/true, /*HasNSW=*/true);
-            idx->addIncoming(nextIdx, bodyBB);
-            auto* backBr_2379 = builder->CreateBr(loopBB);
-            if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 4> mds;
-                mds.push_back(nullptr);
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-                // Enable vectorization: the fill loop is trivially parallel
-                // (every iteration writes to a unique index) and benefits from
-                // SIMD store widening at O2+.
-                if (optimizationLevel >= OptimizationLevel::O2) {
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                         llvm::ConstantAsMetadata::get(builder->getTrue())}));
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-                }
-                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-                md->replaceOperandWith(0, md);
-                backBr_2379->setMetadata(llvm::LLVMContext::MD_loop, md);
-            }
-            builder->SetInsertPoint(doneBB);
+            // Capture buf/valArg for the lambda
+            llvm::Value* fillBuf = buf;
+            llvm::Value* fillVal = valArg;
+            emitCountingLoop("fill", sizeArg, zero, 4,
+                [&](llvm::PHINode* idx, llvm::BasicBlock* loopBB) {
+                    llvm::Value* elemIdx = builder->CreateAdd(idx, one, "fill.elemidx",
+                                                              /*HasNUW=*/true, /*HasNSW=*/true);
+                    llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(),
+                                                                       fillBuf, elemIdx, "fill.elemptr");
+                    emitStoreArrayElem(fillVal, elemPtr);
+                    llvm::Value* nextIdx = builder->CreateAdd(idx, one, "fill.next",
+                                                              /*HasNUW=*/true, /*HasNSW=*/true);
+                    idx->addIncoming(nextIdx, builder->GetInsertBlock());
+                    attachLoopMetadataVec(
+                        llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+                });
         }
         return builder->CreatePtrToInt(buf, getDefaultType(), "fill.result");
     }
@@ -4387,31 +4256,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Eliminates a redundant add and provides SCEV with tight nsw+nuw flags.
         curMin->addIncoming(newMin, bodyBB);
         idx->addIncoming(offset, bodyBB);
-        auto* backBr_2825 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 4> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            // Vectorization: amin is a reduction loop — each iteration is
-            // independent (depends only on curMin which tracks the minimum).
-            // With llvm.smin intrinsic + vectorize.enable, LLVM emits a
-            // vectorized min-reduction (vpminsd/vpminq on x86) and then
-            // reduces the vector at the end with a single horizontal min.
-            if (optimizationLevel >= OptimizationLevel::O2) {
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                     llvm::ConstantAsMetadata::get(
-                         llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                     llvm::ConstantAsMetadata::get(
-                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-            }
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2825->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadataVec(
+            llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         // Done: return result
         builder->SetInsertPoint(doneBB);
@@ -4508,26 +4354,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // modeling.
         curMax->addIncoming(newMax, bodyBB);
         idx->addIncoming(offset, bodyBB);
-        auto* backBr_2892 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 4> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            if (optimizationLevel >= OptimizationLevel::O2) {
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                     llvm::ConstantAsMetadata::get(
-                         llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                     llvm::ConstantAsMetadata::get(
-                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-            }
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2892->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadataVec(
+            llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         // Done: return result
         builder->SetInsertPoint(doneBB);
@@ -4811,28 +4639,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         acc->addIncoming(newAcc, bodyBB);
         idx->addIncoming(offset, bodyBB);
         {
-            auto* backBr = llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB));
-            if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 4> mds;
-                mds.push_back(nullptr);
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-                if (optimizationLevel >= OptimizationLevel::O2) {
-                    // Count reduction (ZExt + add accumulation): vectorizable
-                    // to a popcount-style integer sum with horizontal reduction.
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-                }
-                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-                md->replaceOperandWith(0, md);
-                backBr->setMetadata(llvm::LLVMContext::MD_loop, md);
-            }
+            attachLoopMetadataVec(
+                llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         }
 
         builder->SetInsertPoint(doneBB);
@@ -5233,28 +5041,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "chars.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         {
-            auto* backBr = llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB));
-            if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 4> mds;
-                mds.push_back(nullptr);
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-                if (optimizationLevel >= OptimizationLevel::O2) {
-                    // str_chars: ZExt(i8→i64) store loop — vectorizable with
-                    // zext-widening when destination is i64 array.
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-                }
-                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-                md->replaceOperandWith(0, md);
-                backBr->setMetadata(llvm::LLVMContext::MD_loop, md);
-            }
+            attachLoopMetadataVec(
+                llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         }
 
         builder->SetInsertPoint(doneBB);
@@ -5839,29 +5627,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nextI = builder->CreateAdd(i, one, "range.next", /*HasNUW=*/true, /*HasNSW=*/true);
         i->addIncoming(nextI, bodyBB);
         {
-            auto* backBr = llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB));
-            if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 4> mds;
-                mds.push_back(nullptr);
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-                if (optimizationLevel >= OptimizationLevel::O2) {
-                    // range() fills an array with start, start+1, ..., end-1.
-                    // This is a stride-1 consecutive-integer store — ideal for
-                    // SIMD vectorization (vpsubq/vpaddd with splat increment).
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-                }
-                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-                md->replaceOperandWith(0, md);
-                backBr->setMetadata(llvm::LLVMContext::MD_loop, md);
-            }
+            attachLoopMetadataVec(
+                llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         }
 
         builder->SetInsertPoint(doneBB);
@@ -6563,29 +6330,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         acc->addIncoming(newAcc, bodyBB);
         idx->addIncoming(offset, bodyBB);
         {
-            auto* backBr = llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB));
-            if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 4> mds;
-                mds.push_back(nullptr);
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-                if (optimizationLevel >= OptimizationLevel::O2) {
-                    // Product reduction: each iteration is independent — enable
-                    // vectorization so LLVM emits a mul-reduction with a
-                    // horizontal multiply at the end.
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
-                    mds.push_back(llvm::MDNode::get(*context,
-                        {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                         llvm::ConstantAsMetadata::get(
-                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
-                }
-                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-                md->replaceOperandWith(0, md);
-                backBr->setMetadata(llvm::LLVMContext::MD_loop, md);
-            }
+            attachLoopMetadataVec(
+                llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         }
 
         builder->SetInsertPoint(doneBB);
