@@ -30,7 +30,7 @@ set -eu
 #      by a single slow/fast benchmark the way sum is)
 #    - Env vars: BENCH_RUNS (default 11), BENCH_WARMUP (default 3),
 #               BENCH_CC (default depends on BENCH_MODE)
-#               BENCH_MODE (default: omsc-fast; set to fair for symmetric flags)
+#               BENCH_MODE (default: fair; set to omsc-fast for OM-advantage flags)
 #
 #  Categories:
 #    - Integer arithmetic & math builtins
@@ -1275,8 +1275,8 @@ fn bench_pipelinestencil(@prefetch n:int) -> int {
 // ── 49. times_loop ───────────────────────────────────────────
 // Accumulation using `times N { acc = acc*3 + __times_i; }`.
 // Demonstrates the OM `times` loop keyword vs a plain for-in.
-// We use the pipeline iterator index via __pipeline_i inside times;
-// since times doesn't expose an iterator, use a manual counter.
+// `times` does not expose an iterator variable, so a manual counter `i`
+// is maintained alongside it.
 @hot @flatten @static @nounwind @unroll
 fn bench_timesloop(@prefetch n:int) -> int {
     var acc:int = 0;
@@ -1310,7 +1310,7 @@ fn bench_strprocess(@prefetch n:int) -> int {
 
 // ── 51. swap_sort ────────────────────────────────────────────
 // Selection sort of a small array (m=32) using native `swap a, b`.
-// Array is reinitialised each iteration from deterministic values.
+// Array is reinitialized each iteration from deterministic values.
 // Tests OM's swap statement vs explicit temp-variable swap in C.
 @hot @static @nounwind
 fn bench_swapsort(@prefetch n:int) -> int {
