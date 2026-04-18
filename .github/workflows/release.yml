@@ -209,7 +209,7 @@ jobs:
           # diagnostics, edge cases, and runtime execution that the example
           # compilations above may miss.
           echo "=== PGO Phase E: Integration test suite ==="
-          bash run_tests.sh > /dev/null 2>&1 || true
+          OMSC_SKIP_BUILD=1 bash run_tests.sh > /dev/null 2>&1 || true
 
           # ── Phase F: Compile benchmark programs at -O3 multiple times to
           # build up hot counters for the most expensive optimization paths
@@ -473,7 +473,7 @@ jobs:
           done
 
           # Run integration tests
-          bash run_tests.sh > /dev/null 2>&1 || true
+          OMSC_SKIP_BUILD=1 bash run_tests.sh > /dev/null 2>&1 || true
 
           # Repeat benchmarks for hot path coverage
           for f in examples/bench_suite.om examples/benchmark_loops_math.om; do
@@ -554,7 +554,7 @@ jobs:
       - name: Run integration tests (Linux)
         if: runner.os == 'Linux'
         timeout-minutes: 15
-        run: bash run_tests.sh
+        run: OMSC_SKIP_BUILD=1 bash run_tests.sh
 
       - name: Package binary (Unix)
         if: runner.os != 'Windows'

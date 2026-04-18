@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
@@ -1413,6 +1414,136 @@ void CodeGenerator::attachLoopMetadata(llvm::BranchInst* backEdgeBr) {
     llvm::MDNode* md = llvm::MDNode::get(*context, mds);
     md->replaceOperandWith(0, md);
     backEdgeBr->setMetadata(llvm::LLVMContext::MD_loop, md);
+}
+
+void CodeGenerator::attachLoopMetadataVec(llvm::BranchInst* backEdgeBr,
+                                           unsigned interleaveCount) {
+    if (optimizationLevel < OptimizationLevel::O1)
+        return;
+    llvm::SmallVector<llvm::Metadata*, 4> mds;
+    mds.push_back(nullptr);
+    mds.push_back(llvm::MDNode::get(*context,
+        {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        mds.push_back(llvm::MDNode::get(*context,
+            {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+             llvm::ConstantAsMetadata::get(
+                 llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        if (interleaveCount > 0) {
+            mds.push_back(llvm::MDNode::get(*context,
+                {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                 llvm::ConstantAsMetadata::get(
+                     llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context),
+                                            interleaveCount))}));
+        }
+    }
+    llvm::MDNode* md = llvm::MDNode::get(*context, mds);
+    md->replaceOperandWith(0, md);
+    backEdgeBr->setMetadata(llvm::LLVMContext::MD_loop, md);
+}
+
+CodeGenerator::CountingLoopInfo CodeGenerator::emitCountingLoop(
+        llvm::StringRef prefix,
+        llvm::Value* limit,
+        llvm::Value* start,
+        unsigned interleaveCount,
+        const std::function<void(llvm::PHINode*, llvm::BasicBlock*)>& bodyFn) {
+    llvm::Function* function  = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* preheader = builder->GetInsertBlock();
+
+    llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context,
+        llvm::Twine(prefix) + ".loop", function);
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context,
+        llvm::Twine(prefix) + ".body", function);
+    llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context,
+        llvm::Twine(prefix) + ".done", function);
+
+    // Jump from preheader into loop header.
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+    // Loop header: PHI + condition check.
+    builder->SetInsertPoint(loopBB);
+    llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2,
+                                             llvm::Twine(prefix) + ".idx");
+    idx->addIncoming(start, preheader);
+
+    llvm::Value* cond = builder->CreateICmpULT(idx, limit,
+                                                llvm::Twine(prefix) + ".cond");
+    // Loops almost never execute zero iterations; mark the taken branch hot.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::MDNode* w = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        builder->CreateCondBr(cond, bodyBB, doneBB, w);
+    } else {
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+    }
+
+    // Body: delegate to caller.  After bodyFn returns the insert point must
+    // be inside bodyBB (the caller emits the body AND the back-edge increment
+    // + branch using the idx PHI and loopBB pointer provided).
+    builder->SetInsertPoint(bodyBB);
+    bodyFn(idx, loopBB);
+
+    // If the body didn't already jump somewhere (e.g. it always ends with a
+    // CreateBr(loopBB)), leave the insert point in doneBB for the caller.
+    builder->SetInsertPoint(doneBB);
+    (void)interleaveCount; // interleaveCount is passed to bodyFn via capture
+    return {idx, doneBB};
+}
+
+// ── IR emit helpers ───────────────────────────────────────────────────────────
+// These helpers collapse the 3-4 line TBAA metadata + load/store/alloc
+// patterns that appear 200+ times across the codegen files into single calls.
+
+llvm::Value* CodeGenerator::emitLoadArrayLen(llvm::Value* arrPtr,
+                                              const llvm::Twine& name) {
+    auto* load = builder->CreateAlignedLoad(getDefaultType(), arrPtr,
+                                             llvm::MaybeAlign(8), name);
+    load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+    load->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+    nonNegValues_.insert(load);
+    return load;
+}
+
+llvm::LoadInst* CodeGenerator::emitLoadArrayElem(llvm::Value* elemPtr,
+                                               const llvm::Twine& name) {
+    auto* load = builder->CreateAlignedLoad(getDefaultType(), elemPtr,
+                                             llvm::MaybeAlign(8), name);
+    load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    return load;
+}
+
+void CodeGenerator::emitStoreArrayLen(llvm::Value* len, llvm::Value* arrPtr) {
+    auto* st = builder->CreateStore(len, arrPtr);
+    st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+}
+
+llvm::StoreInst* CodeGenerator::emitStoreArrayElem(llvm::Value* val, llvm::Value* elemPtr) {
+    auto* st = builder->CreateAlignedStore(val, elemPtr, llvm::MaybeAlign(8));
+    st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    return st;
+}
+
+llvm::Value* CodeGenerator::emitAllocArray(llvm::Value* len,
+                                            const llvm::Twine& name) {
+    llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+    llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+    llvm::Value* slots = builder->CreateAdd(len, one,   name + ".slots",
+                                             /*NUW=*/true, /*NSW=*/true);
+    llvm::Value* bytes = builder->CreateMul(slots, eight, name + ".bytes",
+                                             /*NUW=*/true, /*NSW=*/true);
+    llvm::Value* buf   = builder->CreateCall(getOrDeclareMalloc(), {bytes},
+                                              name + ".buf");
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+        llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+    emitStoreArrayLen(len, buf);
+    return buf;
+}
+
+llvm::Value* CodeGenerator::emitToArrayPtr(llvm::Value* val,
+                                            const llvm::Twine& name) {
+    val = toDefaultType(val);
+    return builder->CreateIntToPtr(val, llvm::PointerType::getUnqual(*context),
+                                   name);
 }
 
 llvm::Function* CodeGenerator::getOrDeclareStrlen() {
@@ -4625,6 +4756,66 @@ void CodeGenerator::generate(Program* program) {
         optimizeOptMaxFunctions();
     }
 
+    // Mark all constant global variables with unnamed_addr at O2+.
+    // unnamed_addr tells LLVM that the address of the global is not
+    // significant — only its value matters — allowing:
+    //   1. ConstantMerge to merge identical globals regardless of address.
+    //   2. The linker to merge constants from different TUs (when LTO is used).
+    //   3. Backend to place the constant in a read-only section closer to
+    //      the code that uses it, improving I-cache locality.
+    //
+    // We apply this to all constant (isConstant=true) globals except those
+    // already marked unnamed_addr or local_unnamed_addr, and except
+    // externally-visible globals (which may be referenced by address from
+    // other TUs, though OmScript programs are single-TU).
+    //
+    // This is a cheap pre-optimizer annotation pass — O(globals) time.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        for (auto& gv : module->globals()) {
+            if (!gv.isConstant()) continue;
+            if (gv.getUnnamedAddr() != llvm::GlobalValue::UnnamedAddr::None) continue;
+            // Don't annotate externally-visible globals with addresses that
+            // external code might rely on (e.g. exported string constants).
+            if (gv.hasExternalLinkage()) continue;
+            // Skip globals that are address-taken in non-load instructions
+            // (i.e. their pointer escapes beyond simple loads).  A simple
+            // heuristic: if all uses are loads or GEP-then-loads, unnamed_addr
+            // is safe.  We check this conservatively: only mark if no use is
+            // a store, call (with the global as a pointer arg), or phi.
+            bool addrTakenAsValue = false;
+            for (auto* user : gv.users()) {
+                if (llvm::isa<llvm::LoadInst>(user)) continue;
+                if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(user)) {
+                    // GEP is fine if all GEP users are loads.
+                    bool gepAllLoads = true;
+                    for (auto* gepUser : gep->users()) {
+                        if (!llvm::isa<llvm::LoadInst>(gepUser)) {
+                            gepAllLoads = false;
+                            break;
+                        }
+                    }
+                    if (gepAllLoads) continue;
+                }
+                if (auto* constExpr = llvm::dyn_cast<llvm::ConstantExpr>(user)) {
+                    // GEP constant expr: also fine if only loaded from.
+                    bool ceAllLoads = true;
+                    for (auto* ceUser : constExpr->users()) {
+                        if (!llvm::isa<llvm::LoadInst>(ceUser)) {
+                            ceAllLoads = false;
+                            break;
+                        }
+                    }
+                    if (ceAllLoads) continue;
+                }
+                addrTakenAsValue = true;
+                break;
+            }
+            if (!addrTakenAsValue) {
+                gv.setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+            }
+        }
+    }
+
     if (verbose_) {
         std::cout << "  [opt] Running LLVM optimization pipeline..." << '\n';
     }
@@ -5714,11 +5905,31 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
             auto rv = evalExpr(bin->right.get());
             if (!lv || !rv) return std::nullopt;
             const int64_t a = *lv, b = *rv;
-            if (bin->op == "+") return a + b;
-            if (bin->op == "-") return a - b;
-            if (bin->op == "*") return a * b;
-            if (bin->op == "/" && b != 0) return a / b;
-            if (bin->op == "%" && b != 0) return a % b;
+            // Wrapping arithmetic helper: cast to uint64_t to avoid signed
+            // overflow UB, then cast the bit-pattern back to int64_t.
+            auto wrap = [](int64_t x, int64_t y, char op) -> int64_t {
+                const auto ux = static_cast<uint64_t>(x);
+                const auto uy = static_cast<uint64_t>(y);
+                switch (op) {
+                case '+': return static_cast<int64_t>(ux + uy);
+                case '-': return static_cast<int64_t>(ux - uy);
+                case '*': return static_cast<int64_t>(ux * uy);
+                default:  return 0;
+                }
+            };
+            // Use wrapping arithmetic for +, -, * to match i64 runtime semantics.
+            if (bin->op == "+") return wrap(a, b, '+');
+            if (bin->op == "-") return wrap(a, b, '-');
+            if (bin->op == "*") return wrap(a, b, '*');
+            // Guard against /0 and the INT64_MIN/-1 trap.
+            if (bin->op == "/" && b != 0) {
+                if (a == std::numeric_limits<int64_t>::min() && b == -1) return std::nullopt;
+                return a / b;
+            }
+            if (bin->op == "%" && b != 0) {
+                if (a == std::numeric_limits<int64_t>::min() && b == -1) return int64_t(0);
+                return a % b;
+            }
             if (bin->op == "&") return a & b;
             if (bin->op == "|") return a | b;
             if (bin->op == "^") return a ^ b;
@@ -5732,9 +5943,16 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
             if (bin->op == ">=") return int64_t(a >= b ? 1 : 0);
             if (bin->op == "**") {
                 if (b < 0) return (a == 1) ? int64_t(1) : (a == -1 ? (b & 1 ? int64_t(-1) : int64_t(1)) : int64_t(0));
-                int64_t result = 1;
-                for (int64_t i = 0; i < b; ++i) result *= a;
-                return result;
+                // Binary exponentiation O(log n) — avoids pathological compile times
+                // for expressions like 2**1000000 appearing in const-eval contexts.
+                uint64_t result = 1, base = static_cast<uint64_t>(a);
+                int64_t exp = b;
+                while (exp > 0) {
+                    if (exp & 1) result *= base;
+                    base *= base;
+                    exp >>= 1;
+                }
+                return static_cast<int64_t>(result);
             }
             return std::nullopt;
         }
@@ -6797,11 +7015,22 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
             rv->kind != ConstValue::Kind::Integer)
             return std::nullopt;
         int64_t a = lv->intVal, b = rv->intVal;
-        if (bin->op == "+")  return ConstValue::fromInt(a + b);
-        if (bin->op == "-")  return ConstValue::fromInt(a - b);
-        if (bin->op == "*")  return ConstValue::fromInt(a * b);
-        if (bin->op == "/" && b != 0) return ConstValue::fromInt(a / b);
-        if (bin->op == "%" && b != 0) return ConstValue::fromInt(a % b);
+        // Use wrapping arithmetic for +, -, * so compile-time evaluation
+        // matches the i64 two's-complement wrapping semantics at runtime.
+        if (bin->op == "+")  return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) + static_cast<uint64_t>(b)));
+        if (bin->op == "-")  return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) - static_cast<uint64_t>(b)));
+        if (bin->op == "*")  return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) * static_cast<uint64_t>(b)));
+        // Division/modulo: guard against division-by-zero AND the i64 overflow
+        // case INT64_MIN / -1 (which traps on x86 IDIV).  Return nullopt for
+        // both so the compiler falls back to runtime evaluation.
+        if (bin->op == "/" && b != 0) {
+            if (a == std::numeric_limits<int64_t>::min() && b == -1) return std::nullopt;
+            return ConstValue::fromInt(a / b);
+        }
+        if (bin->op == "%" && b != 0) {
+            if (a == std::numeric_limits<int64_t>::min() && b == -1) return ConstValue::fromInt(0);
+            return ConstValue::fromInt(a % b);
+        }
         if (bin->op == "&")  return ConstValue::fromInt(a & b);
         if (bin->op == "|")  return ConstValue::fromInt(a | b);
         if (bin->op == "^")  return ConstValue::fromInt(a ^ b);

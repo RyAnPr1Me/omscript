@@ -1537,6 +1537,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // x | -1 (all ones) → -1
         if (rv == -1 && expr->op == "|")
             return llvm::ConstantInt::get(getDefaultType(), -1);
+        // x ^ -1 (all ones) → ~x  (bitwise NOT)
+        if (rv == -1 && expr->op == "^")
+            return builder->CreateNot(left, "nottmp");
+        // x - (-1) → x + 1  (canonical increment form; picks up NSW when non-neg)
+        if (rv == -1 && expr->op == "-") {
+            llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+            bool lnn = nonNegValues_.count(left);
+            auto* r = lnn ? builder->CreateNSWAdd(left, one, "inc")
+                          : builder->CreateAdd(left, one, "inc");
+            if (lnn) nonNegValues_.insert(r);
+            return r;
+        }
     }
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
         const int64_t lv = ci->getSExtValue();
@@ -1567,6 +1579,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // -1 | x → -1
         if (lv == -1 && expr->op == "|")
             return llvm::ConstantInt::get(getDefaultType(), -1);
+        // -1 ^ x → ~x  (bitwise NOT)
+        if (lv == -1 && expr->op == "^")
+            return builder->CreateNot(right, "nottmp");
     }
 
     // Same-value identity optimizations — when both operands are the exact
@@ -3678,6 +3693,19 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "<") {
+        // Fast path: when the left operand is known non-negative and the right
+        // operand is a negative constant, the comparison is always false.
+        // Symmetrically, a negative constant is always less than a non-negative.
+        if (nonNegValues_.count(left)) {
+            if (auto* rci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                if (rci->isNegative())
+                    return llvm::ConstantInt::get(getDefaultType(), 0); // x >= 0 < neg → false
+            }
+        }
+        if (auto* lci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+            if (lci->isNegative() && nonNegValues_.count(right))
+                return llvm::ConstantInt::get(getDefaultType(), 1); // neg < x >= 0 → true
+        }
         // When both operands are provably non-negative, use unsigned comparison.
         // Unsigned comparisons have simpler codegen (no sign-extension) and
         // enable better vectorization — LLVM's loop vectorizer can widen
@@ -3705,6 +3733,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "<=") {
+        // Fast path: non-neg value <= negative constant → always false.
+        // Negative constant <= non-neg value → always true.
+        if (nonNegValues_.count(left)) {
+            if (auto* rci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                if (rci->isNegative())
+                    return llvm::ConstantInt::get(getDefaultType(), 0); // x >= 0 <= neg → false
+            }
+        }
+        if (auto* lci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+            if (lci->isNegative() && nonNegValues_.count(right))
+                return llvm::ConstantInt::get(getDefaultType(), 1); // neg <= x >= 0 → true
+        }
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
         if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
@@ -3725,6 +3765,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         nonNegValues_.insert(result);
         return result;
     } else if (expr->op == ">") {
+        // Fast path: non-neg value > negative constant → always true.
+        // Negative constant > non-neg value → always false.
+        if (nonNegValues_.count(left)) {
+            if (auto* rci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                if (rci->isNegative())
+                    return llvm::ConstantInt::get(getDefaultType(), 1); // x >= 0 > neg → true
+            }
+        }
+        if (auto* lci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+            if (lci->isNegative() && nonNegValues_.count(right))
+                return llvm::ConstantInt::get(getDefaultType(), 0); // neg > x >= 0 → false
+        }
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
         if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
@@ -3745,6 +3797,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         nonNegValues_.insert(result);
         return result;
     } else if (expr->op == ">=") {
+        // Fast path: non-neg value >= negative constant → always true.
+        // Negative constant >= non-neg value → always false.
+        if (nonNegValues_.count(left)) {
+            if (auto* rci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                if (rci->isNegative())
+                    return llvm::ConstantInt::get(getDefaultType(), 1); // x >= 0 >= neg → true
+            }
+        }
+        if (auto* lci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+            if (lci->isNegative() && nonNegValues_.count(right))
+                return llvm::ConstantInt::get(getDefaultType(), 0); // neg >= x >= 0 → false
+        }
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
         if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
@@ -4209,6 +4273,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         // Integer exponentiation via binary exponentiation (exponentiation by
         // squaring).  This is O(log n) in the exponent vs. the naive O(n) loop.
+        // baseNonNeg is needed by the loop-body multiplications for NSW flags.
+        const bool baseNonNeg = nonNegValues_.count(left) > 0;
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* negExpBB = llvm::BasicBlock::Create(*context, "pow.negexp", function);
         llvm::BasicBlock* posExpBB = llvm::BasicBlock::Create(*context, "pow.posexp", function);
@@ -4259,13 +4325,19 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->SetInsertPoint(oddBB);
         llvm::Value* expBit = builder->CreateAnd(exp, one, "pow.bit");
         llvm::Value* isOdd = builder->CreateICmpNE(expBit, zero, "pow.isodd");
-        llvm::Value* newResult = builder->CreateMul(result, base, "pow.mul");
+        // Use NSWMul when the base is known non-negative: result stays in
+        // [0, INT64_MAX], so multiplication cannot produce signed overflow.
+        llvm::Value* newResult = baseNonNeg
+            ? builder->CreateNSWMul(result, base, "pow.mul")
+            : builder->CreateMul(result, base, "pow.mul");
         llvm::Value* resultSel = builder->CreateSelect(isOdd, newResult, result, "pow.rsel");
         builder->CreateBr(squareBB);
 
         // Square the base and halve the exponent
         builder->SetInsertPoint(squareBB);
-        llvm::Value* newBase = builder->CreateMul(base, base, "pow.sq");
+        llvm::Value* newBase = baseNonNeg
+            ? builder->CreateNSWMul(base, base, "pow.sq")
+            : builder->CreateMul(base, base, "pow.sq");
         llvm::Value* newExp = builder->CreateAShr(exp, one, "pow.halve");
         result->addIncoming(resultSel, squareBB);
         base->addIncoming(newBase, squareBB);
@@ -4554,8 +4626,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* updated =
             (op == "++") ? builder->CreateAdd(current, delta, "inc", /*HasNUW=*/false, /*HasNSW=*/true)
                          : builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
-        auto* elemStore = builder->CreateAlignedStore(updated, elemPtr, llvm::MaybeAlign(8));
-        elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        emitStoreArrayElem(updated, elemPtr);
         return isPostfix ? current : updated;
     }
 
@@ -5045,8 +5116,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                 llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
                                                           llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
                 // AlignedStore(8) + tbaaArrayElem_: element slots are 8-byte aligned.
-                auto* st = builder->CreateAlignedStore(elemVal, elemPtr, llvm::MaybeAlign(8));
-                st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+                emitStoreArrayElem(elemVal, elemPtr);
             }
         }
 
@@ -5081,9 +5151,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                 arrVal = toDefaultType(arrVal);
                 arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
             }
-            auto* spreadLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "spread.len");
-            spreadLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-            spreadLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                        llvm::Value* spreadLenLoad = emitLoadArrayLen(arrPtr, "spread.len");
             llvm::Value* arrLen = spreadLenLoad;
             totalLen = builder->CreateAdd(totalLen, arrLen, "spread.addlen");
             evalElems.push_back({arrVal, true, arrLen});
@@ -5141,8 +5209,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
-            auto* spreadSt = builder->CreateAlignedStore(elem, dstPtr, llvm::MaybeAlign(8));
-            spreadSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            emitStoreArrayElem(elem, dstPtr);
             // Increment write index (reuse dstIdx = curIdx+1, nsw+nuw)
             builder->CreateStore(dstIdx, writeIdx);
             // Increment loop counter (reuse srcIdx = i+1, nsw+nuw)
@@ -5375,8 +5442,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
         llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
-    auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
-    elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        auto* elemLoad = emitLoadArrayElem(elemPtr, "idx.elem");
     // OmScript arrays are always initialized: array literals set every element,
     // array_fill zero-initializes via calloc.  The !noundef metadata tells LLVM
     // the loaded value is never poison/undef, enabling more aggressive
@@ -5484,8 +5550,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
-        auto* elemStore = builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
-        elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        auto* elemStore = emitStoreArrayElem(newVal, elemPtr);
         // When inside a parallel loop, attach the access group metadata so
         // LLVM's vectorizer and Polly know this store is iteration-independent.
         if (currentLoopAccessGroup_)

@@ -548,9 +548,20 @@ void CodeGenerator::runOptimizationPasses() {
     // this early — before inlining and other IPO passes — gives alias analysis
     // and LICM accurate function-level memory effects, which propagates to
     // more precise results for every downstream function-level optimisation.
+    //
+    // Also run PostOrderFunctionAttrsPass (bottom-up direction) alongside the
+    // top-down ReversePostOrder pass.  Together they form a bidirectional
+    // attribute inference: PostOrder propagates readnone/readonly up through
+    // callees first (a callee with no memory accesses makes its caller
+    // eligible for readonly if the caller only calls it and other readonly
+    // functions), while ReversePostOrder propagates constraints top-down.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerEarlyEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
+            // Bottom-up: propagate readnone/readonly from leaves to callers.
+            MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+                llvm::PostOrderFunctionAttrsPass()));
+            // Top-down: propagate constraints from callers to callees.
             MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
         });
     }
@@ -683,8 +694,12 @@ void CodeGenerator::runOptimizationPasses() {
             // Phase 3: Hoist cheap instructions above remaining branches.
             SuperblockFPM.addPass(llvm::SpeculativeExecutionPass());
             // Phase 4: Hyperblock formation — convert branches to selects.
+            // FlattenCFGPass is intentionally omitted: it collapses all if-else
+            // chains into sequential code without TTI guidance, which increases
+            // register pressure and can lengthen critical dependency chains on
+            // out-of-order CPUs.  SimplifyCFG with hyperblockCFGOpts already
+            // performs targeted if-conversion where profitable.
             SuperblockFPM.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
-            SuperblockFPM.addPass(llvm::FlattenCFGPass());
             // Phase 5: Cleanup — combine and eliminate dead code.
             SuperblockFPM.addPass(llvm::InstCombinePass());
             SuperblockFPM.addPass(llvm::ADCEPass());
@@ -727,9 +742,18 @@ void CodeGenerator::runOptimizationPasses() {
     // guarantees many of these attributes, but Attributor can infer
     // additional ones (e.g. readnone for pure functions, nocapture for
     // non-escaping parameters) that the manual codegen annotations miss.
+    //
+    // PostOrderFunctionAttrsPass (bottom-up SCC traversal) runs in the same
+    // CGSCC callback to infer readnone/readonly/nosync/nounwind from the IR
+    // of each SCC.  Unlike Attributor (which uses a fixpoint lattice),
+    // PostOrderFunctionAttrsPass is fast and directly marks functions based
+    // on whether they contain load/store/call instructions.  Running it
+    // alongside Attributor provides a complementary signal that helps the
+    // inliner's cost model even when Attributor can't converge.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerCGSCCOptimizerLateEPCallback(
             [](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel /*Level*/) {
+            CGPM.addPass(llvm::PostOrderFunctionAttrsPass());
             CGPM.addPass(llvm::AttributorCGSCCPass());
         });
     }
@@ -1148,6 +1172,24 @@ void CodeGenerator::runOptimizationPasses() {
                 IPO2FPM.addPass(llvm::ADCEPass());
                 MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(IPO2FPM)));
                 MPM.addPass(llvm::DeadArgumentEliminationPass());
+
+                // After the second IPSCCP + constant folding round, re-run
+                // function attribute inference in both directions.  IPSCCP
+                // may have specialized functions (making callees smaller /
+                // simpler), enabling new readnone/readonly proofs that
+                // weren't visible earlier.  Running PostOrder (bottom-up)
+                // first propagates leaf-function purity upward, then
+                // ReversePostOrder (top-down) propagates constraints from
+                // the call sites that IPSCCP simplified.
+                MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+                    llvm::PostOrderFunctionAttrsPass()));
+                MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+                // InferFunctionAttrsPass re-annotates library functions whose
+                // attributes may have been stripped by earlier passes (e.g.
+                // MergedLoadStoreMotion can strip memory attributes on
+                // library calls).  Re-running it is cheap and ensures we
+                // don't lose malloc/free/memcpy noalias annotations.
+                MPM.addPass(llvm::InferFunctionAttrsPass());
             }
 
             // EliminateAvailableExternallyPass removes bodies of externally-
@@ -1249,6 +1291,15 @@ void CodeGenerator::runOptimizationPasses() {
                 // different type instantiations.
                 MPM.addPass(llvm::MergeFunctionsPass());
             }
+
+            // At O2+, run AlwaysInlinerPass at the very end of the main
+            // pipeline.  PartialInlinerPass can create new alwaysinline
+            // wrapper stubs for hot-path copies, and function specialization
+            // (see below) produces clones that are sometimes small enough to
+            // receive alwaysinline.  Inlining these at the end of the main
+            // pipeline means the final code-generation stage sees fully
+            // inlined call graphs without residual call overhead.
+            MPM.addPass(llvm::AlwaysInlinerPass());
         });
     }
 
@@ -1293,6 +1344,16 @@ void CodeGenerator::runOptimizationPasses() {
         }
         MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
     }
+    // At O1+, prepend AlwaysInlinerPass before the module pipeline so that
+    // @optmax functions marked alwaysinline (set in optimizeOptMaxFunctions)
+    // are force-inlined at their call sites before the main pipeline's inliner
+    // runs.  The main inliner skips alwaysinline functions when their body is
+    // larger than the cost threshold; AlwaysInlinerPass does unconditional
+    // inlining regardless of size, matching the user's explicit intent.
+    if (optimizationLevel >= OptimizationLevel::O1 && !optMaxFunctions.empty()) {
+        MPM.addPass(llvm::AlwaysInlinerPass());
+    }
+
     // At O2+, append GlobalOptPass after the standard pipeline to constant-fold
     // and internalize global variables, propagate initial values, and eliminate
     // globals that are only stored but never read.  This cleans up patterns the
@@ -1323,16 +1384,6 @@ void CodeGenerator::runOptimizationPasses() {
             superopt::convertSRemToURem(func);
             superopt::convertSDivToUDiv(func);
         }
-        // Post-srem→urem: expand urem-by-constant to multiplicative-inverse
-        // (mul/shift/sub) sequences, exposing the inner loop to vectorization.
-        unsigned moduloExpanded = 0;
-        for (auto& func : *module) {
-            moduloExpanded += superopt::constantModuloStrengthReduce(func);
-        }
-        if (verbose_ && moduloExpanded > 0) {
-            std::cout << "    Pre-pipeline modulo strength reduction: "
-                      << moduloExpanded << " urem instructions expanded" << '\n';
-        }
     }
     // Pre-pipeline HGOE loop annotation: set target-optimal unroll count,
     // interleave count, and vector width on loops BEFORE the LLVM pipeline
@@ -1356,20 +1407,61 @@ void CodeGenerator::runOptimizationPasses() {
     }
 
     // Strip `cold` and `minsize` attributes from user-defined functions.
-    // LLVM's HotColdSplitting pass (O3) can misidentify user functions as
-    // cold when there's no profile data, leading to minsize codegen that
-    // produces much slower code (register spills, no unrolling, etc.).
-    // The `cold` attribute was only intended for runtime helpers like exit()
-    // and abort() — not for user computation functions.  Stripping these
-    // attributes after the pipeline restores full-speed codegen while keeping
-    // the splitting pass's benefits for genuinely cold outlined blocks.
-    // NOTE: Functions explicitly annotated with @cold by the user are preserved.
-    if (optimizationLevel >= OptimizationLevel::O3) {
+    // LLVM's HotColdSplitting pass runs at O2+ and can misidentify user
+    // functions as cold when there is no PGO profile data, leading to
+    // `minsize` codegen that causes register spills, disables unrolling, and
+    // in the worst case produces incorrect code when combined with `nofree`
+    // inference (e.g., LLVM incorrectly infers that a function with a local
+    // heap-allocated array is `nofree` after inlining, then misoptimizes the
+    // free() call at the end of the function, resulting in runtime crashes).
+    // The `cold` and `minsize` attributes are only appropriate for OS runtime
+    // helpers like exit() and abort() — not for user computation functions.
+    // Stripping these attributes after the pipeline restores full-speed
+    // codegen.  Functions explicitly annotated with @cold by the user are
+    // preserved so that intentional cold annotations remain respected.
+    if (optimizationLevel >= OptimizationLevel::O2) {
         for (auto& F : *module) {
             if (F.isDeclaration()) continue;
             if (userAnnotatedColdFunctions_.count(F.getName())) continue; // preserve @cold
             F.removeFnAttr(llvm::Attribute::Cold);
             F.removeFnAttr(llvm::Attribute::MinSize);
+        }
+    }
+
+    // Strip `nofree` from any non-declaration function that directly or
+    // indirectly calls `free` (or any `allockind("free")` function).
+    // LLVM's attribute inference can incorrectly add `nofree` to functions
+    // after inlining: when a hot function with a local heap-allocated array
+    // is inlined into a cold caller, the combined function's memory-freeing
+    // `invalidate` (= free()) call may be missed by `InferFunctionAttrs`,
+    // leaving a stale `nofree` attribute that causes misoptimizations such
+    // as load-hoisting across free() and use-after-free at runtime.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        for (auto& F : *module) {
+            if (F.isDeclaration()) continue;
+            if (!F.hasFnAttribute(llvm::Attribute::NoFree)) continue;
+            bool callsFree = false;
+            for (auto& BB : F) {
+                for (auto& I : BB) {
+                    auto* call = llvm::dyn_cast<llvm::CallBase>(&I);
+                    if (!call) continue;
+                    auto* callee = call->getCalledFunction();
+                    if (!callee) continue;
+                    // Check if callee is a free-like function (allockind "free").
+                    if (callee->hasFnAttribute("allockind")) {
+                        auto val = callee->getFnAttribute("allockind").getValueAsString();
+                        if (val.contains("free")) { callsFree = true; break; }
+                    }
+                    // Also match by name: free / __libc_free / cfree etc.
+                    llvm::StringRef name = callee->getName();
+                    if (name == "free" || name == "cfree" || name.starts_with("__libc_free")) {
+                        callsFree = true; break;
+                    }
+                }
+                if (callsFree) break;
+            }
+            if (callsFree)
+                F.removeFnAttr(llvm::Attribute::NoFree);
         }
     }
 
@@ -1608,6 +1700,23 @@ void CodeGenerator::runOptimizationPasses() {
             superConfig.synthesis.maxInstructions = 5;
             superConfig.synthesis.costThreshold = 0.9;
         }
+        // Unified cost model: when a hardware profile is available, wire the
+        // hardware-accurate latency data into the superoptimizer so that all
+        // cost-driven decisions (synthesis candidate selection, idiom cost
+        // comparison, replacement gating) use the same source as the HGOE.
+        if (hgoe::shouldActivate(hgoe::HGOEConfig{marchCpu_, mtuneCpu_})) {
+            std::string resolvedCpu = marchCpu_.empty() ? mtuneCpu_ : marchCpu_;
+            if (resolvedCpu == "native")
+                resolvedCpu = llvm::sys::getHostCPUName().str();
+            auto profileOpt = hgoe::lookupMicroarch(resolvedCpu);
+            if (profileOpt) {
+                // Capture profile by value — no lifetime dependency on any graph.
+                hgoe::MicroarchProfile capturedProfile = *profileOpt;
+                superConfig.costFn = [capturedProfile](const llvm::Instruction* i) {
+                    return hgoe::instrCostFromProfile(i, capturedProfile);
+                };
+            }
+        }
         auto superStats = superopt::superoptimizeModule(*module, superConfig);
         const unsigned totalSuperOpts = superStats.idiomsReplaced + superStats.synthReplacements +
                                  superStats.algebraicSimplified + superStats.branchesSimplified +
@@ -1640,6 +1749,25 @@ void CodeGenerator::runOptimizationPasses() {
                 postSuperFPM.run(func);
             }
             postSuperFPM.doFinalization();
+
+            // At O3, run a second superoptimizer pass after the cleanup.
+            // The first pass's simplifications (idiom replacement, algebraic
+            // folds, select merging) expose new patterns — e.g. a De Morgan
+            // transform followed by absorption, or a strength-reduced multiply
+            // that becomes a power-of-2 shift the second pass can recognize.
+            // The second pass is lighter (no synthesis to avoid compile-time
+            // blowup) but picks up the incremental wins from the first pass.
+            if (optimizationLevel >= OptimizationLevel::O3) {
+                superopt::SuperoptimizerConfig superConfig2 = superConfig;
+                superConfig2.enableSynthesis = false;  // skip expensive synthesis on pass 2
+                auto stats2 = superopt::superoptimizeModule(*module, superConfig2);
+                const unsigned total2 = stats2.idiomsReplaced + stats2.algebraicSimplified +
+                                        stats2.branchesSimplified + stats2.deadCodeEliminated;
+                if (verbose_ && total2 > 0) {
+                    std::cout << "    Superoptimizer pass 2: "
+                              << total2 << " additional optimizations" << '\n';
+                }
+            }
         }
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSuperopt_) {
         std::cout << "    Superoptimizer disabled (-fno-superopt)" << '\n';
@@ -1884,6 +2012,37 @@ void CodeGenerator::runOptimizationPasses() {
             }
         }
         cleanupFPM.doFinalization();
+
+        // Post-final-cleanup modulo strength reduction: expand urem-by-constant
+        // to multiplicative-inverse (mul/shift/sub) sequences.
+        //
+        // IMPORTANT: This MUST run AFTER all LLVM optimization passes (including
+        // loop unrolling and InstCombine).  Running it pre-pipeline caused a
+        // correctness bug: LLVM's loop unroller would create multiple copies of
+        // the loop body, and InstCombine would then incorrectly "simplify" the
+        // i128 magic-multiply sequence for unrolled copies.  Specifically,
+        // LLVM replaced `mulhu(x, magic)` (the HIGH 64 bits of x*magic, computed
+        // via i128 arithmetic) with `x * magic mod 2^64` (the LOW 64 bits),
+        // producing wrong remainders for every other unrolled iteration.
+        //
+        // Running here ensures the magic-multiply is introduced AFTER all
+        // InstCombine passes have finished, so no further instcombine pass
+        // can misidentify and corrupt the i128 mulhu pattern.
+        //
+        // The srem→urem conversion still runs pre-pipeline (see above) so the
+        // loop vectorizer's cost model sees urem-by-constant (cheaper than
+        // srem-by-constant in LLVM's cost model) and vectorizes accordingly.
+        if (enableSuperopt_) {
+            unsigned moduloExpanded = 0;
+            for (auto& func : *module) {
+                if (!func.isDeclaration())
+                    moduloExpanded += superopt::constantModuloStrengthReduce(func);
+            }
+            if (verbose_ && moduloExpanded > 0) {
+                std::cout << "    Post-pipeline modulo strength reduction: "
+                          << moduloExpanded << " urem instructions expanded" << '\n';
+            }
+        }
     }
 }
 
@@ -2009,10 +2168,14 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // values) and hyperblocks (via aggressive if-conversion with a high
     // speculation threshold) to create larger basic blocks that improve
     // instruction scheduling and reduce branch overhead.
+    // FlattenCFGPass is intentionally omitted: it collapses all if-else
+    // chains into sequential code without TTI guidance, which increases
+    // register pressure and can lengthen critical dependency chains on
+    // out-of-order CPUs.  SimplifyCFG with hyperblockCFGOpts already
+    // performs targeted if-conversion where profitable.
     fpm.add(llvm::createGVNPass());
     fpm.add(llvm::createSpeculativeExecutionPass());
     fpm.add(llvm::createCFGSimplificationPass(hyperblockCFGOpts()));
-    fpm.add(llvm::createFlattenCFGPass());
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
 
@@ -2032,7 +2195,6 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // (sqrt, etc.) with their inline fast-path + slow-path branch, avoiding
     // the overhead of a full function call when the fast path applies.
     fpm.add(llvm::createPartiallyInlineLibCallsPass());
-    fpm.add(llvm::createFlattenCFGPass());
 
     // Phase 3.5: Aggressive cleanup passes for maximal optimization.
     fpm.add(llvm::createDeadCodeEliminationPass());

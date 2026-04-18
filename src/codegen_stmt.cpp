@@ -739,100 +739,40 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(thenWeight, elseWeight);
         br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
     } else if (optimizationLevel >= OptimizationLevel::O2) {
-        // Infer branch probability from modulo-equality patterns.
-        // Pattern: if (x % k == 0) { … } where k is a positive constant.
-        // The true branch fires ~1/k of the time; emitting accurate weights
-        // (1 : k-1) lets the CPU's branch predictor and LLVM's block layout
-        // optimise for the common (false) case — critical for inner-loop
-        // branches like collatz and cond_arithmetic.
-        //
-        // The emitted condition chain is:
-        //   %srem  = srem/urem %x, k
-        //   %icmp  = icmp eq/ne %srem, 0
-        //   %zext  = zext i1 %icmp to i64   (OM bool-to-int)
-        //   %tobool = icmp ne i64 %zext, 0  (toBool)
-        //   condBr %tobool, then, merge
-        // Trace back through the %tobool → %zext → %icmp → %srem chain.
-        [&]() {
-            // condBool = icmp ne (%zext, 0)
-            auto* outerNE = llvm::dyn_cast<llvm::ICmpInst>(condBool);
-            if (!outerNE || outerNE->getPredicate() != llvm::ICmpInst::ICMP_NE) return;
-            auto* outerRHS = llvm::dyn_cast<llvm::ConstantInt>(outerNE->getOperand(1));
-            if (!outerRHS || !outerRHS->isZero()) return;
-            // Peel zext
-            auto* zext = llvm::dyn_cast<llvm::ZExtInst>(outerNE->getOperand(0));
-            if (!zext) return;
-            // Inner icmp eq/ne
-            auto* innerCmp = llvm::dyn_cast<llvm::ICmpInst>(zext->getOperand(0));
-            if (!innerCmp) return;
-            const bool innerIsEq = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_EQ);
-            const bool innerIsNe = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_NE);
-            if (!innerIsEq && !innerIsNe) return;
-            // One operand of the inner cmp must be 0
-            llvm::Value* remVal = nullptr;
-            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(1))) {
-                if (c->isZero()) remVal = innerCmp->getOperand(0);
-            }
-            if (!remVal) {
-                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(0))) {
-                    if (c->isZero()) remVal = innerCmp->getOperand(1);
-                }
-            }
-            if (!remVal) return;
-            // remVal must be srem/urem with a positive constant divisor
-            auto* remOp = llvm::dyn_cast<llvm::BinaryOperator>(remVal);
-            if (!remOp) return;
-            if (remOp->getOpcode() != llvm::Instruction::SRem &&
-                remOp->getOpcode() != llvm::Instruction::URem) return;
-            auto* divisorCI = llvm::dyn_cast<llvm::ConstantInt>(remOp->getOperand(1));
-            if (!divisorCI) return;
-            const int64_t k = divisorCI->getSExtValue();
-            if (k <= 1 || k > 1024) return;  // sanity: reasonable divisors only
-            // innerIsEq && outerNE(zext): branch fires 1/k of the time
-            // innerIsNe && outerNE(zext): branch fires (k-1)/k of the time
-            const auto kU = static_cast<uint32_t>(k);
-            const uint32_t thenW = innerIsEq ? 1u : (kU - 1u);
-            const uint32_t elseW = innerIsEq ? (kU - 1u) : 1u;
-            llvm::MDNode* brWeights =
-                llvm::MDBuilder(*context).createBranchWeights(thenW, elseW);
-            br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
-        }();
-
         // Infer branch probability from zero/null equality patterns.
         // Pattern: if (x == 0) / if (x != 0) — zero is a common error sentinel.
         // Comparing against 0 is often a null/error check: the non-zero path
         // (normal execution) is taken ~99% of the time.
-        if (!br->getMetadata(llvm::LLVMContext::MD_prof)) {
-            [&]() {
-                // Peel outermost icmp ne %x, 0 (from toBool)
-                auto* outerNE = llvm::dyn_cast<llvm::ICmpInst>(condBool);
-                if (!outerNE || outerNE->getPredicate() != llvm::ICmpInst::ICMP_NE) return;
-                auto* outerRHS = llvm::dyn_cast<llvm::ConstantInt>(outerNE->getOperand(1));
-                if (!outerRHS || !outerRHS->isZero()) return;
-                // Peel optional zext
-                llvm::Value* inner = outerNE->getOperand(0);
-                if (auto* z = llvm::dyn_cast<llvm::ZExtInst>(inner))
-                    inner = z->getOperand(0);
-                // Must be an icmp eq/ne against zero
-                auto* innerCmp = llvm::dyn_cast<llvm::ICmpInst>(inner);
-                if (!innerCmp) return;
-                llvm::ConstantInt* zeroC = nullptr;
-                llvm::Value* tested = nullptr;
-                if ((zeroC = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(1))))
-                    tested = innerCmp->getOperand(0);
-                else if ((zeroC = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(0))))
-                    tested = innerCmp->getOperand(1);
-                if (!zeroC || !zeroC->isZero() || !tested) return;
-                const bool isEqZero = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_EQ);
-                const bool isNeZero = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_NE);
-                if (!isEqZero && !isNeZero) return;
-                // eq 0 → then-branch (zero path) is rare; ne 0 → then-branch is common.
-                const uint32_t thenW = isEqZero ? 1u : 99u;
-                const uint32_t elseW = isEqZero ? 99u : 1u;
-                llvm::MDNode* w = llvm::MDBuilder(*context).createBranchWeights(thenW, elseW);
-                br->setMetadata(llvm::LLVMContext::MD_prof, w);
-            }();
-        }
+        // This heuristic is broadly valid across programs and data distributions.
+        [&]() {
+            // Peel outermost icmp ne %x, 0 (from toBool)
+            auto* outerNE = llvm::dyn_cast<llvm::ICmpInst>(condBool);
+            if (!outerNE || outerNE->getPredicate() != llvm::ICmpInst::ICMP_NE) return;
+            auto* outerRHS = llvm::dyn_cast<llvm::ConstantInt>(outerNE->getOperand(1));
+            if (!outerRHS || !outerRHS->isZero()) return;
+            // Peel optional zext
+            llvm::Value* inner = outerNE->getOperand(0);
+            if (auto* z = llvm::dyn_cast<llvm::ZExtInst>(inner))
+                inner = z->getOperand(0);
+            // Must be an icmp eq/ne against zero
+            auto* innerCmp = llvm::dyn_cast<llvm::ICmpInst>(inner);
+            if (!innerCmp) return;
+            llvm::ConstantInt* zeroC = nullptr;
+            llvm::Value* tested = nullptr;
+            if ((zeroC = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(1))))
+                tested = innerCmp->getOperand(0);
+            else if ((zeroC = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(0))))
+                tested = innerCmp->getOperand(1);
+            if (!zeroC || !zeroC->isZero() || !tested) return;
+            const bool isEqZero = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_EQ);
+            const bool isNeZero = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_NE);
+            if (!isEqZero && !isNeZero) return;
+            // eq 0 → then-branch (zero path) is rare; ne 0 → then-branch is common.
+            const uint32_t thenW = isEqZero ? 1u : 99u;
+            const uint32_t elseW = isEqZero ? 99u : 1u;
+            llvm::MDNode* w = llvm::MDBuilder(*context).createBranchWeights(thenW, elseW);
+            br->setMetadata(llvm::LLVMContext::MD_prof, w);
+        }();
     }
 
     // Save pre-if non-neg state so each branch starts from the same baseline.
@@ -875,8 +815,12 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         }
     }
 
-    // Merge block
+    // Merge block — if it has no predecessors (both then and else terminated
+    // without branching to it), insert an unreachable so the builder has a
+    // valid insert point without generating dead code.
     builder->SetInsertPoint(mergeBB);
+    if (llvm::pred_empty(mergeBB))
+        builder->CreateUnreachable();
 }
 
 void CodeGenerator::generateWhile(WhileStmt* stmt) {
@@ -1323,7 +1267,24 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         stepVal = convertTo(stepVal, iterType);
         if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(stepVal)) {
             stepKnownPositive = stepCI->getSExtValue() > 0;
-            stepKnownNonZero = stepCI->getSExtValue() != 0;
+            stepKnownNonZero  = stepCI->getSExtValue() != 0;
+
+            // Empty-loop elimination for constant wrong-direction step:
+            // a positive step on a range where start > end never iterates,
+            // and a negative step on a range where start < end never iterates.
+            // This avoids emitting the entire loop CFG for these dead ranges.
+            if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+                if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+                    int64_t sv = startCI->getSExtValue();
+                    int64_t ev = endCI->getSExtValue();
+                    int64_t step = stepCI->getSExtValue();
+                    // Ascending step but start > end → condition (i < end) fails immediately.
+                    // Descending step but start < end → condition (i > end) fails immediately.
+                    if ((step > 0 && sv > ev) || (step < 0 && sv < ev)) {
+                        return;
+                    }
+                }
+            }
         }
     } else {
         // Detect compile-time ascending ranges and emit simpler loop code.
@@ -2265,9 +2226,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // TBAA distinguishes the length slot from element loads (slots 1+), enabling
         // LICM to hoist this load out of the loop body.  range communicates
         // lenVal ∈ [0, INT64_MAX) to SCEV for exact trip-count analysis.
-        auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "foreach.len");
-        lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* lenLoad = emitLoadArrayLen(basePtr, "foreach.len");
         lenVal = lenLoad;
     }
 

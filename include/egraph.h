@@ -114,9 +114,19 @@ struct ENode {
         : op(o), name(n), children(std::move(c)) {}
 
     bool operator==(const ENode& other) const {
-        return op == other.op && value == other.value &&
-               fvalue == other.fvalue && name == other.name &&
-               children == other.children;
+        if (op != other.op || value != other.value || name != other.name ||
+            children != other.children)
+            return false;
+        // Use bit-pattern equality for doubles so that two NaN constants with
+        // the same bit pattern compare equal (and two with different payloads
+        // compare unequal).  Plain `fvalue == other.fvalue` fails for NaN
+        // because IEEE 754 mandates NaN != NaN, which would prevent
+        // deduplication of identical NaN e-nodes in the hashcons table.
+        uint64_t fb = 0, ob = 0;
+        static_assert(sizeof(double) == sizeof(uint64_t));
+        __builtin_memcpy(&fb, &fvalue, sizeof(double));
+        __builtin_memcpy(&ob, &other.fvalue, sizeof(double));
+        return fb == ob;
     }
 };
 
@@ -417,6 +427,9 @@ private:
     struct ExtractionResult {
         Cost cost;
         ENode bestNode;
+        unsigned depth = 0; ///< Critical-path depth (0 = leaf). Used as tie-breaker:
+                             ///< when two options have equal cost, prefer the shallower
+                             ///< one to reduce register pressure and expose more ILP.
     };
     std::unordered_map<ClassId, ExtractionResult>
     extractAll(ClassId root, const CostModel& model);

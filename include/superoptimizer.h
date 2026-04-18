@@ -140,6 +140,13 @@ struct SuperoptimizerConfig {
     bool enableAlgebraic = true;         ///< Algebraic identity simplification
     bool enableDeadCodeElim = true;      ///< Remove dead instructions after optimization
     SynthesisConfig synthesis;
+
+    /// Optional hardware-accurate cost model.
+    /// When set, replaces the built-in hardcoded cost table with hardware-profile-
+    /// driven latency data so that synthesis and idiom decisions are based on the
+    /// same source as the Hardware Graph Optimization Engine.
+    /// Thread-safe as long as each thread uses its own SuperoptimizerConfig.
+    std::function<double(const llvm::Instruction*)> costFn;
 };
 
 /// Statistics from a superoptimizer run.

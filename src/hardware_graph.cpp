@@ -556,23 +556,116 @@ double HardwareCostModel::instructionCost(const llvm::Instruction* inst) const {
 }
 
 double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
-    if (pg.nodeCount() == 0) return 0.0;
-
-    // Build adjacency lists (O(N+E)) to avoid O(N×E) inner-loop edge scans.
     const size_t n = pg.nodeCount();
-    std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n); // (dst, lat)
+    if (n == 0) return 0.0;
+
+    // ── 1. Derive port capacities from the hardware graph ───────────────────────
+    // Helper: sum the 'count' field of all nodes of a given resource type.
+    auto portCapacity = [this](ResourceType rt) -> unsigned {
+        unsigned total = 0;
+        for (auto* nd : hw_.findNodes(rt)) total += nd->count;
+        return total ? total : 1u;
+    };
+
+    // Classify each OpClass into a small number of port groups so we can
+    // efficiently track port availability.  Each group maps to one capacity.
+    enum PClass : unsigned {
+        PC_IntArith = 0, // IntArith, Shift, Comparison, Conversion
+        PC_IntMul   = 1, // IntMul (subset of ALU ports on most µarchs)
+        PC_Div      = 2, // IntDiv, FPDiv — shares the divider unit
+        PC_FP       = 3, // FPArith, FPMul, FMA
+        PC_Load     = 4, // Load
+        PC_Store    = 5, // Store
+        PC_Branch   = 6, // Branch
+        PC_Free     = 7, // PHI, Other — no port constraint (rename / free)
+        PC_COUNT    = 8
+    };
+
+    const unsigned cap[PC_COUNT] = {
+        portCapacity(ResourceType::IntegerALU),        // PC_IntArith
+        std::max(1u, portCapacity(ResourceType::IntegerALU) / 2u), // PC_IntMul
+        portCapacity(ResourceType::DividerUnit),       // PC_Div
+        portCapacity(ResourceType::FMAUnit),           // PC_FP
+        portCapacity(ResourceType::LoadUnit),          // PC_Load
+        portCapacity(ResourceType::StoreUnit),         // PC_Store
+        portCapacity(ResourceType::BranchUnit),        // PC_Branch
+        ~0u,                                           // PC_Free (unlimited)
+    };
+
+    const unsigned issueWidth = static_cast<unsigned>(issueWidth_);
+
+    // Map OpClass → PClass.
+    auto toPClass = [](OpClass cls) -> unsigned {
+        switch (cls) {
+        case OpClass::IntArith:
+        case OpClass::Shift:
+        case OpClass::Comparison:
+        case OpClass::Conversion:   return PC_IntArith;
+        case OpClass::IntMul:       return PC_IntMul;
+        case OpClass::IntDiv:       return PC_Div;
+        case OpClass::FPArith:
+        case OpClass::FPMul:
+        case OpClass::FMA:          return PC_FP;
+        case OpClass::FPDiv:        return PC_Div;
+        case OpClass::Load:         return PC_Load;
+        case OpClass::Store:        return PC_Store;
+        case OpClass::Branch:       return PC_Branch;
+        default:                    return PC_Free;
+        }
+    };
+
+    // ── 2. Build adjacency lists (O(N+E)) ───────────────────────────────────────
+    std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n); // (dst, edge_lat)
+    std::vector<std::vector<std::pair<unsigned,unsigned>>> predList(n); // (src, edge_lat)
     std::vector<unsigned> inDeg(n, 0);
 
     for (const auto& e : pg.edges()) {
         if (e.srcId < n && e.dstId < n) {
             succList[e.srcId].emplace_back(e.dstId, e.latency);
-            inDeg[e.dstId]++;
+            predList[e.dstId].emplace_back(e.srcId, e.latency);
+            ++inDeg[e.dstId];
         }
     }
 
-    // Cycle-accurate simulation: assign each node to the earliest cycle where
-    // all dependencies are satisfied and a port is available.
-    std::vector<unsigned> scheduledCycle(n, 0);
+    // ── 3. Per-node execution latency ──────────────────────────────────────────
+    std::vector<unsigned> nodeLat(n, 1);
+    for (unsigned i = 0; i < n; ++i) {
+        const ProgramNode* node = pg.getNode(i);
+        if (node) {
+            unsigned lat = static_cast<unsigned>(
+                std::max(0.0, node->estimatedLatency));
+            nodeLat[i] = lat;
+        }
+    }
+
+    // ── 4. Port/issue occupancy tracking (sparse, per cycle) ──────────────────
+    // Using unordered_map for O(1) average access; realistic programs have
+    // bounded cycle spread so map memory stays small.
+    //
+    // portUsed[cycle][pc] = number of ops of port class pc already issued at cycle.
+    // issueUsed[cycle]    = total ops issued at cycle (≤ issueWidth).
+    //
+    // For unordered_map<K, unsigned>::operator[], the inserted value is
+    // value-initialised to 0 (confirmed by the C++ standard), so incrementing
+    // a freshly inserted entry is well-defined.
+    // For unordered_map<K, std::array<unsigned, N>>::operator[], the array is
+    // also value-initialised (zero-filled) on first insertion.
+    std::unordered_map<unsigned, std::array<unsigned, PC_COUNT>> portUsed;
+    std::unordered_map<unsigned, unsigned> issueUsed;
+    portUsed.reserve(n);
+    issueUsed.reserve(n);
+
+    // ── 5. Forward list scheduling (topological BFS) ──────────────────────────
+    // Process nodes in topological order.  For each node, compute the earliest
+    // cycle where (a) all predecessors have completed, (b) an issue slot is
+    // free, and (c) a port of the required class is free.
+    //
+    // Note: BFS topological order does not guarantee that the critical-path
+    // node is scheduled first when multiple nodes are ready simultaneously.
+    // For a cost-estimation use-case this is an acceptable approximation;
+    // the result may slightly over-count cycles compared to an optimal list
+    // schedule but never under-counts.
+    std::vector<unsigned> completedAt(n, 0);
 
     std::queue<unsigned> ready;
     for (unsigned i = 0; i < n; ++i)
@@ -581,32 +674,59 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     unsigned maxCycle = 0;
 
     while (!ready.empty()) {
-        unsigned u = ready.front();
+        const unsigned u = ready.front();
         ready.pop();
 
-        // Compute earliest start cycle from predecessors.  Because we build
-        // scheduledCycle in topological order, predecessors are already set.
-        unsigned earliest = 0;
-        // Re-scan edges for incoming latency (predecessors are set already).
-        // This is still O(E) total across all iterations in the outer loop.
-        for (const auto& e : pg.edges()) {
-            if (e.dstId == u && e.srcId < n) {
-                unsigned predEnd = scheduledCycle[e.srcId] + e.latency;
-                if (predEnd > earliest) earliest = predEnd;
-            }
+        // Earliest cycle when all data dependencies are satisfied.
+        unsigned readyCycle = 0;
+        for (const auto& [pred, edgeLat] : predList[u]) {
+            // completedAt[pred] already includes the producer's own latency.
+            if (completedAt[pred] > readyCycle)
+                readyCycle = completedAt[pred];
         }
-        scheduledCycle[u] = earliest;
 
-        // Add instruction latency.
+        // Port class for this instruction.
         const ProgramNode* node = pg.getNode(u);
-        if (node) {
-            unsigned endCycle = earliest + static_cast<unsigned>(node->estimatedLatency);
-            if (endCycle > maxCycle) maxCycle = endCycle;
+        const unsigned pc = toPClass(node ? node->opClass : OpClass::Other);
+
+        // Find the earliest cycle ≥ readyCycle where both the issue slot and
+        // the port slot for this op class are available.
+        // We cap the search at readyCycle + 500 to avoid pathological loops
+        // (in practice 1-10 iterations suffice for typical port utilisation).
+        unsigned scheduleCycle = readyCycle;
+        for (unsigned tries = 0; tries < 500; ++tries, ++scheduleCycle) {
+            // Check global issue-width constraint.
+            {
+                auto iit = issueUsed.find(scheduleCycle);
+                if (iit != issueUsed.end() && iit->second >= issueWidth)
+                    continue;
+            }
+            // Check port-capacity constraint.
+            if (pc != PC_Free) {
+                auto pit = portUsed.find(scheduleCycle);
+                if (pit != portUsed.end() && pit->second[pc] >= cap[pc])
+                    continue;
+            }
+            break; // valid cycle found
         }
 
-        // Release successors (latency not needed here; only topology matters).
+        // Commit the scheduling decision.
+        ++issueUsed[scheduleCycle]; // value-initialises to 0 on first access
+        if (pc != PC_Free) {
+            // try_emplace zero-initialises the array on first insertion.
+            auto& row = portUsed.try_emplace(scheduleCycle,
+                std::array<unsigned, PC_COUNT>{}).first->second;
+            ++row[pc];
+        }
+
+        completedAt[u] = scheduleCycle + nodeLat[u];
+        if (completedAt[u] > maxCycle)
+            maxCycle = completedAt[u];
+
+        // Release successors whose in-degree drops to zero.
         for (auto& [v, ignored] : succList[u]) {
-            if (--inDeg[v] == 0) ready.push(v);
+            if (--inDeg[v] == 0)
+                ready.push(v);
         }
     }
 
@@ -1694,6 +1814,11 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     default:
         return 1;
     }
+}
+
+double instrCostFromProfile(const llvm::Instruction* inst,
+                            const MicroarchProfile& profile) {
+    return static_cast<double>(getOpcodeLatency(inst, profile));
 }
 
 MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
@@ -3256,8 +3381,8 @@ static std::vector<FusionPair> detectFusionPairs(
 /// Usage: set OMSC_DUMP_SCHEDULE=1 in the environment, or call directly.
 static void dumpScheduleDAG(
         const std::vector<llvm::Instruction*>& moveable,
-        const std::vector<std::vector<unsigned>>& succ,
-        const std::vector<std::vector<unsigned>>& pred,
+        const std::vector<std::vector<std::pair<unsigned,unsigned>>>& succ,
+        const std::vector<std::vector<std::pair<unsigned,unsigned>>>& pred,
         const std::vector<unsigned>& critPath,
         const std::vector<unsigned>& lat,
         const MicroarchProfile& profile,
@@ -3278,7 +3403,7 @@ static void dumpScheduleDAG(
             os << " pred={";
             for (unsigned j = 0; j < pred[i].size(); ++j) {
                 if (j > 0) os << ",";
-                os << pred[i][j];
+                os << pred[i][j].first << "(lat=" << pred[i][j].second << ")";
             }
             os << "}";
         }
@@ -3286,7 +3411,7 @@ static void dumpScheduleDAG(
             os << " succ={";
             for (unsigned j = 0; j < succ[i].size(); ++j) {
                 if (j > 0) os << ",";
-                os << succ[i][j];
+                os << succ[i][j].first << "(lat=" << succ[i][j].second << ")";
             }
             os << "}";
         }
@@ -3405,19 +3530,53 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     idx.reserve(n);
     for (unsigned i = 0; i < n; ++i) idx[moveable[i]] = i;
 
-    // ── 3. Build dependency DAG (both succ[] and pred[] for O(1) lookup) ──────
-    std::vector<std::vector<unsigned>> succ(n), pred(n);
+    // ── 3. Per-opcode instruction latencies ──────────────────────────────────
+    // Computed first so that addEdge() can use lat[from] for data-dep edges.
+    std::vector<unsigned> lat(n);
+    for (unsigned i = 0; i < n; ++i)
+        lat[i] = getOpcodeLatency(moveable[i], profile);
+
+    // ── 4. Build dependency DAG with per-edge latency ─────────────────────────
+    // Each edge is (to/from node, edge_latency).  Using per-edge latency gives
+    // the scheduler accurate information about how long a consumer must wait:
+    //
+    //   RAW register deps: edgeLat = lat[from]  — consumer needs the result
+    //   WAR  (Load→Store): edgeLat = 1          — store only needs to be issued
+    //                                              after the load; it does not
+    //                                              need to wait for the load to
+    //                                              complete (no data dependency)
+    //   WAW  (Store→Store): edgeLat = 1         — same ordering-only constraint
+    //   RAW  (Store→Load via memory): edgeLat = lat[from]  — load needs the
+    //                                              store's value (same as before)
+    //   Barrier edges: edgeLat = lat[from]      — full serialisation
+    //
+    // With the old code, WAR/WAW edges used lat[from] (the full load/store
+    // execution latency), which artificially inflated the critical-path depth
+    // of stores after loads and delayed their scheduling unnecessarily.
+    using Edge = std::pair<unsigned, unsigned>; // (neighbor, edgeLat)
+    std::vector<std::vector<Edge>> succ(n), pred(n);
     std::vector<unsigned> inDeg(n, 0);
 
-    // addEdge adds from→to with deduplication.
-    auto addEdge = [&](unsigned from, unsigned to) {
-        for (unsigned s : succ[from]) if (s == to) return;
-        succ[from].push_back(to);
-        pred[to].push_back(from);
+    // addEdge adds from→to with edgeLat, deduplicating and keeping max latency.
+    auto addEdge = [&](unsigned from, unsigned to, unsigned edgeLat) {
+        for (auto& [s, sl] : succ[from]) {
+            if (s == to) {
+                // Duplicate edge: keep the higher latency (more constraining).
+                if (edgeLat > sl) {
+                    sl = edgeLat;
+                    for (auto& [f, fl] : pred[to])
+                        if (f == from) { fl = edgeLat; break; }
+                }
+                return;
+            }
+        }
+        succ[from].push_back({to, edgeLat});
+        pred[to].push_back({from, edgeLat});
         ++inDeg[to];
     };
 
-    // Data dependencies (RAW): if j uses the result of i (same BB), i→j.
+    // RAW register data deps: if j uses the result of i (same BB), i→j.
+    // Edge latency = lat[i] (j cannot start until i's result is ready).
     for (unsigned j = 0; j < n; ++j) {
         for (auto& use : moveable[j]->operands()) {
             auto* def = llvm::dyn_cast<llvm::Instruction>(use.get());
@@ -3425,7 +3584,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             auto it = idx.find(def);
             if (it == idx.end()) continue; // defined outside this BB
             unsigned i = it->second;
-            if (i != j) addEdge(i, j);
+            if (i != j) addEdge(i, j, lat[i]);
         }
     }
 
@@ -3520,26 +3679,28 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 otherMem.push_back(i); // atomics, fences, calls
         }
 
-        // WAW: Store → Store (if aliasing).
+        // WAW: Store → Store ordering (edgeLat=1: just issue ordering, no data dep).
         for (size_t si = 0; si < stores.size(); ++si)
             for (size_t sj = si + 1; sj < stores.size(); ++sj)
                 if (mayAlias(moveable[stores[si]], moveable[stores[sj]]))
-                    addEdge(stores[si], stores[sj]);
+                    addEdge(stores[si], stores[sj], 1u);
 
-        // RAW: Store → Load (if aliasing).
+        // RAW: Store → Load memory dep (load needs store's value: full latency).
         for (unsigned stIdx : stores)
             for (unsigned ldIdx : loads)
                 if (ldIdx > stIdx && mayAlias(moveable[stIdx], moveable[ldIdx]))
-                    addEdge(stIdx, ldIdx);
+                    addEdge(stIdx, ldIdx, lat[stIdx]);
 
-        // WAR: Load → Store (if aliasing).
+        // WAR: Load → Store ordering (edgeLat=1: store only needs to be issued
+        // after the load, not after the load's result is available).
         for (unsigned ldIdx : loads)
             for (unsigned stIdx : stores)
                 if (stIdx > ldIdx && mayAlias(moveable[ldIdx], moveable[stIdx]))
-                    addEdge(ldIdx, stIdx);
+                    addEdge(ldIdx, stIdx, 1u);
 
         // Atomics / fences / calls are serialisation barriers — chain them
-        // with all preceding and succeeding memory ops.
+        // with all preceding and succeeding memory ops.  Use full latency
+        // since barriers require completion ordering.
         int lastBarrier = -1;
         for (unsigned i = 0; i < n; ++i) {
             if (!hasMemoryEffect(moveable[i])) continue;
@@ -3548,34 +3709,34 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             if (isBarrier) {
                 // All prior memory ops must complete before this barrier.
                 for (unsigned si : stores)
-                    if (si < i) addEdge(si, i);
+                    if (si < i) addEdge(si, i, lat[si]);
                 for (unsigned li : loads)
-                    if (li < i) addEdge(li, i);
+                    if (li < i) addEdge(li, i, lat[li]);
                 // This barrier must complete before later memory ops.
                 for (unsigned si : stores)
-                    if (si > i) addEdge(i, si);
+                    if (si > i) addEdge(i, si, lat[i]);
                 for (unsigned li : loads)
-                    if (li > i) addEdge(i, li);
+                    if (li > i) addEdge(i, li, lat[i]);
                 if (lastBarrier >= 0)
-                    addEdge(static_cast<unsigned>(lastBarrier), i);
+                    addEdge(static_cast<unsigned>(lastBarrier), i,
+                            lat[static_cast<unsigned>(lastBarrier)]);
                 lastBarrier = static_cast<int>(i);
             }
         }
     }
 
-    // ── 4. Per-opcode instruction latencies (more precise than OpClass-level) ──
-    std::vector<unsigned> lat(n);
-    for (unsigned i = 0; i < n; ++i)
-        lat[i] = getOpcodeLatency(moveable[i], profile);
-
-    // ── 5. Critical-path depth (bottom-up, longest latency path to any sink) ──
+    // ── 5. Critical-path depth (bottom-up, per-edge latency) ─────────────────
+    // critPath[u] = length of the longest path from u's START to the last
+    // instruction's completion.  Using per-edge latency:
+    //   data dep edge (u→s, edgeLat=lat[u]): edgeLat + critPath[s]
+    //   ordering edge (u→s, edgeLat=1):      edgeLat + critPath[s]
+    // Baseline is lat[u] (instruction's own latency with no successors).
     std::vector<unsigned> critPath(n, 0);
     for (int i = static_cast<int>(n) - 1; i >= 0; --i) {
         auto ui = static_cast<unsigned>(i);
-        unsigned maxSucc = 0;
-        for (unsigned s : succ[ui])
-            if (critPath[s] > maxSucc) maxSucc = critPath[s];
-        critPath[ui] = lat[ui] + maxSucc;
+        critPath[ui] = lat[ui];
+        for (auto [s, edgeLat] : succ[ui])
+            critPath[ui] = std::max(critPath[ui], edgeLat + critPath[s]);
     }
 
     // ── 5b. Dependency chain identification for ILP ──────────────────────────
@@ -3597,9 +3758,9 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 visited[cur] = true;
                 chainId[cur] = nextChain;
                 // Follow both successors and predecessors
-                for (unsigned s : succ[cur])
+                for (auto [s, _] : succ[cur])
                     if (!visited[s]) worklist.push_back(s);
-                for (unsigned p : pred[cur])
+                for (auto [p, _] : pred[cur])
                     if (!visited[p]) worklist.push_back(p);
             }
             ++nextChain;
@@ -3612,10 +3773,11 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     // without affecting the total schedule length, giving the scheduler
     // freedom to optimise for register pressure or port diversity instead.
     std::vector<unsigned> earliestStart(n, 0);
-    // Forward pass: earliest start = max(pred earliest + pred latency)
+    // Forward pass: earliest start = max(pred earliestStart + edgeLat).
     for (unsigned i = 0; i < n; ++i) {
-        for (unsigned p : pred[i])
-            earliestStart[i] = std::max(earliestStart[i], earliestStart[p] + lat[p]);
+        for (auto [p, edgeLat] : pred[i])
+            earliestStart[i] = std::max(earliestStart[i],
+                                        earliestStart[p] + edgeLat);
     }
     unsigned criticalLength = 0;
     for (unsigned i = 0; i < n; ++i)
@@ -3766,7 +3928,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     std::vector<llvm::Instruction*> scheduled;
     scheduled.reserve(n);
     std::vector<bool> done(n, false);
-    std::vector<unsigned> avail(n, 0); // cycle when result is ready
+    std::vector<unsigned> avail(n, 0);    // cycle when instruction's result is ready
+    std::vector<unsigned> issuedAt(n, 0); // cycle when instruction was issued
 
     unsigned currentCycle = 0;
     unsigned totalScheduled = 0;
@@ -3812,10 +3975,10 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // predecessor's result register).
         auto regFreeScore = [&](unsigned id) -> unsigned {
             unsigned score = 0;
-            for (unsigned p : pred[id]) {
+            for (auto [p, _] : pred[id]) {
                 if (!done[p]) continue;
                 bool lastUser = true;
-                for (unsigned s : succ[p])
+                for (auto [s, __] : succ[p])
                     if (s != id && !done[s]) { lastUser = false; break; }
                 if (lastUser) ++score;
             }
@@ -3836,7 +3999,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // to hide the latency if we schedule it now.
         auto stallDistance = [&](unsigned id) -> unsigned {
             unsigned maxConsumerCrit = 0;
-            for (unsigned s : succ[id])
+            for (auto [s, _] : succ[id])
                 if (!done[s]) maxConsumerCrit = std::max(maxConsumerCrit, critPath[s]);
             return maxConsumerCrit;
         };
@@ -4012,10 +4175,15 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 if (pass == 0 && issuedChainsThisCycle.count(chainId[id])) continue;
 
                 // Earliest start: max(currentCycle, predecessor availability).
+                // For data-dep edges (edgeLat = lat[p]): wait for result.
+                // For ordering edges (edgeLat = 1): wait one cycle after issue.
                 unsigned earliest = currentCycle;
-                for (unsigned p : pred[id])
-                    if (done[p] && avail[p] > earliest)
-                        earliest = avail[p];
+                for (auto [p, edgeLat] : pred[id]) {
+                    if (done[p]) {
+                        unsigned waitUntil = issuedAt[p] + edgeLat;
+                        if (waitUntil > earliest) earliest = waitUntil;
+                    }
+                }
 
                 // Pick the earliest-free port instance for this resource type.
                 auto& slots = hwPorts[rtKey];
@@ -4032,6 +4200,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     slots[chosenSlot].nextFree = startCycle + slots[chosenSlot].busyCycles;
                 }
 
+                issuedAt[id] = startCycle;
                 avail[id] = startCycle + lat[id];
                 if (avail[id] > maxCycle) maxCycle = avail[id];
 
@@ -4051,7 +4220,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 }
                 // Check if scheduling this instruction kills any predecessor's
                 // last use, decreasing the live count in the correct file.
-                for (unsigned p : pred[id]) {
+                for (auto [p, _] : pred[id]) {
                     if (!done[p]) continue;
                     if (moveable[p]->getType()->isVoidTy()) continue;
                     if (remainingUsers[p] > 0) --remainingUsers[p];
@@ -4065,7 +4234,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 }
 
                 // Decrement in-degrees of successors.
-                for (unsigned s : succ[id])
+                for (auto [s, _] : succ[id])
                     if (inDeg[s] > 0) --inDeg[s];
 
                 // Update port pressure.
