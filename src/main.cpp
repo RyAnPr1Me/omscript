@@ -1724,6 +1724,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "INVALID";
     case omscript::TokenType::AT:
         return "AT";
+    case omscript::TokenType::BACKTICK_IDENT:
+        return "BACKTICK_IDENT";
     case omscript::TokenType::PIPELINE:
         return "PIPELINE";
     case omscript::TokenType::STAGE:

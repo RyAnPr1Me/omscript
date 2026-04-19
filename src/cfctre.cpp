@@ -947,7 +947,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         // Program synthesis stdlib function (flat-name form of std::synthesize)
         "std__synthesize","std_synthesize",
         // Type-specific fast builtins
-        "mulhi","mulhi_u","absdiff","fast_sqrt","is_nan","is_inf"
+        "mulhi","mulhi_u","absdiff","fast_sqrt","is_nan","is_inf",
+        // 2D column-major matrix builtins
+        "mat_new","mat_fill","mat_get","mat_set","mat_rows","mat_cols","mat_mul","mat_transp"
     };
     // Also accept iN/uN type-cast names (handled by evalTypeCast via evalCall).
     auto isIntWidthCastName = [](const std::string& nm) -> bool {

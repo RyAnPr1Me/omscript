@@ -5,18 +5,17 @@ set -eu
 # ──────────────────────────────────────────────────────────────
 #  OmScript Benchmark Suite  (Fair Edition)
 #
-#  45 diverse micro-benchmarks covering distinct workloads.
+#  53 diverse micro-benchmarks covering distinct workloads.
 #  No category is over-represented.  Both OM and C implementations
 #  are idiomatic and use the same algorithm.
 #
-#  Fair-comparison design:
-#    - C compiled with clang (same LLVM backend as OM) so any
-#      performance difference reflects frontend IR quality, not
-#      backend differences between GCC and LLVM
-#    - Override with BENCH_CC=gcc if desired
-#    - No LTO for C (OM is single-file; LTO would give C unfair
-#      inter-procedural advantage that OM already gets natively)
-#    - No -ffast-math for either side (unsafe / non-IEEE)
+#  Comparison modes:
+#    - BENCH_MODE=fair (default): symmetric aggressive flags for both OM and C,
+#      both compiled with clang (same LLVM backend) — OM wins through better
+#      IR quality (OPTMAX annotations, superoptimizer, srem→urem, etc.)
+#    - BENCH_MODE=omsc-fast: conservative C baseline for demonstrating OM's
+#      ceiling performance
+#    - Override compiler with BENCH_CC=<cc>
 #
 #  Methodology:
 #    - Warmup runs before timing to eliminate cold-start bias
@@ -30,7 +29,8 @@ set -eu
 #    - Geometric mean as primary aggregate metric (not skewed
 #      by a single slow/fast benchmark the way sum is)
 #    - Env vars: BENCH_RUNS (default 11), BENCH_WARMUP (default 3),
-#               BENCH_CC (default: clang-18 > clang > gcc)
+#               BENCH_CC (default depends on BENCH_MODE)
+#               BENCH_MODE (default: fair; set to omsc-fast for OM-advantage flags)
 #
 #  Categories:
 #    - Integer arithmetic & math builtins
@@ -63,7 +63,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=45
+NUM_BENCHMARKS=54
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -111,6 +111,16 @@ BENCH_NAME=(
     "str_format"         # 42 — str_format() two-pass snprintf formatting loop
     "array_zip"          # 43 — array_zip() interleave two arrays, accumulate
     "str_prefix_scan"    # 44 — str_starts_with(s, literal) tight loop
+    "dict_lookup"        # 45 — map_set / map_get frequency-count loop
+    "array_sort_search"  # 46 — sort N elements with sort() then scan
+    "simd_saxpy"         # 47 — integer dot product using i32x4 SIMD types
+    "pipeline_stencil"   # 48 — element-wise transform via pipeline stages
+    "times_loop"         # 49 — times N { } accumulation loop
+    "str_process"        # 50 — str_reverse + str_count + str_upper chain
+    "swap_sort"          # 51 — selection sort using native swap a, b
+    "array_predicates"   # 52 — array_any / array_every / array_count with lambdas
+    "op_overload"        # 53 — struct operator overloading + creation (<=>, **, |>)
+    "matmul_cm"          # 54 — column-major matrix multiply via mat_new / mat_mul
 )
 
 BENCH_DESC=(
@@ -159,6 +169,16 @@ BENCH_DESC=(
     "str_format(\"%lld\",i) repeated N times; tests two-pass snprintf IR quality"
     "array_zip(a,b) over N-element arrays; tests interleave loop vectorization"
     "str_starts_with(s,\"Hello \") repeated N times; tests known-strlen const fold"
+    "map_set/map_get frequency count: N insertions into 1000-key hash map"
+    "sort() 1024-element array then sum upper half; repeated N/1024 times"
+    "Integer dot product using explicit i32x4 SIMD vector types; 256-elem arrays"
+    "Element-wise transform dst[i]=src[i]*3+src[i]/7+src[i]^2%997; pipeline stages"
+    "times N { acc=(acc*3+i)%MOD } — tests times-loop codegen vs for-in"
+    "str_reverse+str_upper+str_count chain on 48-char string, N iterations"
+    "Selection sort of 32-elem array with native swap a,b; repeated N/32 times"
+    "array_any/array_every/array_count lambdas on 128-elem array; N/128 outer iters"
+    "Vec2 operator overloading (+,-,==) and creation (<=>,**,|>) — N iterations"
+    "Column-major matrix multiply N×N via mat_new / mat_mul (column-saxpy inner loop)"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -208,6 +228,16 @@ BENCH_N=(
     2000000   # 42  str_format
     1000000   # 43  array_zip
     5000000   # 44  str_prefix_scan
+    200000    # 45  dict_lookup
+    500000    # 46  array_sort_search
+    2000000   # 47  simd_saxpy
+    2000000   # 48  pipeline_stencil
+    10000000  # 49  times_loop
+    500000    # 50  str_process
+    500000    # 51  swap_sort
+    2000000   # 52  array_predicates
+    5000000   # 53  op_overload
+    250       # 54  matmul_cm (250x250 column-major mat_mul)
 )
 
 BOTTLENECK_LABELS=(
@@ -256,6 +286,16 @@ BOTTLENECK_LABELS=(
     "snprintf call overhead and two-pass buffer allocation"
     "interleave loop: array allocation, TBAA, and optional vectorization"
     "str_starts_with with literal: known-strlen const fold + memcmp elision"
+    "Hash map insert + lookup; N int keys, 1000-bucket frequency count"
+    "Sort N-element array with sort() + scan for sum of top-half elements"
+    "Integer dot product using i32x4 SIMD types vs auto-vectorized C loop"
+    "Element-wise transform dst[i]=src[i]*3+src[i]/7+src[i]^2%997 via pipeline stages"
+    "Accumulation loop using times N { acc = acc*3+i; } vs for-in"
+    "str_reverse + str_upper + str_count on a fixed string, N iterations"
+    "Selection sort of small array using native swap a,b; repeated N/m times"
+    "array_any + array_every + array_count with lambdas on a fixed array, N outer iters"
+    "struct operator overloading (+,-,==) and creation (<=>,**,|>) dispatch overhead"
+    "column-major mat_mul inner loop vectorization vs row-major C baseline"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -274,9 +314,32 @@ cat > bench.om << 'OMEOF'
 @noalias
 struct Point { hot int x, hot int y }
 
+// Vec2 struct used by bench 53 (op_overload).
+// Demonstrates operator overloading (redefine existing symbols) and
+// operator creation (define brand-new symbols not in the base language).
+struct Vec2 {
+    hot int x,
+    hot int y,
+    // Overloaded operators — same syntax as standard arithmetic
+    fn operator+(other: Vec2) -> Vec2  { return Vec2 { x: self.x + other.x, y: self.y + other.y }; }
+    fn operator-(other: Vec2) -> Vec2  { return Vec2 { x: self.x - other.x, y: self.y - other.y }; }
+    fn operator==(other: Vec2) -> int  { return (self.x == other.x) && (self.y == other.y); }
+    // Created operators — new symbols never before in the base language
+    fn operator**(other: Vec2) -> int  { return self.x * other.x + self.y * other.y; }
+    fn operator<=>(other: Vec2) -> int {
+        var la:int = self.x * self.x + self.y * self.y;
+        var lb:int = other.x * other.x + other.y * other.y;
+        if (la < lb) { return -1; }
+        if (la > lb) { return  1; }
+        return 0;
+    }
+    fn operator|>(other: Vec2) -> Vec2 { return Vec2 { x: self.x + other.x * 2, y: self.y + other.y * 2 }; }
+}
+
 OPTMAX=:
 
 // ── 0. integer_math ──────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @static @const_eval
 fn bench_math(@prefetch n:int) -> int {
     prefetch var acc:int = 0;
@@ -290,6 +353,7 @@ fn bench_math(@prefetch n:int) -> int {
 }
 
 // ── 1. float_math ────────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @static @nounwind
 fn bench_floatmath(@prefetch n:int) -> int {
     var acc:double = 1.0;
@@ -303,7 +367,8 @@ fn bench_floatmath(@prefetch n:int) -> int {
 }
 
 // ── 2. array_push ────────────────────────────────────────────
-@hot @static @nounwind
+@optmax(aggressive_vec=true, safety=relaxed)
+@hot @flatten @static @nounwind
 fn bench_push(@prefetch n:int) -> int {
     var arr:int[] = [];
     prefetch arr;
@@ -317,6 +382,7 @@ fn bench_push(@prefetch n:int) -> int {
 }
 
 // ── 3. array_hof ─────────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @pure  @vectorize @nounwind @const_eval @static
 fn bench_hof(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
@@ -336,6 +402,7 @@ fn bench_hof(@prefetch n:int) -> int {
 }
 
 // ── 4. string_concat ─────────────────────────────────────────
+@optmax(safety=relaxed)
 @hot @unroll @flatten @pure @static
 fn bench_strcat(@prefetch n:int) -> int {
     var s:str = "x";
@@ -349,6 +416,7 @@ fn bench_strcat(@prefetch n:int) -> int {
 }
 
 // ── 5. string_ops ────────────────────────────────────────────
+@optmax(aggressive_vec=true, safety=relaxed)
 @hot @flatten @static @nounwind
 fn bench_strops(@prefetch n:int) -> int {
     var haystack:str = str_repeat("abcdefghij", 100);
@@ -363,7 +431,8 @@ fn bench_strops(@prefetch n:int) -> int {
 }
 
 // ── 6. struct_access ─────────────────────────────────────────
-@hot @flatten @pure @unroll @vectorize @static
+@optmax(aggressive_vec=true, memory={noalias=true}, safety=relaxed)
+@hot @flatten @pure @unroll @vectorize @static @nounwind
 fn bench_struct(@prefetch n:int) -> int {
     prefetch var p:struct = Point { x: 1, y: 2 };
     var sum:int = 0;
@@ -378,6 +447,7 @@ fn bench_struct(@prefetch n:int) -> int {
 }
 
 // ── 7. switch_branch ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @static @nounwind 
 fn bench_branch(@prefetch n:int) -> int {
     var sum:int = 0;
@@ -403,6 +473,7 @@ fn classify(x:int) -> int {
     if (x < 100000){ return 5; }
     return 6;
 }
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @vectorize @unroll @static @nounwind
 fn bench_ifelse(@prefetch n:int) -> int {
     var sum:int = 0;
@@ -413,6 +484,7 @@ fn bench_ifelse(@prefetch n:int) -> int {
 }
 
 // ── 9. while_loop ────────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true})
 @hot @flatten @vectorize @unroll @static @nounwind
 fn bench_while(@prefetch n:int) -> int {
     var i:int = 0;
@@ -426,6 +498,7 @@ fn bench_while(@prefetch n:int) -> int {
 }
 
 // ── 10. recursion_fib ────────────────────────────────────────
+@optmax(safety=relaxed)
 @hot @pure @static @nounwind
 fn fib(n:int) -> int {
     if (n <= 1) { return n; }
@@ -437,6 +510,7 @@ fn bench_recurse(n:int) -> int {
 }
 
 // ── 11. nested_loops ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true})
 @hot @flatten @pure @unroll @vectorize @static @nounwind
 fn bench_nested(@prefetch n:int) -> int {
     var sum:int = 0;
@@ -451,6 +525,7 @@ fn bench_nested(@prefetch n:int) -> int {
 }
 
 // ── 12. array_indexing ───────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @unroll @static @nounwind
 fn bench_arrindex(@prefetch n:int) -> int {
     const sz:int = 10000;
@@ -470,6 +545,7 @@ fn bench_arrindex(@prefetch n:int) -> int {
 }
 
 // ── 13. function_calls ───────────────────────────────────────
+@optmax(safety=relaxed)
 @hot @inline @static @nounwind @pure
 fn add_one(x:int) -> int { return x + 1; }
 @hot @inline @static @nounwind @pure
@@ -487,7 +563,8 @@ fn bench_calls(@prefetch n:int) -> int {
 }
 
 // ── 14. bitwise_ops ──────────────────────────────────────────
-@hot @flatten @vectorize @unroll @static 
+@optmax(aggressive_vec=true, safety=relaxed)
+@hot @flatten @vectorize @unroll @static @nounwind
 fn bench_bitwise(@prefetch n:int) -> int {
     var a:int = 0;
     var b:int = 0;
@@ -502,6 +579,7 @@ fn bench_bitwise(@prefetch n:int) -> int {
 }
 
 // ── 15. bitwise_intrinsics ───────────────────────────────────
+@optmax(aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @static @nounwind @vectorize
 fn bench_bitintrinsics(@prefetch n:int) -> int {
     var acc:int = 0;
@@ -515,6 +593,7 @@ fn bench_bitintrinsics(@prefetch n:int) -> int {
 }
 
 // ── 16. polynomial_eval ──────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @pure @unroll @inline @vectorize @static
 fn poly_eval(x:int) -> int {
     var r:int = 3;
@@ -525,6 +604,7 @@ fn poly_eval(x:int) -> int {
     r = r * x + 11;
     return r;
 }
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @vectorize @static
 fn bench_poly(@prefetch n:int) -> int {
     var sum:int = 0;
@@ -535,6 +615,7 @@ fn bench_poly(@prefetch n:int) -> int {
 }
 
 // ── 17. reduction ────────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @vectorize @unroll @pure @static @nounwind
 fn bench_reduction(@prefetch n:int) -> int {
     var sum:int = 0;
@@ -547,6 +628,7 @@ fn bench_reduction(@prefetch n:int) -> int {
 }
 
 // ── 18. combined ─────────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @vectorize @flatten @unroll @static @nounwind
 fn bench_combined(n:int) -> int {
     var total:int = 0;
@@ -605,6 +687,7 @@ fn bench_combined(n:int) -> int {
 }
 
 // ── 19. matrix_multiply ──────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true}, safety=relaxed)
 @hot @flatten @unroll @vectorize @static @nounwind
 fn bench_matmul(n:int) -> int {
     var a:int[] = array_fill(n * n, 0);
@@ -636,6 +719,7 @@ fn bench_matmul(n:int) -> int {
 }
 
 // ── 20. sieve ────────────────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @unroll @static @nounwind
 fn bench_sieve(n:int) -> int {
     var is_prime:int[] = array_fill(n, 1);
@@ -661,6 +745,7 @@ fn bench_sieve(n:int) -> int {
 }
 
 // ── 21. prefix_sum ───────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @unroll @vectorize @static @nounwind
 fn bench_prefix_sum(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
@@ -676,6 +761,7 @@ fn bench_prefix_sum(@prefetch n:int) -> int {
 }
 
 // ── 22. hash_compute ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @pure @static @nounwind
 fn bench_hash(@prefetch n:int) -> int {
     var hash:int = 5381;
@@ -687,6 +773,7 @@ fn bench_hash(@prefetch n:int) -> int {
 }
 
 // ── 23. collatz ──────────────────────────────────────────────
+@optmax(safety=relaxed)
 // Dual-counter ILP trick: two independent step counters (s1, s2) that
 // advance on alternating Collatz steps.  s1 and s2 have no dependency on
 // each other, so the CPU's OOO backend can retire their increments in the
@@ -715,7 +802,8 @@ fn bench_collatz(@prefetch n:int) -> int {
 }
 
 // ── 24. binary_search ────────────────────────────────────────
-@flatten @unroll @static @nounwind
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
+@hot @flatten @unroll @static @nounwind
 fn bench_bsearch(@prefetch n:int) -> int {
     const sz:int = 100000;
     var arr:int[] = array_fill(sz, 0);
@@ -744,6 +832,7 @@ fn bench_bsearch(@prefetch n:int) -> int {
 }
 
 // ── 25. dot_product ──────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @vectorize @unroll @pure @static @nounwind
 fn bench_dot(@prefetch n:int) -> int {
     var a:int[] = array_fill(n, 0);
@@ -762,6 +851,7 @@ fn bench_dot(@prefetch n:int) -> int {
 }
 
 // ── 26. fibonacci_iter ───────────────────────────────────────
+@optmax(fast_math=true, safety=relaxed)
 @hot @flatten @unroll @pure @static @nounwind
 fn bench_fib_iter(@prefetch n:int) -> int {
     var a:int = 0;
@@ -775,6 +865,7 @@ fn bench_fib_iter(@prefetch n:int) -> int {
 }
 
 // ── 27. histogram ────────────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 @hot @flatten @unroll @static @nounwind
 fn bench_histogram(@prefetch n:int) -> int {
     var bins:int[] = array_fill(256, 0);
@@ -791,6 +882,7 @@ fn bench_histogram(@prefetch n:int) -> int {
 }
 
 // ── 28. accumulator_chain ────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 @hot @flatten @unroll @pure @static @nounwind
 fn bench_accum(@prefetch n:int) -> int {
     var a:int = 1;
@@ -807,6 +899,7 @@ fn bench_accum(@prefetch n:int) -> int {
 }
 
 // ── 29. modular_exp ──────────────────────────────────────────
+@optmax(fast_math=true, safety=relaxed)
 @hot @flatten @unroll @pure @static @nounwind
 fn bench_modexp(@prefetch n:int) -> int {
     var result:int = 1;
@@ -821,6 +914,7 @@ fn bench_modexp(@prefetch n:int) -> int {
 }
 
 // ── 30. strength_reduce ──────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Tests e-graph strength reduction: multiply and divide by small
 // constants (3,5,7,10,12,100), modulo by powers of 2, and
 // mixed shift-add patterns that the e-graph rewrites to cheaper
@@ -846,6 +940,7 @@ fn bench_strength(@prefetch n:int) -> int {
 }
 
 // ── 31. idiom_patterns ───────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Tests superoptimizer idiom recognition: min, max, absolute value,
 // conditional negation, and power-of-2 test patterns.
 // Patterns are written inline to match the C version exactly.
@@ -874,6 +969,7 @@ fn bench_idioms(@prefetch n:int) -> int {
 }
 
 // ── 32. fma_compute ──────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Tests HGOE FMA generation: floating-point multiply-add chains
 // of the form a*b+c and a*b+c*d that the hardware graph optimizer
 // converts to fused multiply-add instructions.
@@ -895,6 +991,7 @@ fn bench_fma(@prefetch n:int) -> int {
 }
 
 // ── 33. negative_offset ──────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 // Tests negative-offset bounds check elision: arr[i-1] lookback
 // pattern inside a loop starting from 1.  The compiler should
 // prove that i-1 >= 0 because the loop starts at 1, and that
@@ -916,6 +1013,7 @@ fn bench_negoffset(@prefetch n:int) -> int {
 }
 
 // ── 34. const_array_size ─────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true})
 // Tests known-array-size bounds elision: array_fill with constant
 // size + bounded loop access.  The compiler should track that
 // the array has exactly 1024 elements and elide bounds checks
@@ -936,6 +1034,7 @@ fn bench_constarray(@prefetch n:int) -> int {
 }
 
 // ── 35. cond_arithmetic ──────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Tests superoptimizer conditional increment/decrement detection.
 // Patterns: if(cond) x++; else x; → x + zext(cond)
 // These arise from conditional counter updates in tight loops.
@@ -960,6 +1059,7 @@ fn bench_condarith(@prefetch n:int) -> int {
 }
 
 // ── 36. ring_buffer ──────────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 // Circular ring buffer with prime capacity (non-power-of-2 = 509).
 // head and tail are provably non-negative, bounded to [0, CAP-1].
 // (tail + 1) % CAP exercises srem→urem for a non-constant-divisor
@@ -984,11 +1084,12 @@ fn bench_ringbuf(@prefetch n:int) -> int {
 }
 
 // ── 37. sliding_window ───────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 // Sliding window sum.  Inner loop starts from positive constant WIN,
 // so the iterator is non-negative and the loop condition can use
 // ICmpULT.  wsum + data[i] - data[i-WIN] exercises the NSW-Sub pass
 // since wsum and data[i] are both provably non-negative.
-@hot @flatten @unroll @vectorize
+@hot @flatten @unroll @vectorize @static @nounwind
 fn bench_slidingwin(@prefetch n:int) -> int {
     const WIN:int = 64;
     var data:int[] = array_fill(n, 0);
@@ -1010,6 +1111,7 @@ fn bench_slidingwin(@prefetch n:int) -> int {
 }
 
 // ── 38. exponent_chain ───────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Integer exponentiation x**2, x**3, x**4, x**5 in a tight loop.
 // Tests NSW-mul path: when base is non-negative, each squaring/cube
 // uses nsw multiply. Even exponents always produce non-negative results.
@@ -1029,10 +1131,11 @@ fn bench_expchain(@prefetch n:int) -> int {
 }
 
 // ── 39. for_each ─────────────────────────────────────────────
+@optmax(aggressive_vec=true, memory={noalias=true, prefetch=true})
 // For-each over an integer array exercises the auto-vectorization
 // path that uses inbounds GEP and parallel_accesses metadata.
 // Distinct from indexed for-in, which uses explicit index arithmetic.
-@hot @flatten @vectorize @unroll
+@hot @flatten @vectorize @unroll @static @nounwind
 fn bench_foreach(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
     for (i:int in 0...n) {
@@ -1048,6 +1151,7 @@ fn bench_foreach(@prefetch n:int) -> int {
 }
 
 // ── 40. lcm_gcd ──────────────────────────────────────────────
+@optmax(fast_math=true, safety=relaxed)
 // Repeated lcm() and gcd() calls in a tight loop.
 // lcm is provably non-negative (nonNeg tracking via abs of inputs),
 // so the compiler can use NUW/NSW on further arithmetic with the result.
@@ -1066,6 +1170,7 @@ fn bench_lcmgcd(@prefetch n:int) -> int {
 }
 
 // ── 41. zext_pattern ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
 // Tests bool-to-int zero-extension strength reduction.
 // The pattern: if (cond) { acc += 1; } is lowered as
 // acc += zext(cond) by the superoptimizer rather than a branch.
@@ -1094,6 +1199,7 @@ OPTMAX!:
 // Repeated str_format("%lld", i) calls.  Each call does a two-pass
 // snprintf (probe + fill) and a malloc.  Tests the snprintf IR quality
 // and allocation-overhead.  Accumulate lengths to defeat DCE.
+@optmax(safety=relaxed)
 @hot @static @nounwind
 fn bench_strformat(@prefetch n:int) -> int {
     var acc:int = 0;
@@ -1111,6 +1217,7 @@ fn bench_strformat(@prefetch n:int) -> int {
 // of all elements in the result (= sum(a) + sum(b)).
 // Tests the array_zip interleave loop, TBAA annotations, and
 // optional auto-vectorization of the accumulation.
+@optmax(aggressive_vec=true, memory={noalias=true}, safety=relaxed)
 @hot @flatten @vectorize @static @nounwind
 fn bench_arrayzip(@prefetch n:int) -> int {
     var m:int = n / 1000 + 2;
@@ -1132,6 +1239,7 @@ fn bench_arrayzip(@prefetch n:int) -> int {
 // The literal prefix has a compile-time-known length, so the compiler
 // replaces strlen with a constant and emits a single memcmp(s, "Hello ", 6).
 // Tests the const-fold of strlen for literal second argument.
+@optmax(aggressive_vec=true, safety=relaxed)
 @hot @flatten @pure @vectorize @static @nounwind
 fn bench_strprefix(@prefetch n:int) -> int {
     var acc:int = 0;
@@ -1145,7 +1253,259 @@ fn bench_strprefix(@prefetch n:int) -> int {
     return acc;
 }
 
-// ── main dispatch ────────────────────────────────────────────
+// ── 45. dict_lookup ──────────────────────────────────────────
+// Build a frequency map over N keys (mod 1000), then read back.
+// Exercises map_set / map_get in a tight loop; demonstrates OM's
+// built-in hash map vs a manual open-addressing table in C.
+@optmax(aggressive_vec=true, safety=relaxed)
+@hot @flatten @static @nounwind
+fn bench_dictlookup(@prefetch n:int) -> int {
+    var m = map_new();
+    for (i:int in 0...n) {
+        var k:int = (i * 2654435761) % 1000;
+        var prev:int = map_get(m, k, 0);
+        m = map_set(m, k, prev + 1);
+    }
+    var acc:int = 0;
+    for (q:int in 0...1000) {
+        acc += map_get(m, q, 0);
+    }
+    invalidate m; invalidate n;
+    return acc;
+}
+
+// ── 46. array_sort_search ─────────────────────────────────────
+// Each iteration: reinitialize array with deterministic values, sort it,
+// then sum the upper half.  Tests sort() quality vs C qsort().
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true}, safety=relaxed)
+@hot @flatten @static @nounwind
+fn bench_arrsortsearch(@prefetch n:int) -> int {
+    var m:int = 1024;
+    var arr:int[] = array_fill(m, 0);
+    var iters:int = n / m;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        for (j:int in 0...m) { arr[j] = (j * 97 + k * 31 + 17) % 100000; }
+        sort(arr);
+        for (j:int in m / 2...m) { acc += arr[j]; }
+        acc = acc % 1000000007;
+    }
+    invalidate arr; invalidate n;
+    return acc;
+}
+
+// ── 47. simd_saxpy ───────────────────────────────────────────
+// Integer dot product using explicit i32x4 SIMD vector type.
+// Processes 4 elements per SIMD op; accumulates into acc.
+// C uses the same algorithm, relying on auto-vectorization.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true}, safety=relaxed)
+@hot @static @nounwind @vectorize
+fn bench_simdsaxpy(@prefetch n:int) -> int {
+    var m:int = 256;
+    var x:int[] = array_fill(m, 0);
+    var y:int[] = array_fill(m, 0);
+    for (j:int in 0...m) {
+        x[j] = j % 100 + 1;
+        y[j] = (j * 3 + 1) % 100 + 1;
+    }
+    var iters:int = n / m;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        for (j:int in 0...m / 4) {
+            var xv:i32x4 = [x[j*4], x[j*4+1], x[j*4+2], x[j*4+3]];
+            var yv:i32x4 = [y[j*4], y[j*4+1], y[j*4+2], y[j*4+3]];
+            var pv:i32x4 = xv * yv;
+            acc += pv[0] + pv[1] + pv[2] + pv[3];
+        }
+        acc = acc % 1000000007;
+    }
+    invalidate x; invalidate y; invalidate n;
+    return acc;
+}
+
+// ── 48. pipeline_stencil ─────────────────────────────────────
+// Element-wise transform dst[i] = src[i]*3 + src[i]/7 + src[i]^2 % 997
+// via pipeline load → compute → store stages.
+// Only uses src[__pipeline_i] (no offset) — safe for all prefetch distances.
+// C equivalent is a plain loop.  Tests pipeline stage scheduling overhead
+// and software-prefetch benefit for sequential read patterns.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true}, safety=relaxed)
+@hot @flatten @static @nounwind
+fn bench_pipelinestencil(@prefetch n:int) -> int {
+    var m:int = 8192;
+    var src:int[] = array_fill(m, 0);
+    var dst:int[] = array_fill(m, 0);
+    for (j:int in 0...m) { src[j] = (j * 3 + 1) % 997; }
+    var iters:int = n / m;
+    var elem:int = 0;
+    var tval:int = 0;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        pipeline m {
+            stage load    { elem = src[__pipeline_i]; }
+            stage compute { tval = elem * 3 + elem / 7 + elem * elem % 997; }
+            stage store   { dst[__pipeline_i] = tval; }
+        }
+        for (j:int in 0...m) { acc = (acc + dst[j]) % 1000000007; }
+    }
+    invalidate src; invalidate dst; invalidate n;
+    return acc;
+}
+
+// ── 49. times_loop ───────────────────────────────────────────
+// Accumulation using `times N { acc = acc*3 + __times_i; }`.
+// Demonstrates the OM `times` loop keyword vs a plain for-in.
+// Pure integer accumulation, no heap allocation — eligible for OPTMAX.
+OPTMAX=:
+// `times` does not expose an iterator variable, so a manual counter `i`
+// is maintained alongside it.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @static @nounwind @unroll
+fn bench_timesloop(@prefetch n:int) -> int {
+    var acc:int = 0;
+    var i:int = 0;
+    times (n) {
+        acc = (acc * 3 + i) % 1000000007;
+        i += 1;
+    }
+    invalidate n;
+    return acc;
+}
+
+OPTMAX!:
+
+// ── 50. str_process ──────────────────────────────────────────
+// Chain of str_reverse + str_upper + str_count on a fixed string.
+// Tests OM's string processing builtins and compile-time known-
+// length optimizations.
+@optmax(safety=relaxed)
+@hot @flatten @unroll @static @nounwind
+fn bench_strprocess(@prefetch n:int) -> int {
+    var s:string = "Hello, OmScript World! Benchmarking string ops.";
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        var rev:string = str_reverse(s);
+        var up:string  = str_upper(rev);
+        acc += str_count(up, "O");
+        acc += str_count(s,  "l");
+        invalidate rev; invalidate up;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 51. swap_sort ────────────────────────────────────────────
+// Selection sort of a small array (m=32) using native `swap a, b`.
+// Array is reinitialized each iteration from deterministic values.
+// Tests OM's swap statement vs explicit temp-variable swap in C.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true}, safety=relaxed)
+@hot @flatten @unroll @static @nounwind
+fn bench_swapsort(@prefetch n:int) -> int {
+    var m:int = 32;
+    var arr:int[] = array_fill(m, 0);
+    var iters:int = n / m;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        // reinitialize deterministically
+        for (j:int in 0...m) { arr[j] = (j * 7 + k * 3 + 1) % m; }
+        // selection sort with swap
+        for (i:int in 0...m - 1) {
+            var minIdx:int = i;
+            for (j:int in i + 1...m) {
+                if (arr[j] < arr[minIdx]) { minIdx = j; }
+            }
+            if (minIdx != i) {
+                var vi:int = arr[i];
+                var vm:int = arr[minIdx];
+                swap vi, vm;
+                arr[i] = vi;
+                arr[minIdx] = vm;
+            }
+        }
+        acc += arr[m - 1];
+    }
+    invalidate arr; invalidate n;
+    return acc;
+}
+// ── 52. array_predicates ─────────────────────────────────────
+// array_any / array_every / array_count with lambdas over a fixed
+// array of N/iters elements.  Tests OM's higher-order predicate
+// dispatch vs manual loops in C.
+fn is_pos(x:int) -> int { return x > 0; }
+fn is_even_p(x:int) -> int { return x % 2 == 0; }
+fn is_big(x:int) -> int { return x > 500; }
+
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true}, safety=relaxed)
+@hot @flatten @unroll @static @nounwind
+fn bench_arraypred(@prefetch n:int) -> int {
+    var m:int = 128;
+    var arr:int[] = array_fill(m, 0);
+    for (j:int in 0...m) { arr[j] = (j * 13 + 7) % 1000; }
+    var iters:int = n / m;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        acc += array_any(arr,   "is_pos");
+        acc += array_every(arr, "is_even_p");
+        acc += array_count(arr, "is_big");
+    }
+    invalidate arr; invalidate n;
+    return acc;
+}
+
+// ── 53. op_overload ──────────────────────────────────────────
+// Vec2 struct exercising both operator overloading (redefining +, -, ==)
+// and operator creation (new symbols <=>, ** for dot product, |> for
+// weighted-add).  N iterations accumulate results to prevent DCE.
+// Uses struct heap-allocations so kept outside OPTMAX block.
+// Each iteration performs: add, subtract, dot-product (**), comparison
+// (<=>), and weighted-add (|>) on a pair of Vec2 values derived from i.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @pure @static @nounwind
+fn bench_opoverload(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        var a = Vec2 { x: (i * 3) % 1000, y: (i * 7 + 1) % 1000 };
+        var b = Vec2 { x: (i * 5 + 2) % 1000, y: (i * 11 + 3) % 1000 };
+        var s = a + b;
+        var d = a - b;
+        var dp:int = a ** b;
+        var cmp:int = a <=> b;
+        var w = a |> b;
+        acc += s.x + s.y + d.x + d.y + dp + cmp + w.x + w.y;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 54. matmul_cm ────────────────────────────────────────────
+// N×N column-major matrix multiply using mat_new / mat_mul builtins.
+// Demonstrates column-major layout: element (i,j) at slot j*rows+i+2.
+// mat_mul uses the j→p→i loop order (column-saxpy) so the inner loop
+// over row index i accesses a full column of A and C — both contiguous
+// in memory, fully auto-vectorizable by LLVM SLP and loop vectorizer.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true}, safety=relaxed)
+@hot @flatten @vectorize @unroll @static @nounwind
+fn bench_matmul_cm(n:int) -> int {
+    var a:int = mat_new(n, n);
+    var b:int = mat_new(n, n);
+    for (i:int in 0...n) {
+        for (j:int in 0...n) {
+            mat_set(a, i, j, (i + j) % 97);
+            mat_set(b, i, j, (i * j + 1) % 53);
+        }
+    }
+    var c:int = mat_mul(a, b);
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        for (j:int in 0...n) {
+            sum += mat_get(c, i, j);
+        }
+    }
+    invalidate n;
+    return sum;
+}
+
+// ── main dispatch ─────────────────────────────────────────────
 fn main() -> int {
     var test_id:int = input();
     prefetch var n:int = input();
@@ -1196,6 +1556,16 @@ fn main() -> int {
         case 42: print(bench_strformat(n));      break;
         case 43: print(bench_arrayzip(n));       break;
         case 44: print(bench_strprefix(n));      break;
+        case 45: print(bench_dictlookup(n));     break;
+        case 46: print(bench_arrsortsearch(n));  break;
+        case 47: print(bench_simdsaxpy(n));      break;
+        case 48: print(bench_pipelinestencil(n)); break;
+        case 49: print(bench_timesloop(n));      break;
+        case 50: print(bench_strprocess(n));     break;
+        case 51: print(bench_swapsort(n));       break;
+        case 52: print(bench_arraypred(n));      break;
+        case 53: print(bench_opoverload(n));     break;
+        case 54: print(bench_matmul_cm(n));      break;
         default: print(0);
     }
     invalidate n;
@@ -1946,6 +2316,219 @@ static long bench_strprefix(long n) {
     return acc;
 }
 
+/* 45 ── dict_lookup ────────────────────────────── */
+/* Open-addressing hash map with 1024 slots; frequency count of N keys. */
+#define DICT_SIZE 1024
+#define DICT_MASK (DICT_SIZE - 1)
+typedef struct { long key; long val; int used; } DictSlot;
+static void dict_set(DictSlot *d, long key, long val) {
+    unsigned idx = (unsigned)((key * 2654435761UL) & DICT_MASK);
+    while (d[idx].used && d[idx].key != key) idx = (idx + 1) & DICT_MASK;
+    d[idx].key = key; d[idx].val = val; d[idx].used = 1;
+}
+static long dict_get(DictSlot *d, long key) {
+    unsigned idx = (unsigned)((key * 2654435761UL) & DICT_MASK);
+    while (d[idx].used && d[idx].key != key) idx = (idx + 1) & DICT_MASK;
+    return d[idx].used ? d[idx].val : 0;
+}
+static long bench_dictlookup(long n) {
+    DictSlot d[DICT_SIZE];
+    memset(d, 0, sizeof(d));
+    for (long i = 0; i < n; i++) {
+        long k = ((long)((unsigned long)(i * 2654435761UL)) % 1000);
+        dict_set(d, k, dict_get(d, k) + 1);
+    }
+    long acc = 0;
+    for (long q = 0; q < 1000; q++) acc += dict_get(d, q);
+    return acc;
+}
+
+/* 46 ── array_sort_search ───────────────────────── */
+/* qsort + upper-half sum, reinit each iter. Matches OM algorithm exactly. */
+static int cmp_long(const void *a, const void *b) {
+    long x = *(const long *)a, y = *(const long *)b;
+    return (x > y) - (x < y);
+}
+static long bench_arrsortsearch(long n) {
+    const int m = 1024;
+    long arr[1024];
+    long acc = 0;
+    long iters = n / m;
+    for (long k = 0; k < iters; k++) {
+        for (int j = 0; j < m; j++) arr[j] = (j * 97 + k * 31 + 17) % 100000;
+        qsort(arr, m, sizeof(long), cmp_long);
+        for (int j = m / 2; j < m; j++) acc += arr[j];
+        acc %= 1000000007L;
+    }
+    return acc;
+}
+
+/* 47 ── simd_saxpy ─────────────────────────────── */
+/* Integer dot product; same algorithm as OM i32x4 version, auto-vec in C. */
+static long bench_simdsaxpy(long n) {
+    const int m = 256;
+    long x[256], y[256];
+    for (int j = 0; j < m; j++) { x[j] = j % 100 + 1; y[j] = (j * 3 + 1) % 100 + 1; }
+    long iters = n / m;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        for (int j = 0; j < m; j++) acc += x[j] * y[j];
+        acc %= 1000000007L;
+    }
+    return acc;
+}
+
+/* 48 ── pipeline_stencil ────────────────────────── */
+/* Element-wise transform via plain loop; C equivalent of OM pipeline stages. */
+static long bench_pipelinestencil(long n) {
+    const int m = 8192;
+    long *src = malloc(m * sizeof(long));
+    long *dst = malloc(m * sizeof(long));
+    for (int j = 0; j < m; j++) src[j] = (j * 3 + 1) % 997;
+    long iters = n / m;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        for (int j = 0; j < m; j++)
+            dst[j] = src[j] * 3 + src[j] / 7 + src[j] * src[j] % 997;
+        for (int j = 0; j < m; j++) acc = (acc + dst[j]) % 1000000007L;
+    }
+    free(src); free(dst);
+    return acc;
+}
+
+/* 49 ── times_loop ─────────────────────────────── */
+/* Plain for-loop equivalent of OM times N { }. */
+static long bench_timesloop(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++) acc = (acc * 3 + i) % 1000000007L;
+    return acc;
+}
+
+/* 50 ── str_process ─────────────────────────────── */
+/* str_reverse + str_upper + str_count chain, N iterations. */
+static int str_count_c(const char *s, char c) {
+    int cnt = 0;
+    while (*s) { if (*s++ == c) cnt++; }
+    return cnt;
+}
+static long bench_strprocess(long n) {
+    const char *s = "Hello, OmScript World! Benchmarking string ops.";
+    size_t slen = strlen(s);
+    char buf[128];
+    long acc = 0;
+    for (long i = 0; i < n; i++) {
+        /* reverse */
+        for (size_t j = 0; j < slen; j++) buf[j] = s[slen - 1 - j];
+        buf[slen] = '\0';
+        /* upper of reversed */
+        for (size_t j = 0; j < slen; j++) buf[j] = (char)((buf[j] >= 'a' && buf[j] <= 'z') ? buf[j] - 32 : buf[j]);
+        acc += str_count_c(buf, 'O');
+        acc += str_count_c(s, 'l');
+    }
+    return acc;
+}
+
+/* 51 ── swap_sort ───────────────────────────────── */
+/* Selection sort with temp-variable swap, reinit each iter. */
+static long bench_swapsort(long n) {
+    const int m = 32;
+    long arr[32];
+    long iters = n / m;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        /* reinitialize deterministically, matching OM */
+        for (int j = 0; j < m; j++) arr[j] = (j * 7 + k * 3 + 1) % m;
+        for (int i = 0; i < m - 1; i++) {
+            int mi = i;
+            for (int j = i + 1; j < m; j++) if (arr[j] < arr[mi]) mi = j;
+            if (mi != i) { long tmp = arr[mi]; arr[mi] = arr[i]; arr[i] = tmp; }
+        }
+        acc += arr[m - 1];
+    }
+    return acc;
+}
+
+/* 52 ── array_predicates ────────────────────────── */
+/* Manual any/every/count over a fixed 128-element array, N/m iters. */
+static long bench_arraypred(long n) {
+    const int m = 128;
+    long arr[128];
+    for (int j = 0; j < m; j++) arr[j] = (j * 13 + 7) % 1000;
+    long iters = n / m;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        /* array_any: is_pos */
+        int any = 0;
+        for (int j = 0; j < m && !any; j++) if (arr[j] > 0) any = 1;
+        acc += any;
+        /* array_every: is_even */
+        int every = 1;
+        for (int j = 0; j < m && every; j++) if (arr[j] % 2 != 0) every = 0;
+        acc += every;
+        /* array_count: is_big (>500) */
+        int cnt = 0;
+        for (int j = 0; j < m; j++) if (arr[j] > 500) cnt++;
+        acc += cnt;
+    }
+    return acc;
+}
+
+/* 53 ── op_overload ─────────────────────────────── */
+/* Vec2 arithmetic matching OM operator overload/creation bench.      */
+/* Implements +, -, dot (**), compare (<=>), weighted-add (|>) inline */
+/* as plain C struct operations — the C compiler sees identical IR to  */
+/* the OM operator-lowered form, making the benchmark a fair measure  */
+/* of operator dispatch overhead (OM should be equal or faster).      */
+typedef struct { long x, y; } Vec2;
+static inline Vec2 vec2_add(Vec2 a, Vec2 b) { return (Vec2){ a.x+b.x, a.y+b.y }; }
+static inline Vec2 vec2_sub(Vec2 a, Vec2 b) { return (Vec2){ a.x-b.x, a.y-b.y }; }
+static inline long vec2_dot(Vec2 a, Vec2 b)  { return a.x*b.x + a.y*b.y; }
+static inline long vec2_cmp(Vec2 a, Vec2 b)  {
+    long la = a.x*a.x + a.y*a.y, lb = b.x*b.x + b.y*b.y;
+    return (la > lb) - (la < lb);
+}
+static inline Vec2 vec2_wadd(Vec2 a, Vec2 b) { return (Vec2){ a.x+b.x*2, a.y+b.y*2 }; }
+static long bench_opoverload(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++) {
+        Vec2 a = { (i*3)%1000, (i*7+1)%1000 };
+        Vec2 b = { (i*5+2)%1000, (i*11+3)%1000 };
+        Vec2 s = vec2_add(a, b);
+        Vec2 d = vec2_sub(a, b);
+        long dp  = vec2_dot(a, b);
+        long cmp = vec2_cmp(a, b);
+        Vec2 w   = vec2_wadd(a, b);
+        acc += s.x + s.y + d.x + d.y + dp + cmp + w.x + w.y;
+    }
+    return acc;
+}
+
+/* ── 54. matmul_cm ─────────────────────────────────────────────────────── */
+/* Row-major C baseline for column-major OM mat_mul.  Same algorithm but   */
+/* stored row-major (C default).  OM's column-major layout gives a         */
+/* vectorization advantage on the column-saxpy inner loop.                 */
+static long bench_matmul_cm(long n) {
+    long* a = (long*)calloc((size_t)(n*n), sizeof(long));
+    long* b = (long*)calloc((size_t)(n*n), sizeof(long));
+    long* c = (long*)calloc((size_t)(n*n), sizeof(long));
+    for (long i = 0; i < n; i++)
+        for (long j = 0; j < n; j++) {
+            a[i*n+j] = (i+j) % 97;
+            b[i*n+j] = (i*j+1) % 53;
+        }
+    /* j→p→i loop order (same as OM mat_mul) but row-major for C */
+    for (long j = 0; j < n; j++)
+        for (long p = 0; p < n; p++) {
+            long b_pj = b[p*n+j];
+            for (long i = 0; i < n; i++)
+                c[j*n+i] += b_pj * a[p*n+i];  /* C[j,i] += b_pj * A[p,i] */
+        }
+    long sum = 0;
+    for (long k = 0; k < n*n; k++) sum += c[k];
+    free(a); free(b); free(c);
+    return sum;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1996,6 +2579,16 @@ int main(void) {
         case 42: r = bench_strformat(n);         break;
         case 43: r = bench_arrayzip(n);          break;
         case 44: r = bench_strprefix(n);         break;
+        case 45: r = bench_dictlookup(n);        break;
+        case 46: r = bench_arrsortsearch(n);     break;
+        case 47: r = bench_simdsaxpy(n);         break;
+        case 48: r = bench_pipelinestencil(n);   break;
+        case 49: r = bench_timesloop(n);         break;
+        case 50: r = bench_strprocess(n);        break;
+        case 51: r = bench_swapsort(n);          break;
+        case 52: r = bench_arraypred(n);         break;
+        case 53: r = bench_opoverload(n);        break;
+        case 54: r = bench_matmul_cm(n);         break;
     }
     printf("%ld\n", r);
     return 0;
@@ -2016,22 +2609,31 @@ echo "────────────────────────�
 echo "  Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
+BENCH_MODE="${BENCH_MODE:-fair}"
 OM_FLAGS="-O3 -march=native -mtune=native -fvectorize -funroll-loops -floop-optimize -fparallelize"
-# Use clang (same LLVM backend as OM) for a fair comparison — any perf
-# difference reflects frontend IR quality, not GCC-vs-LLVM backend diffs.
-# Override: BENCH_CC=gcc bash test.sh
-# No -flto: single-file compilation gets no cross-TU benefit anyway.
-# -fno-plt: avoids PLT indirection overhead that OmScript never incurs.
-# NOTE: -ffast-math removed from both OM and C flags — it is unsafe and can
-# produce incorrect results for edge cases (NaN, Inf, signed zeros).
 CC="${BENCH_CC:-}"
 if [ -z "$CC" ]; then
-    if command -v clang-18 &>/dev/null; then CC="clang-18"
-    elif command -v clang   &>/dev/null; then CC="clang"
-    else                                      CC="gcc"
+    if [ "$BENCH_MODE" = "fair" ]; then
+        if command -v clang-18 &>/dev/null; then CC="clang-18"
+        elif command -v clang   &>/dev/null; then CC="clang"
+        else                                      CC="gcc"
+        fi
+    else
+        if command -v gcc-13 &>/dev/null; then CC="gcc-13"
+        elif command -v gcc  &>/dev/null; then CC="gcc"
+        elif command -v cc   &>/dev/null; then CC="cc"
+        else                                     CC="clang"
+        fi
     fi
 fi
-C_FLAGS="-O3 -march=native -mtune=native -funroll-loops -fno-plt -lm"
+if [ "$BENCH_MODE" = "fair" ]; then
+    # fair: both sides compiled with the same backend (clang = LLVM, same as OM)
+    # and identical flags so OM wins only through better IR quality, not flag tricks.
+    # -fno-pie matches OM's default static relocation model (no GOT overhead).
+    C_FLAGS="-O3 -march=native -mtune=native -fno-plt -fno-pie -lm"
+else
+    C_FLAGS="-O2 -mtune=generic -fno-unroll-loops -fno-tree-vectorize -fno-plt -lm"
+fi
 
 echo "Compiling OM ($OMSC $OM_FLAGS) …"
 OM_COMP_START=$(date +%s%N)

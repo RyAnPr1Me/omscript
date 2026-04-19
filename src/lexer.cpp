@@ -761,6 +761,26 @@ Token Lexer::scanMultiLineString() {
             tokens.push_back(makeToken(TokenType::AT, "@"));
             break;
 
+        case '`': {
+            // Backtick-quoted infix operator name: `op`
+            // Scans all characters up to the closing backtick.
+            const int btLine = tokenLine;
+            const int btCol  = tokenColumn;
+            std::string btIdent;
+            while (!isAtEnd() && peek() != '`') {
+                btIdent += advance();
+            }
+            if (isAtEnd()) {
+                lexError("Unterminated backtick operator name (missing closing '`')", btLine, btCol);
+            }
+            advance(); // consume closing '`'
+            if (btIdent.empty()) {
+                lexError("Empty backtick operator name", btLine, btCol);
+            }
+            tokens.push_back(Token(TokenType::BACKTICK_IDENT, btIdent, btLine, btCol));
+            break;
+        }
+
         default:
             lexError("Unexpected character '" + std::string(1, c) + "'", tokenLine, tokenColumn);
             break;
