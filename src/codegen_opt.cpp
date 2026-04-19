@@ -1818,14 +1818,18 @@ void CodeGenerator::runOptimizationPasses() {
     // infinite expansion), so after the standard pipeline has converted one
     // branch to a tail-call loop, we manually inline the remaining recursive
     // call.  Each level doubles the work done per actual function call,
-    // reducing call overhead by ~2^depth.  3 levels gives ~8x fewer calls,
-    // matching GCC -O3's behavior for naive recursive algorithms like fib.
+    // reducing call overhead by ~2^depth.  6 levels gives ~64x fewer calls
+    // (2^6 = 64), providing deep unrolling for naive recursive algorithms
+    // like fib.
     if (optimizationLevel >= OptimizationLevel::O3) {
         static constexpr unsigned kRecursiveInlineDepth = 6;
         // Conservative size limit: the function BEFORE inlining must be
         // small enough that inlining won't create a huge function.
-        // After inlining, each copy roughly doubles the size. So we limit
-        // the pre-inline size to 350 instructions (~350 * 2^4 = 5600 max at depth 4).
+        // After inlining, each copy roughly doubles the size. We limit
+        // the pre-inline size to 350 instructions to cap the resulting
+        // function at ~350 * 2^6 = ~22,400 instructions at depth 6.
+        // In practice the growth is sub-exponential because LLVM's DCE
+        // eliminates dead branches after each inlining level.
         static constexpr unsigned kMaxPreInlineSize = 350;
         llvm::SmallVector<llvm::Function*, 4> inlinedFuncs;
         for (auto& F : *module) {
