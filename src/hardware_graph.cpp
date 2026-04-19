@@ -710,10 +710,14 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 4096;
     p.memoryLatency = 200;
     p.robSize = 224;
+    // Store-to-load forwarding on Skylake: 4 cycles (matches L1D hit latency).
+    // The store buffer comparison adds no extra cycles vs a regular L1 load.
+    p.latStoLForward = 4;
+    // vec512Penalty set on the base Skylake profile: AVX2 (256-bit) native,
+    // no 512-bit penalty.  Ice Lake / Tiger Lake variants override to 2.
+    p.vec512Penalty = 1;
     return p;
 }
-
-/// Return an Intel Sandy Bridge / Ivy Bridge (Intel 2nd/3rd gen) profile.
 /// Sandy Bridge (2011): 6 execution ports, 3 integer ALUs, AVX 256-bit (no FMA).
 /// Ivy Bridge (2012): same microarchitecture, minor improvements.
 [[gnu::cold]] static MicroarchProfile sandyBridgeProfile() {
@@ -748,10 +752,11 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 2048;
     p.memoryLatency = 200;
     p.robSize = 168;
+    // Sandy Bridge store-to-load forwarding: 4 cycles (same as L1 hit).
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // no AVX-512 on Sandy Bridge
     return p;
 }
-
-/// Return a Haswell (Intel 4th gen) microarchitecture profile.
 [[gnu::cold]] static MicroarchProfile haswellProfile() {
     MicroarchProfile p = skylakeProfile();
     p.name = "haswell";
@@ -762,10 +767,11 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Haswell: integer multiply on port P1 only (1 of the 4 ALU ports).
     p.mulPortCount = 1;
     p.robSize = 192;
+    // Haswell store-to-load forwarding: 4 cycles (same as L1 hit latency).
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // AVX2 only, no 512-bit
     return p;
 }
-
-/// Return an Intel Alder Lake / Raptor Lake (Golden Cove P-core) profile.
 [[gnu::cold]] static MicroarchProfile alderlakeProfile() {
     MicroarchProfile p;
     p.name = "alderlake";
@@ -801,10 +807,12 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 12288;     // much larger BTB
     p.memoryLatency = 180;
     p.robSize = 256;
+    // Alder Lake store-to-load forwarding: 4-5 cycles (L1D latency = 5 cycles;
+    // forwarding completes in ~4 cycles via store-buffer bypass).
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // AVX2 only on Golden Cove / Raptor Cove
     return p;
 }
-
-/// Return an AMD Zen 4 (Ryzen 7000 / EPYC Genoa) profile.
 [[gnu::cold]] static MicroarchProfile zen4Profile() {
     MicroarchProfile p;
     p.name = "znver4";
@@ -838,10 +846,14 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 6144;
     p.memoryLatency = 180;
     p.robSize = 320;
+    // Zen 4: store-to-load forwarding = 4 cycles (same as L1D hit latency).
+    // Zen 4 uses 256-bit AVX-512 double-pump internally; the profile already
+    // reflects this with vectorWidth=256.  No additional throughput penalty
+    // needed since the 256-bit paths ARE the native paths.
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // 256-bit native paths; AVX-512 handled at profile level
     return p;
 }
-
-/// Return an AMD Zen 3 (Ryzen 5000) profile.
 [[gnu::cold]] static MicroarchProfile zen3Profile() {
     MicroarchProfile p = zen4Profile();
     p.name = "znver3";
@@ -894,10 +906,13 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 7168;
     p.memoryLatency = 120;
     p.robSize = 600;
+    // Apple M1: store-to-load forwarding is ~4 cycles.  Store execution latency
+    // is 3 cycles (write to store buffer), but forwarding requires a store-buffer
+    // address match which adds 1 cycle → forwarding = 4 cycles > latStore.
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // NEON 128-bit native; no 512-bit SIMD
     return p;
 }
-
-/// Return an ARM Neoverse V2 (server) profile.
 [[gnu::cold]] static MicroarchProfile neoverseV2Profile() {
     MicroarchProfile p;
     p.name = "neoverse-v2";
@@ -931,10 +946,11 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 8192;
     p.memoryLatency = 150;
     p.robSize = 256;
+    // Neoverse V2: store-to-load forwarding = 4 cycles (same as L1D latency).
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // SVE2 256-bit native
     return p;
 }
-
-/// Return an ARM Neoverse N2 profile.
 [[gnu::cold]] static MicroarchProfile neoverseN2Profile() {
     MicroarchProfile p = neoverseV2Profile();
     p.name = "neoverse-n2";
@@ -980,10 +996,12 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.branchMispredictPenalty = 6.0;
     p.btbEntries = 512;
     p.memoryLatency = 200;
+    // RISC-V in-order: forwarding latency = store latency (no out-of-order
+    // store buffer; data is forwarded in the same pipeline cycle as writeback).
+    p.latStoLForward = 3;
+    p.vec512Penalty = 1; // RVV at 128-bit VLEN; no 512-bit wide ops
     return p;
 }
-
-/// Return a SiFive U74 (RISC-V) profile.
 [[gnu::cold]] static MicroarchProfile sifiveU74Profile() {
     MicroarchProfile p = riscvGenericProfile();
     p.name = "sifive-u74";
@@ -1029,10 +1047,11 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 8192;
     p.memoryLatency = 140;     // DDR5 latency
     p.robSize = 256;
+    // Graviton3 (Neoverse V1): store-to-load forwarding = 4 cycles.
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // SVE 256-bit native
     return p;
 }
-
-/// Return an AWS Graviton4 profile (Arm Neoverse V2-based).
 /// Graviton4: 96-core, 256-bit SVE2, DDR5-5600, wider backend.
 [[gnu::cold]] static MicroarchProfile graviton4Profile() {
     MicroarchProfile p = neoverseV2Profile();
@@ -1081,10 +1100,11 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 16384;      // larger BTB
     p.memoryLatency = 170;     // LPDDR5x
     p.robSize = 256;
+    // Lion Cove: store-to-load forwarding = 4 cycles (store buffer bypass).
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // AVX2 only; no 512-bit SIMD on Lion Cove
     return p;
 }
-
-/// Return an improved AMD Zen 5 profile (2024).
 /// Zen 5: 8-wide dispatch, 6 ALU pipes, 2× 256-bit vector, AVX-512
 /// via double-pump, improved branch prediction.
 [[gnu::cold]] static MicroarchProfile zen5Profile() {
@@ -1120,10 +1140,13 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 8192;
     p.memoryLatency = 170;
     p.robSize = 448;
+    // Zen 5: store-to-load forwarding = 4 cycles (same as L1D latency).
+    p.latStoLForward = 4;
+    // Zen 5 has NATIVE 512-bit AVX-512 execution units (not double-pumped),
+    // unlike Zen 4 which decomposes 512-bit ops into 2×256-bit µops.
+    p.vec512Penalty = 1;
     return p;
 }
-
-/// Return an Intel Sapphire Rapids / Emerald Rapids profile.
 /// Sapphire Rapids (Xeon 4th Gen, 2023): 8-wide decode, 6 ALU ports,
 /// AVX-512 native at 512 bits (not double-pumped like Skylake-AVX512),
 /// ROB doubled to 512, 3 load + 3 store ports.
@@ -1164,6 +1187,12 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 12288;
     p.memoryLatency = 200;
     p.robSize = 512;           // Doubled from Skylake's 224
+    // Sapphire Rapids: store-to-load forwarding ≈ 4 cycles (store buffer bypass),
+    // shorter than the full 5-cycle L1D latency.
+    p.latStoLForward = 4;
+    // Sapphire Rapids has NATIVE 512-bit AVX-512 FMA/VecALU units (Golden Cove
+    // execution backend), so no double-pump penalty unlike Skylake-AVX512.
+    p.vec512Penalty = 1;
     return p;
 }
 
@@ -1223,6 +1252,10 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         p.loadPorts = 3;     // Ice Lake: 3 load ports
         p.storePorts = 2;
         p.robSize = 352;     // Ice Lake ROB is 352
+        // Ice Lake / Tiger Lake run 512-bit SIMD by double-pumping the 256-bit
+        // execution units (same as Skylake-AVX512).  This halves throughput:
+        // each 512-bit FMA/VecALU instruction occupies the port for 2 cycles.
+        p.vec512Penalty = 2;
         return p;
     }
 
@@ -3404,6 +3437,19 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 ///   4. Compute critical-path depth bottom-up.
 ///   5. Model per-port-instance availability using real HardwareGraph nodes
 ///      (their `throughput` field gives instructions/cycle for each port).
+/// Returns true if the instruction produces a 512-bit or wider fixed vector.
+/// Used to apply the double-pump throughput penalty on CPUs where 512-bit SIMD
+/// is implemented by running 256-bit units twice (e.g. Skylake-AVX512, Ice Lake).
+/// The penalty is a throughput effect only; latency is the same as 256-bit ops.
+[[nodiscard]] static bool isWideVectorOp(const llvm::Instruction* inst) {
+    if (!inst) return false;
+    llvm::Type* ty = inst->getType();
+    if (!ty->isVectorTy()) return false;
+    auto* vt = llvm::dyn_cast<llvm::FixedVectorType>(ty);
+    if (!vt) return false;
+    return vt->getPrimitiveSizeInBits().getFixedValue() >= 512;
+}
+
 ///   6. List-schedule: at each logical cycle, pick up to issueWidth ready
 ///      instructions ordered by:
 ///        (a) critical-path remaining (latency hiding),
@@ -3587,11 +3633,17 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 if (mayAlias(moveable[stores[si]], moveable[stores[sj]]))
                     addEdge(stores[si], stores[sj], 1u);
 
-        // RAW: Store → Load memory dep (load needs store's value: full latency).
+        // RAW: Store → Load memory dep.
+        // When a load follows a store to the same (possibly aliased) address,
+        // the value is forwarded from the store buffer rather than going through
+        // the cache.  The forwarding latency (latStoLForward) is used as the
+        // edge weight: it is ≤ latStore on most x86 CPUs and > latStore on
+        // some ARM cores (e.g. Apple M-series) where address-match logic adds
+        // a cycle.  Using this precise latency improves schedule quality.
         for (unsigned stIdx : stores)
             for (unsigned ldIdx : loads)
                 if (ldIdx > stIdx && mayAlias(moveable[stIdx], moveable[ldIdx]))
-                    addEdge(stIdx, ldIdx, lat[stIdx]);
+                    addEdge(stIdx, ldIdx, profile.latStoLForward);
 
         // WAR: Load → Store ordering (edgeLat=1: store only needs to be issued
         // after the load, not after the load's result is available).
@@ -3861,6 +3913,20 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             if (done[id] && avail[id] > currentCycle)
                 ++inflightCount;
 
+        // ROB full stall: on a real out-of-order CPU, dispatch is completely
+        // blocked when the reorder buffer is full.  Advance the clock to when
+        // the oldest in-flight instruction retires (completes), freeing one ROB
+        // entry.  This is more accurate than merely adjusting priority (which
+        // was the previous behaviour at the 75% threshold).
+        if (inflightCount >= robCapacity) {
+            unsigned nextRetire = currentCycle + 1;
+            for (unsigned id = 0; id < n; ++id)
+                if (done[id] && avail[id] > currentCycle)
+                    nextRetire = std::min(nextRetire, avail[id]);
+            currentCycle = nextRetire;
+            continue; // retry dispatch at the new cycle
+        }
+
         // Sort ready instructions for maximum throughput — 9-tier priority:
         //   1. Critical path remaining (latency hiding)
         //   2. Long-latency ops first (div/fdiv — start divider early)
@@ -4098,8 +4164,20 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                         if (t < bestTime) { bestTime = t; chosenSlot = s; }
                     }
                     startCycle = bestTime;
-                    // Occupy port for busyCycles (= reciprocal throughput).
-                    slots[chosenSlot].nextFree = startCycle + slots[chosenSlot].busyCycles;
+                    // Occupy the port for busyCycles (= reciprocal throughput).
+                    // Apply the 512-bit double-pump penalty on CPUs where 512-bit
+                    // SIMD is implemented by running 256-bit units twice (e.g.
+                    // Skylake-AVX512, Ice Lake).  Only FMA and VecALU ports are
+                    // affected; loads/stores of 512-bit data use the full-width
+                    // load/store paths and do not incur the double-pump penalty.
+                    unsigned pumpFactor = 1u;
+                    if (profile.vec512Penalty > 1 && isWideVectorOp(moveable[id]) &&
+                        (rtKey == static_cast<int>(ResourceType::FMAUnit) ||
+                         rtKey == static_cast<int>(ResourceType::VectorALU))) {
+                        pumpFactor = profile.vec512Penalty;
+                    }
+                    slots[chosenSlot].nextFree =
+                        startCycle + slots[chosenSlot].busyCycles * pumpFactor;
                 }
 
                 issuedAt[id] = startCycle;
@@ -4255,13 +4333,50 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     // across all basic blocks, apply transforms, then re-cost.  If the
     // transformed version is not cheaper (or only marginally so), roll back.
     if (config.enableTransforms) {
-        // Compute baseline cost (sum of instruction latencies as a proxy).
+        // Compute total expected cycles for a function, accounting for:
+        //   • Per-opcode execution latencies (the critical path contribution)
+        //   • Statistical branch misprediction overhead (10% miss rate assumed
+        //     for general-purpose code without profile data).  Transforms that
+        //     reduce the number of conditional branches (e.g. branchless select,
+        //     loop unrolling) correctly show a lower cost after the transform.
+        //   • 512-bit double-pump penalty: wide-vector ops on CPUs with
+        //     vec512Penalty>1 occupy the execution port for 2 cycles, so their
+        //     throughput contribution is doubled.
+        //
+        // Using a richer cost model means that transforms which reduce branch
+        // frequency or eliminate double-pumped 512-bit ops are accepted even
+        // when raw latency savings are small.
         auto estimateFuncCost = [&](llvm::Function& f) -> unsigned {
+            // kBranchMissRate: fraction of conditional branches that mispredict
+            // in typical general-purpose code without PGO data.  10% is a
+            // standard conservative estimate from hardware performance counters.
+            constexpr double kBranchMissRate = 0.10;
             unsigned cost = 0;
-            for (auto& bb : f)
-                for (auto& inst : bb)
-                    if (!llvm::isa<llvm::PHINode>(inst) && !inst.isTerminator())
-                        cost += getOpcodeLatency(&inst, profile);
+            for (auto& bb : f) {
+                for (auto& inst : bb) {
+                    if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator())
+                        continue;
+                    unsigned latency = getOpcodeLatency(&inst, profile);
+
+                    // 512-bit double-pump: throughput cost is 2× for
+                    // FMA / VecALU instructions on double-pump CPUs.
+                    if (profile.vec512Penalty > 1 && isWideVectorOp(&inst)) {
+                        OpClass cls = classifyOp(&inst);
+                        if (cls == OpClass::FMA || cls == OpClass::FPMul ||
+                            cls == OpClass::FPArith || cls == OpClass::VectorOp)
+                            latency *= profile.vec512Penalty;
+                    }
+                    cost += latency;
+                }
+                // Add statistical branch misprediction overhead for each
+                // conditional branch in the function.
+                if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator())) {
+                    if (br->isConditional()) {
+                        cost += static_cast<unsigned>(
+                            profile.branchMispredictPenalty * kBranchMissRate + 0.5);
+                    }
+                }
+            }
             return cost;
         };
 

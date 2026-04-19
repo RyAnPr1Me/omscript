@@ -424,6 +424,25 @@ struct MicroarchProfile {
     // most microarchitectures (e.g. only 2 of 4 ports on Skylake, port 1 only
     // on Haswell).  The scheduler uses this to avoid overcommitting ALU capacity.
     unsigned mulPortCount = 1;      ///< ALU port instances capable of integer multiply
+
+    // Store-to-load forwarding latency.
+    // When a load immediately follows a store to the same address, the value
+    // can be forwarded from the store buffer without going through the cache.
+    // This latency is used as the Store→Load RAW dependency edge weight in the
+    // scheduler, replacing the less accurate `latStore` value.
+    // Typically equals latLoad (the L1 hit latency) on most architectures.
+    // On some ARM cores (e.g. Apple M-series) forwarding is slower than the
+    // store execution latency because the store buffer comparison adds cycles.
+    unsigned latStoLForward = 4;    ///< Store-to-load forwarding latency (cycles)
+
+    // 512-bit SIMD throughput penalty.
+    // On CPUs that implement 512-bit SIMD by double-pumping 256-bit execution
+    // units (e.g. Skylake-AVX512, Ice Lake), issuing a 512-bit instruction
+    // occupies the FMA/VecALU port for 2 cycles instead of 1.
+    // The latency is unchanged; only throughput (port occupancy) is halved.
+    //   1 = native 512-bit unit (no penalty): Sapphire Rapids, Zen 5, etc.
+    //   2 = double-pumped (2× port occupancy): Skylake-AVX512, Ice Lake, etc.
+    unsigned vec512Penalty = 1;     ///< FMA/VecALU throughput multiplier for 512-bit ops
 };
 
 /// Look up a microarchitecture profile by CPU name.
