@@ -48,6 +48,11 @@
 namespace omscript {
 namespace hgoe {
 
+// Forward declaration: defined later in this file (Step 7).
+// Allows buildFromFunction (Step 2) to call it without reordering definitions.
+static unsigned getOpcodeLatency(const llvm::Instruction* inst,
+                                  const MicroarchProfile& profile);
+
 // ---------------------------------------------------------------------------
 // Resolve "native" to the actual host CPU name.
 // ---------------------------------------------------------------------------
@@ -258,38 +263,16 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     // Apple M-series AArch64).  The per-opcode scheduler in scheduleBasicBlock
     // uses the exact profile values; these defaults only affect the abstract
     // ProgramGraph used by mapProgramToHardware and criticalPathLength.
-    auto defaultLatency = [](const llvm::Instruction* inst) -> unsigned {
-        if (!inst) return 1;
-        switch (inst->getOpcode()) {
-        case llvm::Instruction::Mul:        return 3;
-        case llvm::Instruction::SDiv:
-        case llvm::Instruction::UDiv:
-        case llvm::Instruction::SRem:
-        case llvm::Instruction::URem:       return 20;
-        case llvm::Instruction::FMul:       return 4;
-        case llvm::Instruction::FDiv:
-        case llvm::Instruction::FRem:       return 15;
-        case llvm::Instruction::FAdd:
-        case llvm::Instruction::FSub:       return 4;
-        case llvm::Instruction::FNeg:       return 1;  // bit-flip on sign
-        case llvm::Instruction::Load:       return 4;
-        case llvm::Instruction::Store:      return 4;
-        case llvm::Instruction::Call:
-            if (llvm::isa<llvm::IntrinsicInst>(inst)) return 4;
-            return 10;
-        case llvm::Instruction::ExtractElement:
-        case llvm::Instruction::InsertElement:
-        case llvm::Instruction::ShuffleVector: return 2;
-        case llvm::Instruction::PHI:
-        case llvm::Instruction::ExtractValue:
-        case llvm::Instruction::InsertValue:
-        case llvm::Instruction::Alloca:
-        case llvm::Instruction::BitCast:
-        case llvm::Instruction::IntToPtr:
-        case llvm::Instruction::PtrToInt:   return 0;
-        default:                            return 1;
-        }
-    };
+    // Use the default-constructed MicroarchProfile (conservative generic values)
+    // so that this code shares one authoritative latency table with the rest
+    // of the HGOE and never falls out of sync.
+    static const MicroarchProfile kAbstractProfile = []{
+        MicroarchProfile p;
+        // Integer division: use 20 cycles for the abstract graph to match the
+        // Haswell/Broadwell range; exact values are used by scheduleBasicBlock.
+        p.latIntDiv = 20u;
+        return p;
+    }();
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
@@ -301,7 +284,7 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                 if (auto* opInst = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(i))) {
                     auto prodIt = instToNode_.find(opInst);
                     if (prodIt != instToNode_.end()) {
-                        unsigned prodLat = defaultLatency(opInst);
+                        unsigned prodLat = getOpcodeLatency(opInst, kAbstractProfile);
                         addEdge(prodIt->second, consId, DepType::Data, prodLat);
                     }
                 }
@@ -445,30 +428,21 @@ unsigned ProgramGraph::criticalPathLength() const {
 // Step 5 — Hardware-aware cost model
 // ═════════════════════════════════════════════════════════════════════════════
 
-HardwareCostModel::HardwareCostModel(const HardwareGraph& hw) : hw_(hw) {
-    // Derive vector width from hardware graph.
-    auto vecNodes = hw_.findNodes(ResourceType::VectorALU);
-    if (!vecNodes.empty()) {
-        // Pipeline depth as a proxy for vector width category
-        unsigned depth = vecNodes[0]->pipelineDepth;
-        if (depth >= 16) vectorWidth_ = 16;      // AVX-512
-        else if (depth >= 8) vectorWidth_ = 8;    // AVX2
-        else vectorWidth_ = 4;                     // SSE / NEON
-    }
+HardwareCostModel::HardwareCostModel(const HardwareGraph& hw,
+                                     const MicroarchProfile& profile)
+    : hw_(hw), profile_(profile) {
+    // Derive vector width directly from the profile's SIMD width field (bits).
+    // The old code used pipelineDepth as a proxy; the profile field is exact.
+    if (profile.vectorWidth >= 512)      vectorWidth_ = 16; // AVX-512
+    else if (profile.vectorWidth >= 256) vectorWidth_ = 8;  // AVX2 / Neon 256
+    else                                 vectorWidth_ = 4;  // SSE / NEON 128
 
-    // Derive issue width from dispatch node count.
-    auto dispatchNodes = hw_.findNodes(ResourceType::Dispatch);
-    if (!dispatchNodes.empty()) {
-        issueWidth_ = dispatchNodes[0]->throughput;
-    }
-
-    // Derive cache miss penalties from cache hierarchy.
-    auto l1Nodes = hw_.findNodes(ResourceType::L1DCache);
-    if (!l1Nodes.empty()) cacheMissL1Penalty_ = l1Nodes[0]->latency;
-    auto l2Nodes = hw_.findNodes(ResourceType::L2Cache);
-    if (!l2Nodes.empty()) cacheMissL2Penalty_ = l2Nodes[0]->latency;
-    auto l3Nodes = hw_.findNodes(ResourceType::L3Cache);
-    if (!l3Nodes.empty()) cacheMissL3Penalty_ = l3Nodes[0]->latency;
+    // Issue width, cache penalties: read directly from the profile rather than
+    // reverse-engineering them from hardware-graph node attributes.
+    issueWidth_          = static_cast<double>(profile.issueWidth);
+    cacheMissL1Penalty_  = static_cast<double>(profile.l1DLatency);
+    cacheMissL2Penalty_  = static_cast<double>(profile.l2Latency);
+    cacheMissL3Penalty_  = static_cast<double>(profile.l3Latency);
 }
 
 OpClass HardwareCostModel::classifyInstruction(const llvm::Instruction* inst) const {
@@ -477,82 +451,10 @@ OpClass HardwareCostModel::classifyInstruction(const llvm::Instruction* inst) co
 
 double HardwareCostModel::instructionCost(const llvm::Instruction* inst) const {
     if (!inst) return 0.0;
-
-    const OpClass cls = classifyOp(inst);
-
-    // Use direct latency lookup based on operation class for more accurate
-    // costs than the hardware graph node (which has a single average latency).
-    switch (cls) {
-    case OpClass::IntArith:
-    case OpClass::Shift:
-    case OpClass::Comparison:
-    case OpClass::Conversion:
-        return 1.0; // 1-cycle ALU ops
-
-    case OpClass::IntMul: {
-        // Mul latency from the hardware graph's ALU node count (proxy for
-        // architecture generation).  Skylake: 3 cycles, etc.
-        auto nodes = hw_.findNodes(ResourceType::IntegerALU);
-        return nodes.empty() ? 3.0 : std::max(nodes[0]->latency * 3.0, 3.0);
-    }
-
-    case OpClass::IntDiv: {
-        auto nodes = hw_.findNodes(ResourceType::DividerUnit);
-        return nodes.empty() ? 25.0 : nodes[0]->latency;
-    }
-
-    case OpClass::FPArith: {
-        auto nodes = hw_.findNodes(ResourceType::FMAUnit);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::FPMul: {
-        auto nodes = hw_.findNodes(ResourceType::FMAUnit);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::FPDiv: {
-        auto nodes = hw_.findNodes(ResourceType::DividerUnit);
-        return nodes.empty() ? 14.0 : nodes[0]->latency;
-    }
-
-    case OpClass::FMA: {
-        auto nodes = hw_.findNodes(ResourceType::FMAUnit);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::VectorOp: {
-        auto nodes = hw_.findNodes(ResourceType::VectorALU);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::Load: {
-        auto nodes = hw_.findNodes(ResourceType::LoadUnit);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::Store: {
-        auto nodes = hw_.findNodes(ResourceType::StoreUnit);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::Branch: {
-        auto nodes = hw_.findNodes(ResourceType::BranchUnit);
-        return nodes.empty() ? 1.0 : nodes[0]->latency;
-    }
-
-    case OpClass::Phi:
-        return 0.0;
-
-    case OpClass::Call:
-        return 10.0;
-
-    case OpClass::Intrinsic:
-        return 1.0;
-
-    default:
-        return 3.0;
-    }
+    // Delegate to the single authoritative latency function (getOpcodeLatency)
+    // rather than re-implementing per-opclass dispatch here.  The hardware graph
+    // is still available for structural queries (simulateExecution, etc.).
+    return static_cast<double>(getOpcodeLatency(inst, profile_));
 }
 
 double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {

@@ -299,13 +299,21 @@ private:
 // Step 5 — Hardware-aware cost model
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Forward declaration — MicroarchProfile is defined below (Step 7).
+// Required so that HardwareCostModel can store a reference to it.
+struct MicroarchProfile;
+
 /// Hardware-aware cost model that replaces the normal cost model when HGOE
-/// is active.  Costs are derived from the microarchitecture profile.
+/// is active.  Costs are derived directly from the microarchitecture profile
+/// via getOpcodeLatency — the single authoritative latency lookup function.
 class HardwareCostModel {
 public:
-    explicit HardwareCostModel(const HardwareGraph& hw);
+    /// Construct from both the hardware graph (for structural simulation)
+    /// and the microarchitecture profile (for accurate per-opcode latencies).
+    HardwareCostModel(const HardwareGraph& hw, const MicroarchProfile& profile);
 
     /// Cost of a single instruction on the target hardware.
+    /// Delegates to getOpcodeLatency(inst, profile_).
     double instructionCost(const llvm::Instruction* inst) const;
 
     /// Cost of executing the program graph on the hardware graph.
@@ -320,6 +328,7 @@ public:
 
 private:
     const HardwareGraph& hw_;
+    const MicroarchProfile& profile_; ///< Single authoritative source for latencies
     unsigned vectorWidth_ = 4;
     double issueWidth_ = 4.0;
     double cacheMissL1Penalty_ = 4.0;
@@ -425,9 +434,9 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName);
 HardwareGraph buildHardwareGraph(const MicroarchProfile& profile);
 
 /// Compute instruction latency cost directly from a microarchitecture profile.
-/// Lightweight alternative to HardwareCostModel::instructionCost that does not
-/// require a full HardwareGraph to be constructed.  Returns latency in cycles.
-/// Used by the superoptimizer's unified cost model when hardware info is available.
+/// Returns latency in cycles.  This is the single authoritative latency lookup:
+/// HardwareCostModel::instructionCost() and ProgramGraph::buildFromFunction()
+/// both delegate to this function, ensuring all cost estimates stay consistent.
 double instrCostFromProfile(const llvm::Instruction* inst, const MicroarchProfile& profile);
 
 // ─────────────────────────────────────────────────────────────────────────────
