@@ -2292,7 +2292,11 @@ MicroarchProfile calibrateProfile(const MicroarchProfile& base,
     if (hints.divScale != 1.0) {
         p.latIntDiv = scaleU(p.latIntDiv, hints.divScale);
         p.latFPDiv  = scaleU(p.latFPDiv,  hints.divScale);
-        // Scale throughput fields (reciprocal: smaller = faster, so divide by divScale).
+        // Throughput (ops/cycle) is the reciprocal of latency.  When latency
+        // increases by divScale, throughput must decrease by the same factor
+        // (dividing by divScale).  E.g., divScale=2.0 → latency doubles,
+        // throughput halves: tput /= 2.0.  This is semantically consistent:
+        // a slower divider delivers fewer operations per cycle.
         if (p.tputIntDiv > 0.0 && hints.divScale > 0.0)
             p.tputIntDiv /= hints.divScale;
         if (p.tputFPDiv > 0.0 && hints.divScale > 0.0)
@@ -6670,8 +6674,13 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 }
                 for (auto [p2, _2] : pred[id2]) {
                     if (remUsers2[p2] > 0 && --remUsers2[p2] == 0) {
-                        if (producesVecOrFP(moveable[p2])) { if (simVec > 0) --simVec; }
-                        else { if (simInt > 0) --simInt; }
+                        if (producesVecOrFP(moveable[p2])) {
+                            assert(simVec > 0 && "vec live count underflow in quality tracking");
+                            --simVec;
+                        } else {
+                            assert(simInt > 0 && "int live count underflow in quality tracking");
+                            --simInt;
+                        }
                     }
                 }
                 if (simInt > peakInt) peakInt = simInt;

@@ -1428,7 +1428,8 @@ TEST(HardwareGraphTest, SchedulerQualityTwoIndependentChainsILP) {
         unsigned cSerial = scheduleInstructions(*tms.func, hw, *profile,
                                                 SchedulerPolicy{}, &qSerial);
         EXPECT_GT(cSerial, 0u);
-        (void)qSerial;
+        EXPECT_GE(qSerial.instructionsTotal, 2u);
+        (void)cSerial;
     }
 
     // Parallel chains — each chain is independent
@@ -1444,13 +1445,14 @@ TEST(HardwareGraphTest, SchedulerQualityTwoIndependentChainsILP) {
         unsigned cPar = scheduleInstructions(*tmp.func, hw, *profile,
                                               SchedulerPolicy{}, &qPar);
         EXPECT_GT(cPar, 0u);
-        (void)qPar;
+        EXPECT_GE(qPar.instructionsTotal, 3u);
         // The parallel schedule should not be worse than the serial one.
         // (On a 6-wide machine with 2 multiply ports, p0 and p1 should
         // be issued in the same cycle.)
         EXPECT_LE(cPar, 20u); // sanity: should not take >20 cycles for 3 ops
     }
-    EXPECT_TRUE(true); // combined assertion: both cases ran without crash
+    // Verify both cases ran without crash and produced valid IR
+    // (the ASSERT_TRUE in each sub-scope above already covers this).
 }
 
 TEST(HardwareGraphTest, SchedulerQualityLoadEarlyHidesLatency) {

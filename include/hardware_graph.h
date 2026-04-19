@@ -603,7 +603,11 @@ struct SchedulerQuality {
     unsigned peakIntLive        = 0;   ///< Peak integer register live-value count
     unsigned peakVecLive        = 0;   ///< Peak vector/FP register live-value count
     unsigned basicBlocksScheduled = 0; ///< BBs with ≥2 moveable instructions
-    /// Ratio scheduledCycles / theoreticalMinCycles (1.0 = perfect, higher = worse).
+    /// Ratio criticalPath / scheduledCycles (1.0 = perfect, <1.0 = suboptimal).
+    /// A value of 1.0 means we achieved the theoretical minimum (scheduled in
+    /// exactly as many cycles as the longest dependency chain requires).
+    /// Values below 1.0 indicate the schedule required more cycles than the
+    /// critical path, e.g. due to resource contention or suboptimal ordering.
     /// Set to 0.0 when no scheduling was performed or the function is empty.
     double   efficiency         = 0.0;
 };
