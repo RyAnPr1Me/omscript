@@ -184,7 +184,8 @@ static UnifiedExecutionModel buildExecutionModel(const llvm::Function& F,
         if (auto l1 = TTI.getCacheSize(llvm::TargetTransformInfo::CacheLevel::L1D);
                 l1 && *l1 > 0)
             l1Bytes = static_cast<unsigned>(*l1);
-        // Minimum: two cache lines worth of elements to avoid spurious promotion.
+        // Minimum: two cache lines worth of elements to avoid spurious promotion
+        // of loops with only a handful of iterations (e.g. loop count = 3).
         const unsigned minElems = (2u * cacheLineBytes) / 8u;
         model.streamingMinElements = std::max(l1Bytes / 8u, minElems);
     }
@@ -198,7 +199,9 @@ static UnifiedExecutionModel buildExecutionModel(const llvm::Function& F,
     // ── Register-file–derived budgets ─────────────────────────────────────
     const unsigned scalarRegs = TTI.getNumberOfRegisters(/*Vector=*/false);
     if (scalarRegs > 0) {
-        // Tree rebalancing max width: leave headroom for values live outside the tree.
+        // Tree rebalancing max width: reserve 6 registers for values live outside
+        // the tree (loop induction variable, accumulator, pointers, flags) so that
+        // widening the tree does not spill those live-on-exit values to the stack.
         const unsigned pressureBudget = scalarRegs > 6u ? scalarRegs - 6u : scalarRegs;
         model.treeMaxLeaves = std::clamp<unsigned>(pressureBudget / 2u, 4u, 12u);
 
