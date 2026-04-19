@@ -299,13 +299,21 @@ private:
 // Step 5 — Hardware-aware cost model
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Forward declaration — MicroarchProfile is defined below (Step 7).
+// Required so that HardwareCostModel can store a reference to it.
+struct MicroarchProfile;
+
 /// Hardware-aware cost model that replaces the normal cost model when HGOE
-/// is active.  Costs are derived from the microarchitecture profile.
+/// is active.  Costs are derived directly from the microarchitecture profile
+/// via getOpcodeLatency — the single authoritative latency lookup function.
 class HardwareCostModel {
 public:
-    explicit HardwareCostModel(const HardwareGraph& hw);
+    /// Construct from both the hardware graph (for structural simulation)
+    /// and the microarchitecture profile (for accurate per-opcode latencies).
+    HardwareCostModel(const HardwareGraph& hw, const MicroarchProfile& profile);
 
     /// Cost of a single instruction on the target hardware.
+    /// Delegates to getOpcodeLatency(inst, profile_).
     double instructionCost(const llvm::Instruction* inst) const;
 
     /// Cost of executing the program graph on the hardware graph.
@@ -320,6 +328,7 @@ public:
 
 private:
     const HardwareGraph& hw_;
+    const MicroarchProfile& profile_; ///< Single authoritative source for latencies
     unsigned vectorWidth_ = 4;
     double issueWidth_ = 4.0;
     double cacheMissL1Penalty_ = 4.0;
@@ -415,6 +424,25 @@ struct MicroarchProfile {
     // most microarchitectures (e.g. only 2 of 4 ports on Skylake, port 1 only
     // on Haswell).  The scheduler uses this to avoid overcommitting ALU capacity.
     unsigned mulPortCount = 1;      ///< ALU port instances capable of integer multiply
+
+    // Store-to-load forwarding latency.
+    // When a load immediately follows a store to the same address, the value
+    // can be forwarded from the store buffer without going through the cache.
+    // This latency is used as the Store→Load RAW dependency edge weight in the
+    // scheduler, replacing the less accurate `latStore` value.
+    // Typically equals latLoad (the L1 hit latency) on most architectures.
+    // On some ARM cores (e.g. Apple M-series) forwarding is slower than the
+    // store execution latency because the store buffer comparison adds cycles.
+    unsigned latStoLForward = 4;    ///< Store-to-load forwarding latency (cycles)
+
+    // 512-bit SIMD throughput penalty.
+    // On CPUs that implement 512-bit SIMD by double-pumping 256-bit execution
+    // units (e.g. Skylake-AVX512, Ice Lake), issuing a 512-bit instruction
+    // occupies the FMA/VecALU port for 2 cycles instead of 1.
+    // The latency is unchanged; only throughput (port occupancy) is halved.
+    //   1 = native 512-bit unit (no penalty): Sapphire Rapids, Zen 5, etc.
+    //   2 = double-pumped (2× port occupancy): Skylake-AVX512, Ice Lake, etc.
+    unsigned vec512Penalty = 1;     ///< FMA/VecALU throughput multiplier for 512-bit ops
 };
 
 /// Look up a microarchitecture profile by CPU name.
@@ -425,9 +453,9 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName);
 HardwareGraph buildHardwareGraph(const MicroarchProfile& profile);
 
 /// Compute instruction latency cost directly from a microarchitecture profile.
-/// Lightweight alternative to HardwareCostModel::instructionCost that does not
-/// require a full HardwareGraph to be constructed.  Returns latency in cycles.
-/// Used by the superoptimizer's unified cost model when hardware info is available.
+/// Returns latency in cycles.  This is the single authoritative latency lookup:
+/// HardwareCostModel::instructionCost() and ProgramGraph::buildFromFunction()
+/// both delegate to this function, ensuring all cost estimates stay consistent.
 double instrCostFromProfile(const llvm::Instruction* inst, const MicroarchProfile& profile);
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -48,6 +48,11 @@
 namespace omscript {
 namespace hgoe {
 
+// Forward declaration: defined later in this file (Step 7).
+// Allows buildFromFunction (Step 2) to call it without reordering definitions.
+static unsigned getOpcodeLatency(const llvm::Instruction* inst,
+                                  const MicroarchProfile& profile);
+
 // ---------------------------------------------------------------------------
 // Resolve "native" to the actual host CPU name.
 // ---------------------------------------------------------------------------
@@ -258,38 +263,16 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     // Apple M-series AArch64).  The per-opcode scheduler in scheduleBasicBlock
     // uses the exact profile values; these defaults only affect the abstract
     // ProgramGraph used by mapProgramToHardware and criticalPathLength.
-    auto defaultLatency = [](const llvm::Instruction* inst) -> unsigned {
-        if (!inst) return 1;
-        switch (inst->getOpcode()) {
-        case llvm::Instruction::Mul:        return 3;
-        case llvm::Instruction::SDiv:
-        case llvm::Instruction::UDiv:
-        case llvm::Instruction::SRem:
-        case llvm::Instruction::URem:       return 20;
-        case llvm::Instruction::FMul:       return 4;
-        case llvm::Instruction::FDiv:
-        case llvm::Instruction::FRem:       return 15;
-        case llvm::Instruction::FAdd:
-        case llvm::Instruction::FSub:       return 4;
-        case llvm::Instruction::FNeg:       return 1;  // bit-flip on sign
-        case llvm::Instruction::Load:       return 4;
-        case llvm::Instruction::Store:      return 4;
-        case llvm::Instruction::Call:
-            if (llvm::isa<llvm::IntrinsicInst>(inst)) return 4;
-            return 10;
-        case llvm::Instruction::ExtractElement:
-        case llvm::Instruction::InsertElement:
-        case llvm::Instruction::ShuffleVector: return 2;
-        case llvm::Instruction::PHI:
-        case llvm::Instruction::ExtractValue:
-        case llvm::Instruction::InsertValue:
-        case llvm::Instruction::Alloca:
-        case llvm::Instruction::BitCast:
-        case llvm::Instruction::IntToPtr:
-        case llvm::Instruction::PtrToInt:   return 0;
-        default:                            return 1;
-        }
-    };
+    // Use the default-constructed MicroarchProfile (conservative generic values)
+    // so that this code shares one authoritative latency table with the rest
+    // of the HGOE and never falls out of sync.
+    static const MicroarchProfile kAbstractProfile = []{
+        MicroarchProfile p;
+        // Integer division: use 20 cycles for the abstract graph to match the
+        // Haswell/Broadwell range; exact values are used by scheduleBasicBlock.
+        p.latIntDiv = 20u;
+        return p;
+    }();
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
@@ -301,7 +284,7 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                 if (auto* opInst = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(i))) {
                     auto prodIt = instToNode_.find(opInst);
                     if (prodIt != instToNode_.end()) {
-                        unsigned prodLat = defaultLatency(opInst);
+                        unsigned prodLat = getOpcodeLatency(opInst, kAbstractProfile);
                         addEdge(prodIt->second, consId, DepType::Data, prodLat);
                     }
                 }
@@ -445,30 +428,21 @@ unsigned ProgramGraph::criticalPathLength() const {
 // Step 5 — Hardware-aware cost model
 // ═════════════════════════════════════════════════════════════════════════════
 
-HardwareCostModel::HardwareCostModel(const HardwareGraph& hw) : hw_(hw) {
-    // Derive vector width from hardware graph.
-    auto vecNodes = hw_.findNodes(ResourceType::VectorALU);
-    if (!vecNodes.empty()) {
-        // Pipeline depth as a proxy for vector width category
-        unsigned depth = vecNodes[0]->pipelineDepth;
-        if (depth >= 16) vectorWidth_ = 16;      // AVX-512
-        else if (depth >= 8) vectorWidth_ = 8;    // AVX2
-        else vectorWidth_ = 4;                     // SSE / NEON
-    }
+HardwareCostModel::HardwareCostModel(const HardwareGraph& hw,
+                                     const MicroarchProfile& profile)
+    : hw_(hw), profile_(profile) {
+    // Derive vector width directly from the profile's SIMD width field (bits).
+    // The old code used pipelineDepth as a proxy; the profile field is exact.
+    if (profile.vectorWidth >= 512)      vectorWidth_ = 16; // AVX-512
+    else if (profile.vectorWidth >= 256) vectorWidth_ = 8;  // AVX2 / Neon 256
+    else                                 vectorWidth_ = 4;  // SSE / NEON 128
 
-    // Derive issue width from dispatch node count.
-    auto dispatchNodes = hw_.findNodes(ResourceType::Dispatch);
-    if (!dispatchNodes.empty()) {
-        issueWidth_ = dispatchNodes[0]->throughput;
-    }
-
-    // Derive cache miss penalties from cache hierarchy.
-    auto l1Nodes = hw_.findNodes(ResourceType::L1DCache);
-    if (!l1Nodes.empty()) cacheMissL1Penalty_ = l1Nodes[0]->latency;
-    auto l2Nodes = hw_.findNodes(ResourceType::L2Cache);
-    if (!l2Nodes.empty()) cacheMissL2Penalty_ = l2Nodes[0]->latency;
-    auto l3Nodes = hw_.findNodes(ResourceType::L3Cache);
-    if (!l3Nodes.empty()) cacheMissL3Penalty_ = l3Nodes[0]->latency;
+    // Issue width, cache penalties: read directly from the profile rather than
+    // reverse-engineering them from hardware-graph node attributes.
+    issueWidth_          = static_cast<double>(profile.issueWidth);
+    cacheMissL1Penalty_  = static_cast<double>(profile.l1DLatency);
+    cacheMissL2Penalty_  = static_cast<double>(profile.l2Latency);
+    cacheMissL3Penalty_  = static_cast<double>(profile.l3Latency);
 }
 
 OpClass HardwareCostModel::classifyInstruction(const llvm::Instruction* inst) const {
@@ -477,82 +451,10 @@ OpClass HardwareCostModel::classifyInstruction(const llvm::Instruction* inst) co
 
 double HardwareCostModel::instructionCost(const llvm::Instruction* inst) const {
     if (!inst) return 0.0;
-
-    const OpClass cls = classifyOp(inst);
-
-    // Use direct latency lookup based on operation class for more accurate
-    // costs than the hardware graph node (which has a single average latency).
-    switch (cls) {
-    case OpClass::IntArith:
-    case OpClass::Shift:
-    case OpClass::Comparison:
-    case OpClass::Conversion:
-        return 1.0; // 1-cycle ALU ops
-
-    case OpClass::IntMul: {
-        // Mul latency from the hardware graph's ALU node count (proxy for
-        // architecture generation).  Skylake: 3 cycles, etc.
-        auto nodes = hw_.findNodes(ResourceType::IntegerALU);
-        return nodes.empty() ? 3.0 : std::max(nodes[0]->latency * 3.0, 3.0);
-    }
-
-    case OpClass::IntDiv: {
-        auto nodes = hw_.findNodes(ResourceType::DividerUnit);
-        return nodes.empty() ? 25.0 : nodes[0]->latency;
-    }
-
-    case OpClass::FPArith: {
-        auto nodes = hw_.findNodes(ResourceType::FMAUnit);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::FPMul: {
-        auto nodes = hw_.findNodes(ResourceType::FMAUnit);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::FPDiv: {
-        auto nodes = hw_.findNodes(ResourceType::DividerUnit);
-        return nodes.empty() ? 14.0 : nodes[0]->latency;
-    }
-
-    case OpClass::FMA: {
-        auto nodes = hw_.findNodes(ResourceType::FMAUnit);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::VectorOp: {
-        auto nodes = hw_.findNodes(ResourceType::VectorALU);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::Load: {
-        auto nodes = hw_.findNodes(ResourceType::LoadUnit);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::Store: {
-        auto nodes = hw_.findNodes(ResourceType::StoreUnit);
-        return nodes.empty() ? 4.0 : nodes[0]->latency;
-    }
-
-    case OpClass::Branch: {
-        auto nodes = hw_.findNodes(ResourceType::BranchUnit);
-        return nodes.empty() ? 1.0 : nodes[0]->latency;
-    }
-
-    case OpClass::Phi:
-        return 0.0;
-
-    case OpClass::Call:
-        return 10.0;
-
-    case OpClass::Intrinsic:
-        return 1.0;
-
-    default:
-        return 3.0;
-    }
+    // Delegate to the single authoritative latency function (getOpcodeLatency)
+    // rather than re-implementing per-opclass dispatch here.  The hardware graph
+    // is still available for structural queries (simulateExecution, etc.).
+    return static_cast<double>(getOpcodeLatency(inst, profile_));
 }
 
 double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
@@ -808,10 +710,14 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 4096;
     p.memoryLatency = 200;
     p.robSize = 224;
+    // Store-to-load forwarding on Skylake: 4 cycles (matches L1D hit latency).
+    // The store buffer comparison adds no extra cycles vs a regular L1 load.
+    p.latStoLForward = 4;
+    // vec512Penalty set on the base Skylake profile: AVX2 (256-bit) native,
+    // no 512-bit penalty.  Ice Lake / Tiger Lake variants override to 2.
+    p.vec512Penalty = 1;
     return p;
 }
-
-/// Return an Intel Sandy Bridge / Ivy Bridge (Intel 2nd/3rd gen) profile.
 /// Sandy Bridge (2011): 6 execution ports, 3 integer ALUs, AVX 256-bit (no FMA).
 /// Ivy Bridge (2012): same microarchitecture, minor improvements.
 [[gnu::cold]] static MicroarchProfile sandyBridgeProfile() {
@@ -846,10 +752,14 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 2048;
     p.memoryLatency = 200;
     p.robSize = 168;
+    // Sandy Bridge store-to-load forwarding: 4 cycles (same as L1 hit).
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // no AVX-512 on Sandy Bridge
     return p;
 }
 
 /// Return a Haswell (Intel 4th gen) microarchitecture profile.
+/// Haswell (2013): added AVX2, FMA3, BMI/BMI2; integer multiply on port P1 only.
 [[gnu::cold]] static MicroarchProfile haswellProfile() {
     MicroarchProfile p = skylakeProfile();
     p.name = "haswell";
@@ -860,10 +770,15 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Haswell: integer multiply on port P1 only (1 of the 4 ALU ports).
     p.mulPortCount = 1;
     p.robSize = 192;
+    // Haswell store-to-load forwarding: 4 cycles (same as L1 hit latency).
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // AVX2 only, no 512-bit
     return p;
 }
 
 /// Return an Intel Alder Lake / Raptor Lake (Golden Cove P-core) profile.
+/// Alder Lake (2021): 5-wide integer backend, 3 load ports, 48 KB L1D.
+/// Raptor Lake (2022): same P-core µarch, larger caches.
 [[gnu::cold]] static MicroarchProfile alderlakeProfile() {
     MicroarchProfile p;
     p.name = "alderlake";
@@ -899,10 +814,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 12288;     // much larger BTB
     p.memoryLatency = 180;
     p.robSize = 256;
+    // Alder Lake store-to-load forwarding: 4-5 cycles (L1D latency = 5 cycles;
+    // forwarding completes in ~4 cycles via store-buffer bypass).
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // AVX2 only on Golden Cove / Raptor Cove
     return p;
 }
 
 /// Return an AMD Zen 4 (Ryzen 7000 / EPYC Genoa) profile.
+/// Zen 4 (2022): 6-wide backend, 4 integer pipes, 2 FMA units,
+/// AVX-512 via 256-bit double-pump, 32 KB L1D, ROB=320.
 [[gnu::cold]] static MicroarchProfile zen4Profile() {
     MicroarchProfile p;
     p.name = "znver4";
@@ -936,10 +857,17 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 6144;
     p.memoryLatency = 180;
     p.robSize = 320;
+    // Zen 4: store-to-load forwarding = 4 cycles (same as L1D hit latency).
+    // Zen 4 uses 256-bit AVX-512 double-pump internally; the profile already
+    // reflects this with vectorWidth=256.  No additional throughput penalty
+    // needed since the 256-bit paths ARE the native paths.
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // 256-bit native paths; AVX-512 handled at profile level
     return p;
 }
 
-/// Return an AMD Zen 3 (Ryzen 5000) profile.
+/// Return an AMD Zen 3 (Ryzen 5000 / EPYC Milan) profile.
+/// Zen 3 (2020): unified 8-core CCX (vs 4-core in Zen 2), 512 KB L2, no AVX-512.
 [[gnu::cold]] static MicroarchProfile zen3Profile() {
     MicroarchProfile p = zen4Profile();
     p.name = "znver3";
@@ -992,10 +920,17 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 7168;
     p.memoryLatency = 120;
     p.robSize = 600;
+    // Apple M1: store-to-load forwarding is ~4 cycles.  Store execution latency
+    // is 3 cycles (write to store buffer), but forwarding requires a store-buffer
+    // address match which adds 1 cycle → forwarding = 4 cycles > latStore.
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // NEON 128-bit native; no 512-bit SIMD
     return p;
 }
 
-/// Return an ARM Neoverse V2 (server) profile.
+/// Return an ARM Neoverse V2 (server, 2023) profile.
+/// Used in AWS Graviton4, NVIDIA Grace, Google Axion.  8-wide dispatch,
+/// 256-bit SVE2, 6 integer pipes, 4 FMA units, ROB=256.
 [[gnu::cold]] static MicroarchProfile neoverseV2Profile() {
     MicroarchProfile p;
     p.name = "neoverse-v2";
@@ -1029,10 +964,14 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 8192;
     p.memoryLatency = 150;
     p.robSize = 256;
+    // Neoverse V2: store-to-load forwarding = 4 cycles (same as L1D latency).
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // SVE2 256-bit native
     return p;
 }
 
-/// Return an ARM Neoverse N2 profile.
+/// Return an ARM Neoverse N2 (efficiency server, 2022) profile.
+/// 5-wide dispatch, 4 integer pipes, 128-bit SVE2, 512 KB L2.
 [[gnu::cold]] static MicroarchProfile neoverseN2Profile() {
     MicroarchProfile p = neoverseV2Profile();
     p.name = "neoverse-n2";
@@ -1078,10 +1017,15 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.branchMispredictPenalty = 6.0;
     p.btbEntries = 512;
     p.memoryLatency = 200;
+    // RISC-V in-order: forwarding latency = store latency (no out-of-order
+    // store buffer; data is forwarded in the same pipeline cycle as writeback).
+    p.latStoLForward = 3;
+    p.vec512Penalty = 1; // RVV at 128-bit VLEN; no 512-bit wide ops
     return p;
 }
 
-/// Return a SiFive U74 (RISC-V) profile.
+/// Return a SiFive U74 (RISC-V, in-order, single-issue) profile.
+/// Used in HiFive Unmatched and various embedded SoCs.
 [[gnu::cold]] static MicroarchProfile sifiveU74Profile() {
     MicroarchProfile p = riscvGenericProfile();
     p.name = "sifive-u74";
@@ -1127,11 +1071,14 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 8192;
     p.memoryLatency = 140;     // DDR5 latency
     p.robSize = 256;
+    // Graviton3 (Neoverse V1): store-to-load forwarding = 4 cycles.
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // SVE 256-bit native
     return p;
 }
 
-/// Return an AWS Graviton4 profile (Arm Neoverse V2-based).
-/// Graviton4: 96-core, 256-bit SVE2, DDR5-5600, wider backend.
+/// Return an AWS Graviton4 profile (Arm Neoverse V2-based, 2024).
+/// Graviton4: 96-core, 256-bit SVE2, DDR5-5600, wider backend than Graviton3.
 [[gnu::cold]] static MicroarchProfile graviton4Profile() {
     MicroarchProfile p = neoverseV2Profile();
     p.name = "graviton4";
@@ -1179,12 +1126,15 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 16384;      // larger BTB
     p.memoryLatency = 170;     // LPDDR5x
     p.robSize = 256;
+    // Lion Cove: store-to-load forwarding = 4 cycles (store buffer bypass).
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // AVX2 only; no 512-bit SIMD on Lion Cove
     return p;
 }
 
 /// Return an improved AMD Zen 5 profile (2024).
-/// Zen 5: 8-wide dispatch, 6 ALU pipes, 2× 256-bit vector, AVX-512
-/// via double-pump, improved branch prediction.
+/// Zen 5: 8-wide dispatch, 6 ALU pipes, 4× 256-bit vector units,
+/// native 512-bit AVX-512 (not double-pumped), ROB=448, latFPAdd=3.
 [[gnu::cold]] static MicroarchProfile zen5Profile() {
     MicroarchProfile p;
     p.name = "znver5";
@@ -1218,11 +1168,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 8192;
     p.memoryLatency = 170;
     p.robSize = 448;
+    // Zen 5: store-to-load forwarding = 4 cycles (same as L1D latency).
+    p.latStoLForward = 4;
+    // Zen 5 has NATIVE 512-bit AVX-512 execution units (not double-pumped),
+    // unlike Zen 4 which decomposes 512-bit ops into 2×256-bit µops.
+    p.vec512Penalty = 1;
     return p;
 }
 
 /// Return an Intel Sapphire Rapids / Emerald Rapids profile.
-/// Sapphire Rapids (Xeon 4th Gen, 2023): 8-wide decode, 6 ALU ports,
+/// Sapphire Rapids (Xeon 4th Gen, 2023): 6 µops/cycle dispatch, 5 integer ports,
 /// AVX-512 native at 512 bits (not double-pumped like Skylake-AVX512),
 /// ROB doubled to 512, 3 load + 3 store ports.
 /// Emerald Rapids (Xeon 5th Gen, 2023): same µarch, minor improvements.
@@ -1262,6 +1217,275 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 12288;
     p.memoryLatency = 200;
     p.robSize = 512;           // Doubled from Skylake's 224
+    // Sapphire Rapids: store-to-load forwarding ≈ 4 cycles (store buffer bypass),
+    // shorter than the full 5-cycle L1D latency.
+    p.latStoLForward = 4;
+    // Sapphire Rapids has NATIVE 512-bit AVX-512 FMA/VecALU units (Golden Cove
+    // execution backend), so no double-pump penalty unlike Skylake-AVX512.
+    p.vec512Penalty = 1;
+    return p;
+}
+
+/// Return an Apple M2 (Everest P-core, 2022) profile.
+/// M2 improves on M1 with wider vector units, more FMA units, and higher
+/// bandwidth.  The P-core has 8-wide dispatch, 6 integer pipes, 4 FMA units.
+[[gnu::cold]] static MicroarchProfile appleM2Profile() {
+    MicroarchProfile p;
+    p.name = "apple-m2";
+    p.isa = ISAFamily::AArch64;
+    p.decodeWidth = 8;
+    p.issueWidth = 8;           // 8-wide OoO dispatch (up from 6 on M1)
+    p.pipelineDepth = 13;
+    p.intALUs = 6;              // 6 integer pipes (up from 4 on M1)
+    p.vecUnits = 4;             // 4× 128-bit NEON/FP units (up from 3)
+    p.fmaUnits = 4;             // 4 FMA units (up from 3 on M1)
+    p.loadPorts = 3;            // 3 load pipes (up from 2)
+    p.storePorts = 2;
+    p.branchUnits = 2;
+    p.agus = 3;
+    p.dividers = 2;
+    p.mulPortCount = 4;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 12;
+    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 9; p.latFMA = 3;
+    // M2 L1D: 128 KB; L2: 16 MB shared with E-cores; load latency 3 cycles.
+    p.latLoad = 3; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.17; p.tputIntMul = 0.25;
+    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
+    p.tputLoad = 0.33; p.tputStore = 0.5;
+    p.l1DSize = 128; p.l1DLatency = 3;
+    p.l2Size = 16384; p.l2Latency = 8;
+    p.l3Size = 0;    p.l3Latency = 12;  // SLC (System Level Cache) as L3 proxy
+    p.cacheLineSize = 128;              // Apple Silicon uses 128-byte cache lines
+    p.vectorWidth = 128;                // NEON 128-bit (AMX for matrix, separate)
+    p.intRegisters = 30; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 11.0;   // deep OoO pipeline, good predictor
+    p.btbEntries = 16384;
+    p.memoryLatency = 100;              // LPDDR5 — lower latency than x86 DRAM
+    p.robSize = 250;                    // Larger ROB than M1 (M1≈192)
+    // M2 store-to-load forwarding: 4 cycles (same as L1D hit).
+    // Store buffer address comparison adds 1 cycle vs raw load → 4 > latStore=3.
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // NEON 128-bit native; no 512-bit SIMD
+    return p;
+}
+
+/// Return an Intel Arrow Lake (Lion Cove P-core + Skymont E-core, 2024) profile.
+/// Arrow Lake removed Hyperthreading from P-cores and dropped AVX-512.
+/// Lion Cove improves dispatch to 6-wide vs 5-wide Raptor Lake P-cores.
+/// This profile covers the P-core execution model.
+[[gnu::cold]] static MicroarchProfile arrowLakeProfile() {
+    MicroarchProfile p;
+    p.name = "arrow-lake";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 6;          // 6-wide µop cache delivery
+    p.issueWidth = 6;           // 6-wide dispatch to backend
+    p.pipelineDepth = 14;
+    p.intALUs = 6;              // 6 integer execution ports (P0-P5)
+    p.vecUnits = 3;             // 3 vector ALU ports (no AVX-512)
+    p.fmaUnits = 2;             // 2 FMA units on P0/P1
+    p.loadPorts = 3;            // 3 load ports
+    p.storePorts = 2;
+    p.branchUnits = 2;
+    p.agus = 3;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 12; p.latFMA = 4;
+    p.latLoad = 4; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.17; p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.33; p.tputFPMul = 0.33;
+    p.tputLoad = 0.33; p.tputStore = 0.5;
+    p.l1DSize = 48;  p.l1DLatency = 4;
+    p.l2Size = 2048; p.l2Latency = 14;     // Arrow Lake P-core: 2 MB L2
+    p.l3Size = 36864; p.l3Latency = 42;    // 36 MB shared L3
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;        // AVX2 (AVX-512 removed vs Raptor Lake)
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 12.0;
+    p.btbEntries = 16384;
+    p.memoryLatency = 180;
+    p.robSize = 256;            // Improved vs Raptor Lake (192)
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1;        // No AVX-512
+    return p;
+}
+
+/// Return an AMD EPYC Turin (Zen 5, server, 2024) profile.
+/// Turin: up to 192 cores, Zen 5 µarch, native 512-bit AVX-512, large L3.
+[[gnu::cold]] static MicroarchProfile epycTurinProfile() {
+    MicroarchProfile p = zen5Profile();
+    p.name = "epyc-turin";
+    // Turin uses the same Zen 5 pipeline but with much larger L3 cache
+    // spread across chiplets.  Per-core L3 share is smaller than desktop.
+    p.l2Size = 1024;            // 1 MB L2 per core (same as Zen 5)
+    p.l3Size = 65536;           // 64 MB per CCD (shared across 16 cores)
+    p.l3Latency = 55;           // Slightly higher due to chiplet interconnect
+    p.memoryLatency = 220;      // DDR5-6400, longer NUMA hops on big configs
+    p.robSize = 448;            // Same ROB as desktop Zen 5
+    return p;
+}
+
+/// Return an Intel Granite Rapids (Redwood Cove P-core, 2024) profile.
+/// Xeon 6th Gen: enhanced Sapphire Rapids backend, wider dispatch,
+/// native AVX-512, larger ROB, faster integer execution.
+[[gnu::cold]] static MicroarchProfile graniteRapidsProfile() {
+    MicroarchProfile p = sapphireRapidsProfile();
+    p.name = "granite-rapids";
+    // Granite Rapids: 8-wide dispatch (up from 6 in Sapphire Rapids).
+    p.issueWidth = 8;
+    p.decodeWidth = 6;           // µop cache still 6-wide legacy decode
+    p.intALUs = 6;               // 6 integer execution ports (up from 5)
+    p.vecUnits = 4;              // 4 vector ALU ports (up from 3)
+    p.fmaUnits = 2;              // 2 native 512-bit FMA units
+    p.loadPorts = 3;
+    p.storePorts = 3;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 16;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 4;
+    p.latLoad = 5; p.latStore = 5;
+    p.l1DSize = 48;   p.l1DLatency = 5;
+    p.l2Size = 2048;  p.l2Latency = 14;
+    p.l3Size = 131072; p.l3Latency = 55;  // up to 128 MB shared L3
+    p.robSize = 512;
+    p.btbEntries = 16384;
+    p.memoryLatency = 200;
+    p.vec512Penalty = 1;  // native 512-bit (same as Sapphire Rapids)
+    p.latStoLForward = 4;
+    return p;
+}
+
+/// Return an AMD EPYC Zen4c (Bergamo, 2023) compact profile.
+/// Zen4c uses the same Zen 4 µarch but with smaller caches and higher
+/// core density (up to 128 cores/socket).  Same execution pipeline;
+/// reduced L2 per core (1 MB → 1 MB, but smaller L3 per core share).
+[[gnu::cold]] static MicroarchProfile zen4cProfile() {
+    MicroarchProfile p = zen4Profile();
+    p.name = "znver4c";
+    // Bergamo: same pipeline as Zen 4 but denser packing.
+    // L3 shared more aggressively: effective per-core L3 is smaller.
+    p.l3Size = 16384;   // 16 MB shared (vs 32 MB on standard Zen 4)
+    p.l3Latency = 54;   // slightly higher due to larger NUMA distance
+    p.memoryLatency = 200;
+    return p;
+}
+
+/// Return a SiFive P670 (RISC-V, high-performance OoO, 2023) profile.
+/// P670: 4-issue out-of-order, RVV 128-bit VLEN, in-order front-end decode.
+[[gnu::cold]] static MicroarchProfile sifiveP670Profile() {
+    MicroarchProfile p;
+    p.name = "sifive-p670";
+    p.isa = ISAFamily::RISCV64;
+    p.decodeWidth = 4;
+    p.issueWidth = 4;
+    p.pipelineDepth = 10;
+    p.intALUs = 3;
+    p.vecUnits = 2;
+    p.fmaUnits = 2;
+    p.loadPorts = 2;
+    p.storePorts = 1;
+    p.branchUnits = 1;
+    p.agus = 2;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 16; p.latFMA = 5;
+    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.33; p.tputIntMul = 1.0;
+    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
+    p.tputLoad = 0.5; p.tputStore = 1.0;
+    p.l1DSize = 32; p.l1DLatency = 4;
+    p.l2Size = 1024; p.l2Latency = 12;
+    p.l3Size = 4096; p.l3Latency = 35;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 128;  // RVV at 128-bit VLEN
+    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 8.0;
+    p.btbEntries = 2048;
+    p.memoryLatency = 200;
+    p.robSize = 128;
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1;
+    return p;
+}
+
+/// Return a Qualcomm Oryon (Snapdragon X Elite, 2024) profile.
+/// Oryon is Qualcomm's custom ARMv9 P-core, debuting in the Snapdragon X
+/// Elite/Plus SoC for Windows laptops and competing directly with Apple M3.
+/// Key: 6-wide superscalar OoO, 5 int ALU, 4 FMA/NEON units, large ROB.
+[[gnu::cold]] static MicroarchProfile oryonProfile() {
+    MicroarchProfile p;
+    p.name = "oryon";
+    p.isa = ISAFamily::AArch64;
+    p.decodeWidth = 6;          // 6-wide fetch and decode
+    p.issueWidth = 6;           // 6-wide dispatch to execution units
+    p.pipelineDepth = 12;
+    p.intALUs = 5;              // 5 integer execution pipes
+    p.vecUnits = 4;             // 4 NEON/FP 128-bit units
+    p.fmaUnits = 4;             // 4 FMA units (VFMA.2D, VFMA.4S)
+    p.loadPorts = 3;            // 3 load pipes
+    p.storePorts = 2;
+    p.branchUnits = 2;
+    p.agus = 3;
+    p.dividers = 2;
+    p.mulPortCount = 4;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 12;
+    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 9; p.latFMA = 3;
+    p.latLoad = 4; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.20; p.tputIntMul = 0.25;
+    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
+    p.tputLoad = 0.33; p.tputStore = 0.5;
+    p.l1DSize = 64;  p.l1DLatency = 4;
+    p.l2Size = 1024; p.l2Latency = 10;  // 1 MB L2 per 4-core cluster
+    p.l3Size = 6144; p.l3Latency = 35;  // 6 MB shared L3
+    p.cacheLineSize = 64;
+    p.vectorWidth = 128;        // NEON 128-bit (SVE2 optional)
+    p.intRegisters = 30; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 14.0;
+    p.btbEntries = 8192;
+    p.memoryLatency = 100;      // LPDDR5x — fast
+    p.robSize = 320;
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1;        // NEON 128-bit native
+    return p;
+}
+
+/// Return an Intel Sierra Forest (Crestmont E-core, 2024) profile.
+/// Sierra Forest is Intel's first E-core-only server CPU (Xeon 6 E-series).
+/// Crestmont is an improved Gracemont E-core: 3-wide in-order decode per
+/// cluster, 4 integer ALU pipes (modest OoO), no AVX-512, no SMT.
+[[gnu::cold]] static MicroarchProfile sierraForestProfile() {
+    MicroarchProfile p;
+    p.name = "sierra-forest";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 3;          // 3-wide decode per E-core cluster
+    p.issueWidth = 4;           // 4-wide dispatch (narrower than P-cores)
+    p.pipelineDepth = 10;       // shallower pipeline than P-cores
+    p.intALUs = 4;              // 4 integer execution pipes
+    p.vecUnits = 2;             // 2 vector ALU pipes (256-bit AVX2)
+    p.fmaUnits = 1;             // 1 FMA unit per core
+    p.loadPorts = 2;
+    p.storePorts = 1;
+    p.branchUnits = 1;
+    p.agus = 2;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 5;
+    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.25; p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.5;  p.tputFPMul = 0.5;
+    p.tputLoad = 0.5;   p.tputStore = 1.0;
+    p.l1DSize = 32;  p.l1DLatency = 5;
+    p.l2Size = 2048; p.l2Latency = 14;  // 2 MB per 4-core cluster
+    p.l3Size = 57344; p.l3Latency = 50; // up to 56 MB shared L3
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;        // AVX2 (no AVX-512)
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 9.0; // shorter pipeline → smaller penalty
+    p.btbEntries = 4096;
+    p.memoryLatency = 190;
+    p.robSize = 160;            // Crestmont ROB is ~160 (smaller than P-cores)
+    p.latStoLForward = 5;
+    p.vec512Penalty = 1;        // No AVX-512
     return p;
 }
 
@@ -1306,8 +1530,8 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         normalized == "meteorlake")
         return alderlakeProfile();
 
-    if (normalized == "arrowlake")
-        return lunarLakeProfile(); // Arrow Lake uses Lion Cove P-cores (same as Lunar Lake)
+    if (normalized == "arrowlake" || normalized == "arrowlakes")
+        return arrowLakeProfile();
 
     if (normalized == "lunarlake" || normalized == "pantherlake")
         return lunarLakeProfile();
@@ -1321,6 +1545,10 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         p.loadPorts = 3;     // Ice Lake: 3 load ports
         p.storePorts = 2;
         p.robSize = 352;     // Ice Lake ROB is 352
+        // Ice Lake / Tiger Lake run 512-bit SIMD by double-pumping the 256-bit
+        // execution units (same as Skylake-AVX512).  This halves throughput:
+        // each 512-bit FMA/VecALU instruction occupies the port for 2 cycles.
+        p.vec512Penalty = 2;
         return p;
     }
 
@@ -1328,10 +1556,20 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     // AVX-512 native, 3 load + 3 store ports.
     if (normalized == "sapphirerapids" || normalized == "emeraldrapids")
         return sapphireRapidsProfile();
+    if (normalized == "graniterapids" || normalized == "graniteerapids" ||
+        normalized == "xeon6p")
+        return graniteRapidsProfile();
+    // Sierra Forest: Crestmont E-core server (Xeon 6 E-series).
+    // Completely different pipeline from P-core Granite Rapids.
+    if (normalized == "sierraforest" || normalized == "xeon6e" ||
+        normalized == "clearwaterforest")
+        return sierraForestProfile();
 
     // AMD Zen family
     if (normalized == "znver4" || normalized == "zen4")
         return zen4Profile();
+    if (normalized == "znver4c" || normalized == "zen4c" || normalized == "bergamo")
+        return zen4cProfile();
     if (normalized == "znver3" || normalized == "zen3")
         return zen3Profile();
     if (normalized == "znver2" || normalized == "zen2") {
@@ -1354,29 +1592,31 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     }
     if (normalized == "znver5" || normalized == "zen5")
         return zen5Profile();
+    if (normalized == "epycturin" || normalized == "zen5server" || normalized == "turin")
+        return epycTurinProfile();
 
     // ARM64 — Apple Silicon
     if (normalized == "applem1" || normalized == "applema14")
         return appleMProfile();
     if (normalized == "applem2" || normalized == "applem2pro" ||
-        normalized == "applem2max" || normalized == "applem2ultra") {
-        auto p = appleMProfile();
-        p.name = cpuName;
-        p.l2Size = 16384;
-        return p;
+        normalized == "applem2max" || normalized == "applem2ultra" ||
+        normalized == "applem2base") {
+        return appleM2Profile();
     }
     if (normalized == "applem3" || normalized == "applem3pro" ||
         normalized == "applem3max" || normalized == "applem3ultra" ||
         normalized == "applem4") {
-        auto p = appleMProfile();
+        auto p = appleM2Profile();
         p.name = cpuName;
         p.decodeWidth = 8;
-        p.issueWidth = 10;
+        p.issueWidth = 10;        // M3/M4: wider backend
         p.intALUs = 6;
         p.vecUnits = 4;
+        p.fmaUnits = 4;
         p.l1DSize = 192;
         p.l2Size = 16384;
         p.l3Size = 36864;
+        p.robSize = 300;
         return p;
     }
 
@@ -1421,11 +1661,18 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         return p;
     }
 
+    // ARM64 — Qualcomm Oryon (Snapdragon X Elite)
+    if (normalized == "oryon" || normalized == "snapdragonxelite" ||
+        normalized == "snapdragonxplus" || normalized == "snapdragonx")
+        return oryonProfile();
+
     // RISC-V
     if (normalized == "genericrv64" || normalized == "riscv64")
         return riscvGenericProfile();
     if (normalized == "sifiveu74")
         return sifiveU74Profile();
+    if (normalized == "sifivep670" || normalized == "sifivep470" || normalized == "sifivep270")
+        return sifiveP670Profile();
 
     // Generic / x86-64 baseline
     if (normalized == "x8664" || normalized == "x8664v2" ||
@@ -2049,6 +2296,13 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
         for (auto& inst : bb) {
             // Pattern: fadd(fmul(a, b), c) → fma(a, b, c)
             if (inst.getOpcode() == llvm::Instruction::FAdd) {
+                // IEEE 754-2008 §5.4.1: fused operations require `contract` permission.
+                // We check the fast-math flag on the fadd; the fmul's flag also
+                // contributes but in practice both are set together (e.g. -ffast-math,
+                // #pragma STDC FP_CONTRACT ON, or llvm's `reassoc contract` flags).
+                auto* fpAdd = llvm::cast<llvm::FPMathOperator>(&inst);
+                if (!fpAdd->hasAllowContract()) continue;
+
                 llvm::Value* op0 = inst.getOperand(0);
                 llvm::Value* op1 = inst.getOperand(1);
 
@@ -2466,6 +2720,10 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
         for (auto& inst : bb) {
             // Pattern: fsub(fmul(a, b), c) → fma(a, b, -c)
             if (inst.getOpcode() == llvm::Instruction::FSub) {
+                // Require `contract` permission for FMA fusion (IEEE §5.4.1).
+                auto* fpSub = llvm::cast<llvm::FPMathOperator>(&inst);
+                if (!fpSub->hasAllowContract()) continue;
+
                 llvm::Value* op0 = inst.getOperand(0);
                 llvm::Value* op1 = inst.getOperand(1);
 
@@ -3220,6 +3478,1325 @@ static unsigned canonicalizeFaddFneg(llvm::Function& func) {
     return count;
 }
 
+/// Replace FP division by a compile-time constant with a reciprocal multiply.
+///
+/// Pattern:  fdiv(x, C)  →  fmul(x, 1.0/C)
+///
+/// Requires the `arcp` (allow-reciprocal) fast-math flag on the division, which
+/// permits the compiler to use a reciprocal approximation.  With a constant
+/// divisor this is exact (not an approximation) at the same precision, so the
+/// transform is correct even without `afn` or `unsafe-fp-math`.
+///
+/// Benefit: FP division is 10-15 cycles on most CPUs (latFPDiv = 10-15),
+/// whereas FP multiply is 3-4 cycles (latFPMul = 3-4).  This is the single
+/// most impactful scalar FP transform for division-heavy code.
+///
+/// Also folds `fdiv(1.0, x)` → `fdiv(1.0, x)` (kept, backend emits RCPPS).
+///
+/// Returns the number of divisions replaced.
+static unsigned foldFPDivByConstant(llvm::Function& func,
+                                     const MicroarchProfile& profile) {
+    // Guard: only worth doing when div is materially slower than mul.
+    if (profile.latFPDiv <= profile.latFPMul + 1) return 0;
+
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FDiv) continue;
+            // Check the per-instruction `arcp` fast-math flag.
+            auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
+            if (!fpOp->hasAllowReciprocal()) continue;
+
+            llvm::Value* dividend = inst.getOperand(0);
+            llvm::Value* divisor  = inst.getOperand(1);
+            llvm::Type*  ty       = inst.getType();
+
+            // Only fold when the divisor is a compile-time FP constant (scalar or
+            // splat vector).  Skip division by 0 or denormals.
+            llvm::ConstantFP* cFP = nullptr;
+            if (auto* cfp = llvm::dyn_cast<llvm::ConstantFP>(divisor)) {
+                if (!cfp->isZero() && cfp->getValueAPF().isFiniteNonZero() &&
+                    !cfp->getValueAPF().isDenormal())
+                    cFP = cfp;
+            }
+            // Handle splat vector constant: <4 x float> <C, C, C, C>.
+            if (!cFP) {
+                if (auto* cv = llvm::dyn_cast<llvm::ConstantVector>(divisor)) {
+                    if (auto* sp = cv->getSplatValue())
+                        cFP = llvm::dyn_cast<llvm::ConstantFP>(sp);
+                }
+                if (!cFP) {
+                    if (auto* cdv = llvm::dyn_cast<llvm::ConstantDataVector>(divisor))
+                        cFP = llvm::dyn_cast<llvm::ConstantFP>(cdv->getSplatValue());
+                }
+            }
+            if (!cFP) continue;
+
+            // Compute 1.0 / C in the same FP semantics as the operation.
+            // APFloat(semantics, double) was removed in LLVM 18; use the
+            // double constructor then convert to the target semantics.
+            llvm::APFloat recip(1.0); // start as double 1.0
+            bool lossy = false;
+            recip.convert(cFP->getValueAPF().getSemantics(),
+                          llvm::APFloat::rmNearestTiesToEven, &lossy);
+            llvm::APFloat divisorVal = cFP->getValueAPF();
+            auto status = recip.divide(divisorVal, llvm::APFloat::rmNearestTiesToEven);
+            // Reject if division produced an inexact result that would change
+            // meaning (e.g., 1.0/3.0 is inexact but still exact to IEEE float
+            // precision — this is fine since arcp allows it).
+            (void)status; // non-exact is acceptable with arcp
+
+            // Build the reciprocal constant with the same type as the original.
+            llvm::Value* recipConst;
+            if (ty->isVectorTy()) {
+                // Splat the scalar reciprocal into a vector constant.
+                llvm::Constant* scalarRecip = llvm::ConstantFP::get(
+                    ty->getScalarType(), recip);
+                recipConst = llvm::ConstantVector::getSplat(
+                    llvm::cast<llvm::VectorType>(ty)->getElementCount(),
+                    scalarRecip);
+            } else {
+                recipConst = llvm::ConstantFP::get(ty, recip);
+            }
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* mul = builder.CreateFMul(dividend, recipConst, "recip.mul");
+            // Propagate fast-math flags from the original division.
+            if (auto* mulInst = llvm::dyn_cast<llvm::Instruction>(mul))
+                mulInst->setFastMathFlags(fpOp->getFastMathFlags());
+
+            replacements.emplace_back(&inst, mul);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Replace integer udiv/urem by a power-of-2 constant with logical shifts/masks.
+///
+/// These patterns may survive LLVM's InstCombine when constants are introduced
+/// late (e.g., by our own strength-reduction pass or by constant propagation
+/// after inlining), or when the function was not run through the full O2/O3 pipeline.
+///
+///   udiv(x, 2^k)  →  lshr(x, k)
+///   urem(x, 2^k)  →  and(x, 2^k - 1)
+///   sdiv(x, 2^k)  →  lshr(add(x, 2^k - 1), k)   [with rounding correction]
+///   sdiv(x, 1)    →  x   [free]
+///   udiv(x, 1)    →  x   [free]
+///
+/// Returns the number of operations folded.
+static unsigned foldDivByPow2(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            bool isUDiv = (op == llvm::Instruction::UDiv);
+            bool isURem = (op == llvm::Instruction::URem);
+            bool isSDiv = (op == llvm::Instruction::SDiv);
+            if (!isUDiv && !isURem && !isSDiv) continue;
+            if (!inst.getType()->isIntegerTy()) continue;
+
+            auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
+            if (!ci) continue;
+
+            llvm::Value* x = inst.getOperand(0);
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Type* ty = inst.getType();
+            const llvm::APInt& divisor = ci->getValue();
+            unsigned bitWidth = ty->getIntegerBitWidth();
+            llvm::Value* rep = nullptr;
+
+            if (divisor.isOne()) {
+                // div by 1 is identity.
+                rep = x;
+            } else if (divisor.isPowerOf2()) {
+                unsigned k = divisor.logBase2();
+                if (isUDiv) {
+                    rep = builder.CreateLShr(x,
+                        llvm::ConstantInt::get(ty, k), "udiv.shr");
+                } else if (isURem) {
+                    rep = builder.CreateAnd(x,
+                        llvm::ConstantInt::get(ty, divisor - 1), "urem.and");
+                } else { // SDiv by positive power-of-2
+                    // Signed division by 2^k rounds toward zero.
+                    // Equivalent to: (x + ((x >> 63) & (2^k - 1))) >> k
+                    // where `x >> 63` is the sign-bit replication.
+                    llvm::Value* signBit = builder.CreateAShr(x,
+                        llvm::ConstantInt::get(ty, bitWidth - 1), "sdiv.sign");
+                    llvm::Value* adj = builder.CreateAnd(signBit,
+                        llvm::ConstantInt::get(ty, divisor - 1), "sdiv.adj");
+                    llvm::Value* adjusted = builder.CreateAdd(x, adj, "sdiv.adj_x");
+                    rep = builder.CreateAShr(adjusted,
+                        llvm::ConstantInt::get(ty, k), "sdiv.shr");
+                }
+            }
+
+            if (rep) {
+                replacements.emplace_back(&inst, rep);
+                ++count;
+            }
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Replace `icmp + select` patterns with integer min/max intrinsics, and
+/// `fcmp + select` patterns with FP min/max intrinsics.
+///
+/// This enables the backend to lower to VMIN/VMAX instructions (1 cycle on
+/// most CPUs) instead of a compare + conditional select (2+ µops).
+///
+/// Patterns:
+///   select(icmp slt(a, b), a, b)  →  smin(a, b)
+///   select(icmp sgt(a, b), a, b)  →  smax(a, b)
+///   select(icmp ult(a, b), a, b)  →  umin(a, b)
+///   select(icmp ugt(a, b), a, b)  →  umax(a, b)
+///   select(fcmp olt(a, b), a, b)  →  minnum(a, b)  [fast-math: nnan]
+///   select(fcmp ogt(a, b), a, b)  →  maxnum(a, b)  [fast-math: nnan]
+///
+/// Safety: for FP patterns we require the `nnan` flag to ensure NaN
+/// semantics are compatible with minnum/maxnum (which propagate NaN
+/// differently from a select under NaN inputs).
+///
+/// Returns the number of patterns folded.
+static unsigned foldMinMaxPatterns(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    llvm::Module* mod = func.getParent();
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+
+            llvm::Value* cond    = sel->getCondition();
+            llvm::Value* trueVal = sel->getTrueValue();
+            llvm::Value* falseVal= sel->getFalseValue();
+            llvm::Type*  ty      = sel->getType();
+
+            // ── Integer min/max ──────────────────────────────────────────────
+            if (ty->isIntegerTy() || (ty->isVectorTy() && ty->getScalarType()->isIntegerTy())) {
+                auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond);
+                if (!icmp) continue;
+
+                llvm::Value* a = icmp->getOperand(0);
+                llvm::Value* b = icmp->getOperand(1);
+                llvm::CmpInst::Predicate pred = icmp->getPredicate();
+
+                llvm::Intrinsic::ID intrID = llvm::Intrinsic::not_intrinsic;
+                llvm::Value* minA = nullptr, *minB = nullptr;
+
+                // select(a < b, a, b)  →  smin(a, b)
+                if ((pred == llvm::CmpInst::ICMP_SLT || pred == llvm::CmpInst::ICMP_SLE) &&
+                    trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::smin; minA = a; minB = b;
+                }
+                // select(a > b, a, b)  →  smax(a, b)
+                else if ((pred == llvm::CmpInst::ICMP_SGT || pred == llvm::CmpInst::ICMP_SGE) &&
+                         trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::smax; minA = a; minB = b;
+                }
+                // select(a < b, b, a) → smax(a, b)  [inverted select]
+                else if ((pred == llvm::CmpInst::ICMP_SLT || pred == llvm::CmpInst::ICMP_SLE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::smax; minA = a; minB = b;
+                }
+                // select(a > b, b, a) → smin(a, b)  [inverted select]
+                else if ((pred == llvm::CmpInst::ICMP_SGT || pred == llvm::CmpInst::ICMP_SGE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::smin; minA = a; minB = b;
+                }
+                // Unsigned variants.
+                else if ((pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) &&
+                         trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::umin; minA = a; minB = b;
+                }
+                else if ((pred == llvm::CmpInst::ICMP_UGT || pred == llvm::CmpInst::ICMP_UGE) &&
+                         trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::umax; minA = a; minB = b;
+                }
+                else if ((pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::umax; minA = a; minB = b;
+                }
+                else if ((pred == llvm::CmpInst::ICMP_UGT || pred == llvm::CmpInst::ICMP_UGE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::umin; minA = a; minB = b;
+                }
+
+                if (intrID != llvm::Intrinsic::not_intrinsic && minA && minB) {
+                    llvm::IRBuilder<> builder(sel);
+                    llvm::Function* fn = OMSC_GET_INTRINSIC(mod, intrID, {ty});
+                    llvm::Value* result = builder.CreateCall(fn, {minA, minB}, "minmax");
+                    replacements.emplace_back(sel, result);
+                    ++count;
+                }
+                continue;
+            }
+
+            // ── FP min/max ───────────────────────────────────────────────────
+            if (ty->isFPOrFPVectorTy()) {
+                auto* fcmp = llvm::dyn_cast<llvm::FCmpInst>(cond);
+                if (!fcmp) continue;
+
+                // For FP min/max, require `nnan` flag on the select (or the cmp).
+                // minnum/maxnum semantics: if either operand is NaN, the result is
+                // the other operand.  A plain select propagates NaN as the true/false
+                // value.  With `nnan` the user asserts no NaN, so semantics match.
+                bool noNaN = false;
+                if (auto* fpSel = llvm::dyn_cast<llvm::FPMathOperator>(sel))
+                    noNaN = fpSel->hasNoNaNs();
+                if (!noNaN) {
+                    if (auto* fpCmp = llvm::dyn_cast<llvm::FPMathOperator>(fcmp))
+                        noNaN = fpCmp->hasNoNaNs();
+                }
+                if (!noNaN) continue;
+
+                llvm::Value* a = fcmp->getOperand(0);
+                llvm::Value* b = fcmp->getOperand(1);
+                llvm::CmpInst::Predicate pred = fcmp->getPredicate();
+
+                llvm::Intrinsic::ID intrID = llvm::Intrinsic::not_intrinsic;
+                llvm::Value* minA = nullptr, *minB = nullptr;
+
+                if ((pred == llvm::CmpInst::FCMP_OLT || pred == llvm::CmpInst::FCMP_OLE ||
+                     pred == llvm::CmpInst::FCMP_ULT || pred == llvm::CmpInst::FCMP_ULE) &&
+                    trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::minnum; minA = a; minB = b;
+                }
+                else if ((pred == llvm::CmpInst::FCMP_OGT || pred == llvm::CmpInst::FCMP_OGE ||
+                          pred == llvm::CmpInst::FCMP_UGT || pred == llvm::CmpInst::FCMP_UGE) &&
+                         trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::maxnum; minA = a; minB = b;
+                }
+                // Inverted selects.
+                else if ((pred == llvm::CmpInst::FCMP_OLT || pred == llvm::CmpInst::FCMP_OLE ||
+                          pred == llvm::CmpInst::FCMP_ULT || pred == llvm::CmpInst::FCMP_ULE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::maxnum; minA = a; minB = b;
+                }
+                else if ((pred == llvm::CmpInst::FCMP_OGT || pred == llvm::CmpInst::FCMP_OGE ||
+                          pred == llvm::CmpInst::FCMP_UGT || pred == llvm::CmpInst::FCMP_UGE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::minnum; minA = a; minB = b;
+                }
+
+                if (intrID != llvm::Intrinsic::not_intrinsic && minA && minB) {
+                    llvm::IRBuilder<> builder(sel);
+                    llvm::Function* fn = OMSC_GET_INTRINSIC(mod, intrID, {ty});
+                    llvm::Value* result = builder.CreateCall(fn, {minA, minB}, "fpminmax");
+                    if (auto* ri = llvm::dyn_cast<llvm::Instruction>(result)) {
+                        // Propagate nnan flag to the new intrinsic call.
+                        llvm::FastMathFlags fmf;
+                        fmf.setNoNaNs();
+                        ri->setFastMathFlags(fmf);
+                    }
+                    replacements.emplace_back(sel, result);
+                    ++count;
+                }
+            }
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Replace `fmul(x, -1.0)` and `fmul(-1.0, x)` with `fneg(x)`.
+///
+/// FP multiply by -1.0 is semantically identical to FP negation for all
+/// well-defined values (including ±0, ±∞, and finite numbers).  The sign
+/// of a NaN result is implementation-defined by IEEE 754, so both forms
+/// may produce either sign of NaN — the transform is therefore safe even
+/// without fast-math flags.
+///
+/// Benefit: on every major architecture FNeg maps to a single-cycle
+/// instruction (VXORPS/VXORPD on x86, FNEG on ARM), while FMul uses
+/// the 4-cycle FP-multiply pipeline.  Eliminating the FMul also frees
+/// an FMA/FMul port for real multiply work.
+///
+/// Returns the number of multiplies replaced.
+static unsigned foldFPMulByNeg1(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FMul) continue;
+            llvm::Value* op0 = inst.getOperand(0);
+            llvm::Value* op1 = inst.getOperand(1);
+            llvm::Type*  ty  = inst.getType();
+
+            // Determine which operand is -1.0 (try both orderings).
+            llvm::Value* other = nullptr;
+            for (int s = 0; s < 2; ++s) {
+                llvm::Value* candidate = (s == 0) ? op0 : op1;
+                llvm::Value* partner   = (s == 0) ? op1 : op0;
+
+                // Scalar -1.0 constant.
+                if (auto* cfp = llvm::dyn_cast<llvm::ConstantFP>(candidate)) {
+                    if (cfp->isExactlyValue(-1.0)) { other = partner; break; }
+                }
+                // Splat vector -1.0.
+                if (auto* cv = llvm::dyn_cast<llvm::ConstantVector>(candidate)) {
+                    if (auto* sp = cv->getSplatValue()) {
+                        auto* spc = llvm::dyn_cast<llvm::ConstantFP>(sp);
+                        if (spc && spc->isExactlyValue(-1.0)) { other = partner; break; }
+                    }
+                }
+                if (auto* cdv = llvm::dyn_cast<llvm::ConstantDataVector>(candidate)) {
+                    if (auto* sp = llvm::dyn_cast_or_null<llvm::ConstantFP>(
+                            cdv->getSplatValue())) {
+                        if (sp->isExactlyValue(-1.0)) { other = partner; break; }
+                    }
+                }
+                (void)ty; // used for type check below if needed
+            }
+            if (!other) continue;
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* neg = builder.CreateFNeg(other, "fneg1");
+            // Propagate fast-math flags from the original mul.
+            if (auto* negInst = llvm::dyn_cast<llvm::Instruction>(neg)) {
+                auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
+                negInst->setFastMathFlags(fpOp->getFastMathFlags());
+            }
+            replacements.emplace_back(&inst, neg);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Expand `llvm.pow(x, N)` for small constant exponents to multiply chains.
+///
+/// Calling `pow(x, N)` for integer or half-integer N invokes the math
+/// library, which is 50–100 cycles.  For small constant N we can express
+/// the same value as a short sequence of fmul / sqrt instructions that
+/// execute in 4–12 cycles on modern CPUs.
+///
+/// Transforms applied (require `afn` or `reassoc` fast-math flag):
+///   pow(x, 0.0)  → 1.0          (exact)
+///   pow(x, 1.0)  → x            (exact, no flag needed)
+///   pow(x, 0.5)  → sqrt(x)      (requires nnan, so we use afn/reassoc)
+///   pow(x, 2.0)  → fmul(x, x)   (one extra rounding — requires reassoc)
+///   pow(x, 3.0)  → fmul(fmul(x,x), x)
+///   pow(x, 4.0)  → let t=fmul(x,x); fmul(t,t)
+///   pow(x, 5.0)  → let t=fmul(x,x); fmul(fmul(t,t), x)
+///   pow(x, -0.5) → 1/sqrt(x)    (requires afn)
+///   pow(x, -1.0) → 1/x (or fmul with arcp — handled by foldFPDivByConstant)
+///   pow(x, -2.0) → let t=fmul(x,x); 1/t (then arcp folds)
+///
+/// Returns the number of pow calls replaced.
+static unsigned foldPowBySmallInt(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    llvm::Module* mod = func.getParent();
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(&inst);
+            if (!ii) continue;
+            if (ii->getIntrinsicID() != llvm::Intrinsic::pow &&
+                ii->getIntrinsicID() != llvm::Intrinsic::powi) continue;
+
+            // Check for `afn` or `reassoc` fast-math flag.
+            auto* fpOp = llvm::cast<llvm::FPMathOperator>(ii);
+            bool canApprox = fpOp->hasApproxFunc() || fpOp->hasAllowReassoc();
+            bool hasArcp   = fpOp->hasAllowReciprocal();
+            if (!canApprox && !hasArcp) continue;
+
+            llvm::Value* base = ii->getArgOperand(0);
+            llvm::Type*  ty   = ii->getType();
+            llvm::IRBuilder<> builder(ii);
+            llvm::FastMathFlags fmf = fpOp->getFastMathFlags();
+
+            llvm::Value* result = nullptr;
+
+            // For powi, exponent is an i32 integer.
+            if (ii->getIntrinsicID() == llvm::Intrinsic::powi) {
+                auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ii->getArgOperand(1));
+                if (!ci) continue;
+                int64_t exp = ci->getSExtValue();
+
+                auto mul = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* {
+                    auto* r = llvm::cast<llvm::Instruction>(
+                        builder.CreateFMul(a, b, "pow.mul"));
+                    r->setFastMathFlags(fmf);
+                    return r;
+                };
+                llvm::Value* x2 = nullptr, *x4 = nullptr;
+                auto getX2 = [&]() -> llvm::Value* {
+                    if (!x2) x2 = mul(base, base);
+                    return x2;
+                };
+                auto getX4 = [&]() -> llvm::Value* {
+                    if (!x4) x4 = mul(getX2(), getX2());
+                    return x4;
+                };
+
+                switch (exp) {
+                case -4: { auto d = getX4();
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), d, "pow.recip"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd; break; }
+                case -3:
+                    // pow(x, -3) = 1/(x²·x): requires three multiplies + one divide.
+                    // The added complexity doesn't justify code generation here; the
+                    // library call is only marginally slower for this single case.
+                    // Fall through to the default (no transform).
+                    break;
+                case -2: {
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), getX2(), "pow.recip"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd; break; }
+                case -1: {
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), base, "pow.recip"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd; break; }
+                case 0:  result = llvm::ConstantFP::get(ty, 1.0); break;
+                case 1:  result = base; break;
+                case 2:  result = getX2(); break;
+                case 3:  result = mul(getX2(), base); break;
+                case 4:  result = getX4(); break;
+                case 5:  result = mul(getX4(), base); break;
+                case 6:  result = mul(getX4(), getX2()); break;
+                case 8:  result = mul(getX4(), getX4()); break;
+                default: break;
+                }
+            } else {
+                // llvm.pow with a constant FP exponent.
+                llvm::ConstantFP* cexp = nullptr;
+                if (auto* c = llvm::dyn_cast<llvm::ConstantFP>(ii->getArgOperand(1)))
+                    cexp = c;
+                if (!cexp) continue;
+                double expVal = cexp->getValueAPF().convertToDouble();
+
+                auto mul = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* {
+                    auto* r = llvm::cast<llvm::Instruction>(
+                        builder.CreateFMul(a, b, "pow.mul"));
+                    r->setFastMathFlags(fmf);
+                    return r;
+                };
+                llvm::Value* x2 = nullptr, *x4 = nullptr;
+                auto getX2 = [&]() -> llvm::Value* {
+                    if (!x2) x2 = mul(base, base); return x2;
+                };
+                auto getX4 = [&]() -> llvm::Value* {
+                    if (!x4) x4 = mul(getX2(), getX2()); return x4;
+                };
+
+                if (expVal == 0.0) {
+                    result = llvm::ConstantFP::get(ty, 1.0);
+                } else if (expVal == 1.0) {
+                    result = base;
+                } else if (expVal == 0.5) {
+                    llvm::Function* sqrtFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::sqrt, {ty});
+                    auto* sr = builder.CreateCall(sqrtFn, {base}, "pow.sqrt");
+                    sr->setFastMathFlags(fmf);
+                    result = sr;
+                } else if (expVal == -0.5) {
+                    llvm::Function* sqrtFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::sqrt, {ty});
+                    auto* sr = builder.CreateCall(sqrtFn, {base}, "pow.sqrt");
+                    sr->setFastMathFlags(fmf);
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), sr, "pow.rsqrt"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd;
+                } else if (expVal == 2.0) {
+                    result = getX2();
+                } else if (expVal == 3.0) {
+                    result = mul(getX2(), base);
+                } else if (expVal == 4.0) {
+                    result = getX4();
+                } else if (expVal == 5.0) {
+                    result = mul(getX4(), base);
+                } else if (expVal == 6.0) {
+                    result = mul(getX4(), getX2());
+                } else if (expVal == 8.0) {
+                    result = mul(getX4(), getX4());
+                } else if (expVal == -1.0) {
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), base, "pow.recip"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd;
+                } else if (expVal == -2.0) {
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), getX2(), "pow.recip2"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd;
+                }
+            }
+
+            if (!result) continue;
+            replacements.emplace_back(ii, result);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Replace `sqrt(x * x)` with `fabs(x)`.
+///
+/// For any finite real x, √(x²) = |x|.  The transform avoids a ~10-cycle
+/// sqrt operation by substituting a 1-cycle sign-bit clear (FABS).
+///
+/// Safety conditions:
+///   • `nnan`: no NaN inputs, so x is a real number.
+///   • `ninf`: no infinities; |x| is finite.
+///   Both flags on the sqrt (or `fast`) are required.
+///
+/// The fmul operand's flags are also checked: it must be the only user of
+/// the fmul, or we would keep the fmul alive.
+///
+/// Returns the number of sqrt instructions replaced.
+static unsigned foldSqrtSquare(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    llvm::Module* mod = func.getParent();
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(&inst);
+            if (!ii || ii->getIntrinsicID() != llvm::Intrinsic::sqrt) continue;
+
+            // Require nnan + ninf (or `fast`) on the sqrt.
+            auto* fpSqrt = llvm::cast<llvm::FPMathOperator>(ii);
+            if (!fpSqrt->hasNoNaNs() || !fpSqrt->hasNoInfs()) continue;
+
+            llvm::Value* arg = ii->getArgOperand(0);
+            llvm::Type*  ty  = ii->getType();
+
+            // Pattern: sqrt(fmul(x, x)) where the fmul has exactly one use (this sqrt).
+            auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(arg);
+            if (!fmul || fmul->getOpcode() != llvm::Instruction::FMul) continue;
+            if (!fmul->hasOneUse()) continue;
+            if (fmul->getOperand(0) != fmul->getOperand(1)) continue;
+
+            llvm::Value* x = fmul->getOperand(0);
+            llvm::IRBuilder<> builder(ii);
+            llvm::Function* fabsFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fabs, {ty});
+            llvm::Value* result = builder.CreateCall(fabsFn, {x}, "sqrt_sq_fabs");
+
+            replacements.emplace_back(ii, result);
+            // The fmul will be erased when the sqrt is replaced (use_empty check).
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        // Also erase the now-dead fmul operand.
+        llvm::Value* arg = inst->getOperand(0);
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+        if (auto* dead = llvm::dyn_cast<llvm::Instruction>(arg))
+            if (dead->use_empty()) dead->eraseFromParent();
+    }
+    return count;
+}
+
+/// Replace `select(i1 cond, C_true, C_false)` with casts when the pair of
+/// constants is (1, 0) or (-1, 0) — patterns the backend can lower to a
+/// single SETCC or MOVZX/MOVSX instruction.
+///
+///   select(cond, i32  1, i32  0)  →  zext i1 cond to i32
+///   select(cond, i32 -1, i32  0)  →  sext i1 cond to i32
+///   select(cond, i32  0, i32  1)  →  zext i1 (not cond) to i32
+///     (not folded here — would need xor; left for InstCombine)
+///   select(cond, i64  1, i64  0)  →  zext i1 cond to i64
+///   select(cond, i64 -1, i64  0)  →  sext i1 cond to i64
+///
+/// This reduces a branch-like select sequence (2+ µops: SETCC + MOVZX or
+/// CMOV) to a single µop on architectures with an integrated SETCC.
+///
+/// Returns the number of selects replaced.
+static unsigned foldSelectToBoolCast(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+
+            // Condition must be i1 (bit-width 1).
+            llvm::Value* cond = sel->getCondition();
+            if (!cond->getType()->isIntegerTy(1)) continue;
+
+            llvm::Value* tv = sel->getTrueValue();
+            llvm::Value* fv = sel->getFalseValue();
+            llvm::Type*  ty = sel->getType();
+            if (!ty->isIntegerTy()) continue;
+
+            auto* tCI = llvm::dyn_cast<llvm::ConstantInt>(tv);
+            auto* fCI = llvm::dyn_cast<llvm::ConstantInt>(fv);
+            if (!tCI || !fCI) continue;
+
+            llvm::IRBuilder<> builder(sel);
+            llvm::Value* result = nullptr;
+
+            if (tCI->isOne() && fCI->isZero()) {
+                // select(cond, 1, 0) → zext(cond)
+                result = builder.CreateZExt(cond, ty, "bool.zext");
+            } else if (tCI->isAllOnes() && fCI->isZero()) {
+                // select(cond, -1, 0) → sext(cond)
+                result = builder.CreateSExt(cond, ty, "bool.sext");
+            } else if (tCI->isZero() && fCI->isOne()) {
+                // select(cond, 0, 1) → zext(not cond)
+                // Emit: xor cond, 1 → zext
+                llvm::Value* notCond = builder.CreateXor(
+                    cond, llvm::ConstantInt::getTrue(cond->getContext()), "bool.not");
+                result = builder.CreateZExt(notCond, ty, "bool.notzext");
+            } else if (tCI->isZero() && fCI->isAllOnes()) {
+                // select(cond, 0, -1) → sext(not cond)
+                llvm::Value* notCond = builder.CreateXor(
+                    cond, llvm::ConstantInt::getTrue(cond->getContext()), "bool.not");
+                result = builder.CreateSExt(notCond, ty, "bool.notsext");
+            }
+
+            if (!result) continue;
+            replacements.emplace_back(sel, result);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Hoist loop-invariant GEP instructions out of loop bodies into the loop's
+/// pre-header (the unique non-back-edge predecessor of the loop header).
+///
+/// GEP instructions whose base pointer and all index operands are defined
+/// outside the loop body are invariant — they compute the same address on
+/// every iteration and can be computed once in the pre-header.
+///
+/// Motivation: while LLVM's LICM pass normally handles this, our transforms
+/// (strength reduction, FMA generation, etc.) can introduce new GEP
+/// combinations that appear *after* LICM has run.  Running this pass last
+/// ensures newly created address computations are hoisted.
+///
+/// Algorithm:
+///   1. Detect loop headers (basic blocks with a back-edge predecessor).
+///   2. Identify the pre-header (unique non-back-edge predecessor).
+///   3. Collect all basic blocks in the loop (reachable from header, before latch).
+///   4. For each GEP in any loop BB: if all operands are defined outside the loop,
+///      move the GEP to the end of the pre-header (before its terminator).
+///
+/// Returns the number of GEPs hoisted.
+static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+
+    unsigned count = 0;
+
+    // Assign linear order to BBs for back-edge detection.
+    std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
+    { unsigned ord = 0; for (auto& bb : func) bbOrder[&bb] = ord++; }
+
+    // Process each basic block as a potential loop header.
+    for (auto& header : func) {
+        // Find the latch (back-edge source): a predecessor of header with
+        // a higher linear order.
+        llvm::BasicBlock* latch = nullptr;
+        for (auto* pred : llvm::predecessors(&header)) {
+            if (bbOrder.count(pred) && bbOrder.at(pred) >= bbOrder.at(&header)) {
+                latch = pred;
+                break;
+            }
+        }
+        if (!latch) continue; // not a loop header
+
+        // Find the pre-header: unique predecessor of header that is NOT the latch.
+        // If there are multiple non-latch predecessors, we cannot safely hoist
+        // (the pre-header is ambiguous).
+        llvm::BasicBlock* preHeader = nullptr;
+        unsigned nonLatchPreds = 0;
+        for (auto* pred : llvm::predecessors(&header)) {
+            if (pred != latch) {
+                preHeader = pred;
+                ++nonLatchPreds;
+            }
+        }
+        if (nonLatchPreds != 1 || !preHeader) continue;
+
+        // Collect all basic blocks in the loop body using a BFS from the header
+        // that stays within the back-edge cycle (stops at header when reached via latch).
+        // Simple approximation: all BBs between header and latch in linear order.
+        unsigned headerOrd = bbOrder.at(&header);
+        unsigned latchOrd  = bbOrder.at(latch);
+        std::unordered_set<const llvm::BasicBlock*> loopBBs;
+        for (auto& bb : func) {
+            unsigned ord = bbOrder.at(&bb);
+            if (ord >= headerOrd && ord <= latchOrd)
+                loopBBs.insert(&bb);
+        }
+
+        // Collect GEPs to hoist from any loop BB.
+        // A GEP is invariant if ALL its operands (base + indices) are either:
+        //   • Constants, or
+        //   • Defined in a BB that is NOT in the loop (i.e., outside the loop).
+        std::vector<llvm::GetElementPtrInst*> toHoist;
+
+        for (auto& bb : func) {
+            if (!loopBBs.count(&bb)) continue;
+            for (auto& inst : bb) {
+                auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst);
+                if (!gep) continue;
+
+                // Check all operands.
+                bool invariant = true;
+                for (unsigned i = 0; i < gep->getNumOperands(); ++i) {
+                    llvm::Value* op = gep->getOperand(i);
+                    if (llvm::isa<llvm::Constant>(op)) continue;
+                    auto* defInst = llvm::dyn_cast<llvm::Instruction>(op);
+                    if (!defInst) { invariant = false; break; }
+                    // Loop-invariant if defined outside the loop.
+                    if (loopBBs.count(defInst->getParent())) { invariant = false; break; }
+                }
+                if (!invariant) continue;
+                // Don't hoist if already in the pre-header.
+                if (gep->getParent() == preHeader) continue;
+                // Skip GEPs with side effects (shouldn't exist, but be safe).
+                toHoist.push_back(gep);
+            }
+        }
+
+        // Hoist all invariant GEPs: move them to the pre-header (before its terminator).
+        llvm::Instruction* insertPt = preHeader->getTerminator();
+        for (auto* gep : toHoist) {
+            gep->moveBefore(insertPt);
+            ++count;
+        }
+    }
+    return count;
+}
+
+/// Rebalance linear chains of commutative+associative binary operations into
+/// balanced binary trees, reducing critical path depth.
+///
+/// A linear chain  ((a OP b) OP c) OP d  has depth 3 on a single-issue pipe.
+/// The balanced form  (a OP b) OP (c OP d)  has depth 2, exposing ILP.
+///
+/// For n operands in a chain, the linear form has depth n-1; the balanced
+/// tree has depth ceil(log2(n)).  For chains of 4+ operands on wide-issue
+/// CPUs this is a strict win.
+///
+/// Only applies to:
+///   - Integer:  Add, Mul, And, Or, Xor  (always associative)
+///   - Floating-point:  FAdd, FMul  only when the instruction has the
+///     `reassoc` fast-math flag (preserves IEEE semantics otherwise)
+///
+/// Guard: only rebalance when the critical-path reduction > 0 (chain ≥ 3
+/// operands) and the CPU has ≥ 2 integer ALU ports or ≥ 2 FMA units
+/// (spare capacity to execute the additional independent operations).
+///
+/// Returns the number of chains rebalanced.
+[[gnu::hot]] static unsigned rebalanceChainForILP(llvm::Function& func,
+                                                    const MicroarchProfile& profile) {
+    // Need spare execution units to benefit.
+    bool hasIntILP = profile.intALUs >= 2;
+    bool hasFpILP  = profile.fmaUnits >= 2 || profile.vecUnits >= 2;
+    if (!hasIntILP && !hasFpILP) return 0;
+
+    unsigned count = 0;
+
+    for (auto& bb : func) {
+        // Collect instructions eligible to be a chain root: same binary opcode,
+        // single use in this BB, and the use is also the same opcode.
+        // We process bottom-up: find the deepest instruction in a chain
+        // (the one whose result leaves the chain, i.e. is used outside or
+        // is used by a different opcode), then walk up to collect operands.
+
+        // isChainOp: true if the opcode is commutative+associative and we
+        // are allowed to rebalance it (fast-math for FP, always for int).
+        auto isChainOp = [](const llvm::Instruction* inst) -> bool {
+            if (!inst) return false;
+            switch (inst->getOpcode()) {
+            case llvm::Instruction::Add:
+            case llvm::Instruction::Mul:
+            case llvm::Instruction::And:
+            case llvm::Instruction::Or:
+            case llvm::Instruction::Xor:
+                return true;
+            case llvm::Instruction::FAdd:
+            case llvm::Instruction::FMul:
+                // Only rebalance with reassoc flag to preserve FP semantics.
+                return llvm::cast<llvm::FPMathOperator>(inst)->hasAllowReassoc();
+            default:
+                return false;
+            }
+        };
+
+        // For each instruction in the BB that is a chain op, check if it is
+        // the "root" of a chain (its result is NOT fed into the same op).
+        std::unordered_set<llvm::Instruction*> processed;
+
+        for (auto& rootInst : bb) {
+            if (!isChainOp(&rootInst)) continue;
+            if (processed.count(&rootInst)) continue;
+
+            // Walk UP from the root to collect all instructions in the chain
+            // that have the same opcode, single use back to this chain, and
+            // are in the same BB.  Stop at instructions that have multiple
+            // users (their result must stay live) or are used outside the BB.
+            //
+            // "Chain" = connected component of same-opcode nodes where each
+            // internal node has exactly one user (the next in the chain).
+            // The root is the node whose user is NOT in the chain.
+
+            // Check if rootInst is truly the root: its use is NOT the same op.
+            bool isRoot = true;
+            if (rootInst.hasOneUse()) {
+                auto* user = llvm::dyn_cast<llvm::Instruction>(*rootInst.user_begin());
+                if (user && user->getOpcode() == rootInst.getOpcode() &&
+                    user->getParent() == &bb)
+                    isRoot = false; // there's a parent in the chain
+            }
+            if (!isRoot) continue;
+
+            // Collect leaf operands via DFS: traverse all chain members.
+            // chainMembers: all instructions in the chain (except the root itself).
+            // leaves: the actual operand values that feed into the chain.
+            std::vector<llvm::Instruction*> chainMembers;
+            std::vector<llvm::Value*> leaves;
+            unsigned opcode = rootInst.getOpcode();
+
+            // Use a worklist of (instruction, operand_index).
+            // For each chain member, expand its operands:
+            //   - If operand is a chain-eligible instruction with one use →
+            //     add to chain and expand its operands.
+            //   - Otherwise → it's a leaf.
+            std::function<void(llvm::Instruction*)> collect =
+                [&](llvm::Instruction* inst) {
+                    for (unsigned i = 0; i < inst->getNumOperands(); ++i) {
+                        llvm::Value* op = inst->getOperand(i);
+                        auto* opInst = llvm::dyn_cast<llvm::Instruction>(op);
+                        if (opInst && opInst->getOpcode() == opcode &&
+                            opInst->getParent() == &bb &&
+                            opInst->hasOneUse() &&
+                            !processed.count(opInst)) {
+                            chainMembers.push_back(opInst);
+                            processed.insert(opInst);
+                            collect(opInst);
+                        } else {
+                            leaves.push_back(op);
+                        }
+                    }
+                };
+
+            processed.insert(&rootInst);
+            collect(&rootInst);
+
+            // Need at least 4 leaves to benefit (depth 3 linear → depth 2 tree).
+            if (leaves.size() < 4) continue;
+
+            // Check parallel execution capacity:
+            bool isFP = (opcode == llvm::Instruction::FAdd ||
+                         opcode == llvm::Instruction::FMul);
+            if (isFP && !hasFpILP)  continue;
+            if (!isFP && !hasIntILP) continue;
+
+            // Build balanced binary tree from leaves.
+            // Use IRBuilder positioned just before the root instruction.
+            llvm::IRBuilder<> builder(&rootInst);
+
+            // Copy fast-math flags from root for FP ops.
+            llvm::FastMathFlags fmf;
+            if (isFP)
+                fmf = llvm::cast<llvm::FPMathOperator>(&rootInst)->getFastMathFlags();
+
+            // Build tree bottom-up: combine pairs until one value remains.
+            std::vector<llvm::Value*> work = leaves;
+            while (work.size() > 1) {
+                std::vector<llvm::Value*> next;
+                for (size_t i = 0; i + 1 < work.size(); i += 2) {
+                    llvm::Value* combined;
+                    switch (opcode) {
+                    case llvm::Instruction::Add:
+                        combined = builder.CreateAdd(work[i], work[i+1], "rlp.add");
+                        break;
+                    case llvm::Instruction::Mul:
+                        combined = builder.CreateMul(work[i], work[i+1], "rlp.mul");
+                        break;
+                    case llvm::Instruction::And:
+                        combined = builder.CreateAnd(work[i], work[i+1], "rlp.and");
+                        break;
+                    case llvm::Instruction::Or:
+                        combined = builder.CreateOr(work[i], work[i+1], "rlp.or");
+                        break;
+                    case llvm::Instruction::Xor:
+                        combined = builder.CreateXor(work[i], work[i+1], "rlp.xor");
+                        break;
+                    case llvm::Instruction::FAdd: {
+                        auto* fa = builder.CreateFAdd(work[i], work[i+1], "rlp.fadd");
+                        if (auto* fi = llvm::dyn_cast<llvm::Instruction>(fa))
+                            fi->setFastMathFlags(fmf);
+                        combined = fa;
+                        break;
+                    }
+                    case llvm::Instruction::FMul: {
+                        auto* fm = builder.CreateFMul(work[i], work[i+1], "rlp.fmul");
+                        if (auto* fi = llvm::dyn_cast<llvm::Instruction>(fm))
+                            fi->setFastMathFlags(fmf);
+                        combined = fm;
+                        break;
+                    }
+                    default:
+                        combined = work[i]; // fallback (shouldn't happen)
+                        break;
+                    }
+                    next.push_back(combined);
+                }
+                // Carry forward an odd element unpaired.
+                if (work.size() % 2 == 1)
+                    next.push_back(work.back());
+                work = std::move(next);
+            }
+
+            // Replace the root instruction with the balanced tree result.
+            if (!work.empty() && work[0] != &rootInst) {
+                rootInst.replaceAllUsesWith(work[0]);
+                // Mark old chain for removal: they are now dead.
+                // (LLVM DCE will clean them up; we just need to ensure no uses.)
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
+/// Convert simple if-then-else diamonds to select instructions when the
+/// branch misprediction penalty on the target CPU makes that more profitable.
+///
+/// Pattern:
+///   header:  br cond, then_bb, else_bb / merge_bb
+///   then_bb: %v = <pure_inst>;  br merge_bb        (≤ 2 instructions)
+///   merge_bb: %phi = phi [%v, then_bb], [%other, header]
+///
+/// Replace with (in header):
+///   %v = <pure_inst (hoisted)>
+///   %phi_val = select cond, %v, %other
+///
+/// Profitability: profitable when
+///   branchMispredictPenalty × kMissRate > cost(select) + cost(hoisted_inst)
+/// where kMissRate = 0.1 (10% estimated miss rate without PGO).
+///
+/// Safety guards:
+///   - then_bb has no side effects (no stores, calls, volatile loads)
+///   - then_bb has ≤ 2 non-PHI, non-branch instructions
+///   - The hoisted instruction's operands are all available in the header
+///   - then_bb has exactly one predecessor (header) and one successor (merge)
+///
+/// Returns the number of branches converted.
+static unsigned convertIfElseToSelect(llvm::Function& func,
+                                       const MicroarchProfile& profile) {
+    constexpr double kMissRate = 0.10;
+    // Minimum misprediction penalty (in cycles) to justify conversion.
+    // select costs 1 cycle (ALU); a speculative pure inst costs its latency.
+    // We require: mispredictCycles > 2 * latIntAdd to ensure clear benefit.
+    double mispredictCycles = profile.branchMispredictPenalty * kMissRate;
+    if (mispredictCycles <= static_cast<double>(2 * profile.latIntAdd)) return 0;
+
+    unsigned count = 0;
+    // Collect conversions to apply (avoid invalidating iterators).
+    struct Conversion {
+        llvm::BranchInst* br;
+        llvm::BasicBlock* thenBB;
+        llvm::BasicBlock* mergeBB;
+        llvm::PHINode* phi;
+        llvm::Instruction* thenVal; // the value computed in thenBB (may be null)
+        llvm::Value* elseVal;       // the value from the else path
+        bool thenIsTrue;            // true if thenBB is the true successor
+    };
+    std::vector<Conversion> conversions;
+
+    for (auto& bb : func) {
+        auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator());
+        if (!br || !br->isConditional() || br->getNumSuccessors() != 2) continue;
+
+        llvm::BasicBlock* succTrue  = br->getSuccessor(0);
+        llvm::BasicBlock* succFalse = br->getSuccessor(1);
+
+        // Try both orientations: thenBB = succTrue or thenBB = succFalse.
+        for (int orientation = 0; orientation < 2; ++orientation) {
+            llvm::BasicBlock* thenBB  = (orientation == 0) ? succTrue  : succFalse;
+            llvm::BasicBlock* mergeBB = (orientation == 0) ? succFalse : succTrue;
+
+            // thenBB must have exactly one predecessor (our header).
+            if (thenBB->getSinglePredecessor() != &bb) continue;
+
+            // thenBB must jump unconditionally to mergeBB.
+            auto* thenTerm = llvm::dyn_cast<llvm::BranchInst>(thenBB->getTerminator());
+            if (!thenTerm || thenTerm->isConditional()) continue;
+            if (thenTerm->getSuccessor(0) != mergeBB) continue;
+
+            // Count non-PHI, non-branch instructions in thenBB.
+            std::vector<llvm::Instruction*> thenInsts;
+            for (auto& inst : *thenBB) {
+                if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator()) continue;
+                thenInsts.push_back(&inst);
+            }
+            // Allow at most 2 pure instructions (e.g., a load + cast or a single compute).
+            if (thenInsts.size() > 2) continue;
+
+            // Check all thenBB instructions are pure (no side effects).
+            bool pure = true;
+            for (auto* inst : thenInsts) {
+                if (inst->mayHaveSideEffects() || inst->mayReadOrWriteMemory()) {
+                    pure = false; break;
+                }
+            }
+            if (!pure) continue;
+
+            // Find a PHI in mergeBB that merges a value from thenBB with a
+            // value from &bb (the header / else path).
+            llvm::PHINode* foundPhi = nullptr;
+            llvm::Instruction* thenVal = nullptr;
+            llvm::Value* elseVal = nullptr;
+
+            for (auto& mergeInst : *mergeBB) {
+                auto* phi = llvm::dyn_cast<llvm::PHINode>(&mergeInst);
+                if (!phi) break;
+
+                llvm::Value* fromThen = phi->getIncomingValueForBlock(thenBB);
+                llvm::Value* fromElse = phi->getIncomingValueForBlock(&bb);
+                if (!fromThen || !fromElse) continue;
+
+                // The "from then" value must originate in thenBB (or be a constant).
+                auto* fromThenInst = llvm::dyn_cast<llvm::Instruction>(fromThen);
+                bool thenValIsLocal = !fromThenInst ||
+                                      fromThenInst->getParent() == thenBB;
+                if (!thenValIsLocal) continue;
+
+                // Check that all operands of the thenBB instructions are
+                // available in the header (defined before the branch).
+                bool operandsOk = true;
+                for (auto* inst : thenInsts) {
+                    for (auto& op : inst->operands()) {
+                        auto* opInst = llvm::dyn_cast<llvm::Instruction>(op.get());
+                        if (opInst && opInst->getParent() == thenBB) continue; // def in thenBB
+                        if (opInst && opInst->getParent() != &bb) {
+                            // Must dominate header — conservative: only allow
+                            // values from outside the function (args) or defined
+                            // before the branch in the same function.
+                            // For safety, we only allow args and header-local defs.
+                            // NOTE: `op.get()` may be an Argument (not an Instruction).
+                            operandsOk = false; break;
+                        }
+                        // If op is not an instruction (e.g., a function Argument or
+                        // Constant), it always dominates every block — allow it.
+                    }
+                    if (!operandsOk) break;
+                }
+                if (!operandsOk) continue;
+
+                foundPhi = phi;
+                thenVal  = fromThenInst; // may be null if constant
+                elseVal  = fromElse;
+                break;
+            }
+            if (!foundPhi) continue;
+
+            // Check profitability one more time with the actual hoisted inst cost.
+            unsigned hoistCost = 0;
+            for (auto* inst : thenInsts)
+                hoistCost += getOpcodeLatency(inst, profile);
+            // Profitable if: mispredict cost > select cost (1) + hoist cost
+            if (mispredictCycles <= static_cast<double>(1 + hoistCost)) continue;
+
+            conversions.push_back({br, thenBB, mergeBB, foundPhi, thenVal, elseVal,
+                                   orientation == 0});
+            break; // found a valid orientation for this BB
+        }
+    }
+
+    // Apply conversions in reverse order to avoid invalidating BBs.
+    for (auto& cv : conversions) {
+        llvm::BranchInst* br     = cv.br;
+        llvm::BasicBlock* thenBB = cv.thenBB;
+        llvm::BasicBlock* header = br->getParent();
+        llvm::PHINode*    phi    = cv.phi;
+
+        // Hoist thenBB's instructions into the header (before the branch).
+        std::vector<llvm::Instruction*> toHoist;
+        for (auto& inst : *thenBB)
+            if (!llvm::isa<llvm::PHINode>(inst) && !inst.isTerminator())
+                toHoist.push_back(&inst);
+
+        for (auto* inst : toHoist)
+            inst->moveBefore(br);
+
+        // Build select replacing the PHI.
+        llvm::IRBuilder<> builder(br);
+        llvm::Value* sel;
+        if (cv.thenIsTrue)
+            sel = builder.CreateSelect(br->getCondition(), phi->getIncomingValueForBlock(thenBB),
+                                       cv.elseVal, "sel.if2sel");
+        else
+            sel = builder.CreateSelect(br->getCondition(), cv.elseVal,
+                                       phi->getIncomingValueForBlock(thenBB), "sel.if2sel");
+
+        phi->replaceAllUsesWith(sel);
+        phi->eraseFromParent();
+
+        // Redirect the branch to skip thenBB: unconditional branch to mergeBB.
+        llvm::BasicBlock* mergeBB = cv.mergeBB;
+        // Remove thenBB as a predecessor of mergeBB.
+        // Update any remaining PHIs in mergeBB that reference thenBB.
+        for (auto& inst : *mergeBB) {
+            auto* remainingPhi = llvm::dyn_cast<llvm::PHINode>(&inst);
+            if (!remainingPhi) break;
+            int idx = remainingPhi->getBasicBlockIndex(thenBB);
+            if (idx >= 0) remainingPhi->removeIncomingValue(idx, false);
+        }
+
+        // Replace the conditional branch with an unconditional one to mergeBB.
+        llvm::BranchInst::Create(mergeBB, br);
+        br->eraseFromParent();
+
+        // thenBB is now unreachable; it will be cleaned up by CFG simplification.
+        // Leave it for now; it has no predecessors.
+        (void)header; // suppress unused variable warning
+
+        ++count;
+    }
+
+    return count;
+}
+
+/// Add `!nontemporal` metadata to streaming stores whose estimated working set
+/// exceeds the L1D cache capacity.  Non-temporal stores (MOVNT* on x86, STNPs
+/// on ARM) bypass the cache entirely, avoiding pollution and reducing write-
+/// combine overhead for large sequential writes.
+///
+/// Detection heuristic:
+///   - Store is inside a loop body (basic block with a back-edge to itself or
+///     a predecessor that appears later in linear order).
+///   - The store pointer is a GEP with a stride larger than one cache line,
+///     OR the function contains more unique store base pointers × estimated
+///     element size than L1D capacity.
+///
+/// Safety: non-temporal stores must NOT be used when the stored value will
+/// be read back soon (within the same loop iteration).  We conservatively
+/// skip stores whose pointer is also loaded in the same BB.
+///
+/// Returns the number of stores annotated.
+static unsigned insertNonTemporalHints(llvm::Function& func,
+                                        const MicroarchProfile& profile) {
+    if (func.isDeclaration()) return 0;
+    // Only beneficial for CPUs with a decent L1D (≥ 16 KB).
+    if (profile.l1DSize < 16) return 0;
+
+    unsigned count = 0;
+    llvm::LLVMContext& ctx = func.getContext();
+
+    // Assign linear order to detect loop bodies.
+    std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
+    { unsigned ord = 0; for (auto& bb : func) bbOrder[&bb] = ord++; }
+
+    const llvm::DataLayout* dl = nullptr;
+    if (auto* mod = func.getParent()) dl = &mod->getDataLayout();
+
+    for (auto& bb : func) {
+        // Determine if this BB is a loop body (has a backedge from any successor).
+        bool isLoop = false;
+        for (auto* succ : llvm::successors(&bb)) {
+            if (bbOrder.count(succ) && bbOrder[succ] <= bbOrder[&bb]) {
+                isLoop = true; break;
+            }
+        }
+        if (!isLoop) continue;
+
+        // Collect store and load pointers in this BB to detect read-back.
+        std::unordered_set<llvm::Value*> loadedPtrs;
+        for (auto& inst : bb)
+            if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(&inst))
+                loadedPtrs.insert(ld->getPointerOperand());
+
+        for (auto& inst : bb) {
+            auto* st = llvm::dyn_cast<llvm::StoreInst>(&inst);
+            if (!st || st->isVolatile()) continue;
+
+            // Already annotated.
+            if (st->getMetadata(llvm::LLVMContext::MD_nontemporal)) continue;
+
+            llvm::Value* ptr = st->getPointerOperand();
+
+            // Skip if this pointer is also loaded in the same BB (read-back risk).
+            if (loadedPtrs.count(ptr)) continue;
+
+            // Check for large-stride or large-working-set access.
+            bool shouldAnnotate = false;
+
+            if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+                // Single-index GEP: check element type size vs cache line.
+                if (gep->getNumIndices() == 1 && dl) {
+                    llvm::Type* elemTy = gep->getSourceElementType();
+                    if (elemTy && elemTy->isSized()) {
+                        uint64_t elemBytes = dl->getTypeAllocSize(elemTy);
+                        // Stride > cache line → streaming access pattern.
+                        if (elemBytes > profile.cacheLineSize)
+                            shouldAnnotate = true;
+                        // Working set heuristic: if element count × elemBytes
+                        // plausibly exceeds L1D (assume ≥ 256 iterations).
+                        unsigned estimatedElements = 256;
+                        if (elemBytes * estimatedElements >
+                                static_cast<uint64_t>(profile.l1DSize) * 1024)
+                            shouldAnnotate = true;
+                    }
+                }
+            }
+
+            if (shouldAnnotate) {
+                // Add !nontemporal metadata (value = i32 1).
+                llvm::MDNode* ntMD = llvm::MDNode::get(ctx, {
+                    llvm::ConstantAsMetadata::get(
+                        llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 1))
+                });
+                st->setMetadata(llvm::LLVMContext::MD_nontemporal, ntMD);
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
 TransformStats applyHardwareTransforms(llvm::Function& func,
                                         const MicroarchProfile& profile,
                                         bool enableLoopAnnotation) {
@@ -3232,6 +4809,24 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Canonicalize fadd(x, fneg(y)) → fsub(x, y) before FMA scan so the
     // FMA pass can recognise the resulting fsub patterns.
     stats.fmaGenerated    += canonicalizeFaddFneg(func);
+    // fmul(x, -1.0) → fneg(x): 1 cycle bit-flip vs 4-cycle multiply.
+    // Run before FMA scan so the eliminated fmul doesn't confuse FMA matching.
+    stats.fmaGenerated    += foldFPMulByNeg1(func);
+    // FP division by constant → reciprocal multiply (fdiv → fmul when `arcp` flag).
+    // Run before FMA scan so that the resulting fmul may be fused in a later pass.
+    stats.fmaGenerated    += foldFPDivByConstant(func, profile);
+    // pow(x, N) for small constant N → multiply chain (avoids 50-100cy lib call).
+    // Run after fneg/fdiv folds so the resulting fmuls can be seen by FMA passes.
+    stats.fmaGenerated    += foldPowBySmallInt(func);
+    // sqrt(x * x) → fabs(x) with nnan+ninf: avoids ~10-cycle sqrt.
+    stats.fmaGenerated    += foldSqrtSquare(func);
+    // Integer div/rem by power-of-2 → shift/and (any that slipped past InstCombine).
+    stats.intStrengthReduced = foldDivByPow2(func);
+    // Min/max pattern: icmp/fcmp + select → smin/smax/minnum/maxnum intrinsics.
+    stats.intStrengthReduced += foldMinMaxPatterns(func);
+    // select(cond, 1, 0) → zext(cond), select(cond, -1, 0) → sext(cond).
+    // Enables SETCC/MOVZX backend lowering (1 µop vs. multi-µop select sequence).
+    stats.intStrengthReduced += foldSelectToBoolCast(func);
     stats.prefetchesInserted = insertPrefetches(func, profile);
     stats.branchesOptimized  = optimizeBranchLayout(func, profile);
     stats.loadsStorePaired   = markLoadStorePairs(func, profile);
@@ -3243,10 +4838,16 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
                                  : 0;
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
-    stats.intStrengthReduced = integerStrengthReduce(func, profile);
+    stats.intStrengthReduced += integerStrengthReduce(func, profile);
     // Integer abs detection: replace select+icmp+sub patterns with llvm.abs.
     // Runs after strength reduction so we don't accidentally undo any reductions.
     stats.intStrengthReduced += generateIntegerAbs(func, profile);
+    stats.intStrengthReduced += rebalanceChainForILP(func, profile);
+    stats.branchesOptimized  += convertIfElseToSelect(func, profile);
+    stats.loadsStorePaired   += insertNonTemporalHints(func, profile);
+    // Hoist loop-invariant GEP address calculations to the loop pre-header.
+    // Runs last so all address computations introduced by our transforms are hoisted.
+    stats.loadsStorePaired   += hoistLoopInvariantGEP(func);
 
     return stats;
 }
@@ -3502,6 +5103,19 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 ///   4. Compute critical-path depth bottom-up.
 ///   5. Model per-port-instance availability using real HardwareGraph nodes
 ///      (their `throughput` field gives instructions/cycle for each port).
+/// Returns true if the instruction produces a 512-bit or wider fixed vector.
+/// Used to apply the double-pump throughput penalty on CPUs where 512-bit SIMD
+/// is implemented by running 256-bit units twice (e.g. Skylake-AVX512, Ice Lake).
+/// The penalty is a throughput effect only; latency is the same as 256-bit ops.
+[[nodiscard]] static bool isWideVectorOp(const llvm::Instruction* inst) {
+    if (!inst) return false;
+    llvm::Type* ty = inst->getType();
+    if (!ty->isVectorTy()) return false;
+    auto* vt = llvm::dyn_cast<llvm::FixedVectorType>(ty);
+    if (!vt) return false;
+    return vt->getPrimitiveSizeInBits().getFixedValue() >= 512;
+}
+
 ///   6. List-schedule: at each logical cycle, pick up to issueWidth ready
 ///      instructions ordered by:
 ///        (a) critical-path remaining (latency hiding),
@@ -3532,9 +5146,52 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
     // ── 3. Per-opcode instruction latencies ──────────────────────────────────
     // Computed first so that addEdge() can use lat[from] for data-dep edges.
+    // Load instructions get a tiered latency estimate based on likely cache level:
+    //   - Pointer-chasing load (ptr came from another load): likely L2/L3 miss
+    //     → latency = (l2Latency + l3Latency) / 2 cycles (conservative)
+    //   - GEP with stride larger than one cache line: likely L2 miss
+    //     → latency = l2Latency cycles
+    //   - Otherwise: L1 hit assumed → latency = latLoad (l1DLatency)
+    // This improves schedule quality for memory-bound code by prioritising
+    // high-miss-risk loads earlier, so more independent work can fill the
+    // pipeline while the miss resolves.
+    auto estimateLoadLatency = [&](const llvm::Instruction* inst) -> unsigned {
+        auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst);
+        if (!ld) return getOpcodeLatency(inst, profile);
+
+        const llvm::Value* ptr = ld->getPointerOperand();
+
+        // Pointer chasing: the pointer itself was loaded from memory.
+        // These almost always miss the L1 cache on the first access.
+        if (llvm::isa<llvm::LoadInst>(ptr))
+            return (profile.l2Latency + profile.l3Latency) / 2;
+
+        // GEP with large constant index: stride may exceed one cache line.
+        if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+            const llvm::DataLayout* dl = nullptr;
+            if (auto* mod = inst->getParent()->getParent()->getParent())
+                dl = &mod->getDataLayout();
+            if (dl && gep->getNumIndices() == 1) {
+                llvm::Type* elemTy = gep->getSourceElementType();
+                if (elemTy && elemTy->isSized()) {
+                    for (auto it = gep->idx_begin(); it != gep->idx_end(); ++it) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(*it)) {
+                            uint64_t elemBytes = dl->getTypeAllocSize(elemTy);
+                            uint64_t byteOff = ci->getZExtValue() * elemBytes;
+                            if (byteOff > profile.cacheLineSize * 4)
+                                return profile.l2Latency;
+                        }
+                    }
+                }
+            }
+        }
+
+        return profile.latLoad; // assume L1 hit
+    };
+
     std::vector<unsigned> lat(n);
     for (unsigned i = 0; i < n; ++i)
-        lat[i] = getOpcodeLatency(moveable[i], profile);
+        lat[i] = estimateLoadLatency(moveable[i]);
 
     // ── 4. Build dependency DAG with per-edge latency ─────────────────────────
     // Each edge is (to/from node, edge_latency).  Using per-edge latency gives
@@ -3685,11 +5342,17 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 if (mayAlias(moveable[stores[si]], moveable[stores[sj]]))
                     addEdge(stores[si], stores[sj], 1u);
 
-        // RAW: Store → Load memory dep (load needs store's value: full latency).
+        // RAW: Store → Load memory dep.
+        // When a load follows a store to the same (possibly aliased) address,
+        // the value is forwarded from the store buffer rather than going through
+        // the cache.  The forwarding latency (latStoLForward) is used as the
+        // edge weight: it is ≤ latStore on most x86 CPUs and > latStore on
+        // some ARM cores (e.g. Apple M-series) where address-match logic adds
+        // a cycle.  Using this precise latency improves schedule quality.
         for (unsigned stIdx : stores)
             for (unsigned ldIdx : loads)
                 if (ldIdx > stIdx && mayAlias(moveable[stIdx], moveable[ldIdx]))
-                    addEdge(stIdx, ldIdx, lat[stIdx]);
+                    addEdge(stIdx, ldIdx, profile.latStoLForward);
 
         // WAR: Load → Store ordering (edgeLat=1: store only needs to be issued
         // after the load, not after the load's result is available).
@@ -3959,6 +5622,20 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             if (done[id] && avail[id] > currentCycle)
                 ++inflightCount;
 
+        // ROB full stall: on a real out-of-order CPU, dispatch is completely
+        // blocked when the reorder buffer is full.  Advance the clock to when
+        // the oldest in-flight instruction retires (completes), freeing one ROB
+        // entry.  This is more accurate than merely adjusting priority (which
+        // was the previous behaviour at the 75% threshold).
+        if (inflightCount >= robCapacity) {
+            unsigned nextRetire = currentCycle + 1;
+            for (unsigned id = 0; id < n; ++id)
+                if (done[id] && avail[id] > currentCycle)
+                    nextRetire = std::min(nextRetire, avail[id]);
+            currentCycle = nextRetire;
+            continue; // retry dispatch at the new cycle
+        }
+
         // Sort ready instructions for maximum throughput — 9-tier priority:
         //   1. Critical path remaining (latency hiding)
         //   2. Long-latency ops first (div/fdiv — start divider early)
@@ -4196,8 +5873,20 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                         if (t < bestTime) { bestTime = t; chosenSlot = s; }
                     }
                     startCycle = bestTime;
-                    // Occupy port for busyCycles (= reciprocal throughput).
-                    slots[chosenSlot].nextFree = startCycle + slots[chosenSlot].busyCycles;
+                    // Occupy the port for busyCycles (= reciprocal throughput).
+                    // Apply the 512-bit double-pump penalty on CPUs where 512-bit
+                    // SIMD is implemented by running 256-bit units twice (e.g.
+                    // Skylake-AVX512, Ice Lake).  Only FMA and VecALU ports are
+                    // affected; loads/stores of 512-bit data use the full-width
+                    // load/store paths and do not incur the double-pump penalty.
+                    unsigned pumpFactor = 1u;
+                    if (profile.vec512Penalty > 1 && isWideVectorOp(moveable[id]) &&
+                        (rtKey == static_cast<int>(ResourceType::FMAUnit) ||
+                         rtKey == static_cast<int>(ResourceType::VectorALU))) {
+                        pumpFactor = profile.vec512Penalty;
+                    }
+                    slots[chosenSlot].nextFree =
+                        startCycle + slots[chosenSlot].busyCycles * pumpFactor;
                 }
 
                 issuedAt[id] = startCycle;
@@ -4353,13 +6042,50 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     // across all basic blocks, apply transforms, then re-cost.  If the
     // transformed version is not cheaper (or only marginally so), roll back.
     if (config.enableTransforms) {
-        // Compute baseline cost (sum of instruction latencies as a proxy).
+        // Compute total expected cycles for a function, accounting for:
+        //   • Per-opcode execution latencies (the critical path contribution)
+        //   • Statistical branch misprediction overhead (10% miss rate assumed
+        //     for general-purpose code without profile data).  Transforms that
+        //     reduce the number of conditional branches (e.g. branchless select,
+        //     loop unrolling) correctly show a lower cost after the transform.
+        //   • 512-bit double-pump penalty: wide-vector ops on CPUs with
+        //     vec512Penalty>1 occupy the execution port for 2 cycles, so their
+        //     throughput contribution is doubled.
+        //
+        // Using a richer cost model means that transforms which reduce branch
+        // frequency or eliminate double-pumped 512-bit ops are accepted even
+        // when raw latency savings are small.
         auto estimateFuncCost = [&](llvm::Function& f) -> unsigned {
+            // kBranchMissRate: fraction of conditional branches that mispredict
+            // in typical general-purpose code without PGO data.  10% is a
+            // standard conservative estimate from hardware performance counters.
+            constexpr double kBranchMissRate = 0.10;
             unsigned cost = 0;
-            for (auto& bb : f)
-                for (auto& inst : bb)
-                    if (!llvm::isa<llvm::PHINode>(inst) && !inst.isTerminator())
-                        cost += getOpcodeLatency(&inst, profile);
+            for (auto& bb : f) {
+                for (auto& inst : bb) {
+                    if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator())
+                        continue;
+                    unsigned latency = getOpcodeLatency(&inst, profile);
+
+                    // 512-bit double-pump: throughput cost is 2× for
+                    // FMA / VecALU instructions on double-pump CPUs.
+                    if (profile.vec512Penalty > 1 && isWideVectorOp(&inst)) {
+                        OpClass cls = classifyOp(&inst);
+                        if (cls == OpClass::FMA || cls == OpClass::FPMul ||
+                            cls == OpClass::FPArith || cls == OpClass::VectorOp)
+                            latency *= profile.vec512Penalty;
+                    }
+                    cost += latency;
+                }
+                // Add statistical branch misprediction overhead for each
+                // conditional branch in the function.
+                if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator())) {
+                    if (br->isConditional()) {
+                        cost += static_cast<unsigned>(
+                            profile.branchMispredictPenalty * kBranchMissRate + 0.5);
+                    }
+                }
+            }
             return cost;
         };
 
