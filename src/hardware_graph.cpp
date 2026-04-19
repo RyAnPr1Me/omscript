@@ -392,9 +392,18 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     };
 
     for (auto& bb : func) {
-        llvm::Instruction* lastStore = nullptr;
-        llvm::Instruction* lastLoad  = nullptr;
+        // Track ALL live stores and loads in the BB so that every possible
+        // memory hazard pair receives a dependency edge, not just the last
+        // store/load.  This closes a correctness gap in the original code:
+        //   store @A, 1
+        //   store @B, 2
+        //   load %x, @A     ← missed RAW from store @A with last-only tracking
+        // The pairwise loop is O(stores × loads) per BB which is fine since
+        // basic blocks are small in practice (typically < 100 instructions).
+        std::vector<llvm::Instruction*> liveStores;
+        std::vector<llvm::Instruction*> liveLoads;
         llvm::Instruction* lastBarrier = nullptr;
+
         for (auto& inst : bb) {
             const bool isStore = llvm::isa<llvm::StoreInst>(inst);
             const bool isLoad = llvm::isa<llvm::LoadInst>(inst);
@@ -406,13 +415,13 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                 // (calls, atomics, fences), and later memory ops must not pass it.
                 auto thisIt = instToNode_.find(&inst);
                 if (thisIt != instToNode_.end()) {
-                    if (lastStore) {
-                        auto srcIt = instToNode_.find(lastStore);
+                    for (auto* s : liveStores) {
+                        auto srcIt = instToNode_.find(s);
                         if (srcIt != instToNode_.end())
                             addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
                     }
-                    if (lastLoad) {
-                        auto srcIt = instToNode_.find(lastLoad);
+                    for (auto* l : liveLoads) {
+                        auto srcIt = instToNode_.find(l);
                         if (srcIt != instToNode_.end())
                             addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
                     }
@@ -422,48 +431,60 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                             addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
                     }
                 }
+                // Barrier serialises everything: clear tracked ops so later
+                // loads/stores need only depend on the barrier, not on ops
+                // that already have a transitive dependency through it.
+                liveStores.clear();
+                liveLoads.clear();
                 lastBarrier = &inst;
                 continue;
             }
 
             if (inst.getOpcode() == llvm::Instruction::Store) {
-                // WAW: Store → Store
-                if (lastStore && mayAlias(lastStore, &inst)) {
-                    auto srcIt = instToNode_.find(lastStore);
-                    auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
-                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                auto dstIt = instToNode_.find(&inst);
+                if (dstIt != instToNode_.end()) {
+                    // WAW: all prior aliasing stores must precede this store.
+                    for (auto* s : liveStores) {
+                        if (mayAlias(s, &inst)) {
+                            auto srcIt = instToNode_.find(s);
+                            if (srcIt != instToNode_.end())
+                                addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                        }
+                    }
+                    // WAR: all prior aliasing loads must precede this store.
+                    for (auto* l : liveLoads) {
+                        if (mayAlias(l, &inst)) {
+                            auto srcIt = instToNode_.find(l);
+                            if (srcIt != instToNode_.end())
+                                addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                        }
+                    }
+                    if (lastBarrier) {
+                        auto srcIt = instToNode_.find(lastBarrier);
+                        if (srcIt != instToNode_.end())
+                            addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                    }
                 }
-                // WAR: Load → Store (anti-dependence)
-                if (lastLoad && mayAlias(lastLoad, &inst)) {
-                    auto srcIt = instToNode_.find(lastLoad);
-                    auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
-                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
-                }
-                if (lastBarrier) {
-                    auto srcIt = instToNode_.find(lastBarrier);
-                    auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
-                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
-                }
-                lastStore = &inst;
+                liveStores.push_back(&inst);
             }
             if (inst.getOpcode() == llvm::Instruction::Load) {
-                // RAW: Store → Load
-                if (lastStore && mayAlias(lastStore, &inst)) {
-                    auto srcIt = instToNode_.find(lastStore);
-                    auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
-                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                auto dstIt = instToNode_.find(&inst);
+                if (dstIt != instToNode_.end()) {
+                    // RAW: all prior aliasing stores must precede this load.
+                    for (auto* s : liveStores) {
+                        if (mayAlias(s, &inst)) {
+                            auto srcIt = instToNode_.find(s);
+                            if (srcIt != instToNode_.end())
+                                addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                        }
+                    }
+                    if (lastBarrier) {
+                        auto srcIt = instToNode_.find(lastBarrier);
+                        if (srcIt != instToNode_.end())
+                            addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                    }
                 }
-                if (lastBarrier) {
-                    auto srcIt = instToNode_.find(lastBarrier);
-                    auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
-                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
-                }
-                lastLoad = &inst;
+                liveLoads.push_back(&inst);
             }
         }
     }
@@ -2233,6 +2254,67 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
 
     // Unknown architecture — return nullopt (fallback mode)
     return std::nullopt;
+}
+
+MicroarchProfile calibrateProfile(const MicroarchProfile& base,
+                                   const CalibrationHints& hints) {
+    MicroarchProfile p = base;
+
+    // Helper: scale an unsigned value and clamp to [1, UINT_MAX].
+    auto scaleU = [](unsigned v, double s) -> unsigned {
+        if (s <= 0.0) return 1u;
+        unsigned r = static_cast<unsigned>(std::round(static_cast<double>(v) * s));
+        return std::max(r, 1u);
+    };
+
+    // Integer-add latency group (add, sub, shift, branch, compare).
+    if (hints.intAddScale != 1.0) {
+        p.latIntAdd  = scaleU(p.latIntAdd,  hints.intAddScale);
+        p.latShift   = scaleU(p.latShift,   hints.intAddScale);
+        p.latBranch  = scaleU(p.latBranch,  hints.intAddScale);
+    }
+
+    // FP latency group (fadd, fmul, fma).
+    if (hints.fpAddScale != 1.0) {
+        p.latFPAdd = scaleU(p.latFPAdd, hints.fpAddScale);
+        p.latFPMul = scaleU(p.latFPMul, hints.fpAddScale);
+        p.latFMA   = scaleU(p.latFMA,   hints.fpAddScale);
+    }
+
+    // Load / store-to-load forwarding latency.
+    if (hints.loadScale != 1.0) {
+        p.latLoad        = scaleU(p.latLoad,        hints.loadScale);
+        p.latStore       = scaleU(p.latStore,        hints.loadScale);
+        p.latStoLForward = scaleU(p.latStoLForward,  hints.loadScale);
+    }
+
+    // Division latency (integer and FP).
+    if (hints.divScale != 1.0) {
+        p.latIntDiv = scaleU(p.latIntDiv, hints.divScale);
+        p.latFPDiv  = scaleU(p.latFPDiv,  hints.divScale);
+        // Scale throughput fields (reciprocal: smaller = faster, so divide by divScale).
+        if (p.tputIntDiv > 0.0 && hints.divScale > 0.0)
+            p.tputIntDiv /= hints.divScale;
+        if (p.tputFPDiv > 0.0 && hints.divScale > 0.0)
+            p.tputFPDiv  /= hints.divScale;
+    }
+
+    // Reorder buffer size (e.g., 0.5 when the CPU is running with SMT contention).
+    if (hints.robScale != 1.0)
+        p.robSize = scaleU(p.robSize, hints.robScale);
+
+    // Reservation station size.
+    if (hints.rsScale != 1.0)
+        p.schedulerSize = scaleU(p.schedulerSize, hints.rsScale);
+
+    // Effective issue width (e.g., 0.5 for an SMT-shared front-end).
+    if (hints.issueScale != 1.0) {
+        unsigned newIssue = scaleU(p.issueWidth, hints.issueScale);
+        p.issueWidth  = std::max(newIssue, 1u);
+        p.decodeWidth = std::max(scaleU(p.decodeWidth, hints.issueScale), 1u);
+    }
+
+    return p;
 }
 
 HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
@@ -5698,7 +5780,9 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 /// Returns estimated cycle count for the block.
 [[gnu::hot]] static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                                     const HardwareGraph& hw,
-                                    const MicroarchProfile& profile) {
+                                    const MicroarchProfile& profile,
+                                    const SchedulerPolicy& policy,
+                                    SchedulerQuality* quality) {
     const llvm::DataLayout& dl = bb.getModule()->getDataLayout();
     // ── 1. Collect moveable instructions ─────────────────────────────────────
     std::vector<llvm::Instruction*> moveable;
@@ -6286,7 +6370,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 // delayed to a lower-pressure point without extending the
                 // critical path.  /4 chosen so slack of 4 halves the penalty.
                 if (slack[id] > 0)
-                    penalty = std::max(1u, penalty / (1 + slack[id] / 4));
+                    penalty = std::max(1u, penalty / (1 + slack[id] / policy.slackDamping));
                 return penalty;
             }
             return 0;
@@ -6312,7 +6396,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             bool isLoadB = llvm::isa<llvm::LoadInst>(moveable[b]);
             if (isLoadA != isLoadB)
                 return isLoadA;  // loads before non-loads
-            if (isLoadA && isLoadB) {
+            if (isLoadA && isLoadB && policy.enableCacheMissRisk) {
                 // Heuristic: loads from different base pointers are more
                 // likely to miss (different cache lines).  Loads from GEPs
                 // with large constant offsets may cross cache lines.
@@ -6344,8 +6428,10 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
             // Fusion affinity: prefer instructions whose fusion partner
             // was just scheduled, enabling macro-op / micro-op fusion.
-            bool fusA = hasFusionAffinity(a), fusB = hasFusionAffinity(b);
-            if (fusA != fusB) return fusA;
+            if (policy.enableFusionHeuristic) {
+                bool fusA = hasFusionAffinity(a), fusB = hasFusionAffinity(b);
+                if (fusA != fusB) return fusA;
+            }
 
             OpClass opA = classifyOp(moveable[a]);
             OpClass opB = classifyOp(moveable[b]);
@@ -6376,8 +6462,10 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             }
 
             // Register pressure: penalise instructions that would cause spills.
-            unsigned rpA = regPressurePenalty(a), rpB = regPressurePenalty(b);
-            if (rpA != rpB) return rpA < rpB; // lower penalty = better
+            if (policy.enableRegPressure) {
+                unsigned rpA = regPressurePenalty(a), rpB = regPressurePenalty(b);
+                if (rpA != rpB) return rpA < rpB; // lower penalty = better
+            }
 
             unsigned rfsA = regFreeScore(a), rfsB = regFreeScore(b);
             if (rfsA != rfsB) return rfsA > rfsB;
@@ -6385,7 +6473,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             // Tier 9: ROB pressure — when many instructions are inflight,
             // prefer instructions that complete sooner (lower latency) to
             // allow earlier retirement and free ROB entries.
-            if (inflightCount > robCapacity * 3 / 4) {
+            if (policy.enableROBPressure && inflightCount > robCapacity * 3 / 4) {
                 if (lat[a] != lat[b])
                     return lat[a] < lat[b];  // shorter latency first
             }
@@ -6397,9 +6485,9 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // For large ready lists (> beamWidth), only consider the top-N
         // candidates to prevent combinatorial explosion in very large BBs.
         // The sorted order ensures the highest-priority instructions are kept.
-        constexpr unsigned kBeamWidth = 32;
-        if (ready.size() > kBeamWidth)
-            ready.resize(kBeamWidth);
+        // beamWidth is taken from the scheduler policy (default 32).
+        if (policy.enableBeamPruning && ready.size() > policy.beamWidth)
+            ready.resize(policy.beamWidth);
 
         // Within a cycle, track which ResourceTypes have been issued to
         // encourage diversity and fill different execution units in parallel.
@@ -6424,7 +6512,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 // Pass 1: issue to any port type (fill remaining slots).
                 if (pass == 0 && issuedPortsThisCycle.count(rtKey)) continue;
                 // Pass 0: also prefer chain diversity for ILP.
-                if (pass == 0 && issuedChainsThisCycle.count(chainId[id])) continue;
+                if (pass == 0 && policy.enableChainDiversity &&
+                    issuedChainsThisCycle.count(chainId[id])) continue;
 
                 // Earliest start: max(currentCycle, predecessor availability).
                 // For data-dep edges (edgeLat = lat[p]): wait for result.
@@ -6536,14 +6625,91 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             inst->moveBefore(bb, term->getIterator());
     }
 
-    return maxCycle > 0 ? maxCycle : currentCycle;
+    const unsigned bbCycles = maxCycle > 0 ? maxCycle : currentCycle;
+
+    // ── 10. Accumulate quality metrics ──────────────────────────────────────
+    if (quality && n > 0) {
+        quality->scheduledCycles   += bbCycles;
+        quality->instructionsTotal += n;
+        ++quality->basicBlocksScheduled;
+
+        // Track peak live register counts across the schedule.
+        // We re-walk the scheduled order to obtain the watermark.
+        unsigned peakInt = intLive, peakVec = vecLive;
+        unsigned simInt = 0, simVec = 0;
+        {
+            // Reset to live-in counts and replay.
+            std::unordered_set<const llvm::Value*> extInt, extVec;
+            for (unsigned i = 0; i < n; ++i) {
+                for (auto& use : moveable[i]->operands()) {
+                    auto* val = use.get();
+                    if (llvm::isa<llvm::Constant>(val)) continue;
+                    bool isVec = val->getType()->isFloatingPointTy() ||
+                                 val->getType()->isVectorTy();
+                    if (llvm::dyn_cast<llvm::Argument>(val) ||
+                        (llvm::dyn_cast<llvm::Instruction>(val) &&
+                         idx.find(llvm::dyn_cast<llvm::Instruction>(val)) == idx.end()))
+                        (isVec ? extVec : extInt).insert(val);
+                }
+            }
+            simInt = static_cast<unsigned>(extInt.size());
+            simVec = static_cast<unsigned>(extVec.size());
+
+            std::vector<unsigned> remUsers2(n, 0);
+            for (unsigned i = 0; i < n; ++i)
+                remUsers2[i] = static_cast<unsigned>(succ[i].size());
+
+            for (auto* inst : scheduled) {
+                auto it2 = idx.find(inst);
+                if (it2 == idx.end()) continue;
+                unsigned id2 = it2->second;
+
+                if (!moveable[id2]->getType()->isVoidTy() && lat[id2] > 0) {
+                    if (producesVecOrFP(moveable[id2])) ++simVec;
+                    else ++simInt;
+                }
+                for (auto [p2, _2] : pred[id2]) {
+                    if (remUsers2[p2] > 0 && --remUsers2[p2] == 0) {
+                        if (producesVecOrFP(moveable[p2])) { if (simVec > 0) --simVec; }
+                        else { if (simInt > 0) --simInt; }
+                    }
+                }
+                if (simInt > peakInt) peakInt = simInt;
+                if (simVec > peakVec) peakVec = simVec;
+            }
+        }
+        if (peakInt > quality->peakIntLive) quality->peakIntLive = peakInt;
+        if (peakVec > quality->peakVecLive) quality->peakVecLive = peakVec;
+
+        // Compute critical-path efficiency: maxCritPath / scheduledCycles.
+        // A value of 1.0 means we scheduled at the theoretical minimum.
+        unsigned maxCrit = 0;
+        for (unsigned i = 0; i < n; ++i)
+            if (critPath[i] > maxCrit) maxCrit = critPath[i];
+        if (bbCycles > 0 && maxCrit > 0) {
+            double bbEff = static_cast<double>(maxCrit) / static_cast<double>(bbCycles);
+            // Weighted running average across BBs.
+            unsigned prevBBs = quality->basicBlocksScheduled - 1;
+            if (prevBBs == 0) {
+                quality->efficiency = bbEff;
+            } else {
+                quality->efficiency =
+                    (quality->efficiency * static_cast<double>(prevBBs) + bbEff) /
+                    static_cast<double>(quality->basicBlocksScheduled);
+            }
+        }
+    }
+
+    return bbCycles;
 }
 
 unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw,
-                               const MicroarchProfile& profile) {
+                               const MicroarchProfile& profile,
+                               const SchedulerPolicy& policy,
+                               SchedulerQuality* quality) {
     unsigned totalCycles = 0;
     for (auto& bb : func)
-        totalCycles += scheduleBasicBlock(bb, hw, profile);
+        totalCycles += scheduleBasicBlock(bb, hw, profile, policy, quality);
     return totalCycles;
 }
 // ═════════════════════════════════════════════════════════════════════════════
@@ -6609,7 +6775,8 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
             if (bbSize >= 2)
                 ++stats.basicBlocksScheduled;
         }
-        scheduleInstructions(func, hw, profile);
+        scheduleInstructions(func, hw, profile, config.schedulerPolicy,
+                             &stats.schedulerQuality);
     }
 
     // Step 4 — Apply hardware-aware transformations with cost-based

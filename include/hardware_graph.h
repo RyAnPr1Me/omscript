@@ -543,6 +543,96 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
 // Step 6 & 10 — Top-level HGOE API
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SchedulerPolicy — independently tunable components of the list scheduler
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-subsystem feature flags and heuristic weights for the HGOE list
+/// scheduler.  Splitting the scheduler into independently tunable components
+/// lets each heuristic be validated, benchmarked, and calibrated on its own
+/// without touching the others.
+///
+/// Priority tiers (1 = highest, 9 = lowest tie-break):
+///   1. Critical-path remaining — latency hiding
+///   2. Long-latency first (div/fdiv) — start slow ops early
+///   3. Loads first — hide memory latency
+///   4. Stall distance — consumer work remaining
+///   5. Fusion affinity — keep macro-op / micro-op fusion pairs adjacent
+///   6. Port pressure — schedule bottleneck resource first
+///   7. Register pressure penalty — avoid spills
+///   8. Register-freeing score — reduce live-value count
+///   9. ROB latency preference — short-latency ops when ROB is under pressure
+struct SchedulerPolicy {
+    // ── Feature flags ──────────────────────────────────────────────────────────
+    /// Enable macro-op / micro-op fusion affinity heuristic (tier 5).
+    bool enableFusionHeuristic  = true;
+    /// Enable per-register-file pressure penalty (tier 7).
+    bool enableRegPressure      = true;
+    /// Enable ROB occupancy short-latency preference (tier 9).
+    bool enableROBPressure      = true;
+    /// Enable chain-diversity enforcement in the two-pass issue window.
+    bool enableChainDiversity   = true;
+    /// Enable cache-miss-risk heuristic for load scheduling (tier 3 sub-sort).
+    bool enableCacheMissRisk    = true;
+    /// Enable slack-aware dampening of the register-pressure penalty.
+    bool enableSlackAware       = true;
+    /// Enable beam-search pruning of large ready lists.
+    bool enableBeamPruning      = true;
+
+    // ── Tuning parameters ─────────────────────────────────────────────────────
+    /// Maximum candidates considered per cycle (beam width).  Reducing this
+    /// lowers compile time for very large basic blocks; increasing it gives the
+    /// sorter more candidates to choose from and may improve IPC.
+    unsigned beamWidth          = 32;
+    /// Slack damping divisor for the register-pressure penalty.
+    /// penalty = penalty / (1 + slack / slackDamping).
+    /// Higher values reduce the damping effect; 1 disables it entirely.
+    unsigned slackDamping       = 4;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SchedulerQuality — per-function scheduling efficiency metrics
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Scheduling-efficiency metrics accumulated by scheduleInstructions().
+/// Used to measure the quality of a schedule relative to the theoretical
+/// optimum (critical path) and to compare HGOE against baseline schedulers.
+struct SchedulerQuality {
+    unsigned scheduledCycles    = 0;   ///< Total cycles across all BBs
+    unsigned instructionsTotal  = 0;   ///< Total moveable instructions scheduled
+    unsigned peakIntLive        = 0;   ///< Peak integer register live-value count
+    unsigned peakVecLive        = 0;   ///< Peak vector/FP register live-value count
+    unsigned basicBlocksScheduled = 0; ///< BBs with ≥2 moveable instructions
+    /// Ratio scheduledCycles / theoreticalMinCycles (1.0 = perfect, higher = worse).
+    /// Set to 0.0 when no scheduling was performed or the function is empty.
+    double   efficiency         = 0.0;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CalibrationHints — per-architecture measurement-driven profile adjustment
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-architecture correction factors derived from hardware measurements.
+/// Pass to calibrateProfile() to produce an adjusted MicroarchProfile.
+/// Scale factors <1.0 reduce the base value; >1.0 increase it.
+/// 1.0 (default) is a no-op — the base profile is returned unchanged.
+struct CalibrationHints {
+    double intAddScale   = 1.0; ///< Multiply latIntAdd / latShift / latBranch
+    double fpAddScale    = 1.0; ///< Multiply latFPAdd / latFPMul
+    double loadScale     = 1.0; ///< Multiply latLoad and latStoLForward
+    double divScale      = 1.0; ///< Multiply latIntDiv and latFPDiv
+    double robScale      = 1.0; ///< Scale robSize (e.g., 0.5 for SMT/HT contention)
+    double rsScale       = 1.0; ///< Scale schedulerSize
+    double issueScale    = 1.0; ///< Scale issueWidth (e.g., 0.5 for SMT)
+};
+
+/// Produce an adjusted MicroarchProfile by applying CalibrationHints.
+/// Useful for tuning profile parameters based on measured performance counters
+/// without editing the base profile tables.  All resulting values are clamped
+/// to sane minima so the scheduler never sees zero-capacity resources.
+MicroarchProfile calibrateProfile(const MicroarchProfile& base,
+                                   const CalibrationHints& hints);
+
 /// Configuration for the Hardware Graph Optimization Engine.
 struct HGOEConfig {
     std::string marchCpu;            ///< -march value (empty = not specified)
@@ -555,6 +645,9 @@ struct HGOEConfig {
                                       ///< linker has its own loop optimizer and
                                       ///< forced hints cause excessive compile
                                       ///< time or hangs.
+    /// Per-subsystem scheduler knobs.  The default policy matches the behaviour
+    /// prior to the introduction of this field (all features enabled, beam=32).
+    SchedulerPolicy schedulerPolicy;
 };
 
 /// Apply hardware-graph-driven instruction scheduling to all basic blocks in a
@@ -563,9 +656,17 @@ struct HGOEConfig {
 /// Uses the actual HardwareGraph port model — each execution-unit node carries
 /// a throughput value (instructions/cycle) that drives cycle-accurate port
 /// assignment and port-diversity scheduling.
-/// Returns the estimated total cycle count.
+///
+/// @param func     Function to schedule.
+/// @param hw       Hardware graph built from the target microarchitecture.
+/// @param profile  Microarchitecture profile (latencies, port counts, etc.).
+/// @param policy   Scheduler heuristic knobs (default: all features enabled).
+/// @param quality  Optional output — scheduling-efficiency metrics.
+/// @returns Estimated total cycle count across all scheduled basic blocks.
 unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw,
-                               const MicroarchProfile& profile);
+                               const MicroarchProfile& profile,
+                               const SchedulerPolicy& policy = SchedulerPolicy{},
+                               SchedulerQuality* quality = nullptr);
 
 /// Statistics from the HGOE pipeline.
 struct HGOEStats {
@@ -577,6 +678,8 @@ struct HGOEStats {
     unsigned basicBlocksScheduled = 0; ///< Basic blocks with instructions reordered
     unsigned loopsUnrolled = 0;        ///< Loops annotated for software pipelining
     TransformStats transforms;
+    /// Scheduling-quality metrics from the last scheduleInstructions() call.
+    SchedulerQuality schedulerQuality;
 };
 
 /// Check whether HGOE should activate for the given config.
