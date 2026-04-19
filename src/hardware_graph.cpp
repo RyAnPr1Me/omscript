@@ -309,7 +309,8 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
         case llvm::Intrinsic::roundeven:
         case llvm::Intrinsic::rint:
         case llvm::Intrinsic::nearbyint:
-        case llvm::Intrinsic::trunc:    // llvm.trunc = FP truncation (VROUNDPD mode)
+        case llvm::Intrinsic::trunc:    // llvm.trunc intrinsic = FP rounding toward zero (VROUNDPD mode 3),
+                                        // NOT the integer-narrowing Trunc opcode (llvm::Instruction::Trunc)
         case llvm::Intrinsic::fabs:
         case llvm::Intrinsic::copysign:
         case llvm::Intrinsic::minnum:
@@ -6481,7 +6482,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 // delayed to a lower-pressure point without extending the
                 // critical path.  /4 chosen so slack of 4 halves the penalty.
                 if (slack[id] > 0)
-                    penalty = std::max(1u, penalty / (1 + slack[id] / policy.slackDamping));
+                    penalty = std::max(1u, static_cast<unsigned>(
+                        penalty / (1.0 + static_cast<double>(slack[id]) / policy.slackDamping)));
                 return penalty;
             }
             return 0;
