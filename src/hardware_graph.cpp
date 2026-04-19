@@ -3965,11 +3965,12 @@ static unsigned foldPowBySmallInt(llvm::Function& func) {
                         builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), d, "pow.recip"));
                     fd->setFastMathFlags(fmf);
                     result = fd; break; }
-                case -3: result = mul(mul(getX2(), base),
-                                      builder.CreateFDiv(llvm::ConstantFP::get(ty,1.0),
-                                        mul(getX2(), mul(base,base)), "pow.recip"));
-                    // Too complex; skip.
-                    result = nullptr; break;
+                case -3:
+                    // pow(x, -3) = 1/(x²·x): requires three multiplies + one divide.
+                    // The added complexity doesn't justify code generation here; the
+                    // library call is only marginally slower for this single case.
+                    // Fall through to the default (no transform).
+                    break;
                 case -2: {
                     auto* fd = llvm::cast<llvm::Instruction>(
                         builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), getX2(), "pow.recip"));
@@ -4615,10 +4616,11 @@ static unsigned convertIfElseToSelect(llvm::Function& func,
                             // values from outside the function (args) or defined
                             // before the branch in the same function.
                             // For safety, we only allow args and header-local defs.
-                            if (!llvm::isa<llvm::Argument>(opInst)) {
-                                operandsOk = false; break;
-                            }
+                            // NOTE: `op.get()` may be an Argument (not an Instruction).
+                            operandsOk = false; break;
                         }
+                        // If op is not an instruction (e.g., a function Argument or
+                        // Constant), it always dominates every block — allow it.
                     }
                     if (!operandsOk) break;
                 }
