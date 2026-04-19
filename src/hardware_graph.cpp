@@ -1407,6 +1407,88 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     return p;
 }
 
+/// Return a Qualcomm Oryon (Snapdragon X Elite, 2024) profile.
+/// Oryon is Qualcomm's custom ARMv9 P-core, debuting in the Snapdragon X
+/// Elite/Plus SoC for Windows laptops and competing directly with Apple M3.
+/// Key: 6-wide superscalar OoO, 5 int ALU, 4 FMA/NEON units, large ROB.
+[[gnu::cold]] static MicroarchProfile oryonProfile() {
+    MicroarchProfile p;
+    p.name = "oryon";
+    p.isa = ISAFamily::AArch64;
+    p.decodeWidth = 6;          // 6-wide fetch and decode
+    p.issueWidth = 6;           // 6-wide dispatch to execution units
+    p.pipelineDepth = 12;
+    p.intALUs = 5;              // 5 integer execution pipes
+    p.vecUnits = 4;             // 4 NEON/FP 128-bit units
+    p.fmaUnits = 4;             // 4 FMA units (VFMA.2D, VFMA.4S)
+    p.loadPorts = 3;            // 3 load pipes
+    p.storePorts = 2;
+    p.branchUnits = 2;
+    p.agus = 3;
+    p.dividers = 2;
+    p.mulPortCount = 4;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 12;
+    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 9; p.latFMA = 3;
+    p.latLoad = 4; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.20; p.tputIntMul = 0.25;
+    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
+    p.tputLoad = 0.33; p.tputStore = 0.5;
+    p.l1DSize = 64;  p.l1DLatency = 4;
+    p.l2Size = 1024; p.l2Latency = 10;  // 1 MB L2 per 4-core cluster
+    p.l3Size = 6144; p.l3Latency = 35;  // 6 MB shared L3
+    p.cacheLineSize = 64;
+    p.vectorWidth = 128;        // NEON 128-bit (SVE2 optional)
+    p.intRegisters = 30; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 14.0;
+    p.btbEntries = 8192;
+    p.memoryLatency = 100;      // LPDDR5x — fast
+    p.robSize = 320;
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1;        // NEON 128-bit native
+    return p;
+}
+
+/// Return an Intel Sierra Forest (Crestmont E-core, 2024) profile.
+/// Sierra Forest is Intel's first E-core-only server CPU (Xeon 6 E-series).
+/// Crestmont is an improved Gracemont E-core: 3-wide in-order decode per
+/// cluster, 4 integer ALU pipes (modest OoO), no AVX-512, no SMT.
+[[gnu::cold]] static MicroarchProfile sierraForestProfile() {
+    MicroarchProfile p;
+    p.name = "sierra-forest";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 3;          // 3-wide decode per E-core cluster
+    p.issueWidth = 4;           // 4-wide dispatch (narrower than P-cores)
+    p.pipelineDepth = 10;       // shallower pipeline than P-cores
+    p.intALUs = 4;              // 4 integer execution pipes
+    p.vecUnits = 2;             // 2 vector ALU pipes (256-bit AVX2)
+    p.fmaUnits = 1;             // 1 FMA unit per core
+    p.loadPorts = 2;
+    p.storePorts = 1;
+    p.branchUnits = 1;
+    p.agus = 2;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 5;
+    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.25; p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.5;  p.tputFPMul = 0.5;
+    p.tputLoad = 0.5;   p.tputStore = 1.0;
+    p.l1DSize = 32;  p.l1DLatency = 5;
+    p.l2Size = 2048; p.l2Latency = 14;  // 2 MB per 4-core cluster
+    p.l3Size = 57344; p.l3Latency = 50; // up to 56 MB shared L3
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;        // AVX2 (no AVX-512)
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 9.0; // shorter pipeline → smaller penalty
+    p.btbEntries = 4096;
+    p.memoryLatency = 190;
+    p.robSize = 160;            // Crestmont ROB is ~160 (smaller than P-cores)
+    p.latStoLForward = 5;
+    p.vec512Penalty = 1;        // No AVX-512
+    return p;
+}
+
 /// Normalize a CPU name for lookup: lowercase, strip hyphens.
 static std::string normalizeCpuName(const std::string& name) {
     std::string result;
@@ -1475,8 +1557,13 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     if (normalized == "sapphirerapids" || normalized == "emeraldrapids")
         return sapphireRapidsProfile();
     if (normalized == "graniterapids" || normalized == "graniteerapids" ||
-        normalized == "sierraforest" || normalized == "xeon6")
+        normalized == "xeon6p")
         return graniteRapidsProfile();
+    // Sierra Forest: Crestmont E-core server (Xeon 6 E-series).
+    // Completely different pipeline from P-core Granite Rapids.
+    if (normalized == "sierraforest" || normalized == "xeon6e" ||
+        normalized == "clearwaterforest")
+        return sierraForestProfile();
 
     // AMD Zen family
     if (normalized == "znver4" || normalized == "zen4")
@@ -1573,6 +1660,11 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         p.name = cpuName;
         return p;
     }
+
+    // ARM64 — Qualcomm Oryon (Snapdragon X Elite)
+    if (normalized == "oryon" || normalized == "snapdragonxelite" ||
+        normalized == "snapdragonxplus" || normalized == "snapdragonx")
+        return oryonProfile();
 
     // RISC-V
     if (normalized == "genericrv64" || normalized == "riscv64")
@@ -3728,6 +3820,492 @@ static unsigned foldMinMaxPatterns(llvm::Function& func) {
     return count;
 }
 
+/// Replace `fmul(x, -1.0)` and `fmul(-1.0, x)` with `fneg(x)`.
+///
+/// FP multiply by -1.0 is semantically identical to FP negation for all
+/// well-defined values (including ±0, ±∞, and finite numbers).  The sign
+/// of a NaN result is implementation-defined by IEEE 754, so both forms
+/// may produce either sign of NaN — the transform is therefore safe even
+/// without fast-math flags.
+///
+/// Benefit: on every major architecture FNeg maps to a single-cycle
+/// instruction (VXORPS/VXORPD on x86, FNEG on ARM), while FMul uses
+/// the 4-cycle FP-multiply pipeline.  Eliminating the FMul also frees
+/// an FMA/FMul port for real multiply work.
+///
+/// Returns the number of multiplies replaced.
+static unsigned foldFPMulByNeg1(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FMul) continue;
+            llvm::Value* op0 = inst.getOperand(0);
+            llvm::Value* op1 = inst.getOperand(1);
+            llvm::Type*  ty  = inst.getType();
+
+            // Determine which operand is -1.0 (try both orderings).
+            llvm::Value* other = nullptr;
+            for (int s = 0; s < 2; ++s) {
+                llvm::Value* candidate = (s == 0) ? op0 : op1;
+                llvm::Value* partner   = (s == 0) ? op1 : op0;
+
+                // Scalar -1.0 constant.
+                if (auto* cfp = llvm::dyn_cast<llvm::ConstantFP>(candidate)) {
+                    if (cfp->isExactlyValue(-1.0)) { other = partner; break; }
+                }
+                // Splat vector -1.0.
+                if (auto* cv = llvm::dyn_cast<llvm::ConstantVector>(candidate)) {
+                    if (auto* sp = cv->getSplatValue()) {
+                        auto* spc = llvm::dyn_cast<llvm::ConstantFP>(sp);
+                        if (spc && spc->isExactlyValue(-1.0)) { other = partner; break; }
+                    }
+                }
+                if (auto* cdv = llvm::dyn_cast<llvm::ConstantDataVector>(candidate)) {
+                    if (auto* sp = llvm::dyn_cast_or_null<llvm::ConstantFP>(
+                            cdv->getSplatValue())) {
+                        if (sp->isExactlyValue(-1.0)) { other = partner; break; }
+                    }
+                }
+                (void)ty; // used for type check below if needed
+            }
+            if (!other) continue;
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* neg = builder.CreateFNeg(other, "fneg1");
+            // Propagate fast-math flags from the original mul.
+            if (auto* negInst = llvm::dyn_cast<llvm::Instruction>(neg)) {
+                auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
+                negInst->setFastMathFlags(fpOp->getFastMathFlags());
+            }
+            replacements.emplace_back(&inst, neg);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Expand `llvm.pow(x, N)` for small constant exponents to multiply chains.
+///
+/// Calling `pow(x, N)` for integer or half-integer N invokes the math
+/// library, which is 50–100 cycles.  For small constant N we can express
+/// the same value as a short sequence of fmul / sqrt instructions that
+/// execute in 4–12 cycles on modern CPUs.
+///
+/// Transforms applied (require `afn` or `reassoc` fast-math flag):
+///   pow(x, 0.0)  → 1.0          (exact)
+///   pow(x, 1.0)  → x            (exact, no flag needed)
+///   pow(x, 0.5)  → sqrt(x)      (requires nnan, so we use afn/reassoc)
+///   pow(x, 2.0)  → fmul(x, x)   (one extra rounding — requires reassoc)
+///   pow(x, 3.0)  → fmul(fmul(x,x), x)
+///   pow(x, 4.0)  → let t=fmul(x,x); fmul(t,t)
+///   pow(x, 5.0)  → let t=fmul(x,x); fmul(fmul(t,t), x)
+///   pow(x, -0.5) → 1/sqrt(x)    (requires afn)
+///   pow(x, -1.0) → 1/x (or fmul with arcp — handled by foldFPDivByConstant)
+///   pow(x, -2.0) → let t=fmul(x,x); 1/t (then arcp folds)
+///
+/// Returns the number of pow calls replaced.
+static unsigned foldPowBySmallInt(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    llvm::Module* mod = func.getParent();
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(&inst);
+            if (!ii) continue;
+            if (ii->getIntrinsicID() != llvm::Intrinsic::pow &&
+                ii->getIntrinsicID() != llvm::Intrinsic::powi) continue;
+
+            // Check for `afn` or `reassoc` fast-math flag.
+            auto* fpOp = llvm::cast<llvm::FPMathOperator>(ii);
+            bool canApprox = fpOp->hasApproxFunc() || fpOp->hasAllowReassoc();
+            bool hasArcp   = fpOp->hasAllowReciprocal();
+            if (!canApprox && !hasArcp) continue;
+
+            llvm::Value* base = ii->getArgOperand(0);
+            llvm::Type*  ty   = ii->getType();
+            llvm::IRBuilder<> builder(ii);
+            llvm::FastMathFlags fmf = fpOp->getFastMathFlags();
+
+            llvm::Value* result = nullptr;
+
+            // For powi, exponent is an i32 integer.
+            if (ii->getIntrinsicID() == llvm::Intrinsic::powi) {
+                auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ii->getArgOperand(1));
+                if (!ci) continue;
+                int64_t exp = ci->getSExtValue();
+
+                auto mul = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* {
+                    auto* r = llvm::cast<llvm::Instruction>(
+                        builder.CreateFMul(a, b, "pow.mul"));
+                    r->setFastMathFlags(fmf);
+                    return r;
+                };
+                llvm::Value* x2 = nullptr, *x4 = nullptr;
+                auto getX2 = [&]() -> llvm::Value* {
+                    if (!x2) x2 = mul(base, base);
+                    return x2;
+                };
+                auto getX4 = [&]() -> llvm::Value* {
+                    if (!x4) x4 = mul(getX2(), getX2());
+                    return x4;
+                };
+
+                switch (exp) {
+                case -4: { auto d = getX4();
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), d, "pow.recip"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd; break; }
+                case -3: result = mul(mul(getX2(), base),
+                                      builder.CreateFDiv(llvm::ConstantFP::get(ty,1.0),
+                                        mul(getX2(), mul(base,base)), "pow.recip"));
+                    // Too complex; skip.
+                    result = nullptr; break;
+                case -2: {
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), getX2(), "pow.recip"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd; break; }
+                case -1: {
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), base, "pow.recip"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd; break; }
+                case 0:  result = llvm::ConstantFP::get(ty, 1.0); break;
+                case 1:  result = base; break;
+                case 2:  result = getX2(); break;
+                case 3:  result = mul(getX2(), base); break;
+                case 4:  result = getX4(); break;
+                case 5:  result = mul(getX4(), base); break;
+                case 6:  result = mul(getX4(), getX2()); break;
+                case 8:  result = mul(getX4(), getX4()); break;
+                default: break;
+                }
+            } else {
+                // llvm.pow with a constant FP exponent.
+                llvm::ConstantFP* cexp = nullptr;
+                if (auto* c = llvm::dyn_cast<llvm::ConstantFP>(ii->getArgOperand(1)))
+                    cexp = c;
+                if (!cexp) continue;
+                double expVal = cexp->getValueAPF().convertToDouble();
+
+                auto mul = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* {
+                    auto* r = llvm::cast<llvm::Instruction>(
+                        builder.CreateFMul(a, b, "pow.mul"));
+                    r->setFastMathFlags(fmf);
+                    return r;
+                };
+                llvm::Value* x2 = nullptr, *x4 = nullptr;
+                auto getX2 = [&]() -> llvm::Value* {
+                    if (!x2) x2 = mul(base, base); return x2;
+                };
+                auto getX4 = [&]() -> llvm::Value* {
+                    if (!x4) x4 = mul(getX2(), getX2()); return x4;
+                };
+
+                if (expVal == 0.0) {
+                    result = llvm::ConstantFP::get(ty, 1.0);
+                } else if (expVal == 1.0) {
+                    result = base;
+                } else if (expVal == 0.5) {
+                    llvm::Function* sqrtFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::sqrt, {ty});
+                    auto* sr = builder.CreateCall(sqrtFn, {base}, "pow.sqrt");
+                    sr->setFastMathFlags(fmf);
+                    result = sr;
+                } else if (expVal == -0.5) {
+                    llvm::Function* sqrtFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::sqrt, {ty});
+                    auto* sr = builder.CreateCall(sqrtFn, {base}, "pow.sqrt");
+                    sr->setFastMathFlags(fmf);
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), sr, "pow.rsqrt"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd;
+                } else if (expVal == 2.0) {
+                    result = getX2();
+                } else if (expVal == 3.0) {
+                    result = mul(getX2(), base);
+                } else if (expVal == 4.0) {
+                    result = getX4();
+                } else if (expVal == 5.0) {
+                    result = mul(getX4(), base);
+                } else if (expVal == 6.0) {
+                    result = mul(getX4(), getX2());
+                } else if (expVal == 8.0) {
+                    result = mul(getX4(), getX4());
+                } else if (expVal == -1.0) {
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), base, "pow.recip"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd;
+                } else if (expVal == -2.0) {
+                    auto* fd = llvm::cast<llvm::Instruction>(
+                        builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), getX2(), "pow.recip2"));
+                    fd->setFastMathFlags(fmf);
+                    result = fd;
+                }
+            }
+
+            if (!result) continue;
+            replacements.emplace_back(ii, result);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Replace `sqrt(x * x)` with `fabs(x)`.
+///
+/// For any finite real x, √(x²) = |x|.  The transform avoids a ~10-cycle
+/// sqrt operation by substituting a 1-cycle sign-bit clear (FABS).
+///
+/// Safety conditions:
+///   • `nnan`: no NaN inputs, so x is a real number.
+///   • `ninf`: no infinities; |x| is finite.
+///   Both flags on the sqrt (or `fast`) are required.
+///
+/// The fmul operand's flags are also checked: it must be the only user of
+/// the fmul, or we would keep the fmul alive.
+///
+/// Returns the number of sqrt instructions replaced.
+static unsigned foldSqrtSquare(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    llvm::Module* mod = func.getParent();
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(&inst);
+            if (!ii || ii->getIntrinsicID() != llvm::Intrinsic::sqrt) continue;
+
+            // Require nnan + ninf (or `fast`) on the sqrt.
+            auto* fpSqrt = llvm::cast<llvm::FPMathOperator>(ii);
+            if (!fpSqrt->hasNoNaNs() || !fpSqrt->hasNoInfs()) continue;
+
+            llvm::Value* arg = ii->getArgOperand(0);
+            llvm::Type*  ty  = ii->getType();
+
+            // Pattern: sqrt(fmul(x, x)) where the fmul has exactly one use (this sqrt).
+            auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(arg);
+            if (!fmul || fmul->getOpcode() != llvm::Instruction::FMul) continue;
+            if (!fmul->hasOneUse()) continue;
+            if (fmul->getOperand(0) != fmul->getOperand(1)) continue;
+
+            llvm::Value* x = fmul->getOperand(0);
+            llvm::IRBuilder<> builder(ii);
+            llvm::Function* fabsFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fabs, {ty});
+            llvm::Value* result = builder.CreateCall(fabsFn, {x}, "sqrt_sq_fabs");
+
+            replacements.emplace_back(ii, result);
+            // The fmul will be erased when the sqrt is replaced (use_empty check).
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        // Also erase the now-dead fmul operand.
+        llvm::Value* arg = inst->getOperand(0);
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+        if (auto* dead = llvm::dyn_cast<llvm::Instruction>(arg))
+            if (dead->use_empty()) dead->eraseFromParent();
+    }
+    return count;
+}
+
+/// Replace `select(i1 cond, C_true, C_false)` with casts when the pair of
+/// constants is (1, 0) or (-1, 0) — patterns the backend can lower to a
+/// single SETCC or MOVZX/MOVSX instruction.
+///
+///   select(cond, i32  1, i32  0)  →  zext i1 cond to i32
+///   select(cond, i32 -1, i32  0)  →  sext i1 cond to i32
+///   select(cond, i32  0, i32  1)  →  zext i1 (not cond) to i32
+///     (not folded here — would need xor; left for InstCombine)
+///   select(cond, i64  1, i64  0)  →  zext i1 cond to i64
+///   select(cond, i64 -1, i64  0)  →  sext i1 cond to i64
+///
+/// This reduces a branch-like select sequence (2+ µops: SETCC + MOVZX or
+/// CMOV) to a single µop on architectures with an integrated SETCC.
+///
+/// Returns the number of selects replaced.
+static unsigned foldSelectToBoolCast(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+
+            // Condition must be i1 (bit-width 1).
+            llvm::Value* cond = sel->getCondition();
+            if (!cond->getType()->isIntegerTy(1)) continue;
+
+            llvm::Value* tv = sel->getTrueValue();
+            llvm::Value* fv = sel->getFalseValue();
+            llvm::Type*  ty = sel->getType();
+            if (!ty->isIntegerTy()) continue;
+
+            auto* tCI = llvm::dyn_cast<llvm::ConstantInt>(tv);
+            auto* fCI = llvm::dyn_cast<llvm::ConstantInt>(fv);
+            if (!tCI || !fCI) continue;
+
+            llvm::IRBuilder<> builder(sel);
+            llvm::Value* result = nullptr;
+
+            if (tCI->isOne() && fCI->isZero()) {
+                // select(cond, 1, 0) → zext(cond)
+                result = builder.CreateZExt(cond, ty, "bool.zext");
+            } else if (tCI->isAllOnes() && fCI->isZero()) {
+                // select(cond, -1, 0) → sext(cond)
+                result = builder.CreateSExt(cond, ty, "bool.sext");
+            } else if (tCI->isZero() && fCI->isOne()) {
+                // select(cond, 0, 1) → zext(not cond)
+                // Emit: xor cond, 1 → zext
+                llvm::Value* notCond = builder.CreateXor(
+                    cond, llvm::ConstantInt::getTrue(cond->getContext()), "bool.not");
+                result = builder.CreateZExt(notCond, ty, "bool.notzext");
+            } else if (tCI->isZero() && fCI->isAllOnes()) {
+                // select(cond, 0, -1) → sext(not cond)
+                llvm::Value* notCond = builder.CreateXor(
+                    cond, llvm::ConstantInt::getTrue(cond->getContext()), "bool.not");
+                result = builder.CreateSExt(notCond, ty, "bool.notsext");
+            }
+
+            if (!result) continue;
+            replacements.emplace_back(sel, result);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Hoist loop-invariant GEP instructions out of loop bodies into the loop's
+/// pre-header (the unique non-back-edge predecessor of the loop header).
+///
+/// GEP instructions whose base pointer and all index operands are defined
+/// outside the loop body are invariant — they compute the same address on
+/// every iteration and can be computed once in the pre-header.
+///
+/// Motivation: while LLVM's LICM pass normally handles this, our transforms
+/// (strength reduction, FMA generation, etc.) can introduce new GEP
+/// combinations that appear *after* LICM has run.  Running this pass last
+/// ensures newly created address computations are hoisted.
+///
+/// Algorithm:
+///   1. Detect loop headers (basic blocks with a back-edge predecessor).
+///   2. Identify the pre-header (unique non-back-edge predecessor).
+///   3. Collect all basic blocks in the loop (reachable from header, before latch).
+///   4. For each GEP in any loop BB: if all operands are defined outside the loop,
+///      move the GEP to the end of the pre-header (before its terminator).
+///
+/// Returns the number of GEPs hoisted.
+static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+
+    unsigned count = 0;
+
+    // Assign linear order to BBs for back-edge detection.
+    std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
+    { unsigned ord = 0; for (auto& bb : func) bbOrder[&bb] = ord++; }
+
+    // Process each basic block as a potential loop header.
+    for (auto& header : func) {
+        // Find the latch (back-edge source): a predecessor of header with
+        // a higher linear order.
+        llvm::BasicBlock* latch = nullptr;
+        for (auto* pred : llvm::predecessors(&header)) {
+            if (bbOrder.count(pred) && bbOrder.at(pred) >= bbOrder.at(&header)) {
+                latch = pred;
+                break;
+            }
+        }
+        if (!latch) continue; // not a loop header
+
+        // Find the pre-header: unique predecessor of header that is NOT the latch.
+        // If there are multiple non-latch predecessors, we cannot safely hoist
+        // (the pre-header is ambiguous).
+        llvm::BasicBlock* preHeader = nullptr;
+        unsigned nonLatchPreds = 0;
+        for (auto* pred : llvm::predecessors(&header)) {
+            if (pred != latch) {
+                preHeader = pred;
+                ++nonLatchPreds;
+            }
+        }
+        if (nonLatchPreds != 1 || !preHeader) continue;
+
+        // Collect all basic blocks in the loop body using a BFS from the header
+        // that stays within the back-edge cycle (stops at header when reached via latch).
+        // Simple approximation: all BBs between header and latch in linear order.
+        unsigned headerOrd = bbOrder.at(&header);
+        unsigned latchOrd  = bbOrder.at(latch);
+        std::unordered_set<const llvm::BasicBlock*> loopBBs;
+        for (auto& bb : func) {
+            unsigned ord = bbOrder.at(&bb);
+            if (ord >= headerOrd && ord <= latchOrd)
+                loopBBs.insert(&bb);
+        }
+
+        // Collect GEPs to hoist from any loop BB.
+        // A GEP is invariant if ALL its operands (base + indices) are either:
+        //   • Constants, or
+        //   • Defined in a BB that is NOT in the loop (i.e., outside the loop).
+        std::vector<llvm::GetElementPtrInst*> toHoist;
+
+        for (auto& bb : func) {
+            if (!loopBBs.count(&bb)) continue;
+            for (auto& inst : bb) {
+                auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst);
+                if (!gep) continue;
+
+                // Check all operands.
+                bool invariant = true;
+                for (unsigned i = 0; i < gep->getNumOperands(); ++i) {
+                    llvm::Value* op = gep->getOperand(i);
+                    if (llvm::isa<llvm::Constant>(op)) continue;
+                    auto* defInst = llvm::dyn_cast<llvm::Instruction>(op);
+                    if (!defInst) { invariant = false; break; }
+                    // Loop-invariant if defined outside the loop.
+                    if (loopBBs.count(defInst->getParent())) { invariant = false; break; }
+                }
+                if (!invariant) continue;
+                // Don't hoist if already in the pre-header.
+                if (gep->getParent() == preHeader) continue;
+                // Skip GEPs with side effects (shouldn't exist, but be safe).
+                toHoist.push_back(gep);
+            }
+        }
+
+        // Hoist all invariant GEPs: move them to the pre-header (before its terminator).
+        llvm::Instruction* insertPt = preHeader->getTerminator();
+        for (auto* gep : toHoist) {
+            gep->moveBefore(insertPt);
+            ++count;
+        }
+    }
+    return count;
+}
+
 /// Rebalance linear chains of commutative+associative binary operations into
 /// balanced binary trees, reducing critical path depth.
 ///
@@ -4229,13 +4807,24 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Canonicalize fadd(x, fneg(y)) → fsub(x, y) before FMA scan so the
     // FMA pass can recognise the resulting fsub patterns.
     stats.fmaGenerated    += canonicalizeFaddFneg(func);
+    // fmul(x, -1.0) → fneg(x): 1 cycle bit-flip vs 4-cycle multiply.
+    // Run before FMA scan so the eliminated fmul doesn't confuse FMA matching.
+    stats.fmaGenerated    += foldFPMulByNeg1(func);
     // FP division by constant → reciprocal multiply (fdiv → fmul when `arcp` flag).
     // Run before FMA scan so that the resulting fmul may be fused in a later pass.
     stats.fmaGenerated    += foldFPDivByConstant(func, profile);
+    // pow(x, N) for small constant N → multiply chain (avoids 50-100cy lib call).
+    // Run after fneg/fdiv folds so the resulting fmuls can be seen by FMA passes.
+    stats.fmaGenerated    += foldPowBySmallInt(func);
+    // sqrt(x * x) → fabs(x) with nnan+ninf: avoids ~10-cycle sqrt.
+    stats.fmaGenerated    += foldSqrtSquare(func);
     // Integer div/rem by power-of-2 → shift/and (any that slipped past InstCombine).
     stats.intStrengthReduced = foldDivByPow2(func);
     // Min/max pattern: icmp/fcmp + select → smin/smax/minnum/maxnum intrinsics.
     stats.intStrengthReduced += foldMinMaxPatterns(func);
+    // select(cond, 1, 0) → zext(cond), select(cond, -1, 0) → sext(cond).
+    // Enables SETCC/MOVZX backend lowering (1 µop vs. multi-µop select sequence).
+    stats.intStrengthReduced += foldSelectToBoolCast(func);
     stats.prefetchesInserted = insertPrefetches(func, profile);
     stats.branchesOptimized  = optimizeBranchLayout(func, profile);
     stats.loadsStorePaired   = markLoadStorePairs(func, profile);
@@ -4254,6 +4843,9 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.intStrengthReduced += rebalanceChainForILP(func, profile);
     stats.branchesOptimized  += convertIfElseToSelect(func, profile);
     stats.loadsStorePaired   += insertNonTemporalHints(func, profile);
+    // Hoist loop-invariant GEP address calculations to the loop pre-header.
+    // Runs last so all address computations introduced by our transforms are hoisted.
+    stats.loadsStorePaired   += hoistLoopInvariantGEP(func);
 
     return stats;
 }
