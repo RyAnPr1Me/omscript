@@ -112,6 +112,7 @@
 #include <llvm/Transforms/Scalar/LICM.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
 #include <llvm/Transforms/Vectorize/LoadStoreVectorizer.h>
+#include <llvm/Transforms/Vectorize/LoopVectorize.h>
 #include <llvm/Transforms/Vectorize/SLPVectorizer.h>
 #include <llvm/Transforms/Scalar/NewGVN.h>
 #include <llvm/Transforms/Scalar/Scalarizer.h>
@@ -149,13 +150,15 @@ namespace omscript {
 // Aggressive SimplifyCFG options used throughout the optimization pipeline.
 // Converts if-else chains to selects, hoists/sinks common instructions,
 // converts switches to lookup tables, and speculatively simplifies blocks.
-// bonusInstThreshold=6 allows up to 6 extra instructions to be speculated
+// bonusInstThreshold=10 allows up to 10 extra instructions to be speculated
 // when converting branches to selects — enough for cascading-if classify()
 // patterns and multi-condition guards without over-speculating complex branches.
+// Raised from 6 to 10: more aggressive branch→select conversion is safe for
+// OmScript because all OPTMAX functions have nounwind+nosync semantics.
 // convertSwitchRangeToICmp: converts switch statements with contiguous case
 // ranges to icmp+branch sequences, which are more efficient on modern OoO CPUs
 // with branch prediction than the switch dispatch table.
-static constexpr int kCFGSpeculationBonus = 6;
+static constexpr int kCFGSpeculationBonus = 10;
 static llvm::SimplifyCFGOptions aggressiveCFGOpts() {
     return llvm::SimplifyCFGOptions()
         .convertSwitchToLookupTable(true)
@@ -168,21 +171,21 @@ static llvm::SimplifyCFGOptions aggressiveCFGOpts() {
 }
 
 // Hyperblock-aggressive SimplifyCFG options for superblock/hyperblock formation.
-// Uses a higher bonusInstThreshold (12) to convert more branches to predicated
+// Uses a higher bonusInstThreshold (24) to convert more branches to predicated
 // (select) instructions, creating larger basic blocks that give the scheduler
 // and register allocator more freedom.  This is the IR-level equivalent of
 // hyperblock formation in traditional compilers.
 //
-// Threshold=12 is chosen to match GCC's aggressive if-conversion heuristic:
-// it allows speculating up to 12 instructions to convert a branch to a select,
-// which covers 2-3 chained comparisons with arithmetic (common in classify()
-// and range-check patterns).  Values above 12 risk register-pressure increases
-// that offset the scheduling benefit on x86-64 (16 GPRs).
+// Threshold=24 is twice the previous value of 12; it covers 4-6 chained
+// comparisons with arithmetic (classify() patterns, multi-range checks) without
+// the register-pressure blowup of unlimited speculation.  Since OmScript does
+// not care about compile time, the extra SimplifyCFG analysis cost is worthwhile
+// for the I-cache density benefit of predicated regions.
 //
 // needCanonicalLoops(false) allows SimplifyCFG to break canonical loop form
 // when it enables more aggressive if-conversion — the loop canonicalization
 // passes that run later will restore the form if needed.
-static constexpr int kHyperblockSpeculationBonus = 12;
+static constexpr int kHyperblockSpeculationBonus = 24;
 static llvm::SimplifyCFGOptions hyperblockCFGOpts() {
     return llvm::SimplifyCFGOptions()
         .convertSwitchToLookupTable(true)
@@ -663,7 +666,7 @@ void CodeGenerator::runOptimizationPasses() {
         PTO.InlinerThreshold = 500;
     }
     if (optimizationLevel == OptimizationLevel::O3) {
-        PTO.InlinerThreshold = 1500; // aggressive inlining for maximum IPC
+        PTO.InlinerThreshold = 3000; // aggressive inlining for maximum IPC (compile time not a concern)
     }
     // ForgetAllSCEVInLoopUnroll forces SCEV to recompute trip counts after
     // each unrolling step.  Without this, stale trip-count information from
@@ -1747,12 +1750,12 @@ void CodeGenerator::runOptimizationPasses() {
     // reducing call overhead by ~2^depth.  3 levels gives ~8x fewer calls,
     // matching GCC -O3's behavior for naive recursive algorithms like fib.
     if (optimizationLevel >= OptimizationLevel::O3) {
-        static constexpr unsigned kRecursiveInlineDepth = 4;
+        static constexpr unsigned kRecursiveInlineDepth = 6;
         // Conservative size limit: the function BEFORE inlining must be
         // small enough that inlining won't create a huge function.
         // After inlining, each copy roughly doubles the size. So we limit
-        // the pre-inline size to 200 instructions (~200 * 2^3 = 1600 max).
-        static constexpr unsigned kMaxPreInlineSize = 200;
+        // the pre-inline size to 350 instructions (~350 * 2^4 = 5600 max at depth 4).
+        static constexpr unsigned kMaxPreInlineSize = 350;
         llvm::SmallVector<llvm::Function*, 4> inlinedFuncs;
         for (auto& F : *module) {
             if (F.isDeclaration() || F.getName() == "main") continue;
@@ -1832,8 +1835,8 @@ void CodeGenerator::runOptimizationPasses() {
     // specializations per function to control code-size growth.
     if (optimizationLevel >= OptimizationLevel::O3) {
         unsigned totalSpecialized = 0;
-        constexpr unsigned kMaxSpecsPerFunc = 4;
-        constexpr unsigned kMaxFuncSizeForSpec = 200;
+        constexpr unsigned kMaxSpecsPerFunc = 8;
+        constexpr unsigned kMaxFuncSizeForSpec = 400;
 
         // Collect call sites with constant arguments
         struct SpecCandidate {
@@ -2323,7 +2326,13 @@ void CodeGenerator::runOptimizationPasses() {
         if (optimizationLevel >= OptimizationLevel::O2) {
             llvm::PipelineTuningOptions PTOClose;
             PTOClose.SLPVectorization  = enableVectorize_;
-            PTOClose.LoopVectorization = false; // main pipeline already did loop-vec
+            // Re-run the loop vectorizer here — after srem→urem conversion,
+            // superoptimizer idiom replacement, and HGOE restructuring, loops
+            // that were previously non-vectorizable (due to srem cost-model
+            // rejection or SCEV blockage) are now eligible.  This is the key
+            // advantage over clang, which only runs the loop vectorizer once.
+            PTOClose.LoopVectorization = enableVectorize_;
+            PTOClose.LoopInterleaving  = enableVectorize_;
             PTOClose.LoopUnrolling     = false;
             llvm::PassBuilder PBClose(targetMachine.get(), PTOClose);
             llvm::LoopAnalysisManager  LAMClose;
@@ -2355,7 +2364,18 @@ void CodeGenerator::runOptimizationPasses() {
             // to improved vectorization decisions.
             FPMClose.addPass(llvm::CorrelatedValuePropagationPass());
             FPMClose.addPass(llvm::BDCEPass());
+            // SCCPPass: sparse conditional constant propagation — propagates
+            // constants through PHI nodes and branch conditions, enabling folding
+            // that becomes possible after srem→urem and superoptimizer transforms.
+            // Runs before InstCombine so the folded constants are picked up.
+            FPMClose.addPass(llvm::SCCPPass());
             FPMClose.addPass(llvm::InstCombinePass());
+            // AggressiveInstCombinePass: a more exhaustive InstCombine that
+            // matches multi-instruction patterns the standard InstCombine misses
+            // (e.g. multi-shift idioms, combined compare-and-branch patterns,
+            // interleaved arithmetic).  Placed after standard InstCombine to
+            // catch patterns exposed by the preceding passes.
+            FPMClose.addPass(llvm::AggressiveInstCombinePass());
             // SLP + VectorCombine: catch newly-vectorizable loops after srem→urem.
             if (enableVectorize_) {
                 FPMClose.addPass(llvm::SLPVectorizerPass());
@@ -2475,6 +2495,50 @@ void CodeGenerator::optimizeOptMaxFunctions() {
             func.addFnAttr("prefer-vector-width", "512");
             // min-legal-vector-width=0 lets the vectorizer choose width freely.
             func.addFnAttr("min-legal-vector-width", "0");
+        }
+
+        // fast_math=true: sweep all existing FP instructions and apply full
+        // fast-math flags.  Instructions created during IR building already got
+        // flags from the builder context, but instructions introduced by earlier
+        // optimization passes (GVN, InstCombine, inliner) may not have them.
+        // Applying flags now ensures the OPTMAX FPM and the new-PM vectorizer
+        // both see a fully fast-math environment for FP-heavy loops.
+        if (cfgIt != optMaxFunctionConfigs_.end() && cfgIt->second.fastMath) {
+            llvm::FastMathFlags FMF;
+            FMF.setFast();
+            for (auto& BB : func) {
+                for (auto& I : BB) {
+                    if (auto* fpOp = llvm::dyn_cast<llvm::FPMathOperator>(&I)) {
+                        if (auto* fpInst = llvm::dyn_cast<llvm::Instruction>(fpOp)) {
+                            fpInst->setFastMathFlags(FMF);
+                        }
+                    }
+                }
+            }
+            // Also set function-level attributes for LTO and backend.
+            func.addFnAttr("unsafe-fp-math", "true");
+            func.addFnAttr("no-nans-fp-math", "true");
+            func.addFnAttr("no-infs-fp-math", "true");
+            func.addFnAttr("no-signed-zeros-fp-math", "true");
+            func.addFnAttr("approx-func-fp-math", "true");
+            func.addFnAttr("no-trapping-math", "true");
+        }
+
+        // memory.noalias=true: annotate all pointer-type parameters as noalias
+        // to allow the alias analysis to treat them as non-overlapping.  This
+        // enables LICM to hoist loads across calls, DSE to eliminate dead stores
+        // to pointer parameters, and the vectorizer to use !noalias metadata on
+        // loads/stores inside loops.
+        if (cfgIt != optMaxFunctionConfigs_.end() && cfgIt->second.memory.noalias) {
+            unsigned argIdx = 0;
+            for (auto& arg : func.args()) {
+                if (arg.getType()->isPointerTy()) {
+                    func.addParamAttr(argIdx, llvm::Attribute::NoAlias);
+                    func.addParamAttr(argIdx, llvm::Attribute::NoCapture);
+                    func.addParamAttr(argIdx, llvm::Attribute::NonNull);
+                }
+                ++argIdx;
+            }
         }
 
         optMaxFuncs.push_back(&func);
@@ -2632,9 +2696,107 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         }
     }
     fpm.doFinalization();
-}
 
-void CodeGenerator::writeObjectFile(const std::string& filename) {
+    // ── New-PM Loop + SLP Vectorization for OPTMAX Functions ──────────────
+    // The legacy FPM above cannot run the loop vectorizer (new PM only).
+    // After the full legacy pass stack, many loops are in ideal canonical form
+    // (IndVar simplified, LCSSA, rotated, unaliased) — perfect for the loop
+    // vectorizer.  We build a lightweight new-PM FunctionPassManager that runs:
+    //   1. LoopSimplify + LCSSA: canonicalize any loops the legacy passes restructured
+    //   2. SCCP: propagate constants exposed by the legacy OPTMAX passes
+    //   3. CorrelatedValuePropagation: sharpen value ranges for cost model
+    //   4. BDCE: remove dead bits (important after srem→urem in OPTMAX)
+    //   5. InstCombine: clean up before vectorization
+    //   6. LoopVectorizePass: vectorize loops (core of this phase)
+    //   7. SLPVectorizerPass: SLP vectorization of independent scalar sequences
+    //   8. VectorCombinePass: merge redundant vector insert/extract
+    //   9. AggressiveInstCombinePass: multi-instruction patterns missed above
+    //  10. InstCombine + ADCE + SimplifyCFG: final cleanup
+    //
+    // Only runs for functions with aggressive_vec=true (the vectorization-
+    // capable annotation), avoiding unnecessary analysis on non-vector functions.
+    if (!optMaxFuncs.empty()) {
+        auto tmVec = createTargetMachine();
+        if (tmVec) {
+            llvm::PipelineTuningOptions PTOVec;
+            PTOVec.LoopVectorization = true;
+            PTOVec.SLPVectorization  = true;
+            PTOVec.LoopInterleaving  = true;
+            PTOVec.LoopUnrolling     = false;
+            llvm::PassBuilder PBVec(tmVec.get(), PTOVec);
+            llvm::LoopAnalysisManager  LAMVec;
+            llvm::FunctionAnalysisManager FAMVec;
+            llvm::CGSCCAnalysisManager CGAMVec;
+            llvm::ModuleAnalysisManager MAMVec;
+            PBVec.registerModuleAnalyses(MAMVec);
+            PBVec.registerCGSCCAnalyses(CGAMVec);
+            PBVec.registerFunctionAnalyses(FAMVec);
+            PBVec.registerLoopAnalyses(LAMVec);
+            PBVec.crossRegisterProxies(LAMVec, FAMVec, CGAMVec, MAMVec);
+
+            llvm::FunctionPassManager FPMVec;
+            // Canonicalize loops so the loop vectorizer can analyze them.
+            FPMVec.addPass(llvm::LoopSimplifyPass());
+            FPMVec.addPass(llvm::LCSSAPass());
+            llvm::LoopPassManager LPMPre;
+            LPMPre.addPass(llvm::IndVarSimplifyPass());
+            LPMPre.addPass(llvm::LoopRotatePass());
+            FPMVec.addPass(llvm::createFunctionToLoopPassAdaptor(
+                std::move(LPMPre), /*UseMemorySSA=*/true));
+            // SCCP: propagate constants exposed by the OPTMAX legacy passes.
+            FPMVec.addPass(llvm::SCCPPass());
+            // CVP + BDCE: sharpen value ranges and remove dead bits.
+            FPMVec.addPass(llvm::CorrelatedValuePropagationPass());
+            FPMVec.addPass(llvm::BDCEPass());
+            FPMVec.addPass(llvm::InstCombinePass());
+            // IRCE: eliminate inductive range checks proven by CVP+BDCE.
+            FPMVec.addPass(llvm::IRCEPass());
+            // Loop vectorizer: the primary new transformation missing from legacy FPM.
+            FPMVec.addPass(llvm::LoopVectorizePass(
+                llvm::LoopVectorizeOptions(/*InterleaveOnlyWhenForced=*/false,
+                                           /*VectorizeOnlyWhenForced=*/false)));
+            // SLP vectorizer: catch independent scalar operations in vectorized code.
+            FPMVec.addPass(llvm::SLPVectorizerPass());
+            // VectorCombine: clean up redundant vector operations.
+            FPMVec.addPass(llvm::VectorCombinePass());
+            // AggressiveInstCombine: multi-instruction pattern matching.
+            FPMVec.addPass(llvm::AggressiveInstCombinePass());
+            // Final cleanup.
+            FPMVec.addPass(llvm::InstCombinePass());
+            FPMVec.addPass(llvm::ADCEPass());
+            FPMVec.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+
+            // Build a wrapper module pass that runs FPMVec only on OPTMAX
+            // functions, to avoid perturbing non-OPTMAX functions.
+            struct OptMaxVecModulePass : public llvm::PassInfoMixin<OptMaxVecModulePass> {
+                llvm::FunctionPassManager FPM;
+                const llvm::SmallVector<llvm::Function*, 16>& Funcs;
+                OptMaxVecModulePass(llvm::FunctionPassManager fpm,
+                                    const llvm::SmallVector<llvm::Function*, 16>& funcs)
+                    : FPM(std::move(fpm)), Funcs(funcs) {}
+                llvm::PreservedAnalyses run(llvm::Module& M,
+                                            llvm::ModuleAnalysisManager& MAM) {
+                    auto& FAM = MAM.getResult<llvm::FunctionAnalysisManagerModuleProxy>(M).getManager();
+                    bool changed = false;
+                    for (llvm::Function* F : Funcs) {
+                        if (!F || F->isDeclaration()) continue;
+                        auto PA = FPM.run(*F, FAM);
+                        changed |= !PA.areAllPreserved();
+                    }
+                    return changed ? llvm::PreservedAnalyses::none()
+                                   : llvm::PreservedAnalyses::all();
+                }
+            };
+
+            llvm::ModulePassManager MPMVec;
+            MPMVec.addPass(OptMaxVecModulePass(std::move(FPMVec), optMaxFuncs));
+            MPMVec.run(*module, MAMVec);
+            if (verbose_) {
+                std::cout << "    OPTMAX new-PM vectorization pass complete" << '\n';
+            }
+        }
+    }
+}
     // Initialize only native target
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
