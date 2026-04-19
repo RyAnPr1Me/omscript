@@ -135,6 +135,9 @@ enum class ResourceType {
     FPRegisterFile,     ///< Floating-point register file
     Dispatch,           ///< Front-end dispatch/rename stage
     Retire,             ///< Retirement / writeback stage
+    SchedulerQueue,     ///< Unified reservation station / scheduler queue
+    LoadBuffer,         ///< Load queue / load buffer
+    StoreBuffer,        ///< Store queue / store buffer
 };
 
 /// A node in the hardware execution graph.
@@ -443,6 +446,40 @@ struct MicroarchProfile {
     //   1 = native 512-bit unit (no penalty): Sapphire Rapids, Zen 5, etc.
     //   2 = double-pumped (2× port occupancy): Skylake-AVX512, Ice Lake, etc.
     unsigned vec512Penalty = 1;     ///< FMA/VecALU throughput multiplier for 512-bit ops
+
+    // Division throughput (reciprocal cycles per instruction).
+    // Division units are rarely fully pipelined: a new divide cannot start
+    // every cycle.  These fields capture the *throughput* constraint separately
+    // from the latency fields above.  When zero the latency is used as a
+    // conservative fallback.
+    double tputFPDiv = 0.0;         ///< FP divide throughput (0 = use latFPDiv as reciprocal)
+    double tputIntDiv = 0.0;        ///< Int divide throughput (0 = use latIntDiv as reciprocal)
+
+    // Reservation station (scheduler queue) size.
+    // Instructions are held in the RS from dispatch until their operands are
+    // ready and a port is available.  When the RS is full, the front-end stalls
+    // regardless of remaining ROB capacity.
+    unsigned schedulerSize = 64;    ///< Unified RS / scheduler queue entries
+
+    // Load and store buffer sizes.
+    // Out-of-order CPUs track outstanding loads and stores in dedicated
+    // hardware buffers.  When a buffer fills, dispatch of new loads / stores
+    // is stalled until an entry retires.
+    unsigned loadBufferEntries = 64;   ///< Load buffer / MOB load queue entries
+    unsigned storeBufferEntries = 36;  ///< Store buffer / MOB store queue entries
+
+    // Memory subsystem bandwidth (bytes per cycle, single-core peak read).
+    // Used to bound throughput for streaming / vectorised loops.
+    // 0 means "not modelled" (no bandwidth penalty applied).
+    unsigned l1DBandwidthBytesPerCycle = 0;  ///< L1D peak load bandwidth
+    unsigned l2BandwidthBytesPerCycle  = 0;  ///< L2 peak bandwidth
+    unsigned l3BandwidthBytesPerCycle  = 0;  ///< L3 peak bandwidth
+    unsigned memBandwidthBytesPerCycle = 0;  ///< DRAM peak bandwidth (single-core)
+
+    // SMT / Hyperthreading support.
+    // When enabled, effective per-thread resource budgets (RS, ROB, LB, SB)
+    // are roughly halved during competition from the sibling thread.
+    bool hasHyperthreading = false;  ///< CPU supports simultaneous multi-threading
 };
 
 /// Look up a microarchitecture profile by CPU name.

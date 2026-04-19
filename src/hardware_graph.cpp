@@ -26,6 +26,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/PatternMatch.h>
+#include <llvm/Analysis/ValueTracking.h>
 
 // LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
 #if LLVM_VERSION_MAJOR >= 19
@@ -52,6 +53,87 @@ namespace hgoe {
 // Allows buildFromFunction (Step 2) to call it without reordering definitions.
 static unsigned getOpcodeLatency(const llvm::Instruction* inst,
                                   const MicroarchProfile& profile);
+
+/// Return the memory pointer operand for load/store instructions.
+[[nodiscard]] static const llvm::Value* getMemoryPointerOperand(const llvm::Instruction* inst) {
+    if (const auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst))
+        return ld->getPointerOperand();
+    if (const auto* st = llvm::dyn_cast<llvm::StoreInst>(inst))
+        return st->getPointerOperand();
+    return nullptr;
+}
+
+/// Resolve a pointer to (base, constant byte offset) when provable.
+[[nodiscard]] static bool getBaseAndConstByteOffset(const llvm::Value* ptr,
+                                                    const llvm::DataLayout& dl,
+                                                    const llvm::Value*& base,
+                                                    int64_t& offset) {
+    if (!ptr || !ptr->getType()->isPointerTy()) return false;
+    int64_t off = 0;
+    const llvm::Value* rawBase = llvm::GetPointerBaseWithConstantOffset(ptr, off, dl);
+    if (!rawBase) return false;
+    base = rawBase->stripPointerCasts();
+    offset = off;
+    return true;
+}
+
+/// Alias query used by HGOE memory-edge construction.
+[[nodiscard]] static bool hgoeMayAlias(const llvm::Instruction* a,
+                                       const llvm::Instruction* b,
+                                       const llvm::DataLayout& dl) {
+    // Side-effecting calls/barriers are always conservative-alias.
+    if ((llvm::isa<llvm::CallBase>(a) && a->mayHaveSideEffects()) ||
+        (llvm::isa<llvm::CallBase>(b) && b->mayHaveSideEffects()))
+        return true;
+
+    const llvm::Value* ptrA = getMemoryPointerOperand(a);
+    const llvm::Value* ptrB = getMemoryPointerOperand(b);
+    if (!ptrA || !ptrB) return true;
+
+    ptrA = ptrA->stripPointerCasts();
+    ptrB = ptrB->stripPointerCasts();
+    if (ptrA == ptrB) return true;
+
+    // Constant byte offsets from the same underlying base never alias when
+    // offsets differ. This handles multi-index/struct-field GEPs.
+    const llvm::Value* baseA = nullptr;
+    const llvm::Value* baseB = nullptr;
+    int64_t offA = 0;
+    int64_t offB = 0;
+    const bool hasOffA = getBaseAndConstByteOffset(ptrA, dl, baseA, offA);
+    const bool hasOffB = getBaseAndConstByteOffset(ptrB, dl, baseB, offB);
+    if (hasOffA && hasOffB && baseA == baseB && offA != offB)
+        return false;
+
+    // Fall back to underlying-object disambiguation.
+    const llvm::Value* objA = llvm::getUnderlyingObject(ptrA);
+    const llvm::Value* objB = llvm::getUnderlyingObject(ptrB);
+    if (objA) objA = objA->stripPointerCasts();
+    if (objB) objB = objB->stripPointerCasts();
+    if (!objA || !objB) return true;
+    if (objA == objB) return true;
+
+    const bool aIsAlloca = llvm::isa<llvm::AllocaInst>(objA);
+    const bool bIsAlloca = llvm::isa<llvm::AllocaInst>(objB);
+    const bool aIsArg = llvm::isa<llvm::Argument>(objA);
+    const bool bIsArg = llvm::isa<llvm::Argument>(objB);
+    const bool aIsGlobal = llvm::isa<llvm::GlobalVariable>(objA);
+    const bool bIsGlobal = llvm::isa<llvm::GlobalVariable>(objB);
+
+    if ((aIsAlloca && bIsAlloca) ||
+        (aIsGlobal && bIsGlobal) ||
+        (aIsAlloca && bIsArg) || (aIsArg && bIsAlloca))
+        return false;
+
+    if (aIsArg && bIsArg) {
+        const auto* argA = llvm::cast<llvm::Argument>(objA);
+        const auto* argB = llvm::cast<llvm::Argument>(objB);
+        if (argA->hasNoAliasAttr() || argB->hasNoAliasAttr())
+            return false;
+    }
+
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Resolve "native" to the actual host CPU name.
@@ -245,6 +327,7 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     nodes_.clear();
     edges_.clear();
     instToNode_.clear();
+    const llvm::DataLayout& dl = func.getParent()->getDataLayout();
 
     // Phase 1: Create a node for each instruction.
     for (auto& bb : func) {
@@ -304,53 +387,45 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     // same base pointer with constant indices, we check whether the indices
     // overlap.  Non-overlapping accesses can skip the memory edge, reducing
     // false dependencies and enabling better scheduling.
-    auto mayAlias = [](const llvm::Instruction* a, const llvm::Instruction* b) -> bool {
-        // Conservative default: assume they may alias.
-        const llvm::Value* ptrA = nullptr;
-        const llvm::Value* ptrB = nullptr;
-        if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(a)) ptrA = ld->getPointerOperand();
-        if (auto* st = llvm::dyn_cast<llvm::StoreInst>(a)) ptrA = st->getPointerOperand();
-        if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(b)) ptrB = ld->getPointerOperand();
-        if (auto* st = llvm::dyn_cast<llvm::StoreInst>(b)) ptrB = st->getPointerOperand();
-        if (!ptrA || !ptrB) return true;
-
-        // If pointers are identical, they definitely alias.
-        if (ptrA == ptrB) return true;
-
-        // If both are GEPs from the same base with constant offsets, compare.
-        auto* gepA = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrA);
-        auto* gepB = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrB);
-        if (gepA && gepB &&
-            gepA->getPointerOperand() == gepB->getPointerOperand() &&
-            gepA->getNumIndices() == 1 && gepB->getNumIndices() == 1) {
-            auto* idxA = llvm::dyn_cast<llvm::ConstantInt>(gepA->getOperand(1));
-            auto* idxB = llvm::dyn_cast<llvm::ConstantInt>(gepB->getOperand(1));
-            if (idxA && idxB && idxA->getSExtValue() != idxB->getSExtValue())
-                return false; // Different constant offsets — no alias.
-        }
-
-        // Different base pointers from different allocations cannot alias.
-        auto underlyingAlloc = [](const llvm::Value* v) -> const llvm::Value* {
-            while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(v))
-                v = gep->getPointerOperand();
-            return v;
-        };
-        const llvm::Value* baseA = underlyingAlloc(ptrA);
-        const llvm::Value* baseB = underlyingAlloc(ptrB);
-        if (baseA != baseB) {
-            // Distinct allocas or distinct function args never alias.
-            const bool allocA = llvm::isa<llvm::AllocaInst>(baseA) || llvm::isa<llvm::Argument>(baseA);
-            const bool allocB = llvm::isa<llvm::AllocaInst>(baseB) || llvm::isa<llvm::Argument>(baseB);
-            if (allocA && allocB) return false;
-        }
-
-        return true; // conservative fallback
+    auto mayAlias = [&](const llvm::Instruction* a, const llvm::Instruction* b) -> bool {
+        return hgoeMayAlias(a, b, dl);
     };
 
     for (auto& bb : func) {
         llvm::Instruction* lastStore = nullptr;
         llvm::Instruction* lastLoad  = nullptr;
+        llvm::Instruction* lastBarrier = nullptr;
         for (auto& inst : bb) {
+            const bool isStore = llvm::isa<llvm::StoreInst>(inst);
+            const bool isLoad = llvm::isa<llvm::LoadInst>(inst);
+            const bool isBarrierMem =
+                inst.mayReadOrWriteMemory() && !isLoad && !isStore;
+
+            if (isBarrierMem) {
+                // All prior memory ops must complete before a side-effecting op
+                // (calls, atomics, fences), and later memory ops must not pass it.
+                auto thisIt = instToNode_.find(&inst);
+                if (thisIt != instToNode_.end()) {
+                    if (lastStore) {
+                        auto srcIt = instToNode_.find(lastStore);
+                        if (srcIt != instToNode_.end())
+                            addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
+                    }
+                    if (lastLoad) {
+                        auto srcIt = instToNode_.find(lastLoad);
+                        if (srcIt != instToNode_.end())
+                            addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
+                    }
+                    if (lastBarrier) {
+                        auto srcIt = instToNode_.find(lastBarrier);
+                        if (srcIt != instToNode_.end())
+                            addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
+                    }
+                }
+                lastBarrier = &inst;
+                continue;
+            }
+
             if (inst.getOpcode() == llvm::Instruction::Store) {
                 // WAW: Store → Store
                 if (lastStore && mayAlias(lastStore, &inst)) {
@@ -366,12 +441,24 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                     if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
                         addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
                 }
+                if (lastBarrier) {
+                    auto srcIt = instToNode_.find(lastBarrier);
+                    auto dstIt = instToNode_.find(&inst);
+                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
+                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                }
                 lastStore = &inst;
             }
             if (inst.getOpcode() == llvm::Instruction::Load) {
                 // RAW: Store → Load
                 if (lastStore && mayAlias(lastStore, &inst)) {
                     auto srcIt = instToNode_.find(lastStore);
+                    auto dstIt = instToNode_.find(&inst);
+                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
+                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                }
+                if (lastBarrier) {
+                    auto srcIt = instToNode_.find(lastBarrier);
                     auto dstIt = instToNode_.find(&inst);
                     if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
                         addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
@@ -534,9 +621,37 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     for (unsigned i = 0; i < n; ++i) {
         const ProgramNode* node = pg.getNode(i);
         if (node) {
-            unsigned lat = static_cast<unsigned>(
-                std::max(0.0, node->estimatedLatency));
+            unsigned lat = node->inst
+                ? getOpcodeLatency(node->inst, profile_)
+                : static_cast<unsigned>(std::max(0.0, node->estimatedLatency));
             nodeLat[i] = lat;
+        }
+    }
+
+    // ── 3b. Critical-path priority (longest latency-weighted path) ───────────
+    std::vector<unsigned> priority(n, 0);
+    {
+        std::vector<unsigned> topo;
+        topo.reserve(n);
+        std::vector<unsigned> deg(inDeg);
+        std::queue<unsigned> q;
+        for (unsigned i = 0; i < n; ++i)
+            if (deg[i] == 0) q.push(i);
+        while (!q.empty()) {
+            unsigned u = q.front();
+            q.pop();
+            topo.push_back(u);
+            for (auto [v, edgeLat] : succList[u]) {
+                (void)edgeLat;
+                if (--deg[v] == 0) q.push(v);
+            }
+        }
+        for (auto it = topo.rbegin(); it != topo.rend(); ++it) {
+            unsigned u = *it;
+            unsigned maxSucc = 0;
+            for (auto [v, edgeLat] : succList[u])
+                maxSucc = std::max(maxSucc, priority[v] + edgeLat);
+            priority[u] = nodeLat[u] + maxSucc;
         }
     }
 
@@ -568,15 +683,43 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     // the result may slightly over-count cycles compared to an optimal list
     // schedule but never under-counts.
     std::vector<unsigned> completedAt(n, 0);
-
-    std::queue<unsigned> ready;
+    std::vector<unsigned> scheduledAt(n, 0);
+    std::vector<bool> isScheduled(n, false);
+    std::vector<unsigned> remainingUsers(n, 0);
     for (unsigned i = 0; i < n; ++i)
-        if (inDeg[i] == 0) ready.push(i);
+        remainingUsers[i] = static_cast<unsigned>(succList[i].size());
+
+    // Lightweight register/rename-pressure model.
+    const unsigned regBudget = std::max(
+        8u, profile_.intRegisters + profile_.vecRegisters + profile_.fpRegisters);
+    unsigned liveValues = 0;
+
+    auto inflightAt = [&](unsigned cycle) -> unsigned {
+        unsigned inflight = 0;
+        for (unsigned i = 0; i < n; ++i) {
+            if (!isScheduled[i]) continue;
+            if (scheduledAt[i] <= cycle && completedAt[i] > cycle)
+                ++inflight;
+        }
+        return inflight;
+    };
+
+    struct ReadyEntry {
+        unsigned prio;
+        unsigned id;
+    };
+    auto readyCmp = [](const ReadyEntry& a, const ReadyEntry& b) {
+        if (a.prio != b.prio) return a.prio < b.prio; // max-heap by priority
+        return a.id > b.id;
+    };
+    std::priority_queue<ReadyEntry, std::vector<ReadyEntry>, decltype(readyCmp)> ready(readyCmp);
+    for (unsigned i = 0; i < n; ++i)
+        if (inDeg[i] == 0) ready.push({priority[i], i});
 
     unsigned maxCycle = 0;
 
     while (!ready.empty()) {
-        const unsigned u = ready.front();
+        const unsigned u = ready.top().id;
         ready.pop();
 
         // Earliest cycle when all data dependencies are satisfied.
@@ -609,6 +752,9 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
                 if (pit != portUsed.end() && pit->second[pc] >= cap[pc])
                     continue;
             }
+            // Rename/ROB pressure: avoid over-issuing when too many uops are in-flight.
+            if (inflightAt(scheduleCycle) >= profile_.robSize)
+                continue;
             break; // valid cycle found
         }
 
@@ -621,14 +767,38 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
             ++row[pc];
         }
 
-        completedAt[u] = scheduleCycle + nodeLat[u];
+        unsigned freesNow = 0;
+        for (const auto& [pred, ignored] : predList[u]) {
+            (void)ignored;
+            if (remainingUsers[pred] == 1) ++freesNow;
+        }
+        const bool producesValue = !succList[u].empty();
+        const int projectedLiveSigned =
+            static_cast<int>(liveValues) +
+            (producesValue ? 1 : 0) -
+            static_cast<int>(freesNow);
+        const unsigned projectedLive =
+            static_cast<unsigned>(std::max(projectedLiveSigned, 0));
+        const unsigned spillPenalty =
+            (projectedLive > regBudget) ? (projectedLive - regBudget) : 0u;
+
+        scheduledAt[u] = scheduleCycle;
+        isScheduled[u] = true;
+        completedAt[u] = scheduleCycle + nodeLat[u] + spillPenalty;
         if (completedAt[u] > maxCycle)
             maxCycle = completedAt[u];
+
+        for (const auto& [pred, ignored] : predList[u]) {
+            (void)ignored;
+            if (remainingUsers[pred] > 0 && --remainingUsers[pred] == 0 && liveValues > 0)
+                --liveValues;
+        }
+        if (producesValue) ++liveValues;
 
         // Release successors whose in-degree drops to zero.
         for (auto& [v, ignored] : succList[u]) {
             if (--inDeg[v] == 0)
-                ready.push(v);
+                ready.push({priority[v], v});
         }
     }
 
@@ -716,6 +886,23 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // vec512Penalty set on the base Skylake profile: AVX2 (256-bit) native,
     // no 512-bit penalty.  Ice Lake / Tiger Lake variants override to 2.
     p.vec512Penalty = 1;
+    // Division throughput: Skylake divider not fully pipelined.
+    // FP64 divide: throughput ~1/17 cycles, FP32 ~1/7.  Use conservative FP64.
+    p.tputFPDiv = 1.0 / 17.0;
+    p.tputIntDiv = 1.0 / 26.0;
+    // Reservation station (unified scheduler): 97 entries.
+    p.schedulerSize = 97;
+    // Load buffer: 128 entries (MOB load queue).  Store buffer: 72 entries.
+    p.loadBufferEntries = 128;
+    p.storeBufferEntries = 72;
+    // L1D bandwidth: 2 load ports × 32 B = 64 B/cycle.
+    // L2 bandwidth: ~32 B/cycle.  L3 ~16 B/cycle.  DRAM ~8 B/cycle at 1 GHz.
+    p.l1DBandwidthBytesPerCycle = 64;
+    p.l2BandwidthBytesPerCycle  = 32;
+    p.l3BandwidthBytesPerCycle  = 16;
+    p.memBandwidthBytesPerCycle = 8;
+    // Skylake supports Hyperthreading (SMT2) on desktop and server parts.
+    p.hasHyperthreading = true;
     return p;
 }
 /// Sandy Bridge (2011): 6 execution ports, 3 integer ALUs, AVX 256-bit (no FMA).
@@ -755,6 +942,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Sandy Bridge store-to-load forwarding: 4 cycles (same as L1 hit).
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // no AVX-512 on Sandy Bridge
+    p.tputFPDiv = 1.0 / 14.0;
+    p.tputIntDiv = 1.0 / 22.0;
+    p.schedulerSize = 54;
+    p.loadBufferEntries = 64;
+    p.storeBufferEntries = 36;
+    p.l1DBandwidthBytesPerCycle = 32; // 1 full-width load port (256-bit AVX split as 2×128)
+    p.l2BandwidthBytesPerCycle  = 16;
+    p.l3BandwidthBytesPerCycle  = 12;
+    p.memBandwidthBytesPerCycle = 6;
+    p.hasHyperthreading = true;
     return p;
 }
 
@@ -773,6 +970,17 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Haswell store-to-load forwarding: 4 cycles (same as L1 hit latency).
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // AVX2 only, no 512-bit
+    // Haswell has the same divider throughput as Skylake; RS and buffers are smaller.
+    p.tputFPDiv = 1.0 / 14.0;
+    p.tputIntDiv = 1.0 / 24.0;
+    p.schedulerSize = 60;
+    p.loadBufferEntries = 72;
+    p.storeBufferEntries = 42;
+    p.l1DBandwidthBytesPerCycle = 64;
+    p.l2BandwidthBytesPerCycle  = 32;
+    p.l3BandwidthBytesPerCycle  = 16;
+    p.memBandwidthBytesPerCycle = 8;
+    p.hasHyperthreading = true;
     return p;
 }
 
@@ -818,6 +1026,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // forwarding completes in ~4 cycles via store-buffer bypass).
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // AVX2 only on Golden Cove / Raptor Cove
+    p.tputFPDiv = 1.0 / 14.0;
+    p.tputIntDiv = 1.0 / 23.0;
+    p.schedulerSize = 120;
+    p.loadBufferEntries = 192;
+    p.storeBufferEntries = 114;
+    p.l1DBandwidthBytesPerCycle = 96; // 2 load ports × 32 B + partial store bandwidth
+    p.l2BandwidthBytesPerCycle  = 48;
+    p.l3BandwidthBytesPerCycle  = 20;
+    p.memBandwidthBytesPerCycle = 10;
+    p.hasHyperthreading = true; // Golden Cove P-cores support HT
     return p;
 }
 
@@ -863,6 +1081,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // needed since the 256-bit paths ARE the native paths.
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // 256-bit native paths; AVX-512 handled at profile level
+    p.tputFPDiv = 1.0 / 13.0;
+    p.tputIntDiv = 1.0 / 17.0;
+    p.schedulerSize = 96;
+    p.loadBufferEntries = 88;
+    p.storeBufferEntries = 64;
+    p.l1DBandwidthBytesPerCycle = 96; // 3 AGU × 32 B
+    p.l2BandwidthBytesPerCycle  = 48;
+    p.l3BandwidthBytesPerCycle  = 24;
+    p.memBandwidthBytesPerCycle = 12;
+    p.hasHyperthreading = false; // Zen 4 desktop: SMT disabled by default; server enables it
     return p;
 }
 
@@ -925,6 +1153,17 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // address match which adds 1 cycle → forwarding = 4 cycles > latStore.
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // NEON 128-bit native; no 512-bit SIMD
+    p.tputFPDiv = 1.0 / 10.0;
+    p.tputIntDiv = 1.0 / 10.0;
+    // Apple M1 Firestorm: very large RS (~600 effective), massive buffers.
+    p.schedulerSize = 600;
+    p.loadBufferEntries = 320;
+    p.storeBufferEntries = 168;
+    p.l1DBandwidthBytesPerCycle = 192; // 3 wide load paths × 16 B NEON (AMX aside)
+    p.l2BandwidthBytesPerCycle  = 96;
+    p.l3BandwidthBytesPerCycle  = 48;
+    p.memBandwidthBytesPerCycle = 32; // LPDDR5 ~32 GB/s / 3.2 GHz ≈ 10 B/cyc; rough
+    p.hasHyperthreading = false; // Apple Silicon: no SMT
     return p;
 }
 
@@ -967,6 +1206,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Neoverse V2: store-to-load forwarding = 4 cycles (same as L1D latency).
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // SVE2 256-bit native
+    p.tputFPDiv = 1.0 / 10.0;
+    p.tputIntDiv = 1.0 / 12.0;
+    p.schedulerSize = 128;
+    p.loadBufferEntries = 128;
+    p.storeBufferEntries = 72;
+    p.l1DBandwidthBytesPerCycle = 48; // 3 load paths × 16 B
+    p.l2BandwidthBytesPerCycle  = 32;
+    p.l3BandwidthBytesPerCycle  = 16;
+    p.memBandwidthBytesPerCycle = 10;
+    p.hasHyperthreading = false; // Neoverse V2: no SMT
     return p;
 }
 
@@ -1021,6 +1270,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // store buffer; data is forwarded in the same pipeline cycle as writeback).
     p.latStoLForward = 3;
     p.vec512Penalty = 1; // RVV at 128-bit VLEN; no 512-bit wide ops
+    p.tputFPDiv = 1.0 / 18.0;
+    p.tputIntDiv = 1.0 / 20.0;
+    p.schedulerSize = 8;
+    p.loadBufferEntries = 8;
+    p.storeBufferEntries = 8;
+    p.l1DBandwidthBytesPerCycle = 8;
+    p.l2BandwidthBytesPerCycle  = 8;
+    p.l3BandwidthBytesPerCycle  = 6;
+    p.memBandwidthBytesPerCycle = 4;
+    p.hasHyperthreading = false;
     return p;
 }
 
@@ -1074,6 +1333,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Graviton3 (Neoverse V1): store-to-load forwarding = 4 cycles.
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // SVE 256-bit native
+    p.tputFPDiv = 1.0 / 10.0;
+    p.tputIntDiv = 1.0 / 12.0;
+    p.schedulerSize = 128;
+    p.loadBufferEntries = 120;
+    p.storeBufferEntries = 64;
+    p.l1DBandwidthBytesPerCycle = 48; // 3 load pipes × 16 B
+    p.l2BandwidthBytesPerCycle  = 32;
+    p.l3BandwidthBytesPerCycle  = 18;
+    p.memBandwidthBytesPerCycle = 12; // DDR5
+    p.hasHyperthreading = false;
     return p;
 }
 
@@ -1129,6 +1398,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Lion Cove: store-to-load forwarding = 4 cycles (store buffer bypass).
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // AVX2 only; no 512-bit SIMD on Lion Cove
+    p.tputFPDiv = 1.0 / 10.0;
+    p.tputIntDiv = 1.0 / 20.0;
+    p.schedulerSize = 160;
+    p.loadBufferEntries = 256;
+    p.storeBufferEntries = 120;
+    p.l1DBandwidthBytesPerCycle = 96; // 3 load ports × 32 B
+    p.l2BandwidthBytesPerCycle  = 48;
+    p.l3BandwidthBytesPerCycle  = 20;
+    p.memBandwidthBytesPerCycle = 10;
+    p.hasHyperthreading = false; // Lunar Lake: no Hyperthreading on Lion Cove
     return p;
 }
 
@@ -1173,6 +1452,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Zen 5 has NATIVE 512-bit AVX-512 execution units (not double-pumped),
     // unlike Zen 4 which decomposes 512-bit ops into 2×256-bit µops.
     p.vec512Penalty = 1;
+    p.tputFPDiv = 1.0 / 12.0;
+    p.tputIntDiv = 1.0 / 15.0;
+    p.schedulerSize = 128;
+    p.loadBufferEntries = 128;
+    p.storeBufferEntries = 80;
+    p.l1DBandwidthBytesPerCycle = 128; // 4 load ports × 32 B
+    p.l2BandwidthBytesPerCycle  = 64;
+    p.l3BandwidthBytesPerCycle  = 32;
+    p.memBandwidthBytesPerCycle = 16;
+    p.hasHyperthreading = false;
     return p;
 }
 
@@ -1223,6 +1512,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Sapphire Rapids has NATIVE 512-bit AVX-512 FMA/VecALU units (Golden Cove
     // execution backend), so no double-pump penalty unlike Skylake-AVX512.
     p.vec512Penalty = 1;
+    p.tputFPDiv = 1.0 / 15.0;
+    p.tputIntDiv = 1.0 / 18.0;
+    p.schedulerSize = 160;
+    p.loadBufferEntries = 192;
+    p.storeBufferEntries = 128;
+    p.l1DBandwidthBytesPerCycle = 96; // 3 load ports × 32 B
+    p.l2BandwidthBytesPerCycle  = 64;
+    p.l3BandwidthBytesPerCycle  = 32;
+    p.memBandwidthBytesPerCycle = 14;
+    p.hasHyperthreading = true; // Sapphire Rapids server: HT enabled
     return p;
 }
 
@@ -1266,6 +1565,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Store buffer address comparison adds 1 cycle vs raw load → 4 > latStore=3.
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // NEON 128-bit native; no 512-bit SIMD
+    p.tputFPDiv = 1.0 / 9.0;
+    p.tputIntDiv = 1.0 / 12.0;
+    p.schedulerSize = 480;
+    p.loadBufferEntries = 320;
+    p.storeBufferEntries = 168;
+    p.l1DBandwidthBytesPerCycle = 192;
+    p.l2BandwidthBytesPerCycle  = 96;
+    p.l3BandwidthBytesPerCycle  = 48;
+    p.memBandwidthBytesPerCycle = 32;
+    p.hasHyperthreading = false;
     return p;
 }
 
@@ -1307,6 +1616,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.robSize = 256;            // Improved vs Raptor Lake (192)
     p.latStoLForward = 4;
     p.vec512Penalty = 1;        // No AVX-512
+    p.tputFPDiv = 1.0 / 12.0;
+    p.tputIntDiv = 1.0 / 20.0;
+    p.schedulerSize = 160;
+    p.loadBufferEntries = 256;
+    p.storeBufferEntries = 120;
+    p.l1DBandwidthBytesPerCycle = 96; // 3 load ports × 32 B
+    p.l2BandwidthBytesPerCycle  = 48;
+    p.l3BandwidthBytesPerCycle  = 20;
+    p.memBandwidthBytesPerCycle = 10;
+    p.hasHyperthreading = false; // Arrow Lake: no Hyperthreading on Lion Cove
     return p;
 }
 
@@ -1350,6 +1669,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.memoryLatency = 200;
     p.vec512Penalty = 1;  // native 512-bit (same as Sapphire Rapids)
     p.latStoLForward = 4;
+    p.tputFPDiv = 1.0 / 14.0;
+    p.tputIntDiv = 1.0 / 16.0;
+    p.schedulerSize = 160;
+    p.loadBufferEntries = 192;
+    p.storeBufferEntries = 128;
+    p.l1DBandwidthBytesPerCycle = 96;
+    p.l2BandwidthBytesPerCycle  = 64;
+    p.l3BandwidthBytesPerCycle  = 32;
+    p.memBandwidthBytesPerCycle = 14;
+    p.hasHyperthreading = true;
     return p;
 }
 
@@ -1404,6 +1733,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.robSize = 128;
     p.latStoLForward = 4;
     p.vec512Penalty = 1;
+    p.tputFPDiv = 1.0 / 16.0;
+    p.tputIntDiv = 1.0 / 20.0;
+    p.schedulerSize = 40;
+    p.loadBufferEntries = 32;
+    p.storeBufferEntries = 24;
+    p.l1DBandwidthBytesPerCycle = 16;
+    p.l2BandwidthBytesPerCycle  = 12;
+    p.l3BandwidthBytesPerCycle  = 8;
+    p.memBandwidthBytesPerCycle = 4;
+    p.hasHyperthreading = false;
     return p;
 }
 
@@ -1445,6 +1784,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.robSize = 320;
     p.latStoLForward = 4;
     p.vec512Penalty = 1;        // NEON 128-bit native
+    p.tputFPDiv = 1.0 / 9.0;
+    p.tputIntDiv = 1.0 / 12.0;
+    p.schedulerSize = 320;
+    p.loadBufferEntries = 256;
+    p.storeBufferEntries = 128;
+    p.l1DBandwidthBytesPerCycle = 192;
+    p.l2BandwidthBytesPerCycle  = 96;
+    p.l3BandwidthBytesPerCycle  = 48;
+    p.memBandwidthBytesPerCycle = 32;
+    p.hasHyperthreading = false;
     return p;
 }
 
@@ -1484,8 +1833,190 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.btbEntries = 4096;
     p.memoryLatency = 190;
     p.robSize = 160;            // Crestmont ROB is ~160 (smaller than P-cores)
-    p.latStoLForward = 5;
+    p.latStoLForward = 4;
     p.vec512Penalty = 1;        // No AVX-512
+    p.tputFPDiv = 1.0 / 14.0;
+    p.tputIntDiv = 1.0 / 20.0;
+    p.schedulerSize = 64;
+    p.loadBufferEntries = 72;
+    p.storeBufferEntries = 48;
+    p.l1DBandwidthBytesPerCycle = 64; // 2 load ports × 32 B
+    p.l2BandwidthBytesPerCycle  = 32;
+    p.l3BandwidthBytesPerCycle  = 14;
+    p.memBandwidthBytesPerCycle = 6;
+    p.hasHyperthreading = false; // Sierra Forest E-cores: no SMT
+    return p;
+}
+
+/// Return an Intel Gracemont (Atom E-core, 2021-2024) standalone profile.
+/// Gracemont is Intel's efficiency E-core used in Alder/Raptor Lake hybrid
+/// CPUs and Sierra Forest servers.  It is a shallow in-order-ish 3-wide
+/// decode core — significantly narrower than the P-core Golden/Raptor Cove.
+/// In Alder/Raptor Lake it is paired with P-cores; here modelled standalone.
+[[gnu::cold]] static MicroarchProfile gracemontProfile() {
+    MicroarchProfile p;
+    p.name = "gracemont";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 3;          // 3-wide decode (clustered E-core)
+    p.issueWidth = 4;           // 4 µops dispatched per cycle
+    p.pipelineDepth = 8;        // shallow pipeline
+    p.intALUs = 3;              // 3 integer execution pipes
+    p.vecUnits = 2;             // 2 vector ALU pipes
+    p.fmaUnits = 1;             // 1 FMA unit
+    p.loadPorts = 2;
+    p.storePorts = 1;
+    p.branchUnits = 1;
+    p.agus = 2;
+    p.dividers = 1;
+    p.mulPortCount = 1;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 5;
+    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.33; p.tputIntMul = 1.0;
+    p.tputFPAdd = 0.5;  p.tputFPMul = 0.5;
+    p.tputLoad = 0.5;   p.tputStore = 1.0;
+    p.l1DSize = 32;  p.l1DLatency = 5;
+    p.l2Size = 4096; p.l2Latency = 14;   // 4 MB shared per cluster
+    p.l3Size = 20480; p.l3Latency = 44;  // 20 MB shared L3 (Alder Lake die)
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;        // AVX2 (no AVX-512)
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 8.0;
+    p.btbEntries = 1024;
+    p.memoryLatency = 200;
+    p.robSize = 128;
+    p.latStoLForward = 5;
+    p.vec512Penalty = 1;
+    p.tputFPDiv = 1.0 / 14.0;
+    p.tputIntDiv = 1.0 / 20.0;
+    p.schedulerSize = 48;
+    p.loadBufferEntries = 64;
+    p.storeBufferEntries = 32;
+    p.l1DBandwidthBytesPerCycle = 64;
+    p.l2BandwidthBytesPerCycle  = 28;
+    p.l3BandwidthBytesPerCycle  = 12;
+    p.memBandwidthBytesPerCycle = 6;
+    p.hasHyperthreading = false;
+    return p;
+}
+
+/// Return an ARM Cortex-A76 (high-performance mobile, 2019) profile.
+/// The A76 is a wide 4-issue OoO core found in many Cortex-based SoCs
+/// (Arm Mali-G76 era).  First core to match x86 laptop single-thread perf.
+[[gnu::cold]] static MicroarchProfile cortexA76Profile() {
+    MicroarchProfile p;
+    p.name = "cortex-a76";
+    p.isa = ISAFamily::AArch64;
+    p.decodeWidth = 4;
+    p.issueWidth = 4;
+    p.pipelineDepth = 13;
+    p.intALUs = 3;              // 3 integer execution pipes (B, M, S)
+    p.vecUnits = 2;             // 2 NEON/FP 128-bit pipes
+    p.fmaUnits = 2;
+    p.loadPorts = 2;
+    p.storePorts = 1;
+    p.branchUnits = 1;
+    p.agus = 2;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 10;
+    p.latFPAdd = 3; p.latFPMul = 4; p.latFPDiv = 12; p.latFMA = 4;
+    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.33; p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.5;  p.tputFPMul = 0.5;
+    p.tputLoad = 0.5;   p.tputStore = 1.0;
+    p.l1DSize = 64;  p.l1DLatency = 4;
+    p.l2Size = 512;  p.l2Latency = 10;
+    p.l3Size = 4096; p.l3Latency = 32;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 128;        // NEON 128-bit
+    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 11.0;
+    p.btbEntries = 4096;
+    p.memoryLatency = 120;
+    p.robSize = 128;
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1;
+    p.tputFPDiv = 1.0 / 12.0;
+    p.tputIntDiv = 1.0 / 10.0;
+    p.schedulerSize = 64;
+    p.loadBufferEntries = 56;
+    p.storeBufferEntries = 32;
+    p.l1DBandwidthBytesPerCycle = 32; // 2 load pipes × 16 B
+    p.l2BandwidthBytesPerCycle  = 16;
+    p.l3BandwidthBytesPerCycle  = 10;
+    p.memBandwidthBytesPerCycle = 6;
+    p.hasHyperthreading = false;
+    return p;
+}
+
+/// Return an ARM Cortex-A55 (efficiency mobile, 2017–present) profile.
+/// The A55 is a compact 2-issue in-order core widely used as the efficiency
+/// cluster in big.LITTLE / DynamIQ designs paired with A75/A76/A78/X1.
+[[gnu::cold]] static MicroarchProfile cortexA55Profile() {
+    MicroarchProfile p;
+    p.name = "cortex-a55";
+    p.isa = ISAFamily::AArch64;
+    p.decodeWidth = 2;
+    p.issueWidth = 2;           // dual-issue in-order
+    p.pipelineDepth = 8;
+    p.intALUs = 2;
+    p.vecUnits = 1;
+    p.fmaUnits = 1;
+    p.loadPorts = 1;
+    p.storePorts = 1;
+    p.branchUnits = 1;
+    p.agus = 1;
+    p.dividers = 1;
+    p.mulPortCount = 1;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 12;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 5;
+    p.latLoad = 3; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.5; p.tputIntMul = 1.0;
+    p.tputFPAdd = 1.0;  p.tputFPMul = 1.0;
+    p.tputLoad = 1.0;   p.tputStore = 1.0;
+    p.l1DSize = 32;  p.l1DLatency = 3;
+    p.l2Size = 256;  p.l2Latency = 8;
+    p.l3Size = 2048; p.l3Latency = 28;  // shared LLC
+    p.cacheLineSize = 64;
+    p.vectorWidth = 128;
+    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 8.0;
+    p.btbEntries = 1024;
+    p.memoryLatency = 100;
+    p.robSize = 64;             // effectively in-order; small window
+    p.latStoLForward = 3;
+    p.vec512Penalty = 1;
+    p.tputFPDiv = 1.0 / 14.0;
+    p.tputIntDiv = 1.0 / 12.0;
+    p.schedulerSize = 16;
+    p.loadBufferEntries = 16;
+    p.storeBufferEntries = 8;
+    p.l1DBandwidthBytesPerCycle = 16;
+    p.l2BandwidthBytesPerCycle  = 8;
+    p.l3BandwidthBytesPerCycle  = 6;
+    p.memBandwidthBytesPerCycle = 4;
+    p.hasHyperthreading = false;
+    return p;
+}
+
+/// Return an NVIDIA Grace CPU (Neoverse V2-based, 2023) profile.
+/// Grace is NVIDIA's first CPU, used in the Grace-Hopper and Grace-Grace
+/// Superchips.  The CPU is a Neoverse V2 (72 cores) with HBM2e memory
+/// providing very high bandwidth (~500 GB/s shared across the chip).
+[[gnu::cold]] static MicroarchProfile nvidiaGraceProfile() {
+    MicroarchProfile p = neoverseV2Profile();
+    p.name = "nvidia-grace";
+    // Same Neoverse V2 execution pipeline.  Key difference: HBM2e memory.
+    p.memoryLatency = 80;       // HBM2e: ~80 ns at 3.1 GHz → ~250 cycles; 
+                                 // effective with hardware prefetcher: ~80 cyc
+    // HBM bandwidth: ~500 GB/s total / 72 cores ≈ 6.9 GB/s per core.
+    // At 3.1 GHz → ~2.2 bytes/cycle per core (aggregate).  Use a higher value
+    // to reflect that many-core workloads can sustain more per-core bandwidth.
+    p.memBandwidthBytesPerCycle = 20; // higher than DDR5; HBM delivers well
+    p.l3Size = 114688;          // 117 MB Last-Level Cache (system level cache)
+    p.l3Latency = 45;
+    p.hasHyperthreading = false;
     return p;
 }
 
@@ -1535,6 +2066,11 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
 
     if (normalized == "lunarlake" || normalized == "pantherlake")
         return lunarLakeProfile();
+
+    // Intel Gracemont / Crestmont E-core (standalone or as secondary cluster).
+    if (normalized == "gracemont" || normalized == "atomx7000" ||
+        normalized == "elkhart" || normalized == "jasper")
+        return gracemontProfile();
 
     if (normalized == "icelakeserver" || normalized == "icelakeclient" ||
         normalized == "tigerlake") {
@@ -1638,6 +2174,11 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         return p;
     }
 
+    // NVIDIA Grace CPU (Neoverse V2-based, HBM2e memory).
+    if (normalized == "nvidiagrace" || normalized == "grace" ||
+        normalized == "gracehopper" || normalized == "neoversev2grace")
+        return nvidiaGraceProfile();
+
     // ARM64 — AWS Graviton (server)
     if (normalized == "graviton3")
         return graviton3Profile();
@@ -1646,12 +2187,18 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
 
     // ARM64 — Cortex
     if (normalized == "cortexa78" || normalized == "cortexa78c" ||
-        normalized == "cortexa77" || normalized == "cortexa76") {
-        auto p = neoverseN2Profile();
+        normalized == "cortexa77") {
+        auto p = cortexA76Profile();
         p.name = cpuName;
         p.issueWidth = 4;
-        p.intALUs = 3;
-        p.vectorWidth = 128;
+        return p;
+    }
+    if (normalized == "cortexa76" || normalized == "cortexa76ae")
+        return cortexA76Profile();
+    if (normalized == "cortexa55" || normalized == "cortexa53" ||
+        normalized == "cortexa35") {
+        auto p = cortexA55Profile();
+        p.name = cpuName;
         return p;
     }
     if (normalized == "cortexall" || normalized == "cortexx3" ||
@@ -1763,6 +2310,29 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     // Retirement stage
     unsigned retire = g.addNode(ResourceType::Retire, "retire",
                                  1, 1.0, static_cast<double>(profile.issueWidth), 1);
+
+    // Reservation station (scheduler queue).
+    // The RS holds dispatched µops until their operands are ready.
+    // count = RS entries; throughput = issueWidth (how many µops can be
+    // issued from the RS per cycle); latency ≈ 1 cycle scheduling latency.
+    unsigned rs = g.addNode(ResourceType::SchedulerQueue, "sched_queue",
+                             profile.schedulerSize > 0 ? profile.schedulerSize : 64u,
+                             1.0,
+                             static_cast<double>(profile.issueWidth), 1);
+
+    // Load buffer and store buffer.
+    // count = number of entries; throughput = number of loads/stores per cycle.
+    unsigned lb = g.addNode(ResourceType::LoadBuffer, "load_buf",
+                             profile.loadBufferEntries > 0 ? profile.loadBufferEntries : 64u,
+                             static_cast<double>(profile.latLoad),
+                             static_cast<double>(profile.loadPorts), 1);
+
+    unsigned sb = g.addNode(ResourceType::StoreBuffer, "store_buf",
+                             profile.storeBufferEntries > 0 ? profile.storeBufferEntries : 36u,
+                             static_cast<double>(profile.latStore),
+                             static_cast<double>(profile.storePorts), 1);
+
+    (void)rs; (void)lb; (void)sb; // referenced for structural completeness
 
     // Dispatch → execution unit edges
     g.addEdge(dispatch, intALU, 0.0, static_cast<double>(profile.intALUs),
@@ -4171,7 +4741,7 @@ static unsigned foldSelectToBoolCast(llvm::Function& func) {
             if (tCI->isOne() && fCI->isZero()) {
                 // select(cond, 1, 0) → zext(cond)
                 result = builder.CreateZExt(cond, ty, "bool.zext");
-            } else if (tCI->isAllOnes() && fCI->isZero()) {
+            } else if (tCI->isMinusOne() && fCI->isZero()) {
                 // select(cond, -1, 0) → sext(cond)
                 result = builder.CreateSExt(cond, ty, "bool.sext");
             } else if (tCI->isZero() && fCI->isOne()) {
@@ -4180,7 +4750,7 @@ static unsigned foldSelectToBoolCast(llvm::Function& func) {
                 llvm::Value* notCond = builder.CreateXor(
                     cond, llvm::ConstantInt::getTrue(cond->getContext()), "bool.not");
                 result = builder.CreateZExt(notCond, ty, "bool.notzext");
-            } else if (tCI->isZero() && fCI->isAllOnes()) {
+            } else if (tCI->isZero() && fCI->isMinusOne()) {
                 // select(cond, 0, -1) → sext(not cond)
                 llvm::Value* notCond = builder.CreateXor(
                     cond, llvm::ConstantInt::getTrue(cond->getContext()), "bool.not");
@@ -5129,6 +5699,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 [[gnu::hot]] static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                                     const HardwareGraph& hw,
                                     const MicroarchProfile& profile) {
+    const llvm::DataLayout& dl = bb.getModule()->getDataLayout();
     // ── 1. Collect moveable instructions ─────────────────────────────────────
     std::vector<llvm::Instruction*> moveable;
     moveable.reserve(bb.size());
@@ -5272,56 +5843,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // non-aliasing, allowing the dependency to be elided.
         auto mayAlias = [&](const llvm::Instruction* a,
                             const llvm::Instruction* b) -> bool {
-            const llvm::Value* ptrA = getMemPtr(a);
-            const llvm::Value* ptrB = getMemPtr(b);
-            if (!ptrA || !ptrB) return true;        // conservative
-            if (ptrA == ptrB)   return true;         // definite alias
-
-            // GEP with constant offsets from the same base → no alias.
-            const auto* gepA = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrA);
-            const auto* gepB = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrB);
-            if (gepA && gepB &&
-                gepA->getPointerOperand() == gepB->getPointerOperand() &&
-                gepA->getNumIndices() == 1 && gepB->getNumIndices() == 1) {
-                const auto* idxA = llvm::dyn_cast<llvm::ConstantInt>(gepA->getOperand(1));
-                const auto* idxB = llvm::dyn_cast<llvm::ConstantInt>(gepB->getOperand(1));
-                if (idxA && idxB && idxA->getSExtValue() != idxB->getSExtValue())
-                    return false;  // different constant offsets → no alias
-            }
-
-            // Distinct local allocations / arguments cannot alias.
-            auto underlyingBase = [](const llvm::Value* v) -> const llvm::Value* {
-                while (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(v))
-                    v = gep->getPointerOperand();
-                return v;
-            };
-            const llvm::Value* baseA = underlyingBase(ptrA);
-            const llvm::Value* baseB = underlyingBase(ptrB);
-            if (baseA != baseB) {
-                bool aIsAlloca = llvm::isa<llvm::AllocaInst>(baseA);
-                bool bIsAlloca = llvm::isa<llvm::AllocaInst>(baseB);
-                bool aIsArg    = llvm::isa<llvm::Argument>(baseA);
-                bool bIsArg    = llvm::isa<llvm::Argument>(baseB);
-
-                // Two distinct stack allocations never alias.
-                if (aIsAlloca && bIsAlloca) return false;
-
-                // Alloca and a pointer argument don't alias: the alloca was
-                // created after the call and its address cannot have been
-                // passed to the caller that holds the argument.
-                if ((aIsAlloca && bIsArg) || (aIsArg && bIsAlloca)) return false;
-
-                // Two different pointer arguments only provably don't alias
-                // when at least one carries the `noalias` (restrict) attribute.
-                if (aIsArg && bIsArg) {
-                    const auto* argA = llvm::cast<llvm::Argument>(baseA);
-                    const auto* argB = llvm::cast<llvm::Argument>(baseB);
-                    if (argA->hasNoAliasAttr() || argB->hasNoAliasAttr())
-                        return false;
-                }
-            }
-
-            return true;  // conservative fallback
+            if (!getMemPtr(a) || !getMemPtr(b)) return true;
+            return hgoeMayAlias(a, b, dl);
         };
 
         // Collect memory instruction indices by type.
@@ -5583,6 +6106,21 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     unsigned robCapacity = profile.robSize > 0 ? profile.robSize : 224u;
     unsigned inflightCount = 0;
 
+    // ── 6f. Reservation station pressure tracking ─────────────────────────────
+    // The RS (scheduler queue) holds dispatched µops that are waiting for
+    // operands or a free execution port.  When the RS is full, the front-end
+    // stalls even if the ROB still has capacity.  Track outstanding (issued but
+    // not yet completed) µop count and stall when it reaches rsCapacity.
+    unsigned rsCapacity = profile.schedulerSize > 0 ? profile.schedulerSize : 64u;
+
+    // ── 6g. Load buffer and store buffer capacity tracking ────────────────────
+    // Outstanding loads and stores occupy entries in the Load Buffer (MOB) and
+    // Store Buffer until they complete.  Track them independently.
+    unsigned lbCapacity = profile.loadBufferEntries > 0 ? profile.loadBufferEntries : 64u;
+    unsigned sbCapacity = profile.storeBufferEntries > 0 ? profile.storeBufferEntries : 36u;
+    unsigned outstandingLoads  = 0;
+    unsigned outstandingStores = 0;
+
     // ── 6d. Debug: dump schedule DAG if requested ─────────────────────────────
     if (shouldDumpSchedule())
         dumpScheduleDAG(moveable, succ, pred, critPath, lat, profile);
@@ -5634,6 +6172,43 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     nextRetire = std::min(nextRetire, avail[id]);
             currentCycle = nextRetire;
             continue; // retry dispatch at the new cycle
+        }
+
+        // Reservation-station full stall: the RS holds µops that have been
+        // dispatched but not yet issued to an execution port.  It is drained
+        // as µops complete; advance the clock to when the next in-flight op
+        // finishes if the RS is at capacity.  rsCapacity is typically smaller
+        // than robCapacity so this check fires on deeper OoO windows first.
+        if (inflightCount >= rsCapacity) {
+            unsigned nextComplete = currentCycle + 1;
+            for (unsigned id = 0; id < n; ++id)
+                if (done[id] && avail[id] > currentCycle)
+                    nextComplete = std::min(nextComplete, avail[id]);
+            currentCycle = nextComplete;
+            continue;
+        }
+
+        // Load / Store buffer stall: count outstanding loads and stores.
+        {
+            outstandingLoads  = 0;
+            outstandingStores = 0;
+            for (unsigned id = 0; id < n; ++id) {
+                if (!done[id] || avail[id] <= currentCycle) continue;
+                if (llvm::isa<llvm::LoadInst>(moveable[id]))  ++outstandingLoads;
+                if (llvm::isa<llvm::StoreInst>(moveable[id])) ++outstandingStores;
+            }
+            if (outstandingLoads >= lbCapacity || outstandingStores >= sbCapacity) {
+                // Advance to the next load/store completion.
+                unsigned nextMemComplete = currentCycle + 1;
+                for (unsigned id = 0; id < n; ++id) {
+                    if (!done[id] || avail[id] <= currentCycle) continue;
+                    if (llvm::isa<llvm::LoadInst>(moveable[id]) ||
+                        llvm::isa<llvm::StoreInst>(moveable[id]))
+                        nextMemComplete = std::min(nextMemComplete, avail[id]);
+                }
+                currentCycle = nextMemComplete;
+                continue;
+            }
         }
 
         // Sort ready instructions for maximum throughput — 9-tier priority:
