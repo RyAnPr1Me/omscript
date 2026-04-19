@@ -2364,10 +2364,25 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     unsigned agu = g.addNode(ResourceType::AGU, "agu",
                               profile.agus, 1.0, 1.0, 1);
 
+    // Divider port throughput: use tputIntDiv if measured (non-zero), otherwise
+    // model the divider as a non-pipelined serial unit where throughput equals
+    // 1/latIntDiv (one new divide can start only after the previous one
+    // completes).  The initHWPort lambda uses busy = ceil(1/throughput), so
+    // passing 1.0/latIntDiv → busy = latIntDiv cycles, correctly blocking the
+    // port for the full latency of the previous operation.
+    //
+    // NOTE: The previous code passed latIntDiv as throughput (i.e. 25.0 for
+    // Skylake), which caused busy = ceil(1/25) = 1 cycle — the port was
+    // treated as free after a single cycle, letting unlimited divides be
+    // issued each cycle.  This was a significant throughput over-estimate.
+    double divTput = (profile.tputIntDiv > 0.0)
+        ? profile.tputIntDiv
+        : 1.0 / static_cast<double>(std::max(profile.latIntDiv, 1u));
+
     unsigned divider = g.addNode(ResourceType::DividerUnit, "divider",
                                   profile.dividers,
                                   static_cast<double>(profile.latIntDiv),
-                                  static_cast<double>(profile.latIntDiv), 1);
+                                  divTput, 1);
 
     // Cache hierarchy
     unsigned l1d = g.addNode(ResourceType::L1DCache, "l1d_cache",
