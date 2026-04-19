@@ -757,6 +757,9 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.vec512Penalty = 1; // no AVX-512 on Sandy Bridge
     return p;
 }
+
+/// Return a Haswell (Intel 4th gen) microarchitecture profile.
+/// Haswell (2013): added AVX2, FMA3, BMI/BMI2; integer multiply on port P1 only.
 [[gnu::cold]] static MicroarchProfile haswellProfile() {
     MicroarchProfile p = skylakeProfile();
     p.name = "haswell";
@@ -772,6 +775,10 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.vec512Penalty = 1; // AVX2 only, no 512-bit
     return p;
 }
+
+/// Return an Intel Alder Lake / Raptor Lake (Golden Cove P-core) profile.
+/// Alder Lake (2021): 5-wide integer backend, 3 load ports, 48 KB L1D.
+/// Raptor Lake (2022): same P-core µarch, larger caches.
 [[gnu::cold]] static MicroarchProfile alderlakeProfile() {
     MicroarchProfile p;
     p.name = "alderlake";
@@ -813,6 +820,10 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.vec512Penalty = 1; // AVX2 only on Golden Cove / Raptor Cove
     return p;
 }
+
+/// Return an AMD Zen 4 (Ryzen 7000 / EPYC Genoa) profile.
+/// Zen 4 (2022): 6-wide backend, 4 integer pipes, 2 FMA units,
+/// AVX-512 via 256-bit double-pump, 32 KB L1D, ROB=320.
 [[gnu::cold]] static MicroarchProfile zen4Profile() {
     MicroarchProfile p;
     p.name = "znver4";
@@ -854,6 +865,9 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.vec512Penalty = 1; // 256-bit native paths; AVX-512 handled at profile level
     return p;
 }
+
+/// Return an AMD Zen 3 (Ryzen 5000 / EPYC Milan) profile.
+/// Zen 3 (2020): unified 8-core CCX (vs 4-core in Zen 2), 512 KB L2, no AVX-512.
 [[gnu::cold]] static MicroarchProfile zen3Profile() {
     MicroarchProfile p = zen4Profile();
     p.name = "znver3";
@@ -913,6 +927,10 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.vec512Penalty = 1; // NEON 128-bit native; no 512-bit SIMD
     return p;
 }
+
+/// Return an ARM Neoverse V2 (server, 2023) profile.
+/// Used in AWS Graviton4, NVIDIA Grace, Google Axion.  8-wide dispatch,
+/// 256-bit SVE2, 6 integer pipes, 4 FMA units, ROB=256.
 [[gnu::cold]] static MicroarchProfile neoverseV2Profile() {
     MicroarchProfile p;
     p.name = "neoverse-v2";
@@ -951,6 +969,9 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.vec512Penalty = 1; // SVE2 256-bit native
     return p;
 }
+
+/// Return an ARM Neoverse N2 (efficiency server, 2022) profile.
+/// 5-wide dispatch, 4 integer pipes, 128-bit SVE2, 512 KB L2.
 [[gnu::cold]] static MicroarchProfile neoverseN2Profile() {
     MicroarchProfile p = neoverseV2Profile();
     p.name = "neoverse-n2";
@@ -1002,6 +1023,9 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.vec512Penalty = 1; // RVV at 128-bit VLEN; no 512-bit wide ops
     return p;
 }
+
+/// Return a SiFive U74 (RISC-V, in-order, single-issue) profile.
+/// Used in HiFive Unmatched and various embedded SoCs.
 [[gnu::cold]] static MicroarchProfile sifiveU74Profile() {
     MicroarchProfile p = riscvGenericProfile();
     p.name = "sifive-u74";
@@ -1052,7 +1076,9 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.vec512Penalty = 1; // SVE 256-bit native
     return p;
 }
-/// Graviton4: 96-core, 256-bit SVE2, DDR5-5600, wider backend.
+
+/// Return an AWS Graviton4 profile (Arm Neoverse V2-based, 2024).
+/// Graviton4: 96-core, 256-bit SVE2, DDR5-5600, wider backend than Graviton3.
 [[gnu::cold]] static MicroarchProfile graviton4Profile() {
     MicroarchProfile p = neoverseV2Profile();
     p.name = "graviton4";
@@ -1105,8 +1131,10 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.vec512Penalty = 1; // AVX2 only; no 512-bit SIMD on Lion Cove
     return p;
 }
-/// Zen 5: 8-wide dispatch, 6 ALU pipes, 2× 256-bit vector, AVX-512
-/// via double-pump, improved branch prediction.
+
+/// Return an improved AMD Zen 5 profile (2024).
+/// Zen 5: 8-wide dispatch, 6 ALU pipes, 4× 256-bit vector units,
+/// native 512-bit AVX-512 (not double-pumped), ROB=448, latFPAdd=3.
 [[gnu::cold]] static MicroarchProfile zen5Profile() {
     MicroarchProfile p;
     p.name = "znver5";
@@ -1147,7 +1175,9 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.vec512Penalty = 1;
     return p;
 }
-/// Sapphire Rapids (Xeon 4th Gen, 2023): 8-wide decode, 6 ALU ports,
+
+/// Return an Intel Sapphire Rapids / Emerald Rapids profile.
+/// Sapphire Rapids (Xeon 4th Gen, 2023): 6 µops/cycle dispatch, 5 integer ports,
 /// AVX-512 native at 512 bits (not double-pumped like Skylake-AVX512),
 /// ROB doubled to 512, 3 load + 3 store ports.
 /// Emerald Rapids (Xeon 5th Gen, 2023): same µarch, minor improvements.
@@ -1192,6 +1222,88 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.latStoLForward = 4;
     // Sapphire Rapids has NATIVE 512-bit AVX-512 FMA/VecALU units (Golden Cove
     // execution backend), so no double-pump penalty unlike Skylake-AVX512.
+    p.vec512Penalty = 1;
+    return p;
+}
+
+/// Return an Intel Granite Rapids (Redwood Cove P-core, 2024) profile.
+/// Xeon 6th Gen: enhanced Sapphire Rapids backend, wider dispatch,
+/// native AVX-512, larger ROB, faster integer execution.
+[[gnu::cold]] static MicroarchProfile graniteRapidsProfile() {
+    MicroarchProfile p = sapphireRapidsProfile();
+    p.name = "granite-rapids";
+    // Granite Rapids: 8-wide dispatch (up from 6 in Sapphire Rapids).
+    p.issueWidth = 8;
+    p.decodeWidth = 6;           // µop cache still 6-wide legacy decode
+    p.intALUs = 6;               // 6 integer execution ports (up from 5)
+    p.vecUnits = 4;              // 4 vector ALU ports (up from 3)
+    p.fmaUnits = 2;              // 2 native 512-bit FMA units
+    p.loadPorts = 3;
+    p.storePorts = 3;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 16;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 4;
+    p.latLoad = 5; p.latStore = 5;
+    p.l1DSize = 48;   p.l1DLatency = 5;
+    p.l2Size = 2048;  p.l2Latency = 14;
+    p.l3Size = 131072; p.l3Latency = 55;  // up to 128 MB shared L3
+    p.robSize = 512;
+    p.btbEntries = 16384;
+    p.memoryLatency = 200;
+    p.vec512Penalty = 1;  // native 512-bit (same as Sapphire Rapids)
+    p.latStoLForward = 4;
+    return p;
+}
+
+/// Return an AMD EPYC Zen4c (Bergamo, 2023) compact profile.
+/// Zen4c uses the same Zen 4 µarch but with smaller caches and higher
+/// core density (up to 128 cores/socket).  Same execution pipeline;
+/// reduced L2 per core (1 MB → 1 MB, but smaller L3 per core share).
+[[gnu::cold]] static MicroarchProfile zen4cProfile() {
+    MicroarchProfile p = zen4Profile();
+    p.name = "znver4c";
+    // Bergamo: same pipeline as Zen 4 but denser packing.
+    // L3 shared more aggressively: effective per-core L3 is smaller.
+    p.l3Size = 16384;   // 16 MB shared (vs 32 MB on standard Zen 4)
+    p.l3Latency = 54;   // slightly higher due to larger NUMA distance
+    p.memoryLatency = 200;
+    return p;
+}
+
+/// Return a SiFive P670 (RISC-V, high-performance OoO, 2023) profile.
+/// P670: 4-issue out-of-order, RVV 128-bit VLEN, in-order front-end decode.
+[[gnu::cold]] static MicroarchProfile sifiveP670Profile() {
+    MicroarchProfile p;
+    p.name = "sifive-p670";
+    p.isa = ISAFamily::RISCV64;
+    p.decodeWidth = 4;
+    p.issueWidth = 4;
+    p.pipelineDepth = 10;
+    p.intALUs = 3;
+    p.vecUnits = 2;
+    p.fmaUnits = 2;
+    p.loadPorts = 2;
+    p.storePorts = 1;
+    p.branchUnits = 1;
+    p.agus = 2;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 16; p.latFMA = 5;
+    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.33; p.tputIntMul = 1.0;
+    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
+    p.tputLoad = 0.5; p.tputStore = 1.0;
+    p.l1DSize = 32; p.l1DLatency = 4;
+    p.l2Size = 1024; p.l2Latency = 12;
+    p.l3Size = 4096; p.l3Latency = 35;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 128;  // RVV at 128-bit VLEN
+    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 8.0;
+    p.btbEntries = 2048;
+    p.memoryLatency = 200;
+    p.robSize = 128;
+    p.latStoLForward = 4;
     p.vec512Penalty = 1;
     return p;
 }
@@ -1263,10 +1375,15 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     // AVX-512 native, 3 load + 3 store ports.
     if (normalized == "sapphirerapids" || normalized == "emeraldrapids")
         return sapphireRapidsProfile();
+    if (normalized == "graniterrapids" || normalized == "graniteerapids" ||
+        normalized == "sierraforest")
+        return graniteRapidsProfile();
 
     // AMD Zen family
     if (normalized == "znver4" || normalized == "zen4")
         return zen4Profile();
+    if (normalized == "znver4c" || normalized == "zen4c" || normalized == "bergamo")
+        return zen4cProfile();
     if (normalized == "znver3" || normalized == "zen3")
         return zen3Profile();
     if (normalized == "znver2" || normalized == "zen2") {
@@ -1361,6 +1478,8 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         return riscvGenericProfile();
     if (normalized == "sifiveu74")
         return sifiveU74Profile();
+    if (normalized == "sifivep670" || normalized == "sifivep470" || normalized == "sifivep270")
+        return sifiveP670Profile();
 
     // Generic / x86-64 baseline
     if (normalized == "x8664" || normalized == "x8664v2" ||
@@ -3155,6 +3274,495 @@ static unsigned canonicalizeFaddFneg(llvm::Function& func) {
     return count;
 }
 
+/// Rebalance linear chains of commutative+associative binary operations into
+/// balanced binary trees, reducing critical path depth.
+///
+/// A linear chain  ((a OP b) OP c) OP d  has depth 3 on a single-issue pipe.
+/// The balanced form  (a OP b) OP (c OP d)  has depth 2, exposing ILP.
+///
+/// For n operands in a chain, the linear form has depth n-1; the balanced
+/// tree has depth ceil(log2(n)).  For chains of 4+ operands on wide-issue
+/// CPUs this is a strict win.
+///
+/// Only applies to:
+///   - Integer:  Add, Mul, And, Or, Xor  (always associative)
+///   - Floating-point:  FAdd, FMul  only when the instruction has the
+///     `reassoc` fast-math flag (preserves IEEE semantics otherwise)
+///
+/// Guard: only rebalance when the critical-path reduction > 0 (chain ≥ 3
+/// operands) and the CPU has ≥ 2 integer ALU ports or ≥ 2 FMA units
+/// (spare capacity to execute the additional independent operations).
+///
+/// Returns the number of chains rebalanced.
+[[gnu::hot]] static unsigned rebalanceChainForILP(llvm::Function& func,
+                                                    const MicroarchProfile& profile) {
+    // Need spare execution units to benefit.
+    bool hasIntILP = profile.intALUs >= 2;
+    bool hasFpILP  = profile.fmaUnits >= 2 || profile.vecUnits >= 2;
+    if (!hasIntILP && !hasFpILP) return 0;
+
+    unsigned count = 0;
+
+    for (auto& bb : func) {
+        // Collect instructions eligible to be a chain root: same binary opcode,
+        // single use in this BB, and the use is also the same opcode.
+        // We process bottom-up: find the deepest instruction in a chain
+        // (the one whose result leaves the chain, i.e. is used outside or
+        // is used by a different opcode), then walk up to collect operands.
+
+        // isChainOp: true if the opcode is commutative+associative and we
+        // are allowed to rebalance it (fast-math for FP, always for int).
+        auto isChainOp = [](const llvm::Instruction* inst) -> bool {
+            if (!inst) return false;
+            switch (inst->getOpcode()) {
+            case llvm::Instruction::Add:
+            case llvm::Instruction::Mul:
+            case llvm::Instruction::And:
+            case llvm::Instruction::Or:
+            case llvm::Instruction::Xor:
+                return true;
+            case llvm::Instruction::FAdd:
+            case llvm::Instruction::FMul:
+                // Only rebalance with reassoc flag to preserve FP semantics.
+                return llvm::cast<llvm::FPMathOperator>(inst)->hasAllowReassoc();
+            default:
+                return false;
+            }
+        };
+
+        // For each instruction in the BB that is a chain op, check if it is
+        // the "root" of a chain (its result is NOT fed into the same op).
+        std::unordered_set<llvm::Instruction*> processed;
+
+        for (auto& rootInst : bb) {
+            if (!isChainOp(&rootInst)) continue;
+            if (processed.count(&rootInst)) continue;
+
+            // Walk UP from the root to collect all instructions in the chain
+            // that have the same opcode, single use back to this chain, and
+            // are in the same BB.  Stop at instructions that have multiple
+            // users (their result must stay live) or are used outside the BB.
+            //
+            // "Chain" = connected component of same-opcode nodes where each
+            // internal node has exactly one user (the next in the chain).
+            // The root is the node whose user is NOT in the chain.
+
+            // Check if rootInst is truly the root: its use is NOT the same op.
+            bool isRoot = true;
+            if (rootInst.hasOneUse()) {
+                auto* user = llvm::dyn_cast<llvm::Instruction>(*rootInst.user_begin());
+                if (user && user->getOpcode() == rootInst.getOpcode() &&
+                    user->getParent() == &bb)
+                    isRoot = false; // there's a parent in the chain
+            }
+            if (!isRoot) continue;
+
+            // Collect leaf operands via DFS: traverse all chain members.
+            // chainMembers: all instructions in the chain (except the root itself).
+            // leaves: the actual operand values that feed into the chain.
+            std::vector<llvm::Instruction*> chainMembers;
+            std::vector<llvm::Value*> leaves;
+            unsigned opcode = rootInst.getOpcode();
+
+            // Use a worklist of (instruction, operand_index).
+            // For each chain member, expand its operands:
+            //   - If operand is a chain-eligible instruction with one use →
+            //     add to chain and expand its operands.
+            //   - Otherwise → it's a leaf.
+            std::function<void(llvm::Instruction*)> collect =
+                [&](llvm::Instruction* inst) {
+                    for (unsigned i = 0; i < inst->getNumOperands(); ++i) {
+                        llvm::Value* op = inst->getOperand(i);
+                        auto* opInst = llvm::dyn_cast<llvm::Instruction>(op);
+                        if (opInst && opInst->getOpcode() == opcode &&
+                            opInst->getParent() == &bb &&
+                            opInst->hasOneUse() &&
+                            !processed.count(opInst)) {
+                            chainMembers.push_back(opInst);
+                            processed.insert(opInst);
+                            collect(opInst);
+                        } else {
+                            leaves.push_back(op);
+                        }
+                    }
+                };
+
+            processed.insert(&rootInst);
+            collect(&rootInst);
+
+            // Need at least 4 leaves to benefit (depth 3 linear → depth 2 tree).
+            if (leaves.size() < 4) continue;
+
+            // Check parallel execution capacity:
+            bool isFP = (opcode == llvm::Instruction::FAdd ||
+                         opcode == llvm::Instruction::FMul);
+            if (isFP && !hasFpILP)  continue;
+            if (!isFP && !hasIntILP) continue;
+
+            // Build balanced binary tree from leaves.
+            // Use IRBuilder positioned just before the root instruction.
+            llvm::IRBuilder<> builder(&rootInst);
+
+            // Copy fast-math flags from root for FP ops.
+            llvm::FastMathFlags fmf;
+            if (isFP)
+                fmf = llvm::cast<llvm::FPMathOperator>(&rootInst)->getFastMathFlags();
+
+            // Build tree bottom-up: combine pairs until one value remains.
+            std::vector<llvm::Value*> work = leaves;
+            while (work.size() > 1) {
+                std::vector<llvm::Value*> next;
+                for (size_t i = 0; i + 1 < work.size(); i += 2) {
+                    llvm::Value* combined;
+                    switch (opcode) {
+                    case llvm::Instruction::Add:
+                        combined = builder.CreateAdd(work[i], work[i+1], "rlp.add");
+                        break;
+                    case llvm::Instruction::Mul:
+                        combined = builder.CreateMul(work[i], work[i+1], "rlp.mul");
+                        break;
+                    case llvm::Instruction::And:
+                        combined = builder.CreateAnd(work[i], work[i+1], "rlp.and");
+                        break;
+                    case llvm::Instruction::Or:
+                        combined = builder.CreateOr(work[i], work[i+1], "rlp.or");
+                        break;
+                    case llvm::Instruction::Xor:
+                        combined = builder.CreateXor(work[i], work[i+1], "rlp.xor");
+                        break;
+                    case llvm::Instruction::FAdd: {
+                        auto* fa = builder.CreateFAdd(work[i], work[i+1], "rlp.fadd");
+                        if (auto* fi = llvm::dyn_cast<llvm::Instruction>(fa))
+                            fi->setFastMathFlags(fmf);
+                        combined = fa;
+                        break;
+                    }
+                    case llvm::Instruction::FMul: {
+                        auto* fm = builder.CreateFMul(work[i], work[i+1], "rlp.fmul");
+                        if (auto* fi = llvm::dyn_cast<llvm::Instruction>(fm))
+                            fi->setFastMathFlags(fmf);
+                        combined = fm;
+                        break;
+                    }
+                    default:
+                        combined = work[i]; // fallback (shouldn't happen)
+                        break;
+                    }
+                    next.push_back(combined);
+                }
+                // Carry forward an odd element unpaired.
+                if (work.size() % 2 == 1)
+                    next.push_back(work.back());
+                work = std::move(next);
+            }
+
+            // Replace the root instruction with the balanced tree result.
+            if (!work.empty() && work[0] != &rootInst) {
+                rootInst.replaceAllUsesWith(work[0]);
+                // Mark old chain for removal: they are now dead.
+                // (LLVM DCE will clean them up; we just need to ensure no uses.)
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
+/// Convert simple if-then-else diamonds to select instructions when the
+/// branch misprediction penalty on the target CPU makes that more profitable.
+///
+/// Pattern:
+///   header:  br cond, then_bb, else_bb / merge_bb
+///   then_bb: %v = <pure_inst>;  br merge_bb        (≤ 2 instructions)
+///   merge_bb: %phi = phi [%v, then_bb], [%other, header]
+///
+/// Replace with (in header):
+///   %v = <pure_inst (hoisted)>
+///   %phi_val = select cond, %v, %other
+///
+/// Profitability: profitable when
+///   branchMispredictPenalty × kMissRate > cost(select) + cost(hoisted_inst)
+/// where kMissRate = 0.1 (10% estimated miss rate without PGO).
+///
+/// Safety guards:
+///   - then_bb has no side effects (no stores, calls, volatile loads)
+///   - then_bb has ≤ 2 non-PHI, non-branch instructions
+///   - The hoisted instruction's operands are all available in the header
+///   - then_bb has exactly one predecessor (header) and one successor (merge)
+///
+/// Returns the number of branches converted.
+static unsigned convertIfElseToSelect(llvm::Function& func,
+                                       const MicroarchProfile& profile) {
+    constexpr double kMissRate = 0.10;
+    // Minimum misprediction penalty (in cycles) to justify conversion.
+    // select costs 1 cycle (ALU); a speculative pure inst costs its latency.
+    // We require: mispredictCycles > 2 * latIntAdd to ensure clear benefit.
+    double mispredictCycles = profile.branchMispredictPenalty * kMissRate;
+    if (mispredictCycles <= static_cast<double>(2 * profile.latIntAdd)) return 0;
+
+    unsigned count = 0;
+    // Collect conversions to apply (avoid invalidating iterators).
+    struct Conversion {
+        llvm::BranchInst* br;
+        llvm::BasicBlock* thenBB;
+        llvm::BasicBlock* mergeBB;
+        llvm::PHINode* phi;
+        llvm::Instruction* thenVal; // the value computed in thenBB (may be null)
+        llvm::Value* elseVal;       // the value from the else path
+        bool thenIsTrue;            // true if thenBB is the true successor
+    };
+    std::vector<Conversion> conversions;
+
+    for (auto& bb : func) {
+        auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator());
+        if (!br || !br->isConditional() || br->getNumSuccessors() != 2) continue;
+
+        llvm::BasicBlock* succTrue  = br->getSuccessor(0);
+        llvm::BasicBlock* succFalse = br->getSuccessor(1);
+
+        // Try both orientations: thenBB = succTrue or thenBB = succFalse.
+        for (int orientation = 0; orientation < 2; ++orientation) {
+            llvm::BasicBlock* thenBB  = (orientation == 0) ? succTrue  : succFalse;
+            llvm::BasicBlock* mergeBB = (orientation == 0) ? succFalse : succTrue;
+
+            // thenBB must have exactly one predecessor (our header).
+            if (thenBB->getSinglePredecessor() != &bb) continue;
+
+            // thenBB must jump unconditionally to mergeBB.
+            auto* thenTerm = llvm::dyn_cast<llvm::BranchInst>(thenBB->getTerminator());
+            if (!thenTerm || thenTerm->isConditional()) continue;
+            if (thenTerm->getSuccessor(0) != mergeBB) continue;
+
+            // Count non-PHI, non-branch instructions in thenBB.
+            std::vector<llvm::Instruction*> thenInsts;
+            for (auto& inst : *thenBB) {
+                if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator()) continue;
+                thenInsts.push_back(&inst);
+            }
+            // Allow at most 2 pure instructions (e.g., a load + cast or a single compute).
+            if (thenInsts.size() > 2) continue;
+
+            // Check all thenBB instructions are pure (no side effects).
+            bool pure = true;
+            for (auto* inst : thenInsts) {
+                if (inst->mayHaveSideEffects() || inst->mayReadOrWriteMemory()) {
+                    pure = false; break;
+                }
+            }
+            if (!pure) continue;
+
+            // Find a PHI in mergeBB that merges a value from thenBB with a
+            // value from &bb (the header / else path).
+            llvm::PHINode* foundPhi = nullptr;
+            llvm::Instruction* thenVal = nullptr;
+            llvm::Value* elseVal = nullptr;
+
+            for (auto& mergeInst : *mergeBB) {
+                auto* phi = llvm::dyn_cast<llvm::PHINode>(&mergeInst);
+                if (!phi) break;
+
+                llvm::Value* fromThen = phi->getIncomingValueForBlock(thenBB);
+                llvm::Value* fromElse = phi->getIncomingValueForBlock(&bb);
+                if (!fromThen || !fromElse) continue;
+
+                // The "from then" value must originate in thenBB (or be a constant).
+                auto* fromThenInst = llvm::dyn_cast<llvm::Instruction>(fromThen);
+                bool thenValIsLocal = !fromThenInst ||
+                                      fromThenInst->getParent() == thenBB;
+                if (!thenValIsLocal) continue;
+
+                // Check that all operands of the thenBB instructions are
+                // available in the header (defined before the branch).
+                bool operandsOk = true;
+                for (auto* inst : thenInsts) {
+                    for (auto& op : inst->operands()) {
+                        auto* opInst = llvm::dyn_cast<llvm::Instruction>(op.get());
+                        if (opInst && opInst->getParent() == thenBB) continue; // def in thenBB
+                        if (opInst && opInst->getParent() != &bb) {
+                            // Must dominate header — conservative: only allow
+                            // values from outside the function (args) or defined
+                            // before the branch in the same function.
+                            // For safety, we only allow args and header-local defs.
+                            if (!llvm::isa<llvm::Argument>(opInst)) {
+                                operandsOk = false; break;
+                            }
+                        }
+                    }
+                    if (!operandsOk) break;
+                }
+                if (!operandsOk) continue;
+
+                foundPhi = phi;
+                thenVal  = fromThenInst; // may be null if constant
+                elseVal  = fromElse;
+                break;
+            }
+            if (!foundPhi) continue;
+
+            // Check profitability one more time with the actual hoisted inst cost.
+            unsigned hoistCost = 0;
+            for (auto* inst : thenInsts)
+                hoistCost += getOpcodeLatency(inst, profile);
+            // Profitable if: mispredict cost > select cost (1) + hoist cost
+            if (mispredictCycles <= static_cast<double>(1 + hoistCost)) continue;
+
+            conversions.push_back({br, thenBB, mergeBB, foundPhi, thenVal, elseVal,
+                                   orientation == 0});
+            break; // found a valid orientation for this BB
+        }
+    }
+
+    // Apply conversions in reverse order to avoid invalidating BBs.
+    for (auto& cv : conversions) {
+        llvm::BranchInst* br     = cv.br;
+        llvm::BasicBlock* thenBB = cv.thenBB;
+        llvm::BasicBlock* header = br->getParent();
+        llvm::PHINode*    phi    = cv.phi;
+
+        // Hoist thenBB's instructions into the header (before the branch).
+        std::vector<llvm::Instruction*> toHoist;
+        for (auto& inst : *thenBB)
+            if (!llvm::isa<llvm::PHINode>(inst) && !inst.isTerminator())
+                toHoist.push_back(&inst);
+
+        for (auto* inst : toHoist)
+            inst->moveBefore(br);
+
+        // Build select replacing the PHI.
+        llvm::IRBuilder<> builder(br);
+        llvm::Value* sel;
+        if (cv.thenIsTrue)
+            sel = builder.CreateSelect(br->getCondition(), phi->getIncomingValueForBlock(thenBB),
+                                       cv.elseVal, "sel.if2sel");
+        else
+            sel = builder.CreateSelect(br->getCondition(), cv.elseVal,
+                                       phi->getIncomingValueForBlock(thenBB), "sel.if2sel");
+
+        phi->replaceAllUsesWith(sel);
+        phi->eraseFromParent();
+
+        // Redirect the branch to skip thenBB: unconditional branch to mergeBB.
+        llvm::BasicBlock* mergeBB = cv.mergeBB;
+        // Remove thenBB as a predecessor of mergeBB.
+        // Update any remaining PHIs in mergeBB that reference thenBB.
+        for (auto& inst : *mergeBB) {
+            auto* remainingPhi = llvm::dyn_cast<llvm::PHINode>(&inst);
+            if (!remainingPhi) break;
+            int idx = remainingPhi->getBasicBlockIndex(thenBB);
+            if (idx >= 0) remainingPhi->removeIncomingValue(idx, false);
+        }
+
+        // Replace the conditional branch with an unconditional one to mergeBB.
+        llvm::BranchInst::Create(mergeBB, br);
+        br->eraseFromParent();
+
+        // thenBB is now unreachable; it will be cleaned up by CFG simplification.
+        // Leave it for now; it has no predecessors.
+        (void)header; // suppress unused variable warning
+
+        ++count;
+    }
+
+    return count;
+}
+
+/// Add `!nontemporal` metadata to streaming stores whose estimated working set
+/// exceeds the L1D cache capacity.  Non-temporal stores (MOVNT* on x86, STNPs
+/// on ARM) bypass the cache entirely, avoiding pollution and reducing write-
+/// combine overhead for large sequential writes.
+///
+/// Detection heuristic:
+///   - Store is inside a loop body (basic block with a back-edge to itself or
+///     a predecessor that appears later in linear order).
+///   - The store pointer is a GEP with a stride larger than one cache line,
+///     OR the function contains more unique store base pointers × estimated
+///     element size than L1D capacity.
+///
+/// Safety: non-temporal stores must NOT be used when the stored value will
+/// be read back soon (within the same loop iteration).  We conservatively
+/// skip stores whose pointer is also loaded in the same BB.
+///
+/// Returns the number of stores annotated.
+static unsigned insertNonTemporalHints(llvm::Function& func,
+                                        const MicroarchProfile& profile) {
+    if (func.isDeclaration()) return 0;
+    // Only beneficial for CPUs with a decent L1D (≥ 16 KB).
+    if (profile.l1DSize < 16) return 0;
+
+    unsigned count = 0;
+    llvm::LLVMContext& ctx = func.getContext();
+
+    // Assign linear order to detect loop bodies.
+    std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
+    { unsigned ord = 0; for (auto& bb : func) bbOrder[&bb] = ord++; }
+
+    const llvm::DataLayout* dl = nullptr;
+    if (auto* mod = func.getParent()) dl = &mod->getDataLayout();
+
+    for (auto& bb : func) {
+        // Determine if this BB is a loop body (has a backedge from any successor).
+        bool isLoop = false;
+        for (auto* succ : llvm::successors(&bb)) {
+            if (bbOrder.count(succ) && bbOrder[succ] <= bbOrder[&bb]) {
+                isLoop = true; break;
+            }
+        }
+        if (!isLoop) continue;
+
+        // Collect store and load pointers in this BB to detect read-back.
+        std::unordered_set<llvm::Value*> loadedPtrs;
+        for (auto& inst : bb)
+            if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(&inst))
+                loadedPtrs.insert(ld->getPointerOperand());
+
+        for (auto& inst : bb) {
+            auto* st = llvm::dyn_cast<llvm::StoreInst>(&inst);
+            if (!st || st->isVolatile()) continue;
+
+            // Already annotated.
+            if (st->getMetadata(llvm::LLVMContext::MD_nontemporal)) continue;
+
+            llvm::Value* ptr = st->getPointerOperand();
+
+            // Skip if this pointer is also loaded in the same BB (read-back risk).
+            if (loadedPtrs.count(ptr)) continue;
+
+            // Check for large-stride or large-working-set access.
+            bool shouldAnnotate = false;
+
+            if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+                // Single-index GEP: check element type size vs cache line.
+                if (gep->getNumIndices() == 1 && dl) {
+                    llvm::Type* elemTy = gep->getSourceElementType();
+                    if (elemTy && elemTy->isSized()) {
+                        uint64_t elemBytes = dl->getTypeAllocSize(elemTy);
+                        // Stride > cache line → streaming access pattern.
+                        if (elemBytes > profile.cacheLineSize)
+                            shouldAnnotate = true;
+                        // Working set heuristic: if element count × elemBytes
+                        // plausibly exceeds L1D (assume ≥ 256 iterations).
+                        unsigned estimatedElements = 256;
+                        if (elemBytes * estimatedElements >
+                                static_cast<uint64_t>(profile.l1DSize) * 1024)
+                            shouldAnnotate = true;
+                    }
+                }
+            }
+
+            if (shouldAnnotate) {
+                // Add !nontemporal metadata (value = i32 1).
+                llvm::MDNode* ntMD = llvm::MDNode::get(ctx, {
+                    llvm::ConstantAsMetadata::get(
+                        llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 1))
+                });
+                st->setMetadata(llvm::LLVMContext::MD_nontemporal, ntMD);
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
 TransformStats applyHardwareTransforms(llvm::Function& func,
                                         const MicroarchProfile& profile,
                                         bool enableLoopAnnotation) {
@@ -3182,6 +3790,9 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Integer abs detection: replace select+icmp+sub patterns with llvm.abs.
     // Runs after strength reduction so we don't accidentally undo any reductions.
     stats.intStrengthReduced += generateIntegerAbs(func, profile);
+    stats.intStrengthReduced += rebalanceChainForILP(func, profile);
+    stats.branchesOptimized  += convertIfElseToSelect(func, profile);
+    stats.loadsStorePaired   += insertNonTemporalHints(func, profile);
 
     return stats;
 }
@@ -3480,9 +4091,52 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
     // ── 3. Per-opcode instruction latencies ──────────────────────────────────
     // Computed first so that addEdge() can use lat[from] for data-dep edges.
+    // Load instructions get a tiered latency estimate based on likely cache level:
+    //   - Pointer-chasing load (ptr came from another load): likely L2/L3 miss
+    //     → latency = (l2Latency + l3Latency) / 2 cycles (conservative)
+    //   - GEP with stride larger than one cache line: likely L2 miss
+    //     → latency = l2Latency cycles
+    //   - Otherwise: L1 hit assumed → latency = latLoad (l1DLatency)
+    // This improves schedule quality for memory-bound code by prioritising
+    // high-miss-risk loads earlier, so more independent work can fill the
+    // pipeline while the miss resolves.
+    auto estimateLoadLatency = [&](const llvm::Instruction* inst) -> unsigned {
+        auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst);
+        if (!ld) return getOpcodeLatency(inst, profile);
+
+        const llvm::Value* ptr = ld->getPointerOperand();
+
+        // Pointer chasing: the pointer itself was loaded from memory.
+        // These almost always miss the L1 cache on the first access.
+        if (llvm::isa<llvm::LoadInst>(ptr))
+            return (profile.l2Latency + profile.l3Latency) / 2;
+
+        // GEP with large constant index: stride may exceed one cache line.
+        if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+            const llvm::DataLayout* dl = nullptr;
+            if (auto* mod = inst->getParent()->getParent()->getParent())
+                dl = &mod->getDataLayout();
+            if (dl && gep->getNumIndices() == 1) {
+                llvm::Type* elemTy = gep->getSourceElementType();
+                if (elemTy && elemTy->isSized()) {
+                    for (auto it = gep->idx_begin(); it != gep->idx_end(); ++it) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(*it)) {
+                            uint64_t elemBytes = dl->getTypeAllocSize(elemTy);
+                            uint64_t byteOff = ci->getZExtValue() * elemBytes;
+                            if (byteOff > profile.cacheLineSize * 4)
+                                return profile.l2Latency;
+                        }
+                    }
+                }
+            }
+        }
+
+        return profile.latLoad; // assume L1 hit
+    };
+
     std::vector<unsigned> lat(n);
     for (unsigned i = 0; i < n; ++i)
-        lat[i] = getOpcodeLatency(moveable[i], profile);
+        lat[i] = estimateLoadLatency(moveable[i]);
 
     // ── 4. Build dependency DAG with per-edge latency ─────────────────────────
     // Each edge is (to/from node, edge_latency).  Using per-edge latency gives
