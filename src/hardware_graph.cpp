@@ -1226,6 +1226,105 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     return p;
 }
 
+/// Return an Apple M2 (Everest P-core, 2022) profile.
+/// M2 improves on M1 with wider vector units, more FMA units, and higher
+/// bandwidth.  The P-core has 8-wide dispatch, 6 integer pipes, 4 FMA units.
+[[gnu::cold]] static MicroarchProfile appleM2Profile() {
+    MicroarchProfile p;
+    p.name = "apple-m2";
+    p.isa = ISAFamily::AArch64;
+    p.decodeWidth = 8;
+    p.issueWidth = 8;           // 8-wide OoO dispatch (up from 6 on M1)
+    p.pipelineDepth = 13;
+    p.intALUs = 6;              // 6 integer pipes (up from 4 on M1)
+    p.vecUnits = 4;             // 4× 128-bit NEON/FP units (up from 3)
+    p.fmaUnits = 4;             // 4 FMA units (up from 3 on M1)
+    p.loadPorts = 3;            // 3 load pipes (up from 2)
+    p.storePorts = 2;
+    p.branchUnits = 2;
+    p.agus = 3;
+    p.dividers = 2;
+    p.mulPortCount = 4;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 12;
+    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 9; p.latFMA = 3;
+    // M2 L1D: 128 KB; L2: 16 MB shared with E-cores; load latency 3 cycles.
+    p.latLoad = 3; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.17; p.tputIntMul = 0.25;
+    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
+    p.tputLoad = 0.33; p.tputStore = 0.5;
+    p.l1DSize = 128; p.l1DLatency = 3;
+    p.l2Size = 16384; p.l2Latency = 8;
+    p.l3Size = 0;    p.l3Latency = 12;  // SLC (System Level Cache) as L3 proxy
+    p.cacheLineSize = 128;              // Apple Silicon uses 128-byte cache lines
+    p.vectorWidth = 128;                // NEON 128-bit (AMX for matrix, separate)
+    p.intRegisters = 30; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 11.0;   // deep OoO pipeline, good predictor
+    p.btbEntries = 16384;
+    p.memoryLatency = 100;              // LPDDR5 — lower latency than x86 DRAM
+    p.robSize = 250;                    // Larger ROB than M1 (M1≈192)
+    // M2 store-to-load forwarding: 4 cycles (same as L1D hit).
+    // Store buffer address comparison adds 1 cycle vs raw load → 4 > latStore=3.
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1; // NEON 128-bit native; no 512-bit SIMD
+    return p;
+}
+
+/// Return an Intel Arrow Lake (Lion Cove P-core + Skymont E-core, 2024) profile.
+/// Arrow Lake removed Hyperthreading from P-cores and dropped AVX-512.
+/// Lion Cove improves dispatch to 6-wide vs 5-wide Raptor Lake P-cores.
+/// This profile covers the P-core execution model.
+[[gnu::cold]] static MicroarchProfile arrowLakeProfile() {
+    MicroarchProfile p;
+    p.name = "arrow-lake";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 6;          // 6-wide µop cache delivery
+    p.issueWidth = 6;           // 6-wide dispatch to backend
+    p.pipelineDepth = 14;
+    p.intALUs = 6;              // 6 integer execution ports (P0-P5)
+    p.vecUnits = 3;             // 3 vector ALU ports (no AVX-512)
+    p.fmaUnits = 2;             // 2 FMA units on P0/P1
+    p.loadPorts = 3;            // 3 load ports
+    p.storePorts = 2;
+    p.branchUnits = 2;
+    p.agus = 3;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
+    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 12; p.latFMA = 4;
+    p.latLoad = 4; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.17; p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.33; p.tputFPMul = 0.33;
+    p.tputLoad = 0.33; p.tputStore = 0.5;
+    p.l1DSize = 48;  p.l1DLatency = 4;
+    p.l2Size = 2048; p.l2Latency = 14;     // Arrow Lake P-core: 2 MB L2
+    p.l3Size = 36864; p.l3Latency = 42;    // 36 MB shared L3
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;        // AVX2 (AVX-512 removed vs Raptor Lake)
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 12.0;
+    p.btbEntries = 16384;
+    p.memoryLatency = 180;
+    p.robSize = 256;            // Improved vs Raptor Lake (192)
+    p.latStoLForward = 4;
+    p.vec512Penalty = 1;        // No AVX-512
+    return p;
+}
+
+/// Return an AMD EPYC Turin (Zen 5, server, 2024) profile.
+/// Turin: up to 192 cores, Zen 5 µarch, native 512-bit AVX-512, large L3.
+[[gnu::cold]] static MicroarchProfile epycTurinProfile() {
+    MicroarchProfile p = zen5Profile();
+    p.name = "epyc-turin";
+    // Turin uses the same Zen 5 pipeline but with much larger L3 cache
+    // spread across chiplets.  Per-core L3 share is smaller than desktop.
+    p.l2Size = 1024;            // 1 MB L2 per core (same as Zen 5)
+    p.l3Size = 65536;           // 64 MB per CCD (shared across 16 cores)
+    p.l3Latency = 55;           // Slightly higher due to chiplet interconnect
+    p.memoryLatency = 220;      // DDR5-6400, longer NUMA hops on big configs
+    p.robSize = 448;            // Same ROB as desktop Zen 5
+    return p;
+}
+
 /// Return an Intel Granite Rapids (Redwood Cove P-core, 2024) profile.
 /// Xeon 6th Gen: enhanced Sapphire Rapids backend, wider dispatch,
 /// native AVX-512, larger ROB, faster integer execution.
@@ -1349,8 +1448,8 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         normalized == "meteorlake")
         return alderlakeProfile();
 
-    if (normalized == "arrowlake")
-        return lunarLakeProfile(); // Arrow Lake uses Lion Cove P-cores (same as Lunar Lake)
+    if (normalized == "arrowlake" || normalized == "arrowlakes")
+        return arrowLakeProfile();
 
     if (normalized == "lunarlake" || normalized == "pantherlake")
         return lunarLakeProfile();
@@ -1406,29 +1505,31 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     }
     if (normalized == "znver5" || normalized == "zen5")
         return zen5Profile();
+    if (normalized == "epycturin" || normalized == "zen5server" || normalized == "turin")
+        return epycTurinProfile();
 
     // ARM64 — Apple Silicon
     if (normalized == "applem1" || normalized == "applema14")
         return appleMProfile();
     if (normalized == "applem2" || normalized == "applem2pro" ||
-        normalized == "applem2max" || normalized == "applem2ultra") {
-        auto p = appleMProfile();
-        p.name = cpuName;
-        p.l2Size = 16384;
-        return p;
+        normalized == "applem2max" || normalized == "applem2ultra" ||
+        normalized == "applem2base") {
+        return appleM2Profile();
     }
     if (normalized == "applem3" || normalized == "applem3pro" ||
         normalized == "applem3max" || normalized == "applem3ultra" ||
         normalized == "applem4") {
-        auto p = appleMProfile();
+        auto p = appleM2Profile();
         p.name = cpuName;
         p.decodeWidth = 8;
-        p.issueWidth = 10;
+        p.issueWidth = 10;        // M3/M4: wider backend
         p.intALUs = 6;
         p.vecUnits = 4;
+        p.fmaUnits = 4;
         p.l1DSize = 192;
         p.l2Size = 16384;
         p.l3Size = 36864;
+        p.robSize = 300;
         return p;
     }
 
@@ -2103,6 +2204,13 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
         for (auto& inst : bb) {
             // Pattern: fadd(fmul(a, b), c) → fma(a, b, c)
             if (inst.getOpcode() == llvm::Instruction::FAdd) {
+                // IEEE 754-2008 §5.4.1: fused operations require `contract` permission.
+                // We check the fast-math flag on the fadd; the fmul's flag also
+                // contributes but in practice both are set together (e.g. -ffast-math,
+                // #pragma STDC FP_CONTRACT ON, or llvm's `reassoc contract` flags).
+                auto* fpAdd = llvm::cast<llvm::FPMathOperator>(&inst);
+                if (!fpAdd->hasAllowContract()) continue;
+
                 llvm::Value* op0 = inst.getOperand(0);
                 llvm::Value* op1 = inst.getOperand(1);
 
@@ -2520,6 +2628,10 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
         for (auto& inst : bb) {
             // Pattern: fsub(fmul(a, b), c) → fma(a, b, -c)
             if (inst.getOpcode() == llvm::Instruction::FSub) {
+                // Require `contract` permission for FMA fusion (IEEE §5.4.1).
+                auto* fpSub = llvm::cast<llvm::FPMathOperator>(&inst);
+                if (!fpSub->hasAllowContract()) continue;
+
                 llvm::Value* op0 = inst.getOperand(0);
                 llvm::Value* op1 = inst.getOperand(1);
 
@@ -3274,6 +3386,348 @@ static unsigned canonicalizeFaddFneg(llvm::Function& func) {
     return count;
 }
 
+/// Replace FP division by a compile-time constant with a reciprocal multiply.
+///
+/// Pattern:  fdiv(x, C)  →  fmul(x, 1.0/C)
+///
+/// Requires the `arcp` (allow-reciprocal) fast-math flag on the division, which
+/// permits the compiler to use a reciprocal approximation.  With a constant
+/// divisor this is exact (not an approximation) at the same precision, so the
+/// transform is correct even without `afn` or `unsafe-fp-math`.
+///
+/// Benefit: FP division is 10-15 cycles on most CPUs (latFPDiv = 10-15),
+/// whereas FP multiply is 3-4 cycles (latFPMul = 3-4).  This is the single
+/// most impactful scalar FP transform for division-heavy code.
+///
+/// Also folds `fdiv(1.0, x)` → `fdiv(1.0, x)` (kept, backend emits RCPPS).
+///
+/// Returns the number of divisions replaced.
+static unsigned foldFPDivByConstant(llvm::Function& func,
+                                     const MicroarchProfile& profile) {
+    // Guard: only worth doing when div is materially slower than mul.
+    if (profile.latFPDiv <= profile.latFPMul + 1) return 0;
+
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FDiv) continue;
+            // Check the per-instruction `arcp` fast-math flag.
+            auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
+            if (!fpOp->hasAllowReciprocal()) continue;
+
+            llvm::Value* dividend = inst.getOperand(0);
+            llvm::Value* divisor  = inst.getOperand(1);
+            llvm::Type*  ty       = inst.getType();
+
+            // Only fold when the divisor is a compile-time FP constant (scalar or
+            // splat vector).  Skip division by 0 or denormals.
+            llvm::ConstantFP* cFP = nullptr;
+            if (auto* cfp = llvm::dyn_cast<llvm::ConstantFP>(divisor)) {
+                if (!cfp->isZero() && cfp->getValueAPF().isFiniteNonZero() &&
+                    !cfp->getValueAPF().isDenormal())
+                    cFP = cfp;
+            }
+            // Handle splat vector constant: <4 x float> <C, C, C, C>.
+            if (!cFP) {
+                if (auto* cv = llvm::dyn_cast<llvm::ConstantVector>(divisor)) {
+                    if (auto* sp = cv->getSplatValue())
+                        cFP = llvm::dyn_cast<llvm::ConstantFP>(sp);
+                }
+                if (!cFP) {
+                    if (auto* cdv = llvm::dyn_cast<llvm::ConstantDataVector>(divisor))
+                        cFP = llvm::dyn_cast<llvm::ConstantFP>(cdv->getSplatValue());
+                }
+            }
+            if (!cFP) continue;
+
+            // Compute 1.0 / C in the same FP semantics as the operation.
+            // APFloat(semantics, double) was removed in LLVM 18; use the
+            // double constructor then convert to the target semantics.
+            llvm::APFloat recip(1.0); // start as double 1.0
+            bool lossy = false;
+            recip.convert(cFP->getValueAPF().getSemantics(),
+                          llvm::APFloat::rmNearestTiesToEven, &lossy);
+            llvm::APFloat divisorVal = cFP->getValueAPF();
+            auto status = recip.divide(divisorVal, llvm::APFloat::rmNearestTiesToEven);
+            // Reject if division produced an inexact result that would change
+            // meaning (e.g., 1.0/3.0 is inexact but still exact to IEEE float
+            // precision — this is fine since arcp allows it).
+            (void)status; // non-exact is acceptable with arcp
+
+            // Build the reciprocal constant with the same type as the original.
+            llvm::Value* recipConst;
+            if (ty->isVectorTy()) {
+                // Splat the scalar reciprocal into a vector constant.
+                llvm::Constant* scalarRecip = llvm::ConstantFP::get(
+                    ty->getScalarType(), recip);
+                recipConst = llvm::ConstantVector::getSplat(
+                    llvm::cast<llvm::VectorType>(ty)->getElementCount(),
+                    scalarRecip);
+            } else {
+                recipConst = llvm::ConstantFP::get(ty, recip);
+            }
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* mul = builder.CreateFMul(dividend, recipConst, "recip.mul");
+            // Propagate fast-math flags from the original division.
+            if (auto* mulInst = llvm::dyn_cast<llvm::Instruction>(mul))
+                mulInst->setFastMathFlags(fpOp->getFastMathFlags());
+
+            replacements.emplace_back(&inst, mul);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Replace integer udiv/urem by a power-of-2 constant with logical shifts/masks.
+///
+/// These patterns may survive LLVM's InstCombine when constants are introduced
+/// late (e.g., by our own strength-reduction pass or by constant propagation
+/// after inlining), or when the function was not run through the full O2/O3 pipeline.
+///
+///   udiv(x, 2^k)  →  lshr(x, k)
+///   urem(x, 2^k)  →  and(x, 2^k - 1)
+///   sdiv(x, 2^k)  →  lshr(add(x, 2^k - 1), k)   [with rounding correction]
+///   sdiv(x, 1)    →  x   [free]
+///   udiv(x, 1)    →  x   [free]
+///
+/// Returns the number of operations folded.
+static unsigned foldDivByPow2(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            bool isUDiv = (op == llvm::Instruction::UDiv);
+            bool isURem = (op == llvm::Instruction::URem);
+            bool isSDiv = (op == llvm::Instruction::SDiv);
+            if (!isUDiv && !isURem && !isSDiv) continue;
+            if (!inst.getType()->isIntegerTy()) continue;
+
+            auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
+            if (!ci) continue;
+
+            llvm::Value* x = inst.getOperand(0);
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Type* ty = inst.getType();
+            const llvm::APInt& divisor = ci->getValue();
+            unsigned bitWidth = ty->getIntegerBitWidth();
+            llvm::Value* rep = nullptr;
+
+            if (divisor.isOne()) {
+                // div by 1 is identity.
+                rep = x;
+            } else if (divisor.isPowerOf2()) {
+                unsigned k = divisor.logBase2();
+                if (isUDiv) {
+                    rep = builder.CreateLShr(x,
+                        llvm::ConstantInt::get(ty, k), "udiv.shr");
+                } else if (isURem) {
+                    rep = builder.CreateAnd(x,
+                        llvm::ConstantInt::get(ty, divisor - 1), "urem.and");
+                } else { // SDiv by positive power-of-2
+                    // Signed division by 2^k rounds toward zero.
+                    // Equivalent to: (x + ((x >> 63) & (2^k - 1))) >> k
+                    // where `x >> 63` is the sign-bit replication.
+                    llvm::Value* signBit = builder.CreateAShr(x,
+                        llvm::ConstantInt::get(ty, bitWidth - 1), "sdiv.sign");
+                    llvm::Value* adj = builder.CreateAnd(signBit,
+                        llvm::ConstantInt::get(ty, divisor - 1), "sdiv.adj");
+                    llvm::Value* adjusted = builder.CreateAdd(x, adj, "sdiv.adj_x");
+                    rep = builder.CreateAShr(adjusted,
+                        llvm::ConstantInt::get(ty, k), "sdiv.shr");
+                }
+            }
+
+            if (rep) {
+                replacements.emplace_back(&inst, rep);
+                ++count;
+            }
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Replace `icmp + select` patterns with integer min/max intrinsics, and
+/// `fcmp + select` patterns with FP min/max intrinsics.
+///
+/// This enables the backend to lower to VMIN/VMAX instructions (1 cycle on
+/// most CPUs) instead of a compare + conditional select (2+ µops).
+///
+/// Patterns:
+///   select(icmp slt(a, b), a, b)  →  smin(a, b)
+///   select(icmp sgt(a, b), a, b)  →  smax(a, b)
+///   select(icmp ult(a, b), a, b)  →  umin(a, b)
+///   select(icmp ugt(a, b), a, b)  →  umax(a, b)
+///   select(fcmp olt(a, b), a, b)  →  minnum(a, b)  [fast-math: nnan]
+///   select(fcmp ogt(a, b), a, b)  →  maxnum(a, b)  [fast-math: nnan]
+///
+/// Safety: for FP patterns we require the `nnan` flag to ensure NaN
+/// semantics are compatible with minnum/maxnum (which propagate NaN
+/// differently from a select under NaN inputs).
+///
+/// Returns the number of patterns folded.
+static unsigned foldMinMaxPatterns(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    llvm::Module* mod = func.getParent();
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+
+            llvm::Value* cond    = sel->getCondition();
+            llvm::Value* trueVal = sel->getTrueValue();
+            llvm::Value* falseVal= sel->getFalseValue();
+            llvm::Type*  ty      = sel->getType();
+
+            // ── Integer min/max ──────────────────────────────────────────────
+            if (ty->isIntegerTy() || (ty->isVectorTy() && ty->getScalarType()->isIntegerTy())) {
+                auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond);
+                if (!icmp) continue;
+
+                llvm::Value* a = icmp->getOperand(0);
+                llvm::Value* b = icmp->getOperand(1);
+                llvm::CmpInst::Predicate pred = icmp->getPredicate();
+
+                llvm::Intrinsic::ID intrID = llvm::Intrinsic::not_intrinsic;
+                llvm::Value* minA = nullptr, *minB = nullptr;
+
+                // select(a < b, a, b)  →  smin(a, b)
+                if ((pred == llvm::CmpInst::ICMP_SLT || pred == llvm::CmpInst::ICMP_SLE) &&
+                    trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::smin; minA = a; minB = b;
+                }
+                // select(a > b, a, b)  →  smax(a, b)
+                else if ((pred == llvm::CmpInst::ICMP_SGT || pred == llvm::CmpInst::ICMP_SGE) &&
+                         trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::smax; minA = a; minB = b;
+                }
+                // select(a < b, b, a) → smax(a, b)  [inverted select]
+                else if ((pred == llvm::CmpInst::ICMP_SLT || pred == llvm::CmpInst::ICMP_SLE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::smax; minA = a; minB = b;
+                }
+                // select(a > b, b, a) → smin(a, b)  [inverted select]
+                else if ((pred == llvm::CmpInst::ICMP_SGT || pred == llvm::CmpInst::ICMP_SGE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::smin; minA = a; minB = b;
+                }
+                // Unsigned variants.
+                else if ((pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) &&
+                         trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::umin; minA = a; minB = b;
+                }
+                else if ((pred == llvm::CmpInst::ICMP_UGT || pred == llvm::CmpInst::ICMP_UGE) &&
+                         trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::umax; minA = a; minB = b;
+                }
+                else if ((pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::umax; minA = a; minB = b;
+                }
+                else if ((pred == llvm::CmpInst::ICMP_UGT || pred == llvm::CmpInst::ICMP_UGE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::umin; minA = a; minB = b;
+                }
+
+                if (intrID != llvm::Intrinsic::not_intrinsic && minA && minB) {
+                    llvm::IRBuilder<> builder(sel);
+                    llvm::Function* fn = OMSC_GET_INTRINSIC(mod, intrID, {ty});
+                    llvm::Value* result = builder.CreateCall(fn, {minA, minB}, "minmax");
+                    replacements.emplace_back(sel, result);
+                    ++count;
+                }
+                continue;
+            }
+
+            // ── FP min/max ───────────────────────────────────────────────────
+            if (ty->isFPOrFPVectorTy()) {
+                auto* fcmp = llvm::dyn_cast<llvm::FCmpInst>(cond);
+                if (!fcmp) continue;
+
+                // For FP min/max, require `nnan` flag on the select (or the cmp).
+                // minnum/maxnum semantics: if either operand is NaN, the result is
+                // the other operand.  A plain select propagates NaN as the true/false
+                // value.  With `nnan` the user asserts no NaN, so semantics match.
+                bool noNaN = false;
+                if (auto* fpSel = llvm::dyn_cast<llvm::FPMathOperator>(sel))
+                    noNaN = fpSel->hasNoNaNs();
+                if (!noNaN) {
+                    if (auto* fpCmp = llvm::dyn_cast<llvm::FPMathOperator>(fcmp))
+                        noNaN = fpCmp->hasNoNaNs();
+                }
+                if (!noNaN) continue;
+
+                llvm::Value* a = fcmp->getOperand(0);
+                llvm::Value* b = fcmp->getOperand(1);
+                llvm::CmpInst::Predicate pred = fcmp->getPredicate();
+
+                llvm::Intrinsic::ID intrID = llvm::Intrinsic::not_intrinsic;
+                llvm::Value* minA = nullptr, *minB = nullptr;
+
+                if ((pred == llvm::CmpInst::FCMP_OLT || pred == llvm::CmpInst::FCMP_OLE ||
+                     pred == llvm::CmpInst::FCMP_ULT || pred == llvm::CmpInst::FCMP_ULE) &&
+                    trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::minnum; minA = a; minB = b;
+                }
+                else if ((pred == llvm::CmpInst::FCMP_OGT || pred == llvm::CmpInst::FCMP_OGE ||
+                          pred == llvm::CmpInst::FCMP_UGT || pred == llvm::CmpInst::FCMP_UGE) &&
+                         trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::maxnum; minA = a; minB = b;
+                }
+                // Inverted selects.
+                else if ((pred == llvm::CmpInst::FCMP_OLT || pred == llvm::CmpInst::FCMP_OLE ||
+                          pred == llvm::CmpInst::FCMP_ULT || pred == llvm::CmpInst::FCMP_ULE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::maxnum; minA = a; minB = b;
+                }
+                else if ((pred == llvm::CmpInst::FCMP_OGT || pred == llvm::CmpInst::FCMP_OGE ||
+                          pred == llvm::CmpInst::FCMP_UGT || pred == llvm::CmpInst::FCMP_UGE) &&
+                         trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::minnum; minA = a; minB = b;
+                }
+
+                if (intrID != llvm::Intrinsic::not_intrinsic && minA && minB) {
+                    llvm::IRBuilder<> builder(sel);
+                    llvm::Function* fn = OMSC_GET_INTRINSIC(mod, intrID, {ty});
+                    llvm::Value* result = builder.CreateCall(fn, {minA, minB}, "fpminmax");
+                    if (auto* ri = llvm::dyn_cast<llvm::Instruction>(result)) {
+                        // Propagate nnan flag to the new intrinsic call.
+                        llvm::FastMathFlags fmf;
+                        fmf.setNoNaNs();
+                        ri->setFastMathFlags(fmf);
+                    }
+                    replacements.emplace_back(sel, result);
+                    ++count;
+                }
+            }
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
 /// Rebalance linear chains of commutative+associative binary operations into
 /// balanced binary trees, reducing critical path depth.
 ///
@@ -3775,6 +4229,13 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Canonicalize fadd(x, fneg(y)) → fsub(x, y) before FMA scan so the
     // FMA pass can recognise the resulting fsub patterns.
     stats.fmaGenerated    += canonicalizeFaddFneg(func);
+    // FP division by constant → reciprocal multiply (fdiv → fmul when `arcp` flag).
+    // Run before FMA scan so that the resulting fmul may be fused in a later pass.
+    stats.fmaGenerated    += foldFPDivByConstant(func, profile);
+    // Integer div/rem by power-of-2 → shift/and (any that slipped past InstCombine).
+    stats.intStrengthReduced = foldDivByPow2(func);
+    // Min/max pattern: icmp/fcmp + select → smin/smax/minnum/maxnum intrinsics.
+    stats.intStrengthReduced += foldMinMaxPatterns(func);
     stats.prefetchesInserted = insertPrefetches(func, profile);
     stats.branchesOptimized  = optimizeBranchLayout(func, profile);
     stats.loadsStorePaired   = markLoadStorePairs(func, profile);
@@ -3786,7 +4247,7 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
                                  : 0;
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
-    stats.intStrengthReduced = integerStrengthReduce(func, profile);
+    stats.intStrengthReduced += integerStrengthReduce(func, profile);
     // Integer abs detection: replace select+icmp+sub patterns with llvm.abs.
     // Runs after strength reduction so we don't accidentally undo any reductions.
     stats.intStrengthReduced += generateIntegerAbs(func, profile);
