@@ -6364,7 +6364,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
         // Single O(n) scan: compute all stall-check quantities in one pass.
         // Previously four separate loops; merging them reduces the per-cycle
-        // work from 4×O(n) to 1×O(n) and improves cache utilisation.
+        // work from 4×O(n) to 1×O(n) and improves cache utilization.
         inflightCount     = 0;
         outstandingLoads  = 0;
         outstandingStores = 0;
@@ -6737,9 +6737,11 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
         // Advance the cycle counter.  If nothing was issued this cycle,
         // skip ahead to the earliest time any port becomes free or any
-        // in-flight instruction's result becomes available, avoiding
-        // empty-cycle spin.  Note: avail[] is only set when done[id]=true,
-        // so we check done[id] (not !done[id]).
+        // dispatched instruction's result becomes available, avoiding
+        // empty-cycle spin.  done[id] means "dispatched to the RS / execution
+        // unit"; avail[id] (set at dispatch time) is when the result is ready.
+        // Checking done[id] is correct: avail[] is only populated when
+        // done[id]=true, so the old `!done[id]` condition was always false.
         if (issued == 0) {
             unsigned nextEvent = currentCycle + 1;
             for (auto& [key, portSlots] : hwPorts)
