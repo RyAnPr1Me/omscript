@@ -2346,6 +2346,16 @@ void CodeGenerator::runOptimizationPasses() {
                 std::move(LPMClose), /*UseMemorySSA=*/true));
             // IRCE is a FunctionPass in LLVM 18.
             FPMClose.addPass(llvm::IRCEPass());
+            // CorrelatedValuePropagation: tighten value-range information using
+            // branch conditions (e.g. i%97 is proven in [0,96] → enables narrower
+            // arithmetic, better vectorization cost model, and signed→unsigned).
+            // BDCE: remove dead bits using Known-Bits analysis — particularly
+            // valuable after srem→urem conversion where high bits become unused.
+            // Both run BEFORE the SLP vectorizer so better range information leads
+            // to improved vectorization decisions.
+            FPMClose.addPass(llvm::CorrelatedValuePropagationPass());
+            FPMClose.addPass(llvm::BDCEPass());
+            FPMClose.addPass(llvm::InstCombinePass());
             // SLP + VectorCombine: catch newly-vectorizable loops after srem→urem.
             if (enableVectorize_) {
                 FPMClose.addPass(llvm::SLPVectorizerPass());
