@@ -132,8 +132,13 @@
 #include <llvm/Transforms/Scalar/LowerExpectIntrinsic.h>
 #include <llvm/Transforms/Scalar/WarnMissedTransforms.h>
 #include <llvm/Transforms/Scalar/LowerConstantIntrinsics.h>
+#include <llvm/Analysis/AliasAnalysis.h>
+#include <llvm/Analysis/BranchProbabilityInfo.h>
 #include <llvm/Analysis/LoopInfo.h>
+#include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/Analysis/ScalarEvolution.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/Transforms/Utils/ValueMapper.h>
 #include <optional>
 #include <stdexcept>
 
@@ -441,6 +446,530 @@ struct LargeArrayStreamingStorePass
         }
         return changed ? llvm::PreservedAnalyses::none()
                        : llvm::PreservedAnalyses::all();
+    }
+};
+
+// ── Memory Access Phase Reordering (MAPR) ─────────────────────────────────────
+//
+// Within each basic block, hoists independent loads above immediately preceding
+// stores.  Clustering all independent loads as early as possible lets the OoO
+// execution unit issue them in parallel, hiding multiple cache-miss latencies
+// simultaneously — maximising memory-level parallelism (MLP).
+//
+// Correctness guarantee:
+//   A load L may be hoisted above a store S only when:
+//   (a) AA proves L's address and S's target are NoAlias.
+//   (b) No instruction between S and L transitively computes L's address
+//       (data dependency: loading through a pointer written by S would be
+//        incorrect if we reorder the load before the write).
+//   (c) No volatile / atomic / fence / call appears in the gap.
+//
+// Microarchitectural motivation:
+//   Modern x86/ARM OoO cores maintain a load queue (Zen4: 192, M-series: 256+
+//   entries) and a store buffer (~72–96 entries).  When loads appear after
+//   stores in program order, the LSU must perform a store-to-load forwarding
+//   check — typically 2–4 cycles overhead even for non-aliasing pairs.
+//   Hoisting loads above non-aliasing stores eliminates this overhead and
+//   allows multiple cache misses to be issued in the same dispatch window.
+//
+//   MAPR operates at IR level where MemorySSA alias information is most
+//   precise and is complementary to the backend instruction scheduler (which
+//   operates on machine instructions after instruction selection).
+//
+//   Placement: after DSE+MemCpyOpt (dead stores already removed, shrinking
+//   the set of stores that could block hoisting), before InstCombine so that
+//   newly-adjacent load pairs are visible for potential load-combining.
+// ─────────────────────────────────────────────────────────────────────────────
+struct MemoryAccessPhaseReorderPass
+    : public llvm::PassInfoMixin<MemoryAccessPhaseReorderPass> {
+
+    // Scan limit: how many instructions to look back from a load when
+    // searching for hoisting opportunities.  Bounded to keep the pass
+    // linear on blocks with many stores followed by many loads.
+    static constexpr unsigned kMaxHoistDist = 24;
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& FAM) {
+        auto& AA = FAM.getResult<llvm::AAManager>(F);
+        bool changed = false;
+        for (auto& BB : F)
+            changed |= processBlock(BB, AA);
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+
+private:
+    // Compute the set of instructions in BB that transitively contribute to
+    // computing LI's memory address (data-dependency frontier).  Used to
+    // detect whether hoisting LI past instruction P would create a
+    // use-before-definition (P computes part of LI's address).
+    static llvm::SmallPtrSet<llvm::Instruction*, 8>
+    addressDeps(const llvm::LoadInst* LI, const llvm::BasicBlock* BB) {
+        llvm::SmallPtrSet<llvm::Instruction*, 8> deps;
+        llvm::SmallVector<const llvm::Value*, 8> wl;
+        wl.push_back(LI->getPointerOperand());
+        while (!wl.empty()) {
+            const auto* V = wl.pop_back_val();
+            const auto* I = llvm::dyn_cast<llvm::Instruction>(V);
+            if (!I || I->getParent() != BB) continue;
+            if (!deps.insert(const_cast<llvm::Instruction*>(I)).second) continue;
+            for (const auto& op : I->operands())
+                wl.push_back(op.get());
+        }
+        return deps;
+    }
+
+    // Attempt to hoist LI as far toward the top of its basic block as alias
+    // analysis and data dependencies allow.  Returns true if the load moved.
+    static bool tryHoistLoad(llvm::LoadInst* LI, llvm::AAResults& AA) {
+        llvm::BasicBlock* BB = LI->getParent();
+        const auto deps    = addressDeps(LI, BB);
+        const auto loadLoc = llvm::MemoryLocation::get(LI);
+
+        // `insertBefore`: the earliest safe instruction we found so far
+        // (the load will be placed immediately before it).
+        llvm::Instruction* insertBefore = nullptr;
+
+        llvm::BasicBlock::iterator it(LI);
+        unsigned dist = 0;
+        while (it != BB->begin() && dist < kMaxHoistDist) {
+            --it;
+            ++dist;
+            llvm::Instruction* pred = &*it;
+
+            // Hard stop: PHI nodes must stay at the top of their basic block.
+            // Hoisting the load before a PHI node would violate LLVM IR invariants.
+            if (llvm::isa<llvm::PHINode>(pred)) break;
+
+            // Hard stop: `pred` is in the address-computation chain of LI.
+            // Moving LI before pred would use pred's result before it exists.
+            if (deps.count(pred)) break;
+
+            // Non-volatile, non-atomic loads are pure from a memory-ordering
+            // perspective — loads don't conflict with each other.
+            if (auto* prevLI = llvm::dyn_cast<llvm::LoadInst>(pred)) {
+                if (prevLI->isVolatile() || prevLI->isAtomic()) break;
+                insertBefore = pred;
+                continue;
+            }
+
+            // Store: only safe to hoist past if provably NoAlias.
+            if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(pred)) {
+                if (SI->isVolatile() || SI->isAtomic()) break;
+                if (AA.alias(loadLoc, llvm::MemoryLocation::get(SI))
+                        != llvm::AliasResult::NoAlias)
+                    break;
+                insertBefore = pred;
+                continue;
+            }
+
+            // Fence, call, or any instruction with memory side effects: stop.
+            if (llvm::isa<llvm::FenceInst>(pred))    break;
+            if (pred->mayReadOrWriteMemory())         break;
+            if (pred->mayHaveSideEffects())           break;
+
+            // Pure instruction (arithmetic, GEP, cast, …): safe to hoist past.
+            insertBefore = pred;
+        }
+
+        if (!insertBefore) return false;
+        LI->moveBefore(insertBefore);
+        return true;
+    }
+
+    static bool processBlock(llvm::BasicBlock& BB, llvm::AAResults& AA) {
+        // Snapshot loads before we start moving them to avoid iterator issues.
+        llvm::SmallVector<llvm::LoadInst*, 16> loads;
+        for (auto& I : BB)
+            if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(&I))
+                if (!LI->isVolatile() && !LI->isAtomic())
+                    loads.push_back(LI);
+
+        // Process loads in forward order.  Hoisting L1 shrinks the store gap,
+        // which only helps subsequent loads (L2, L3, …) hoist further.
+        bool changed = false;
+        for (auto* LI : loads)
+            changed |= tryHoistLoad(LI, AA);
+        return changed;
+    }
+};
+
+// ── Tree Height Reduction Pass (RPAR) ─────────────────────────────────────────
+//
+// Rebalances linear chains of identical associative binary operations into
+// balanced binary trees, reducing critical path depth from O(n) to O(log₂ n).
+// This exposes instruction-level parallelism (ILP) that the OoO core can
+// exploit by executing independent sub-trees in parallel.
+//
+// Motivation:
+//   LLVM's ReassociatePass focuses on exposing CSE by canonicalising operand
+//   order, not on minimising dependency depth.  For pure arithmetic chains:
+//
+//     t1 = a + b          depth 1
+//     t2 = t1 + c         depth 2
+//     t3 = t2 + d         depth 3
+//     t4 = t3 + e         depth 4
+//
+//   the balanced form:
+//
+//     t12 = a + b         depth 1 (parallel with t34)
+//     t34 = c + d         depth 1
+//     t1234 = t12 + t34   depth 2
+//     result = t1234 + e  depth 3
+//
+//   has depth ⌈log₂ n⌉ instead of n−1.  On a 4-wide OoO core, a 4-element
+//   chain goes from depth 3 → depth 2 — a 1-cycle saving per reduction, per
+//   OPTMAX function call.  For longer chains (8, 16 elements), savings are
+//   3 and 4 cycles respectively, compounding across loop iterations.
+//
+// Correctness:
+//   Integer add/mul/and/or/xor are unconditionally associative and commutative.
+//   FP fadd/fmul require the 'reassoc' fast-math flag (set by OmScript's
+//   @OPTMAX fast_math annotation) to allow reassociation without changing
+//   rounding behaviour.
+//
+//   Intermediate nodes used outside the chain are treated as leaves to avoid
+//   duplicating computation.  Only chains with ≥ kMinLeaves leaves are
+//   rebalanced: 4 leaves → depth 2 instead of 3 (guaranteed 1-cycle saving).
+//
+// Placement: between InstCombine and AggressiveInstCombine.  InstCombine
+// canonicalises operand ordering first (exposing uniform-opcode chains);
+// AggressiveInstCombine later removes any dead intermediates.
+// ─────────────────────────────────────────────────────────────────────────────
+struct TreeHeightReductionPass
+    : public llvm::PassInfoMixin<TreeHeightReductionPass> {
+
+    // Minimum number of leaves to make tree balancing profitable.
+    // 4 leaves: linear depth 3 → balanced depth 2 (+1 cycle saved).
+    // 3 leaves: linear depth 2 → balanced depth 2 (no gain).
+    static constexpr unsigned kMinLeaves = 4;
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& /*FAM*/) {
+        bool changed = false;
+        for (auto& BB : F)
+            changed |= processBlock(BB);
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+
+private:
+    using BinOp = llvm::BinaryOperator;
+
+    // Returns true if BO can be reassociated (associative + commutative, and
+    // for FP ops, the 'reassoc' fast-math flag must be set).
+    static bool isBalanceable(const BinOp* BO) {
+        switch (BO->getOpcode()) {
+        case llvm::Instruction::Add:
+        case llvm::Instruction::Mul:
+        case llvm::Instruction::And:
+        case llvm::Instruction::Or:
+        case llvm::Instruction::Xor:
+            return true;
+        case llvm::Instruction::FAdd:
+        case llvm::Instruction::FMul:
+            return BO->getFastMathFlags().allowReassoc();
+        default:
+            return false;
+        }
+    }
+
+    // Collect all scalar leaves of the binary-op tree rooted at V into
+    // `leaves`.  A leaf is any value that is NOT a single-use BinOp with
+    // the same opcode in the current basic block.  The single-use constraint
+    // ensures we never duplicate computation for values used elsewhere.
+    // `isRoot=true` bypasses the use-count check for the tree root itself
+    // (the root may have multiple external users and still be expandable).
+    static void collectLeaves(llvm::Value* V, unsigned opcode,
+                               llvm::BasicBlock* BB,
+                               llvm::SmallVectorImpl<llvm::Value*>& leaves,
+                               bool isRoot) {
+        auto* BO = llvm::dyn_cast<BinOp>(V);
+        if (!BO || BO->getOpcode() != opcode || BO->getParent() != BB
+                || !isBalanceable(BO)
+                || (!isRoot && !BO->hasOneUse())) {
+            leaves.push_back(V);
+            return;
+        }
+        collectLeaves(BO->getOperand(0), opcode, BB, leaves, /*isRoot=*/false);
+        collectLeaves(BO->getOperand(1), opcode, BB, leaves, /*isRoot=*/false);
+    }
+
+    // Recursively build a balanced binary tree over leaves[lo..hi) using
+    // `opcode`.  New instructions are inserted via the IRBuilder (which is
+    // positioned immediately before the original root instruction).
+    static llvm::Value* buildTree(llvm::SmallVectorImpl<llvm::Value*>& leaves,
+                                   unsigned lo, unsigned hi,
+                                   unsigned opcode,
+                                   llvm::FastMathFlags fmf,
+                                   llvm::IRBuilder<>& B) {
+        if (hi - lo == 1) return leaves[lo];
+        const unsigned mid = (lo + hi) / 2;
+        auto* lhs = buildTree(leaves, lo,  mid, opcode, fmf, B);
+        auto* rhs = buildTree(leaves, mid, hi,  opcode, fmf, B);
+        llvm::Value* result = nullptr;
+        switch (opcode) {
+        case llvm::Instruction::Add:  result = B.CreateAdd (lhs, rhs); break;
+        case llvm::Instruction::Mul:  result = B.CreateMul (lhs, rhs); break;
+        case llvm::Instruction::And:  result = B.CreateAnd (lhs, rhs); break;
+        case llvm::Instruction::Or:   result = B.CreateOr  (lhs, rhs); break;
+        case llvm::Instruction::Xor:  result = B.CreateXor (lhs, rhs); break;
+        case llvm::Instruction::FAdd:
+            result = B.CreateFAdd(lhs, rhs);
+            llvm::cast<llvm::Instruction>(result)->setFastMathFlags(fmf);
+            break;
+        case llvm::Instruction::FMul:
+            result = B.CreateFMul(lhs, rhs);
+            llvm::cast<llvm::Instruction>(result)->setFastMathFlags(fmf);
+            break;
+        default: llvm_unreachable("unexpected opcode in TreeHeightReduction::buildTree");
+        }
+        return result;
+    }
+
+    static bool processBlock(llvm::BasicBlock& BB) {
+        // Identify root BinOps: an instruction whose result is NOT consumed
+        // by another same-opcode instruction in the same basic block.
+        llvm::SmallVector<BinOp*, 16> roots;
+        for (auto& I : BB) {
+            auto* BO = llvm::dyn_cast<BinOp>(&I);
+            if (!BO || !isBalanceable(BO)) continue;
+            const unsigned opc = BO->getOpcode();
+            bool isRoot = true;
+            for (auto* U : BO->users()) {
+                if (auto* UBO = llvm::dyn_cast<BinOp>(U))
+                    if (UBO->getOpcode() == opc && UBO->getParent() == &BB) {
+                        isRoot = false;
+                        break;
+                    }
+            }
+            if (isRoot) roots.push_back(BO);
+        }
+
+        bool changed = false;
+        for (BinOp* root : roots) {
+            const unsigned opc = root->getOpcode();
+            llvm::SmallVector<llvm::Value*, 16> leaves;
+            collectLeaves(root, opc, &BB, leaves, /*isRoot=*/true);
+            if (leaves.size() < kMinLeaves) continue;
+
+            // Build the balanced tree, inserting instructions just before root.
+            llvm::IRBuilder<> builder(root);
+            llvm::Value* balanced = buildTree(leaves, 0, leaves.size(),
+                                               opc, root->getFastMathFlags(),
+                                               builder);
+            if (balanced == root) continue;
+            root->replaceAllUsesWith(balanced);
+            // The now-unused linear chain will be removed by ADCE/DCE.
+            changed = true;
+        }
+        return changed;
+    }
+};
+
+// ── Branch Entropy Reduction Pass (BER) ────────────────────────────────────────
+//
+// Converts small, high-entropy (near-50/50 probability) conditional branches
+// into select instructions, eliminating branch-mispredict flushes (~15–20
+// cycle penalty on modern cores) at the cost of unconditionally executing
+// both branch arms.
+//
+// This differs from SimplifyCFG's SpeculateBlocks in two key ways:
+//
+//   1. BER checks branch-probability metadata: if one direction has
+//      probability ≥ 75% (a "biased" branch), the CPU's branch predictor
+//      already handles it well at near-zero mispredict rate.  Converting such
+//      a branch to select wastes ALU cycles on the cold path's computation.
+//      BER skips biased branches and leaves them as-is.
+//
+//   2. BER uses a µop-budgeted arm threshold: the conversion is profitable
+//      only when both arms together fit within kMaxArmInsts instructions.
+//      Above this limit, the speculative execution cost exceeds the average
+//      mispredict penalty.  SimplifyCFG's bonusInstThreshold applies a
+//      per-arm limit; BER limits the combined cost, which is a tighter bound.
+//
+// Without PGO data, BranchProbabilityInfo returns 50/50 for all branches —
+// BER then converts all qualifying diamonds regardless of direction.  With
+// PGO data, BER correctly preserves hot-path biased branches.
+//
+// Pattern detected (diamond CFG):
+//
+//   head:
+//     br cond, %trueBB, %falseBB
+//   trueBB:   [≤ kMaxArmInsts pure instrs]  br %merge
+//   falseBB:  [≤ kMaxArmInsts pure instrs]  br %merge
+//   merge:
+//     %phi = phi [v_true, %trueBB], [v_false, %falseBB]
+//
+// After transformation:
+//   head:
+//     [trueBB instrs cloned here]
+//     [falseBB instrs cloned here]
+//     %phi = select cond, v_true, v_false
+//     br %merge   (unconditional)
+//
+// Placement: immediately before SimplifyCFG so that SimplifyCFG can
+// eliminate the now-empty trueBB and falseBB blocks.
+// ─────────────────────────────────────────────────────────────────────────────
+struct BranchEntropyReductionPass
+    : public llvm::PassInfoMixin<BranchEntropyReductionPass> {
+
+    // Maximum combined pure instruction count across both arms.
+    // Tuned so that speculated work stays below the typical mispredict penalty
+    // (~15 µops on Zen4 / Apple M-series).
+    static constexpr unsigned kMaxArmInsts = 4;
+
+    // A branch is considered biased (and thus well-predicted) when one
+    // direction has probability ≥ 75% (3/4).
+    // BranchProbability denominator = 1u<<31 ≈ 2.1 billion.
+    static constexpr uint32_t kBiasNum = (1u << 31) * 3 / 4; // ≈ 75%
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& FAM) {
+        auto& BPI = FAM.getResult<llvm::BranchProbabilityAnalysis>(F);
+        bool changed = false;
+        // Collect up-front to avoid iterator invalidation during CFG edits.
+        llvm::SmallVector<llvm::BranchInst*, 16> candidates;
+        for (auto& BB : F)
+            if (auto* BI = llvm::dyn_cast<llvm::BranchInst>(BB.getTerminator()))
+                if (BI->isConditional())
+                    candidates.push_back(BI);
+        for (auto* BI : candidates)
+            changed |= tryConvertDiamond(BI, BPI);
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+
+private:
+    // Returns the number of pure (speculatable) non-terminator instructions in
+    // BB, or UINT_MAX if any instruction has side effects, memory accesses, or
+    // is a PHI node (PHI nodes cannot be cloned into the head block without
+    // violating LLVM IR's invariant that PHIs must be grouped at block tops).
+    static unsigned countPureInsts(const llvm::BasicBlock* BB) {
+        unsigned n = 0;
+        for (const auto& I : *BB) {
+            if (llvm::isa<llvm::DbgInfoIntrinsic>(&I)) continue;
+            if (llvm::isa<llvm::BranchInst>(&I))       continue;
+            if (llvm::isa<llvm::PHINode>(&I))           return UINT_MAX;
+            if (I.mayHaveSideEffects() || I.mayReadOrWriteMemory())
+                return UINT_MAX;
+            ++n;
+        }
+        return n;
+    }
+
+    static bool tryConvertDiamond(llvm::BranchInst* BI,
+                                   llvm::BranchProbabilityInfo& BPI) {
+        llvm::BasicBlock* head    = BI->getParent();
+        llvm::BasicBlock* trueBB  = BI->getSuccessor(0);
+        llvm::BasicBlock* falseBB = BI->getSuccessor(1);
+        if (trueBB == falseBB) return false;
+
+        // Skip biased branches: the branch predictor handles them at ~0%
+        // mispredict rate.  Converting them wastes ALU resources.
+        {
+            const uint32_t num = BPI.getEdgeProbability(head, trueBB).getNumerator();
+            if (num >= kBiasNum)           return false; // trueBB very likely
+            if (num <= (1u << 31) - kBiasNum) return false; // falseBB very likely
+        }
+
+        // Both arms must have exactly one predecessor (head) — otherwise
+        // cloning their instructions into head would create multiple definitions.
+        if (!trueBB->getSinglePredecessor())  return false;
+        if (!falseBB->getSinglePredecessor()) return false;
+
+        // Both arms must end with an unconditional branch to the same merge block.
+        auto* trueTerm  = llvm::dyn_cast<llvm::BranchInst>(trueBB->getTerminator());
+        auto* falseTerm = llvm::dyn_cast<llvm::BranchInst>(falseBB->getTerminator());
+        if (!trueTerm  || trueTerm->isConditional())  return false;
+        if (!falseTerm || falseTerm->isConditional()) return false;
+        llvm::BasicBlock* merge = trueTerm->getSuccessor(0);
+        if (falseTerm->getSuccessor(0) != merge) return false;
+
+        // Arms must be purely computational; check combined instruction budget.
+        const unsigned trueN  = countPureInsts(trueBB);
+        const unsigned falseN = countPureInsts(falseBB);
+        if (trueN  == UINT_MAX) return false;
+        if (falseN == UINT_MAX) return false;
+        if (trueN + falseN > kMaxArmInsts) return false;
+        if (trueN + falseN == 0)           return false;
+
+        // Every phi in the merge block must have exactly two incoming edges,
+        // both from our arms.
+        for (const auto& phi : merge->phis()) {
+            if (phi.getNumIncomingValues() != 2)        return false;
+            const auto* blk0 = phi.getIncomingBlock(0);
+            const auto* blk1 = phi.getIncomingBlock(1);
+            if ((blk0 != trueBB || blk1 != falseBB) &&
+                (blk0 != falseBB || blk1 != trueBB)) return false;
+        }
+
+        // Verify that arm instructions are only used within their own arm or
+        // in the merge block's phi nodes (no escaping uses that would require
+        // the cloned instruction to be visible outside head).
+        auto checkEscapes = [&](const llvm::BasicBlock* arm) {
+            for (const auto& I : *arm) {
+                if (llvm::isa<llvm::BranchInst>(&I)) continue;
+                for (const auto* U : I.users()) {
+                    const auto* UI = llvm::dyn_cast<llvm::Instruction>(U);
+                    if (!UI) return false;
+                    if (UI->getParent() == arm)   continue;
+                    if (UI->getParent() == merge && llvm::isa<llvm::PHINode>(UI)) continue;
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!checkEscapes(trueBB) || !checkEscapes(falseBB)) return false;
+
+        // ── Transformation ────────────────────────────────────────────────
+        llvm::Value* cond = BI->getCondition();
+        llvm::IRBuilder<> builder(BI);
+
+        // Clone arm instructions into head, remapping intra-arm uses.
+        llvm::ValueToValueMapTy trueVM, falseVM;
+        auto cloneArm = [&](const llvm::BasicBlock* arm,
+                             llvm::ValueToValueMapTy& vm) {
+            for (const auto& I : *arm) {
+                if (llvm::isa<llvm::BranchInst>(&I)) continue;
+                auto* clone = I.clone();
+                for (auto& op : clone->operands()) {
+                    llvm::Value* mapped = vm.lookup(op.get());
+                    if (mapped) op = mapped;
+                }
+                builder.Insert(clone);
+                vm[&I] = clone;
+            }
+        };
+        cloneArm(trueBB,  trueVM);
+        cloneArm(falseBB, falseVM);
+
+        // Replace phi nodes in merge with select instructions.
+        llvm::SmallVector<llvm::PHINode*, 8> phis;
+        for (auto& phi : merge->phis())
+            phis.push_back(&phi);
+        for (auto* phi : phis) {
+            llvm::Value* tv = phi->getIncomingValueForBlock(trueBB);
+            llvm::Value* fv = phi->getIncomingValueForBlock(falseBB);
+            {
+                llvm::Value* m = trueVM.lookup(tv);
+                if (m) tv = m;
+            }
+            {
+                llvm::Value* m = falseVM.lookup(fv);
+                if (m) fv = m;
+            }
+            phi->replaceAllUsesWith(
+                builder.CreateSelect(cond, tv, fv, phi->getName()));
+            phi->eraseFromParent();
+        }
+
+        // Replace the conditional branch with an unconditional jump to merge.
+        // builder is still positioned before BI, so CreateBr inserts there.
+        builder.CreateBr(merge);
+        BI->eraseFromParent();
+        // trueBB and falseBB are now dead; SimplifyCFG will remove them.
+        return true;
     }
 };
 
@@ -1035,7 +1564,7 @@ void CodeGenerator::runOptimizationPasses() {
             // Reassociate reorders commutative/associative expressions to
             // expose more CSE opportunities for GVN.
             FPM.addPass(llvm::ReassociatePass());
-            FPM.addPass(llvm::GVNPass());
+            FPM.addPass(llvm::NewGVNPass());
             FPM.addPass(llvm::InstSimplifyPass());
             FPM.addPass(llvm::AlignmentFromAssumptionsPass());
             // CorrelatedValuePropagation uses value-range information from
@@ -1344,8 +1873,9 @@ void CodeGenerator::runOptimizationPasses() {
             // Re-run SLP vectorizer to catch new vectorization
             // opportunities in inlined code.
             ReOptFPM.addPass(llvm::SLPVectorizerPass());
-            // Full GVN catches deep redundancies.
-            ReOptFPM.addPass(llvm::GVNPass());
+            // NewGVN catches deep redundancies using MemorySSA for more
+            // precise memory dependency analysis than classic GVN.
+            ReOptFPM.addPass(llvm::NewGVNPass());
             // Final CFG cleanup.
             ReOptFPM.addPass(llvm::SimplifyCFGPass());
             MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(ReOptFPM)));
@@ -1419,7 +1949,7 @@ void CodeGenerator::runOptimizationPasses() {
                 llvm::FunctionPassManager IPO2FPM;
                 IPO2FPM.addPass(llvm::SCCPPass());
                 IPO2FPM.addPass(llvm::InstCombinePass());
-                IPO2FPM.addPass(llvm::GVNPass());
+                IPO2FPM.addPass(llvm::NewGVNPass());
                 IPO2FPM.addPass(llvm::ADCEPass());
                 MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(IPO2FPM)));
                 MPM.addPass(llvm::DeadArgumentEliminationPass());
@@ -2414,6 +2944,9 @@ void CodeGenerator::runOptimizationPasses() {
             CloseFPM.addPass(llvm::NewGVNPass());
             CloseFPM.addPass(llvm::DSEPass());
             CloseFPM.addPass(llvm::MemCpyOptPass());
+            // MAPR: hoist independent loads above non-aliasing preceding stores
+            // to maximise memory-level parallelism in the closing pipeline.
+            CloseFPM.addPass(MemoryAccessPhaseReorderPass());
             CloseFPM.addPass(llvm::InstCombinePass());
             // Phase 3: loop normalization + invariant hoisting.
             CloseFPM.addPass(llvm::LoopSimplifyPass());
@@ -2429,6 +2962,9 @@ void CodeGenerator::runOptimizationPasses() {
             CloseFPM.addPass(llvm::ConstraintEliminationPass());
             // Phase 4: strength reduction + final peephole.
             CloseFPM.addPass(llvm::InstCombinePass());
+            // RPAR: rebalance linear associative chains into O(log n) depth
+            // trees to expose ILP for the OoO execution unit.
+            CloseFPM.addPass(TreeHeightReductionPass());
             CloseFPM.addPass(llvm::AggressiveInstCombinePass());
             // Phase 5: second vectorization pass (after srem→urem + superopt).
             if (enableVectorize_) {
@@ -2438,6 +2974,9 @@ void CodeGenerator::runOptimizationPasses() {
             // Final peephole + dead-code removal.
             CloseFPM.addPass(llvm::InstCombinePass());
             CloseFPM.addPass(llvm::ADCEPass());
+            // BER: convert near-50/50 small diamond CFGs to select instructions,
+            // eliminating branch-mispredict flushes before the final CFG cleanup.
+            CloseFPM.addPass(BranchEntropyReductionPass());
             CloseFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
             runPostFPMOnAll(std::move(CloseFPM));
             if (verbose_) {
@@ -2748,9 +3287,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     FPMMax.addPass(llvm::LoopUnrollPass(
         llvm::LoopUnrollOptions(/*OptLevel=*/3, /*OnlyWhenForced=*/false,
                                 /*ForgetSCEV=*/true)));
-    // Post-unroll cleanup: GVN merges values made equal by unrolled IVs; CVP
-    // sharpens ranges; hyperblock CFG converts exposed branches to selects.
-    FPMMax.addPass(llvm::GVNPass());
+    // Post-unroll cleanup: NewGVN merges values made equal by unrolled IVs
+    // using MemorySSA for more precise memory-dep analysis; CVP sharpens ranges;
+    // hyperblock CFG converts exposed branches to selects.
+    FPMMax.addPass(llvm::NewGVNPass());
     FPMMax.addPass(llvm::InstCombinePass());
     FPMMax.addPass(llvm::CorrelatedValuePropagationPass());
     FPMMax.addPass(llvm::JumpThreadingPass());
@@ -2774,6 +3314,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     FPMMax.addPass(llvm::LibCallsShrinkWrapPass());
     FPMMax.addPass(llvm::DSEPass());
     FPMMax.addPass(llvm::MemCpyOptPass());
+    // MAPR: hoist independent loads above non-aliasing preceding stores to
+    // cluster load issues and maximise memory-level parallelism before
+    // vectorisation sees the loop body.
+    FPMMax.addPass(MemoryAccessPhaseReorderPass());
     FPMMax.addPass(llvm::Float2IntPass());
     FPMMax.addPass(llvm::DivRemPairsPass());
     FPMMax.addPass(llvm::InferAlignmentPass());
@@ -2783,7 +3327,14 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     FPMMax.addPass(llvm::GuardWideningPass());
     FPMMax.addPass(llvm::SCCPPass());
     FPMMax.addPass(llvm::InstCombinePass());
+    // RPAR: rebalance linear associative chains into O(log n) depth balanced
+    // trees, reducing the critical path through arithmetic reductions and
+    // exposing ILP for the OoO scheduler.
+    FPMMax.addPass(TreeHeightReductionPass());
     FPMMax.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+    // BER: convert near-50/50 diamond CFGs to select instructions, removing
+    // mispredict flushes from unpredictable branches in hot OPTMAX loops.
+    FPMMax.addPass(BranchEntropyReductionPass());
     FPMMax.addPass(llvm::ADCEPass());
 
     // ── Phase 4: Vectorization ────────────────────────────────────────────
@@ -2849,14 +3400,27 @@ void CodeGenerator::optimizeOptMaxFunctions() {
 
     // ── Run the OPTMAX pipeline on each OPTMAX function ───────────────────
     // Up to optMaxIterations passes for convergence: the first iteration does
-    // the heavy lifting (unrolling, vectorization); subsequent iterations catch
-    // patterns newly exposed by those transforms.  Exit early when a full pass
-    // of the FPM reports that all analyses are preserved (= no IR changes).
+    // the heavy lifting (unrolling, vectorization, tree rebalancing); subsequent
+    // iterations catch patterns newly exposed by those transforms.
+    //
+    // Two convergence criteria (either triggers early exit):
+    //   (a) PA.areAllPreserved(): the FPM explicitly reports no IR changes.
+    //       This fires when every pass in the FPM returns PreservedAnalyses::all(),
+    //       which happens occasionally for already-optimal functions.
+    //   (b) Instruction-count delta = 0: the function size did not change.
+    //       This is a more reliable convergence check because many LLVM passes
+    //       conservatively return PreservedAnalyses::none() even when no IR
+    //       was actually modified (to avoid expensive analysis re-validation).
+    //       Comparing instruction counts catches this case at the cost of one
+    //       extra getInstructionCount() call per iteration.
     constexpr int optMaxIterations = 5;
     for (llvm::Function* func : optMaxFuncs) {
+        unsigned prevCount = func->getInstructionCount();
         for (int i = 0; i < optMaxIterations; ++i) {
             auto PA = FPMMax.run(*func, FAMMax);
-            if (PA.areAllPreserved()) break;
+            const unsigned newCount = func->getInstructionCount();
+            if (PA.areAllPreserved() || newCount == prevCount) break;
+            prevCount = newCount;
         }
 
         // report=true: print a compact per-function optimization summary to
