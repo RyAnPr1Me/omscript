@@ -1743,6 +1743,75 @@ void CodeGenerator::runOptimizationPasses() {
         }
     }
 
+    // ── Shared post-pipeline analysis infrastructure ──────────────────────
+    // All post-main-pipeline cleanup passes share one PassBuilder and four
+    // analysis managers.  This eliminates 4-5 redundant PassBuilder/TargetMachine
+    // setups and allows LLVM's deferred analysis invalidation to correctly track
+    // what was changed between cleanup stages, avoiding redundant recomputation.
+    //
+    // PTOPost enables vectorization so that TargetTransformInfo, LoopVectorize,
+    // and SLP analysis infrastructure are registered in PostFAM/PostLAM.  The
+    // PTO flags only affect analysis registration here (not pass insertion),
+    // since we manually add passes to each FPM rather than using
+    // buildPerModuleDefaultPipeline.
+    llvm::PipelineTuningOptions PTOPost;
+    PTOPost.LoopVectorization = atLeastO2 && enableVectorize_;
+    PTOPost.SLPVectorization  = atLeastO2 && enableVectorize_;
+    PTOPost.LoopInterleaving  = atLeastO2 && enableVectorize_;
+    PTOPost.LoopUnrolling     = false;
+    llvm::PassBuilder PostPB(targetMachine.get(), PTOPost);
+    llvm::LoopAnalysisManager  PostLAM;
+    llvm::FunctionAnalysisManager PostFAM;
+    llvm::CGSCCAnalysisManager PostCGAM;
+    llvm::ModuleAnalysisManager PostMAM;
+    PostPB.registerModuleAnalyses(PostMAM);
+    PostPB.registerCGSCCAnalyses(PostCGAM);
+    PostPB.registerFunctionAnalyses(PostFAM);
+    PostPB.registerLoopAnalyses(PostLAM);
+    PostPB.crossRegisterProxies(PostLAM, PostFAM, PostCGAM, PostMAM);
+
+    // Helper: run an FPM on a specific subset of functions using PostMAM.
+    // Returns immediately if funcs is empty.  Uses a FilteredFuncPass module
+    // wrapper so that the FunctionAnalysisManagerModuleProxy is correctly set up
+    // (required for per-function analysis access like TargetIRAnalysis).
+    auto runPostFPMOnFuncs = [&](llvm::FunctionPassManager FPM,
+                                 std::vector<llvm::Function*> funcs) {
+        if (funcs.empty()) return;
+        struct FilteredFuncPass : public llvm::PassInfoMixin<FilteredFuncPass> {
+            llvm::FunctionPassManager FPM;
+            std::vector<llvm::Function*> funcs;
+            FilteredFuncPass(llvm::FunctionPassManager fpm,
+                             std::vector<llvm::Function*> f)
+                : FPM(std::move(fpm)), funcs(std::move(f)) {}
+            llvm::PreservedAnalyses run(llvm::Module& M,
+                                        llvm::ModuleAnalysisManager& MAM) {
+                auto& FAM =
+                    MAM.getResult<llvm::FunctionAnalysisManagerModuleProxy>(M)
+                       .getManager();
+                bool changed = false;
+                for (auto* F : funcs) {
+                    if (F && !F->isDeclaration()) {
+                        auto PA = FPM.run(*F, FAM);
+                        changed |= !PA.areAllPreserved();
+                    }
+                }
+                return changed ? llvm::PreservedAnalyses::none()
+                               : llvm::PreservedAnalyses::all();
+            }
+        };
+        llvm::ModulePassManager MPMPost;
+        MPMPost.addPass(FilteredFuncPass(std::move(FPM), std::move(funcs)));
+        MPMPost.run(*module, PostMAM);
+    };
+
+    // Helper: run an FPM on ALL non-declaration functions using PostMAM.
+    auto runPostFPMOnAll = [&](llvm::FunctionPassManager FPM) {
+        llvm::ModulePassManager MPMPost;
+        MPMPost.addPass(
+            llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
+        MPMPost.run(*module, PostMAM);
+    };
+
     // Bounded recursive inlining: replicate GCC's deep recursive inlining
     // by manually inlining self-recursive calls a fixed number of levels.
     // LLVM's inliner refuses to inline self-recursive calls (to prevent
@@ -1810,19 +1879,25 @@ void CodeGenerator::runOptimizationPasses() {
         if (verbose_) {
             std::cout << "    Bounded recursive inlining complete" << '\n';
         }
-        // Post-recursive-inlining cleanup: only run on functions that were
-        // actually inlined, not all functions in the module.
+        // Post-recursive-inlining cleanup (new-PM).
+        // NewGVN + SCCP + CVP are significantly more powerful than the old
+        // legacy GVN for catching redundancies after recursive inlining:
+        // - SCCP propagates constants through inlined phi nodes
+        // - CVP sharpens value ranges from duplicated branch conditions
+        // - NewGVN catches memory-SSA-backed redundant loads the old GVN misses
+        // - DSE removes stores whose values are dead after inlining merges paths
         if (!inlinedFuncs.empty()) {
-            llvm::legacy::FunctionPassManager postInlineFPM(module.get());
-            postInlineFPM.add(llvm::createGVNPass());
-            postInlineFPM.add(llvm::createInstructionCombiningPass());
-            postInlineFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
-            postInlineFPM.add(llvm::createDeadCodeEliminationPass());
-            postInlineFPM.doInitialization();
-            for (auto* F : inlinedFuncs) {
-                postInlineFPM.run(*F);
-            }
-            postInlineFPM.doFinalization();
+            llvm::FunctionPassManager PostInlineFPM;
+            PostInlineFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+            PostInlineFPM.addPass(llvm::SCCPPass());
+            PostInlineFPM.addPass(llvm::CorrelatedValuePropagationPass());
+            PostInlineFPM.addPass(llvm::NewGVNPass());
+            PostInlineFPM.addPass(llvm::DSEPass());
+            PostInlineFPM.addPass(llvm::InstCombinePass());
+            PostInlineFPM.addPass(llvm::ADCEPass());
+            PostInlineFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+            runPostFPMOnFuncs(std::move(PostInlineFPM),
+                              {inlinedFuncs.begin(), inlinedFuncs.end()});
         }
     }
 
@@ -1928,27 +2003,36 @@ void CodeGenerator::runOptimizationPasses() {
                       << " call sites specialized" << '\n';
         }
 
-        // Run a cleanup pass on specialized functions
+        // Run a new-PM cleanup pass on specialized functions.
+        // Uses NewGVN + SCCP + CVP + DSE instead of the old legacy GVN pass:
+        // - InstSimplify folds constant expressions exposed when constant args
+        //   were inlined (e.g. a switch on a constant argument becomes a
+        //   direct branch, which SROA/mem2reg can then promote to registers)
+        // - SCCP propagates the newly-constant arguments through phi nodes
+        // - CVP sharpens value ranges from branch conditions on inlined constants
+        // - NewGVN eliminates redundancies visible after constant propagation
+        // - DSE removes stores into stack slots that were promoted to constants
         if (totalSpecialized > 0) {
-            llvm::legacy::FunctionPassManager specFPM(module.get());
-            // InstSimplify folds constant expressions that were exposed when
-            // constant arguments were inlined into the specialized clone.
-            specFPM.add(llvm::createInstSimplifyLegacyPass());
-            specFPM.add(llvm::createSROAPass());
-            specFPM.add(llvm::createPromoteMemoryToRegisterPass());
-            specFPM.add(llvm::createEarlyCSEPass(/*UseMemorySSA=*/true));
-            specFPM.add(llvm::createGVNPass());
-            specFPM.add(llvm::createInstructionCombiningPass());
-            specFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
-            specFPM.add(llvm::createDeadCodeEliminationPass());
-            specFPM.doInitialization();
+            std::vector<llvm::Function*> specFuncList;
             for (auto& func : *module) {
-                if (func.isDeclaration()) continue;
-                if (func.getName().contains(".spec.")) {
-                    specFPM.run(func);
-                }
+                if (!func.isDeclaration() && func.getName().contains(".spec."))
+                    specFuncList.push_back(&func);
             }
-            specFPM.doFinalization();
+            if (!specFuncList.empty()) {
+                llvm::FunctionPassManager SpecFPM;
+                SpecFPM.addPass(llvm::InstSimplifyPass());
+                SpecFPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
+                SpecFPM.addPass(llvm::PromotePass());
+                SpecFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+                SpecFPM.addPass(llvm::SCCPPass());
+                SpecFPM.addPass(llvm::CorrelatedValuePropagationPass());
+                SpecFPM.addPass(llvm::NewGVNPass());
+                SpecFPM.addPass(llvm::DSEPass());
+                SpecFPM.addPass(llvm::InstCombinePass());
+                SpecFPM.addPass(llvm::ADCEPass());
+                SpecFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                runPostFPMOnFuncs(std::move(SpecFPM), std::move(specFuncList));
+            }
         }
     }
 
@@ -2009,24 +2093,32 @@ void CodeGenerator::runOptimizationPasses() {
                       << " (" << totalSuperOpts << " total optimizations)" << '\n';
         }
 
-        // Post-superoptimizer cleanup: the superoptimizer creates algebraically
-        // simplified patterns that may have new CSE opportunities.  A quick
-        // GVN + InstCombine + SimplifyCFG pass cleans these up before the
-        // signed→unsigned conversion and HGOE runs.
-        // Only run on functions ≤2000 instructions to avoid excessive compile time.
+        // Post-superoptimizer cleanup (new-PM, functions ≤2000 instructions).
+        // Replaces the old legacy GVN pass with NewGVN + SCCP + CVP + DSE
+        // to catch the full range of redundancies the superoptimizer creates:
+        // - SCCP folds constants through idiom-replacement phi nodes
+        // - CVP sharpens value ranges from simplified branch conditions
+        // - NewGVN catches memory-SSA-backed redundancies from idiom rewrites
+        // - DSE removes stores made dead by select-merging and algebra folds
+        // - MemCpyOpt coalesces adjacent stores the superoptimizer introduced
         if (totalSuperOpts > 0) {
-            llvm::legacy::FunctionPassManager postSuperFPM(module.get());
-            postSuperFPM.add(llvm::createGVNPass());
-            postSuperFPM.add(llvm::createInstructionCombiningPass());
-            postSuperFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
-            postSuperFPM.add(llvm::createDeadCodeEliminationPass());
-            postSuperFPM.doInitialization();
+            std::vector<llvm::Function*> smallFuncs;
             for (auto& func : *module) {
-                if (func.isDeclaration()) continue;
-                if (func.getInstructionCount() > 2000) continue;
-                postSuperFPM.run(func);
+                if (!func.isDeclaration() && func.getInstructionCount() <= 2000)
+                    smallFuncs.push_back(&func);
             }
-            postSuperFPM.doFinalization();
+            if (!smallFuncs.empty()) {
+                llvm::FunctionPassManager PSuperFPM;
+                PSuperFPM.addPass(llvm::SCCPPass());
+                PSuperFPM.addPass(llvm::CorrelatedValuePropagationPass());
+                PSuperFPM.addPass(llvm::NewGVNPass());
+                PSuperFPM.addPass(llvm::DSEPass());
+                PSuperFPM.addPass(llvm::MemCpyOptPass());
+                PSuperFPM.addPass(llvm::InstCombinePass());
+                PSuperFPM.addPass(llvm::ADCEPass());
+                PSuperFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                runPostFPMOnFuncs(std::move(PSuperFPM), std::move(smallFuncs));
+            }
 
             // At O3, run a second superoptimizer pass after the cleanup.
             // The first pass's simplifications (idiom replacement, algebraic
@@ -2265,134 +2357,87 @@ void CodeGenerator::runOptimizationPasses() {
                       << '\n';
         }
 
-        // ── Final closing-pass cleanup ─────────────────────────────────────
-        // After all custom optimization passes (superoptimizer, HGOE, recursive
-        // inlining, function specialization), a closing-pass pipeline picks up
-        // any optimization opportunities those passes created:
+        // ── Unified new-PM closing pipeline ──────────────────────────────────
+        // Merges the former legacy cleanupFPM and the former separate new-PM
+        // mini-pipeline into one coherent pass sequence, using the shared
+        // PostMAM analysis managers.  This eliminates an entire extra pass over
+        // all functions and avoids creating a second PassBuilder/TargetMachine.
         //
-        //  1. EarlyCSE (with MemorySSA): catches redundant loads and computations
-        //     that the superoptimizer's algebraic transforms exposed.
-        //  2. GVN: merges values that became equal after srem→urem + superopt.
-        //  3. IndVarSimplify: re-canonicalizes induction variables after HGOE loop
-        //     restructuring so bounds checks can be proven away.
-        //  4. IRCE: eliminates inductive range checks that IndVarSimplify exposed.
-        //  5. SLP vectorizer: re-runs the SLP vectorizer to catch loops that
-        //     became vectorizable after srem→urem conversion (signed→unsigned
-        //     enables the cost model to accept modulo-heavy loops).  This is an
-        //     OmScript-specific advantage: C compilers cannot prove loop counters
-        //     non-negative at compile time and thus leave srem in place.
-        //  6. VectorCombine: cleans up redundant scalar/vector interactions the
-        //     SLP vectorizer may have introduced.
-        //  7. InstCombine + SimplifyCFG: final peephole + CFG cleanup.
-        //  8. LICM + LoopStrengthReduce: hoist newly-invariant computations and
-        //     reduce addressing complexity after all the above transforms.
-        //  9. DCE: remove any dead code created by the above passes.
+        // Phase 1: Constant propagation + value-range refinement.
+        //   SCCP + CVP run BEFORE NewGVN so that the GVN's memory-SSA value
+        //   numbering has accurate range and constant information to work with.
+        //   BDCE removes dead bits that SCCP/CVP have proven always-zero, keeping
+        //   the IR clean for the vectorizer cost model.
         //
-        // This "closing pass" pattern is used in GCC -O3's second tree-opt round
-        // and LLVM's ThinLTO pipeline.  It is the primary architectural advantage
-        // of OmScript over a standard clang compilation: clang runs its pipeline
-        // once, while OmScript re-cleans after its domain-specific custom passes.
-        llvm::legacy::FunctionPassManager cleanupFPM(module.get());
-        cleanupFPM.add(llvm::createEarlyCSEPass(/*UseMemorySSA=*/true));
-        cleanupFPM.add(llvm::createGVNPass());
-        cleanupFPM.add(llvm::createInstructionCombiningPass());
-        cleanupFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
-        // Post-pipeline loop cleanup: LoopSimplify re-canonicalizes loops
-        // after superoptimizer/HGOE transforms, enabling LICM to hoist
-        // invariants and LSR to reduce address computation complexity.
-        cleanupFPM.add(llvm::createLoopSimplifyPass());
-        cleanupFPM.add(llvm::createLCSSAPass());
-        cleanupFPM.add(llvm::createLICMPass());
-        cleanupFPM.add(llvm::createLoopStrengthReducePass());
-        cleanupFPM.add(llvm::createDeadCodeEliminationPass());
-        cleanupFPM.add(llvm::createInstructionCombiningPass());
-        cleanupFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
-        cleanupFPM.add(llvm::createDeadCodeEliminationPass());
-        cleanupFPM.doInitialization();
-        for (auto& func : *module) {
-            if (!func.isDeclaration()) {
-                cleanupFPM.run(func);
-            }
-        }
-        cleanupFPM.doFinalization();
-
-        // ── New-PM closing mini-pipeline ──────────────────────────────────
-        // Passes that only exist in the new pass manager (no legacy wrappers):
-        //   - IndVarSimplify: re-canonicalize IVs after HGOE loop restructuring
-        //   - IRCE: eliminate induction-variable bounds checks proven in-range
-        //   - SLP vectorizer: re-vectorize loops whose srem→urem conversions
-        //     now make them vectorizable (clang never does this second pass)
-        //   - VectorCombine: merge scalar/vector interactions SLP introduced
-        // Run via a lightweight new-PM FunctionPassManager using the already-
-        // configured target machine and PipelineTuningOptions.
+        // Phase 2: Value numbering + memory cleanup.
+        //   NewGVN is significantly more powerful than legacy GVN for post-custom-
+        //   pass cleanup: it handles memory SSA, congruence classes through phi
+        //   nodes, and loads/stores that classical GVN misses.  DSE and MemCpyOpt
+        //   run after GVN to remove stores and copies that GVN proved dead.
+        //
+        // Phase 3: Loop normalization + invariant hoisting.
+        //   IndVarSimplify re-canonicalizes IVs modified by HGOE/superoptimizer.
+        //   LICM(MemSSA) hoists newly-invariant computations out of loops that
+        //   SCCP/CVP/NewGVN just simplified.  IRCE removes bounds checks that
+        //   IndVarSimplify proved always-true.  ConstraintElimination handles
+        //   remaining relational checks via a system of linear constraints.
+        //
+        // Phase 4: Strength reduction + final peephole.
+        //   AggressiveInstCombine catches multi-instruction patterns (multi-shift
+        //   idioms, interleaved arithmetic) that standard InstCombine misses.
+        //
+        // Phase 5: Vectorization (second pass).
+        //   Re-runs SLP after srem→urem + superoptimizer + HGOE because those
+        //   transforms expose loops that were non-vectorizable before (e.g. a
+        //   modulo-heavy loop where srem blocked vectorization).  This second
+        //   vectorization pass is the key OmScript advantage over clang, which
+        //   only vectorizes once.  VectorCombine cleans up scalar/vector extract/
+        //   insert redundancies the SLP vectorizer introduces.
+        //
+        // This "closing pass" pattern mirrors GCC -O3's second tree-optimization
+        // round and LLVM's ThinLTO pipeline.  The difference is that OmScript's
+        // domain-specific custom passes (superoptimizer, HGOE, recursive inlining,
+        // function specialization) create optimization opportunities that the
+        // standard LLVM pipeline cannot anticipate.
         if (optimizationLevel >= OptimizationLevel::O2) {
-            llvm::PipelineTuningOptions PTOClose;
-            PTOClose.SLPVectorization  = enableVectorize_;
-            // Re-run the loop vectorizer here — after srem→urem conversion,
-            // superoptimizer idiom replacement, and HGOE restructuring, loops
-            // that were previously non-vectorizable (due to srem cost-model
-            // rejection or SCEV blockage) are now eligible.  This is the key
-            // advantage over clang, which only runs the loop vectorizer once.
-            PTOClose.LoopVectorization = enableVectorize_;
-            PTOClose.LoopInterleaving  = enableVectorize_;
-            PTOClose.LoopUnrolling     = false;
-            llvm::PassBuilder PBClose(targetMachine.get(), PTOClose);
-            llvm::LoopAnalysisManager  LAMClose;
-            llvm::FunctionAnalysisManager FAMClose;
-            llvm::CGSCCAnalysisManager CGAMClose;
-            llvm::ModuleAnalysisManager MAMClose;
-            PBClose.registerModuleAnalyses(MAMClose);
-            PBClose.registerCGSCCAnalyses(CGAMClose);
-            PBClose.registerFunctionAnalyses(FAMClose);
-            PBClose.registerLoopAnalyses(LAMClose);
-            PBClose.crossRegisterProxies(LAMClose, FAMClose, CGAMClose, MAMClose);
-
-            llvm::FunctionPassManager FPMClose;
-            // IndVarSimplify + IRCE: eliminate bounds checks in counted loops.
-            FPMClose.addPass(llvm::LoopSimplifyPass());
-            FPMClose.addPass(llvm::LCSSAPass());
-            llvm::LoopPassManager LPMClose;
-            LPMClose.addPass(llvm::IndVarSimplifyPass());
-            FPMClose.addPass(llvm::createFunctionToLoopPassAdaptor(
-                std::move(LPMClose), /*UseMemorySSA=*/true));
-            // IRCE is a FunctionPass in LLVM 18.
-            FPMClose.addPass(llvm::IRCEPass());
-            // CorrelatedValuePropagation: tighten value-range information using
-            // branch conditions (e.g. i%97 is proven in [0,96] → enables narrower
-            // arithmetic, better vectorization cost model, and signed→unsigned).
-            // BDCE: remove dead bits using Known-Bits analysis — particularly
-            // valuable after srem→urem conversion where high bits become unused.
-            // Both run BEFORE the SLP vectorizer so better range information leads
-            // to improved vectorization decisions.
-            FPMClose.addPass(llvm::CorrelatedValuePropagationPass());
-            FPMClose.addPass(llvm::BDCEPass());
-            // SCCPPass: sparse conditional constant propagation — propagates
-            // constants through PHI nodes and branch conditions, enabling folding
-            // that becomes possible after srem→urem and superoptimizer transforms.
-            // Runs before InstCombine so the folded constants are picked up.
-            FPMClose.addPass(llvm::SCCPPass());
-            FPMClose.addPass(llvm::InstCombinePass());
-            // AggressiveInstCombinePass: a more exhaustive InstCombine that
-            // matches multi-instruction patterns the standard InstCombine misses
-            // (e.g. multi-shift idioms, combined compare-and-branch patterns,
-            // interleaved arithmetic).  Placed after standard InstCombine to
-            // catch patterns exposed by the preceding passes.
-            FPMClose.addPass(llvm::AggressiveInstCombinePass());
-            // SLP + VectorCombine: catch newly-vectorizable loops after srem→urem.
-            if (enableVectorize_) {
-                FPMClose.addPass(llvm::SLPVectorizerPass());
-                FPMClose.addPass(llvm::VectorCombinePass());
+            llvm::FunctionPassManager CloseFPM;
+            // Phase 1: constant propagation + value-range refinement.
+            CloseFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+            CloseFPM.addPass(llvm::SCCPPass());
+            CloseFPM.addPass(llvm::CorrelatedValuePropagationPass());
+            CloseFPM.addPass(llvm::BDCEPass());
+            // Phase 2: value numbering + memory cleanup.
+            CloseFPM.addPass(llvm::NewGVNPass());
+            CloseFPM.addPass(llvm::DSEPass());
+            CloseFPM.addPass(llvm::MemCpyOptPass());
+            CloseFPM.addPass(llvm::InstCombinePass());
+            // Phase 3: loop normalization + invariant hoisting.
+            CloseFPM.addPass(llvm::LoopSimplifyPass());
+            CloseFPM.addPass(llvm::LCSSAPass());
+            {
+                llvm::LoopPassManager LPMClose;
+                LPMClose.addPass(llvm::IndVarSimplifyPass());
+                LPMClose.addPass(llvm::LICMPass(llvm::LICMOptions()));
+                CloseFPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+                    std::move(LPMClose), /*UseMemorySSA=*/true));
             }
-            // Final cleanup after the vectorizer.
-            FPMClose.addPass(llvm::InstCombinePass());
-            FPMClose.addPass(llvm::ADCEPass());
-            FPMClose.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
-
-            llvm::ModulePassManager MPMClose;
-            MPMClose.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPMClose)));
-            MPMClose.run(*module, MAMClose);
+            CloseFPM.addPass(llvm::IRCEPass());
+            CloseFPM.addPass(llvm::ConstraintEliminationPass());
+            // Phase 4: strength reduction + final peephole.
+            CloseFPM.addPass(llvm::InstCombinePass());
+            CloseFPM.addPass(llvm::AggressiveInstCombinePass());
+            // Phase 5: second vectorization pass (after srem→urem + superopt).
+            if (enableVectorize_) {
+                CloseFPM.addPass(llvm::SLPVectorizerPass());
+                CloseFPM.addPass(llvm::VectorCombinePass());
+            }
+            // Final peephole + dead-code removal.
+            CloseFPM.addPass(llvm::InstCombinePass());
+            CloseFPM.addPass(llvm::ADCEPass());
+            CloseFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+            runPostFPMOnAll(std::move(CloseFPM));
             if (verbose_) {
-                std::cout << "    Closing new-PM mini-pipeline complete" << '\n';
+                std::cout << "    Unified closing new-PM pipeline complete" << '\n';
             }
         }
 
@@ -2430,24 +2475,57 @@ void CodeGenerator::runOptimizationPasses() {
 }
 
 void CodeGenerator::optimizeFunction(llvm::Function* func) {
-    // Per-function optimization for targeted optimization of individual functions.
-    // This allows selectively optimizing specific functions (e.g., hot functions
-    // identified at compile time, or OPTMAX-annotated functions) without running
-    // the full module-wide optimization pipeline.
-    llvm::legacy::FunctionPassManager fpm(module.get());
+    // Per-function optimization using the new pass manager.
+    // Replaces the former legacy FunctionPassManager with a new-PM pipeline
+    // that uses NewGVN (more powerful than legacy GVN — handles memory-SSA
+    // congruence classes and loads through phi nodes), DSEPass (uses MemorySSA
+    // for precise dead-store detection), and ADCEPass (aggressive dead-code
+    // elimination instead of simple DCE).
+    if (!func || func->isDeclaration()) return;
+    auto tm = createTargetMachine();
+    llvm::PassBuilder PBFunc(tm.get());
+    llvm::LoopAnalysisManager  LAMFunc;
+    llvm::FunctionAnalysisManager FAMFunc;
+    llvm::CGSCCAnalysisManager CGAMFunc;
+    llvm::ModuleAnalysisManager MAMFunc;
+    PBFunc.registerModuleAnalyses(MAMFunc);
+    PBFunc.registerCGSCCAnalyses(CGAMFunc);
+    PBFunc.registerFunctionAnalyses(FAMFunc);
+    PBFunc.registerLoopAnalyses(LAMFunc);
+    PBFunc.crossRegisterProxies(LAMFunc, FAMFunc, CGAMFunc, MAMFunc);
 
-    fpm.add(llvm::createSROAPass());
-    fpm.add(llvm::createEarlyCSEPass());
-    fpm.add(llvm::createPromoteMemoryToRegisterPass());
-    fpm.add(llvm::createInstructionCombiningPass());
-    fpm.add(llvm::createReassociatePass());
-    fpm.add(llvm::createGVNPass());
-    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
-    fpm.add(llvm::createDeadCodeEliminationPass());
+    // Build the per-function pipeline.
+    llvm::FunctionPassManager FPMFunc;
+    FPMFunc.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
+    FPMFunc.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+    FPMFunc.addPass(llvm::PromotePass());
+    FPMFunc.addPass(llvm::InstCombinePass());
+    FPMFunc.addPass(llvm::ReassociatePass());
+    FPMFunc.addPass(llvm::NewGVNPass());
+    FPMFunc.addPass(llvm::DSEPass());
+    FPMFunc.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+    FPMFunc.addPass(llvm::ADCEPass());
 
-    fpm.doInitialization();
-    fpm.run(*func);
-    fpm.doFinalization();
+    // Run via module-level adapter so TargetIRAnalysis and library-info
+    // analyses are properly initialized through the ModuleAnalysisManager proxy.
+    struct SingleFuncModulePass
+        : public llvm::PassInfoMixin<SingleFuncModulePass> {
+        llvm::FunctionPassManager FPM;
+        llvm::Function* Target;
+        SingleFuncModulePass(llvm::FunctionPassManager fpm, llvm::Function* F)
+            : FPM(std::move(fpm)), Target(F) {}
+        llvm::PreservedAnalyses run(llvm::Module& M,
+                                    llvm::ModuleAnalysisManager& MAM) {
+            auto& FAM =
+                MAM.getResult<llvm::FunctionAnalysisManagerModuleProxy>(M)
+                   .getManager();
+            FPM.run(*Target, FAM);
+            return llvm::PreservedAnalyses::none();
+        }
+    };
+    llvm::ModulePassManager MPMFunc;
+    MPMFunc.addPass(SingleFuncModulePass(std::move(FPMFunc), func));
+    MPMFunc.run(*module, MAMFunc);
 }
 
 
