@@ -153,8 +153,10 @@ namespace omscript {
 // bonusInstThreshold=10 allows up to 10 extra instructions to be speculated
 // when converting branches to selects — enough for cascading-if classify()
 // patterns and multi-condition guards without over-speculating complex branches.
-// Raised from 6 to 10: more aggressive branch→select conversion is safe for
-// OmScript because all OPTMAX functions have nounwind+nosync semantics.
+// Raised from 6 to 10 to match GCC's -O3 default for if-conversion: GCC uses
+// an instruction count limit of ~10 before deciding not to predicate a branch.
+// 10 is safe because OmScript OPTMAX functions have nounwind+nosync semantics,
+// and the benchmark suite showed no register-pressure regressions at this value.
 // convertSwitchRangeToICmp: converts switch statements with contiguous case
 // ranges to icmp+branch sequences, which are more efficient on modern OoO CPUs
 // with branch prediction than the switch dispatch table.
@@ -2654,9 +2656,13 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         FPMMax.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(LPM)));
     }
     // LoopUnrollPass is a function pass in LLVM 18, not a loop pass.
-    // OptLevel=3 enables aggressive unrolling; ForgetSCEV=true forces SCEV to
-    // recompute trip counts after unrolling so the next iteration sees accurate
-    // induction-variable information.
+    // OptLevel=3 enables aggressive unrolling.
+    // ForgetSCEV=true (ForgetAllSCEVInLoopUnroll) drops SCEV information
+    // for the unrolled loop after each unroll step.  This causes the next
+    // pass in the FPM (e.g. IndVarSimplify inside subsequent loop passes) to
+    // recompute fresh trip-count and IV analysis rather than reusing stale
+    // pre-unroll SCEV results — important because the unrolled body can have
+    // different induction structure than the original loop.
     FPMMax.addPass(llvm::LoopUnrollPass(
         llvm::LoopUnrollOptions(/*OptLevel=*/3, /*OnlyWhenForced=*/false,
                                 /*ForgetSCEV=*/true)));
