@@ -1375,8 +1375,8 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     // AVX-512 native, 3 load + 3 store ports.
     if (normalized == "sapphirerapids" || normalized == "emeraldrapids")
         return sapphireRapidsProfile();
-    if (normalized == "graniterrapids" || normalized == "graniteerapids" ||
-        normalized == "sierraforest")
+    if (normalized == "graniterapids" || normalized == "graniteerapids" ||
+        normalized == "sierraforest" || normalized == "xeon6")
         return graniteRapidsProfile();
 
     // AMD Zen family
