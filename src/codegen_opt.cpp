@@ -2433,14 +2433,12 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Phase 0: Apply aggressive function attributes to OPTMAX functions.
     // - nounwind: guaranteed no exceptions (enables tail call, smaller EH tables)
     // - optsize is NOT set (we want max speed, not size)
-    // alwaysinline threshold is intentionally low: force-inlining large
-    // functions into call sites with many other inlined functions inflates
-    // code size and causes I-cache pressure.  The inliner already handles
-    // profitable inlining decisions via inlinehint + cost model.
-    //
-    // We collect OPTMAX function pointers in a single pass so that the later
-    // optimization loop can skip the name→string conversion per function.
-    static constexpr unsigned kAlwaysInlineThreshold = 200; // instruction count
+    // alwaysinline threshold: force-inline OPTMAX helpers up to 500 instructions.
+    // A higher threshold ensures utility functions like classify(), poly_eval(),
+    // gcd(), and Vec2 operator methods are force-inlined, eliminating call
+    // overhead in tight loops and enabling the surrounding loop to be
+    // vectorized end-to-end without opaque call barriers.
+    static constexpr unsigned kAlwaysInlineThreshold = 500; // instruction count
     llvm::SmallVector<llvm::Function*, 16> optMaxFuncs;
     for (auto& func : module->functions()) {
         if (func.isDeclaration())
@@ -2595,14 +2593,13 @@ void CodeGenerator::optimizeOptMaxFunctions() {
 
     fpm.doInitialization();
     for (llvm::Function* func : optMaxFuncs) {
-        // OPTMAX runs the aggressive pass stack up to 3 times to maximize optimization.
+        // OPTMAX runs the aggressive pass stack up to 5 times to maximize optimization.
         // The first iteration does the heavy lifting; the second catches
-        // patterns exposed by loop/strength-reduce transforms.  Beyond two,
-        // passes reach a near-fixed-point and additional iterations produce
-        // negligible changes while doubling compile time.
+        // patterns exposed by loop/strength-reduce transforms; iterations
+        // 3-5 converge further algebraic and control-flow patterns.
         // Early exit: if a pass iteration makes no changes, the fixed point is
         // reached and further iterations cannot improve the IR.
-        constexpr int optMaxIterations = 3;
+        constexpr int optMaxIterations = 5;
         for (int i = 0; i < optMaxIterations; ++i) {
             if (!fpm.run(*func)) break;
         }
