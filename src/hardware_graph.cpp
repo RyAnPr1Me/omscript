@@ -69,11 +69,11 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
                                                     const llvm::Value*& base,
                                                     int64_t& offset) {
     if (!ptr || !ptr->getType()->isPointerTy()) return false;
-    llvm::APInt off(dl.getIndexTypeSizeInBits(ptr->getType()), 0, true);
+    int64_t off = 0;
     const llvm::Value* rawBase = llvm::GetPointerBaseWithConstantOffset(ptr, off, dl);
-    if (!rawBase || !off.isSignedIntN(64)) return false;
+    if (!rawBase) return false;
     base = rawBase->stripPointerCasts();
-    offset = off.getSExtValue();
+    offset = off;
     return true;
 }
 
@@ -106,8 +106,8 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
         return false;
 
     // Fall back to underlying-object disambiguation.
-    const llvm::Value* objA = llvm::GetUnderlyingObject(ptrA, dl);
-    const llvm::Value* objB = llvm::GetUnderlyingObject(ptrB, dl);
+    const llvm::Value* objA = llvm::getUnderlyingObject(ptrA);
+    const llvm::Value* objB = llvm::getUnderlyingObject(ptrB);
     if (objA) objA = objA->stripPointerCasts();
     if (objB) objB = objB->stripPointerCasts();
     if (!objA || !objB) return true;
