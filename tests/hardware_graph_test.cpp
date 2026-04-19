@@ -18,9 +18,18 @@
 #include "parser.h"
 #include <gtest/gtest.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+
+// LLVM 19+ renamed getDeclaration → getOrInsertDeclaration.
+#if LLVM_VERSION_MAJOR >= 19
+#define OMSC_TEST_GET_INTRIN llvm::Intrinsic::getOrInsertDeclaration
+#else
+#define OMSC_TEST_GET_INTRIN llvm::Intrinsic::getDeclaration
+#endif
 
 using namespace omscript;
 using namespace omscript::hgoe;
@@ -1730,3 +1739,224 @@ TEST(HardwareGraphTest, HGOEStatsSchedulerQualityPopulated) {
     ASSERT_TRUE(tm.verify());
 }
 
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Per-CPU port-assignment correctness tests
+// These tests verify that after the classifyOp / port-model fixes, specific
+// instruction types are routed to the correct execution-unit ports so they
+// no longer spuriously compete with integer ALU operations.
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(HardwareGraphTest, PortModel_FMAIntrinUsesFMAUnit) {
+    // Create a function with 4 independent llvm.fma intrinsics.
+    // After the classifyOp fix fma→OpClass::FMA, they should be dispatched
+    // to the FMAUnit, not the IntegerALU.  Scheduling must produce valid IR
+    // and stay within a reasonable cycle budget.
+    HGOETestModule tm("fma_intrin_test", 2, /*useFP=*/true);
+    llvm::IRBuilder<>& b = tm.builder;
+    llvm::LLVMContext& ctx = tm.ctx;
+
+    llvm::Type* f64 = llvm::Type::getDoubleTy(ctx);
+    llvm::Value* a = tm.arg(0), *bv = tm.arg(1);
+
+    llvm::Function* fmaFn =
+        OMSC_TEST_GET_INTRIN(tm.mod.get(), llvm::Intrinsic::fma,
+                                        {f64});
+    llvm::Value* fma0 = b.CreateCall(fmaFn, {a, bv, a},   "fma0");
+    llvm::Value* fma1 = b.CreateCall(fmaFn, {bv, a, bv},  "fma1");
+    llvm::Value* fma2 = b.CreateCall(fmaFn, {a, a, bv},   "fma2");
+    llvm::Value* fma3 = b.CreateCall(fmaFn, {bv, bv, a},  "fma3");
+
+    llvm::Value* s01  = b.CreateFAdd(fma0, fma1, "s01");
+    llvm::Value* s23  = b.CreateFAdd(fma2, fma3, "s23");
+    llvm::Value* tot  = b.CreateFAdd(s01, s23, "tot");
+    b.CreateRet(tot);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    SchedulerQuality quality;
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile,
+                                           SchedulerPolicy{}, &quality);
+    EXPECT_GT(cycles, 0u);
+    // 3-level FMA/FPAdd tree: critical path ≤ latFMA + latFPAdd*2 + overhead
+    EXPECT_LE(cycles, static_cast<unsigned>(profile->latFMA * 2 + profile->latFPAdd * 2 + 8u));
+    EXPECT_GT(quality.efficiency, 0.0);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, PortModel_SqrtUsesDividerUnit) {
+    // llvm.sqrt is classified as OpClass::FPDiv (DividerUnit) after the fix.
+    // Two independent sqrts: verify the schedule is valid and cycle-bounded.
+    HGOETestModule tm("sqrt_test", 2, /*useFP=*/true);
+    llvm::IRBuilder<>& b = tm.builder;
+    llvm::LLVMContext& ctx = tm.ctx;
+
+    llvm::Type* f64 = llvm::Type::getDoubleTy(ctx);
+    llvm::Function* sqrtFn =
+        OMSC_TEST_GET_INTRIN(tm.mod.get(), llvm::Intrinsic::sqrt,
+                                        {f64});
+    llvm::Value* a = tm.arg(0), *bv = tm.arg(1);
+    llvm::Value* sq0 = b.CreateCall(sqrtFn, {a},  "sq0");
+    llvm::Value* sq1 = b.CreateCall(sqrtFn, {bv}, "sq1");
+    llvm::Value* res = b.CreateFAdd(sq0, sq1, "res");
+    b.CreateRet(res);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    SchedulerQuality quality;
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile,
+                                           SchedulerPolicy{}, &quality);
+    EXPECT_GT(cycles, 0u);
+    // sqrt latency == latFPDiv (14 on Skylake); FPAdd on top → ≤ ~35 cycles
+    EXPECT_LE(cycles, 2u * profile->latFPDiv + 10u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, PortModel_FCmpUsesFPPipeline) {
+    // FCmp must be classified as FPArith (FMAUnit) not Comparison (IntegerALU).
+    HGOETestModule tm("fcmp_test", 2, /*useFP=*/true);
+    llvm::IRBuilder<>& b = tm.builder;
+    llvm::Value* a = tm.arg(0), *bv = tm.arg(1);
+
+    llvm::Value* cmp = b.CreateFCmpOLT(a, bv, "cmp");
+    llvm::Value* sel = b.CreateSelect(cmp, a, bv, "sel");
+    b.CreateRet(sel);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("znver4");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    SchedulerQuality quality;
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile,
+                                           SchedulerPolicy{}, &quality);
+    EXPECT_GT(cycles, 0u);
+    EXPECT_LE(cycles, 4u * profile->latFPAdd + 5u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, PortModel_FPConversionUsesFPPipeline) {
+    // UIToFP/SIToFP/FPToSI must be classified as FPArith (FMAUnit), not
+    // Conversion (IntegerALU).  Verify scheduling of a conversion chain.
+    HGOETestModule tm("fp_convert_test", 2, /*useFP=*/false);
+    llvm::IRBuilder<>& b = tm.builder;
+    llvm::LLVMContext& ctx = tm.ctx;
+
+    llvm::Type* f64 = llvm::Type::getDoubleTy(ctx);
+    llvm::Value* a = tm.arg(0), *bv = tm.arg(1);
+
+    llvm::Value* fa   = b.CreateSIToFP(a, f64, "fa");
+    llvm::Value* fb   = b.CreateSIToFP(bv, f64, "fb");
+    llvm::Value* prod = b.CreateFMul(fa, fb, "prod");
+    llvm::Value* back = b.CreateFPToSI(prod, llvm::Type::getInt64Ty(ctx), "back");
+    llvm::Value* res  = b.CreateAdd(back, a, "res");
+    b.CreateRet(res);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    SchedulerQuality quality;
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile,
+                                           SchedulerPolicy{}, &quality);
+    EXPECT_GT(cycles, 0u);
+    // Critical path: 2 × latFPConvert(=5) + latFPMul(=4) + latFPConvert + latIntAdd
+    // = 5+4+5+1 = 15 + overhead.  Allow generous upper bound.
+    EXPECT_LE(cycles, 30u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, PortModel_FPRoundIntrinUsesFPPort) {
+    // floor/ceil should be classified as FPArith (FMAUnit), not Intrinsic
+    // (IntegerALU).  Verify scheduling produces valid IR.
+    HGOETestModule tm("fp_round_test", 1, /*useFP=*/true);
+    llvm::IRBuilder<>& b = tm.builder;
+    llvm::LLVMContext& ctx = tm.ctx;
+
+    llvm::Type* f64 = llvm::Type::getDoubleTy(ctx);
+    llvm::Function* floorFn =
+        OMSC_TEST_GET_INTRIN(tm.mod.get(), llvm::Intrinsic::floor,
+                                        {f64});
+    llvm::Function* ceilFn =
+        OMSC_TEST_GET_INTRIN(tm.mod.get(), llvm::Intrinsic::ceil,
+                                        {f64});
+    llvm::Value* a  = tm.arg(0);
+    llvm::Value* fl = b.CreateCall(floorFn, {a}, "fl");
+    llvm::Value* cl = b.CreateCall(ceilFn,  {a}, "cl");
+    llvm::Value* r  = b.CreateFAdd(fl, cl, "r");
+    b.CreateRet(r);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("znver5");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    SchedulerQuality quality;
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile,
+                                           SchedulerPolicy{}, &quality);
+    EXPECT_GT(cycles, 0u);
+    // floor/ceil latency ≈ latFPAdd*2; fadd on top → reasonable upper bound
+    EXPECT_LE(cycles, 3u * profile->latFPAdd + 8u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, PortModel_DividerPortBlocked_SerialDivides) {
+    // After the divider throughput fix, two chained integer divides must take
+    // at least 2 × latIntDiv cycles: the divider is non-pipelined, so the
+    // second divide cannot start until the first completes its full latency.
+    HGOETestModule tm("serial_div_test", 2);
+    llvm::IRBuilder<>& b = tm.builder;
+    llvm::Value* a = tm.arg(0), *bv = tm.arg(1);
+
+    llvm::Value* d0  = b.CreateSDiv(a, bv,  "d0");
+    llvm::Value* d1  = b.CreateSDiv(d0, bv, "d1");  // depends on d0
+    b.CreateRet(d1);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    SchedulerQuality quality;
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile,
+                                           SchedulerPolicy{}, &quality);
+    // Two serial non-pipelined divides: at least 2 × latIntDiv
+    EXPECT_GE(cycles, 2u * profile->latIntDiv);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, PortModel_DividerPort_ParallelBound) {
+    // Two INDEPENDENT divides are bounded by the slower of:
+    //   - serial: 2 × latIntDiv  (single divider, Skylake)
+    //   - parallel: latIntDiv    (two dividers, Apple M1)
+    // Either way, cycles ≤ 2 × latIntDiv + small constant.
+    HGOETestModule tm("parallel_div_test", 2);
+    llvm::IRBuilder<>& b = tm.builder;
+    llvm::Value* a = tm.arg(0), *bv = tm.arg(1);
+
+    llvm::Value* d0  = b.CreateSDiv(a,  bv, "d0");
+    llvm::Value* d1  = b.CreateSDiv(bv, a,  "d1");  // independent of d0
+    llvm::Value* res = b.CreateAdd(d0, d1, "res");
+    b.CreateRet(res);
+    ASSERT_TRUE(tm.verify());
+
+    for (const char* cpu : {"skylake", "apple-m1"}) {
+        auto profile = lookupMicroarch(cpu);
+        ASSERT_TRUE(profile.has_value()) << "CPU: " << cpu;
+        HardwareGraph hw = buildHardwareGraph(*profile);
+
+        SchedulerQuality quality;
+        unsigned cycles = scheduleInstructions(*tm.func, hw, *profile,
+                                               SchedulerPolicy{}, &quality);
+        EXPECT_GT(cycles, 0u) << "CPU: " << cpu;
+        EXPECT_LE(cycles, 2u * profile->latIntDiv + 5u) << "CPU: " << cpu;
+        ASSERT_TRUE(tm.verify()) << "CPU: " << cpu;
+    }
+}

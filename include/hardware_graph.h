@@ -386,6 +386,13 @@ struct MicroarchProfile {
     unsigned latStore = 4;
     unsigned latBranch = 1;
     unsigned latShift = 1;
+    /// Latency for integer↔FP conversion instructions (CVTSI2SD, SCVTF, etc.).
+    /// On x86 these use a bypass path from the integer file to the FP file and
+    /// typically take one cycle more than a plain FP-add (e.g., Skylake
+    /// CVTSI2SD = 5 cycles while VADDPD = 4 cycles).
+    /// On AArch64 SCVTF/UCVTF/FCVTZS have the same latency as FADD.
+    /// 0 = unset: the scheduler automatically falls back to latFPAdd.
+    unsigned latFPConvert = 0;      ///< Int↔FP conversion latency (0 = use latFPAdd)
 
     // Throughput (reciprocal: cycles per instruction)
     double tputIntAdd = 0.25;       ///< 4 per cycle → 0.25

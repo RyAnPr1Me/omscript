@@ -236,23 +236,37 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
     case llvm::Instruction::AShr:
         return OpClass::Shift;
 
+    // Integer compare uses the integer ALU pipeline.
     case llvm::Instruction::ICmp:
-    case llvm::Instruction::FCmp:
         return OpClass::Comparison;
 
+    // Floating-point compare uses the FP pipeline (same ports as FADD/FMUL).
+    // On x86: VCMPPD/VCMPPS execute on P0/P1 (FMA unit) not integer ALU.
+    // On AArch64: FCMP/FCCMP execute on the FP pipe.
+    case llvm::Instruction::FCmp:
+        return OpClass::FPArith;
+
+    // Integer-only conversions: these stay on the integer ALU (register rename
+    // or single-cycle move on all major architectures).
     case llvm::Instruction::Trunc:
     case llvm::Instruction::ZExt:
     case llvm::Instruction::SExt:
+    case llvm::Instruction::BitCast:
+    case llvm::Instruction::IntToPtr:
+    case llvm::Instruction::PtrToInt:
+        return OpClass::Conversion;
+
+    // FP/cross-domain conversions go through the FP pipeline.
+    // On x86: CVTSI2SD/CVTTSD2SI etc. execute on P0/P1 (FMA unit).
+    // On AArch64: SCVTF/UCVTF/FCVTZS execute on the FP pipe.
+    // Using FPArith routes them to FMAUnit (correct on all supported ISAs).
     case llvm::Instruction::FPToUI:
     case llvm::Instruction::FPToSI:
     case llvm::Instruction::UIToFP:
     case llvm::Instruction::SIToFP:
-    case llvm::Instruction::BitCast:
-    case llvm::Instruction::IntToPtr:
-    case llvm::Instruction::PtrToInt:
     case llvm::Instruction::FPTrunc:
     case llvm::Instruction::FPExt:
-        return OpClass::Conversion;
+        return OpClass::FPArith;
 
     // SIMD / vector instructions map to the vector execution units.
     case llvm::Instruction::ExtractElement:
@@ -268,9 +282,60 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
         return OpClass::Phi;
 
     case llvm::Instruction::Call: {
-        if (llvm::isa<llvm::IntrinsicInst>(inst))
+        const auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(inst);
+        if (!ii) return OpClass::Call;
+        // Dispatch known intrinsics to the correct execution-unit class so
+        // the scheduler assigns them to the right hardware ports.
+        switch (ii->getIntrinsicID()) {
+        // ── FMA unit (P0/P1 on x86, FP pipe on AArch64) ────────────────────
+        case llvm::Intrinsic::fma:
+        case llvm::Intrinsic::fmuladd:
+            return OpClass::FMA;
+
+        // ── FP divider / sqrt unit ──────────────────────────────────────────
+        // sqrt shares the hardware divider port on both x86 (VSQRTSD runs on
+        // the divider unit, same port as VDIVSD) and AArch64 (FSQRT uses the
+        // FP divide pipeline).  Scheduling it early is critical for latency
+        // hiding since the divider is non-pipelined on most µarchs.
+        case llvm::Intrinsic::sqrt:
+            return OpClass::FPDiv;
+
+        // ── FP pipeline — rounding / abs / sign / min / max ────────────────
+        // VROUNDPD/FRINTM/FRINTP execute on FMA ports (P0/P1 on x86, FP on
+        // AArch64).  fabs/copysign/minnum/maxnum likewise use the FP pipe.
+        case llvm::Intrinsic::floor:
+        case llvm::Intrinsic::ceil:
+        case llvm::Intrinsic::round:
+        case llvm::Intrinsic::roundeven:
+        case llvm::Intrinsic::rint:
+        case llvm::Intrinsic::nearbyint:
+        case llvm::Intrinsic::trunc:    // llvm.trunc = FP truncation (VROUNDPD mode)
+        case llvm::Intrinsic::fabs:
+        case llvm::Intrinsic::copysign:
+        case llvm::Intrinsic::minnum:
+        case llvm::Intrinsic::maxnum:
+            return OpClass::FPArith;
+
+        // ── Integer ALU ─────────────────────────────────────────────────────
+        // Scalar abs/min/max and bit-count operations use the integer pipe.
+        case llvm::Intrinsic::abs:
+        case llvm::Intrinsic::smin:
+        case llvm::Intrinsic::smax:
+        case llvm::Intrinsic::umin:
+        case llvm::Intrinsic::umax:
+        case llvm::Intrinsic::ctpop:
+        case llvm::Intrinsic::ctlz:
+        case llvm::Intrinsic::cttz:
+            return OpClass::IntArith;
+
+        // ── Zero-cost hint (no execution resource) ──────────────────────────
+        case llvm::Intrinsic::prefetch:
+            return OpClass::Phi;
+
+        // ── Unknown intrinsic: conservative fallback ────────────────────────
+        default:
             return OpClass::Intrinsic;
-        return OpClass::Call;
+        }
     }
 
     case llvm::Instruction::Select:
@@ -924,6 +989,9 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.memBandwidthBytesPerCycle = 8;
     // Skylake supports Hyperthreading (SMT2) on desktop and server parts.
     p.hasHyperthreading = true;
+    // CVTSI2SD/CVTSI2SS on x86: integer-to-FP bypass path adds 1 cycle vs FADD.
+    // Skylake: CVTSI2SD = 5 cycles, VADDPD = 4 cycles.
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 /// Sandy Bridge (2011): 6 execution ports, 3 integer ALUs, AVX 256-bit (no FMA).
@@ -973,6 +1041,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 12;
     p.memBandwidthBytesPerCycle = 6;
     p.hasHyperthreading = true;
+    // Sandy Bridge: CVTSI2SD = 6 cycles (latFPAdd=5), VADDPD = 5 cycles.
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1112,6 +1182,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 24;
     p.memBandwidthBytesPerCycle = 12;
     p.hasHyperthreading = false; // Zen 4 desktop: SMT disabled by default; server enables it
+    // Zen 4: VCVTSI2SD = 4 cycles, VADDPD = 3 cycles → +1 for CVT bypass.
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1429,6 +1501,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 20;
     p.memBandwidthBytesPerCycle = 10;
     p.hasHyperthreading = false; // Lunar Lake: no Hyperthreading on Lion Cove
+    // Lunar Lake (Lion Cove): CVTSI2SD = latFPAdd+1 (x86 CVT bypass cycle).
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1483,6 +1557,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 32;
     p.memBandwidthBytesPerCycle = 16;
     p.hasHyperthreading = false;
+    // Zen 5: VCVTSI2SD = latFPAdd+1 cycles (x86 CVT bypass path).
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1543,6 +1619,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 32;
     p.memBandwidthBytesPerCycle = 14;
     p.hasHyperthreading = true; // Sapphire Rapids server: HT enabled
+    // Sapphire Rapids: CVTSI2SD = latFPAdd+1 (x86 integer-to-FP bypass path).
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1647,6 +1725,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 20;
     p.memBandwidthBytesPerCycle = 10;
     p.hasHyperthreading = false; // Arrow Lake: no Hyperthreading on Lion Cove
+    // Arrow Lake (Lion Cove P-core): CVTSI2SD = latFPAdd+1 (x86 CVT bypass).
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1866,6 +1946,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 14;
     p.memBandwidthBytesPerCycle = 6;
     p.hasHyperthreading = false; // Sierra Forest E-cores: no SMT
+    // Sierra Forest (Crestmont): x86 CVT bypass adds 1 cycle vs FP-add.
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1918,6 +2000,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 12;
     p.memBandwidthBytesPerCycle = 6;
     p.hasHyperthreading = false;
+    // Gracemont: x86 E-core, CVTSI2SD = latFPAdd+1 (CVT bypass path).
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -2576,8 +2660,14 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     case llvm::Instruction::And:
     case llvm::Instruction::Or:
     case llvm::Instruction::Xor:
-    case llvm::Instruction::Select:  // CMOV-like, single ALU cycle
         return profile.latIntAdd;
+    case llvm::Instruction::Select:
+        // FP or vector result: uses FCSEL/BLENDVPD which go through the FP
+        // pipeline — same latency as FP-add on both x86 and AArch64.
+        // Integer result: CMOV / CSEL — single integer ALU cycle.
+        return (inst->getType()->isFloatingPointTy() ||
+                inst->getType()->isVectorTy())
+               ? profile.latFPAdd : profile.latIntAdd;
     case llvm::Instruction::Mul:
         return profile.latIntMul;
     case llvm::Instruction::SDiv:
@@ -2660,7 +2750,9 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     case llvm::Instruction::SIToFP:
     case llvm::Instruction::FPTrunc:
     case llvm::Instruction::FPExt:
-        return profile.latFPAdd; // FP pipeline
+        // FP pipeline; dedicated CVT bypass path.
+        // latFPConvert = 0 means "unset — fall back to latFPAdd".
+        return (profile.latFPConvert > 0) ? profile.latFPConvert : profile.latFPAdd;
     case llvm::Instruction::BitCast:
     case llvm::Instruction::IntToPtr:
     case llvm::Instruction::PtrToInt:
