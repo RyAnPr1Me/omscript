@@ -188,8 +188,11 @@ static UnifiedExecutionModel buildExecutionModel(const llvm::Function& F,
 static unsigned instructionUopCost(const llvm::Instruction& I,
                                    const llvm::TargetTransformInfo& TTI) {
     if (I.isTerminator() || llvm::isa<llvm::DbgInfoIntrinsic>(I)) return 0;
-    const int c = static_cast<int>(TTI.getUserCost(&I));
-    return c <= 0 ? 1u : static_cast<unsigned>(c);
+    const llvm::InstructionCost c =
+        TTI.getInstructionCost(&I, llvm::TargetTransformInfo::TCK_RecipThroughput);
+    if (!c.isValid()) return 1u;
+    const int64_t v = c.getValue().value_or(1);
+    return v <= 0 ? 1u : static_cast<unsigned>(v);
 }
 
 static const llvm::Value* getBasePointer(const llvm::Value* V) {
