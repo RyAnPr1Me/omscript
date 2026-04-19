@@ -41,6 +41,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <numeric>
 #include <queue>
 #include <set>
@@ -781,6 +782,12 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         8u, profile_.intRegisters + profile_.vecRegisters + profile_.fpRegisters);
     unsigned liveValues = 0;
 
+    // Track total scheduled instructions; when numScheduled < robSize the ROB
+    // cannot be full (inflight ≤ numScheduled), so the O(n) inflight scan can
+    // be skipped entirely — the fast path fires for the vast majority of BBs.
+    unsigned numScheduled = 0;
+    const unsigned robSize = static_cast<unsigned>(profile_.robSize);
+
     auto inflightAt = [&](unsigned cycle) -> unsigned {
         unsigned inflight = 0;
         for (unsigned i = 0; i < n; ++i) {
@@ -839,8 +846,12 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
                 if (pit != portUsed.end() && pit->second[pc] >= cap[pc])
                     continue;
             }
-            // Rename/ROB pressure: avoid over-issuing when too many uops are in-flight.
-            if (inflightAt(scheduleCycle) >= profile_.robSize)
+            // Rename/ROB pressure: avoid over-issuing when too many uops are
+            // in-flight.  Fast path: if fewer instructions have been scheduled
+            // than the ROB capacity the buffer cannot be full, so skip the
+            // O(n) scan entirely — this covers the common case.
+            if (robSize > 0 && numScheduled >= robSize &&
+                inflightAt(scheduleCycle) >= robSize)
                 continue;
             break; // valid cycle found
         }
@@ -871,6 +882,7 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
 
         scheduledAt[u] = scheduleCycle;
         isScheduled[u] = true;
+        ++numScheduled;
         completedAt[u] = scheduleCycle + nodeLat[u] + spillPenalty;
         if (completedAt[u] > maxCycle)
             maxCycle = completedAt[u];
@@ -6350,22 +6362,34 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             if (ready.empty()) break;
         }
 
-        // Compute ROB occupancy: instructions scheduled but not yet completed.
-        inflightCount = 0;
-        for (unsigned id = 0; id < n; ++id)
-            if (done[id] && avail[id] > currentCycle)
-                ++inflightCount;
+        // Single O(n) scan: compute all stall-check quantities in one pass.
+        // Previously four separate loops; merging them reduces the per-cycle
+        // work from 4×O(n) to 1×O(n) and improves cache utilisation.
+        inflightCount     = 0;
+        outstandingLoads  = 0;
+        outstandingStores = 0;
+        unsigned nextRetire  = std::numeric_limits<unsigned>::max();
+        unsigned nextMemAvail = std::numeric_limits<unsigned>::max();
+        for (unsigned id = 0; id < n; ++id) {
+            if (!done[id] || avail[id] <= currentCycle) continue;
+            ++inflightCount;
+            if (avail[id] < nextRetire) nextRetire = avail[id];
+            if (llvm::isa<llvm::LoadInst>(moveable[id])) {
+                ++outstandingLoads;
+                if (avail[id] < nextMemAvail) nextMemAvail = avail[id];
+            } else if (llvm::isa<llvm::StoreInst>(moveable[id])) {
+                ++outstandingStores;
+                if (avail[id] < nextMemAvail) nextMemAvail = avail[id];
+            }
+        }
+        if (nextRetire  == std::numeric_limits<unsigned>::max()) nextRetire  = currentCycle + 1;
+        if (nextMemAvail == std::numeric_limits<unsigned>::max()) nextMemAvail = currentCycle + 1;
 
         // ROB full stall: on a real out-of-order CPU, dispatch is completely
         // blocked when the reorder buffer is full.  Advance the clock to when
         // the oldest in-flight instruction retires (completes), freeing one ROB
-        // entry.  This is more accurate than merely adjusting priority (which
-        // was the previous behaviour at the 75% threshold).
+        // entry.
         if (inflightCount >= robCapacity) {
-            unsigned nextRetire = currentCycle + 1;
-            for (unsigned id = 0; id < n; ++id)
-                if (done[id] && avail[id] > currentCycle)
-                    nextRetire = std::min(nextRetire, avail[id]);
             currentCycle = nextRetire;
             continue; // retry dispatch at the new cycle
         }
@@ -6376,48 +6400,32 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // finishes if the RS is at capacity.  rsCapacity is typically smaller
         // than robCapacity so this check fires on deeper OoO windows first.
         if (inflightCount >= rsCapacity) {
-            unsigned nextComplete = currentCycle + 1;
-            for (unsigned id = 0; id < n; ++id)
-                if (done[id] && avail[id] > currentCycle)
-                    nextComplete = std::min(nextComplete, avail[id]);
-            currentCycle = nextComplete;
+            currentCycle = nextRetire;
             continue;
         }
 
-        // Load / Store buffer stall: count outstanding loads and stores.
-        {
-            outstandingLoads  = 0;
-            outstandingStores = 0;
-            for (unsigned id = 0; id < n; ++id) {
-                if (!done[id] || avail[id] <= currentCycle) continue;
-                if (llvm::isa<llvm::LoadInst>(moveable[id]))  ++outstandingLoads;
-                if (llvm::isa<llvm::StoreInst>(moveable[id])) ++outstandingStores;
-            }
-            if (outstandingLoads >= lbCapacity || outstandingStores >= sbCapacity) {
-                // Advance to the next load/store completion.
-                unsigned nextMemComplete = currentCycle + 1;
-                for (unsigned id = 0; id < n; ++id) {
-                    if (!done[id] || avail[id] <= currentCycle) continue;
-                    if (llvm::isa<llvm::LoadInst>(moveable[id]) ||
-                        llvm::isa<llvm::StoreInst>(moveable[id]))
-                        nextMemComplete = std::min(nextMemComplete, avail[id]);
-                }
-                currentCycle = nextMemComplete;
-                continue;
-            }
+        // Load / Store buffer stall: advance to the next memory-op completion.
+        if (outstandingLoads >= lbCapacity || outstandingStores >= sbCapacity) {
+            currentCycle = nextMemAvail;
+            continue;
         }
 
-        // Sort ready instructions for maximum throughput — 9-tier priority:
+        // Sort ready instructions for maximum throughput — 10-tier priority:
         //   1. Critical path remaining (latency hiding)
         //   2. Long-latency ops first (div/fdiv — start divider early)
+        //   2b. Earliest start: among same critPath+class, sooner-startable first
         //   3. Loads first (hide memory latency, may miss in cache)
         //   4. Stall distance (consumer work remaining — more = better hiding)
         //   5. Fusion affinity (schedule fusion partners adjacently)
         //   6. Port pressure (schedule bottleneck resource first)
+        //   6.5. Port utilization balance (even load across execution units)
         //   7. Register pressure penalty (per register file — int vs vec/FP)
         //   8. Register-freeing score (reduce live values)
-        //   9. Instruction index (deterministic tie-break)
+        //   9. ROB latency preference (short-latency when ROB is under pressure)
+        //  10. Instruction index (deterministic tie-break)
         //
+        // ── Helper lambdas (defined once, results cached below) ──────────────
+
         // Register-freeing score: count of predecessors whose only remaining
         // not-yet-scheduled user is this instruction (scheduling it frees the
         // predecessor's result register).
@@ -6461,48 +6469,66 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             return done[it->second]; // partner already scheduled
         };
 
+        // ── Precompute per-instruction metrics for this cycle's sort ─────────
+        // Calling these lambdas inside std::sort invokes O(degree) work per
+        // comparison, totalling O(n log n × degree).  Snapshotting all values
+        // into flat arrays before sorting reduces per-comparison cost to O(1),
+        // eliminates repeated traversals of the same successor/predecessor
+        // lists, and guarantees a consistent view for the strict-weak-order
+        // requirement of std::sort.
+        std::vector<unsigned> rfsCache(n, 0);
+        std::vector<unsigned> sdCache(n, 0);
+        std::vector<bool>     fusCache(n, false);
+        std::vector<unsigned> rpCache(n, 0);
+        for (unsigned id : ready) {
+            rfsCache[id] = regFreeScore(id);
+            sdCache[id]  = stallDistance(id);
+            fusCache[id] = hasFusionAffinity(id);
+        }
         // Register pressure penalty — per physical register file.
+        // Uses cached regFreeScore (rfsCache) to avoid a second O(degree) walk.
         // On all major architectures, integer and vector/FP registers are
         // completely independent files.  A penalty only applies when scheduling
         // this instruction would push the *appropriate* file over its budget.
-        // This eliminates false penalties when mixing int and FP operations:
-        // e.g. being over integer budget should not penalise an FP instruction.
-        auto regPressurePenalty = [&](unsigned id) -> unsigned {
-            if (moveable[id]->getType()->isVoidTy()) return 0;
-            if (lat[id] == 0) return 0; // free ops (bitcast, phi) don't need regs
+        for (unsigned id : ready) {
+            if (moveable[id]->getType()->isVoidTy() || lat[id] == 0) continue;
             bool isVec = producesVecOrFP(moveable[id]);
             unsigned live   = isVec ? vecLive   : intLive;
             unsigned budget = isVec ? vecRegBudget : intRegBudget;
-            unsigned rfs = regFreeScore(id);
-            // Net delta: +1 produced, rfs freed.  Only penalise if net is positive
-            // and pushes past budget.
+            unsigned rfs    = rfsCache[id];
             if (live + 1 > budget + rfs) {
                 unsigned penalty = (live + 1 - rfs > budget) ? (live + 1 - rfs - budget) : 0;
                 // Dampen penalty for instructions with slack — they can be
                 // delayed to a lower-pressure point without extending the
-                // critical path.  /4 chosen so slack of 4 halves the penalty.
+                // critical path.
                 if (slack[id] > 0)
                     penalty = std::max(1u, static_cast<unsigned>(
                         penalty / (1.0 + static_cast<double>(slack[id]) / policy.slackDamping)));
-                return penalty;
+                rpCache[id] = penalty;
             }
-            return 0;
-        };
+        }
 
         std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
+            // Tier 1: critical path remaining — schedule the longest chain first.
             if (critPath[a] != critPath[b])
                 return critPath[a] > critPath[b];
 
-            // Long-latency operations (div, fdiv) before other ops at same
-            // critical path — start them early so the divider is busy while
-            // independent ALU/load work proceeds.  LLVM's generic scheduler
-            // does not have per-CPU divider latency data; our profiles do.
+            // Tier 2: long-latency operations (div, fdiv) before other ops at
+            // same critical path — start them early so the divider is busy while
+            // independent ALU/load work proceeds.
             bool longA = isLongLatencyOp(a);
             bool longB = isLongLatencyOp(b);
             if (longA != longB)
                 return longA;  // long-latency first
 
-            // Loads first: schedule early to hide memory latency.
+            // Tier 2b: among equal critPath and latency class, schedule the
+            // instruction that can start soonest.  Issuing an earlier-startable
+            // instruction first secures the best port slot for it, letting its
+            // chain complete earlier and freeing resources sooner.
+            if (earliestStart[a] != earliestStart[b])
+                return earliestStart[a] < earliestStart[b];
+
+            // Tier 3: loads first — schedule early to hide memory latency.
             // Within loads, prefer those with potentially longer latency
             // (likely cache misses based on access pattern analysis).
             bool isLoadA = llvm::isa<llvm::LoadInst>(moveable[a]);
@@ -6534,18 +6560,17 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     return riskA > riskB;  // higher miss risk = schedule earlier
             }
 
-            // Among same-class ready instructions, prefer those whose
-            // consumers have the most remaining work (= more stall hiding).
-            unsigned sdA = stallDistance(a), sdB = stallDistance(b);
-            if (sdA != sdB) return sdA > sdB;
+            // Tier 4: stall distance — prefer instructions whose consumers have
+            // the most remaining work (more opportunity to hide latency).
+            if (sdCache[a] != sdCache[b]) return sdCache[a] > sdCache[b];
 
-            // Fusion affinity: prefer instructions whose fusion partner
+            // Tier 5: fusion affinity — prefer instructions whose fusion partner
             // was just scheduled, enabling macro-op / micro-op fusion.
             if (policy.enableFusionHeuristic) {
-                bool fusA = hasFusionAffinity(a), fusB = hasFusionAffinity(b);
-                if (fusA != fusB) return fusA;
+                if (fusCache[a] != fusCache[b]) return static_cast<bool>(fusCache[a]);
             }
 
+            // Tier 6: port pressure — schedule bottleneck resource first.
             OpClass opA = classifyOp(moveable[a]);
             OpClass opB = classifyOp(moveable[b]);
             int rtA = (opA == OpClass::IntMul) ? kIntMulPortKey
@@ -6574,14 +6599,15 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     return crossA < crossB;  // prefer less-loaded port
             }
 
-            // Register pressure: penalise instructions that would cause spills.
+            // Tier 7: register pressure — penalise instructions that would
+            // cause spills (cached, O(1) lookup).
             if (policy.enableRegPressure) {
-                unsigned rpA = regPressurePenalty(a), rpB = regPressurePenalty(b);
-                if (rpA != rpB) return rpA < rpB; // lower penalty = better
+                if (rpCache[a] != rpCache[b]) return rpCache[a] < rpCache[b];
             }
 
-            unsigned rfsA = regFreeScore(a), rfsB = regFreeScore(b);
-            if (rfsA != rfsB) return rfsA > rfsB;
+            // Tier 8: register-freeing score — prefer instructions that release
+            // dead predecessor values, reducing live-value count (O(1) lookup).
+            if (rfsCache[a] != rfsCache[b]) return rfsCache[a] > rfsCache[b];
 
             // Tier 9: ROB pressure — when many instructions are inflight,
             // prefer instructions that complete sooner (lower latency) to
@@ -6591,6 +6617,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     return lat[a] < lat[b];  // shorter latency first
             }
 
+            // Tier 10: deterministic tie-break by original instruction index.
             return a < b;
         });
 
@@ -6710,7 +6737,9 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
         // Advance the cycle counter.  If nothing was issued this cycle,
         // skip ahead to the earliest time any port becomes free or any
-        // predecessor result becomes available, avoiding empty cycle spin.
+        // in-flight instruction's result becomes available, avoiding
+        // empty-cycle spin.  Note: avail[] is only set when done[id]=true,
+        // so we check done[id] (not !done[id]).
         if (issued == 0) {
             unsigned nextEvent = currentCycle + 1;
             for (auto& [key, portSlots] : hwPorts)
@@ -6718,7 +6747,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     if (slot.nextFree > currentCycle)
                         nextEvent = std::min(nextEvent, slot.nextFree);
             for (unsigned id = 0; id < n; ++id)
-                if (!done[id] && avail[id] > currentCycle)
+                if (done[id] && avail[id] > currentCycle)
                     nextEvent = std::min(nextEvent, avail[id]);
             currentCycle = nextEvent;
         } else {
