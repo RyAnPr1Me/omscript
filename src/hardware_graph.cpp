@@ -26,6 +26,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/PatternMatch.h>
+#include <llvm/Analysis/ValueTracking.h>
 
 // LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
 #if LLVM_VERSION_MAJOR >= 19
@@ -52,6 +53,87 @@ namespace hgoe {
 // Allows buildFromFunction (Step 2) to call it without reordering definitions.
 static unsigned getOpcodeLatency(const llvm::Instruction* inst,
                                   const MicroarchProfile& profile);
+
+/// Return the memory pointer operand for load/store instructions.
+[[nodiscard]] static const llvm::Value* getMemoryPointerOperand(const llvm::Instruction* inst) {
+    if (const auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst))
+        return ld->getPointerOperand();
+    if (const auto* st = llvm::dyn_cast<llvm::StoreInst>(inst))
+        return st->getPointerOperand();
+    return nullptr;
+}
+
+/// Resolve a pointer to (base, constant byte offset) when provable.
+[[nodiscard]] static bool getBaseAndConstByteOffset(const llvm::Value* ptr,
+                                                    const llvm::DataLayout& dl,
+                                                    const llvm::Value*& base,
+                                                    int64_t& offset) {
+    if (!ptr || !ptr->getType()->isPointerTy()) return false;
+    llvm::APInt off(dl.getIndexTypeSizeInBits(ptr->getType()), 0, true);
+    const llvm::Value* rawBase = llvm::GetPointerBaseWithConstantOffset(ptr, off, dl);
+    if (!rawBase || !off.isSignedIntN(64)) return false;
+    base = rawBase->stripPointerCasts();
+    offset = off.getSExtValue();
+    return true;
+}
+
+/// Alias query used by HGOE memory-edge construction.
+[[nodiscard]] static bool hgoeMayAlias(const llvm::Instruction* a,
+                                       const llvm::Instruction* b,
+                                       const llvm::DataLayout& dl) {
+    // Side-effecting calls/barriers are always conservative-alias.
+    if ((llvm::isa<llvm::CallBase>(a) && a->mayHaveSideEffects()) ||
+        (llvm::isa<llvm::CallBase>(b) && b->mayHaveSideEffects()))
+        return true;
+
+    const llvm::Value* ptrA = getMemoryPointerOperand(a);
+    const llvm::Value* ptrB = getMemoryPointerOperand(b);
+    if (!ptrA || !ptrB) return true;
+
+    ptrA = ptrA->stripPointerCasts();
+    ptrB = ptrB->stripPointerCasts();
+    if (ptrA == ptrB) return true;
+
+    // Constant byte offsets from the same underlying base never alias when
+    // offsets differ. This handles multi-index/struct-field GEPs.
+    const llvm::Value* baseA = nullptr;
+    const llvm::Value* baseB = nullptr;
+    int64_t offA = 0;
+    int64_t offB = 0;
+    const bool hasOffA = getBaseAndConstByteOffset(ptrA, dl, baseA, offA);
+    const bool hasOffB = getBaseAndConstByteOffset(ptrB, dl, baseB, offB);
+    if (hasOffA && hasOffB && baseA == baseB && offA != offB)
+        return false;
+
+    // Fall back to underlying-object disambiguation.
+    const llvm::Value* objA = llvm::GetUnderlyingObject(ptrA, dl);
+    const llvm::Value* objB = llvm::GetUnderlyingObject(ptrB, dl);
+    if (objA) objA = objA->stripPointerCasts();
+    if (objB) objB = objB->stripPointerCasts();
+    if (!objA || !objB) return true;
+    if (objA == objB) return true;
+
+    const bool aIsAlloca = llvm::isa<llvm::AllocaInst>(objA);
+    const bool bIsAlloca = llvm::isa<llvm::AllocaInst>(objB);
+    const bool aIsArg = llvm::isa<llvm::Argument>(objA);
+    const bool bIsArg = llvm::isa<llvm::Argument>(objB);
+    const bool aIsGlobal = llvm::isa<llvm::GlobalVariable>(objA);
+    const bool bIsGlobal = llvm::isa<llvm::GlobalVariable>(objB);
+
+    if ((aIsAlloca && bIsAlloca) ||
+        (aIsGlobal && bIsGlobal) ||
+        (aIsAlloca && bIsArg) || (aIsArg && bIsAlloca))
+        return false;
+
+    if (aIsArg && bIsArg) {
+        const auto* argA = llvm::cast<llvm::Argument>(objA);
+        const auto* argB = llvm::cast<llvm::Argument>(objB);
+        if (argA->hasNoAliasAttr() || argB->hasNoAliasAttr())
+            return false;
+    }
+
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Resolve "native" to the actual host CPU name.
@@ -245,6 +327,7 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     nodes_.clear();
     edges_.clear();
     instToNode_.clear();
+    const llvm::DataLayout& dl = func.getParent()->getDataLayout();
 
     // Phase 1: Create a node for each instruction.
     for (auto& bb : func) {
@@ -304,53 +387,45 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     // same base pointer with constant indices, we check whether the indices
     // overlap.  Non-overlapping accesses can skip the memory edge, reducing
     // false dependencies and enabling better scheduling.
-    auto mayAlias = [](const llvm::Instruction* a, const llvm::Instruction* b) -> bool {
-        // Conservative default: assume they may alias.
-        const llvm::Value* ptrA = nullptr;
-        const llvm::Value* ptrB = nullptr;
-        if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(a)) ptrA = ld->getPointerOperand();
-        if (auto* st = llvm::dyn_cast<llvm::StoreInst>(a)) ptrA = st->getPointerOperand();
-        if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(b)) ptrB = ld->getPointerOperand();
-        if (auto* st = llvm::dyn_cast<llvm::StoreInst>(b)) ptrB = st->getPointerOperand();
-        if (!ptrA || !ptrB) return true;
-
-        // If pointers are identical, they definitely alias.
-        if (ptrA == ptrB) return true;
-
-        // If both are GEPs from the same base with constant offsets, compare.
-        auto* gepA = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrA);
-        auto* gepB = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrB);
-        if (gepA && gepB &&
-            gepA->getPointerOperand() == gepB->getPointerOperand() &&
-            gepA->getNumIndices() == 1 && gepB->getNumIndices() == 1) {
-            auto* idxA = llvm::dyn_cast<llvm::ConstantInt>(gepA->getOperand(1));
-            auto* idxB = llvm::dyn_cast<llvm::ConstantInt>(gepB->getOperand(1));
-            if (idxA && idxB && idxA->getSExtValue() != idxB->getSExtValue())
-                return false; // Different constant offsets — no alias.
-        }
-
-        // Different base pointers from different allocations cannot alias.
-        auto underlyingAlloc = [](const llvm::Value* v) -> const llvm::Value* {
-            while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(v))
-                v = gep->getPointerOperand();
-            return v;
-        };
-        const llvm::Value* baseA = underlyingAlloc(ptrA);
-        const llvm::Value* baseB = underlyingAlloc(ptrB);
-        if (baseA != baseB) {
-            // Distinct allocas or distinct function args never alias.
-            const bool allocA = llvm::isa<llvm::AllocaInst>(baseA) || llvm::isa<llvm::Argument>(baseA);
-            const bool allocB = llvm::isa<llvm::AllocaInst>(baseB) || llvm::isa<llvm::Argument>(baseB);
-            if (allocA && allocB) return false;
-        }
-
-        return true; // conservative fallback
+    auto mayAlias = [&](const llvm::Instruction* a, const llvm::Instruction* b) -> bool {
+        return hgoeMayAlias(a, b, dl);
     };
 
     for (auto& bb : func) {
         llvm::Instruction* lastStore = nullptr;
         llvm::Instruction* lastLoad  = nullptr;
+        llvm::Instruction* lastBarrier = nullptr;
         for (auto& inst : bb) {
+            const bool isStore = llvm::isa<llvm::StoreInst>(inst);
+            const bool isLoad = llvm::isa<llvm::LoadInst>(inst);
+            const bool isBarrierMem =
+                inst.mayReadOrWriteMemory() && !isLoad && !isStore;
+
+            if (isBarrierMem) {
+                // All prior memory ops must complete before a side-effecting op
+                // (calls, atomics, fences), and later memory ops must not pass it.
+                auto thisIt = instToNode_.find(&inst);
+                if (thisIt != instToNode_.end()) {
+                    if (lastStore) {
+                        auto srcIt = instToNode_.find(lastStore);
+                        if (srcIt != instToNode_.end())
+                            addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
+                    }
+                    if (lastLoad) {
+                        auto srcIt = instToNode_.find(lastLoad);
+                        if (srcIt != instToNode_.end())
+                            addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
+                    }
+                    if (lastBarrier) {
+                        auto srcIt = instToNode_.find(lastBarrier);
+                        if (srcIt != instToNode_.end())
+                            addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
+                    }
+                }
+                lastBarrier = &inst;
+                continue;
+            }
+
             if (inst.getOpcode() == llvm::Instruction::Store) {
                 // WAW: Store → Store
                 if (lastStore && mayAlias(lastStore, &inst)) {
@@ -366,12 +441,24 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                     if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
                         addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
                 }
+                if (lastBarrier) {
+                    auto srcIt = instToNode_.find(lastBarrier);
+                    auto dstIt = instToNode_.find(&inst);
+                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
+                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                }
                 lastStore = &inst;
             }
             if (inst.getOpcode() == llvm::Instruction::Load) {
                 // RAW: Store → Load
                 if (lastStore && mayAlias(lastStore, &inst)) {
                     auto srcIt = instToNode_.find(lastStore);
+                    auto dstIt = instToNode_.find(&inst);
+                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
+                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                }
+                if (lastBarrier) {
+                    auto srcIt = instToNode_.find(lastBarrier);
                     auto dstIt = instToNode_.find(&inst);
                     if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
                         addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
@@ -534,9 +621,37 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     for (unsigned i = 0; i < n; ++i) {
         const ProgramNode* node = pg.getNode(i);
         if (node) {
-            unsigned lat = static_cast<unsigned>(
-                std::max(0.0, node->estimatedLatency));
+            unsigned lat = node->inst
+                ? getOpcodeLatency(node->inst, profile_)
+                : static_cast<unsigned>(std::max(0.0, node->estimatedLatency));
             nodeLat[i] = lat;
+        }
+    }
+
+    // ── 3b. Critical-path priority (longest latency-weighted path) ───────────
+    std::vector<unsigned> priority(n, 0);
+    {
+        std::vector<unsigned> topo;
+        topo.reserve(n);
+        std::vector<unsigned> deg(inDeg);
+        std::queue<unsigned> q;
+        for (unsigned i = 0; i < n; ++i)
+            if (deg[i] == 0) q.push(i);
+        while (!q.empty()) {
+            unsigned u = q.front();
+            q.pop();
+            topo.push_back(u);
+            for (auto [v, edgeLat] : succList[u]) {
+                (void)edgeLat;
+                if (--deg[v] == 0) q.push(v);
+            }
+        }
+        for (auto it = topo.rbegin(); it != topo.rend(); ++it) {
+            unsigned u = *it;
+            unsigned maxSucc = 0;
+            for (auto [v, edgeLat] : succList[u])
+                maxSucc = std::max(maxSucc, priority[v] + edgeLat);
+            priority[u] = nodeLat[u] + maxSucc;
         }
     }
 
@@ -568,15 +683,43 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     // the result may slightly over-count cycles compared to an optimal list
     // schedule but never under-counts.
     std::vector<unsigned> completedAt(n, 0);
-
-    std::queue<unsigned> ready;
+    std::vector<unsigned> scheduledAt(n, 0);
+    std::vector<bool> isScheduled(n, false);
+    std::vector<unsigned> remainingUsers(n, 0);
     for (unsigned i = 0; i < n; ++i)
-        if (inDeg[i] == 0) ready.push(i);
+        remainingUsers[i] = static_cast<unsigned>(succList[i].size());
+
+    // Lightweight register/rename-pressure model.
+    const unsigned regBudget = std::max(
+        8u, profile_.intRegisters + profile_.vecRegisters + profile_.fpRegisters);
+    unsigned liveValues = 0;
+
+    auto inflightAt = [&](unsigned cycle) -> unsigned {
+        unsigned inflight = 0;
+        for (unsigned i = 0; i < n; ++i) {
+            if (!isScheduled[i]) continue;
+            if (scheduledAt[i] <= cycle && completedAt[i] > cycle)
+                ++inflight;
+        }
+        return inflight;
+    };
+
+    struct ReadyEntry {
+        unsigned prio;
+        unsigned id;
+    };
+    auto readyCmp = [](const ReadyEntry& a, const ReadyEntry& b) {
+        if (a.prio != b.prio) return a.prio < b.prio; // max-heap by priority
+        return a.id > b.id;
+    };
+    std::priority_queue<ReadyEntry, std::vector<ReadyEntry>, decltype(readyCmp)> ready(readyCmp);
+    for (unsigned i = 0; i < n; ++i)
+        if (inDeg[i] == 0) ready.push({priority[i], i});
 
     unsigned maxCycle = 0;
 
     while (!ready.empty()) {
-        const unsigned u = ready.front();
+        const unsigned u = ready.top().id;
         ready.pop();
 
         // Earliest cycle when all data dependencies are satisfied.
@@ -609,6 +752,9 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
                 if (pit != portUsed.end() && pit->second[pc] >= cap[pc])
                     continue;
             }
+            // Rename/ROB pressure: avoid over-issuing when too many uops are in-flight.
+            if (inflightAt(scheduleCycle) >= profile_.robSize)
+                continue;
             break; // valid cycle found
         }
 
@@ -621,14 +767,38 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
             ++row[pc];
         }
 
-        completedAt[u] = scheduleCycle + nodeLat[u];
+        unsigned freesNow = 0;
+        for (const auto& [pred, ignored] : predList[u]) {
+            (void)ignored;
+            if (remainingUsers[pred] == 1) ++freesNow;
+        }
+        const bool producesValue = !succList[u].empty();
+        const int projectedLiveSigned =
+            static_cast<int>(liveValues) +
+            (producesValue ? 1 : 0) -
+            static_cast<int>(freesNow);
+        const unsigned projectedLive =
+            static_cast<unsigned>(std::max(projectedLiveSigned, 0));
+        const unsigned spillPenalty =
+            (projectedLive > regBudget) ? (projectedLive - regBudget) : 0u;
+
+        scheduledAt[u] = scheduleCycle;
+        isScheduled[u] = true;
+        completedAt[u] = scheduleCycle + nodeLat[u] + spillPenalty;
         if (completedAt[u] > maxCycle)
             maxCycle = completedAt[u];
+
+        for (const auto& [pred, ignored] : predList[u]) {
+            (void)ignored;
+            if (remainingUsers[pred] > 0 && --remainingUsers[pred] == 0 && liveValues > 0)
+                --liveValues;
+        }
+        if (producesValue) ++liveValues;
 
         // Release successors whose in-degree drops to zero.
         for (auto& [v, ignored] : succList[u]) {
             if (--inDeg[v] == 0)
-                ready.push(v);
+                ready.push({priority[v], v});
         }
     }
 
@@ -5129,6 +5299,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 [[gnu::hot]] static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                                     const HardwareGraph& hw,
                                     const MicroarchProfile& profile) {
+    const llvm::DataLayout& dl = bb.getModule()->getDataLayout();
     // ── 1. Collect moveable instructions ─────────────────────────────────────
     std::vector<llvm::Instruction*> moveable;
     moveable.reserve(bb.size());
@@ -5272,56 +5443,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // non-aliasing, allowing the dependency to be elided.
         auto mayAlias = [&](const llvm::Instruction* a,
                             const llvm::Instruction* b) -> bool {
-            const llvm::Value* ptrA = getMemPtr(a);
-            const llvm::Value* ptrB = getMemPtr(b);
-            if (!ptrA || !ptrB) return true;        // conservative
-            if (ptrA == ptrB)   return true;         // definite alias
-
-            // GEP with constant offsets from the same base → no alias.
-            const auto* gepA = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrA);
-            const auto* gepB = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrB);
-            if (gepA && gepB &&
-                gepA->getPointerOperand() == gepB->getPointerOperand() &&
-                gepA->getNumIndices() == 1 && gepB->getNumIndices() == 1) {
-                const auto* idxA = llvm::dyn_cast<llvm::ConstantInt>(gepA->getOperand(1));
-                const auto* idxB = llvm::dyn_cast<llvm::ConstantInt>(gepB->getOperand(1));
-                if (idxA && idxB && idxA->getSExtValue() != idxB->getSExtValue())
-                    return false;  // different constant offsets → no alias
-            }
-
-            // Distinct local allocations / arguments cannot alias.
-            auto underlyingBase = [](const llvm::Value* v) -> const llvm::Value* {
-                while (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(v))
-                    v = gep->getPointerOperand();
-                return v;
-            };
-            const llvm::Value* baseA = underlyingBase(ptrA);
-            const llvm::Value* baseB = underlyingBase(ptrB);
-            if (baseA != baseB) {
-                bool aIsAlloca = llvm::isa<llvm::AllocaInst>(baseA);
-                bool bIsAlloca = llvm::isa<llvm::AllocaInst>(baseB);
-                bool aIsArg    = llvm::isa<llvm::Argument>(baseA);
-                bool bIsArg    = llvm::isa<llvm::Argument>(baseB);
-
-                // Two distinct stack allocations never alias.
-                if (aIsAlloca && bIsAlloca) return false;
-
-                // Alloca and a pointer argument don't alias: the alloca was
-                // created after the call and its address cannot have been
-                // passed to the caller that holds the argument.
-                if ((aIsAlloca && bIsArg) || (aIsArg && bIsAlloca)) return false;
-
-                // Two different pointer arguments only provably don't alias
-                // when at least one carries the `noalias` (restrict) attribute.
-                if (aIsArg && bIsArg) {
-                    const auto* argA = llvm::cast<llvm::Argument>(baseA);
-                    const auto* argB = llvm::cast<llvm::Argument>(baseB);
-                    if (argA->hasNoAliasAttr() || argB->hasNoAliasAttr())
-                        return false;
-                }
-            }
-
-            return true;  // conservative fallback
+            if (!getMemPtr(a) || !getMemPtr(b)) return true;
+            return hgoeMayAlias(a, b, dl);
         };
 
         // Collect memory instruction indices by type.
