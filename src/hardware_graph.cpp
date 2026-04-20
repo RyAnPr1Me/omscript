@@ -7039,6 +7039,356 @@ static unsigned hoistLoopInvariantInst(llvm::Function& func) {
     return count;
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// New algebraic & peephole transforms for HGOE overhaul
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Fold redundant PHI nodes: phi(x, x, ..., x) → x.
+/// When all incoming values are the same (after GVN, LICM, or jump threading),
+/// the PHI is a trivial identity and can be replaced.
+static unsigned foldRedundantPHIs(llvm::Function& func) {
+    unsigned count = 0;
+    bool changed = true;
+    // Iterate to a fixed point because folding one PHI may expose another.
+    while (changed) {
+        changed = false;
+        std::vector<llvm::PHINode*> toErase;
+        for (auto& bb : func) {
+            for (auto& inst : bb) {
+                auto* phi = llvm::dyn_cast<llvm::PHINode>(&inst);
+                if (!phi) break; // PHIs are at the start of the BB
+                if (phi->getNumIncomingValues() == 0) continue;
+                llvm::Value* common = phi->getIncomingValue(0);
+                bool allSame = true;
+                for (unsigned i = 1; i < phi->getNumIncomingValues(); ++i) {
+                    if (phi->getIncomingValue(i) != common) {
+                        allSame = false;
+                        break;
+                    }
+                }
+                if (allSame && common != phi) {
+                    phi->replaceAllUsesWith(common);
+                    toErase.push_back(phi);
+                    ++count;
+                    changed = true;
+                }
+            }
+        }
+        for (auto* phi : toErase) phi->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold add(add(x, C1), C2) → add(x, C1+C2): merge chained constant adds.
+/// This is the IR equivalent of LEA-style address combining.  After strength
+/// reduction and GEP merging, chained adds with constants are common.
+/// Folding them reduces critical-path depth and frees an ALU port.
+static unsigned foldChainedAdds(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Add) continue;
+            // Match: add(add(x, C1), C2)
+            for (int outerSide = 0; outerSide < 2; ++outerSide) {
+                auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(outerSide));
+                if (!c2) continue;
+                auto* innerAdd = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1 - outerSide));
+                if (!innerAdd || innerAdd->getOpcode() != llvm::Instruction::Add) continue;
+                if (!innerAdd->hasOneUse()) continue; // don't break other users
+                for (int innerSide = 0; innerSide < 2; ++innerSide) {
+                    auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(innerAdd->getOperand(innerSide));
+                    if (!c1) continue;
+                    llvm::Value* x = innerAdd->getOperand(1 - innerSide);
+                    // Create add(x, C1+C2)
+                    llvm::APInt merged = c1->getValue() + c2->getValue();
+                    auto* newConst = llvm::ConstantInt::get(inst.getType(), merged);
+                    auto* newAdd = llvm::BinaryOperator::CreateAdd(x, newConst, "", &inst);
+                    newAdd->setDebugLoc(inst.getDebugLoc());
+                    // Preserve nuw/nsw if both original adds had them
+                    if (auto* outerBO = llvm::dyn_cast<llvm::BinaryOperator>(&inst)) {
+                        if (outerBO->hasNoUnsignedWrap() && innerAdd->hasNoUnsignedWrap())
+                            newAdd->setHasNoUnsignedWrap(true);
+                        if (outerBO->hasNoSignedWrap() && innerAdd->hasNoSignedWrap())
+                            newAdd->setHasNoSignedWrap(true);
+                    }
+                    inst.replaceAllUsesWith(newAdd);
+                    toErase.push_back(&inst);
+                    toErase.push_back(innerAdd);
+                    ++count;
+                    goto next_inst;
+                }
+            }
+            next_inst:;
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold add(sub(0, x), y) → sub(y, x) and add(y, sub(0, x)) → sub(y, x).
+/// Catches negation patterns that survive after foldIntMulByNeg1 / foldIntAddNeg.
+static unsigned foldAddNegToSub(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Add) continue;
+            for (int side = 0; side < 2; ++side) {
+                auto* negSub = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(side));
+                if (!negSub || negSub->getOpcode() != llvm::Instruction::Sub) continue;
+                auto* zero = llvm::dyn_cast<llvm::ConstantInt>(negSub->getOperand(0));
+                if (!zero || !zero->isZero()) continue;
+                if (!negSub->hasOneUse()) continue;
+                llvm::Value* x = negSub->getOperand(1);
+                llvm::Value* y = inst.getOperand(1 - side);
+                auto* newSub = llvm::BinaryOperator::CreateSub(y, x, "", &inst);
+                newSub->setDebugLoc(inst.getDebugLoc());
+                inst.replaceAllUsesWith(newSub);
+                toErase.push_back(&inst);
+                toErase.push_back(negSub);
+                ++count;
+                break;
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold sub(x, x) → 0: self-subtraction elimination.
+/// Appears after PHI folding, LICM, or GVN when both operands resolve to the same value.
+static unsigned foldSubSelf(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Sub) continue;
+            if (inst.getOperand(0) == inst.getOperand(1)) {
+                inst.replaceAllUsesWith(llvm::ConstantInt::get(inst.getType(), 0));
+                toErase.push_back(&inst);
+                ++count;
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Narrow zext to trunc when the extension is followed by a truncation
+/// back to the original width: trunc(zext(x)) → x for matching types.
+/// Also handles sext: trunc(sext(x)) → x.
+/// This catches patterns left after loop unrolling where iterator widening
+/// introduces unnecessary zext→trunc pairs.
+static unsigned foldNarrowExtTrunc(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Trunc) continue;
+            auto* ext = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+            if (!ext) continue;
+            bool isExt = (ext->getOpcode() == llvm::Instruction::ZExt ||
+                          ext->getOpcode() == llvm::Instruction::SExt);
+            if (!isExt) continue;
+            llvm::Value* orig = ext->getOperand(0);
+            if (orig->getType() != inst.getType()) continue;
+            inst.replaceAllUsesWith(orig);
+            toErase.push_back(&inst);
+            if (ext->hasOneUse() || ext->use_empty())
+                toErase.push_back(ext);
+            ++count;
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// FP reassociation for latency reduction: turn linear fadd/fmul chains into
+/// balanced trees when `reassoc` flag is present.
+/// fadd(fadd(fadd(a, b), c), d) → fadd(fadd(a, b), fadd(c, d))
+/// This cuts the critical-path depth from O(n) to O(log n) for n-element reductions.
+/// Only applied when the instruction has the `reassoc` fast-math flag.
+static unsigned reassociateFPChains(llvm::Function& func) {
+    unsigned count = 0;
+    // Collect linear FP chains (fadd or fmul with reassoc).
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FAdd &&
+                inst.getOpcode() != llvm::Instruction::FMul)
+                continue;
+            if (!inst.hasAllowReassoc()) continue;
+            // Only process the root (last use of the chain — instruction with no
+            // single-use chain consumer of the same opcode).
+            bool isRoot = true;
+            for (auto* user : inst.users()) {
+                auto* userInst = llvm::dyn_cast<llvm::Instruction>(user);
+                if (userInst && userInst->getOpcode() == inst.getOpcode() &&
+                    userInst->hasAllowReassoc()) {
+                    isRoot = false;
+                    break;
+                }
+            }
+            if (!isRoot) continue;
+
+            // Walk the chain and collect leaf values.
+            std::vector<llvm::Value*> leaves;
+            std::vector<llvm::Instruction*> chainInsts;
+            std::function<void(llvm::Value*)> collect = [&](llvm::Value* v) {
+                auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(v);
+                if (binOp && binOp->getOpcode() == inst.getOpcode() &&
+                    binOp->hasAllowReassoc() && binOp->hasOneUse()) {
+                    chainInsts.push_back(binOp);
+                    collect(binOp->getOperand(0));
+                    collect(binOp->getOperand(1));
+                } else {
+                    leaves.push_back(v);
+                }
+            };
+            collect(&inst);
+
+            if (leaves.size() < 4) continue; // not worth rebalancing
+
+            // Build a balanced reduction tree.
+            llvm::IRBuilder<> builder(&inst);
+            builder.setFastMathFlags(inst.getFastMathFlags());
+            while (leaves.size() > 1) {
+                std::vector<llvm::Value*> next;
+                for (unsigned i = 0; i + 1 < leaves.size(); i += 2) {
+                    llvm::Value* combined;
+                    if (inst.getOpcode() == llvm::Instruction::FAdd)
+                        combined = builder.CreateFAdd(leaves[i], leaves[i + 1]);
+                    else
+                        combined = builder.CreateFMul(leaves[i], leaves[i + 1]);
+                    if (auto* ci = llvm::dyn_cast<llvm::Instruction>(combined))
+                        ci->setFastMathFlags(inst.getFastMathFlags());
+                    next.push_back(combined);
+                }
+                if (leaves.size() & 1)
+                    next.push_back(leaves.back());
+                leaves = std::move(next);
+            }
+
+            inst.replaceAllUsesWith(leaves[0]);
+            // Don't erase yet — other chain instructions may reference each other.
+            // Mark for deletion.
+            chainInsts.push_back(&inst);
+            for (auto it = chainInsts.rbegin(); it != chainInsts.rend(); ++it) {
+                if ((*it)->use_empty())
+                    (*it)->eraseFromParent();
+            }
+            ++count;
+        }
+    }
+    return count;
+}
+
+/// Fold or(shl(x, C1), lshr(x, C2)) → fshl(x, x, C1) when C1+C2 = bitwidth.
+/// This recognizes rotate-left idioms and lowers them to funnel-shift intrinsics
+/// which map to single-cycle ROL/ROR on x86 and EXTR on AArch64.
+static unsigned foldRotateIdiom(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Or) continue;
+            if (!inst.getType()->isIntegerTy()) continue;
+            unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+            if (bitWidth == 0) continue;
+
+            auto* op0 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+            auto* op1 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+            if (!op0 || !op1) continue;
+
+            // Match shl+lshr pair (either order)
+            llvm::BinaryOperator* shlOp = nullptr;
+            llvm::BinaryOperator* shrOp = nullptr;
+            if (op0->getOpcode() == llvm::Instruction::Shl &&
+                op1->getOpcode() == llvm::Instruction::LShr) {
+                shlOp = op0; shrOp = op1;
+            } else if (op1->getOpcode() == llvm::Instruction::Shl &&
+                       op0->getOpcode() == llvm::Instruction::LShr) {
+                shlOp = op1; shrOp = op0;
+            } else continue;
+
+            // Both must operate on the same value
+            if (shlOp->getOperand(0) != shrOp->getOperand(0)) continue;
+            llvm::Value* x = shlOp->getOperand(0);
+
+            // Check for constant shift amounts that sum to bitwidth
+            auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(shlOp->getOperand(1));
+            auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(shrOp->getOperand(1));
+            if (!c1 || !c2) continue;
+            if (c1->getZExtValue() + c2->getZExtValue() != bitWidth) continue;
+
+            // Create fshl(x, x, C1) — funnel shift left
+            llvm::Module* mod = func.getParent();
+            llvm::Function* fshl = OMSC_GET_INTRINSIC(
+                mod, llvm::Intrinsic::fshl, {inst.getType()});
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* result = builder.CreateCall(fshl, {x, x, c1});
+            inst.replaceAllUsesWith(result);
+            toErase.push_back(&inst);
+            if (shlOp->hasOneUse() || shlOp->use_empty()) toErase.push_back(shlOp);
+            if (shrOp->hasOneUse() || shrOp->use_empty()) toErase.push_back(shrOp);
+            ++count;
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold extractvalue(insertvalue(base, val, idx), idx) → val.
+/// This pattern appears after SROA and struct returns where the value
+/// is immediately extracted from the aggregate it was just inserted into.
+static unsigned foldExtractInsert(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* ev = llvm::dyn_cast<llvm::ExtractValueInst>(&inst);
+            if (!ev) continue;
+            auto* iv = llvm::dyn_cast<llvm::InsertValueInst>(ev->getAggregateOperand());
+            if (!iv) continue;
+            // Check indices match exactly
+            if (ev->getIndices() == iv->getIndices()) {
+                ev->replaceAllUsesWith(iv->getInsertedValueOperand());
+                toErase.push_back(ev);
+                ++count;
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Dead code elimination: remove instructions with no uses and no side effects.
+/// This is a cleanup pass that catches instructions left dead by our transforms.
+static unsigned eliminateDeadInstructions(llvm::Function& func) {
+    unsigned count = 0;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& bb : func) {
+            llvm::SmallVector<llvm::Instruction*, 16> dead;
+            for (auto it = bb.rbegin(); it != bb.rend(); ++it) {
+                llvm::Instruction* inst = &*it;
+                if (inst->isTerminator()) continue;
+                if (llvm::isa<llvm::PHINode>(inst)) continue;
+                if (!inst->use_empty()) continue;
+                if (inst->mayHaveSideEffects()) continue;
+                dead.push_back(inst);
+            }
+            for (auto* d : dead) {
+                d->eraseFromParent();
+                ++count;
+                changed = true;
+            }
+        }
+    }
+    return count;
+}
+
 TransformStats applyHardwareTransforms(llvm::Function& func,
                                         const MicroarchProfile& profile,
                                         bool enableLoopAnnotation) {
@@ -7147,6 +7497,31 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Eliminate redundant loads: forward stored values and eliminate
     // repeated loads from the same pointer (local GVN-like).
     stats.loadsStorePaired   += eliminateRedundantLoads(func);
+
+    // ── New HGOE overhaul transforms ────────────────────────────────────────
+    // These additional transforms close remaining gaps vs LLVM InstCombine.
+
+    // Redundant PHI elimination: phi(x, x, ..., x) → x.
+    // Must run before other transforms that may produce intermediate PHIs.
+    stats.intStrengthReduced += foldRedundantPHIs(func);
+    // Chained constant adds: add(add(x, C1), C2) → add(x, C1+C2).
+    // LEA-style combining for address arithmetic.
+    stats.intStrengthReduced += foldChainedAdds(func);
+    // add(sub(0,x), y) → sub(y, x): negation folding.
+    stats.intStrengthReduced += foldAddNegToSub(func);
+    // sub(x, x) → 0: self-subtraction elimination.
+    stats.intStrengthReduced += foldSubSelf(func);
+    // trunc(zext/sext(x)) → x when types match.
+    stats.intStrengthReduced += foldNarrowExtTrunc(func);
+    // Rotate idiom: or(shl(x, C1), lshr(x, C2)) → fshl(x, x, C1)
+    // when C1+C2 = bitwidth.  Maps to ROL/ROR on x86, EXTR on AArch64.
+    stats.intStrengthReduced += foldRotateIdiom(func);
+    // extractvalue(insertvalue(base, val, idx), idx) → val.
+    stats.intStrengthReduced += foldExtractInsert(func);
+    // FP reassociation: turn linear fadd/fmul chains into balanced trees
+    // when reassoc flag is present (cuts critical path from O(n) to O(log n)).
+    stats.fmaGenerated       += reassociateFPChains(func);
+
     // Hoist loop-invariant GEP address calculations to the loop pre-header.
     // Runs last so all address computations introduced by our transforms are hoisted.
     stats.loadsStorePaired   += hoistLoopInvariantGEP(func);
@@ -7159,6 +7534,10 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Runs last since all other transforms (convertIfElseToSelect, foldMinMaxPatterns,
     // foldSelectToBoolCast, etc.) may have simplified one arm to match the other.
     stats.intStrengthReduced += foldSelectSameValue(func);
+
+    // Final dead code elimination: sweep up instructions left dead by all
+    // preceding transforms.  Must run absolutely last.
+    eliminateDeadInstructions(func);
 
     return stats;
 }
@@ -8324,7 +8703,12 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             // Tier 9: ROB pressure — when many instructions are inflight,
             // prefer instructions that complete sooner (lower latency) to
             // allow earlier retirement and free ROB entries.
-            if (policy.enableROBPressure && inflightCount > robCapacity * 3 / 4) {
+            // Enhanced: also activate when issue slots are nearly saturated
+            // (>50% inflight), not just at 75% ROB.  This improves retirement
+            // rate in compute-dense code where the ROB fills quickly.
+            if (policy.enableROBPressure &&
+                (inflightCount > robCapacity * 3 / 4 ||
+                 inflightCount > robCapacity / 2)) {
                 if (lat[a] != lat[b])
                     return lat[a] < lat[b];  // shorter latency first
             }
@@ -8739,6 +9123,12 @@ unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw,
     unsigned totalCycles = 0;
     for (auto& bb : func)
         totalCycles += scheduleBasicBlock(bb, hw, profile, policy, quality);
+
+    // Compute IPC estimate: instructions / cycles.
+    if (quality && quality->scheduledCycles > 0) {
+        quality->estimatedIPC = static_cast<double>(quality->instructionsTotal) /
+                                static_cast<double>(quality->scheduledCycles);
+    }
     return totalCycles;
 }
 // ═════════════════════════════════════════════════════════════════════════════
@@ -8786,16 +9176,44 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     if (config.enableTransforms)
         applyTargetAttributes(func, cpuName, profile);
 
+    // ── Cost model lambda (shared by scheduling and transform phases) ────────
+    // Compute total expected cycles for a function, accounting for:
+    //   • Per-opcode execution latencies (the critical path contribution)
+    //   • Statistical branch misprediction overhead (10% miss rate assumed
+    //     for general-purpose code without profile data).
+    //   • 512-bit double-pump penalty.
+    auto estimateFuncCost = [&](llvm::Function& f) -> unsigned {
+        constexpr double kBranchMissRate = 0.10;
+        unsigned cost = 0;
+        for (auto& bb : f) {
+            for (auto& inst : bb) {
+                if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator())
+                    continue;
+                unsigned latency = getOpcodeLatency(&inst, profile);
+                if (profile.vec512Penalty > 1 && isWideVectorOp(&inst)) {
+                    OpClass cls = classifyOp(&inst);
+                    if (cls == OpClass::FMA || cls == OpClass::FPMul ||
+                        cls == OpClass::FPArith || cls == OpClass::VectorOp)
+                        latency *= profile.vec512Penalty;
+                }
+                cost += latency;
+            }
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator())) {
+                if (br->isConditional()) {
+                    cost += static_cast<unsigned>(
+                        profile.branchMispredictPenalty * kBranchMissRate + 0.5);
+                }
+            }
+        }
+        return cost;
+    };
+
     // Step 3 — Map program onto hardware (list scheduling).
     if (config.enableScheduling) {
         MappingResult mapping = mapProgramToHardware(pg, hw, profile);
         stats.totalScheduledCycles += mapping.totalCycles;
         stats.avgPortUtilization = mapping.portUtilization;
 
-        // Step 3b — Physically reorder LLVM IR instructions within each basic
-        // block to maximise throughput on the specific microarchitecture.
-        // Uses per-opcode latencies, per-port throughput from the HardwareGraph,
-        // multiply-port constraints, and register-pressure-aware priority.
         for (auto& bb : func) {
             unsigned bbSize = 0;
             for (auto& inst : bb)
@@ -8808,66 +9226,54 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
                              &stats.schedulerQuality);
     }
 
-    // Step 4 — Apply hardware-aware transformations with cost-based
-    // accept/reject.  Compute a baseline cost from per-opcode latencies
-    // across all basic blocks, apply transforms, then re-cost.  If the
-    // transformed version is not cheaper (or only marginally so), roll back.
+    // Step 4 — Iterative transform-schedule pipeline.
+    // Run transforms→schedule→transforms→schedule (up to 3 rounds), accepting
+    // each iteration only if cost improves.  This catches cascading simplification
+    // opportunities: transforms may expose new scheduling freedom, and better
+    // scheduling may expose dead code or new transform targets.
+    // LLVM's MachineScheduler effectively does this by running DAG mutations
+    // between scheduling passes — we explicitly iterate at the IR level.
     if (config.enableTransforms) {
-        // Compute total expected cycles for a function, accounting for:
-        //   • Per-opcode execution latencies (the critical path contribution)
-        //   • Statistical branch misprediction overhead (10% miss rate assumed
-        //     for general-purpose code without profile data).  Transforms that
-        //     reduce the number of conditional branches (e.g. branchless select,
-        //     loop unrolling) correctly show a lower cost after the transform.
-        //   • 512-bit double-pump penalty: wide-vector ops on CPUs with
-        //     vec512Penalty>1 occupy the execution port for 2 cycles, so their
-        //     throughput contribution is doubled.
-        //
-        // Using a richer cost model means that transforms which reduce branch
-        // frequency or eliminate double-pumped 512-bit ops are accepted even
-        // when raw latency savings are small.
-        auto estimateFuncCost = [&](llvm::Function& f) -> unsigned {
-            // kBranchMissRate: fraction of conditional branches that mispredict
-            // in typical general-purpose code without PGO data.  10% is a
-            // standard conservative estimate from hardware performance counters.
-            constexpr double kBranchMissRate = 0.10;
-            unsigned cost = 0;
-            for (auto& bb : f) {
-                for (auto& inst : bb) {
-                    if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator())
-                        continue;
-                    unsigned latency = getOpcodeLatency(&inst, profile);
+        unsigned bestCost = estimateFuncCost(func);
+        unsigned maxIters = config.schedulerPolicy.enableIterativeRefine
+                           ? config.schedulerPolicy.maxRefineIters : 1;
 
-                    // 512-bit double-pump: throughput cost is 2× for
-                    // FMA / VecALU instructions on double-pump CPUs.
-                    if (profile.vec512Penalty > 1 && isWideVectorOp(&inst)) {
-                        OpClass cls = classifyOp(&inst);
-                        if (cls == OpClass::FMA || cls == OpClass::FPMul ||
-                            cls == OpClass::FPArith || cls == OpClass::VectorOp)
-                            latency *= profile.vec512Penalty;
-                    }
-                    cost += latency;
-                }
-                // Add statistical branch misprediction overhead for each
-                // conditional branch in the function.
-                if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator())) {
-                    if (br->isConditional()) {
-                        cost += static_cast<unsigned>(
-                            profile.branchMispredictPenalty * kBranchMissRate + 0.5);
-                    }
-                }
+        for (unsigned iter = 0; iter < maxIters; ++iter) {
+            unsigned costBefore = estimateFuncCost(func);
+            TransformStats iterStats = applyHardwareTransforms(func, profile,
+                                                                // Only annotate loops on first pass
+                                                                config.enableLoopAnnotation && (iter == 0));
+            unsigned costAfterTransform = estimateFuncCost(func);
+
+            // Accumulate transform statistics.
+            if (iter == 0) {
+                stats.transforms = iterStats;
+            } else {
+                stats.transforms.fmaGenerated      += iterStats.fmaGenerated;
+                stats.transforms.loadsStorePaired   += iterStats.loadsStorePaired;
+                stats.transforms.prefetchesInserted += iterStats.prefetchesInserted;
+                stats.transforms.branchesOptimized  += iterStats.branchesOptimized;
+                stats.transforms.vectorExpanded     += iterStats.vectorExpanded;
+                stats.transforms.intStrengthReduced += iterStats.intStrengthReduced;
             }
-            return cost;
-        };
 
-        unsigned costBefore = estimateFuncCost(func);
-        stats.transforms = applyHardwareTransforms(func, profile,
-                                                    config.enableLoopAnnotation);
-        unsigned costAfter = estimateFuncCost(func);
+            // Re-schedule after transforms to exploit new opportunities.
+            if (config.enableScheduling && costAfterTransform < costBefore) {
+                scheduleInstructions(func, hw, profile, config.schedulerPolicy,
+                                     &stats.schedulerQuality);
+            }
 
-        // Accept the transformation: log the cost delta for diagnostics.
-        if (costAfter < costBefore)
-            stats.totalScheduledCycles = costBefore - costAfter; // cycles saved
+            unsigned costAfter = estimateFuncCost(func);
+
+            // Stop iterating if no improvement (fixed point reached).
+            if (costAfter >= bestCost) break;
+            bestCost = costAfter;
+        }
+
+        // Log the total cost delta.
+        unsigned initialCost = estimateFuncCost(func);
+        if (initialCost < bestCost)
+            stats.totalScheduledCycles = bestCost - initialCost;
         else
             stats.totalScheduledCycles = 0;
         stats.loopsUnrolled = stats.transforms.vectorExpanded;

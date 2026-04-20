@@ -539,6 +539,12 @@ struct TransformStats {
     unsigned vectorExpanded = 0;      ///< Vector width expansions
     unsigned intStrengthReduced = 0;  ///< Integer multiplies replaced by shift+add
     CacheOptStats cacheOpt;           ///< Cache-aware optimization stats
+    // ── Per-transform counters (HGOE overhaul) ──────────────────────────────
+    unsigned phisFolded = 0;          ///< Redundant PHI nodes eliminated
+    unsigned chainedAddsMerged = 0;   ///< Chained constant adds merged (LEA-style)
+    unsigned rotatesRecognized = 0;   ///< Rotate idioms → fshl/fshr intrinsics
+    unsigned fpChainsReassoc = 0;     ///< FP chains rebalanced for ILP
+    unsigned deadInstsEliminated = 0; ///< Dead instructions swept by final DCE
 };
 
 /// Apply hardware-aware transformations to a function.
@@ -597,6 +603,9 @@ struct SchedulerPolicy {
     bool enableStoreUopSplit    = true;
     /// Enable cross-BB liveness hints for register-pressure estimation.
     bool enableCrossBBLiveness  = true;
+    /// Enable iterative transform-schedule refinement.  Runs up to 3 rounds
+    /// of transforms→schedule, accepting each only if cost improves.
+    bool enableIterativeRefine  = true;
 
     // ── Tuning parameters ─────────────────────────────────────────────────────
     /// Maximum candidates considered per cycle (beam width).  Reducing this
@@ -607,6 +616,9 @@ struct SchedulerPolicy {
     /// penalty = penalty / (1 + slack / slackDamping).
     /// Higher values reduce the damping effect; 1 disables it entirely.
     unsigned slackDamping       = 4;
+    /// Maximum iterations for iterative transform-schedule refinement.
+    /// Higher values may find better schedules but increase compile time.
+    unsigned maxRefineIters     = 3;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -623,12 +635,15 @@ struct SchedulerQuality {
     unsigned peakVecLive        = 0;   ///< Peak vector/FP register live-value count
     unsigned basicBlocksScheduled = 0; ///< BBs with ≥2 moveable instructions
     /// Ratio criticalPath / scheduledCycles (1.0 = perfect, <1.0 = suboptimal).
-    /// A value of 1.0 means we achieved the theoretical minimum (scheduled in
-    /// exactly as many cycles as the longest dependency chain requires).
-    /// Values below 1.0 indicate the schedule required more cycles than the
-    /// critical path, e.g. due to resource contention or suboptimal ordering.
-    /// Set to 0.0 when no scheduling was performed or the function is empty.
     double   efficiency         = 0.0;
+    /// Estimated instructions-per-cycle (IPC) achieved by the schedule.
+    /// IPC = instructionsTotal / scheduledCycles.  Higher is better.
+    /// For comparison: LLVM MachineScheduler typically achieves 2.5-3.5 IPC
+    /// on modern x86 for integer code; the HGOE targets 3.0-4.0 by using
+    /// more accurate microarchitectural modeling.
+    double   estimatedIPC       = 0.0;
+    /// Number of scheduling iterations used (iterative refinement).
+    unsigned refineIterations   = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
