@@ -3218,6 +3218,45 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
                     continue;
                 }
             }
+
+            // Pattern: fneg(fma_result) where fma_result = fadd(fmul(a,b), c)
+            // → fma(-a, b, -c) (FNMSUB: fused negate-multiply-subtract)
+            // This matches the pattern: -(a*b + c) which is common in
+            // Newton-Raphson iterations and coordinate transforms.
+            if (inst.getOpcode() == llvm::Instruction::FNeg) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                if (inner && inner->getOpcode() == llvm::Instruction::FAdd &&
+                    inner->hasOneUse()) {
+                    auto* fpAdd = llvm::cast<llvm::FPMathOperator>(inner);
+                    if (fpAdd->hasAllowContract()) {
+                        for (int swap = 0; swap < 2; ++swap) {
+                            auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(
+                                inner->getOperand(swap));
+                            llvm::Value* addend = inner->getOperand(1 - swap);
+                            if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
+                                fmul->hasOneUse()) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Module* mod = func.getParent();
+                                llvm::Type* ty = inst.getType();
+                                llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                                    mod, llvm::Intrinsic::fma, {ty});
+                                llvm::Value* negA = builder.CreateFNeg(
+                                    fmul->getOperand(0), "fnmsub.neg_a");
+                                llvm::Value* negC = builder.CreateFNeg(
+                                    addend, "fnmsub.neg_c");
+                                llvm::Value* result = builder.CreateCall(
+                                    fmaFn, {negA, fmul->getOperand(1), negC}, "fnmsub");
+                                inst.replaceAllUsesWith(result);
+                                toErase.push_back(&inst);
+                                toErase.push_back(inner);
+                                toErase.push_back(fmul);
+                                count++;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3664,6 +3703,27 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
             unsigned a = static_cast<unsigned>(__builtin_ctzll(adjusted));
             if (a > b && a < bitWidth)
                 return builder.CreateSub(shl(xv, a), shl(xv, b), "sr.sub2");
+        }
+    }
+
+    // ── Form 4: (2^a + 1) * 2^b  → add(shl(x, a+b), shl(x, b)) ──────────
+    // Catches constants like 3*2^k, 5*2^k, 9*2^k, 17*2^k which are very
+    // common in array indexing (sizeof(struct) * index).
+    {
+        unsigned b = static_cast<unsigned>(__builtin_ctzll(absCV));
+        uint64_t inner = absCV >> b;
+        if (inner > 1 && ((inner - 1) & (inner - 2)) == 0) {
+            // inner = 2^a + 1
+            unsigned a = static_cast<unsigned>(__builtin_ctzll(inner - 1));
+            if (a + b < bitWidth)
+                return builder.CreateAdd(shl(xv, a + b), shl(xv, b), "sr.p2p1");
+        }
+        // (2^a - 1) * 2^b  → sub(shl(x, a+b), shl(x, b))
+        if (inner > 1 && ((inner + 1) & inner) == 0) {
+            // inner = 2^a - 1
+            unsigned a = static_cast<unsigned>(64 - __builtin_clzll(inner + 1)) - 1;
+            if (a + b < bitWidth)
+                return builder.CreateSub(shl(xv, a + b), shl(xv, b), "sr.p2m1");
         }
     }
 

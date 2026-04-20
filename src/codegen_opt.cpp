@@ -1044,7 +1044,14 @@ private:
         // Expected value model:
         //   convert iff speculative compute cost is lower than expected
         //   branch-mispredict penalty.
-        const double confidenceScaledRate = hasProfWeights ? minProb : (minProb * 0.35);
+        // Scale factor: with profile weights we trust the probability exactly;
+        // without, we use 0.5 (conservative assumption: modern CPUs achieve
+        // ~93-97% prediction accuracy for structured code, so the minority
+        // side has ~3-7% probability, but for truly unpredictable branches
+        // minProb ≈ 0.5 and the penalty dominates).  The old 0.35 was too
+        // pessimistic, causing us to keep branches that modern OoO CPUs
+        // would mispredict frequently in tight loops.
+        const double confidenceScaledRate = hasProfWeights ? minProb : (minProb * 0.50);
         const double expectedMispredictCost =
             confidenceScaledRate * model.branchMispredictPenaltyUops;
         if (static_cast<double>(trueN + falseN) >= expectedMispredictCost)

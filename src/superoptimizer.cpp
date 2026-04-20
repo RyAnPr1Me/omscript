@@ -952,6 +952,32 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         }
     }
 
+    // Pattern 2b: Reverse XOR-subtract trick: (x >> (W-1)) + (x ^ (x >> (W-1)))
+    // Some compilers emit abs as: signBit = ashr x, W-1; result = (signBit + x) ^ signBit
+    // or: result = add(ashr(x, W-1), xor(x, ashr(x, W-1)))
+    if (inst->getOpcode() == llvm::Instruction::Add) {
+        for (int side = 0; side < 2; ++side) {
+            auto* ashr = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(side));
+            auto* xorOp = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(1 - side));
+            if (!ashr || !xorOp) continue;
+            if (ashr->getOpcode() != llvm::Instruction::AShr) continue;
+            if (xorOp->getOpcode() != llvm::Instruction::Xor) continue;
+            llvm::Value* x = ashr->getOperand(0);
+            unsigned bitWidth = inst->getType()->getIntegerBitWidth();
+            if (!isConstInt(ashr->getOperand(1), bitWidth - 1)) continue;
+            // xor must be x ^ ashr
+            if ((xorOp->getOperand(0) == x && xorOp->getOperand(1) == ashr) ||
+                (xorOp->getOperand(1) == x && xorOp->getOperand(0) == ashr)) {
+                IdiomMatch match;
+                match.idiom = Idiom::AbsoluteValue;
+                match.rootInst = inst;
+                match.operands = {x};
+                match.bitWidth = bitWidth;
+                return match;
+            }
+        }
+    }
+
     // Pattern 3: abs(a - b) from select(a > b, a-b, b-a) or select(a < b, b-a, a-b)
     //
     // This is the canonical "absolute difference" or "distance" pattern:
@@ -2282,31 +2308,39 @@ static bool replaceIdiom(IdiomMatch& match) {
             llvm::Value* simplified = nullptr;
 
             // Pattern: (x * c1) * c2 → x * (c1*c2) when constants in different BBs
+            // Also handles commutative variants: c2 * (x * c1), c2 * (c1 * x), etc.
             if (inst.getOpcode() == llvm::Instruction::Mul) {
-                auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
-                auto c2 = getConstIntValue(inst.getOperand(1));
-                if (lhs && c2 && lhs->getOpcode() == llvm::Instruction::Mul) {
-                    auto c1 = getConstIntValue(lhs->getOperand(1));
-                    if (c1 && hasOneUse(lhs)) {
+                for (int outerSide = 0; outerSide < 2 && !simplified; ++outerSide) {
+                    auto c2 = getConstIntValue(inst.getOperand(outerSide));
+                    auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1 - outerSide));
+                    if (!c2 || !inner || inner->getOpcode() != llvm::Instruction::Mul) continue;
+                    if (!hasOneUse(inner)) continue;
+                    for (int innerSide = 0; innerSide < 2 && !simplified; ++innerSide) {
+                        auto c1 = getConstIntValue(inner->getOperand(innerSide));
+                        if (!c1) continue;
                         llvm::IRBuilder<> builder(&inst);
                         llvm::Value* combined = llvm::ConstantInt::get(
                             inst.getType(), *c1 * *c2);
-                        simplified = builder.CreateMul(lhs->getOperand(0), combined, "mulcombine");
+                        simplified = builder.CreateMul(inner->getOperand(1 - innerSide), combined, "mulcombine");
                     }
                 }
             }
 
             // Pattern: (x + c1) + c2 → x + (c1+c2)
-            if (inst.getOpcode() == llvm::Instruction::Add) {
-                auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
-                auto c2 = getConstIntValue(inst.getOperand(1));
-                if (lhs && c2 && lhs->getOpcode() == llvm::Instruction::Add) {
-                    auto c1 = getConstIntValue(lhs->getOperand(1));
-                    if (c1 && hasOneUse(lhs)) {
+            // Also handles commutative variants: c2 + (x + c1), c2 + (c1 + x), etc.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                for (int outerSide = 0; outerSide < 2 && !simplified; ++outerSide) {
+                    auto c2 = getConstIntValue(inst.getOperand(outerSide));
+                    auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1 - outerSide));
+                    if (!c2 || !inner || inner->getOpcode() != llvm::Instruction::Add) continue;
+                    if (!hasOneUse(inner)) continue;
+                    for (int innerSide = 0; innerSide < 2 && !simplified; ++innerSide) {
+                        auto c1 = getConstIntValue(inner->getOperand(innerSide));
+                        if (!c1) continue;
                         llvm::IRBuilder<> builder(&inst);
                         llvm::Value* combined = llvm::ConstantInt::get(
                             inst.getType(), *c1 + *c2);
-                        simplified = builder.CreateAdd(lhs->getOperand(0), combined, "addcombine");
+                        simplified = builder.CreateAdd(inner->getOperand(1 - innerSide), combined, "addcombine");
                     }
                 }
             }
@@ -2943,43 +2977,56 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // Pattern: (x * c1) + (x * c2) → x * (c1 + c2)
+            // Handles all commutative operand orderings of the constants.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
                 auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
                 if (lhs && rhs &&
                     lhs->getOpcode() == llvm::Instruction::Mul &&
-                    rhs->getOpcode() == llvm::Instruction::Mul) {
-                    auto c1 = getConstIntValue(lhs->getOperand(1));
-                    auto c2 = getConstIntValue(rhs->getOperand(1));
-                    if (c1 && c2 &&
-                        lhs->getOperand(0) == rhs->getOperand(0) &&
-                        hasOneUse(lhs) && hasOneUse(rhs)) {
-                        llvm::IRBuilder<> builder(&inst);
-                        llvm::Value* combined = llvm::ConstantInt::get(
-                            inst.getType(), *c1 + *c2);
-                        simplified = builder.CreateMul(lhs->getOperand(0), combined,
-                            "factor_mul");
+                    rhs->getOpcode() == llvm::Instruction::Mul &&
+                    hasOneUse(lhs) && hasOneUse(rhs)) {
+                    // Try all 4 combinations of which operand is the constant
+                    for (int ls = 0; ls < 2 && !simplified; ++ls) {
+                        auto c1 = getConstIntValue(lhs->getOperand(ls));
+                        if (!c1) continue;
+                        llvm::Value* x1 = lhs->getOperand(1 - ls);
+                        for (int rs = 0; rs < 2 && !simplified; ++rs) {
+                            auto c2 = getConstIntValue(rhs->getOperand(rs));
+                            if (!c2) continue;
+                            llvm::Value* x2 = rhs->getOperand(1 - rs);
+                            if (x1 != x2) continue;
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::Value* combined = llvm::ConstantInt::get(
+                                inst.getType(), *c1 + *c2);
+                            simplified = builder.CreateMul(x1, combined, "factor_mul");
+                        }
                     }
                 }
             }
 
             // Pattern: (x * c1) - (x * c2) → x * (c1 - c2)
+            // Handles all commutative operand orderings of the constants.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
                 auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
                 if (lhs && rhs &&
                     lhs->getOpcode() == llvm::Instruction::Mul &&
-                    rhs->getOpcode() == llvm::Instruction::Mul) {
-                    auto c1 = getConstIntValue(lhs->getOperand(1));
-                    auto c2 = getConstIntValue(rhs->getOperand(1));
-                    if (c1 && c2 &&
-                        lhs->getOperand(0) == rhs->getOperand(0) &&
-                        hasOneUse(lhs) && hasOneUse(rhs)) {
-                        llvm::IRBuilder<> builder(&inst);
-                        llvm::Value* combined = llvm::ConstantInt::get(
-                            inst.getType(), *c1 - *c2);
-                        simplified = builder.CreateMul(lhs->getOperand(0), combined,
-                            "factor_sub_mul");
+                    rhs->getOpcode() == llvm::Instruction::Mul &&
+                    hasOneUse(lhs) && hasOneUse(rhs)) {
+                    for (int ls = 0; ls < 2 && !simplified; ++ls) {
+                        auto c1 = getConstIntValue(lhs->getOperand(ls));
+                        if (!c1) continue;
+                        llvm::Value* x1 = lhs->getOperand(1 - ls);
+                        for (int rs = 0; rs < 2 && !simplified; ++rs) {
+                            auto c2 = getConstIntValue(rhs->getOperand(rs));
+                            if (!c2) continue;
+                            llvm::Value* x2 = rhs->getOperand(1 - rs);
+                            if (x1 != x2) continue;
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::Value* combined = llvm::ConstantInt::get(
+                                inst.getType(), *c1 - *c2);
+                            simplified = builder.CreateMul(x1, combined, "factor_sub_mul");
+                        }
                     }
                 }
             }
@@ -7356,8 +7403,13 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
 
     for (auto& bb : func) {
         if (auto* sw = llvm::dyn_cast<llvm::SwitchInst>(bb.getTerminator())) {
-            // Only handle small switches (≤8 non-default cases)
-            if (sw->getNumCases() >= 2 && sw->getNumCases() <= 8) {
+            // Handle switches up to 16 non-default cases.  A 16-case switch
+            // produces at most 4 levels of cascaded selects (depth = log₂(16)).
+            // Each select is 1 cycle (CMOV on x86), so the worst case is 4
+            // cycles vs. a branch-mispredict penalty of 15-20 cycles on modern
+            // OoO CPUs (Haswell+, Zen2+).  This is profitable for any switch
+            // that isn't dominated by a perfectly-predicted branch.
+            if (sw->getNumCases() >= 2 && sw->getNumCases() <= 16) {
                 toProcess.push_back(sw);
             }
         }
@@ -7404,7 +7456,7 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
             for (auto& inst : *caseBB) {
                 if (!inst.isTerminator()) instCount++;
             }
-            if (instCount > 3) { allConverge = false; break; }
+            if (instCount > 5) { allConverge = false; break; }
         }
         if (!allConverge || anySideEffects) continue;
 

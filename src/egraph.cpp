@@ -33,14 +33,16 @@ namespace egraph {
 
 Cost CostModel::nodeCost(const ENode& node) const {
     switch (node.op) {
-    // Free / near-free operations
+    // Free / near-free operations — materialized as immediate operands
+    // or register copies (0 latency in the OoO backend)
     case Op::Const:
     case Op::ConstF:
     case Op::Var:
     case Op::Nop:
         return 0.1;
 
-    // Simple ALU ops — 1 cycle latency on modern x86
+    // Simple ALU ops — 1 cycle latency, 0.25 reciprocal throughput on
+    // modern x86 (4 ALU ports on Skylake/Zen3+).  Cost 1.0 is correct.
     case Op::Add:
     case Op::Sub:
     case Op::Neg:
@@ -52,16 +54,18 @@ Cost CostModel::nodeCost(const ENode& node) const {
     case Op::Shr:
         return 1.0;
 
-    // Multiply — 3 cycles on modern x86
+    // Multiply — 3 cycles latency, 1 cycle throughput on Skylake/Zen3.
+    // Cost should reflect latency (3) since it appears on the critical path.
     case Op::Mul:
         return 3.0;
 
-    // Division/modulo — 20-40 cycles, very expensive
+    // Division/modulo — 20-90 cycles (data-dependent), very expensive.
+    // Div is the single most important target for strength reduction.
     case Op::Div:
     case Op::Mod:
-        return 25.0;
+        return 30.0;
 
-    // Comparisons — 1 cycle
+    // Comparisons — 1 cycle (same ALU port as add/sub)
     case Op::Eq:
     case Op::Ne:
     case Op::Lt:
@@ -70,24 +74,39 @@ Cost CostModel::nodeCost(const ENode& node) const {
     case Op::Ge:
         return 1.0;
 
-    // Logical ops
+    // Logical ops — at the AST level these imply short-circuit evaluation
+    // which means a branch.  A branch costs ~1 cycle when predicted
+    // correctly, but misprediction is ~15 cycles.  Cost 2.0 incentivizes
+    // the e-graph to prefer bitwise-and/or rewrites (cost 1.0) when safe,
+    // while still recognizing that logical ops are NOT as expensive as a
+    // full function call.  (Previous value 1.5 was too close to bitwise
+    // ops, making the e-graph indifferent between them.)
     case Op::LogAnd:
     case Op::LogOr:
-        return 1.5; // Slightly more due to short-circuit branch
+        return 2.0;
     case Op::LogNot:
         return 1.0;
 
-    // Math — power is very expensive, sqrt moderate
+    // Power — general pow() is a library call (~50-100 cycles).
+    // Cost 50.0 strongly incentivizes pow(x,2)→x*x, pow(x,3)→x*x*x, etc.
     case Op::Pow:
         return 50.0;
+    // Sqrt — ~12-15 cycles on Skylake (SQRTSS), ~10-14 on Zen3.
     case Op::Sqrt:
-        return 10.0;
+        return 12.0;
 
-    // Ternary (branch) — moderate due to branch prediction
+    // Ternary (select) — at the AST level this represents a conditional
+    // expression.  When lowered to LLVM IR as a select instruction, it is
+    // 1 cycle (CMOV on x86).  But at the AST level we model it at 1.5
+    // to slightly prefer arithmetic rewrites over branching, while keeping
+    // it cheaper than any multi-instruction alternative.
+    // (Previous value 3.0 was far too high — caused the e-graph to avoid
+    //  min()/max()/clamp() patterns that lower to single CMOVs.)
     case Op::Ternary:
-        return 3.0;
+        return 1.5;
 
-    // Function call — overhead from call/ret + potential cache miss
+    // Function call — call/ret overhead + potential I-cache miss.
+    // General calls can be ~5-20 cycles; use 15 as a conservative middle.
     case Op::Call:
         return 15.0;
     }
