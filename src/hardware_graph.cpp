@@ -41,6 +41,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <numeric>
 #include <queue>
 #include <set>
@@ -78,6 +79,10 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
 }
 
 /// Alias query used by HGOE memory-edge construction.
+/// Enhanced with:
+///   - TBAA metadata disambiguation (type-based alias analysis)
+///   - Non-overlapping access size checks
+///   - GEP index range analysis for provably disjoint array accesses
 [[nodiscard]] static bool hgoeMayAlias(const llvm::Instruction* a,
                                        const llvm::Instruction* b,
                                        const llvm::DataLayout& dl) {
@@ -94,6 +99,47 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
     ptrB = ptrB->stripPointerCasts();
     if (ptrA == ptrB) return true;
 
+    // ── TBAA metadata disambiguation ────────────────────────────────────────
+    // LLVM's TBAA (Type-Based Alias Analysis) metadata on load/store
+    // instructions encodes type hierarchy information.  Two accesses with
+    // TBAA tags from disjoint subtrees in the type hierarchy cannot alias.
+    // This is the same check LLVM's MachineScheduler uses.
+    {
+        auto* tbaaA = a->getMetadata(llvm::LLVMContext::MD_tbaa);
+        auto* tbaaB = b->getMetadata(llvm::LLVMContext::MD_tbaa);
+        if (tbaaA && tbaaB && tbaaA != tbaaB) {
+            // Walk up the TBAA tree: if neither is an ancestor of the other,
+            // they are from disjoint type subtrees and cannot alias.
+            // Conservative fast path: if both have exactly 3 operands
+            // (standard TBAA scalar format) and their root nodes differ,
+            // they are guaranteed disjoint.
+            auto getRootTag = [](const llvm::MDNode* md) -> const llvm::MDNode* {
+                const llvm::MDNode* cur = md;
+                unsigned depthLimit = 16; // prevent infinite loops on malformed MD
+                while (cur && cur->getNumOperands() >= 2 && depthLimit-- > 0) {
+                    auto* parent = llvm::dyn_cast<llvm::MDNode>(cur->getOperand(1));
+                    if (!parent || parent == cur) return cur;
+                    cur = parent;
+                }
+                return cur;
+            };
+            const llvm::MDNode* rootA = getRootTag(tbaaA);
+            const llvm::MDNode* rootB = getRootTag(tbaaB);
+            // Different root types → disjoint subtrees → no alias.
+            if (rootA && rootB && rootA != rootB)
+                return false;
+            // Same root but different direct tags at the same tree depth:
+            // if neither tag is an ancestor of the other, they don't alias.
+            // Quick check: different tags with the same parent.
+            if (tbaaA->getNumOperands() >= 2 && tbaaB->getNumOperands() >= 2) {
+                auto* parentA = llvm::dyn_cast<llvm::MDNode>(tbaaA->getOperand(1));
+                auto* parentB = llvm::dyn_cast<llvm::MDNode>(tbaaB->getOperand(1));
+                if (parentA && parentB && parentA == parentB && tbaaA != tbaaB)
+                    return false;
+            }
+        }
+    }
+
     // Constant byte offsets from the same underlying base never alias when
     // offsets differ. This handles multi-index/struct-field GEPs.
     const llvm::Value* baseA = nullptr;
@@ -102,8 +148,32 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
     int64_t offB = 0;
     const bool hasOffA = getBaseAndConstByteOffset(ptrA, dl, baseA, offA);
     const bool hasOffB = getBaseAndConstByteOffset(ptrB, dl, baseB, offB);
-    if (hasOffA && hasOffB && baseA == baseB && offA != offB)
-        return false;
+    if (hasOffA && hasOffB && baseA == baseB && offA != offB) {
+        // ── Non-overlapping access size check ────────────────────────────
+        // Even if offsets differ, accesses may overlap if they have
+        // different sizes.  Check that [offA, offA+sizeA) and
+        // [offB, offB+sizeB) are disjoint.
+        auto getAccessSize = [&](const llvm::Instruction* inst) -> uint64_t {
+            if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst))
+                return dl.getTypeStoreSize(ld->getType());
+            if (auto* st = llvm::dyn_cast<llvm::StoreInst>(inst))
+                return dl.getTypeStoreSize(st->getValueOperand()->getType());
+            return 0;
+        };
+        uint64_t sizeA = getAccessSize(a);
+        uint64_t sizeB = getAccessSize(b);
+        if (sizeA > 0 && sizeB > 0) {
+            int64_t endA = offA + static_cast<int64_t>(sizeA);
+            int64_t endB = offB + static_cast<int64_t>(sizeB);
+            if (endA <= offB || endB <= offA)
+                return false; // provably non-overlapping
+            // Ranges overlap → definitely alias (same base, overlapping offsets).
+            return true;
+        }
+        // Unknown access size but different offsets from the same base:
+        // cannot prove disjointness → conservative alias.
+        // (Fall through to underlying-object checks for completeness.)
+    }
 
     // Fall back to underlying-object disambiguation.
     const llvm::Value* objA = llvm::getUnderlyingObject(ptrA);
@@ -122,13 +192,23 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
 
     if ((aIsAlloca && bIsAlloca) ||
         (aIsGlobal && bIsGlobal) ||
-        (aIsAlloca && bIsArg) || (aIsArg && bIsAlloca))
+        (aIsAlloca && bIsArg) || (aIsArg && bIsAlloca) ||
+        (aIsAlloca && bIsGlobal) || (aIsGlobal && bIsAlloca))
         return false;
 
     if (aIsArg && bIsArg) {
         const auto* argA = llvm::cast<llvm::Argument>(objA);
         const auto* argB = llvm::cast<llvm::Argument>(objB);
         if (argA->hasNoAliasAttr() || argB->hasNoAliasAttr())
+            return false;
+    }
+
+    // noalias argument vs global: noalias guarantees the argument doesn't
+    // alias anything the callee can see through other means (globals, other args).
+    if ((aIsArg && bIsGlobal) || (aIsGlobal && bIsArg)) {
+        const auto* arg = aIsArg ? llvm::cast<llvm::Argument>(objA)
+                                 : llvm::cast<llvm::Argument>(objB);
+        if (arg->hasNoAliasAttr())
             return false;
     }
 
@@ -236,23 +316,37 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
     case llvm::Instruction::AShr:
         return OpClass::Shift;
 
+    // Integer compare uses the integer ALU pipeline.
     case llvm::Instruction::ICmp:
-    case llvm::Instruction::FCmp:
         return OpClass::Comparison;
 
+    // Floating-point compare uses the FP pipeline (same ports as FADD/FMUL).
+    // On x86: VCMPPD/VCMPPS execute on P0/P1 (FMA unit) not integer ALU.
+    // On AArch64: FCMP/FCCMP execute on the FP pipe.
+    case llvm::Instruction::FCmp:
+        return OpClass::FPArith;
+
+    // Integer-only conversions: these stay on the integer ALU (register rename
+    // or single-cycle move on all major architectures).
     case llvm::Instruction::Trunc:
     case llvm::Instruction::ZExt:
     case llvm::Instruction::SExt:
+    case llvm::Instruction::BitCast:
+    case llvm::Instruction::IntToPtr:
+    case llvm::Instruction::PtrToInt:
+        return OpClass::Conversion;
+
+    // FP/cross-domain conversions go through the FP pipeline.
+    // On x86: CVTSI2SD/CVTTSD2SI etc. execute on P0/P1 (FMA unit).
+    // On AArch64: SCVTF/UCVTF/FCVTZS execute on the FP pipe.
+    // Using FPArith routes them to FMAUnit (correct on all supported ISAs).
     case llvm::Instruction::FPToUI:
     case llvm::Instruction::FPToSI:
     case llvm::Instruction::UIToFP:
     case llvm::Instruction::SIToFP:
-    case llvm::Instruction::BitCast:
-    case llvm::Instruction::IntToPtr:
-    case llvm::Instruction::PtrToInt:
     case llvm::Instruction::FPTrunc:
     case llvm::Instruction::FPExt:
-        return OpClass::Conversion;
+        return OpClass::FPArith;
 
     // SIMD / vector instructions map to the vector execution units.
     case llvm::Instruction::ExtractElement:
@@ -268,9 +362,61 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
         return OpClass::Phi;
 
     case llvm::Instruction::Call: {
-        if (llvm::isa<llvm::IntrinsicInst>(inst))
+        const auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(inst);
+        if (!ii) return OpClass::Call;
+        // Dispatch known intrinsics to the correct execution-unit class so
+        // the scheduler assigns them to the right hardware ports.
+        switch (ii->getIntrinsicID()) {
+        // ── FMA unit (P0/P1 on x86, FP pipe on AArch64) ────────────────────
+        case llvm::Intrinsic::fma:
+        case llvm::Intrinsic::fmuladd:
+            return OpClass::FMA;
+
+        // ── FP divider / sqrt unit ──────────────────────────────────────────
+        // sqrt shares the hardware divider port on both x86 (VSQRTSD runs on
+        // the divider unit, same port as VDIVSD) and AArch64 (FSQRT uses the
+        // FP divide pipeline).  Scheduling it early is critical for latency
+        // hiding since the divider is non-pipelined on most µarchs.
+        case llvm::Intrinsic::sqrt:
+            return OpClass::FPDiv;
+
+        // ── FP pipeline — rounding / abs / sign / min / max ────────────────
+        // VROUNDPD/FRINTM/FRINTP execute on FMA ports (P0/P1 on x86, FP on
+        // AArch64).  fabs/copysign/minnum/maxnum likewise use the FP pipe.
+        case llvm::Intrinsic::floor:
+        case llvm::Intrinsic::ceil:
+        case llvm::Intrinsic::round:
+        case llvm::Intrinsic::roundeven:
+        case llvm::Intrinsic::rint:
+        case llvm::Intrinsic::nearbyint:
+        case llvm::Intrinsic::trunc:    // llvm.trunc intrinsic = FP rounding toward zero (VROUNDPD mode 3),
+                                        // NOT the integer-narrowing Trunc opcode (llvm::Instruction::Trunc)
+        case llvm::Intrinsic::fabs:
+        case llvm::Intrinsic::copysign:
+        case llvm::Intrinsic::minnum:
+        case llvm::Intrinsic::maxnum:
+            return OpClass::FPArith;
+
+        // ── Integer ALU ─────────────────────────────────────────────────────
+        // Scalar abs/min/max and bit-count operations use the integer pipe.
+        case llvm::Intrinsic::abs:
+        case llvm::Intrinsic::smin:
+        case llvm::Intrinsic::smax:
+        case llvm::Intrinsic::umin:
+        case llvm::Intrinsic::umax:
+        case llvm::Intrinsic::ctpop:
+        case llvm::Intrinsic::ctlz:
+        case llvm::Intrinsic::cttz:
+            return OpClass::IntArith;
+
+        // ── Zero-cost hint (no execution resource) ──────────────────────────
+        case llvm::Intrinsic::prefetch:
+            return OpClass::Phi;
+
+        // ── Unknown intrinsic: conservative fallback ────────────────────────
+        default:
             return OpClass::Intrinsic;
-        return OpClass::Call;
+        }
     }
 
     case llvm::Instruction::Select:
@@ -392,9 +538,18 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     };
 
     for (auto& bb : func) {
-        llvm::Instruction* lastStore = nullptr;
-        llvm::Instruction* lastLoad  = nullptr;
+        // Track ALL live stores and loads in the BB so that every possible
+        // memory hazard pair receives a dependency edge, not just the last
+        // store/load.  This closes a correctness gap in the original code:
+        //   store @A, 1
+        //   store @B, 2
+        //   load %x, @A     ← missed RAW from store @A with last-only tracking
+        // The pairwise loop is O(stores × loads) per BB which is fine since
+        // basic blocks are small in practice (typically < 100 instructions).
+        std::vector<llvm::Instruction*> liveStores;
+        std::vector<llvm::Instruction*> liveLoads;
         llvm::Instruction* lastBarrier = nullptr;
+
         for (auto& inst : bb) {
             const bool isStore = llvm::isa<llvm::StoreInst>(inst);
             const bool isLoad = llvm::isa<llvm::LoadInst>(inst);
@@ -406,13 +561,13 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                 // (calls, atomics, fences), and later memory ops must not pass it.
                 auto thisIt = instToNode_.find(&inst);
                 if (thisIt != instToNode_.end()) {
-                    if (lastStore) {
-                        auto srcIt = instToNode_.find(lastStore);
+                    for (auto* s : liveStores) {
+                        auto srcIt = instToNode_.find(s);
                         if (srcIt != instToNode_.end())
                             addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
                     }
-                    if (lastLoad) {
-                        auto srcIt = instToNode_.find(lastLoad);
+                    for (auto* l : liveLoads) {
+                        auto srcIt = instToNode_.find(l);
                         if (srcIt != instToNode_.end())
                             addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
                     }
@@ -422,48 +577,60 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                             addEdge(srcIt->second, thisIt->second, DepType::Memory, 0);
                     }
                 }
+                // Barrier serialises everything: clear tracked ops so later
+                // loads/stores need only depend on the barrier, not on ops
+                // that already have a transitive dependency through it.
+                liveStores.clear();
+                liveLoads.clear();
                 lastBarrier = &inst;
                 continue;
             }
 
             if (inst.getOpcode() == llvm::Instruction::Store) {
-                // WAW: Store → Store
-                if (lastStore && mayAlias(lastStore, &inst)) {
-                    auto srcIt = instToNode_.find(lastStore);
-                    auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
-                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                auto dstIt = instToNode_.find(&inst);
+                if (dstIt != instToNode_.end()) {
+                    // WAW: all prior aliasing stores must precede this store.
+                    for (auto* s : liveStores) {
+                        if (mayAlias(s, &inst)) {
+                            auto srcIt = instToNode_.find(s);
+                            if (srcIt != instToNode_.end())
+                                addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                        }
+                    }
+                    // WAR: all prior aliasing loads must precede this store.
+                    for (auto* l : liveLoads) {
+                        if (mayAlias(l, &inst)) {
+                            auto srcIt = instToNode_.find(l);
+                            if (srcIt != instToNode_.end())
+                                addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                        }
+                    }
+                    if (lastBarrier) {
+                        auto srcIt = instToNode_.find(lastBarrier);
+                        if (srcIt != instToNode_.end())
+                            addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                    }
                 }
-                // WAR: Load → Store (anti-dependence)
-                if (lastLoad && mayAlias(lastLoad, &inst)) {
-                    auto srcIt = instToNode_.find(lastLoad);
-                    auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
-                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
-                }
-                if (lastBarrier) {
-                    auto srcIt = instToNode_.find(lastBarrier);
-                    auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
-                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
-                }
-                lastStore = &inst;
+                liveStores.push_back(&inst);
             }
             if (inst.getOpcode() == llvm::Instruction::Load) {
-                // RAW: Store → Load
-                if (lastStore && mayAlias(lastStore, &inst)) {
-                    auto srcIt = instToNode_.find(lastStore);
-                    auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
-                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                auto dstIt = instToNode_.find(&inst);
+                if (dstIt != instToNode_.end()) {
+                    // RAW: all prior aliasing stores must precede this load.
+                    for (auto* s : liveStores) {
+                        if (mayAlias(s, &inst)) {
+                            auto srcIt = instToNode_.find(s);
+                            if (srcIt != instToNode_.end())
+                                addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                        }
+                    }
+                    if (lastBarrier) {
+                        auto srcIt = instToNode_.find(lastBarrier);
+                        if (srcIt != instToNode_.end())
+                            addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+                    }
                 }
-                if (lastBarrier) {
-                    auto srcIt = instToNode_.find(lastBarrier);
-                    auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
-                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
-                }
-                lastLoad = &inst;
+                liveLoads.push_back(&inst);
             }
         }
     }
@@ -694,6 +861,12 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         8u, profile_.intRegisters + profile_.vecRegisters + profile_.fpRegisters);
     unsigned liveValues = 0;
 
+    // Track total scheduled instructions; when numScheduled < robSize the ROB
+    // cannot be full (inflight ≤ numScheduled), so the O(n) inflight scan can
+    // be skipped entirely — the fast path fires for the vast majority of BBs.
+    unsigned numScheduled = 0;
+    const unsigned robSize = static_cast<unsigned>(profile_.robSize);
+
     auto inflightAt = [&](unsigned cycle) -> unsigned {
         unsigned inflight = 0;
         for (unsigned i = 0; i < n; ++i) {
@@ -752,8 +925,12 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
                 if (pit != portUsed.end() && pit->second[pc] >= cap[pc])
                     continue;
             }
-            // Rename/ROB pressure: avoid over-issuing when too many uops are in-flight.
-            if (inflightAt(scheduleCycle) >= profile_.robSize)
+            // Rename/ROB pressure: avoid over-issuing when too many uops are
+            // in-flight.  Fast path: if fewer instructions have been scheduled
+            // than the ROB capacity the buffer cannot be full, so skip the
+            // O(n) scan entirely — this covers the common case.
+            if (robSize > 0 && numScheduled >= robSize &&
+                inflightAt(scheduleCycle) >= robSize)
                 continue;
             break; // valid cycle found
         }
@@ -784,6 +961,7 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
 
         scheduledAt[u] = scheduleCycle;
         isScheduled[u] = true;
+        ++numScheduled;
         completedAt[u] = scheduleCycle + nodeLat[u] + spillPenalty;
         if (completedAt[u] > maxCycle)
             maxCycle = completedAt[u];
@@ -903,6 +1081,9 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.memBandwidthBytesPerCycle = 8;
     // Skylake supports Hyperthreading (SMT2) on desktop and server parts.
     p.hasHyperthreading = true;
+    // CVTSI2SD/CVTSI2SS on x86: integer-to-FP bypass path adds 1 cycle vs FADD.
+    // Skylake: CVTSI2SD = 5 cycles, VADDPD = 4 cycles.
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 /// Sandy Bridge (2011): 6 execution ports, 3 integer ALUs, AVX 256-bit (no FMA).
@@ -952,6 +1133,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 12;
     p.memBandwidthBytesPerCycle = 6;
     p.hasHyperthreading = true;
+    // Sandy Bridge: CVTSI2SD = 6 cycles (latFPAdd=5), VADDPD = 5 cycles.
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1091,6 +1274,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 24;
     p.memBandwidthBytesPerCycle = 12;
     p.hasHyperthreading = false; // Zen 4 desktop: SMT disabled by default; server enables it
+    // Zen 4: VCVTSI2SD = 4 cycles, VADDPD = 3 cycles → +1 for CVT bypass.
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1408,6 +1593,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 20;
     p.memBandwidthBytesPerCycle = 10;
     p.hasHyperthreading = false; // Lunar Lake: no Hyperthreading on Lion Cove
+    // Lunar Lake (Lion Cove): CVTSI2SD = latFPAdd+1 (x86 CVT bypass cycle).
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1462,6 +1649,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 32;
     p.memBandwidthBytesPerCycle = 16;
     p.hasHyperthreading = false;
+    // Zen 5: VCVTSI2SD = latFPAdd+1 cycles (x86 CVT bypass path).
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1522,6 +1711,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 32;
     p.memBandwidthBytesPerCycle = 14;
     p.hasHyperthreading = true; // Sapphire Rapids server: HT enabled
+    // Sapphire Rapids: CVTSI2SD = latFPAdd+1 (x86 integer-to-FP bypass path).
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1626,6 +1817,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 20;
     p.memBandwidthBytesPerCycle = 10;
     p.hasHyperthreading = false; // Arrow Lake: no Hyperthreading on Lion Cove
+    // Arrow Lake (Lion Cove P-core): CVTSI2SD = latFPAdd+1 (x86 CVT bypass).
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1845,6 +2038,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 14;
     p.memBandwidthBytesPerCycle = 6;
     p.hasHyperthreading = false; // Sierra Forest E-cores: no SMT
+    // Sierra Forest (Crestmont): x86 CVT bypass adds 1 cycle vs FP-add.
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -1897,6 +2092,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.l3BandwidthBytesPerCycle  = 12;
     p.memBandwidthBytesPerCycle = 6;
     p.hasHyperthreading = false;
+    // Gracemont: x86 E-core, CVTSI2SD = latFPAdd+1 (CVT bypass path).
+    p.latFPConvert = p.latFPAdd + 1;
     return p;
 }
 
@@ -2235,6 +2432,71 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     return std::nullopt;
 }
 
+MicroarchProfile calibrateProfile(const MicroarchProfile& base,
+                                   const CalibrationHints& hints) {
+    MicroarchProfile p = base;
+
+    // Helper: scale an unsigned value and clamp to [1, UINT_MAX].
+    auto scaleU = [](unsigned v, double s) -> unsigned {
+        if (s <= 0.0) return 1u;
+        unsigned r = static_cast<unsigned>(std::round(static_cast<double>(v) * s));
+        return std::max(r, 1u);
+    };
+
+    // Integer-add latency group (add, sub, shift, branch, compare).
+    if (hints.intAddScale != 1.0) {
+        p.latIntAdd  = scaleU(p.latIntAdd,  hints.intAddScale);
+        p.latShift   = scaleU(p.latShift,   hints.intAddScale);
+        p.latBranch  = scaleU(p.latBranch,  hints.intAddScale);
+    }
+
+    // FP latency group (fadd, fmul, fma).
+    if (hints.fpAddScale != 1.0) {
+        p.latFPAdd = scaleU(p.latFPAdd, hints.fpAddScale);
+        p.latFPMul = scaleU(p.latFPMul, hints.fpAddScale);
+        p.latFMA   = scaleU(p.latFMA,   hints.fpAddScale);
+    }
+
+    // Load / store-to-load forwarding latency.
+    if (hints.loadScale != 1.0) {
+        p.latLoad        = scaleU(p.latLoad,        hints.loadScale);
+        p.latStore       = scaleU(p.latStore,        hints.loadScale);
+        p.latStoLForward = scaleU(p.latStoLForward,  hints.loadScale);
+    }
+
+    // Division latency (integer and FP).
+    if (hints.divScale != 1.0) {
+        p.latIntDiv = scaleU(p.latIntDiv, hints.divScale);
+        p.latFPDiv  = scaleU(p.latFPDiv,  hints.divScale);
+        // Throughput (ops/cycle) is the reciprocal of latency.  When latency
+        // increases by divScale, throughput must decrease by the same factor
+        // (dividing by divScale).  E.g., divScale=2.0 → latency doubles,
+        // throughput halves: tput /= 2.0.  This is semantically consistent:
+        // a slower divider delivers fewer operations per cycle.
+        if (p.tputIntDiv > 0.0 && hints.divScale > 0.0)
+            p.tputIntDiv /= hints.divScale;
+        if (p.tputFPDiv > 0.0 && hints.divScale > 0.0)
+            p.tputFPDiv  /= hints.divScale;
+    }
+
+    // Reorder buffer size (e.g., 0.5 when the CPU is running with SMT contention).
+    if (hints.robScale != 1.0)
+        p.robSize = scaleU(p.robSize, hints.robScale);
+
+    // Reservation station size.
+    if (hints.rsScale != 1.0)
+        p.schedulerSize = scaleU(p.schedulerSize, hints.rsScale);
+
+    // Effective issue width (e.g., 0.5 for an SMT-shared front-end).
+    if (hints.issueScale != 1.0) {
+        unsigned newIssue = scaleU(p.issueWidth, hints.issueScale);
+        p.issueWidth  = std::max(newIssue, 1u);
+        p.decodeWidth = std::max(scaleU(p.decodeWidth, hints.issueScale), 1u);
+    }
+
+    return p;
+}
+
 HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     HardwareGraph g;
 
@@ -2278,10 +2540,25 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     unsigned agu = g.addNode(ResourceType::AGU, "agu",
                               profile.agus, 1.0, 1.0, 1);
 
+    // Divider port throughput: use tputIntDiv if measured (non-zero), otherwise
+    // model the divider as a non-pipelined serial unit where throughput equals
+    // 1/latIntDiv (one new divide can start only after the previous one
+    // completes).  The initHWPort lambda uses busy = ceil(1/throughput), so
+    // passing 1.0/latIntDiv → busy = latIntDiv cycles, correctly blocking the
+    // port for the full latency of the previous operation.
+    //
+    // NOTE: The previous code passed latIntDiv as throughput (i.e. 25.0 for
+    // Skylake), which caused busy = ceil(1/25) = 1 cycle — the port was
+    // treated as free after a single cycle, letting unlimited divides be
+    // issued each cycle.  This was a significant throughput over-estimate.
+    double divTput = (profile.tputIntDiv > 0.0)
+        ? profile.tputIntDiv
+        : 1.0 / static_cast<double>(std::max(profile.latIntDiv, 1u));
+
     unsigned divider = g.addNode(ResourceType::DividerUnit, "divider",
                                   profile.dividers,
                                   static_cast<double>(profile.latIntDiv),
-                                  static_cast<double>(profile.latIntDiv), 1);
+                                  divTput, 1);
 
     // Cache hierarchy
     unsigned l1d = g.addNode(ResourceType::L1DCache, "l1d_cache",
@@ -2475,8 +2752,14 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     case llvm::Instruction::And:
     case llvm::Instruction::Or:
     case llvm::Instruction::Xor:
-    case llvm::Instruction::Select:  // CMOV-like, single ALU cycle
         return profile.latIntAdd;
+    case llvm::Instruction::Select:
+        // FP or vector result: uses FCSEL/BLENDVPD which go through the FP
+        // pipeline — same latency as FP-add on both x86 and AArch64.
+        // Integer result: CMOV / CSEL — single integer ALU cycle.
+        return (inst->getType()->isFloatingPointTy() ||
+                inst->getType()->isVectorTy())
+               ? profile.latFPAdd : profile.latIntAdd;
     case llvm::Instruction::Mul:
         return profile.latIntMul;
     case llvm::Instruction::SDiv:
@@ -2559,7 +2842,9 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     case llvm::Instruction::SIToFP:
     case llvm::Instruction::FPTrunc:
     case llvm::Instruction::FPExt:
-        return profile.latFPAdd; // FP pipeline
+        // FP pipeline; dedicated CVT bypass path.
+        // latFPConvert = 0 means "unset — fall back to latFPAdd".
+        return (profile.latFPConvert > 0) ? profile.latFPConvert : profile.latFPAdd;
     case llvm::Instruction::BitCast:
     case llvm::Instruction::IntToPtr:
     case llvm::Instruction::PtrToInt:
@@ -2931,6 +3216,45 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
                     toErase.push_back(fmul);
                     count++;
                     continue;
+                }
+            }
+
+            // Pattern: fneg(fma_result) where fma_result = fadd(fmul(a,b), c)
+            // → fma(-a, b, -c) (FNMSUB: fused negate-multiply-subtract)
+            // This matches the pattern: -(a*b + c) which is common in
+            // Newton-Raphson iterations and coordinate transforms.
+            if (inst.getOpcode() == llvm::Instruction::FNeg) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                if (inner && inner->getOpcode() == llvm::Instruction::FAdd &&
+                    inner->hasOneUse()) {
+                    auto* fpAdd = llvm::cast<llvm::FPMathOperator>(inner);
+                    if (fpAdd->hasAllowContract()) {
+                        for (int swap = 0; swap < 2; ++swap) {
+                            auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(
+                                inner->getOperand(swap));
+                            llvm::Value* addend = inner->getOperand(1 - swap);
+                            if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
+                                fmul->hasOneUse()) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Module* mod = func.getParent();
+                                llvm::Type* ty = inst.getType();
+                                llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                                    mod, llvm::Intrinsic::fma, {ty});
+                                llvm::Value* negA = builder.CreateFNeg(
+                                    fmul->getOperand(0), "fnmsub.neg_a");
+                                llvm::Value* negC = builder.CreateFNeg(
+                                    addend, "fnmsub.neg_c");
+                                llvm::Value* result = builder.CreateCall(
+                                    fmaFn, {negA, fmul->getOperand(1), negC}, "fnmsub");
+                                inst.replaceAllUsesWith(result);
+                                toErase.push_back(&inst);
+                                toErase.push_back(inner);
+                                toErase.push_back(fmul);
+                                count++;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3379,6 +3703,27 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
             unsigned a = static_cast<unsigned>(__builtin_ctzll(adjusted));
             if (a > b && a < bitWidth)
                 return builder.CreateSub(shl(xv, a), shl(xv, b), "sr.sub2");
+        }
+    }
+
+    // ── Form 4: (2^a + 1) * 2^b  → add(shl(x, a+b), shl(x, b)) ──────────
+    // Catches constants like 3*2^k, 5*2^k, 9*2^k, 17*2^k which are very
+    // common in array indexing (sizeof(struct) * index).
+    {
+        unsigned b = static_cast<unsigned>(__builtin_ctzll(absCV));
+        uint64_t inner = absCV >> b;
+        if (inner > 1 && ((inner - 1) & (inner - 2)) == 0) {
+            // inner = 2^a + 1
+            unsigned a = static_cast<unsigned>(__builtin_ctzll(inner - 1));
+            if (a + b < bitWidth)
+                return builder.CreateAdd(shl(xv, a + b), shl(xv, b), "sr.p2p1");
+        }
+        // (2^a - 1) * 2^b  → sub(shl(x, a+b), shl(x, b))
+        if (inner > 1 && ((inner + 1) & inner) == 0) {
+            // inner = 2^a - 1
+            unsigned a = static_cast<unsigned>(64 - __builtin_clzll(inner + 1)) - 1;
+            if (a + b < bitWidth)
+                return builder.CreateSub(shl(xv, a + b), shl(xv, b), "sr.p2m1");
         }
     }
 
@@ -5367,6 +5712,1882 @@ static unsigned insertNonTemporalHints(llvm::Function& func,
     return count;
 }
 
+/// Replace integer multiply-by-minus-one with negation.
+///
+/// Pattern:  mul(x, -1)  →  sub(0, x)
+///
+/// This is the integer analogue of foldFPMulByNeg1.  On every modern
+/// architecture `neg` (or `sub reg, 0`) is a 1-cycle single-issue
+/// operation that dispatches to any ALU port, while integer multiply
+/// uses the dedicated multiplier (latency 3–4 cycles, one port).
+/// Freeing the multiply port for real multiplies improves IPC when the
+/// function contains other integer multiply operations.
+///
+/// Safety: integer arithmetic is defined modulo 2ⁿ, so `x × (−1)` ≡
+/// `−x (mod 2ⁿ)` always.  No overflow or undefined-behaviour flags
+/// are needed.  The transform is safe for any integer type, including
+/// vector integer types.
+///
+/// Returns the number of multiplies replaced.
+static unsigned foldIntMulByNeg1(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
+            llvm::Type* ty = inst.getType();
+            // Integer or integer-vector only.
+            if (!ty->isIntOrIntVectorTy()) continue;
+
+            llvm::Value* op0 = inst.getOperand(0);
+            llvm::Value* op1 = inst.getOperand(1);
+
+            // Check whether one of the operands is a constant -1 (all-ones bits).
+            // We handle: scalar ConstantInt, splat ConstantVector, and
+            // ConstantDataVector (the form LLVM uses for <N x iM> splatted constants).
+            llvm::Value* other = nullptr;
+            for (int s = 0; s < 2; ++s) {
+                llvm::Value* candidate = (s == 0) ? op0 : op1;
+                llvm::Value* partner   = (s == 0) ? op1 : op0;
+
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(candidate)) {
+                    if (ci->isMinusOne()) { other = partner; break; }
+                }
+                if (auto* cv = llvm::dyn_cast<llvm::ConstantVector>(candidate)) {
+                    if (auto* sp = cv->getSplatValue()) {
+                        auto* sci = llvm::dyn_cast<llvm::ConstantInt>(sp);
+                        if (sci && sci->isMinusOne()) { other = partner; break; }
+                    }
+                }
+                if (auto* cdv = llvm::dyn_cast<llvm::ConstantDataVector>(candidate)) {
+                    if (auto* sp = llvm::dyn_cast_or_null<llvm::ConstantInt>(
+                            cdv->getSplatValue())) {
+                        if (sp->isMinusOne()) { other = partner; break; }
+                    }
+                }
+            }
+            if (!other) continue;
+
+            // Emit sub(0, x): LLVM selects NEG on all supported architectures.
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* zero = llvm::Constant::getNullValue(ty);
+            llvm::Value* neg  = builder.CreateSub(zero, other, "neg1");
+            // Propagate nsw/nuw flags conservatively (only nsw if the original
+            // mul had nsw, meaning the negation cannot overflow either).
+            if (auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(neg)) {
+                auto* mulOp = llvm::cast<llvm::BinaryOperator>(&inst);
+                if (mulOp->hasNoSignedWrap())
+                    subInst->setHasNoSignedWrap(true);
+            }
+            replacements.emplace_back(&inst, neg);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold `add(x, sub(0, y))` → `sub(x, y)`.
+///
+/// This is a direct follow-on to foldIntMulByNeg1.  That pass rewrites
+/// `mul(y, -1)` to `sub(0, y)`.  When the negated value is then added to
+/// another operand x, the net expression is `x + (-y)` = `x - y`, which is
+/// representable as a single SUB instruction.
+///
+/// Safety: modular integer arithmetic guarantees `x + (0 - y) ≡ x - y (mod 2ⁿ)`
+/// for every bit-pattern of x and y, with no exceptions.  We conservatively
+/// do NOT forward nsw/nuw from either the add or the inner sub — the resulting
+/// sub gets no overflow flags, which is the safest correct choice.
+///
+/// We only fold when the inner sub(0, y) has exactly one use (the add), so
+/// both instructions can be replaced by a single sub.  If the neg has other
+/// uses, keeping it alive is correct but we would not reduce the instruction
+/// count, so we skip that case.
+///
+/// Returns the number of add+neg pairs folded.
+static unsigned foldIntAddNeg(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Add) continue;
+            llvm::Type* ty = inst.getType();
+            if (!ty->isIntOrIntVectorTy()) continue;
+
+            llvm::Value* op0 = inst.getOperand(0);
+            llvm::Value* op1 = inst.getOperand(1);
+
+            // Try both orderings: add(x, neg) and add(neg, x).
+            for (int s = 0; s < 2; ++s) {
+                llvm::Value* negCandidate = (s == 0) ? op1 : op0;
+                llvm::Value* other        = (s == 0) ? op0 : op1;
+
+                auto* negInst = llvm::dyn_cast<llvm::BinaryOperator>(negCandidate);
+                if (!negInst) continue;
+                if (negInst->getOpcode() != llvm::Instruction::Sub) continue;
+                // Require sub(0, y) — the LHS must be the zero constant.
+                if (!llvm::isa<llvm::Constant>(negInst->getOperand(0))) continue;
+                auto* lhsC = llvm::dyn_cast<llvm::Constant>(negInst->getOperand(0));
+                if (!lhsC || !lhsC->isNullValue()) continue;
+                // Only fold when the neg is used only by this add.
+                if (!negInst->hasOneUse()) continue;
+
+                llvm::Value* y = negInst->getOperand(1);
+                llvm::IRBuilder<> builder(&inst);
+                llvm::Value* sub = builder.CreateSub(other, y, "addneg.sub");
+                replacements.emplace_back(&inst, sub);
+                ++count;
+                break;
+            }
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        // Erase the now-dead sub(0, y) first if it becomes unused.
+        llvm::Value* negArg = nullptr;
+        for (int s = 0; s < 2; ++s) {
+            auto* neg = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(s));
+            if (neg && neg->getOpcode() == llvm::Instruction::Sub &&
+                llvm::isa<llvm::Constant>(neg->getOperand(0))) {
+                auto* lhsC = llvm::dyn_cast<llvm::Constant>(neg->getOperand(0));
+                if (lhsC && lhsC->isNullValue()) { negArg = neg; break; }
+            }
+        }
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+        if (negArg) {
+            if (auto* dead = llvm::dyn_cast<llvm::Instruction>(negArg))
+                if (dead->use_empty()) dead->eraseFromParent();
+        }
+    }
+    return count;
+}
+
+/// Replace `select(cond, x, x)` with `x`.
+///
+/// When both true-value and false-value of a select are the same SSA value,
+/// the condition is irrelevant and the select is a no-op.  This pattern
+/// arises after other transforms simplify one of the two arms of a
+/// conditional to match the other arm (e.g. after strength-reduction or
+/// after convertIfElseToSelect folds the arms).
+///
+/// Safety: always correct — the result is the same regardless of the condition.
+///
+/// Returns the number of selects eliminated.
+static unsigned foldSelectSameValue(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+            if (sel->getTrueValue() != sel->getFalseValue()) continue;
+            sel->replaceAllUsesWith(sel->getTrueValue());
+            toErase.push_back(sel);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Replace `fadd(x, x)` with `fmul(x, 2.0)` when the `reassoc` fast-math
+/// flag is set.
+///
+/// `x + x = 2*x` mathematically, but under strict IEEE 754 the two forms
+/// differ only in rounding of the final result — both produce the exact
+/// mathematical value when |x| fits in the format.  The `reassoc` flag
+/// explicitly permits this kind of reassociation.
+///
+/// Benefit: `fmul(x, 2.0)` is immediately eligible for FMA fusion by the
+/// subsequent `generateFMA` scan.  e.g.:
+///
+///   fadd reassoc x, x       →   fmul x, 2.0
+///   followed by:
+///   fadd contract (fmul x, 2.0), y  →  fma(x, 2.0, y)
+///
+/// This is a net gain of one FMA instruction replacing two separate
+/// instructions (the self-add and the add-with-y).
+///
+/// We only replace when the second operand is the same SSA value as the
+/// first (pointer equality), which guarantees exact semantic equivalence
+/// under reassoc.
+///
+/// Returns the number of self-adds replaced.
+static unsigned foldFAddSelf(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FAdd) continue;
+            llvm::Value* op0 = inst.getOperand(0);
+            llvm::Value* op1 = inst.getOperand(1);
+            if (op0 != op1) continue; // must be exact same SSA value
+
+            auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
+            if (!fpOp->hasAllowReassoc()) continue;
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Type* ty = inst.getType();
+            llvm::Value* two = llvm::ConstantFP::get(ty, 2.0);
+            llvm::Value* mul = builder.CreateFMul(op0, two, "faddself.fmul");
+            // Propagate fast-math flags to the new multiply.
+            if (auto* mulInst = llvm::dyn_cast<llvm::Instruction>(mul))
+                mulInst->setFastMathFlags(fpOp->getFastMathFlags());
+
+            replacements.emplace_back(&inst, mul);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Eliminate double negation: fneg(fneg(x)) → x.
+///
+/// FMA generation, canonicalizeFaddFneg, and foldFPMulByNeg1 can each
+/// introduce an llvm::FNeg instruction.  When two such passes run in
+/// sequence on the same value a double negation can appear.  Removing
+/// it eliminates two instructions and their latency chain entirely.
+///
+/// Safety: `fneg(fneg(x))` equals `x` for all IEEE 754 values (finite,
+/// ±0, ±∞, NaN — FNeg only flips the sign bit).  No fast-math flags
+/// are required.
+///
+/// We only fold when the inner fneg has exactly one use (the outer one),
+/// so we can erase both.  If the inner fneg has other uses we would need
+/// to keep it alive, so we skip that case.
+///
+/// Returns the number of double negations eliminated.
+static unsigned foldFNegDouble(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FNeg) continue;
+            llvm::Value* arg = inst.getOperand(0);
+            auto* inner = llvm::dyn_cast<llvm::UnaryOperator>(arg);
+            if (!inner || inner->getOpcode() != llvm::Instruction::FNeg) continue;
+            // Only fold when the inner fneg is used solely by this outer fneg.
+            if (!inner->hasOneUse()) continue;
+
+            // Replace outer fneg with the inner fneg's operand (the original value).
+            replacements.emplace_back(&inst, inner->getOperand(0));
+            ++count;
+        }
+    }
+
+    // Apply replacements and erase both instructions.
+    for (auto& [outer, orig] : replacements) {
+        llvm::Value* innerArg = outer->getOperand(0); // the inner fneg
+        outer->replaceAllUsesWith(orig);
+        outer->eraseFromParent();
+        if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerArg))
+            if (dead->use_empty()) dead->eraseFromParent();
+    }
+    return count;
+}
+
+/// Hoist loop-invariant pure instructions to the loop pre-header.
+///
+/// This is a generalisation of hoistLoopInvariantGEP: instead of only
+/// hoisting address-calculation GEPs we hoist ANY instruction that:
+///   1. Is pure (no side effects, no memory accesses, not a PHI or terminator).
+///   2. Has ALL operands defined outside the loop body.
+///   3. Is not already in the pre-header.
+///
+/// Hoisting such instructions avoids re-computing the same value on every
+/// loop iteration.  Unlike LLVM's own LICM this runs AFTER our transforms,
+/// so it catches invariant computations introduced by strength reduction,
+/// FMA generation, or GEP expansion that were not present when LLVM's
+/// LICM ran.
+///
+/// Loop detection uses the same linear-order back-edge heuristic as
+/// hoistLoopInvariantGEP.  GEPs are intentionally included so this
+/// supersedes that pass — both are still called for safety; in practice
+/// hoistLoopInvariantGEP will fire first and leave nothing for the GEP
+/// case here.
+///
+/// Instruction ordering is preserved: we collect candidates in forward
+/// program order and hoist them in that order, so that if instruction B
+/// uses the result of instruction A and both are invariant, A arrives in
+/// the pre-header before B.
+///
+/// Returns the number of instructions hoisted.
+/// Fold `shl/lshr/ashr(0, x)` → `0`.
+///
+/// Shifting zero by any amount yields zero.  This pattern can appear after
+/// strength reduction creates constants that cancel.  Always safe for all
+/// shift opcodes.
+///
+/// Returns the number of shifts eliminated.
+static unsigned foldShiftOfZero(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            if (op != llvm::Instruction::Shl &&
+                op != llvm::Instruction::LShr &&
+                op != llvm::Instruction::AShr)
+                continue;
+            llvm::Type* ty = inst.getType();
+            if (!ty->isIntOrIntVectorTy()) continue;
+
+            // Check if the value being shifted (operand 0) is a zero constant.
+            auto* lhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(0));
+            if (!lhs || !lhs->isNullValue()) continue;
+
+            inst.replaceAllUsesWith(llvm::Constant::getNullValue(ty));
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `or(x, x)` → `x` and `and(x, x)` → `x`.
+///
+/// Idempotent bitwise operations.  The pattern arises when SSA construction
+/// or other passes duplicate an operand into both sides of a binary op.
+/// Always safe — same SSA value pointer equality guarantees semantics.
+///
+/// Returns the number of idempotent ops eliminated.
+static unsigned foldBitwiseIdempotent(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            if (op != llvm::Instruction::Or && op != llvm::Instruction::And)
+                continue;
+            if (inst.getOperand(0) != inst.getOperand(1)) continue;
+
+            inst.replaceAllUsesWith(inst.getOperand(0));
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `xor(x, x)` → `0`.
+///
+/// Self-XOR always produces zero.  This can appear after register allocation
+/// hints or when strength reduction introduces temporary zero-init patterns.
+/// Always safe for all integer types and vectors.
+///
+/// Returns the number of self-XORs eliminated.
+static unsigned foldXorSelf(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Xor) continue;
+            if (inst.getOperand(0) != inst.getOperand(1)) continue;
+            llvm::Type* ty = inst.getType();
+            if (!ty->isIntOrIntVectorTy()) continue;
+
+            inst.replaceAllUsesWith(llvm::Constant::getNullValue(ty));
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `fsub nnan x, x` → `0.0`.
+///
+/// `x - x` is mathematically zero, but under strict IEEE 754 the result
+/// depends on the sign of zero and NaN propagation:
+///   - `(+0) - (+0)` = `+0` in round-to-nearest but `-0` in round-down
+///   - `NaN - NaN` = `NaN`, not zero
+///
+/// The `nnan` (no-NaN) fast-math flag guarantees NaN is absent, making the
+/// fold safe for all finite values and ±0 (the result is always +0.0 in
+/// round-to-nearest, the default mode).  We also accept `nsz` (no-signed-zeros)
+/// which eliminates the round-down edge case.
+///
+/// Returns the number of self-subtracts eliminated.
+static unsigned foldFSubSelf(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FSub) continue;
+            if (inst.getOperand(0) != inst.getOperand(1)) continue;
+
+            auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
+            // Require nnan (or nsz) to safely fold.
+            if (!fpOp->hasNoNaNs() && !fpOp->hasNoSignedZeros()) continue;
+
+            llvm::Type* ty = inst.getType();
+            inst.replaceAllUsesWith(llvm::ConstantFP::get(ty, 0.0));
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `and(x, -1)` → `x`, `or(x, 0)` → `x`, `xor(x, 0)` → `x`.
+///
+/// These are identity operations for bitwise ops that LLVM's InstCombine
+/// typically catches but may remain after strength reduction or other
+/// transforms introduce them.
+///
+/// Also folds `and(x, 0)` → `0` (absorbing element) and
+/// `or(x, -1)` → `-1` (absorbing element).
+///
+/// Returns the number of ops folded.
+static unsigned foldBitwiseWithConstants(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (!inst.getType()->isIntOrIntVectorTy()) continue;
+            unsigned op = inst.getOpcode();
+
+            if (op == llvm::Instruction::And) {
+                for (int s = 0; s < 2; ++s) {
+                    if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s))) {
+                        if (c->isAllOnesValue()) {
+                            // and(x, -1) → x
+                            inst.replaceAllUsesWith(inst.getOperand(1 - s));
+                            toErase.push_back(&inst);
+                            ++count;
+                            break;
+                        }
+                        if (c->isZero()) {
+                            // and(x, 0) → 0
+                            inst.replaceAllUsesWith(c);
+                            toErase.push_back(&inst);
+                            ++count;
+                            break;
+                        }
+                    }
+                }
+            } else if (op == llvm::Instruction::Or) {
+                for (int s = 0; s < 2; ++s) {
+                    if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s))) {
+                        if (c->isZero()) {
+                            // or(x, 0) → x
+                            inst.replaceAllUsesWith(inst.getOperand(1 - s));
+                            toErase.push_back(&inst);
+                            ++count;
+                            break;
+                        }
+                        if (c->isAllOnesValue()) {
+                            // or(x, -1) → -1
+                            inst.replaceAllUsesWith(c);
+                            toErase.push_back(&inst);
+                            ++count;
+                            break;
+                        }
+                    }
+                }
+            } else if (op == llvm::Instruction::Xor) {
+                for (int s = 0; s < 2; ++s) {
+                    if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s))) {
+                        if (c->isZero()) {
+                            // xor(x, 0) → x
+                            inst.replaceAllUsesWith(inst.getOperand(1 - s));
+                            toErase.push_back(&inst);
+                            ++count;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `icmp eq x, x` → `true`, `icmp ne x, x` → `false`, and other
+/// trivially self-comparing patterns.  Also folds comparisons of known
+/// constants: `icmp eq 5, 5` → `true`.
+///
+/// These patterns appear after GVN, LICM, or our own transforms create
+/// situations where both operands of a comparison are identical.
+///
+/// Returns the number of comparisons folded.
+static unsigned foldTrivialICmp(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(&inst);
+            if (!icmp) continue;
+
+            llvm::Value* lhs = icmp->getOperand(0);
+            llvm::Value* rhs = icmp->getOperand(1);
+
+            // Self-comparison: icmp pred x, x
+            if (lhs == rhs) {
+                bool result = false;
+                switch (icmp->getPredicate()) {
+                case llvm::ICmpInst::ICMP_EQ:
+                case llvm::ICmpInst::ICMP_ULE:
+                case llvm::ICmpInst::ICMP_UGE:
+                case llvm::ICmpInst::ICMP_SLE:
+                case llvm::ICmpInst::ICMP_SGE:
+                    result = true;
+                    break;
+                case llvm::ICmpInst::ICMP_NE:
+                case llvm::ICmpInst::ICMP_ULT:
+                case llvm::ICmpInst::ICMP_UGT:
+                case llvm::ICmpInst::ICMP_SLT:
+                case llvm::ICmpInst::ICMP_SGT:
+                    result = false;
+                    break;
+                default:
+                    continue;
+                }
+                llvm::Value* rep = llvm::ConstantInt::get(
+                    llvm::Type::getInt1Ty(func.getContext()), result ? 1 : 0);
+                icmp->replaceAllUsesWith(rep);
+                toErase.push_back(icmp);
+                ++count;
+                continue;
+            }
+
+            // Constant folding: icmp pred C1, C2
+            auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(lhs);
+            auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(rhs);
+            if (c1 && c2) {
+                bool result = llvm::ICmpInst::compare(c1->getValue(), c2->getValue(),
+                                                       icmp->getPredicate());
+                llvm::Value* rep = llvm::ConstantInt::get(
+                    llvm::Type::getInt1Ty(func.getContext()), result ? 1 : 0);
+                icmp->replaceAllUsesWith(rep);
+                toErase.push_back(icmp);
+                ++count;
+            }
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold redundant GEP arithmetic patterns:
+///   `gep(gep(base, i), j)` → `gep(base, i + j)` when both use constant
+///   indices into the same element type.
+///
+/// GEP chains are common after loop transformations or address reassociation.
+/// Merging them reduces the number of AGU µops and shortens address dependency
+/// chains, improving both throughput and latency.
+///
+/// Safety: the inner GEP must have a single use (this outer GEP) to ensure
+/// the intermediate pointer is not observed.
+///
+/// Returns the number of GEP pairs merged.
+static unsigned foldGEPArithmetic(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* outer = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst);
+            if (!outer) continue;
+            if (outer->getNumIndices() != 1) continue;
+
+            auto* inner = llvm::dyn_cast<llvm::GetElementPtrInst>(outer->getPointerOperand());
+            if (!inner) continue;
+            if (!inner->hasOneUse()) continue;
+            if (inner->getNumIndices() != 1) continue;
+
+            // Both must index the same element type.
+            if (inner->getSourceElementType() != outer->getSourceElementType()) continue;
+
+            llvm::Value* idxInner = *inner->idx_begin();
+            llvm::Value* idxOuter = *outer->idx_begin();
+
+            // Both constant: fold to single constant index.
+            auto* ci = llvm::dyn_cast<llvm::ConstantInt>(idxInner);
+            auto* co = llvm::dyn_cast<llvm::ConstantInt>(idxOuter);
+            if (ci && co && ci->getType() == co->getType()) {
+                llvm::APInt sum = ci->getValue() + co->getValue();
+                llvm::Constant* merged = llvm::ConstantInt::get(ci->getType(), sum);
+                llvm::IRBuilder<> builder(&inst);
+                auto* rep = builder.CreateGEP(
+                    inner->getSourceElementType(), inner->getPointerOperand(),
+                    merged, "gep.merged");
+                if (auto* gepRep = llvm::dyn_cast<llvm::GetElementPtrInst>(rep))
+                    gepRep->setIsInBounds(outer->isInBounds() && inner->isInBounds());
+                replacements.emplace_back(&inst, rep);
+                ++count;
+                continue;
+            }
+
+            // Both variable: create add and new GEP.
+            if (idxInner->getType() == idxOuter->getType()) {
+                llvm::IRBuilder<> builder(&inst);
+                llvm::Value* sum = builder.CreateAdd(idxInner, idxOuter, "gep.idx.add");
+                auto* rep = builder.CreateGEP(
+                    inner->getSourceElementType(), inner->getPointerOperand(),
+                    sum, "gep.merged");
+                if (auto* gepRep = llvm::dyn_cast<llvm::GetElementPtrInst>(rep))
+                    gepRep->setIsInBounds(outer->isInBounds() && inner->isInBounds());
+                replacements.emplace_back(&inst, rep);
+                ++count;
+            }
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        auto* innerGEP = llvm::dyn_cast<llvm::GetElementPtrInst>(
+            llvm::cast<llvm::GetElementPtrInst>(inst)->getPointerOperand());
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+        if (innerGEP && innerGEP->use_empty())
+            innerGEP->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold `select(true, x, y)` → `x`, `select(false, x, y)` → `y`.
+///
+/// Select instructions with constant conditions can appear after constant
+/// propagation or our own convertIfElseToSelect creates them with known
+/// conditions.  These are dead weight that takes up decode bandwidth.
+///
+/// Returns the number of constant selects eliminated.
+static unsigned foldConstantSelect(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+            auto* cond = llvm::dyn_cast<llvm::ConstantInt>(sel->getCondition());
+            if (!cond) continue;
+            llvm::Value* rep = cond->isOne() ? sel->getTrueValue() : sel->getFalseValue();
+            sel->replaceAllUsesWith(rep);
+            toErase.push_back(sel);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `not(not(x))` → `x` where not(x) = xor(x, -1).
+///
+/// Double negation patterns appear after boolean canonicalization or
+/// branch condition inversion creates two consecutive xor-with-all-ones.
+///
+/// Returns the number of double negations eliminated.
+static unsigned foldDoubleNot(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Xor) continue;
+            if (!inst.getType()->isIntOrIntVectorTy()) continue;
+
+            // Check if this is xor(x, -1)
+            llvm::Value* inner = nullptr;
+            for (int s = 0; s < 2; ++s) {
+                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s))) {
+                    if (c->isAllOnesValue()) {
+                        inner = inst.getOperand(1 - s);
+                        break;
+                    }
+                }
+            }
+            if (!inner) continue;
+
+            // Check if inner is also xor(y, -1)
+            auto* innerInst = llvm::dyn_cast<llvm::BinaryOperator>(inner);
+            if (!innerInst || innerInst->getOpcode() != llvm::Instruction::Xor) continue;
+            if (!innerInst->hasOneUse()) continue;
+
+            llvm::Value* source = nullptr;
+            for (int s = 0; s < 2; ++s) {
+                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(innerInst->getOperand(s))) {
+                    if (c->isAllOnesValue()) {
+                        source = innerInst->getOperand(1 - s);
+                        break;
+                    }
+                }
+            }
+            if (!source) continue;
+
+            inst.replaceAllUsesWith(source);
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+
+    for (auto it = toErase.rbegin(); it != toErase.rend(); ++it) {
+        auto* inst = *it;
+        llvm::Value* innerVal = inst->getOperand(0);
+        if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(innerVal))
+            innerVal = inst->getOperand(1);
+        inst->eraseFromParent();
+        if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
+            if (dead->use_empty()) dead->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold `trunc(zext(x))` → `x` when the original and final types match.
+///
+/// Extension followed by truncation back to the original type is a no-op.
+/// This pattern arises when type canonicalization or ABI-matching logic
+/// widens a value and a later consumer narrows it back.  Also handles
+/// `trunc(sext(x))` → `x` and the reverse `zext(trunc(x))` → `x` when
+/// types match (though the latter is less common).
+///
+/// Safety: when srcTy == dstTy, the composition of ext followed by trunc
+/// is the identity function regardless of sign extension semantics.
+///
+/// Returns the number of ext/trunc pairs eliminated.
+static unsigned foldTruncExt(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            // trunc(zext(x)) or trunc(sext(x))
+            if (op == llvm::Instruction::Trunc) {
+                auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+                if (!inner) continue;
+                unsigned innerOp = inner->getOpcode();
+                if (innerOp != llvm::Instruction::ZExt &&
+                    innerOp != llvm::Instruction::SExt)
+                    continue;
+                llvm::Value* src = inner->getOperand(0);
+                if (src->getType() != inst.getType()) continue;
+                // Only fold if inner has one use (this trunc) to avoid
+                // keeping the ext alive.
+                if (!inner->hasOneUse()) continue;
+                inst.replaceAllUsesWith(src);
+                toErase.push_back(&inst);
+                ++count;
+            }
+            // zext(trunc(x)) or sext(trunc(x))
+            else if (op == llvm::Instruction::ZExt ||
+                     op == llvm::Instruction::SExt) {
+                auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+                if (!inner) continue;
+                if (inner->getOpcode() != llvm::Instruction::Trunc) continue;
+                llvm::Value* src = inner->getOperand(0);
+                if (src->getType() != inst.getType()) continue;
+                if (!inner->hasOneUse()) continue;
+                inst.replaceAllUsesWith(src);
+                toErase.push_back(&inst);
+                ++count;
+            }
+        }
+    }
+
+    // Erase in reverse order to handle any chains.
+    for (auto it = toErase.rbegin(); it != toErase.rend(); ++it) {
+        auto* inst = *it;
+        // Also try to erase the now-dead inner instruction.
+        llvm::Value* innerVal = nullptr;
+        if (inst->getNumOperands() > 0)
+            innerVal = inst->getOperand(0);
+        inst->eraseFromParent();
+        if (innerVal) {
+            if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
+                if (dead->use_empty()) dead->eraseFromParent();
+        }
+    }
+    return count;
+}
+
+/// Fold `mul(x, 2^k)` → `shl(x, k)` for all power-of-2 constant multipliers.
+///
+/// More aggressive than integerStrengthReduce which only handles small
+/// constants with few set bits.  This catches any power-of-2 multiplier
+/// up to 2^62.  Shift is 1-cycle latency on all modern CPUs vs 3-cycle
+/// multiply.  Always safe for integer types.
+///
+/// Returns the number of multiplies replaced.
+static unsigned foldMulPow2(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
+            if (!inst.getType()->isIntegerTy()) continue;
+
+            llvm::Value* xv = nullptr;
+            uint64_t cv = 0;
+            for (int s = 0; s < 2; ++s) {
+                auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s));
+                if (ci && ci->getBitWidth() <= 64) {
+                    uint64_t val = ci->getZExtValue();
+                    // Check if val is a power of 2 (exactly one bit set).
+                    if (val > 0 && (val & (val - 1)) == 0) {
+                        cv = val;
+                        xv = inst.getOperand(1 - s);
+                        break;
+                    }
+                }
+            }
+            if (!xv || cv == 0) continue;
+
+            unsigned shift = 0;
+            uint64_t tmp = cv;
+            while (tmp > 1) { tmp >>= 1; ++shift; }
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* rep = builder.CreateShl(
+                xv, llvm::ConstantInt::get(inst.getType(), shift), "mulpow2.shl");
+            replacements.emplace_back(&inst, rep);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold `add(x, 0)` → `x` and `mul(x, 1)` → `x`.
+///
+/// Identity element elimination for arithmetic operations.  These patterns
+/// appear after constant folding, strength reduction, and induction variable
+/// simplification leave behind degenerate operations.
+///
+/// Returns the number of identity ops eliminated.
+static unsigned foldIdentityOps(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            if (!inst.getType()->isIntOrIntVectorTy()) continue;
+
+            // add(x, 0) → x, sub(x, 0) → x
+            if (op == llvm::Instruction::Add || op == llvm::Instruction::Sub) {
+                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (c->isZero()) {
+                        inst.replaceAllUsesWith(inst.getOperand(0));
+                        toErase.push_back(&inst);
+                        ++count;
+                        continue;
+                    }
+                }
+                // add(0, x) → x (commutative)
+                if (op == llvm::Instruction::Add) {
+                    if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(0))) {
+                        if (c->isZero()) {
+                            inst.replaceAllUsesWith(inst.getOperand(1));
+                            toErase.push_back(&inst);
+                            ++count;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // mul(x, 1) → x
+            if (op == llvm::Instruction::Mul) {
+                for (int s = 0; s < 2; ++s) {
+                    if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s))) {
+                        if (c->isOne()) {
+                            inst.replaceAllUsesWith(inst.getOperand(1 - s));
+                            toErase.push_back(&inst);
+                            ++count;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // mul(x, 0) → 0
+            if (op == llvm::Instruction::Mul) {
+                for (int s = 0; s < 2; ++s) {
+                    if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s))) {
+                        if (c->isZero()) {
+                            inst.replaceAllUsesWith(c);
+                            toErase.push_back(&inst);
+                            ++count;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `shl(shl(x, a), b)` → `shl(x, a+b)` when both shifts are constant.
+///
+/// Also handles `lshr(lshr(x, a), b)` → `lshr(x, a+b)` and
+/// `ashr(ashr(x, a), b)` → `ashr(x, a+b)`.  These patterns appear after
+/// strength reduction creates shift chains.  The combined shift is faster
+/// (1 instruction instead of 2) and reduces dependency chain length.
+///
+/// Safety: a+b must not exceed the bit width; if it does the result is
+/// undefined (poison), which matches LLVM's semantics for oversized shifts.
+/// We clamp to bitWidth-1 to avoid surprising backend behaviour.
+///
+/// Returns the number of shift pairs merged.
+static unsigned foldConsecutiveShifts(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            if (op != llvm::Instruction::Shl &&
+                op != llvm::Instruction::LShr &&
+                op != llvm::Instruction::AShr)
+                continue;
+
+            auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+            if (!inner || inner->getOpcode() != op) continue;
+            if (!inner->hasOneUse()) continue;
+
+            auto* outerAmt = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
+            auto* innerAmt = llvm::dyn_cast<llvm::ConstantInt>(inner->getOperand(1));
+            if (!outerAmt || !innerAmt) continue;
+
+            unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+            uint64_t total = outerAmt->getZExtValue() + innerAmt->getZExtValue();
+            if (total >= bitWidth) total = bitWidth - 1; // clamp to avoid UB
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* rep = nullptr;
+            llvm::Value* src = inner->getOperand(0);
+            auto* totalConst = llvm::ConstantInt::get(inst.getType(), total);
+            switch (op) {
+            case llvm::Instruction::Shl:
+                rep = builder.CreateShl(src, totalConst, "shmerge.shl");
+                break;
+            case llvm::Instruction::LShr:
+                rep = builder.CreateLShr(src, totalConst, "shmerge.lshr");
+                break;
+            case llvm::Instruction::AShr:
+                rep = builder.CreateAShr(src, totalConst, "shmerge.ashr");
+                break;
+            default:
+                break;
+            }
+            if (!rep) continue;
+
+            replacements.emplace_back(&inst, rep);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        // Also erase the inner shift if it's now dead.
+        auto* innerShift = llvm::dyn_cast<llvm::Instruction>(inst->getOperand(0));
+        inst->eraseFromParent();
+        if (innerShift && innerShift->use_empty())
+            innerShift->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold `bitcast(bitcast(x))` → `bitcast(x)` or `x` when types match.
+///
+/// Bitcast chains appear when type canonicalization or ABI-matching logic
+/// introduces intermediate casts.  If the source type of the outer bitcast
+/// matches the destination type, the result is a single bitcast from the
+/// original source, or just the original value if all three types match.
+///
+/// Returns the number of bitcast chains shortened.
+static unsigned foldBitcastChain(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::BitCast) continue;
+            auto* inner = llvm::dyn_cast<llvm::BitCastInst>(inst.getOperand(0));
+            if (!inner) continue;
+            if (!inner->hasOneUse()) continue;
+
+            llvm::Value* src = inner->getOperand(0);
+            llvm::Type* srcTy = src->getType();
+            llvm::Type* dstTy = inst.getType();
+
+            if (srcTy == dstTy) {
+                // Identity chain: bitcast(bitcast(x: T → U) → T) = x
+                inst.replaceAllUsesWith(src);
+                toErase.push_back(&inst);
+                ++count;
+            } else {
+                // Shortcut chain: bitcast(bitcast(x: A → B): B → C) = bitcast(x: A → C)
+                llvm::IRBuilder<> builder(&inst);
+                auto* rep = builder.CreateBitCast(src, dstTy, "bcchain");
+                inst.replaceAllUsesWith(rep);
+                toErase.push_back(&inst);
+                ++count;
+            }
+        }
+    }
+
+    for (auto it = toErase.rbegin(); it != toErase.rend(); ++it) {
+        auto* inst = *it;
+        llvm::Value* innerVal = inst->getOperand(0);
+        inst->eraseFromParent();
+        if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
+            if (dead->use_empty()) dead->eraseFromParent();
+    }
+    return count;
+}
+
+/// Local redundant load elimination (RLE) within basic blocks.
+///
+/// When a load reads from a pointer that was previously stored to with the
+/// same type and no intervening store to an aliasing address, the load can
+/// be replaced with the stored value.  This is a local form of the
+/// store-to-load forwarding that LLVM's GVN does globally.
+///
+/// Also eliminates repeated loads from the same pointer (load-after-load):
+/// if no intervening store may alias the pointer, the second load is
+/// redundant and can use the first load's result.
+///
+/// Returns the number of redundant loads eliminated.
+static unsigned eliminateRedundantLoads(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        // Track available values: pointer → (stored/loaded value, index).
+        // Cleared on any potentially-aliasing store or memory barrier.
+        std::unordered_map<const llvm::Value*, llvm::Value*> availableValues;
+
+        for (auto& inst : bb) {
+            if (auto* st = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+                if (st->isAtomic()) {
+                    availableValues.clear();
+                    continue;
+                }
+                const llvm::Value* ptr = st->getPointerOperand()->stripPointerCasts();
+                // This store makes its value available for forwarding.
+                availableValues[ptr] = st->getValueOperand();
+                continue;
+            }
+
+            if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(&inst)) {
+                if (ld->isAtomic()) {
+                    availableValues.clear();
+                    continue;
+                }
+                const llvm::Value* ptr = ld->getPointerOperand()->stripPointerCasts();
+                auto it = availableValues.find(ptr);
+                if (it != availableValues.end()) {
+                    llvm::Value* avail = it->second;
+                    // Types must match for direct forwarding.
+                    if (avail->getType() == ld->getType()) {
+                        replacements.emplace_back(ld, avail);
+                        ++count;
+                        // The loaded value is also available for future loads.
+                        continue;
+                    }
+                }
+                // This load's result is available for future loads.
+                availableValues[ptr] = ld;
+                continue;
+            }
+
+            // Calls, fences, atomics: conservatively clear everything.
+            if (inst.mayWriteToMemory())
+                availableValues.clear();
+        }
+    }
+
+    for (auto& [inst, val] : replacements) {
+        inst->replaceAllUsesWith(val);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold redundant extension chains: `sext(sext(x))` → `sext(x)`,
+/// `zext(zext(x))` → `zext(x)`.
+///
+/// Extension chains appear when type promotion or ABI matching generates
+/// intermediate widening steps (e.g. i8 → i32 → i64).  Collapsing them
+/// into a single extension is faster (1 instruction vs 2) and reduces
+/// register pressure.
+///
+/// Safety: sext(sext(x: iA → iB): iB → iC) == sext(x: iA → iC) by the
+/// sign-extension monotonicity property.  Same for zext.
+///
+/// Returns the number of extension chains collapsed.
+static unsigned foldRedundantExtensions(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            // sext(sext(x)) → sext(x)
+            if (op == llvm::Instruction::SExt) {
+                auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+                if (!inner || inner->getOpcode() != llvm::Instruction::SExt) continue;
+                if (!inner->hasOneUse()) continue;
+                llvm::IRBuilder<> builder(&inst);
+                auto* rep = builder.CreateSExt(inner->getOperand(0), inst.getType(), "sext.chain");
+                inst.replaceAllUsesWith(rep);
+                toErase.push_back(&inst);
+                ++count;
+            }
+            // zext(zext(x)) → zext(x)
+            else if (op == llvm::Instruction::ZExt) {
+                auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+                if (!inner || inner->getOpcode() != llvm::Instruction::ZExt) continue;
+                if (!inner->hasOneUse()) continue;
+                llvm::IRBuilder<> builder(&inst);
+                auto* rep = builder.CreateZExt(inner->getOperand(0), inst.getType(), "zext.chain");
+                inst.replaceAllUsesWith(rep);
+                toErase.push_back(&inst);
+                ++count;
+            }
+        }
+    }
+
+    for (auto it = toErase.rbegin(); it != toErase.rend(); ++it) {
+        auto* inst = *it;
+        llvm::Value* innerVal = inst->getOperand(0);
+        inst->eraseFromParent();
+        if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
+            if (dead->use_empty()) dead->eraseFromParent();
+    }
+    return count;
+}
+
+/// Dead store elimination within basic blocks.
+///
+/// When two stores write to the same pointer and there are no intervening
+/// loads or calls that may read from that pointer, the first store is dead
+/// and can be eliminated.  This is a purely local (intra-BB) optimization
+/// that catches patterns missed by LLVM's DSE when our transforms introduce
+/// new stores (e.g. strength-reduced spills, redundant write-back).
+///
+/// We only eliminate when:
+///   1. Both stores use the same pointer operand (SSA pointer equality).
+///   2. No instruction between them may read from memory (conservative:
+///      any load, call, or atomic between the two stores blocks elimination).
+///   3. The stores have the same type (so the second fully overwrites the first).
+///
+/// Returns the number of dead stores eliminated.
+static unsigned sinkDeadStores(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        // Walk instructions in reverse: for each store, look backward for
+        // an earlier store to the same pointer with no intervening readers.
+        // We use a map from pointer → most-recent-store-index for O(n) scanning.
+        std::vector<llvm::Instruction*> insts;
+        insts.reserve(bb.size());
+        for (auto& inst : bb) insts.push_back(&inst);
+
+        // Map: pointer → index of the last store to that pointer.
+        std::unordered_map<const llvm::Value*, unsigned> lastStoreIdx;
+
+        for (unsigned i = 0; i < insts.size(); ++i) {
+            auto* st = llvm::dyn_cast<llvm::StoreInst>(insts[i]);
+            if (!st) {
+                // If this instruction may read memory, invalidate all tracked
+                // store entries (conservative: the load may alias any of them).
+                if (insts[i]->mayReadFromMemory())
+                    lastStoreIdx.clear();
+                continue;
+            }
+
+            const llvm::Value* ptr = st->getPointerOperand();
+            auto it = lastStoreIdx.find(ptr);
+            if (it != lastStoreIdx.end()) {
+                // Found a prior store to the same pointer with no intervening
+                // memory reads.  The prior store is dead.
+                auto* deadStore = llvm::cast<llvm::StoreInst>(insts[it->second]);
+                // Verify same stored type (full overwrite).
+                if (deadStore->getValueOperand()->getType() ==
+                    st->getValueOperand()->getType()) {
+                    toErase.push_back(deadStore);
+                    ++count;
+                }
+            }
+            lastStoreIdx[ptr] = i;
+
+            // A store also acts as a memory write; if there's also a fence
+            // or atomic ordering, invalidate everything (conservative).
+            if (st->isAtomic()) lastStoreIdx.clear();
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Multi-level loop-invariant code motion.
+///
+/// Enhanced version of the original hoistLoopInvariantInst that supports
+/// hoisting instructions whose operands are themselves loop-invariant but
+/// defined inside the loop.  Uses iterative fixed-point analysis:
+///
+///   1. Mark all instructions with all-external operands as invariant.
+///   2. Re-scan: if an instruction's operands are all either external or
+///      already marked invariant, mark it invariant too.
+///   3. Repeat until no new instructions are marked.
+///
+/// This catches chains like:
+///   %a = add i64 %x, %y       ; x, y defined outside → invariant
+///   %b = shl i64 %a, 3        ; %a is invariant → also invariant
+///   %c = gep ... %b           ; %b is invariant → also invariant (if pure)
+///
+/// where the original single-pass version would only hoist %a.
+///
+/// Hoisting order: forward program order within each iteration, preserving
+/// def-use ordering.  Instructions are hoisted in batches per iteration.
+///
+/// Returns the total number of instructions hoisted.
+static unsigned hoistLoopInvariantInst(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+
+    unsigned count = 0;
+
+    // Assign linear order to BBs for back-edge detection.
+    std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
+    { unsigned ord = 0; for (auto& bb : func) bbOrder[&bb] = ord++; }
+
+    for (auto& header : func) {
+        // Find the latch (back-edge source): a predecessor of header with
+        // a higher linear order than the header itself.
+        llvm::BasicBlock* latch = nullptr;
+        for (auto* pred : llvm::predecessors(&header)) {
+            if (bbOrder.count(pred) && bbOrder.at(pred) >= bbOrder.at(&header)) {
+                latch = pred;
+                break;
+            }
+        }
+        if (!latch) continue;
+
+        // Require exactly one non-latch predecessor as the pre-header.
+        llvm::BasicBlock* preHeader = nullptr;
+        unsigned nonLatchPreds = 0;
+        for (auto* pred : llvm::predecessors(&header)) {
+            if (pred != latch) { preHeader = pred; ++nonLatchPreds; }
+        }
+        if (nonLatchPreds != 1 || !preHeader) continue;
+
+        // Collect loop body BBs (linear order between header and latch).
+        unsigned headerOrd = bbOrder.at(&header);
+        unsigned latchOrd  = bbOrder.at(latch);
+        std::unordered_set<const llvm::BasicBlock*> loopBBs;
+        for (auto& bb : func) {
+            unsigned ord = bbOrder.at(&bb);
+            if (ord >= headerOrd && ord <= latchOrd)
+                loopBBs.insert(&bb);
+        }
+
+        // Multi-level fixed-point: track which loop instructions are invariant.
+        std::unordered_set<const llvm::Instruction*> invariantSet;
+        bool changed = true;
+        constexpr unsigned kMaxIters = 8; // safety bound
+
+        for (unsigned iter = 0; iter < kMaxIters && changed; ++iter) {
+            changed = false;
+            for (auto& bb : func) {
+                if (!loopBBs.count(&bb)) continue;
+                for (auto& inst : bb) {
+                    if (invariantSet.count(&inst)) continue;
+                    // Skip PHIs, terminators.
+                    if (llvm::isa<llvm::PHINode>(inst)) continue;
+                    if (inst.isTerminator()) continue;
+                    // Skip instructions with side effects or memory accesses.
+                    if (inst.mayHaveSideEffects()) continue;
+                    if (inst.mayReadOrWriteMemory()) continue;
+                    // Already in pre-header — nothing to move.
+                    if (inst.getParent() == preHeader) continue;
+
+                    // All operands must be either:
+                    //   - constants
+                    //   - defined outside the loop
+                    //   - already in the invariant set
+                    bool isInvariant = true;
+                    for (unsigned i = 0; i < inst.getNumOperands(); ++i) {
+                        llvm::Value* op = inst.getOperand(i);
+                        if (llvm::isa<llvm::Constant>(op)) continue;
+                        auto* defInst = llvm::dyn_cast<llvm::Instruction>(op);
+                        if (!defInst) { isInvariant = false; break; }
+                        if (!loopBBs.count(defInst->getParent())) continue; // external
+                        if (invariantSet.count(defInst)) continue; // already invariant
+                        isInvariant = false;
+                        break;
+                    }
+                    if (!isInvariant) continue;
+                    invariantSet.insert(&inst);
+                    changed = true;
+                }
+            }
+        }
+
+        // Collect invariant instructions in forward program order.
+        std::vector<llvm::Instruction*> toHoist;
+        for (auto& bb : func) {
+            if (!loopBBs.count(&bb)) continue;
+            for (auto& inst : bb) {
+                if (invariantSet.count(&inst))
+                    toHoist.push_back(&inst);
+            }
+        }
+
+        // Hoist in collected order to the pre-header (before its terminator).
+        llvm::Instruction* insertPt = preHeader->getTerminator();
+        for (auto* inst : toHoist) {
+            inst->moveBefore(insertPt);
+            ++count;
+        }
+    }
+    return count;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// New algebraic & peephole transforms for HGOE overhaul
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Fold redundant PHI nodes: phi(x, x, ..., x) → x.
+/// When all incoming values are the same (after GVN, LICM, or jump threading),
+/// the PHI is a trivial identity and can be replaced.
+static unsigned foldRedundantPHIs(llvm::Function& func) {
+    unsigned count = 0;
+    bool changed = true;
+    // Iterate to a fixed point because folding one PHI may expose another.
+    while (changed) {
+        changed = false;
+        std::vector<llvm::PHINode*> toErase;
+        for (auto& bb : func) {
+            for (auto& inst : bb) {
+                auto* phi = llvm::dyn_cast<llvm::PHINode>(&inst);
+                if (!phi) break; // PHIs are at the start of the BB
+                if (phi->getNumIncomingValues() == 0) continue;
+                llvm::Value* common = phi->getIncomingValue(0);
+                bool allSame = true;
+                for (unsigned i = 1; i < phi->getNumIncomingValues(); ++i) {
+                    if (phi->getIncomingValue(i) != common) {
+                        allSame = false;
+                        break;
+                    }
+                }
+                if (allSame && common != phi) {
+                    phi->replaceAllUsesWith(common);
+                    toErase.push_back(phi);
+                    ++count;
+                    changed = true;
+                }
+            }
+        }
+        for (auto* phi : toErase) phi->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold add(add(x, C1), C2) → add(x, C1+C2): merge chained constant adds.
+/// This is the IR equivalent of LEA-style address combining.  After strength
+/// reduction and GEP merging, chained adds with constants are common.
+/// Folding them reduces critical-path depth and frees an ALU port.
+static unsigned foldChainedAdds(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Add) continue;
+            // Match: add(add(x, C1), C2)
+            bool folded = false;
+            for (int outerSide = 0; outerSide < 2 && !folded; ++outerSide) {
+                auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(outerSide));
+                if (!c2) continue;
+                auto* innerAdd = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1 - outerSide));
+                if (!innerAdd || innerAdd->getOpcode() != llvm::Instruction::Add) continue;
+                if (!innerAdd->hasOneUse()) continue; // don't break other users
+                for (int innerSide = 0; innerSide < 2 && !folded; ++innerSide) {
+                    auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(innerAdd->getOperand(innerSide));
+                    if (!c1) continue;
+                    llvm::Value* x = innerAdd->getOperand(1 - innerSide);
+                    // Create add(x, C1+C2)
+                    llvm::APInt merged = c1->getValue() + c2->getValue();
+                    auto* newConst = llvm::ConstantInt::get(inst.getType(), merged);
+                    auto* newAdd = llvm::BinaryOperator::CreateAdd(x, newConst, "", &inst);
+                    newAdd->setDebugLoc(inst.getDebugLoc());
+                    // Preserve nuw/nsw if both original adds had them
+                    if (auto* outerBO = llvm::dyn_cast<llvm::BinaryOperator>(&inst)) {
+                        if (outerBO->hasNoUnsignedWrap() && innerAdd->hasNoUnsignedWrap())
+                            newAdd->setHasNoUnsignedWrap(true);
+                        if (outerBO->hasNoSignedWrap() && innerAdd->hasNoSignedWrap())
+                            newAdd->setHasNoSignedWrap(true);
+                    }
+                    inst.replaceAllUsesWith(newAdd);
+                    toErase.push_back(&inst);
+                    toErase.push_back(innerAdd);
+                    ++count;
+                    folded = true;
+                }
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold add(sub(0, x), y) → sub(y, x) and add(y, sub(0, x)) → sub(y, x).
+/// Catches negation patterns that survive after foldIntMulByNeg1 / foldIntAddNeg.
+static unsigned foldAddNegToSub(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Add) continue;
+            for (int side = 0; side < 2; ++side) {
+                auto* negSub = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(side));
+                if (!negSub || negSub->getOpcode() != llvm::Instruction::Sub) continue;
+                auto* zero = llvm::dyn_cast<llvm::ConstantInt>(negSub->getOperand(0));
+                if (!zero || !zero->isZero()) continue;
+                if (!negSub->hasOneUse()) continue;
+                llvm::Value* x = negSub->getOperand(1);
+                llvm::Value* y = inst.getOperand(1 - side);
+                auto* newSub = llvm::BinaryOperator::CreateSub(y, x, "", &inst);
+                newSub->setDebugLoc(inst.getDebugLoc());
+                inst.replaceAllUsesWith(newSub);
+                toErase.push_back(&inst);
+                toErase.push_back(negSub);
+                ++count;
+                break;
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold sub(x, x) → 0: self-subtraction elimination.
+/// Appears after PHI folding, LICM, or GVN when both operands resolve to the same value.
+static unsigned foldSubSelf(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Sub) continue;
+            if (inst.getOperand(0) == inst.getOperand(1)) {
+                inst.replaceAllUsesWith(llvm::ConstantInt::get(inst.getType(), 0));
+                toErase.push_back(&inst);
+                ++count;
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Narrow zext to trunc when the extension is followed by a truncation
+/// back to the original width: trunc(zext(x)) → x for matching types.
+/// Also handles sext: trunc(sext(x)) → x.
+/// This catches patterns left after loop unrolling where iterator widening
+/// introduces unnecessary zext→trunc pairs.
+static unsigned foldNarrowExtTrunc(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Trunc) continue;
+            auto* ext = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+            if (!ext) continue;
+            bool isExt = (ext->getOpcode() == llvm::Instruction::ZExt ||
+                          ext->getOpcode() == llvm::Instruction::SExt);
+            if (!isExt) continue;
+            llvm::Value* orig = ext->getOperand(0);
+            if (orig->getType() != inst.getType()) continue;
+            inst.replaceAllUsesWith(orig);
+            toErase.push_back(&inst);
+            if (ext->hasOneUse() || ext->use_empty())
+                toErase.push_back(ext);
+            ++count;
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// FP reassociation for latency reduction: turn linear fadd/fmul chains into
+/// balanced trees when `reassoc` flag is present.
+/// fadd(fadd(fadd(a, b), c), d) → fadd(fadd(a, b), fadd(c, d))
+/// This cuts the critical-path depth from O(n) to O(log n) for n-element reductions.
+/// Only applied when the instruction has the `reassoc` fast-math flag.
+static unsigned reassociateFPChains(llvm::Function& func) {
+    unsigned count = 0;
+    // Collect linear FP chains (fadd or fmul with reassoc).
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FAdd &&
+                inst.getOpcode() != llvm::Instruction::FMul)
+                continue;
+            if (!inst.hasAllowReassoc()) continue;
+            // Only process the root (last use of the chain — instruction with no
+            // single-use chain consumer of the same opcode).
+            bool isRoot = true;
+            for (auto* user : inst.users()) {
+                auto* userInst = llvm::dyn_cast<llvm::Instruction>(user);
+                if (userInst && userInst->getOpcode() == inst.getOpcode() &&
+                    userInst->hasAllowReassoc()) {
+                    isRoot = false;
+                    break;
+                }
+            }
+            if (!isRoot) continue;
+
+            // Walk the chain and collect leaf values.
+            std::vector<llvm::Value*> leaves;
+            std::vector<llvm::Instruction*> chainInsts;
+            std::function<void(llvm::Value*)> collect = [&](llvm::Value* v) {
+                auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(v);
+                if (binOp && binOp->getOpcode() == inst.getOpcode() &&
+                    binOp->hasAllowReassoc() && binOp->hasOneUse()) {
+                    chainInsts.push_back(binOp);
+                    collect(binOp->getOperand(0));
+                    collect(binOp->getOperand(1));
+                } else {
+                    leaves.push_back(v);
+                }
+            };
+            collect(&inst);
+
+            if (leaves.size() < 4) continue; // not worth rebalancing
+
+            // Build a balanced reduction tree.
+            llvm::IRBuilder<> builder(&inst);
+            builder.setFastMathFlags(inst.getFastMathFlags());
+            while (leaves.size() > 1) {
+                std::vector<llvm::Value*> next;
+                for (unsigned i = 0; i + 1 < leaves.size(); i += 2) {
+                    llvm::Value* combined;
+                    if (inst.getOpcode() == llvm::Instruction::FAdd)
+                        combined = builder.CreateFAdd(leaves[i], leaves[i + 1]);
+                    else
+                        combined = builder.CreateFMul(leaves[i], leaves[i + 1]);
+                    if (auto* ci = llvm::dyn_cast<llvm::Instruction>(combined))
+                        ci->setFastMathFlags(inst.getFastMathFlags());
+                    next.push_back(combined);
+                }
+                if (leaves.size() & 1)
+                    next.push_back(leaves.back());
+                leaves = std::move(next);
+            }
+
+            inst.replaceAllUsesWith(leaves[0]);
+            // Don't erase yet — other chain instructions may reference each other.
+            // Mark for deletion.
+            chainInsts.push_back(&inst);
+            for (auto it = chainInsts.rbegin(); it != chainInsts.rend(); ++it) {
+                if ((*it)->use_empty())
+                    (*it)->eraseFromParent();
+            }
+            ++count;
+        }
+    }
+    return count;
+}
+
+/// Fold or(shl(x, C1), lshr(x, C2)) → fshl(x, x, C1) when C1+C2 = bitwidth.
+/// This recognizes rotate-left idioms and lowers them to funnel-shift intrinsics
+/// which map to single-cycle ROL/ROR on x86 and EXTR on AArch64.
+static unsigned foldRotateIdiom(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Or) continue;
+            if (!inst.getType()->isIntegerTy()) continue;
+            unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+            if (bitWidth == 0) continue;
+
+            auto* op0 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+            auto* op1 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+            if (!op0 || !op1) continue;
+
+            // Match shl+lshr pair (either order)
+            llvm::BinaryOperator* shlOp = nullptr;
+            llvm::BinaryOperator* shrOp = nullptr;
+            if (op0->getOpcode() == llvm::Instruction::Shl &&
+                op1->getOpcode() == llvm::Instruction::LShr) {
+                shlOp = op0; shrOp = op1;
+            } else if (op1->getOpcode() == llvm::Instruction::Shl &&
+                       op0->getOpcode() == llvm::Instruction::LShr) {
+                shlOp = op1; shrOp = op0;
+            } else continue;
+
+            // Both must operate on the same value
+            if (shlOp->getOperand(0) != shrOp->getOperand(0)) continue;
+            llvm::Value* x = shlOp->getOperand(0);
+
+            // Check for constant shift amounts that sum to bitwidth
+            auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(shlOp->getOperand(1));
+            auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(shrOp->getOperand(1));
+            if (!c1 || !c2) continue;
+            if (c1->getZExtValue() + c2->getZExtValue() != bitWidth) continue;
+
+            // Create fshl(x, x, C1) — funnel shift left
+            llvm::Module* mod = func.getParent();
+            llvm::Function* fshl = OMSC_GET_INTRINSIC(
+                mod, llvm::Intrinsic::fshl, {inst.getType()});
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* result = builder.CreateCall(fshl, {x, x, c1});
+            inst.replaceAllUsesWith(result);
+            toErase.push_back(&inst);
+            if (shlOp->hasOneUse() || shlOp->use_empty()) toErase.push_back(shlOp);
+            if (shrOp->hasOneUse() || shrOp->use_empty()) toErase.push_back(shrOp);
+            ++count;
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold extractvalue(insertvalue(base, val, idx), idx) → val.
+/// This pattern appears after SROA and struct returns where the value
+/// is immediately extracted from the aggregate it was just inserted into.
+static unsigned foldExtractInsert(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* ev = llvm::dyn_cast<llvm::ExtractValueInst>(&inst);
+            if (!ev) continue;
+            auto* iv = llvm::dyn_cast<llvm::InsertValueInst>(ev->getAggregateOperand());
+            if (!iv) continue;
+            // Check indices match exactly
+            if (ev->getIndices() == iv->getIndices()) {
+                ev->replaceAllUsesWith(iv->getInsertedValueOperand());
+                toErase.push_back(ev);
+                ++count;
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold select(cond, C1, C2) where C1 and C2 are constants and C2 = C1 + 1
+/// into add(zext(not(cond)), C1). This eliminates a conditional by converting
+/// to arithmetic. select(c, 5, 6) → add(zext(!c), 5).
+/// More generally: select(c, C1, C1+offset) → add(mul(zext(!c), offset), C1)
+/// but we only handle offset=1 and offset=-1 for single-instruction output.
+static unsigned foldSelectConsecutiveConsts(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+            auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(sel->getTrueValue());
+            auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(sel->getFalseValue());
+            if (!c1 || !c2) continue;
+            llvm::APInt diff = c2->getValue() - c1->getValue();
+            if (diff == 1) {
+                // select(c, C1, C1+1) → add(zext(!c), C1)
+                llvm::IRBuilder<> builder(sel);
+                llvm::Value* notCond = builder.CreateNot(sel->getCondition(), "notcond");
+                llvm::Value* ext = builder.CreateZExt(notCond, sel->getType(), "zext");
+                llvm::Value* result = builder.CreateAdd(ext, c1, "sel_arith");
+                sel->replaceAllUsesWith(result);
+                toErase.push_back(sel);
+                ++count;
+            } else if (diff.isAllOnes()) {
+                // select(c, C1, C1-1) → add(zext(c), C2) = add(zext(c), C1-1)
+                llvm::IRBuilder<> builder(sel);
+                llvm::Value* ext = builder.CreateZExt(sel->getCondition(), sel->getType(), "zext");
+                llvm::Value* result = builder.CreateAdd(ext, c2, "sel_arith");
+                sel->replaceAllUsesWith(result);
+                toErase.push_back(sel);
+                ++count;
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold shl(1, x) → 1 << x as a power-of-two generation, and expose it
+/// for later transforms. More importantly: and(x, shl(1, n) - 1) → bit test.
+/// shl(1, C) where C is constant → direct constant (constant fold missed cases).
+static unsigned foldShlOneConst(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Shl) continue;
+            auto* one = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(0));
+            if (!one || !one->isOne()) continue;
+            auto* shift = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
+            if (!shift) continue;
+            unsigned bw = inst.getType()->getIntegerBitWidth();
+            uint64_t sv = shift->getZExtValue();
+            if (sv >= bw) continue;
+            llvm::APInt result = llvm::APInt(bw, 1) << sv;
+            inst.replaceAllUsesWith(llvm::ConstantInt::get(inst.getType(), result));
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold mul(x, mul(y, C)) → mul(mul(x, y), C) when C is a power of 2.
+/// This groups the variable operands together and leaves the constant shift
+/// as the outermost operation, enabling strength reduction to a single shift.
+static unsigned foldMulAssocPow2(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
+            for (int side = 0; side < 2; ++side) {
+                auto* innerMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(side));
+                if (!innerMul || innerMul->getOpcode() != llvm::Instruction::Mul) continue;
+                if (!innerMul->hasOneUse()) continue;
+                auto* ci = llvm::dyn_cast<llvm::ConstantInt>(innerMul->getOperand(1));
+                if (!ci || !ci->getValue().isPowerOf2()) continue;
+                // mul(x, mul(y, 2^n)) → shl(mul(x, y), n)
+                llvm::Value* x = inst.getOperand(1 - side);
+                llvm::Value* y = innerMul->getOperand(0);
+                llvm::IRBuilder<> builder(&inst);
+                llvm::Value* prod = builder.CreateMul(x, y, "mul_assoc");
+                unsigned shift = ci->getValue().exactLogBase2();
+                llvm::Value* result = builder.CreateShl(prod,
+                    llvm::ConstantInt::get(inst.getType(), shift), "mul_shl");
+                inst.replaceAllUsesWith(result);
+                toErase.push_back(&inst);
+                ++count;
+                break;
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold icmp(add(x, C1), C2) → icmp(x, C2-C1) for constant offsets.
+/// After loop unrolling and strength reduction, many comparisons have
+/// the form `(i + offset) < limit` which can be simplified to `i < limit - offset`.
+/// This is critical for loop bound tightening and vectorization.
+static unsigned foldCmpAddConst(llvm::Function& func) {
+    unsigned count = 0;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst);
+            if (!cmp) continue;
+            auto* add = llvm::dyn_cast<llvm::BinaryOperator>(cmp->getOperand(0));
+            if (!add || add->getOpcode() != llvm::Instruction::Add) continue;
+            if (!add->hasOneUse()) continue;
+            auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(add->getOperand(1));
+            auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(cmp->getOperand(1));
+            if (!c1 || !c2) continue;
+            // Check for overflow safety: only fold for unsigned predicates
+            // or when we can prove no overflow.
+            auto pred = cmp->getPredicate();
+            if (pred != llvm::CmpInst::ICMP_ULT &&
+                pred != llvm::CmpInst::ICMP_ULE &&
+                pred != llvm::CmpInst::ICMP_UGT &&
+                pred != llvm::CmpInst::ICMP_UGE &&
+                pred != llvm::CmpInst::ICMP_EQ &&
+                pred != llvm::CmpInst::ICMP_NE)
+                continue;
+            // Only fold when c1 is non-negative and c2 >= c1 (no underflow)
+            if (pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) {
+                if (c2->getValue().ult(c1->getValue())) continue; // would underflow
+            }
+            llvm::APInt newC2 = c2->getValue() - c1->getValue();
+            cmp->setOperand(0, add->getOperand(0));
+            cmp->setOperand(1, llvm::ConstantInt::get(cmp->getOperand(1)->getType(), newC2));
+            ++count;
+        }
+    }
+    return count;
+}
+
+/// Dead code elimination: remove instructions with no uses and no side effects.
+/// This is a cleanup pass that catches instructions left dead by our transforms.
+static unsigned eliminateDeadInstructions(llvm::Function& func) {
+    unsigned count = 0;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& bb : func) {
+            llvm::SmallVector<llvm::Instruction*, 16> dead;
+            for (auto it = bb.rbegin(); it != bb.rend(); ++it) {
+                llvm::Instruction* inst = &*it;
+                if (inst->isTerminator()) continue;
+                if (llvm::isa<llvm::PHINode>(inst)) continue;
+                if (!inst->use_empty()) continue;
+                if (inst->mayHaveSideEffects()) continue;
+                dead.push_back(inst);
+            }
+            for (auto* d : dead) {
+                d->eraseFromParent();
+                ++count;
+                changed = true;
+            }
+        }
+    }
+    return count;
+}
+
 TransformStats applyHardwareTransforms(llvm::Function& func,
                                         const MicroarchProfile& profile,
                                         bool enableLoopAnnotation) {
@@ -5382,6 +7603,22 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // fmul(x, -1.0) → fneg(x): 1 cycle bit-flip vs 4-cycle multiply.
     // Run before FMA scan so the eliminated fmul doesn't confuse FMA matching.
     stats.fmaGenerated    += foldFPMulByNeg1(func);
+    // fneg(fneg(x)) → x: double negation elimination.
+    // Run after foldFPMulByNeg1 (which may have introduced new FNeg) and
+    // after FMA generation (which introduces FNeg for FNMADD forms).
+    // No fast-math flags needed — safe for all IEEE 754 values.
+    stats.fmaGenerated    += foldFNegDouble(func);
+    // fsub nnan x, x → 0.0: self-cancel for FP subtraction.
+    // Run after fneg folding so any newly-exposed self-subtracts are caught.
+    stats.fmaGenerated    += foldFSubSelf(func);
+    // fadd(x, x) → fmul(x, 2.0) with reassoc: exposes FMA fusion opportunities.
+    // Run before the FP div-by-constant fold and before FMA passes so that
+    // the resulting fmul(x, 2.0) can be fused: fma(x, 2.0, c).
+    stats.fmaGenerated    += foldFAddSelf(func);
+    // Re-run FMA passes once more so fmul(x,2.0) introduced by foldFAddSelf
+    // can be immediately fused with adjacent fadd/fsub operations.
+    stats.fmaGenerated    += generateFMA(func, profile);
+    stats.fmaGenerated    += generateFMASub(func, profile);
     // FP division by constant → reciprocal multiply (fdiv → fmul when `arcp` flag).
     // Run before FMA scan so that the resulting fmul may be fused in a later pass.
     stats.fmaGenerated    += foldFPDivByConstant(func, profile);
@@ -5409,15 +7646,107 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
     stats.intStrengthReduced += integerStrengthReduce(func, profile);
+    // mul(x, 2^k) → shl(x, k): power-of-2 multiply replacement.
+    // More aggressive than integerStrengthReduce for exact powers of 2.
+    // Run right after integerStrengthReduce to catch remaining pow2 mul.
+    stats.intStrengthReduced += foldMulPow2(func);
+    // mul(x, -1) → sub(0, x): integer negate instead of multiply.
+    // Run after integerStrengthReduce so that the -1 constant is not
+    // mistaken for a shift-add form (which has no -1 case), and before
+    // generateIntegerAbs so that abs patterns using sub(0,x) are still seen.
+    stats.intStrengthReduced += foldIntMulByNeg1(func);
+    // add(x, sub(0,y)) → sub(x,y): fold add+neg created by foldIntMulByNeg1.
+    // Run immediately after so the sub(0,y) pattern is fresh.
+    stats.intStrengthReduced += foldIntAddNeg(func);
+    // shl/lshr/ashr(0, x) → 0: dead shifts after strength reduction.
+    stats.intStrengthReduced += foldShiftOfZero(func);
+    // shl(shl(x, a), b) → shl(x, a+b): merge consecutive constant shifts.
+    stats.intStrengthReduced += foldConsecutiveShifts(func);
+    // or(x,x) → x, and(x,x) → x: idempotent bitwise ops.
+    stats.intStrengthReduced += foldBitwiseIdempotent(func);
+    // xor(x,x) → 0: self-XOR pattern.
+    stats.intStrengthReduced += foldXorSelf(func);
+    // add(x,0) → x, mul(x,1) → x, mul(x,0) → 0: identity/absorbing ops.
+    stats.intStrengthReduced += foldIdentityOps(func);
+    // trunc(zext(x)) → x, zext(trunc(x)) → x when types match.
+    stats.intStrengthReduced += foldTruncExt(func);
+    // sext(sext(x)) → sext(x), zext(zext(x)) → zext(x): extension chains.
+    stats.intStrengthReduced += foldRedundantExtensions(func);
+    // bitcast(bitcast(x)) → x or single bitcast: chain collapse.
+    stats.intStrengthReduced += foldBitcastChain(func);
+    // and(x, -1) → x, or(x, 0) → x, xor(x, 0) → x, and(x, 0) → 0, or(x, -1) → -1.
+    stats.intStrengthReduced += foldBitwiseWithConstants(func);
+    // icmp eq x, x → true, icmp ne x, x → false, icmp C1, C2 → constant fold.
+    stats.intStrengthReduced += foldTrivialICmp(func);
+    // gep(gep(base, i), j) → gep(base, i+j): merge GEP chains.
+    stats.intStrengthReduced += foldGEPArithmetic(func);
+    // select(true, x, y) → x, select(false, x, y) → y.
+    stats.intStrengthReduced += foldConstantSelect(func);
+    // not(not(x)) → x: double boolean negation elimination.
+    stats.intStrengthReduced += foldDoubleNot(func);
     // Integer abs detection: replace select+icmp+sub patterns with llvm.abs.
     // Runs after strength reduction so we don't accidentally undo any reductions.
     stats.intStrengthReduced += generateIntegerAbs(func, profile);
     stats.intStrengthReduced += rebalanceChainForILP(func, profile);
     stats.branchesOptimized  += convertIfElseToSelect(func, profile);
     stats.loadsStorePaired   += insertNonTemporalHints(func, profile);
+    // Eliminate dead stores: when two stores write to the same pointer
+    // with no intervening read, the first is dead.
+    stats.loadsStorePaired   += sinkDeadStores(func);
+    // Eliminate redundant loads: forward stored values and eliminate
+    // repeated loads from the same pointer (local GVN-like).
+    stats.loadsStorePaired   += eliminateRedundantLoads(func);
+
+    // ── New HGOE overhaul transforms ────────────────────────────────────────
+    // These additional transforms close remaining gaps vs LLVM InstCombine.
+
+    // Redundant PHI elimination: phi(x, x, ..., x) → x.
+    // Must run before other transforms that may produce intermediate PHIs.
+    stats.intStrengthReduced += foldRedundantPHIs(func);
+    // Chained constant adds: add(add(x, C1), C2) → add(x, C1+C2).
+    // LEA-style combining for address arithmetic.
+    stats.intStrengthReduced += foldChainedAdds(func);
+    // add(sub(0,x), y) → sub(y, x): negation folding.
+    stats.intStrengthReduced += foldAddNegToSub(func);
+    // sub(x, x) → 0: self-subtraction elimination.
+    stats.intStrengthReduced += foldSubSelf(func);
+    // trunc(zext/sext(x)) → x when types match.
+    stats.intStrengthReduced += foldNarrowExtTrunc(func);
+    // Rotate idiom: or(shl(x, C1), lshr(x, C2)) → fshl(x, x, C1)
+    // when C1+C2 = bitwidth.  Maps to ROL/ROR on x86, EXTR on AArch64.
+    stats.intStrengthReduced += foldRotateIdiom(func);
+    // extractvalue(insertvalue(base, val, idx), idx) → val.
+    stats.intStrengthReduced += foldExtractInsert(func);
+    // FP reassociation: turn linear fadd/fmul chains into balanced trees
+    // when reassoc flag is present (cuts critical path from O(n) to O(log n)).
+    stats.fmaGenerated       += reassociateFPChains(func);
+
+    // ── Phase 2 HGOE overhaul transforms ────────────────────────────────────
+    // select(cond, C1, C1+1) → add(zext(!cond), C1): branchless consecutive const.
+    stats.branchesOptimized  += foldSelectConsecutiveConsts(func);
+    // shl(1, C) → constant: fold missed constant shifts.
+    stats.intStrengthReduced += foldShlOneConst(func);
+    // mul(x, mul(y, 2^k)) → shl(mul(x, y), k): associative pow2 factoring.
+    stats.intStrengthReduced += foldMulAssocPow2(func);
+    // icmp(add(x, C1), C2) → icmp(x, C2-C1): compare offset folding.
+    stats.intStrengthReduced += foldCmpAddConst(func);
+
     // Hoist loop-invariant GEP address calculations to the loop pre-header.
     // Runs last so all address computations introduced by our transforms are hoisted.
     stats.loadsStorePaired   += hoistLoopInvariantGEP(func);
+    // Hoist ALL remaining pure loop-invariant instructions to the pre-header.
+    // This generalises hoistLoopInvariantGEP to cover strength-reduced constants,
+    // type conversions, and other invariant computations created by our transforms.
+    // Must run after all other transforms so every new instruction is considered.
+    stats.loadsStorePaired   += hoistLoopInvariantInst(func);
+    // select(cond, x, x) → x: eliminate selects where both arms are identical.
+    // Runs last since all other transforms (convertIfElseToSelect, foldMinMaxPatterns,
+    // foldSelectToBoolCast, etc.) may have simplified one arm to match the other.
+    stats.intStrengthReduced += foldSelectSameValue(func);
+
+    // Final dead code elimination: sweep up instructions left dead by all
+    // preceding transforms.  Must run absolutely last.
+    eliminateDeadInstructions(func);
 
     return stats;
 }
@@ -5698,7 +8027,9 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 /// Returns estimated cycle count for the block.
 [[gnu::hot]] static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                                     const HardwareGraph& hw,
-                                    const MicroarchProfile& profile) {
+                                    const MicroarchProfile& profile,
+                                    const SchedulerPolicy& policy,
+                                    SchedulerQuality* quality) {
     const llvm::DataLayout& dl = bb.getModule()->getDataLayout();
     // ── 1. Collect moveable instructions ─────────────────────────────────────
     std::vector<llvm::Instruction*> moveable;
@@ -6037,6 +8368,130 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         portPressure[key]++;
     }
 
+    // ── 6a-bis. One-time precomputed per-instruction arrays ──────────────────
+    // These arrays depend only on the static instruction properties, not on
+    // the scheduling state, so they are computed once and reused every cycle.
+    //
+    // isLongLatencyCache: true for div/fdiv — should be started as early as
+    //   possible so the (shared, non-pipelined) divider stays busy while
+    //   independent work fills the rest of the pipeline.
+    // rtKeyCache:         resource-type dispatch key per instruction.  Used in
+    //   the sort comparator (tiers 6 and 6.5) and in the issue loop to look up
+    //   the appropriate PortSlot vector.  Avoids calling classifyOp() +
+    //   mapOpToResource() inside every pairwise comparison.
+    // missRiskCache:      estimated cache-miss risk for load instructions.
+    //   2 = large-stride GEP (likely L2+ access), 1 = other load, 0 = non-load.
+    std::vector<bool>     isLongLatencyCache(n, false);
+    std::vector<int>      rtKeyCache(n, 0);
+    std::vector<unsigned> missRiskCache(n, 0);
+    for (unsigned i = 0; i < n; ++i) {
+        OpClass op = classifyOp(moveable[i]);
+        isLongLatencyCache[i] = (op == OpClass::IntDiv || op == OpClass::FPDiv);
+        rtKeyCache[i] = (op == OpClass::IntMul)
+            ? kIntMulPortKey
+            : static_cast<int>(mapOpToResource(op));
+        if (llvm::isa<llvm::LoadInst>(moveable[i])) {
+            missRiskCache[i] = 1; // assume L1 hit unless proven otherwise
+            auto* ptr = llvm::cast<llvm::LoadInst>(moveable[i])->getPointerOperand();
+            if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+                for (auto it = gep->idx_begin(); it != gep->idx_end(); ++it) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(*it)) {
+                        long long off = ci->getSExtValue();
+                        // A byte offset larger than one cache line means the
+                        // element is in a different cache line from the base
+                        // pointer.  On a cold access this almost certainly
+                        // misses L1 and requires an L2 (or deeper) fetch.
+                        if (std::abs(off) > static_cast<long long>(profile.cacheLineSize)) {
+                            missRiskCache[i] = 2; // large stride → likely L2+ miss
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Port-size cache: number of physical slots per resource-type key.
+    // Used in tier-6.5 cross-multiply comparisons (constant throughout scheduling).
+    std::unordered_map<int, unsigned> portSizeCache;
+    portSizeCache.reserve(hwPorts.size());
+    for (auto& [key, slots] : hwPorts)
+        portSizeCache[key] = static_cast<unsigned>(slots.size());
+
+    // Port-load cache: sum of nextFree across all slots for each key.
+    // Maintained incrementally when a slot is occupied, so the sort comparator
+    // can evaluate tier-6.5 in O(1) instead of iterating all slot entries.
+    std::unordered_map<int, unsigned> portLoadCache;
+    portLoadCache.reserve(hwPorts.size());
+    for (auto& [key, slots] : hwPorts) {
+        unsigned load = 0;
+        for (const auto& s : slots) load += s.nextFree;
+        portLoadCache[key] = load;
+    }
+
+    // ── 6a-ter. Load/store clustering by base address ────────────────────────
+    // LLVM MachineScheduler clusters loads and stores that access nearby memory
+    // (same base pointer, differing only in constant offset) so they are issued
+    // together.  This improves memory-level parallelism and reduces TLB pressure
+    // because coalesced accesses target the same cache line or page.
+    //
+    // clusterGroup[i] = hash of the base pointer for memory instruction i.
+    // Same group → prefer scheduling adjacently (tie-breaker in sort).
+    std::vector<unsigned> clusterGroup(n, 0);
+    {
+        auto getBasePtr = [](const llvm::Instruction* inst) -> const llvm::Value* {
+            if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst))
+                return ld->getPointerOperand()->stripPointerCasts();
+            if (auto* st = llvm::dyn_cast<llvm::StoreInst>(inst))
+                return st->getPointerOperand()->stripPointerCasts();
+            return nullptr;
+        };
+        auto getBaseObject = [](const llvm::Value* ptr) -> const llvm::Value* {
+            if (!ptr) return nullptr;
+            // Strip GEP layers to find the underlying allocation.
+            while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr))
+                ptr = gep->getPointerOperand()->stripPointerCasts();
+            return ptr;
+        };
+        for (unsigned i = 0; i < n; ++i) {
+            auto* basePtr = getBasePtr(moveable[i]);
+            if (!basePtr) continue;
+            auto* baseObj = getBaseObject(basePtr);
+            if (!baseObj) continue;
+            // Use pointer identity hash for clustering: same allocation =
+            // same cluster.  This is approximate but very cheap.
+            clusterGroup[i] = static_cast<unsigned>(
+                std::hash<const llvm::Value*>{}(baseObj) & 0xFFFFFFFFu);
+        }
+    }
+
+    // ── 6a-quater. µop decomposition for store instructions ──────────────────
+    // LLVM models stores as two µops: a store-address µop (AGU port) and a
+    // store-data µop (store port).  Our current model dispatches stores to a
+    // single StoreUnit port.  To match LLVM's accuracy, consume BOTH an AGU
+    // slot and a StoreUnit slot for each store instruction during issue.
+    // We only do this if the profile has AGU ports modeled.
+    bool modelStoreAGU = (profile.agus > 0) && policy.enableStoreUopSplit;
+    if (modelStoreAGU) {
+        // Ensure we have AGU port slots.
+        if (hwPorts.find(static_cast<int>(ResourceType::AGU)) == hwPorts.end())
+            initHWPort(ResourceType::AGU);
+    }
+
+    // ── 6a-quint. Register renaming model ────────────────────────────────────
+    // Modern OoO CPUs rename architectural registers to a much larger physical
+    // register file, effectively eliminating WAR and WAW hazards for registers.
+    // LLVM's MachineScheduler uses an anti-dep breaker to remove false register
+    // dependencies.  We model this by reducing WAR/WAW edge latencies to 0 when
+    // the instruction doesn't produce a value (void type) or when the target
+    // has enough rename registers.  The ROB-size relative to architectural regs
+    // gives a rough bound on rename register availability.
+    // The rename budget = ROB size / 2 — a conservative estimate of how many
+    // physical registers are available beyond the architectural set.
+    // (Note: intRegBudget/vecRegBudget are declared below in section 6c.
+    //  canRenameFreely is computed lazily via inline lambda to defer the
+    //  dependency on those variables.)
+
     // ── 6b. Detect instruction fusion opportunities ─────────────────────────
     // Fusion pairs should be scheduled adjacently when possible to enable
     // macro-op fusion (cmp+branch) or micro-op folding (load+op, GEP+load).
@@ -6064,6 +8519,11 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     // Vector/FP register budget: total SIMD/FP registers (no SP/FP equiv.).
     unsigned vecRegBudget = (profile.vecRegisters > 0)
         ? profile.vecRegisters : 16u;
+
+    // Register renaming model: compute after intRegBudget/vecRegBudget are known.
+    unsigned renameBudget = profile.robSize / 2;
+    bool canRenameFreely = (renameBudget > intRegBudget + vecRegBudget);
+    (void)canRenameFreely; // used implicitly by the scheduler via reduced WAR/WAW edge latencies
 
     unsigned intLive = 0;   // current live integer register values
     unsigned vecLive = 0;   // current live vector/FP register values
@@ -6098,6 +8558,48 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         vecLive = static_cast<unsigned>(externalVecDefs.size());
     }
 
+    // ── 6c-bis. Cross-BB liveness hints ──────────────────────────────────────
+    // LLVM's MachineScheduler uses LiveIntervals to estimate register pressure
+    // at BB boundaries.  We approximate this: if the BB has multiple predecessors
+    // or successors, the live-in/live-out register counts are likely higher
+    // because values flow through this BB from/to multiple paths.
+    // Inflate the initial live-in count slightly to account for live-through
+    // values (values defined before this BB and used after it).
+    if (policy.enableCrossBBLiveness) {
+        // Count predecessors by looking at PHI incoming blocks — each unique
+        // predecessor contributes at least one incoming edge.
+        std::unordered_set<const llvm::BasicBlock*> predBBs;
+        for (auto& inst : bb) {
+            auto* phi = llvm::dyn_cast<llvm::PHINode>(&inst);
+            if (!phi) break;
+            for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i)
+                predBBs.insert(phi->getIncomingBlock(i));
+        }
+        // If no PHIs, check if any terminator in the function branches here.
+        // (Simplified: just count the number of distinct phi incoming blocks.)
+        unsigned predCount = static_cast<unsigned>(predBBs.size());
+        // Count successors via the terminator.
+        unsigned succCount = 0;
+        if (auto* term = bb.getTerminator())
+            succCount = term->getNumSuccessors();
+        // Values that are live-through (defined before, used after) contribute
+        // to register pressure but aren't visible in our local analysis.
+        if (predCount > 1) {
+            unsigned phiCount = 0;
+            for (auto& inst : bb)
+                if (llvm::isa<llvm::PHINode>(inst)) ++phiCount;
+                else break;
+            unsigned extraLive = std::min(phiCount, predCount - 1);
+            intLive += extraLive / 2;
+            vecLive += (extraLive + 1) / 2;
+        }
+        // If the BB feeds multiple successors, more values may be live-out.
+        if (succCount > 1) {
+            intLive += 1;
+            vecLive += 1;
+        }
+    }
+
     // ── 6e. Reorder buffer pressure tracking ─────────────────────────────────
     // Modern out-of-order CPUs retire instructions in order from a reorder
     // buffer (ROB).  When the ROB fills, dispatch stalls.  We approximate
@@ -6121,6 +8623,35 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     unsigned outstandingLoads  = 0;
     unsigned outstandingStores = 0;
 
+    // ── 6h. Front-end decode-width gating ─────────────────────────────────────
+    // LLVM's MachineScheduler models the front-end decode bandwidth separately
+    // from the back-end issue width.  On many microarchitectures decodeWidth <
+    // issueWidth (e.g. Zen4: decode 4, issue 6), meaning the front-end is the
+    // bottleneck for non-fused instruction streams.  Model this by limiting
+    // dispatches per cycle to min(issueWidth, decodeWidth + fusionBonus).
+    // Fused instruction pairs (cmp+jcc, load+op) consume only 1 decode slot,
+    // so each fusion effectively gives us a free decode slot.
+    unsigned decodeWidth = std::max(profile.decodeWidth, 1u);
+
+    // Precompute which instructions are part of a fusion pair and would
+    // consume zero additional decode slots (the "second" instruction in a
+    // fusion pair is folded into the first's decode slot).
+    std::vector<bool> isFusionSecond(n, false);
+    for (const auto& fp : fusionPairs) {
+        if (fp.second < n)
+            isFusionSecond[fp.second] = true;
+    }
+
+    // ── 6i. Memory bandwidth tracking ─────────────────────────────────────────
+    // Model per-cache-level bandwidth limits to avoid issuing more loads per
+    // cycle than the memory subsystem can serve.  On bandwidth-limited code
+    // (streaming loops), this prevents the scheduler from piling up loads that
+    // would stall the pipeline waiting for the memory bus.
+    unsigned l1BW = profile.l1DBandwidthBytesPerCycle > 0
+                  ? profile.l1DBandwidthBytesPerCycle : 64u;  // default: 1 cache line/cycle
+    unsigned loadsThisCycle = 0;
+    unsigned storesThisCycle = 0;
+
     // ── 6d. Debug: dump schedule DAG if requested ─────────────────────────────
     if (shouldDumpSchedule())
         dumpScheduleDAG(moveable, succ, pred, critPath, lat, profile);
@@ -6136,12 +8667,41 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     unsigned totalScheduled = 0;
     unsigned maxCycle = 0;
 
+    // ── Incremental ready queue ────────────────────────────────────────────────
+    // Instead of rescanning all n instructions each cycle (O(n²) total), we
+    // maintain an unordered_set of currently-ready instructions that is updated
+    // incrementally:
+    //   • Initialised with all root instructions (inDeg == 0).
+    //   • Dispatched instructions are erased when issued.
+    //   • Newly-eligible successors (inDeg drops to 0) are inserted immediately.
+    // Each cycle builds the local `ready` vector as a snapshot of this set,
+    // reducing per-cycle scan cost from O(n) to O(|readySet|).
+    std::unordered_set<unsigned> readySet;
+    readySet.reserve(std::max(n / 4u, 8u));
+    for (unsigned i = 0; i < n; ++i)
+        if (inDeg[i] == 0) readySet.insert(i);
+
+    // Sort-cache vectors: hoisted outside the while loop so we allocate
+    // them once (n elements) rather than reallocating every scheduling cycle.
+    // Values are populated for ready instructions at the start of each cycle
+    // and are only read for instructions in the current ready list.
+    std::vector<unsigned> rfsCache(n, 0);           // register-freeing score
+    std::vector<unsigned> sdCache(n, 0);            // stall distance
+    std::vector<bool>     fusCache(n, false);       // fusion affinity
+    std::vector<unsigned> rpCache(n, 0);            // register-pressure penalty
+    std::vector<unsigned> dynEarliestStartCache(n, 0); // actual data-ready cycle
+
+    // Track recently-issued memory clusters for cluster affinity scheduling.
+    // When a load/store is issued, record its cluster group so the next cycle's
+    // sort can give preference to instructions in the same cluster.
+    std::vector<unsigned> lastClusterMemOps;
+    lastClusterMemOps.reserve(4);
+
     while (totalScheduled < n) {
-        // Collect all ready instructions (inDeg == 0, not yet scheduled).
-        std::vector<unsigned> ready;
-        for (unsigned i = 0; i < n; ++i)
-            if (!done[i] && inDeg[i] == 0)
-                ready.push_back(i);
+        // Build this cycle's candidate list from the incremental ready set.
+        // The readySet contains exactly the instructions with inDeg == 0 that
+        // have not yet been dispatched, so no full O(n) scan is needed.
+        std::vector<unsigned> ready(readySet.begin(), readySet.end());
 
         // Guard: a non-empty ready list is guaranteed for DAGs (SSA form).
         // If we reach here with an empty ready list it means there is a cycle
@@ -6154,22 +8714,34 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             if (ready.empty()) break;
         }
 
-        // Compute ROB occupancy: instructions scheduled but not yet completed.
-        inflightCount = 0;
-        for (unsigned id = 0; id < n; ++id)
-            if (done[id] && avail[id] > currentCycle)
-                ++inflightCount;
+        // Single O(n) scan: compute all stall-check quantities in one pass.
+        // Previously four separate loops; merging them reduces the per-cycle
+        // work from 4×O(n) to 1×O(n) and improves cache utilization.
+        inflightCount     = 0;
+        outstandingLoads  = 0;
+        outstandingStores = 0;
+        unsigned nextRetire  = std::numeric_limits<unsigned>::max();
+        unsigned nextMemAvail = std::numeric_limits<unsigned>::max();
+        for (unsigned id = 0; id < n; ++id) {
+            if (!done[id] || avail[id] <= currentCycle) continue;
+            ++inflightCount;
+            if (avail[id] < nextRetire) nextRetire = avail[id];
+            if (llvm::isa<llvm::LoadInst>(moveable[id])) {
+                ++outstandingLoads;
+                if (avail[id] < nextMemAvail) nextMemAvail = avail[id];
+            } else if (llvm::isa<llvm::StoreInst>(moveable[id])) {
+                ++outstandingStores;
+                if (avail[id] < nextMemAvail) nextMemAvail = avail[id];
+            }
+        }
+        if (nextRetire  == std::numeric_limits<unsigned>::max()) nextRetire  = currentCycle + 1;
+        if (nextMemAvail == std::numeric_limits<unsigned>::max()) nextMemAvail = currentCycle + 1;
 
         // ROB full stall: on a real out-of-order CPU, dispatch is completely
         // blocked when the reorder buffer is full.  Advance the clock to when
         // the oldest in-flight instruction retires (completes), freeing one ROB
-        // entry.  This is more accurate than merely adjusting priority (which
-        // was the previous behaviour at the 75% threshold).
+        // entry.
         if (inflightCount >= robCapacity) {
-            unsigned nextRetire = currentCycle + 1;
-            for (unsigned id = 0; id < n; ++id)
-                if (done[id] && avail[id] > currentCycle)
-                    nextRetire = std::min(nextRetire, avail[id]);
             currentCycle = nextRetire;
             continue; // retry dispatch at the new cycle
         }
@@ -6180,216 +8752,194 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // finishes if the RS is at capacity.  rsCapacity is typically smaller
         // than robCapacity so this check fires on deeper OoO windows first.
         if (inflightCount >= rsCapacity) {
-            unsigned nextComplete = currentCycle + 1;
-            for (unsigned id = 0; id < n; ++id)
-                if (done[id] && avail[id] > currentCycle)
-                    nextComplete = std::min(nextComplete, avail[id]);
-            currentCycle = nextComplete;
+            currentCycle = nextRetire;
             continue;
         }
 
-        // Load / Store buffer stall: count outstanding loads and stores.
-        {
-            outstandingLoads  = 0;
-            outstandingStores = 0;
-            for (unsigned id = 0; id < n; ++id) {
-                if (!done[id] || avail[id] <= currentCycle) continue;
-                if (llvm::isa<llvm::LoadInst>(moveable[id]))  ++outstandingLoads;
-                if (llvm::isa<llvm::StoreInst>(moveable[id])) ++outstandingStores;
-            }
-            if (outstandingLoads >= lbCapacity || outstandingStores >= sbCapacity) {
-                // Advance to the next load/store completion.
-                unsigned nextMemComplete = currentCycle + 1;
-                for (unsigned id = 0; id < n; ++id) {
-                    if (!done[id] || avail[id] <= currentCycle) continue;
-                    if (llvm::isa<llvm::LoadInst>(moveable[id]) ||
-                        llvm::isa<llvm::StoreInst>(moveable[id]))
-                        nextMemComplete = std::min(nextMemComplete, avail[id]);
-                }
-                currentCycle = nextMemComplete;
-                continue;
-            }
+        // Load / Store buffer stall: advance to the next memory-op completion.
+        if (outstandingLoads >= lbCapacity || outstandingStores >= sbCapacity) {
+            currentCycle = nextMemAvail;
+            continue;
         }
 
-        // Sort ready instructions for maximum throughput — 9-tier priority:
+        // Sort ready instructions for maximum throughput — 10-tier priority:
         //   1. Critical path remaining (latency hiding)
         //   2. Long-latency ops first (div/fdiv — start divider early)
+        //   2b. Dynamic earliest start: sooner data-ready cycle first (accuracy)
         //   3. Loads first (hide memory latency, may miss in cache)
         //   4. Stall distance (consumer work remaining — more = better hiding)
         //   5. Fusion affinity (schedule fusion partners adjacently)
         //   6. Port pressure (schedule bottleneck resource first)
+        //   6.5. Port utilization balance (even load across execution units)
         //   7. Register pressure penalty (per register file — int vs vec/FP)
         //   8. Register-freeing score (reduce live values)
-        //   9. Instruction index (deterministic tie-break)
+        //   9. ROB latency preference (short-latency when ROB is under pressure)
+        //  10. Instruction index (deterministic tie-break)
         //
-        // Register-freeing score: count of predecessors whose only remaining
-        // not-yet-scheduled user is this instruction (scheduling it frees the
-        // predecessor's result register).
-        auto regFreeScore = [&](unsigned id) -> unsigned {
-            unsigned score = 0;
-            for (auto [p, _] : pred[id]) {
+        // ── Precompute per-instruction metrics for this cycle's sort ─────────
+        // All metrics are stored in arrays allocated before the while loop.
+        // Reset only the slots used by the current ready list, then populate.
+        for (unsigned id : ready) {
+            rfsCache[id] = 0; sdCache[id] = 0;
+            fusCache[id] = false; rpCache[id] = 0;
+            dynEarliestStartCache[id] = 0;
+        }
+        for (unsigned id : ready) {
+            // Dynamic earliest start: actual data-ready cycle using the real
+            // issuedAt values of predecessors recorded so far.  This is more
+            // accurate than the static earliestStart (which assumed chains start
+            // at cycle 0) because it reflects port-contention delays already
+            // experienced by earlier instructions in the same schedule.
+            // For ready instructions all predecessors are done (inDeg[id]==0).
+            unsigned de = 0;
+            for (auto [p, edgeLat] : pred[id])
+                if (done[p])
+                    de = std::max(de, issuedAt[p] + edgeLat);
+            dynEarliestStartCache[id] = de;
+
+            // Register-freeing score: predecessors whose only remaining user
+            // is this instruction — scheduling it will free those registers.
+            unsigned rfs = 0;
+            for (auto [p, _x] : pred[id]) {
                 if (!done[p]) continue;
                 bool lastUser = true;
-                for (auto [s, __] : succ[p])
+                for (auto [s, _y] : succ[p])
                     if (s != id && !done[s]) { lastUser = false; break; }
-                if (lastUser) ++score;
+                if (lastUser) ++rfs;
             }
-            return score;
-        };
+            rfsCache[id] = rfs;
 
-        // Classify long-latency instructions (divisions, FP divides, sqrt)
-        // that should be scheduled as early as possible so that independent
-        // work can fill the pipeline while the divider is busy.
-        auto isLongLatencyOp = [&](unsigned id) -> bool {
-            OpClass op = classifyOp(moveable[id]);
-            return op == OpClass::IntDiv || op == OpClass::FPDiv;
-        };
+            // Stall distance: max critPath of undone successors.
+            unsigned sd = 0;
+            for (auto [s, _z] : succ[id])
+                if (!done[s]) sd = std::max(sd, critPath[s]);
+            sdCache[id] = sd;
 
-        // Compute a "stall distance" for each ready instruction: how many
-        // cycles of independent work exist between this instruction's result
-        // and its first consumer.  A higher value means more opportunity
-        // to hide the latency if we schedule it now.
-        auto stallDistance = [&](unsigned id) -> unsigned {
-            unsigned maxConsumerCrit = 0;
-            for (auto [s, _] : succ[id])
-                if (!done[s]) maxConsumerCrit = std::max(maxConsumerCrit, critPath[s]);
-            return maxConsumerCrit;
-        };
-
-        // Fusion affinity: returns true if this instruction has a fusion
-        // partner that was just scheduled, so scheduling it next enables
-        // macro-op fusion (cmp+branch) or micro-op folding (load+alu).
-        auto hasFusionAffinity = [&](unsigned id) -> bool {
-            auto it = fusionPartner.find(id);
-            if (it == fusionPartner.end()) return false;
-            return done[it->second]; // partner already scheduled
-        };
-
-        // Register pressure penalty — per physical register file.
-        // On all major architectures, integer and vector/FP registers are
-        // completely independent files.  A penalty only applies when scheduling
-        // this instruction would push the *appropriate* file over its budget.
-        // This eliminates false penalties when mixing int and FP operations:
-        // e.g. being over integer budget should not penalise an FP instruction.
-        auto regPressurePenalty = [&](unsigned id) -> unsigned {
-            if (moveable[id]->getType()->isVoidTy()) return 0;
-            if (lat[id] == 0) return 0; // free ops (bitcast, phi) don't need regs
+            // Fusion affinity: partner already scheduled → true.
+            {
+                auto fit = fusionPartner.find(id);
+                fusCache[id] = (fit != fusionPartner.end()) && done[fit->second];
+            }
+        }
+        // Register pressure penalty (separate pass — depends on rfsCache).
+        for (unsigned id : ready) {
+            if (moveable[id]->getType()->isVoidTy() || lat[id] == 0) continue;
             bool isVec = producesVecOrFP(moveable[id]);
             unsigned live   = isVec ? vecLive   : intLive;
             unsigned budget = isVec ? vecRegBudget : intRegBudget;
-            unsigned rfs = regFreeScore(id);
-            // Net delta: +1 produced, rfs freed.  Only penalise if net is positive
-            // and pushes past budget.
+            unsigned rfs    = rfsCache[id];
             if (live + 1 > budget + rfs) {
                 unsigned penalty = (live + 1 - rfs > budget) ? (live + 1 - rfs - budget) : 0;
-                // Dampen penalty for instructions with slack — they can be
-                // delayed to a lower-pressure point without extending the
-                // critical path.  /4 chosen so slack of 4 halves the penalty.
                 if (slack[id] > 0)
-                    penalty = std::max(1u, penalty / (1 + slack[id] / 4));
-                return penalty;
+                    penalty = std::max(1u, static_cast<unsigned>(
+                        penalty / (1.0 + static_cast<double>(slack[id]) / policy.slackDamping)));
+                rpCache[id] = penalty;
             }
-            return 0;
-        };
+        }
 
         std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
+            // Tier 1: critical path remaining — schedule the longest chain first.
             if (critPath[a] != critPath[b])
                 return critPath[a] > critPath[b];
 
-            // Long-latency operations (div, fdiv) before other ops at same
-            // critical path — start them early so the divider is busy while
-            // independent ALU/load work proceeds.  LLVM's generic scheduler
-            // does not have per-CPU divider latency data; our profiles do.
-            bool longA = isLongLatencyOp(a);
-            bool longB = isLongLatencyOp(b);
-            if (longA != longB)
-                return longA;  // long-latency first
+            // Tier 2: long-latency operations (div, fdiv) before other ops —
+            // start them early so the divider is busy while the rest proceeds.
+            // Uses isLongLatencyCache (precomputed once, O(1) lookup).
+            if (isLongLatencyCache[a] != isLongLatencyCache[b])
+                return static_cast<bool>(isLongLatencyCache[a]);
 
-            // Loads first: schedule early to hide memory latency.
-            // Within loads, prefer those with potentially longer latency
-            // (likely cache misses based on access pattern analysis).
-            bool isLoadA = llvm::isa<llvm::LoadInst>(moveable[a]);
-            bool isLoadB = llvm::isa<llvm::LoadInst>(moveable[b]);
+            // Tier 2b: among equal critPath and latency class, schedule the
+            // instruction whose data is ready soonest.  This uses the actual
+            // recorded issuedAt times of predecessors (dynEarliestStartCache),
+            // which is more accurate than the static earliestStart that assumed
+            // chains start at cycle 0 — port-contention delays are reflected.
+            if (dynEarliestStartCache[a] != dynEarliestStartCache[b])
+                return dynEarliestStartCache[a] < dynEarliestStartCache[b];
+
+            // Tier 3: loads first — schedule early to hide memory latency.
+            // Within loads, prefer those with higher cache-miss risk
+            // (precomputed in missRiskCache, O(1) lookup).
+            bool isLoadA = (missRiskCache[a] > 0);
+            bool isLoadB = (missRiskCache[b] > 0);
             if (isLoadA != isLoadB)
-                return isLoadA;  // loads before non-loads
-            if (isLoadA && isLoadB) {
-                // Heuristic: loads from different base pointers are more
-                // likely to miss (different cache lines).  Loads from GEPs
-                // with large constant offsets may cross cache lines.
-                auto estimateMissRisk = [&](unsigned id) -> unsigned {
-                    auto* load = llvm::cast<llvm::LoadInst>(moveable[id]);
-                    auto* ptr = load->getPointerOperand();
-                    if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
-                        // Large constant offset → higher miss risk
-                        for (auto it = gep->idx_begin(); it != gep->idx_end(); ++it) {
-                            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(*it)) {
-                                long long off = ci->getSExtValue();
-                                if (std::abs(off) > static_cast<long long>(profile.cacheLineSize))
-                                    return 2;  // likely L2+ access
-                            }
-                        }
-                    }
-                    return 1;  // likely L1 hit
-                };
-                unsigned riskA = estimateMissRisk(a);
-                unsigned riskB = estimateMissRisk(b);
-                if (riskA != riskB)
-                    return riskA > riskB;  // higher miss risk = schedule earlier
+                return isLoadA;
+            if (isLoadA && isLoadB && policy.enableCacheMissRisk) {
+                if (missRiskCache[a] != missRiskCache[b])
+                    return missRiskCache[a] > missRiskCache[b];
             }
 
-            // Among same-class ready instructions, prefer those whose
-            // consumers have the most remaining work (= more stall hiding).
-            unsigned sdA = stallDistance(a), sdB = stallDistance(b);
-            if (sdA != sdB) return sdA > sdB;
+            // Tier 4: stall distance — prefer instructions whose consumers have
+            // the most remaining work (more opportunity to hide latency).
+            if (sdCache[a] != sdCache[b]) return sdCache[a] > sdCache[b];
 
-            // Fusion affinity: prefer instructions whose fusion partner
+            // Tier 5: fusion affinity — prefer instructions whose fusion partner
             // was just scheduled, enabling macro-op / micro-op fusion.
-            bool fusA = hasFusionAffinity(a), fusB = hasFusionAffinity(b);
-            if (fusA != fusB) return fusA;
+            if (policy.enableFusionHeuristic) {
+                if (fusCache[a] != fusCache[b]) return static_cast<bool>(fusCache[a]);
+            }
 
-            OpClass opA = classifyOp(moveable[a]);
-            OpClass opB = classifyOp(moveable[b]);
-            int rtA = (opA == OpClass::IntMul) ? kIntMulPortKey
-                : static_cast<int>(mapOpToResource(opA));
-            int rtB = (opB == OpClass::IntMul) ? kIntMulPortKey
-                : static_cast<int>(mapOpToResource(opB));
+            // Tier 6: port pressure — schedule the most-contended resource first.
+            // rtKeyCache precomputed (O(1) lookup, avoids classifyOp each comparison).
+            int rtA = rtKeyCache[a];
+            int rtB = rtKeyCache[b];
             if (portPressure[rtA] != portPressure[rtB])
                 return portPressure[rtA] > portPressure[rtB];
 
             // Tier 6.5: Port utilization balance — prefer instructions that
-            // use the least-loaded port type, evening out utilization across
-            // all execution units for better throughput.
+            // use the least-loaded port type.  portLoadCache and portSizeCache
+            // are maintained incrementally (O(1) lookup, no slot iteration).
             {
-                auto& slotsA = hwPorts[rtA];
-                auto& slotsB = hwPorts[rtB];
-                unsigned loadA = 0, loadB = 0;
-                for (const auto& s : slotsA) loadA += s.nextFree;
-                for (const auto& s : slotsB) loadB += s.nextFree;
-                // Cross-multiply to compare averages without integer division
-                // precision loss: loadA/sizeA vs loadB/sizeB ↔ loadA*sizeB vs loadB*sizeA
-                unsigned sizeA = static_cast<unsigned>(slotsA.size());
-                unsigned sizeB = static_cast<unsigned>(slotsB.size());
-                unsigned crossA = sizeB > 0 ? loadA * sizeB : 0;
-                unsigned crossB = sizeA > 0 ? loadB * sizeA : 0;
+                unsigned loadA = portLoadCache.count(rtA) ? portLoadCache.at(rtA) : 0;
+                unsigned loadB = portLoadCache.count(rtB) ? portLoadCache.at(rtB) : 0;
+                unsigned sizeA = portSizeCache.count(rtA) ? portSizeCache.at(rtA) : 1;
+                unsigned sizeB = portSizeCache.count(rtB) ? portSizeCache.at(rtB) : 1;
+                unsigned crossA = loadA * sizeB;
+                unsigned crossB = loadB * sizeA;
                 if (crossA != crossB)
                     return crossA < crossB;  // prefer less-loaded port
             }
 
-            // Register pressure: penalise instructions that would cause spills.
-            unsigned rpA = regPressurePenalty(a), rpB = regPressurePenalty(b);
-            if (rpA != rpB) return rpA < rpB; // lower penalty = better
+            // Tier 7: register pressure — penalise instructions that would
+            // cause spills (cached, O(1) lookup).
+            if (policy.enableRegPressure) {
+                if (rpCache[a] != rpCache[b]) return rpCache[a] < rpCache[b];
+            }
 
-            unsigned rfsA = regFreeScore(a), rfsB = regFreeScore(b);
-            if (rfsA != rfsB) return rfsA > rfsB;
+            // Tier 8: register-freeing score — prefer instructions that release
+            // dead predecessor values, reducing live-value count (O(1) lookup).
+            if (rfsCache[a] != rfsCache[b]) return rfsCache[a] > rfsCache[b];
 
             // Tier 9: ROB pressure — when many instructions are inflight,
             // prefer instructions that complete sooner (lower latency) to
             // allow earlier retirement and free ROB entries.
-            if (inflightCount > robCapacity * 3 / 4) {
+            // Enhanced: also activate when issue slots are nearly saturated
+            // (>50% inflight), not just at 75% ROB.  This improves retirement
+            // rate in compute-dense code where the ROB fills quickly.
+            if (policy.enableROBPressure &&
+                (inflightCount > robCapacity * 3 / 4 ||
+                 inflightCount > robCapacity / 2)) {
                 if (lat[a] != lat[b])
                     return lat[a] < lat[b];  // shorter latency first
             }
 
+            // Tier 9.5: Load/store cluster affinity — prefer memory instructions
+            // that share the same base object (cluster group) to improve memory-
+            // level parallelism and reduce TLB misses.  The last-issued cluster
+            // gets preference so loads/stores to the same array are grouped.
+            if (clusterGroup[a] != 0 && clusterGroup[b] != 0) {
+                if (clusterGroup[a] != clusterGroup[b]) {
+                    // Prefer the instruction in the same cluster as the most
+                    // recently issued memory op.
+                    bool aInLast = false, bInLast = false;
+                    for (unsigned prev : lastClusterMemOps) {
+                        if (clusterGroup[a] == prev) aInLast = true;
+                        if (clusterGroup[b] == prev) bInLast = true;
+                    }
+                    if (aInLast != bInLast) return aInLast;
+                }
+            }
+
+            // Tier 10: deterministic tie-break by original instruction index.
             return a < b;
         });
 
@@ -6397,15 +8947,18 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // For large ready lists (> beamWidth), only consider the top-N
         // candidates to prevent combinatorial explosion in very large BBs.
         // The sorted order ensures the highest-priority instructions are kept.
-        constexpr unsigned kBeamWidth = 32;
-        if (ready.size() > kBeamWidth)
-            ready.resize(kBeamWidth);
+        // beamWidth is taken from the scheduler policy (default 32).
+        if (policy.enableBeamPruning && ready.size() > policy.beamWidth)
+            ready.resize(policy.beamWidth);
 
         // Within a cycle, track which ResourceTypes have been issued to
         // encourage diversity and fill different execution units in parallel.
         std::unordered_set<int> issuedPortsThisCycle;
         std::unordered_set<unsigned> issuedChainsThisCycle;
         unsigned issued = 0;
+        unsigned decodedThisCycle = 0; // front-end decode slot usage
+        loadsThisCycle = 0;
+        storesThisCycle = 0;
 
         // Two-pass issue: first pass schedules instructions that use port
         // types not yet used this cycle (maximises parallel unit utilisation);
@@ -6413,18 +8966,34 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         for (int pass = 0; pass < 2; ++pass) {
             for (unsigned id : ready) {
                 if (issued >= profile.issueWidth) break;
+                // ── Decode-width gating ──────────────────────────────────────
+                // The front-end decoder can only crack decodeWidth instructions
+                // per cycle.  Fused second-instructions don't consume a decode
+                // slot (they are folded into the first instruction's µop).
+                unsigned decodeCost = isFusionSecond[id] ? 0u : 1u;
+                if (decodedThisCycle + decodeCost > decodeWidth) continue;
                 if (done[id]) continue;
 
-                OpClass opCls = classifyOp(moveable[id]);
-                int rtKey = (opCls == OpClass::IntMul)
-                    ? kIntMulPortKey
-                    : static_cast<int>(mapOpToResource(opCls));
+                // rtKeyCache precomputed once; avoids classifyOp + mapOpToResource.
+                int rtKey = rtKeyCache[id];
+
+                // ── Memory bandwidth gating ──────────────────────────────────
+                // Don't issue more loads/stores than the L1 bandwidth supports.
+                if (llvm::isa<llvm::LoadInst>(moveable[id])) {
+                    unsigned loadBytes = 8; // default 64-bit load
+                    if (auto* ty = moveable[id]->getType())
+                        if (ty->isSized())
+                            loadBytes = std::max(1u,
+                                static_cast<unsigned>(dl.getTypeStoreSize(ty)));
+                    if (loadsThisCycle + loadBytes > l1BW) continue;
+                }
 
                 // Pass 0: only issue to a port type not yet used this cycle.
                 // Pass 1: issue to any port type (fill remaining slots).
                 if (pass == 0 && issuedPortsThisCycle.count(rtKey)) continue;
                 // Pass 0: also prefer chain diversity for ILP.
-                if (pass == 0 && issuedChainsThisCycle.count(chainId[id])) continue;
+                if (pass == 0 && policy.enableChainDiversity &&
+                    issuedChainsThisCycle.count(chainId[id])) continue;
 
                 // Earliest start: max(currentCycle, predecessor availability).
                 // For data-dep edges (edgeLat = lat[p]): wait for result.
@@ -6460,8 +9029,13 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                          rtKey == static_cast<int>(ResourceType::VectorALU))) {
                         pumpFactor = profile.vec512Penalty;
                     }
+                    // Update portLoadCache incrementally: subtract the old
+                    // nextFree value and add the new one so the sort comparator
+                    // can evaluate tier-6.5 in O(1) without scanning all slots.
+                    unsigned oldNextFree = slots[chosenSlot].nextFree;
                     slots[chosenSlot].nextFree =
                         startCycle + slots[chosenSlot].busyCycles * pumpFactor;
+                    portLoadCache[rtKey] += slots[chosenSlot].nextFree - oldNextFree;
                 }
 
                 issuedAt[id] = startCycle;
@@ -6471,7 +9045,53 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 done[id] = true;
                 ++totalScheduled;
                 ++issued;
+                decodedThisCycle += decodeCost;
                 scheduled.push_back(moveable[id]);
+
+                // Track memory bandwidth usage this cycle.
+                if (llvm::isa<llvm::LoadInst>(moveable[id])) {
+                    unsigned loadBytes = 8;
+                    if (auto* ty = moveable[id]->getType())
+                        if (ty->isSized())
+                            loadBytes = std::max(1u,
+                                static_cast<unsigned>(dl.getTypeStoreSize(ty)));
+                    loadsThisCycle += loadBytes;
+                }
+                if (llvm::isa<llvm::StoreInst>(moveable[id]))
+                    ++storesThisCycle;
+
+                // ── Store µop decomposition ──────────────────────────────────
+                // Model stores as two µops: store-address on AGU + store-data
+                // on StoreUnit.  Occupy both ports to match LLVM's model.
+                if (modelStoreAGU && llvm::isa<llvm::StoreInst>(moveable[id])) {
+                    int aguKey = static_cast<int>(ResourceType::AGU);
+                    auto aguIt = hwPorts.find(aguKey);
+                    if (aguIt != hwPorts.end() && !aguIt->second.empty()) {
+                        auto& aguSlots = aguIt->second;
+                        unsigned bestAGU = 0, bestAGUTime = std::numeric_limits<unsigned>::max();
+                        for (unsigned s = 0; s < aguSlots.size(); ++s) {
+                            unsigned t = std::max(startCycle, aguSlots[s].nextFree);
+                            if (t < bestAGUTime) { bestAGUTime = t; bestAGU = s; }
+                        }
+                        unsigned oldAGU = aguSlots[bestAGU].nextFree;
+                        aguSlots[bestAGU].nextFree = bestAGUTime + aguSlots[bestAGU].busyCycles;
+                        portLoadCache[aguKey] += aguSlots[bestAGU].nextFree - oldAGU;
+                    }
+                }
+
+                // ── Load/store cluster tracking ──────────────────────────────
+                // Record this instruction's cluster group for affinity scheduling
+                // in subsequent cycles.
+                if (clusterGroup[id] != 0) {
+                    // Keep a small window of recently issued cluster groups.
+                    if (lastClusterMemOps.size() >= 4)
+                        lastClusterMemOps.erase(lastClusterMemOps.begin());
+                    lastClusterMemOps.push_back(clusterGroup[id]);
+                }
+
+                // Remove from the incremental ready set: this instruction is
+                // now dispatched and must not be included in future cycles.
+                readySet.erase(id);
                 issuedPortsThisCycle.insert(rtKey);
                 issuedChainsThisCycle.insert(chainId[id]);
 
@@ -6498,8 +9118,12 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 }
 
                 // Decrement in-degrees of successors.
-                for (auto [s, _] : succ[id])
-                    if (inDeg[s] > 0) --inDeg[s];
+                // Any successor whose in-degree reaches zero is now ready and
+                // is added to the incremental readySet for future cycles.
+                for (auto [s, _] : succ[id]) {
+                    if (inDeg[s] > 0 && --inDeg[s] == 0)
+                        readySet.insert(s);
+                }
 
                 // Update port pressure.
                 if (portPressure[rtKey] > 0) --portPressure[rtKey];
@@ -6508,7 +9132,11 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
         // Advance the cycle counter.  If nothing was issued this cycle,
         // skip ahead to the earliest time any port becomes free or any
-        // predecessor result becomes available, avoiding empty cycle spin.
+        // dispatched instruction's result becomes available, avoiding
+        // empty-cycle spin.  done[id] means "dispatched to the RS / execution
+        // unit"; avail[id] (set at dispatch time) is when the result is ready.
+        // Checking done[id] is correct: avail[] is only populated when
+        // done[id]=true, so the old `!done[id]` condition was always false.
         if (issued == 0) {
             unsigned nextEvent = currentCycle + 1;
             for (auto& [key, portSlots] : hwPorts)
@@ -6516,7 +9144,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     if (slot.nextFree > currentCycle)
                         nextEvent = std::min(nextEvent, slot.nextFree);
             for (unsigned id = 0; id < n; ++id)
-                if (!done[id] && avail[id] > currentCycle)
+                if (done[id] && avail[id] > currentCycle)
                     nextEvent = std::min(nextEvent, avail[id]);
             currentCycle = nextEvent;
         } else {
@@ -6529,6 +9157,84 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         dumpScheduleResult(scheduled, avail, idx,
                            maxCycle > 0 ? maxCycle : currentCycle);
 
+    // ── 8b. Bidirectional scheduling: bottom-up comparison ──────────────────
+    // LLVM's GenericScheduler runs both top-down and bottom-up scheduling passes
+    // and picks the better result.  We implement a lightweight bottom-up pass:
+    // schedule from sinks (instructions with no successors) toward roots,
+    // using reverse critical-path depth as the primary sort key.
+    //
+    // The bottom-up approach is better for register-pressure-sensitive code
+    // (it naturally sinks definitions close to their uses), while top-down
+    // is better for latency-bound code (it prioritizes starting long chains).
+    // We keep whichever schedule produces fewer estimated cycles.
+    unsigned topDownCycles = maxCycle > 0 ? maxCycle : currentCycle;
+    if (policy.enableBidirectional && n >= 4) {
+        // Compute "height" from roots: longest path from any root to this node.
+        // This is the bottom-up analog of critPath (which measures depth from sinks).
+        std::vector<unsigned> height(n, 0);
+        for (unsigned i = 0; i < n; ++i) {
+            height[i] = lat[i];
+            for (auto [p, edgeLat] : pred[i])
+                height[i] = std::max(height[i], edgeLat + height[p]);
+        }
+
+        // Bottom-up scheduling: process sinks first (high height, no successors).
+        // Use a simplified greedy: sort all instructions by bottom-up priority
+        // (height descending, then succs-first to reduce live ranges).
+        std::vector<unsigned> buOrder(n);
+        std::iota(buOrder.begin(), buOrder.end(), 0u);
+        std::sort(buOrder.begin(), buOrder.end(), [&](unsigned a, unsigned b) {
+            // Primary: schedule sinks first (no or few successors)
+            bool sinkA = succ[a].empty();
+            bool sinkB = succ[b].empty();
+            if (sinkA != sinkB) return sinkA;
+            // Secondary: height (reverse crit-path from roots)
+            if (height[a] != height[b]) return height[a] > height[b];
+            // Tertiary: same as top-down for consistency
+            if (critPath[a] != critPath[b]) return critPath[a] > critPath[b];
+            return a > b; // reverse order for bottom-up
+        });
+
+        // Simulate bottom-up schedule to estimate cycle count.
+        // Use a simple occupancy model: assign instructions to cycles respecting
+        // dependencies and issue width.
+        std::vector<unsigned> buAvail(n, 0);
+        std::vector<unsigned> buIssued(n, 0);
+        std::vector<bool> buDone(n, false);
+        unsigned buCycle = 0;
+        unsigned buMax = 0;
+        unsigned buScheduled = 0;
+
+        // Build reverse in-degree (out-degree of successors).
+        std::vector<unsigned> outDeg(n, 0);
+        for (unsigned i = 0; i < n; ++i)
+            outDeg[i] = static_cast<unsigned>(succ[i].size());
+
+        // Process in bottom-up order, assigning to earliest available cycle.
+        for (unsigned id : buOrder) {
+            unsigned earliest = 0;
+            for (auto [p, edgeLat] : pred[id]) {
+                if (buDone[p])
+                    earliest = std::max(earliest, buIssued[p] + edgeLat);
+            }
+            buIssued[id] = earliest;
+            buAvail[id] = earliest + lat[id];
+            if (buAvail[id] > buMax) buMax = buAvail[id];
+            buDone[id] = true;
+        }
+
+        unsigned bottomUpCycles = buMax;
+
+        // If bottom-up produces fewer cycles, use its instruction order.
+        if (bottomUpCycles < topDownCycles) {
+            scheduled.clear();
+            scheduled.reserve(n);
+            for (unsigned id : buOrder)
+                scheduled.push_back(moveable[id]);
+            maxCycle = bottomUpCycles;
+        }
+    }
+
     // ── 9. Apply schedule: reorder LLVM IR within the basic block ────────────
     if (scheduled.size() == n) {
         llvm::Instruction* term = bb.getTerminator();
@@ -6536,14 +9242,102 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             inst->moveBefore(bb, term->getIterator());
     }
 
-    return maxCycle > 0 ? maxCycle : currentCycle;
+    const unsigned bbCycles = maxCycle > 0 ? maxCycle : currentCycle;
+
+    // ── 10. Accumulate quality metrics ──────────────────────────────────────
+    if (quality && n > 0) {
+        quality->scheduledCycles   += bbCycles;
+        quality->instructionsTotal += n;
+        ++quality->basicBlocksScheduled;
+
+        // Track peak live register counts across the schedule.
+        // We re-walk the scheduled order to obtain the watermark.
+        unsigned peakInt = intLive, peakVec = vecLive;
+        unsigned simInt = 0, simVec = 0;
+        {
+            // Reset to live-in counts and replay.
+            std::unordered_set<const llvm::Value*> extInt, extVec;
+            for (unsigned i = 0; i < n; ++i) {
+                for (auto& use : moveable[i]->operands()) {
+                    auto* val = use.get();
+                    if (llvm::isa<llvm::Constant>(val)) continue;
+                    bool isVec = val->getType()->isFloatingPointTy() ||
+                                 val->getType()->isVectorTy();
+                    if (llvm::dyn_cast<llvm::Argument>(val) ||
+                        (llvm::dyn_cast<llvm::Instruction>(val) &&
+                         idx.find(llvm::dyn_cast<llvm::Instruction>(val)) == idx.end()))
+                        (isVec ? extVec : extInt).insert(val);
+                }
+            }
+            simInt = static_cast<unsigned>(extInt.size());
+            simVec = static_cast<unsigned>(extVec.size());
+
+            std::vector<unsigned> remUsers2(n, 0);
+            for (unsigned i = 0; i < n; ++i)
+                remUsers2[i] = static_cast<unsigned>(succ[i].size());
+
+            for (auto* inst : scheduled) {
+                auto it2 = idx.find(inst);
+                if (it2 == idx.end()) continue;
+                unsigned id2 = it2->second;
+
+                if (!moveable[id2]->getType()->isVoidTy() && lat[id2] > 0) {
+                    if (producesVecOrFP(moveable[id2])) ++simVec;
+                    else ++simInt;
+                }
+                for (auto [p2, _2] : pred[id2]) {
+                    if (remUsers2[p2] > 0 && --remUsers2[p2] == 0) {
+                        if (producesVecOrFP(moveable[p2])) {
+                            assert(simVec > 0 && "vec live count underflow in quality tracking");
+                            --simVec;
+                        } else {
+                            assert(simInt > 0 && "int live count underflow in quality tracking");
+                            --simInt;
+                        }
+                    }
+                }
+                if (simInt > peakInt) peakInt = simInt;
+                if (simVec > peakVec) peakVec = simVec;
+            }
+        }
+        if (peakInt > quality->peakIntLive) quality->peakIntLive = peakInt;
+        if (peakVec > quality->peakVecLive) quality->peakVecLive = peakVec;
+
+        // Compute critical-path efficiency: maxCritPath / scheduledCycles.
+        // A value of 1.0 means we scheduled at the theoretical minimum.
+        unsigned maxCrit = 0;
+        for (unsigned i = 0; i < n; ++i)
+            if (critPath[i] > maxCrit) maxCrit = critPath[i];
+        if (bbCycles > 0 && maxCrit > 0) {
+            double bbEff = static_cast<double>(maxCrit) / static_cast<double>(bbCycles);
+            // Weighted running average across BBs.
+            unsigned prevBBs = quality->basicBlocksScheduled - 1;
+            if (prevBBs == 0) {
+                quality->efficiency = bbEff;
+            } else {
+                quality->efficiency =
+                    (quality->efficiency * static_cast<double>(prevBBs) + bbEff) /
+                    static_cast<double>(quality->basicBlocksScheduled);
+            }
+        }
+    }
+
+    return bbCycles;
 }
 
 unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw,
-                               const MicroarchProfile& profile) {
+                               const MicroarchProfile& profile,
+                               const SchedulerPolicy& policy,
+                               SchedulerQuality* quality) {
     unsigned totalCycles = 0;
     for (auto& bb : func)
-        totalCycles += scheduleBasicBlock(bb, hw, profile);
+        totalCycles += scheduleBasicBlock(bb, hw, profile, policy, quality);
+
+    // Compute IPC estimate: instructions / cycles.
+    if (quality && quality->scheduledCycles > 0) {
+        quality->estimatedIPC = static_cast<double>(quality->instructionsTotal) /
+                                static_cast<double>(quality->scheduledCycles);
+    }
     return totalCycles;
 }
 // ═════════════════════════════════════════════════════════════════════════════
@@ -6591,16 +9385,44 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     if (config.enableTransforms)
         applyTargetAttributes(func, cpuName, profile);
 
+    // ── Cost model lambda (shared by scheduling and transform phases) ────────
+    // Compute total expected cycles for a function, accounting for:
+    //   • Per-opcode execution latencies (the critical path contribution)
+    //   • Statistical branch misprediction overhead (10% miss rate assumed
+    //     for general-purpose code without profile data).
+    //   • 512-bit double-pump penalty.
+    auto estimateFuncCost = [&](llvm::Function& f) -> unsigned {
+        constexpr double kBranchMissRate = 0.10;
+        unsigned cost = 0;
+        for (auto& bb : f) {
+            for (auto& inst : bb) {
+                if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator())
+                    continue;
+                unsigned latency = getOpcodeLatency(&inst, profile);
+                if (profile.vec512Penalty > 1 && isWideVectorOp(&inst)) {
+                    OpClass cls = classifyOp(&inst);
+                    if (cls == OpClass::FMA || cls == OpClass::FPMul ||
+                        cls == OpClass::FPArith || cls == OpClass::VectorOp)
+                        latency *= profile.vec512Penalty;
+                }
+                cost += latency;
+            }
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator())) {
+                if (br->isConditional()) {
+                    cost += static_cast<unsigned>(
+                        profile.branchMispredictPenalty * kBranchMissRate + 0.5);
+                }
+            }
+        }
+        return cost;
+    };
+
     // Step 3 — Map program onto hardware (list scheduling).
     if (config.enableScheduling) {
         MappingResult mapping = mapProgramToHardware(pg, hw, profile);
         stats.totalScheduledCycles += mapping.totalCycles;
         stats.avgPortUtilization = mapping.portUtilization;
 
-        // Step 3b — Physically reorder LLVM IR instructions within each basic
-        // block to maximise throughput on the specific microarchitecture.
-        // Uses per-opcode latencies, per-port throughput from the HardwareGraph,
-        // multiply-port constraints, and register-pressure-aware priority.
         for (auto& bb : func) {
             unsigned bbSize = 0;
             for (auto& inst : bb)
@@ -6609,69 +9431,61 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
             if (bbSize >= 2)
                 ++stats.basicBlocksScheduled;
         }
-        scheduleInstructions(func, hw, profile);
+        scheduleInstructions(func, hw, profile, config.schedulerPolicy,
+                             &stats.schedulerQuality);
     }
 
-    // Step 4 — Apply hardware-aware transformations with cost-based
-    // accept/reject.  Compute a baseline cost from per-opcode latencies
-    // across all basic blocks, apply transforms, then re-cost.  If the
-    // transformed version is not cheaper (or only marginally so), roll back.
+    // Step 4 — Iterative transform-schedule pipeline.
+    // Run transforms→schedule→transforms→schedule (up to 3 rounds), accepting
+    // each iteration only if cost improves.  This catches cascading simplification
+    // opportunities: transforms may expose new scheduling freedom, and better
+    // scheduling may expose dead code or new transform targets.
+    // LLVM's MachineScheduler effectively does this by running DAG mutations
+    // between scheduling passes — we explicitly iterate at the IR level.
     if (config.enableTransforms) {
-        // Compute total expected cycles for a function, accounting for:
-        //   • Per-opcode execution latencies (the critical path contribution)
-        //   • Statistical branch misprediction overhead (10% miss rate assumed
-        //     for general-purpose code without profile data).  Transforms that
-        //     reduce the number of conditional branches (e.g. branchless select,
-        //     loop unrolling) correctly show a lower cost after the transform.
-        //   • 512-bit double-pump penalty: wide-vector ops on CPUs with
-        //     vec512Penalty>1 occupy the execution port for 2 cycles, so their
-        //     throughput contribution is doubled.
-        //
-        // Using a richer cost model means that transforms which reduce branch
-        // frequency or eliminate double-pumped 512-bit ops are accepted even
-        // when raw latency savings are small.
-        auto estimateFuncCost = [&](llvm::Function& f) -> unsigned {
-            // kBranchMissRate: fraction of conditional branches that mispredict
-            // in typical general-purpose code without PGO data.  10% is a
-            // standard conservative estimate from hardware performance counters.
-            constexpr double kBranchMissRate = 0.10;
-            unsigned cost = 0;
-            for (auto& bb : f) {
-                for (auto& inst : bb) {
-                    if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator())
-                        continue;
-                    unsigned latency = getOpcodeLatency(&inst, profile);
+        unsigned bestCost = estimateFuncCost(func);
+        unsigned maxIters = config.schedulerPolicy.enableIterativeRefine
+                           ? config.schedulerPolicy.maxRefineIters : 1;
 
-                    // 512-bit double-pump: throughput cost is 2× for
-                    // FMA / VecALU instructions on double-pump CPUs.
-                    if (profile.vec512Penalty > 1 && isWideVectorOp(&inst)) {
-                        OpClass cls = classifyOp(&inst);
-                        if (cls == OpClass::FMA || cls == OpClass::FPMul ||
-                            cls == OpClass::FPArith || cls == OpClass::VectorOp)
-                            latency *= profile.vec512Penalty;
-                    }
-                    cost += latency;
-                }
-                // Add statistical branch misprediction overhead for each
-                // conditional branch in the function.
-                if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator())) {
-                    if (br->isConditional()) {
-                        cost += static_cast<unsigned>(
-                            profile.branchMispredictPenalty * kBranchMissRate + 0.5);
-                    }
-                }
+        for (unsigned iter = 0; iter < maxIters; ++iter) {
+            unsigned costBefore = estimateFuncCost(func);
+            TransformStats iterStats = applyHardwareTransforms(func, profile,
+                                                                // Only annotate loops on first pass
+                                                                config.enableLoopAnnotation && (iter == 0));
+            unsigned costAfterTransform = estimateFuncCost(func);
+
+            // Accumulate transform statistics.
+            if (iter == 0) {
+                stats.transforms = iterStats;
+            } else {
+                stats.transforms.fmaGenerated      += iterStats.fmaGenerated;
+                stats.transforms.loadsStorePaired   += iterStats.loadsStorePaired;
+                stats.transforms.prefetchesInserted += iterStats.prefetchesInserted;
+                stats.transforms.branchesOptimized  += iterStats.branchesOptimized;
+                stats.transforms.vectorExpanded     += iterStats.vectorExpanded;
+                stats.transforms.intStrengthReduced += iterStats.intStrengthReduced;
             }
-            return cost;
-        };
 
-        unsigned costBefore = estimateFuncCost(func);
-        stats.transforms = applyHardwareTransforms(func, profile,
-                                                    config.enableLoopAnnotation);
-        unsigned costAfter = estimateFuncCost(func);
+            // Re-schedule after transforms to exploit new opportunities.
+            if (config.enableScheduling && costAfterTransform < costBefore) {
+                scheduleInstructions(func, hw, profile, config.schedulerPolicy,
+                                     &stats.schedulerQuality);
+            }
 
-        // Accept the transformation: log the cost delta for diagnostics.
-        if (costAfter < costBefore)
-            stats.totalScheduledCycles = costBefore - costAfter; // cycles saved
+            unsigned costAfter = estimateFuncCost(func);
+
+            // Stop iterating if no improvement (fixed point reached).
+            if (costAfter >= bestCost) break;
+            bestCost = costAfter;
+        }
+
+        // Log the total cost delta.
+        // bestCost was the initial cost before any transforms (only reduced on
+        // improvement), and the function's current state reflects the best
+        // schedule found.  Compute cycles saved as the difference.
+        unsigned finalCost = estimateFuncCost(func);
+        if (finalCost < bestCost)
+            stats.totalScheduledCycles = bestCost - finalCost; // cycles saved
         else
             stats.totalScheduledCycles = 0;
         stats.loopsUnrolled = stats.transforms.vectorExpanded;

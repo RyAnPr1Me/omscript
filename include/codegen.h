@@ -776,6 +776,34 @@ class CodeGenerator {
     llvm::DenseMap<llvm::Value*, int64_t> allocaUpperBound_;
     llvm::MDNode* currentLoopAccessGroup_ = nullptr; ///< Access group for parallel loop metadata
 
+    // ── Range-to-pointer-arithmetic state ─────────────────────────────────────
+    // When a `for i in start..end` loop is entered and the loop body pre-scan
+    // (`preScanLoopArrayAccesses`) finds arrays accessed purely as `arr[i]`,
+    // we pre-compute the data pointer for each such array BEFORE the loop.
+    // Inside the loop body, `generateIndex`/`generateIndexAssign` use these
+    // cached data pointers directly (inbounds GEP, no bounds check).
+    //
+    // Scoping: like `loopArrayLenCache_`, these maps are saved/restored on
+    // loop entry/exit (see generateForStatement).  They are cleared when the
+    // loop body has been fully generated so inner loops don't see stale data.
+    //
+    // Safety: arrays are only entered if ALL accesses in the body are of the
+    // form `arr[iterVar]` (simple direct index — no push/pop, no arr[expr]).
+    // For arrays that ARE written (arr[i] = ...), the data pointer is still
+    // valid because writing elements does not change the array's base pointer
+    // or length header.
+    //
+    // Key: array variable name.  Value: pre-computed data pointer (i64*, the
+    // pointer to arr[0], i.e., `base + 1`).
+    llvm::StringMap<llvm::Value*> loopPtrModeDataPtrs_;
+    /// Pre-loaded lengths for pointer-mode arrays (keyed by array name).
+    /// Cached here so `canElideBoundsCheck` can use the same SSA value.
+    llvm::StringMap<llvm::Value*> loopPtrModeLens_;
+    /// Active iterator variable name for the current pointer-mode loop.
+    /// Empty when not in a pointer-mode loop.  Used by generateIndex to check
+    /// whether the current index expression is exactly the active iterator.
+    std::string loopPtrModeIterVar_;
+
     // Code generation methods
     [[gnu::hot]] llvm::Function* generateFunction(FunctionDecl* func);
     [[gnu::hot]] void generateStatement(Statement* stmt);
@@ -1341,6 +1369,27 @@ class CodeGenerator {
     /// @param line     Source line number for the runtime error message (0 = unknown)
     void emitBoundsCheck(llvm::Value* idxVal, llvm::Value* basePtr,
                          bool isStr, bool isBorrowed, const char* prefix, int line = 0);
+
+    // ── Range-to-pointer-arithmetic helpers ──────────────────────────────────
+
+    /// Pre-scan the AST of a for-loop body to collect arrays that are accessed
+    /// ONLY as `arr[iterVar]` (direct index, exactly the loop iterator) and
+    /// have no length-modifying calls (push/pop/array_remove/array_insert) in
+    /// the body.  Arrays that also appear as `arr[expr]` (non-trivial index)
+    /// or in length-modifying calls are excluded — those arrays continue to
+    /// receive normal bounds checks.
+    ///
+    /// The returned map keys are array variable names.  The bool value is
+    /// `true` if the array is also written (IndexAssignExpr) in the loop body,
+    /// and `false` if it is only read.  Writing elements does NOT change the
+    /// base pointer or length header, so both read-only and written arrays are
+    /// eligible for pointer-mode optimization.
+    ///
+    /// @param body     Root statement of the loop body
+    /// @param iterVar  Name of the loop iterator variable
+    /// @return  Map from array name → is_written.  Empty if no eligible arrays.
+    std::unordered_map<std::string, bool> preScanLoopArrayAccesses(
+        const Statement* body, const std::string& iterVar);
 
     // Optimization methods
     void runOptimizationPasses();
