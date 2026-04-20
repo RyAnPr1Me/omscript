@@ -5871,6 +5871,8 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // type conversions, and other invariant computations created by our transforms.
     // Must run after all other transforms so every new instruction is considered.
     stats.loadsStorePaired   += hoistLoopInvariantInst(func);
+
+    return stats;
 }
 // ═════════════════════════════════════════════════════════════════════════════
 // Step 3b — Schedule-driven instruction reordering
