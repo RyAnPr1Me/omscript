@@ -11,7 +11,7 @@
 #include "opt_orchestrator.h"
 #include "codegen.h"   // CodeGenerator + OptimizationLevel
 
-#include <algorithm>
+#include <deque>
 #include <cassert>
 #include <chrono>
 #include <iostream>
@@ -91,18 +91,23 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
     }
 
     // Seed queue with zero-in-degree passes, sorted by ID for determinism.
-    std::vector<uint32_t> ready;
-    for (const auto& [id, deg] : inDegree) {
-        if (deg == 0) ready.push_back(id);
+    // Use deque so front removal is O(1) instead of O(n).
+    std::deque<uint32_t> ready;
+    {
+        std::vector<uint32_t> tmp;
+        for (const auto& [id, deg] : inDegree) {
+            if (deg == 0) tmp.push_back(id);
+        }
+        std::sort(tmp.begin(), tmp.end());
+        for (auto id : tmp) ready.push_back(id);
     }
-    std::sort(ready.begin(), ready.end());
 
     std::vector<uint32_t> order;
     order.reserve(inSet.size());
 
     while (!ready.empty()) {
         uint32_t cur = ready.front();
-        ready.erase(ready.begin());
+        ready.pop_front();
         order.push_back(cur);
 
         const PassMetadata* meta = find(cur);
@@ -116,7 +121,7 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
                     if (std::string(req) == fact) {
                         inDegree[p.id]--;
                         if (inDegree[p.id] == 0) {
-                            // Insert in sorted position.
+                            // Insert in sorted position for determinism.
                             auto pos = std::lower_bound(ready.begin(), ready.end(), p.id);
                             ready.insert(pos, p.id);
                         }
@@ -302,58 +307,62 @@ void OptimizationOrchestrator::runInvalidated(Program* program, OptimizationCont
 }
 
 // ── Per-pass wrappers ─────────────────────────────────────────────────────────
+//
+// Each wrapper:
+//   1. Delegates to the corresponding CodeGenerator method (Phase A behavior).
+//   2. Marks the produced fact valid in ctx.validity().
+//   3. Increments the statistics counter.
+//
+// The `ctx` parameter is used only for validity tracking in these Phase A
+// wrappers.  In future phases (B/D/E) the wrappers will read pre-conditions
+// from ctx (e.g., verifying required facts are present) and write their
+// analysis results directly into ctx instead of CodeGenerator's private maps.
+// The parameter is retained now (rather than removed) so the signature is
+// stable across phases and call sites do not need to change.
 
 void OptimizationOrchestrator::runStringTypes(Program* program, OptimizationContext& ctx) {
-    (void)ctx;
     codegen_->preAnalyzeStringTypes(program);
     ctx.validity().stringTypes = true;
     ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runArrayTypes(Program* program, OptimizationContext& ctx) {
-    (void)ctx;
     codegen_->preAnalyzeArrayTypes(program);
     ctx.validity().arrayTypes = true;
     ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runConstantReturns(Program* program, OptimizationContext& ctx) {
-    (void)ctx;
     codegen_->analyzeConstantReturnValues(program);
     ctx.validity().constantReturns = true;
     ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runPurity(Program* program, OptimizationContext& ctx) {
-    (void)ctx;
     codegen_->autoDetectConstEvalFunctions(program);
     ctx.validity().purity = true;
     ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runEffects(Program* program, OptimizationContext& ctx) {
-    (void)ctx;
     codegen_->inferFunctionEffects(program);
     ctx.validity().effects = true;
     ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runSynthesis(Program* program, OptimizationContext& ctx) {
-    (void)ctx;
     codegen_->runSynthesisPass(program, verbose_);
     ctx.validity().synthesis = true;
     ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runCFCTRE(Program* program, OptimizationContext& ctx) {
-    (void)ctx;
     codegen_->runCFCTRE(program);
     ctx.validity().cfctre = true;
     ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& ctx) {
-    (void)ctx;
     // E-graph optimization is conditional on the optimization level and the
     // enableEGraph_ flag — decisions that live in CodeGenerator.  We delegate
     // the full conditional to CodeGenerator via a new wrapper so the

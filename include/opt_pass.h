@@ -17,8 +17,9 @@
 ///   tokens.  The registry can topologically sort any subset of passes.
 /// • Deterministic: tie-breaking order is determined by the stable numeric
 ///   PassId, not by insertion order or pointer values.
-/// • Extensible: new passes are registered with a single
-///   OMSC_REGISTER_PASS() call; no global arrays to update manually.
+/// • Extensible: new passes are registered via `PassRegistry::registerPass()`.
+///   The `PassId::k*` constants defined in `opt_orchestrator.cpp` provide
+///   stable, named references to each registered pass.
 /// • Zero-overhead when disabled: all metadata lives in read-only data
 ///   sections; no virtual dispatch at runtime.
 
