@@ -1,6 +1,8 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "egraph.h"
+#include "opt_context.h"
+#include "opt_orchestrator.h"
 #include "synthesize.h"
 #include <climits>
 #include <cmath>
@@ -4409,73 +4411,24 @@ void CodeGenerator::generate(Program* program) {
         }
     }
 
-    // Pre-analyze string types: determine which functions return strings and
-    // which parameters receive string arguments, so that print/concat/etc.
-    // work correctly when strings cross function boundaries.
-    preAnalyzeStringTypes(program);
+    // ── Optimization pre-pass sequence ────────────────────────────────────
+    //
+    // All pre-pass analyses and AST transforms are coordinated by the
+    // OptimizationOrchestrator, which:
+    //   1. Runs each pass in dependency order (string types → array types →
+    //      constant returns → purity → effects → synthesis → CF-CTRE → egraph)
+    //   2. Records which facts are valid in the OptimizationContext
+    //   3. Syncs the per-function analysis results into optCtx_ so that
+    //      codegen can query a single surface instead of multiple maps.
+    //
+    // Behavior is identical to the previous inline sequence; the Orchestrator
+    // simply makes the dependency graph explicit and facts centrally available.
+    optCtx_ = std::make_unique<OptimizationContext>();
+    optCtx_->setCTEngine(ctEngine_.get());
 
-    // Pre-analyze array types: mirror of string type analysis for array types.
-    // Populates arrayReturningFunctions_ and funcParamArrayTypes_ so that
-    // isStringExpr() correctly returns false for variables assigned from
-    // array-returning function calls, and arrayVars_ stays accurate across
-    // function boundaries.
-    preAnalyzeArrayTypes(program);
-
-    // Pre-analyze constant return values: determine which zero-parameter, pure
-    // functions always return the same compile-time constant (string or integer).
-    // Results enable deep inter-procedural constant folding during codegen:
-    //   len(make_str())      → compile-time constant (no runtime strlen)
-    //   const n = get_n();   → n is tracked as a compile-time constant
-    //   for (i in 0..get_n()) → loop bound folded to a constant
-    analyzeConstantReturnValues(program);
-
-    // Auto-detect pure user-defined functions: identify functions with parameters
-    // whose bodies are pure (no I/O, no global mutations) and register them in
-    // constEvalFunctions_.  This enables the existing tryConstEval/tryConstEvalFull
-    // machinery to fold calls to these functions at compile time when all arguments
-    // are constants, without requiring explicit @const_eval annotations.
-    // Runs after analyzeConstantReturnValues so zero-arg const-returning functions
-    // are already classified and can be recognized as pure callees.
-    autoDetectConstEvalFunctions(program);
-
-    // Effect inference: determine which user functions have I/O, memory
-    // reads/writes, or observable mutation.  Must run after autoDetectConstEvalFunctions
-    // so that the constEvalFunctions_ set is already populated (those are pure).
-    inferFunctionEffects(program);
-
-    // std::synthesize body synthesis: detect functions whose entire body is
-    //   return std__synthesize(examples_literal[, ops[, depth[, hint]]]);
-    // and replace that body with a synthesized expression tree.  Must run
-    // before CF-CTRE so the synthesized body is visible to the constant
-    // folder and purity analysis.
-    runSynthesisPass(program, verbose_);
-
-    // CF-CTRE (Cross-Function Compile-Time Reasoning Engine): execute pure
-    // functions across call boundaries at compile time.  Populates the
-    // memoisation cache with pre-evaluated results and the pure-function
-    // registry with auto-detected purity.  Placed after all pre-analysis
-    // passes so every available piece of constant information is visible.
-    runCFCTRE(program);
-
-    // E-Graph Equality Saturation: apply algebraic simplification, constant
-    // folding, strength reduction, and other rewrites at the AST level using
-    // an e-graph.  This discovers globally optimal expression representations
-    // before LLVM codegen, enabling optimizations that LLVM's pass pipeline
-    // may miss (e.g., cross-expression algebraic identities).
-    // Enabled at O2+ unless explicitly disabled with -fno-egraph.
-    if (enableEGraph_ && optimizationLevel >= OptimizationLevel::O2) {
-        if (verbose_) {
-            std::cout << "  [opt] Running e-graph equality saturation on AST ("
-                      << program->functions.size() << " functions)..." << '\n';
-        }
-        egraph::optimizeProgram(program);
-        if (verbose_) {
-            auto rules = egraph::getAllRules();
-            std::cout << "  [opt] E-graph saturation complete (" << rules.size()
-                      << " rewrite rules applied)" << '\n';
-        }
-    } else if (verbose_ && optimizationLevel < OptimizationLevel::O2) {
-        std::cout << "  [opt] E-graph optimization skipped (requires O2+)" << '\n';
+    {
+        OptimizationOrchestrator orch(optimizationLevel, verbose_, this);
+        orch.runPrepasses(program, *optCtx_);
     }
 
     if (verbose_) {
@@ -7971,6 +7924,39 @@ void CodeGenerator::runCFCTRE(Program* program) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// runSynthesisPass — public wrapper (delegates to the free function in
+// synthesize.h so the Orchestrator can call it without include gymnastics).
+// ─────────────────────────────────────────────────────────────────────────────
+
+void CodeGenerator::runSynthesisPass(Program* program, bool verbose) {
+    ::omscript::runSynthesisPass(program, verbose);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runEGraphPass — thin conditional wrapper called by the Orchestrator.
+// Applies the same conditions as the original inline block in generate().
+// ─────────────────────────────────────────────────────────────────────────────
+
+void CodeGenerator::runEGraphPass(Program* program) {
+    if (!enableEGraph_ || optimizationLevel < OptimizationLevel::O2) {
+        if (verbose_ && optimizationLevel < OptimizationLevel::O2) {
+            std::cout << "  [opt] E-graph optimization skipped (requires O2+)" << '\n';
+        }
+        return;
+    }
+    if (verbose_) {
+        std::cout << "  [opt] Running e-graph equality saturation on AST ("
+                  << program->functions.size() << " functions)..." << '\n';
+    }
+    egraph::optimizeProgram(program);
+    if (verbose_) {
+        auto rules = egraph::getAllRules();
+        std::cout << "  [opt] E-graph saturation complete (" << rules.size()
+                  << " rewrite rules applied)" << '\n';
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ctValueToConstValue / constValueToCTValue — bridge between the two
 // value representations used inside CodeGenerator.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -8069,41 +8055,9 @@ CodeGenerator::buildComptimeEnv() const {
 void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
     if (!program || optimizationLevel < OptimizationLevel::O1) return;
 
-    // Set of builtins known to be pure (no I/O, no heap mutation observable
-    // to the caller, deterministic output for given inputs).
-    static const std::unordered_set<std::string> kPureBuiltins = {
-        "abs", "min", "max", "sign", "clamp", "pow", "sqrt", "log2", "log",
-        "log10", "exp", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
-        "cbrt", "hypot", "fma", "copysign", "min_float", "max_float",
-        "gcd", "lcm", "exp2",
-        "is_even", "is_odd", "is_power_of_2", "is_alpha", "is_digit",
-        "floor", "ceil", "round",
-        "popcount", "clz", "ctz", "bswap", "bitreverse",
-        "rotate_left", "rotate_right", "saturating_add", "saturating_sub",
-        "to_int", "to_float", "to_string", "number_to_string",
-        "string_to_number", "str_to_int", "char_code", "to_char",
-        "str_len", "len", "typeof",
-        "char_at", "str_eq", "str_find", "str_index_of",
-        "str_starts_with", "str_ends_with", "startswith", "endswith",
-        "str_upper", "str_lower", "str_trim", "str_reverse",
-        "str_substr", "str_contains", "str_replace", "str_repeat",
-        "str_count", "str_pad_left", "str_pad_right",
-        "str_chars", "str_join",
-        "sum", "array_product", "array_last",
-        "array_min", "array_max", "array_contains", "index_of", "array_find",
-        "array_fill", "array_concat", "array_slice", "array_copy",
-        "range", "range_step",
-    };
-
-    // Set of builtin/user names that are impure (I/O, heap side-effects, etc.)
-    static const std::unordered_set<std::string> kImpureBuiltins = {
-        "print", "println", "printf", "input", "input_line", "assert",
-        "push", "pop", "insert", "remove", "reverse", "sort", "shuffle",
-        "swap", "resize", "clear", "append",
-        "fopen", "fclose", "fread", "fwrite", "fappend",
-        "exit", "abort", "panic", "error",
-        "random", "rand", "time", "sleep",
-    };
+    // Purity queries now delegated to the unified BuiltinEffectTable.
+    // BuiltinEffectTable::isPure(name)   replaces kPureBuiltins.count(name)
+    // BuiltinEffectTable::isImpure(name) replaces kImpureBuiltins.count(name)
 
     // Build index of all user function declarations for O(1) lookup.
     std::unordered_map<std::string, const FunctionDecl*> allFuncs;
@@ -8153,10 +8107,10 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         }
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<const CallExpr*>(expr);
-            // Impure builtins: not pure.
-            if (kImpureBuiltins.count(call->callee)) return false;
-            // Known-pure builtins: OK.
-            if (kPureBuiltins.count(call->callee)) {
+            // Impure builtins: not pure (uses unified BuiltinEffectTable).
+            if (BuiltinEffectTable::isImpure(call->callee)) return false;
+            // Known-pure builtins: OK (uses unified BuiltinEffectTable).
+            if (BuiltinEffectTable::isPure(call->callee)) {
                 for (const auto& arg : call->arguments) {
                     if (!isExprPure(arg.get())) return false;
                 }
@@ -8331,37 +8285,10 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
 void CodeGenerator::inferFunctionEffects(Program* program) {
     if (!program) return;
 
-    // Builtins known to perform I/O or have synchronization side effects.
-    static const std::unordered_set<std::string> kIOBuiltins = {
-        "print", "println", "write", "print_char",
-        "input", "input_line",
-        "file_read", "file_write", "file_append", "file_exists",
-        "thread_create", "thread_join",
-        "mutex_lock", "mutex_unlock", "mutex_new", "mutex_destroy",
-        "sleep", "exit", "exit_program",
-        "assert",
-    };
-
-    // Builtins that write/mutate heap memory observable to the caller.
-    static const std::unordered_set<std::string> kMutatingBuiltins = {
-        "push", "pop", "sort", "reverse", "swap",
-        "array_remove", "array_insert",
-        "map_set", "map_remove",
-        "str_replace",  // returns new string — not truly mutating, but conservative
-    };
-
-    // Builtins that only read memory (return value depends on array/string content).
-    static const std::unordered_set<std::string> kReadBuiltins = {
-        "len", "str_len", "sum", "array_min", "array_max", "array_product",
-        "array_last", "array_contains", "index_of", "array_find", "array_count",
-        "array_any", "array_every", "array_reduce", "array_map", "array_filter",
-        "map_get", "map_has", "map_keys", "map_values", "map_size",
-        "str_contains", "str_index_of", "str_find", "str_starts_with",
-        "str_ends_with", "str_count", "str_upper", "str_lower", "str_trim",
-        "str_reverse", "str_substr", "str_chars", "str_join", "str_repeat",
-        "str_pad_left", "str_pad_right", "char_at",
-        "typeof", "to_int", "to_float", "to_string",
-    };
+    // Effect queries now delegated to the unified BuiltinEffectTable.
+    // BuiltinEffectTable::isIO(name)       replaces kIOBuiltins.count(name)
+    // BuiltinEffectTable::isMutating(name) replaces kMutatingBuiltins.count(name)
+    // BuiltinEffectTable::isReadOnly(name) replaces kReadBuiltins.count(name)
 
     // Build function index.
     std::unordered_map<std::string, const FunctionDecl*> allFuncs;
@@ -8393,12 +8320,12 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
             break;
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<const CallExpr*>(expr);
-            if (kIOBuiltins.count(call->callee)) {
+            if (BuiltinEffectTable::isIO(call->callee)) {
                 fx.hasIO = true;
-            } else if (kMutatingBuiltins.count(call->callee)) {
+            } else if (BuiltinEffectTable::isMutating(call->callee)) {
                 fx.writesMemory = true;
                 fx.hasMutation  = true;
-            } else if (kReadBuiltins.count(call->callee)) {
+            } else if (BuiltinEffectTable::isReadOnly(call->callee)) {
                 fx.readsMemory = true;
             } else if (call->callee == selfName) {
                 // Self-recursive call: conservatively mark memory access
