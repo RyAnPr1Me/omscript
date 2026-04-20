@@ -6274,6 +6274,10 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 for (auto it = gep->idx_begin(); it != gep->idx_end(); ++it) {
                     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(*it)) {
                         long long off = ci->getSExtValue();
+                        // A byte offset larger than one cache line means the
+                        // element is in a different cache line from the base
+                        // pointer.  On a cold access this almost certainly
+                        // misses L1 and requires an L2 (or deeper) fetch.
                         if (std::abs(off) > static_cast<long long>(profile.cacheLineSize)) {
                             missRiskCache[i] = 2; // large stride → likely L2+ miss
                             break;
