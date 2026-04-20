@@ -36,6 +36,7 @@
 #include "egraph.h"  // EGraph, SaturationConfig, egraph::optimizeProgram, etc.
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -174,6 +175,21 @@ struct AnalysisValidity {
         purity          = false;
         effects         = false;
         cfctre          = false;
+    }
+
+    /// Return true if the analysis fact identified by @p fact is currently valid.
+    /// @p fact should be one of the AnalysisFact::k* string literals defined in
+    /// opt_pass.h (e.g. "purity", "effects").  Unknown fact names return false.
+    bool isValid(std::string_view fact) const noexcept {
+        if (fact == "string_types")     return stringTypes;
+        if (fact == "array_types")      return arrayTypes;
+        if (fact == "constant_returns") return constantReturns;
+        if (fact == "purity")           return purity;
+        if (fact == "effects")          return effects;
+        if (fact == "synthesis")        return synthesis;
+        if (fact == "cfctre")           return cfctre;
+        if (fact == "egraph")           return egraph;
+        return false; // unknown fact — conservatively not valid
     }
 };
 

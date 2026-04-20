@@ -11,9 +11,10 @@
 #include "opt_orchestrator.h"
 #include "codegen.h"   // CodeGenerator + OptimizationLevel
 
-#include <deque>
 #include <cassert>
 #include <chrono>
+#include <deque>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <unordered_map>
@@ -132,7 +133,18 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
     }
 
     if (order.size() != inSet.size()) {
-        throw std::logic_error("OptimizationOrchestrator: dependency cycle detected in pass registry");
+        // Identify which passes were not reached (they are part of the cycle).
+        std::unordered_set<uint32_t> reached(order.begin(), order.end());
+        std::string cycleNames;
+        for (const auto& p : passes_) {
+            if (inSet.count(p.id) && !reached.count(p.id)) {
+                if (!cycleNames.empty()) cycleNames += ", ";
+                cycleNames += p.name;
+            }
+        }
+        throw std::logic_error(
+            "OptimizationOrchestrator: dependency cycle detected in pass registry"
+            " (involved passes: " + cycleNames + ")");
     }
     return order;
 }
@@ -271,95 +283,166 @@ OptimizationOrchestrator::OptimizationOrchestrator(OptimizationLevel optLevel,
 
 // ── runPrepasses ─────────────────────────────────────────────────────────────
 //
-// Runs every pre-pass in dependency order, skipping passes whose analysis
-// validity flag is already set.  The existing behavior of generate() is
-// preserved: the same functions are called in the same logical order.
+// Runs every pre-pass in dependency order, delegating to runPassPipeline.
+// The pass execution order is determined by PassRegistry::topologicalOrder()
+// from the declared requires/provides metadata — no hardcoded sequence.
 
 void OptimizationOrchestrator::runPrepasses(Program* program, OptimizationContext& ctx) {
     stats_ = {};
-
-    // Passes run unconditionally on every compilation (validity starts false).
-    runStringTypes    (program, ctx);
-    runArrayTypes     (program, ctx);
-    runConstantReturns(program, ctx);
-    runPurity         (program, ctx);
-    runEffects        (program, ctx);
-    runSynthesis      (program, ctx);
-    runCFCTRE         (program, ctx);
-    runEGraph         (program, ctx);
-
-    // After all passes have run, sync the per-function analysis data from
-    // CodeGenerator's internal maps back into the unified context.
+    runPassPipeline(program, ctx, /*skipValid=*/false);
     syncFactsToContext(program, ctx);
 }
 
 void OptimizationOrchestrator::runInvalidated(Program* program, OptimizationContext& ctx) {
-    const auto& v = ctx.validity();
-    if (!v.stringTypes)     runStringTypes    (program, ctx);
-    if (!v.arrayTypes)      runArrayTypes     (program, ctx);
-    if (!v.constantReturns) runConstantReturns(program, ctx);
-    if (!v.purity)          runPurity         (program, ctx);
-    if (!v.effects)         runEffects        (program, ctx);
-    if (!v.synthesis)       runSynthesis      (program, ctx);
-    if (!v.cfctre)          runCFCTRE         (program, ctx);
-    if (!v.egraph)          runEGraph         (program, ctx);
+    stats_ = {};
+    runPassPipeline(program, ctx, /*skipValid=*/true);
     syncFactsToContext(program, ctx);
+}
+
+// ── runPassPipeline ───────────────────────────────────────────────────────────
+//
+// Core driver shared by runPrepasses and runInvalidated.
+//
+// Algorithm:
+//   1. Ask PassRegistry for a topologically-sorted list of pass IDs.
+//   2. Build a dispatch map: PassId → per-pass wrapper lambda.
+//   3. For each pass in order:
+//        a. If skipValid and all provided facts are already valid → skip.
+//        b. Verify preconditions (required facts): emit a warning if any
+//           required fact is not yet valid (programming-error guard).
+//        c. Call the wrapper, timing it with a steady_clock wall-clock.
+//        d. Record the pass name + elapsed time in stats_.passTimings.
+//   4. Accumulate stats_.totalElapsedMs across the whole pipeline.
+//   5. When verbose, print a per-pass timing summary table.
+
+void OptimizationOrchestrator::runPassPipeline(Program* program,
+                                                OptimizationContext& ctx,
+                                                bool skipValid) {
+    // ── Dispatch map ─────────────────────────────────────────────────────
+    // Maps a stable PassId to the per-pass wrapper that runs the work.
+    // Built once per call (IDs are assigned at static-init time, so they are
+    // stable for the lifetime of the process).
+    using Runner = std::function<void(Program*, OptimizationContext&)>;
+    const std::unordered_map<uint32_t, Runner> dispatch = {
+        {PassId::kStringTypes,     [this](Program* p, OptimizationContext& c){ runStringTypes(p, c); }},
+        {PassId::kArrayTypes,      [this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); }},
+        {PassId::kConstantReturns, [this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); }},
+        {PassId::kPurity,          [this](Program* p, OptimizationContext& c){ runPurity(p, c); }},
+        {PassId::kEffects,         [this](Program* p, OptimizationContext& c){ runEffects(p, c); }},
+        {PassId::kSynthesis,       [this](Program* p, OptimizationContext& c){ runSynthesis(p, c); }},
+        {PassId::kCFCTRE,          [this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); }},
+        {PassId::kEGraph,          [this](Program* p, OptimizationContext& c){ runEGraph(p, c); }},
+    };
+
+    const auto& reg   = PassRegistry::instance();
+    const auto  order = reg.topologicalOrder(); // dependency-sorted IDs
+
+    const auto tPipelineStart = std::chrono::steady_clock::now();
+
+    for (uint32_t id : order) {
+        const PassMetadata* meta = reg.find(id);
+        if (!meta) continue;
+
+        auto it = dispatch.find(id);
+        if (it == dispatch.end()) continue; // pass has no wrapper (IR-level pass, etc.)
+
+        // ── Skip already-valid passes (runInvalidated mode) ────────────
+        if (skipValid) {
+            bool allProvided = true;
+            for (const char* fact : meta->provides_) {
+                if (!ctx.validity().isValid(fact)) { allProvided = false; break; }
+            }
+            if (allProvided) {
+                ++stats_.passesSkipped;
+                continue;
+            }
+        }
+
+        // ── Precondition guard ─────────────────────────────────────────
+        // If a required fact is not yet valid, the pass ordering is wrong.
+        // Emit a warning rather than aborting so release builds are robust.
+        for (const char* req : meta->requires_) {
+            if (!ctx.validity().isValid(req)) {
+                std::cerr << "[omscript][opt] WARNING: pass '" << meta->name
+                          << "' requires fact '" << req
+                          << "' which is not yet valid — pass ordering may be incorrect\n";
+            }
+        }
+
+        // ── Time and run the pass ──────────────────────────────────────
+        const auto tStart = std::chrono::steady_clock::now();
+        it->second(program, ctx);
+        const auto tEnd   = std::chrono::steady_clock::now();
+        const double ms   = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+
+        stats_.passTimings.push_back({std::string(meta->name), ms});
+        ++stats_.passesRun;
+        // Note: stats_.passesRun is now incremented here instead of inside
+        // each per-pass wrapper; the wrappers no longer touch stats_.
+    }
+
+    const auto tPipelineEnd = std::chrono::steady_clock::now();
+    stats_.totalElapsedMs =
+        std::chrono::duration<double, std::milli>(tPipelineEnd - tPipelineStart).count();
+
+    // ── Verbose timing summary ─────────────────────────────────────────
+    if (verbose_) {
+        std::cout << "  [opt] Pre-pass pipeline: "
+                  << stats_.passesRun    << " ran, "
+                  << stats_.passesSkipped << " skipped, "
+                  << stats_.totalElapsedMs << " ms total\n";
+        for (const auto& pt : stats_.passTimings) {
+            std::cout << "  [opt]   " << pt.name << ": " << pt.elapsedMs << " ms\n";
+        }
+    }
 }
 
 // ── Per-pass wrappers ─────────────────────────────────────────────────────────
 //
 // Each wrapper:
-//   1. Delegates to the corresponding CodeGenerator method (Phase A behavior).
+//   1. Delegates to the corresponding CodeGenerator method.
 //   2. Marks the produced fact valid in ctx.validity().
-//   3. Increments the statistics counter.
+//   3. Increments the pass counter (done by runPassPipeline, not here).
 //
-// The `ctx` parameter is used only for validity tracking in these Phase A
-// wrappers.  In future phases (B/D/E) the wrappers will read pre-conditions
-// from ctx (e.g., verifying required facts are present) and write their
-// analysis results directly into ctx instead of CodeGenerator's private maps.
-// The parameter is retained now (rather than removed) so the signature is
-// stable across phases and call sites do not need to change.
+// Phase B: runPassPipeline checks that all required facts are valid before
+// calling each wrapper, and records wall-clock timing around the call.
+// runPrepasses / runInvalidated are now driven by PassRegistry::topologicalOrder()
+// rather than a hardcoded sequence, so adding or reordering passes only
+// requires a metadata change in registerAllPasses().
 
 void OptimizationOrchestrator::runStringTypes(Program* program, OptimizationContext& ctx) {
     codegen_->preAnalyzeStringTypes(program);
     ctx.validity().stringTypes = true;
-    ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runArrayTypes(Program* program, OptimizationContext& ctx) {
     codegen_->preAnalyzeArrayTypes(program);
     ctx.validity().arrayTypes = true;
-    ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runConstantReturns(Program* program, OptimizationContext& ctx) {
     codegen_->analyzeConstantReturnValues(program);
     ctx.validity().constantReturns = true;
-    ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runPurity(Program* program, OptimizationContext& ctx) {
     codegen_->autoDetectConstEvalFunctions(program);
     ctx.validity().purity = true;
-    ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runEffects(Program* program, OptimizationContext& ctx) {
     codegen_->inferFunctionEffects(program);
     ctx.validity().effects = true;
-    ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runSynthesis(Program* program, OptimizationContext& ctx) {
     codegen_->runSynthesisPass(program, verbose_);
     ctx.validity().synthesis = true;
-    ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runCFCTRE(Program* program, OptimizationContext& ctx) {
     codegen_->runCFCTRE(program);
     ctx.validity().cfctre = true;
-    ++stats_.passesRun;
 }
 
 void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& ctx) {
@@ -368,7 +451,6 @@ void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& 
     // settings and then calls ctx.egraph().optimizeProgram().
     codegen_->runEGraphPass(program, ctx);
     ctx.validity().egraph = true;
-    ++stats_.passesRun;
 }
 
 // ── syncFactsToContext ────────────────────────────────────────────────────────

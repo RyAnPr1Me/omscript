@@ -35,6 +35,7 @@
 
 #include "opt_context.h"
 #include "opt_pass.h"
+#include <vector>
 
 namespace omscript {
 
@@ -85,10 +86,20 @@ public:
 
     // ── Statistics ────────────────────────────────────────────────────────
 
+    /// Wall-clock timing for a single pass.
+    struct PassTiming {
+        std::string name;      ///< Pass name (mirrors PassMetadata::name)
+        double      elapsedMs; ///< Wall-clock time in milliseconds
+    };
+
     struct RunStats {
-        unsigned passesRun       = 0; ///< Number of passes that executed
-        unsigned passesSkipped   = 0; ///< Number of passes skipped (already valid)
-        double   totalElapsedMs  = 0; ///< Wall-clock time for all passes
+        unsigned passesRun      = 0; ///< Number of passes that executed
+        unsigned passesSkipped  = 0; ///< Number of passes skipped (already valid)
+        double   totalElapsedMs = 0; ///< Wall-clock time for all passes (ms)
+
+        /// Per-pass wall-clock times in execution order.
+        /// Empty until after the first runPrepasses / runInvalidated call.
+        std::vector<PassTiming> passTimings;
     };
 
     const RunStats& lastRunStats() const noexcept { return stats_; }
@@ -109,6 +120,14 @@ private:
     /// Copy analysis results from the CodeGenerator's per-pass output into
     /// the unified OptimizationContext so callers can query a single surface.
     void syncFactsToContext(Program* program, OptimizationContext& ctx) const;
+
+    /// Core pipeline driver used by both runPrepasses and runInvalidated.
+    ///
+    /// Computes the topological order from PassRegistry, then iterates over
+    /// passes in dependency order.  When @p skipValid is true, each pass whose
+    /// provided facts are already all-valid in ctx is skipped (increments
+    /// passesSkipped).  Per-pass wall-clock timing is recorded in stats_.
+    void runPassPipeline(Program* program, OptimizationContext& ctx, bool skipValid);
 
     // ── State ─────────────────────────────────────────────────────────────
     OptimizationLevel optLevel_;

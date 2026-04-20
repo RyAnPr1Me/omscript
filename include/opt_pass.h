@@ -37,8 +37,8 @@ enum class PassPhase : uint8_t {
     Preprocessing,        ///< Source-level analysis before semantic checks
     EvaluationAnalysis,   ///< Purity detection, effect inference, CF-CTRE
     ASTTransform,         ///< AST rewrites (e-graph, OPTMAX folder, loop fusion)
-    IRPipeline,           ///< LLVM pass-manager pipeline (O1/O2/O3 + OPTMAX)
-    BackendTuning,        ///< Superoptimizer, HGOE, post-pipeline cleanup
+    IRPipeline,           ///< Reserved: LLVM pass-manager pipeline (O1/O2/O3 + OPTMAX)
+    BackendTuning,        ///< Reserved: Superoptimizer, HGOE, post-pipeline cleanup
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
