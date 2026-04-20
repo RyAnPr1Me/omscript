@@ -5,7 +5,7 @@
 /// @file opt_context.h
 /// @brief Unified Optimization Context for the OmScript compiler.
 ///
-/// This header provides three foundational abstractions:
+/// This header provides four foundational abstractions:
 ///
 ///  1. BuiltinEffectTable — the SINGLE canonical source of truth for the
 ///     purity and side-effect classification of every built-in function.
@@ -19,14 +19,21 @@
 ///     all pre-passes, stored in one place instead of spread across
 ///     separate maps inside CodeGenerator.
 ///
-///  3. OptimizationContext — owns the FunctionFacts store, exposes the
-///     analysis-validity flags that let the orchestrator decide which
-///     passes need to be (re-)run, and provides a single query surface for
-///     codegen to ask questions like "is this function pure?" without knowing
-///     which analysis pass produced the answer.
+///  3. EGraphSubsystem — the e-graph equality-saturation optimizer as a
+///     first-class subsystem of the optimization pipeline.  Owned by
+///     OptimizationContext; configured before the egraph pre-pass runs;
+///     exposes per-run statistics after the pass completes.  Calling code
+///     (Orchestrator, CodeGenerator) accesses the e-graph exclusively
+///     through this subsystem rather than the egraph:: free functions.
+///
+///  4. OptimizationContext — owns the FunctionFacts store, the EGraphSubsystem,
+///     analysis-validity flags, and a non-owning pointer to the CTEngine.
+///     Provides a single query surface for codegen to ask questions like
+///     "is this function pure?" without knowing which analysis pass answered.
 
 #include "ast.h"     // FunctionEffects, OptMaxConfig, etc.
 #include "cfctre.h"  // CTValue, CTEngine
+#include "egraph.h"  // EGraph, SaturationConfig, egraph::optimizeProgram, etc.
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -171,12 +178,114 @@ struct AnalysisValidity {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// EGraphConfig — configuration for one EGraphSubsystem run
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// Mirrors the fields of `egraph::SaturationConfig` but lives in the public
+/// optimization-system surface so callers (CodeGenerator, tests) can adjust
+/// them without knowing the internal `SaturationConfig` type.
+///
+/// Default values match the existing behaviour of `egraph::optimizeExpression`.
+struct EGraphConfig {
+    size_t maxNodes            = 10000; ///< Node limit per expression graph
+    size_t maxIterations       = 15;    ///< Saturation iteration cap
+    bool   enableConstFolding  = true;  ///< Enable constant-folding during saturation
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EGraphStats — per-run statistics produced by EGraphSubsystem
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// Reset at the start of each call to optimizeProgram/optimizeFunction.
+/// Available for query (e.g., verbose logging) after the pass completes.
+struct EGraphStats {
+    unsigned expressionsAttempted  = 0; ///< Expressions submitted to the e-graph
+    unsigned expressionsSimplified = 0; ///< Expressions that changed after extraction
+    unsigned expressionsSkipped    = 0; ///< Expressions not representable in the e-graph
+    unsigned functionsChanged      = 0; ///< Functions with ≥1 simplified expression
+    size_t   rulesApplied          = 0; ///< Total rewrites across all saturations
+
+    void reset() noexcept { *this = {}; }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EGraphSubsystem — e-graph equality-saturation as an optimization subsystem
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// This is the single entry point for all e-graph equality-saturation
+/// optimization.  It is owned by `OptimizationContext` and accessed via
+/// `ctx.egraph()`.
+///
+/// **Why a subsystem rather than free functions?**
+///
+///   Free functions (`egraph::optimizeProgram`) cannot carry per-run state,
+///   configuration, or statistics without global variables.  Making the e-graph
+///   a subsystem allows:
+///     • Configuration injection per compilation (e.g., tighter node limits at
+///       lower optimization levels).
+///     • Per-run statistics aggregation for verbose output and future profiling.
+///     • A stable interface point for future changes (e.g., per-function rule
+///       sets, incremental saturation, external rule plugins).
+///
+/// **Usage**
+/// ```cpp
+/// ctx.egraph().setConfig({.maxNodes = 20000, .maxIterations = 20});
+/// ctx.egraph().optimizeProgram(program);
+/// if (verbose) print(ctx.egraph().stats());
+/// ```
+class EGraphSubsystem {
+public:
+    EGraphSubsystem()  = default;
+    ~EGraphSubsystem() = default;
+
+    // ── Configuration ─────────────────────────────────────────────────────
+
+    /// Replace the current configuration.  Must be called before any
+    /// optimize* call; ignored after the pass has started running.
+    void setConfig(EGraphConfig cfg) noexcept { config_ = cfg; }
+    const EGraphConfig& config() const noexcept { return config_; }
+
+    /// Build the egraph::SaturationConfig from our config for internal use.
+    egraph::SaturationConfig toSaturationConfig() const noexcept {
+        egraph::SaturationConfig sc;
+        sc.maxNodes            = config_.maxNodes;
+        sc.maxIterations       = config_.maxIterations;
+        sc.enableConstantFolding = config_.enableConstFolding;
+        return sc;
+    }
+
+    // ── Entry points ──────────────────────────────────────────────────────
+
+    /// Optimize a single AST expression.  Returns the simplified expression
+    /// (or the original if no improvement was found / not representable).
+    std::unique_ptr<Expression> optimizeExpression(const Expression* expr);
+
+    /// Optimize all expressions in one function's body.
+    void optimizeFunction(FunctionDecl* func);
+
+    /// Optimize all functions in a program.  Resets stats before running.
+    void optimizeProgram(Program* program);
+
+    // ── Statistics ────────────────────────────────────────────────────────
+
+    const EGraphStats& stats() const noexcept { return stats_; }
+
+    /// Reset statistics (called automatically at the start of optimizeProgram).
+    void resetStats() noexcept { stats_.reset(); }
+
+private:
+    EGraphConfig config_;
+    EGraphStats  stats_;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // OptimizationContext — the unified analysis hub
 // ─────────────────────────────────────────────────────────────────────────────
 ///
-/// Owns the per-function facts table, analysis-validity flags, and a
-/// non-owning pointer to the CTEngine (owned by CodeGenerator since the
-/// engine contains the memoisation cache that outlives the context).
+/// Owns the per-function facts table, analysis-validity flags, the
+/// EGraphSubsystem, and a non-owning pointer to the CTEngine (owned by
+/// CodeGenerator since the engine contains the memoisation cache that
+/// outlives the context).
 ///
 /// **Lifetime**: created at the top of CodeGenerator::generate() and lives
 /// for the duration of that call.  CodeGenerator passes a pointer to it into
@@ -275,10 +384,21 @@ public:
         return facts_;
     }
 
+    // ── E-Graph subsystem ─────────────────────────────────────────────────
+    ///
+    /// The e-graph subsystem is the canonical entry point for equality-saturation
+    /// optimization.  It is owned by the context, configured before the egraph
+    /// pre-pass, and carries per-run statistics after the pass completes.
+    ///
+    /// Access via: ctx.egraph().*
+    EGraphSubsystem&       egraph()       noexcept { return egraph_; }
+    const EGraphSubsystem& egraph() const noexcept { return egraph_; }
+
 private:
     std::unordered_map<std::string, FunctionFacts> facts_;
     AnalysisValidity validity_;
     CTEngine*        ctEngine_ = nullptr;
+    EGraphSubsystem  egraph_;
 };
 
 } // namespace omscript

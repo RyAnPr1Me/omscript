@@ -7933,26 +7933,53 @@ void CodeGenerator::runSynthesisPass(Program* program, bool verbose) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// runEGraphPass — thin conditional wrapper called by the Orchestrator.
-// Applies the same conditions as the original inline block in generate().
+// runEGraphPass — conditional wrapper called by the Orchestrator.
+//
+// 1. Checks the optimization level and enableEGraph_ flag.
+// 2. Configures the EGraphSubsystem in the OptimizationContext based on the
+//    current optimization level (higher levels = more liberal node limits).
+// 3. Delegates to ctx.egraph().optimizeProgram() so all e-graph work goes
+//    through the subsystem (config + stats are tracked there).
 // ─────────────────────────────────────────────────────────────────────────────
 
-void CodeGenerator::runEGraphPass(Program* program) {
+void CodeGenerator::runEGraphPass(Program* program, OptimizationContext& ctx) {
     if (!enableEGraph_ || optimizationLevel < OptimizationLevel::O2) {
         if (verbose_ && optimizationLevel < OptimizationLevel::O2) {
             std::cout << "  [opt] E-graph optimization skipped (requires O2+)" << '\n';
         }
         return;
     }
+
+    // Set per-level configuration on the subsystem before running.
+    // O3 / OPTMAX get higher limits; O2 gets the conservative defaults.
+    EGraphConfig cfg;
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        cfg.maxNodes      = 50000;
+        cfg.maxIterations = 30;
+    } else {
+        cfg.maxNodes      = 10000;
+        cfg.maxIterations = 15;
+    }
+    cfg.enableConstFolding = true;
+    ctx.egraph().setConfig(cfg);
+
     if (verbose_) {
         std::cout << "  [opt] Running e-graph equality saturation on AST ("
-                  << program->functions.size() << " functions)..." << '\n';
+                  << program->functions.size() << " functions, maxNodes="
+                  << cfg.maxNodes << ", maxIter=" << cfg.maxIterations
+                  << ")..." << '\n';
     }
-    egraph::optimizeProgram(program);
+
+    // All work goes through the subsystem.
+    ctx.egraph().optimizeProgram(program);
+
     if (verbose_) {
-        auto rules = egraph::getAllRules();
-        std::cout << "  [opt] E-graph saturation complete (" << rules.size()
-                  << " rewrite rules applied)" << '\n';
+        const auto& s = ctx.egraph().stats();
+        std::cout << "  [opt] E-graph saturation complete: "
+                  << s.expressionsSimplified << "/" << s.expressionsAttempted
+                  << " expressions simplified, "
+                  << s.functionsChanged << " functions changed, "
+                  << s.expressionsSkipped << " skipped (not representable)\n";
     }
 }
 

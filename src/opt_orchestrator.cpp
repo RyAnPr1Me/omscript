@@ -363,11 +363,10 @@ void OptimizationOrchestrator::runCFCTRE(Program* program, OptimizationContext& 
 }
 
 void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& ctx) {
-    // E-graph optimization is conditional on the optimization level and the
-    // enableEGraph_ flag — decisions that live in CodeGenerator.  We delegate
-    // the full conditional to CodeGenerator via a new wrapper so the
-    // orchestrator doesn't need to replicate those checks.
-    codegen_->runEGraphPass(program);
+    // Delegate the level/flag guard to CodeGenerator (it knows enableEGraph_).
+    // If the guard passes, CodeGenerator configures the subsystem from its own
+    // settings and then calls ctx.egraph().optimizeProgram().
+    codegen_->runEGraphPass(program, ctx);
     ctx.validity().egraph = true;
     ++stats_.passesRun;
 }

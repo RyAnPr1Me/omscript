@@ -335,10 +335,11 @@ class CodeGenerator {
     void autoDetectConstEvalFunctions(Program* program);
     void inferFunctionEffects(Program* program);
 
-    /// Thin wrapper around egraph::optimizeProgram that applies the same
-    /// conditions (O2+, enableEGraph_) as the original inline call in generate().
-    /// Called by the Orchestrator for the egraph pass.
-    void runEGraphPass(Program* program);
+    /// Conditional wrapper for the e-graph pre-pass.  Checks the optimization
+    /// level and enableEGraph_ flag, then configures ctx.egraph() based on
+    /// the current level and calls ctx.egraph().optimizeProgram().
+    /// Called by the Orchestrator which owns the OptimizationContext.
+    void runEGraphPass(Program* program, OptimizationContext& ctx);
 
     /// Public-facing wrapper for runSynthesisPass that the Orchestrator calls.
     /// Delegates to the free function declared in synthesize.h.
