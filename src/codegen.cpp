@@ -5023,28 +5023,27 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
     // Auto-apply LLVM memory-effect attributes based on inferred effects.
     // Only applied when @pure is NOT already set (which sets readonly explicitly).
-    if (!func->hintPure) {
-        auto fxIt = functionEffects_.find(func->name);
-        if (fxIt != functionEffects_.end()) {
-            const FunctionEffects& fx = fxIt->second;
-            if (fx.isReadNone()) {
-                // No memory access, no I/O: readnone + nosync + willreturn
-                function->setDoesNotAccessMemory();
-                function->setNoSync();
-                if (!isSelfRecursive) {
-                    function->setWillReturn();
-                    function->addFnAttr(llvm::Attribute::Speculatable);
-                }
-            } else if (fx.isReadOnly()) {
-                // Reads memory but does not write or do I/O: readonly + nosync
-                function->setOnlyReadsMemory();
-                function->setNoSync();
-                if (!isSelfRecursive)
-                    function->setWillReturn();
-            } else if (fx.isNoSync()) {
-                // Has writes but no I/O: nosync
-                function->setNoSync();
+    // Query the unified OptimizationContext so IR emission uses the single
+    // canonical fact surface (populated by syncFactsToContext before codegen).
+    if (!func->hintPure && optCtx_) {
+        const FunctionEffects& fx = optCtx_->effects(func->name);
+        if (fx.isReadNone()) {
+            // No memory access, no I/O: readnone + nosync + willreturn
+            function->setDoesNotAccessMemory();
+            function->setNoSync();
+            if (!isSelfRecursive) {
+                function->setWillReturn();
+                function->addFnAttr(llvm::Attribute::Speculatable);
             }
+        } else if (fx.isReadOnly()) {
+            // Reads memory but does not write or do I/O: readonly + nosync
+            function->setOnlyReadsMemory();
+            function->setNoSync();
+            if (!isSelfRecursive)
+                function->setWillReturn();
+        } else if (fx.isNoSync()) {
+            // Has writes but no I/O: nosync
+            function->setNoSync();
         }
     }
     if (func->hintNoReturn) {

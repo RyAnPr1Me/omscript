@@ -384,9 +384,17 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             stmt->initializer->type == ASTNodeType::CALL_EXPR) {
             auto* callInit = static_cast<CallExpr*>(stmt->initializer.get());
             if (callInit->arguments.empty()) {
-                auto it = constIntReturnFunctions_.find(callInit->callee);
-                if (it != constIntReturnFunctions_.end())
-                    constIntFolds_.try_emplace(stmt->name, it->second);
+                // Prefer the unified OptimizationContext; fall back to the
+                // private map when optCtx_ is not yet available (e.g., tests
+                // that call generateVarDecl without running the full pipeline).
+                if (optCtx_) {
+                    auto v = optCtx_->constIntReturn(callInit->callee);
+                    if (v) constIntFolds_.try_emplace(stmt->name, *v);
+                } else {
+                    auto it = constIntReturnFunctions_.find(callInit->callee);
+                    if (it != constIntReturnFunctions_.end())
+                        constIntFolds_.try_emplace(stmt->name, it->second);
+                }
             }
         }
         // Track whether this variable holds a string value so that print(),
