@@ -585,6 +585,18 @@ struct SchedulerPolicy {
     bool enableSlackAware       = true;
     /// Enable beam-search pruning of large ready lists.
     bool enableBeamPruning      = true;
+    /// Enable bidirectional scheduling: run both top-down and bottom-up passes
+    /// and pick whichever produces fewer cycles.  This matches LLVM's
+    /// GenericScheduler approach.
+    bool enableBidirectional    = true;
+    /// Enable load/store clustering by base address.  Groups memory accesses
+    /// to nearby addresses to improve MLP and reduce TLB pressure.
+    bool enableMemoryClustering = true;
+    /// Enable store µop decomposition (model store-address + store-data
+    /// as separate µops occupying AGU + StoreUnit ports).
+    bool enableStoreUopSplit    = true;
+    /// Enable cross-BB liveness hints for register-pressure estimation.
+    bool enableCrossBBLiveness  = true;
 
     // ── Tuning parameters ─────────────────────────────────────────────────────
     /// Maximum candidates considered per cycle (beam width).  Reducing this
