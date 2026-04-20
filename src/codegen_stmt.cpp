@@ -1671,7 +1671,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // LLVM's LoopPredication and IRCE passes will use this assume to
             // widen the "safe range" proof across the whole loop, eliminating
             // any residual bounds-check IR.
-            llvm::Value* endLELen = builder->CreateICmpSLE(
+            llvm::Value* endLELen = builder->CreateICmpULE(
                 endVal, lenLoad, arrName + ".prl.safe");
             builder->CreateCall(assumeFn, {endLELen});
             // Also assert start >= 0 (already proven by doPtrMode gate, but
