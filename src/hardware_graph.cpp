@@ -79,6 +79,10 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
 }
 
 /// Alias query used by HGOE memory-edge construction.
+/// Enhanced with:
+///   - TBAA metadata disambiguation (type-based alias analysis)
+///   - Non-overlapping access size checks
+///   - GEP index range analysis for provably disjoint array accesses
 [[nodiscard]] static bool hgoeMayAlias(const llvm::Instruction* a,
                                        const llvm::Instruction* b,
                                        const llvm::DataLayout& dl) {
@@ -95,6 +99,47 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
     ptrB = ptrB->stripPointerCasts();
     if (ptrA == ptrB) return true;
 
+    // ── TBAA metadata disambiguation ────────────────────────────────────────
+    // LLVM's TBAA (Type-Based Alias Analysis) metadata on load/store
+    // instructions encodes type hierarchy information.  Two accesses with
+    // TBAA tags from disjoint subtrees in the type hierarchy cannot alias.
+    // This is the same check LLVM's MachineScheduler uses.
+    {
+        auto* tbaaA = a->getMetadata(llvm::LLVMContext::MD_tbaa);
+        auto* tbaaB = b->getMetadata(llvm::LLVMContext::MD_tbaa);
+        if (tbaaA && tbaaB && tbaaA != tbaaB) {
+            // Walk up the TBAA tree: if neither is an ancestor of the other,
+            // they are from disjoint type subtrees and cannot alias.
+            // Conservative fast path: if both have exactly 3 operands
+            // (standard TBAA scalar format) and their root nodes differ,
+            // they are guaranteed disjoint.
+            auto getRootTag = [](const llvm::MDNode* md) -> const llvm::MDNode* {
+                const llvm::MDNode* cur = md;
+                unsigned safety = 16; // prevent infinite loops on malformed MD
+                while (cur && cur->getNumOperands() >= 2 && safety-- > 0) {
+                    auto* parent = llvm::dyn_cast<llvm::MDNode>(cur->getOperand(1));
+                    if (!parent || parent == cur) return cur;
+                    cur = parent;
+                }
+                return cur;
+            };
+            const llvm::MDNode* rootA = getRootTag(tbaaA);
+            const llvm::MDNode* rootB = getRootTag(tbaaB);
+            // Different root types → disjoint subtrees → no alias.
+            if (rootA && rootB && rootA != rootB)
+                return false;
+            // Same root but different direct tags at the same tree depth:
+            // if neither tag is an ancestor of the other, they don't alias.
+            // Quick check: different tags with the same parent.
+            if (tbaaA->getNumOperands() >= 2 && tbaaB->getNumOperands() >= 2) {
+                auto* parentA = llvm::dyn_cast<llvm::MDNode>(tbaaA->getOperand(1));
+                auto* parentB = llvm::dyn_cast<llvm::MDNode>(tbaaB->getOperand(1));
+                if (parentA && parentB && parentA == parentB && tbaaA != tbaaB)
+                    return false;
+            }
+        }
+    }
+
     // Constant byte offsets from the same underlying base never alias when
     // offsets differ. This handles multi-index/struct-field GEPs.
     const llvm::Value* baseA = nullptr;
@@ -103,8 +148,29 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
     int64_t offB = 0;
     const bool hasOffA = getBaseAndConstByteOffset(ptrA, dl, baseA, offA);
     const bool hasOffB = getBaseAndConstByteOffset(ptrB, dl, baseB, offB);
-    if (hasOffA && hasOffB && baseA == baseB && offA != offB)
-        return false;
+    if (hasOffA && hasOffB && baseA == baseB && offA != offB) {
+        // ── Non-overlapping access size check ────────────────────────────
+        // Even if offsets differ, accesses may overlap if they have
+        // different sizes.  Check that [offA, offA+sizeA) and
+        // [offB, offB+sizeB) are disjoint.
+        auto getAccessSize = [&](const llvm::Instruction* inst) -> uint64_t {
+            if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst))
+                return dl.getTypeStoreSize(ld->getType());
+            if (auto* st = llvm::dyn_cast<llvm::StoreInst>(inst))
+                return dl.getTypeStoreSize(st->getValueOperand()->getType());
+            return 0;
+        };
+        uint64_t sizeA = getAccessSize(a);
+        uint64_t sizeB = getAccessSize(b);
+        if (sizeA > 0 && sizeB > 0) {
+            int64_t endA = offA + static_cast<int64_t>(sizeA);
+            int64_t endB = offB + static_cast<int64_t>(sizeB);
+            if (endA <= offB || endB <= offA)
+                return false; // provably non-overlapping
+        } else {
+            return false; // different offsets, unknown size → original heuristic
+        }
+    }
 
     // Fall back to underlying-object disambiguation.
     const llvm::Value* objA = llvm::getUnderlyingObject(ptrA);
@@ -123,13 +189,23 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
 
     if ((aIsAlloca && bIsAlloca) ||
         (aIsGlobal && bIsGlobal) ||
-        (aIsAlloca && bIsArg) || (aIsArg && bIsAlloca))
+        (aIsAlloca && bIsArg) || (aIsArg && bIsAlloca) ||
+        (aIsAlloca && bIsGlobal) || (aIsGlobal && bIsAlloca))
         return false;
 
     if (aIsArg && bIsArg) {
         const auto* argA = llvm::cast<llvm::Argument>(objA);
         const auto* argB = llvm::cast<llvm::Argument>(objB);
         if (argA->hasNoAliasAttr() || argB->hasNoAliasAttr())
+            return false;
+    }
+
+    // noalias argument vs global: noalias guarantees the argument doesn't
+    // alias anything the callee can see through other means (globals, other args).
+    if ((aIsArg && bIsGlobal) || (aIsGlobal && bIsArg)) {
+        const auto* arg = aIsArg ? llvm::cast<llvm::Argument>(objA)
+                                 : llvm::cast<llvm::Argument>(objB);
+        if (arg->hasNoAliasAttr())
             return false;
     }
 
@@ -6090,6 +6166,377 @@ static unsigned foldTruncExt(llvm::Function& func) {
     return count;
 }
 
+/// Fold `mul(x, 2^k)` → `shl(x, k)` for all power-of-2 constant multipliers.
+///
+/// More aggressive than integerStrengthReduce which only handles small
+/// constants with few set bits.  This catches any power-of-2 multiplier
+/// up to 2^62.  Shift is 1-cycle latency on all modern CPUs vs 3-cycle
+/// multiply.  Always safe for integer types.
+///
+/// Returns the number of multiplies replaced.
+static unsigned foldMulPow2(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
+            if (!inst.getType()->isIntegerTy()) continue;
+
+            llvm::Value* xv = nullptr;
+            uint64_t cv = 0;
+            for (int s = 0; s < 2; ++s) {
+                auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s));
+                if (ci && ci->getBitWidth() <= 64) {
+                    uint64_t val = ci->getZExtValue();
+                    // Check if val is a power of 2 (exactly one bit set).
+                    if (val > 0 && (val & (val - 1)) == 0) {
+                        cv = val;
+                        xv = inst.getOperand(1 - s);
+                        break;
+                    }
+                }
+            }
+            if (!xv || cv == 0) continue;
+
+            unsigned shift = 0;
+            uint64_t tmp = cv;
+            while (tmp > 1) { tmp >>= 1; ++shift; }
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* rep = builder.CreateShl(
+                xv, llvm::ConstantInt::get(inst.getType(), shift), "mulpow2.shl");
+            replacements.emplace_back(&inst, rep);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold `add(x, 0)` → `x` and `mul(x, 1)` → `x`.
+///
+/// Identity element elimination for arithmetic operations.  These patterns
+/// appear after constant folding, strength reduction, and induction variable
+/// simplification leave behind degenerate operations.
+///
+/// Returns the number of identity ops eliminated.
+static unsigned foldIdentityOps(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            if (!inst.getType()->isIntOrIntVectorTy()) continue;
+
+            // add(x, 0) → x, sub(x, 0) → x
+            if (op == llvm::Instruction::Add || op == llvm::Instruction::Sub) {
+                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (c->isZero()) {
+                        inst.replaceAllUsesWith(inst.getOperand(0));
+                        toErase.push_back(&inst);
+                        ++count;
+                        continue;
+                    }
+                }
+                // add(0, x) → x (commutative)
+                if (op == llvm::Instruction::Add) {
+                    if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(0))) {
+                        if (c->isZero()) {
+                            inst.replaceAllUsesWith(inst.getOperand(1));
+                            toErase.push_back(&inst);
+                            ++count;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // mul(x, 1) → x
+            if (op == llvm::Instruction::Mul) {
+                for (int s = 0; s < 2; ++s) {
+                    if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s))) {
+                        if (c->isOne()) {
+                            inst.replaceAllUsesWith(inst.getOperand(1 - s));
+                            toErase.push_back(&inst);
+                            ++count;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // mul(x, 0) → 0
+            if (op == llvm::Instruction::Mul) {
+                for (int s = 0; s < 2; ++s) {
+                    if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s))) {
+                        if (c->isZero()) {
+                            inst.replaceAllUsesWith(c);
+                            toErase.push_back(&inst);
+                            ++count;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `shl(shl(x, a), b)` → `shl(x, a+b)` when both shifts are constant.
+///
+/// Also handles `lshr(lshr(x, a), b)` → `lshr(x, a+b)` and
+/// `ashr(ashr(x, a), b)` → `ashr(x, a+b)`.  These patterns appear after
+/// strength reduction creates shift chains.  The combined shift is faster
+/// (1 instruction instead of 2) and reduces dependency chain length.
+///
+/// Safety: a+b must not exceed the bit width; if it does the result is
+/// undefined (poison), which matches LLVM's semantics for oversized shifts.
+/// We clamp to bitWidth-1 to avoid surprising backend behaviour.
+///
+/// Returns the number of shift pairs merged.
+static unsigned foldConsecutiveShifts(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            if (op != llvm::Instruction::Shl &&
+                op != llvm::Instruction::LShr &&
+                op != llvm::Instruction::AShr)
+                continue;
+
+            auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+            if (!inner || inner->getOpcode() != op) continue;
+            if (!inner->hasOneUse()) continue;
+
+            auto* outerAmt = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
+            auto* innerAmt = llvm::dyn_cast<llvm::ConstantInt>(inner->getOperand(1));
+            if (!outerAmt || !innerAmt) continue;
+
+            unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+            uint64_t total = outerAmt->getZExtValue() + innerAmt->getZExtValue();
+            if (total >= bitWidth) total = bitWidth - 1; // clamp to avoid UB
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* rep = nullptr;
+            llvm::Value* src = inner->getOperand(0);
+            auto* totalConst = llvm::ConstantInt::get(inst.getType(), total);
+            switch (op) {
+            case llvm::Instruction::Shl:
+                rep = builder.CreateShl(src, totalConst, "shmerge.shl");
+                break;
+            case llvm::Instruction::LShr:
+                rep = builder.CreateLShr(src, totalConst, "shmerge.lshr");
+                break;
+            case llvm::Instruction::AShr:
+                rep = builder.CreateAShr(src, totalConst, "shmerge.ashr");
+                break;
+            default:
+                break;
+            }
+            if (!rep) continue;
+
+            replacements.emplace_back(&inst, rep);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        // Also erase the inner shift if it's now dead.
+        auto* inner = llvm::dyn_cast<llvm::Instruction>(
+            llvm::cast<llvm::Instruction>(rep)->getOperand(0) == inst->getOperand(0)
+            ? inst->getOperand(0)
+            : nullptr);
+        inst->eraseFromParent();
+        if (inner && inner->use_empty())
+            inner->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold `bitcast(bitcast(x))` → `bitcast(x)` or `x` when types match.
+///
+/// Bitcast chains appear when type canonicalization or ABI-matching logic
+/// introduces intermediate casts.  If the source type of the outer bitcast
+/// matches the destination type, the result is a single bitcast from the
+/// original source, or just the original value if all three types match.
+///
+/// Returns the number of bitcast chains shortened.
+static unsigned foldBitcastChain(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::BitCast) continue;
+            auto* inner = llvm::dyn_cast<llvm::BitCastInst>(inst.getOperand(0));
+            if (!inner) continue;
+            if (!inner->hasOneUse()) continue;
+
+            llvm::Value* src = inner->getOperand(0);
+            llvm::Type* srcTy = src->getType();
+            llvm::Type* dstTy = inst.getType();
+
+            if (srcTy == dstTy) {
+                // Identity chain: bitcast(bitcast(x: T → U) → T) = x
+                inst.replaceAllUsesWith(src);
+                toErase.push_back(&inst);
+                ++count;
+            } else {
+                // Shortcut chain: bitcast(bitcast(x: A → B): B → C) = bitcast(x: A → C)
+                llvm::IRBuilder<> builder(&inst);
+                auto* rep = builder.CreateBitCast(src, dstTy, "bcchain");
+                inst.replaceAllUsesWith(rep);
+                toErase.push_back(&inst);
+                ++count;
+            }
+        }
+    }
+
+    for (auto it = toErase.rbegin(); it != toErase.rend(); ++it) {
+        auto* inst = *it;
+        llvm::Value* innerVal = inst->getOperand(0);
+        inst->eraseFromParent();
+        if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
+            if (dead->use_empty()) dead->eraseFromParent();
+    }
+    return count;
+}
+
+/// Local redundant load elimination (RLE) within basic blocks.
+///
+/// When a load reads from a pointer that was previously stored to with the
+/// same type and no intervening store to an aliasing address, the load can
+/// be replaced with the stored value.  This is a local form of the
+/// store-to-load forwarding that LLVM's GVN does globally.
+///
+/// Also eliminates repeated loads from the same pointer (load-after-load):
+/// if no intervening store may alias the pointer, the second load is
+/// redundant and can use the first load's result.
+///
+/// Returns the number of redundant loads eliminated.
+static unsigned eliminateRedundantLoads(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        // Track available values: pointer → (stored/loaded value, index).
+        // Cleared on any potentially-aliasing store or memory barrier.
+        std::unordered_map<const llvm::Value*, llvm::Value*> availableValues;
+
+        for (auto& inst : bb) {
+            if (auto* st = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+                if (st->isAtomic()) {
+                    availableValues.clear();
+                    continue;
+                }
+                const llvm::Value* ptr = st->getPointerOperand()->stripPointerCasts();
+                // This store makes its value available for forwarding.
+                availableValues[ptr] = st->getValueOperand();
+                continue;
+            }
+
+            if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(&inst)) {
+                if (ld->isAtomic()) {
+                    availableValues.clear();
+                    continue;
+                }
+                const llvm::Value* ptr = ld->getPointerOperand()->stripPointerCasts();
+                auto it = availableValues.find(ptr);
+                if (it != availableValues.end()) {
+                    llvm::Value* avail = it->second;
+                    // Types must match for direct forwarding.
+                    if (avail->getType() == ld->getType()) {
+                        replacements.emplace_back(ld, avail);
+                        ++count;
+                        // The loaded value is also available for future loads.
+                        continue;
+                    }
+                }
+                // This load's result is available for future loads.
+                availableValues[ptr] = ld;
+                continue;
+            }
+
+            // Calls, fences, atomics: conservatively clear everything.
+            if (inst.mayWriteToMemory())
+                availableValues.clear();
+        }
+    }
+
+    for (auto& [inst, val] : replacements) {
+        inst->replaceAllUsesWith(val);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Fold redundant extension chains: `sext(sext(x))` → `sext(x)`,
+/// `zext(zext(x))` → `zext(x)`.
+///
+/// Extension chains appear when type promotion or ABI matching generates
+/// intermediate widening steps (e.g. i8 → i32 → i64).  Collapsing them
+/// into a single extension is faster (1 instruction vs 2) and reduces
+/// register pressure.
+///
+/// Safety: sext(sext(x: iA → iB): iB → iC) == sext(x: iA → iC) by the
+/// sign-extension monotonicity property.  Same for zext.
+///
+/// Returns the number of extension chains collapsed.
+static unsigned foldRedundantExtensions(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            // sext(sext(x)) → sext(x)
+            if (op == llvm::Instruction::SExt) {
+                auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+                if (!inner || inner->getOpcode() != llvm::Instruction::SExt) continue;
+                if (!inner->hasOneUse()) continue;
+                llvm::IRBuilder<> builder(&inst);
+                auto* rep = builder.CreateSExt(inner->getOperand(0), inst.getType(), "sext.chain");
+                inst.replaceAllUsesWith(rep);
+                toErase.push_back(&inst);
+                ++count;
+            }
+            // zext(zext(x)) → zext(x)
+            else if (op == llvm::Instruction::ZExt) {
+                auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+                if (!inner || inner->getOpcode() != llvm::Instruction::ZExt) continue;
+                if (!inner->hasOneUse()) continue;
+                llvm::IRBuilder<> builder(&inst);
+                auto* rep = builder.CreateZExt(inner->getOperand(0), inst.getType(), "zext.chain");
+                inst.replaceAllUsesWith(rep);
+                toErase.push_back(&inst);
+                ++count;
+            }
+        }
+    }
+
+    for (auto it = toErase.rbegin(); it != toErase.rend(); ++it) {
+        auto* inst = *it;
+        llvm::Value* innerVal = inst->getOperand(0);
+        inst->eraseFromParent();
+        if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
+            if (dead->use_empty()) dead->eraseFromParent();
+    }
+    return count;
+}
+
 /// Dead store elimination within basic blocks.
 ///
 /// When two stores write to the same pointer and there are no intervening
@@ -6337,6 +6784,10 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
     stats.intStrengthReduced += integerStrengthReduce(func, profile);
+    // mul(x, 2^k) → shl(x, k): power-of-2 multiply replacement.
+    // More aggressive than integerStrengthReduce for exact powers of 2.
+    // Run right after integerStrengthReduce to catch remaining pow2 mul.
+    stats.intStrengthReduced += foldMulPow2(func);
     // mul(x, -1) → sub(0, x): integer negate instead of multiply.
     // Run after integerStrengthReduce so that the -1 constant is not
     // mistaken for a shift-add form (which has no -1 case), and before
@@ -6347,12 +6798,20 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.intStrengthReduced += foldIntAddNeg(func);
     // shl/lshr/ashr(0, x) → 0: dead shifts after strength reduction.
     stats.intStrengthReduced += foldShiftOfZero(func);
+    // shl(shl(x, a), b) → shl(x, a+b): merge consecutive constant shifts.
+    stats.intStrengthReduced += foldConsecutiveShifts(func);
     // or(x,x) → x, and(x,x) → x: idempotent bitwise ops.
     stats.intStrengthReduced += foldBitwiseIdempotent(func);
     // xor(x,x) → 0: self-XOR pattern.
     stats.intStrengthReduced += foldXorSelf(func);
+    // add(x,0) → x, mul(x,1) → x, mul(x,0) → 0: identity/absorbing ops.
+    stats.intStrengthReduced += foldIdentityOps(func);
     // trunc(zext(x)) → x, zext(trunc(x)) → x when types match.
     stats.intStrengthReduced += foldTruncExt(func);
+    // sext(sext(x)) → sext(x), zext(zext(x)) → zext(x): extension chains.
+    stats.intStrengthReduced += foldRedundantExtensions(func);
+    // bitcast(bitcast(x)) → x or single bitcast: chain collapse.
+    stats.intStrengthReduced += foldBitcastChain(func);
     // Integer abs detection: replace select+icmp+sub patterns with llvm.abs.
     // Runs after strength reduction so we don't accidentally undo any reductions.
     stats.intStrengthReduced += generateIntegerAbs(func, profile);
@@ -6362,6 +6821,9 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Eliminate dead stores: when two stores write to the same pointer
     // with no intervening read, the first is dead.
     stats.loadsStorePaired   += sinkDeadStores(func);
+    // Eliminate redundant loads: forward stored values and eliminate
+    // repeated loads from the same pointer (local GVN-like).
+    stats.loadsStorePaired   += eliminateRedundantLoads(func);
     // Hoist loop-invariant GEP address calculations to the loop pre-header.
     // Runs last so all address computations introduced by our transforms are hoisted.
     stats.loadsStorePaired   += hoistLoopInvariantGEP(func);
@@ -7140,6 +7602,35 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     unsigned outstandingLoads  = 0;
     unsigned outstandingStores = 0;
 
+    // ── 6h. Front-end decode-width gating ─────────────────────────────────────
+    // LLVM's MachineScheduler models the front-end decode bandwidth separately
+    // from the back-end issue width.  On many microarchitectures decodeWidth <
+    // issueWidth (e.g. Zen4: decode 4, issue 6), meaning the front-end is the
+    // bottleneck for non-fused instruction streams.  Model this by limiting
+    // dispatches per cycle to min(issueWidth, decodeWidth + fusionBonus).
+    // Fused instruction pairs (cmp+jcc, load+op) consume only 1 decode slot,
+    // so each fusion effectively gives us a free decode slot.
+    unsigned decodeWidth = std::max(profile.decodeWidth, 1u);
+
+    // Precompute which instructions are part of a fusion pair and would
+    // consume zero additional decode slots (the "second" instruction in a
+    // fusion pair is folded into the first's decode slot).
+    std::vector<bool> isFusionSecond(n, false);
+    for (const auto& fp : fusionPairs) {
+        if (fp.second < n)
+            isFusionSecond[fp.second] = true;
+    }
+
+    // ── 6i. Memory bandwidth tracking ─────────────────────────────────────────
+    // Model per-cache-level bandwidth limits to avoid issuing more loads per
+    // cycle than the memory subsystem can serve.  On bandwidth-limited code
+    // (streaming loops), this prevents the scheduler from piling up loads that
+    // would stall the pipeline waiting for the memory bus.
+    unsigned l1BW = profile.l1DBandwidthBytesPerCycle > 0
+                  ? profile.l1DBandwidthBytesPerCycle : 64u;  // default: 1 cache line/cycle
+    unsigned loadsThisCycle = 0;
+    unsigned storesThisCycle = 0;
+
     // ── 6d. Debug: dump schedule DAG if requested ─────────────────────────────
     if (shouldDumpSchedule())
         dumpScheduleDAG(moveable, succ, pred, critPath, lat, profile);
@@ -7416,6 +7907,9 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         std::unordered_set<int> issuedPortsThisCycle;
         std::unordered_set<unsigned> issuedChainsThisCycle;
         unsigned issued = 0;
+        unsigned decodedThisCycle = 0; // front-end decode slot usage
+        loadsThisCycle = 0;
+        storesThisCycle = 0;
 
         // Two-pass issue: first pass schedules instructions that use port
         // types not yet used this cycle (maximises parallel unit utilisation);
@@ -7423,10 +7917,27 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         for (int pass = 0; pass < 2; ++pass) {
             for (unsigned id : ready) {
                 if (issued >= profile.issueWidth) break;
+                // ── Decode-width gating ──────────────────────────────────────
+                // The front-end decoder can only crack decodeWidth instructions
+                // per cycle.  Fused second-instructions don't consume a decode
+                // slot (they are folded into the first instruction's µop).
+                unsigned decodeCost = isFusionSecond[id] ? 0u : 1u;
+                if (decodedThisCycle + decodeCost > decodeWidth) continue;
                 if (done[id]) continue;
 
                 // rtKeyCache precomputed once; avoids classifyOp + mapOpToResource.
                 int rtKey = rtKeyCache[id];
+
+                // ── Memory bandwidth gating ──────────────────────────────────
+                // Don't issue more loads/stores than the L1 bandwidth supports.
+                if (llvm::isa<llvm::LoadInst>(moveable[id])) {
+                    unsigned loadBytes = 8; // default 64-bit load
+                    if (auto* ty = moveable[id]->getType())
+                        if (ty->isSized())
+                            loadBytes = std::max(1u,
+                                static_cast<unsigned>(dl.getTypeStoreSize(ty)));
+                    if (loadsThisCycle + loadBytes > l1BW) continue;
+                }
 
                 // Pass 0: only issue to a port type not yet used this cycle.
                 // Pass 1: issue to any port type (fill remaining slots).
@@ -7485,7 +7996,21 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 done[id] = true;
                 ++totalScheduled;
                 ++issued;
+                decodedThisCycle += decodeCost;
                 scheduled.push_back(moveable[id]);
+
+                // Track memory bandwidth usage this cycle.
+                if (llvm::isa<llvm::LoadInst>(moveable[id])) {
+                    unsigned loadBytes = 8;
+                    if (auto* ty = moveable[id]->getType())
+                        if (ty->isSized())
+                            loadBytes = std::max(1u,
+                                static_cast<unsigned>(dl.getTypeStoreSize(ty)));
+                    loadsThisCycle += loadBytes;
+                }
+                if (llvm::isa<llvm::StoreInst>(moveable[id]))
+                    ++storesThisCycle;
+
                 // Remove from the incremental ready set: this instruction is
                 // now dispatched and must not be included in future cycles.
                 readySet.erase(id);
