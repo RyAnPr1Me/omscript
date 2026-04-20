@@ -3171,55 +3171,159 @@ void CTEngine::runPass(const Program* program) {
         }
     }
 
-    // ── Phase 5: build call graph (lightweight pass) ───────────────────────
+    // ── Phase 5: build call graph (complete pass) ─────────────────────────
     for (auto& fn : program->functions) {
         if (!fn->body) continue;
         graph_.nodes.push_back(fn->name);
-        // Walk calls in the function body.
+        // Walk all expressions to collect call edges.
         std::function<void(const Expression*)> walkE = [&](const Expression* ex) {
             if (!ex) return;
-            if (ex->type == ASTNodeType::CALL_EXPR) {
+            switch (ex->type) {
+            case ASTNodeType::CALL_EXPR: {
                 auto* call = static_cast<const CallExpr*>(ex);
                 graph_.edges.push_back({fn->name, call->callee});
+                for (auto& arg : call->arguments) walkE(arg.get());
+                return;
             }
-            // Recurse into sub-expressions (simplified).
-            if (ex->type == ASTNodeType::BINARY_EXPR) {
+            case ASTNodeType::BINARY_EXPR: {
                 auto* b = static_cast<const BinaryExpr*>(ex);
                 walkE(b->left.get()); walkE(b->right.get());
+                return;
             }
-            if (ex->type == ASTNodeType::CALL_EXPR) {
-                auto* c = static_cast<const CallExpr*>(ex);
-                for (auto& arg : c->arguments) walkE(arg.get());
+            case ASTNodeType::UNARY_EXPR: {
+                auto* u = static_cast<const UnaryExpr*>(ex);
+                walkE(u->operand.get());
+                return;
+            }
+            case ASTNodeType::PREFIX_EXPR: {
+                auto* p = static_cast<const PrefixExpr*>(ex);
+                walkE(p->operand.get());
+                return;
+            }
+            case ASTNodeType::POSTFIX_EXPR: {
+                auto* p = static_cast<const PostfixExpr*>(ex);
+                walkE(p->operand.get());
+                return;
+            }
+            case ASTNodeType::TERNARY_EXPR: {
+                auto* t = static_cast<const TernaryExpr*>(ex);
+                walkE(t->condition.get()); walkE(t->thenExpr.get()); walkE(t->elseExpr.get());
+                return;
+            }
+            case ASTNodeType::INDEX_EXPR: {
+                auto* idx = static_cast<const IndexExpr*>(ex);
+                walkE(idx->array.get()); walkE(idx->index.get());
+                return;
+            }
+            case ASTNodeType::INDEX_ASSIGN_EXPR: {
+                auto* ia = static_cast<const IndexAssignExpr*>(ex);
+                walkE(ia->array.get()); walkE(ia->index.get()); walkE(ia->value.get());
+                return;
+            }
+            case ASTNodeType::ARRAY_EXPR: {
+                auto* ae = static_cast<const ArrayExpr*>(ex);
+                for (auto& el : ae->elements) walkE(el.get());
+                return;
+            }
+            case ASTNodeType::PIPE_EXPR: {
+                auto* pe = static_cast<const PipeExpr*>(ex);
+                walkE(pe->left.get());
+                graph_.edges.push_back({fn->name, pe->functionName});
+                return;
+            }
+            case ASTNodeType::ASSIGN_EXPR: {
+                auto* ae = static_cast<const AssignExpr*>(ex);
+                walkE(ae->value.get());
+                return;
+            }
+            case ASTNodeType::SPREAD_EXPR: {
+                auto* se = static_cast<const SpreadExpr*>(ex);
+                walkE(se->operand.get());
+                return;
+            }
+            default:
+                return;
             }
         };
+        // Walk all statements to find call expressions.
         std::function<void(const Statement*)> walkS = [&](const Statement* st) {
             if (!st) return;
-            if (st->type == ASTNodeType::EXPR_STMT) {
+            switch (st->type) {
+            case ASTNodeType::EXPR_STMT: {
                 auto* es = static_cast<const ExprStmt*>(st);
                 walkE(es->expression.get());
+                return;
             }
-            if (st->type == ASTNodeType::RETURN_STMT) {
+            case ASTNodeType::RETURN_STMT: {
                 auto* r = static_cast<const ReturnStmt*>(st);
                 walkE(r->value.get());
+                return;
             }
-            if (st->type == ASTNodeType::VAR_DECL) {
+            case ASTNodeType::VAR_DECL: {
                 auto* d = static_cast<const VarDecl*>(st);
                 walkE(d->initializer.get());
+                return;
             }
-            if (st->type == ASTNodeType::BLOCK) {
+            case ASTNodeType::MOVE_DECL: {
+                auto* md = static_cast<const MoveDecl*>(st);
+                walkE(md->initializer.get());
+                return;
+            }
+            case ASTNodeType::BLOCK: {
                 auto* blk = static_cast<const BlockStmt*>(st);
                 for (auto& s2 : blk->statements) walkS(s2.get());
+                return;
             }
-            if (st->type == ASTNodeType::IF_STMT) {
+            case ASTNodeType::IF_STMT: {
                 auto* ifs = static_cast<const IfStmt*>(st);
                 walkE(ifs->condition.get());
                 walkS(ifs->thenBranch.get());
                 walkS(ifs->elseBranch.get());
+                return;
             }
-            if (st->type == ASTNodeType::FOR_STMT) {
+            case ASTNodeType::FOR_STMT: {
                 auto* fs = static_cast<const ForStmt*>(st);
                 walkE(fs->start.get()); walkE(fs->end.get());
+                if (fs->step) walkE(fs->step.get());
                 walkS(fs->body.get());
+                return;
+            }
+            case ASTNodeType::FOR_EACH_STMT: {
+                auto* fes = static_cast<const ForEachStmt*>(st);
+                walkE(fes->collection.get());
+                walkS(fes->body.get());
+                return;
+            }
+            case ASTNodeType::WHILE_STMT: {
+                auto* ws = static_cast<const WhileStmt*>(st);
+                walkE(ws->condition.get());
+                walkS(ws->body.get());
+                return;
+            }
+            case ASTNodeType::DO_WHILE_STMT: {
+                auto* dw = static_cast<const DoWhileStmt*>(st);
+                walkS(dw->body.get());
+                walkE(dw->condition.get());
+                return;
+            }
+            case ASTNodeType::SWITCH_STMT: {
+                auto* sw = static_cast<const SwitchStmt*>(st);
+                walkE(sw->condition.get());
+                for (auto& c : sw->cases) {
+                    if (c.value) walkE(c.value.get());
+                    for (auto& v : c.values) walkE(v.get());
+                    for (auto& bs : c.body) walkS(bs.get());
+                }
+                return;
+            }
+            case ASTNodeType::PIPELINE_STMT: {
+                auto* ps = static_cast<const PipelineStmt*>(st);
+                if (ps->count) walkE(ps->count.get());
+                for (auto& stage : ps->stages) walkS(stage.body.get());
+                return;
+            }
+            default:
+                return;
             }
         };
         for (auto& stmt : fn->body->statements) walkS(stmt.get());
@@ -3228,6 +3332,98 @@ void CTEngine::runPass(const Program* program) {
     // ── Phase 6: deduplicate graph nodes ──────────────────────────────────
     std::sort(graph_.nodes.begin(), graph_.nodes.end());
     graph_.nodes.erase(std::unique(graph_.nodes.begin(), graph_.nodes.end()), graph_.nodes.end());
+
+    // ── Phase 7: uniform return value detection ────────────────────────────
+    // For each pure function with parameters, execute it with all-symbolic args.
+    // If the result is concrete, the function always returns the same constant
+    // regardless of its arguments — a stronger guarantee than just purity.
+    //
+    // Example:  fn getVersion(x: int) { return 3 }
+    //   → evaluated with SYMBOLIC x → result = 3 (concrete, not symbolic)
+    //   → registered in uniformReturnValues_["getVersion"] = 3
+    //
+    // This enables the codegen to replace all calls with the constant value,
+    // and the LLVM optimizer to DCE the (now-dead) calls.
+    for (auto& fn : program->functions) {
+        if (!fn->body) continue;
+        if (!pureFunctions_.count(fn->name)) continue;
+        if (uniformReturnValues_.count(fn->name)) continue; // zero-arg: already in globalConsts_
+        if (fn->parameters.empty()) continue;
+
+        // Build all-symbolic argument vector.
+        std::vector<CTValue> symbolicArgs;
+        symbolicArgs.reserve(fn->parameters.size());
+        for (size_t i = 0; i < fn->parameters.size(); ++i)
+            symbolicArgs.push_back(CTValue::symbolic());
+
+        auto result = executeFunction(fn.get(), symbolicArgs);
+        if (result && result->isConcrete()) {
+            uniformReturnValues_[fn->name] = *result;
+            ++stats_.uniformReturnFunctionsFound;
+        }
+    }
+
+    // ── Phase 8: dead function detection ──────────────────────────────────
+    // BFS over the call graph from all entry points.  Functions not reachable
+    // from any entry point are "dead" and can be removed by the LLVM DCE pass.
+    //
+    // Entry points: functions named "main", or any function that is not in the
+    // call graph as a callee (i.e., not called from any other function) — these
+    // could be externally visible (exported) and must be conservatively live.
+    //
+    // Conservative rule: if we can't find ANY entry point, skip dead function
+    // detection to avoid false positives.
+    {
+        // Build callee → callers reverse index AND forward callees index.
+        std::unordered_map<std::string, std::vector<std::string>> callees;
+        std::unordered_set<std::string> allCallees;
+        for (auto& edge : graph_.edges) {
+            callees[edge.first].push_back(edge.second);
+            allCallees.insert(edge.second);
+        }
+
+        // Seed: "main" + any function that is NEVER a callee (could be external entry).
+        std::unordered_set<std::string> alive;
+        std::vector<std::string> worklist;
+        bool hasSeed = false;
+        for (auto& fn : program->functions) {
+            if (!fn->body) continue;
+            // "main" is always an entry point.
+            const bool isMain = fn->name == "main";
+            // A function with no callers in the program graph could be called
+            // from outside (external linkage) — treat as live.
+            const bool noCaller = !allCallees.count(fn->name);
+            if (isMain || noCaller) {
+                if (alive.insert(fn->name).second) {
+                    worklist.push_back(fn->name);
+                    hasSeed = true;
+                }
+            }
+        }
+
+        if (hasSeed) {
+            // Forward BFS.
+            while (!worklist.empty()) {
+                std::string curr = std::move(worklist.back());
+                worklist.pop_back();
+                auto it = callees.find(curr);
+                if (it == callees.end()) continue;
+                for (auto& callee : it->second) {
+                    if (alive.insert(callee).second)
+                        worklist.push_back(callee);
+                }
+            }
+
+            // Mark functions that are registered but not alive.
+            for (auto& fn : program->functions) {
+                if (!fn->body) continue;
+                if (!alive.count(fn->name)) {
+                    deadFunctions_.insert(fn->name);
+                    ++stats_.deadFunctionsDetected;
+                }
+            }
+        }
+    }
 }
 
 } // namespace omscript

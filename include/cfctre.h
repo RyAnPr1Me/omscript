@@ -340,6 +340,8 @@ public:
         int64_t loopsReasoned{0};    ///< For-loops handled by closed-form symbolic analysis
         int64_t branchMerges{0};     ///< Symbolic-IF diamond eliminations (path-sensitive folding)
         int64_t ternaryMerges{0};    ///< Symbolic-ternary both-arm agreement folds
+        int64_t uniformReturnFunctionsFound{0}; ///< Pure functions whose return is always the same constant
+        int64_t deadFunctionsDetected{0};       ///< Functions unreachable from any entry point
     };
     const Stats& stats()      const noexcept { return stats_; }
     void         resetStats()       noexcept { stats_ = {}; }
@@ -351,6 +353,22 @@ public:
     /// remaining runtime call sites.
     const std::unordered_set<std::string>& foldableCallees() const noexcept {
         return foldableCallees_;
+    }
+
+    /// Pure functions that always return the same constant value regardless of
+    /// their arguments (detected by evaluating with symbolic parameters in Phase 6).
+    /// Key = function name; Value = the uniform return value.
+    /// The codegen uses this to fold all call sites to the constant and to
+    /// populate constIntReturnFunctions_ / constStringReturnFunctions_.
+    const std::unordered_map<std::string, CTValue>& uniformReturnValues() const noexcept {
+        return uniformReturnValues_;
+    }
+
+    /// Functions that are unreachable from any program entry point (detected by
+    /// BFS over the call graph in Phase 7).  The codegen marks these `cold` so
+    /// LLVM's DCE / GlobalDCE removes them, and they are excluded from inlining.
+    const std::unordered_set<std::string>& deadFunctions() const noexcept {
+        return deadFunctions_;
     }
 
     /// Interprocedural call graph built during runPass.
@@ -394,6 +412,13 @@ private:
     /// Functions that produced ≥1 concrete fold (memoised with concrete args).
     /// Populated in executeFunction; read by codegen to apply InlineHint.
     std::unordered_set<std::string>                      foldableCallees_;
+
+    /// Phase 6: pure functions whose return value is always the same constant
+    /// (proven by evaluating with symbolic arguments).
+    std::unordered_map<std::string, CTValue>             uniformReturnValues_;
+
+    /// Phase 7: functions unreachable from any entry point via BFS on the call graph.
+    std::unordered_set<std::string>                      deadFunctions_;
 
     /// Memoisation cache: CTMemoKey → snapshot CTValue.
     std::unordered_map<CTMemoKey, CTValue, CTMemoKeyHash> memoCache_;

@@ -7900,6 +7900,31 @@ void CodeGenerator::runCFCTRE(Program* program) {
         }
     }
 
+    // Back-propagate Phase 7 (uniform return values) — functions with parameters
+    // that always return the same constant, proven by symbolic argument evaluation.
+    // These are added to the same fold tables as zero-arg functions above.
+    for (auto& [name, ctVal] : ctEngine_->uniformReturnValues()) {
+        if (ctVal.isInt() && !constIntReturnFunctions_.count(name))
+            constIntReturnFunctions_[name] = ctVal.asI64();
+        else if (ctVal.isString() && !constStringReturnFunctions_.count(name))
+            constStringReturnFunctions_[name] = ctVal.asStr();
+    }
+
+    // Apply Phase 8 dead-function hints: mark unreachable functions as cold
+    // so LLVM's HotColdSplitting / GlobalDCE can eliminate them.  We use
+    // hintCold rather than removing the function body so that the LLVM IR
+    // is still valid; GlobalDCE removes the body after DCE confirms no callers.
+    // Explicitly @noinline so the inliner doesn't try to inline dead code.
+    if (!ctEngine_->deadFunctions().empty()) {
+        const auto& dead = ctEngine_->deadFunctions();
+        for (auto& fn : program->functions) {
+            if (!dead.count(fn->name)) continue;
+            if (fn->hintCold) continue;   // user already annotated
+            fn->hintCold    = true;
+            fn->hintNoInline = true;
+        }
+    }
+
     if (verbose_) {
         const auto& s = ctEngine_->stats();
         std::cout << "  [cfctre] Pass complete: "
@@ -7909,7 +7934,9 @@ void CodeGenerator::runCFCTRE(Program* program) {
                   << s.arraysAllocated       << " arrays allocated, "
                   << s.loopsReasoned         << " loops reasoned, "
                   << s.branchMerges          << " branch merges, "
-                  << s.ternaryMerges         << " ternary merges" << '\n';
+                  << s.ternaryMerges         << " ternary merges, "
+                  << s.uniformReturnFunctionsFound << " uniform-return, "
+                  << s.deadFunctionsDetected << " dead" << '\n';
     }
 
     // ── CF-CTRE-guided inline hints ────────────────────────────────────────
