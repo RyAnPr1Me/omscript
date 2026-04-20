@@ -115,8 +115,8 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
             // they are guaranteed disjoint.
             auto getRootTag = [](const llvm::MDNode* md) -> const llvm::MDNode* {
                 const llvm::MDNode* cur = md;
-                unsigned safety = 16; // prevent infinite loops on malformed MD
-                while (cur && cur->getNumOperands() >= 2 && safety-- > 0) {
+                unsigned depthLimit = 16; // prevent infinite loops on malformed MD
+                while (cur && cur->getNumOperands() >= 2 && depthLimit-- > 0) {
                     auto* parent = llvm::dyn_cast<llvm::MDNode>(cur->getOperand(1));
                     if (!parent || parent == cur) return cur;
                     cur = parent;
@@ -167,9 +167,12 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
             int64_t endB = offB + static_cast<int64_t>(sizeB);
             if (endA <= offB || endB <= offA)
                 return false; // provably non-overlapping
-        } else {
-            return false; // different offsets, unknown size → original heuristic
+            // Ranges overlap → definitely alias (same base, overlapping offsets).
+            return true;
         }
+        // Unknown access size but different offsets from the same base:
+        // cannot prove disjointness → conservative alias.
+        // (Fall through to underlying-object checks for completeness.)
     }
 
     // Fall back to underlying-object disambiguation.
@@ -6355,13 +6358,10 @@ static unsigned foldConsecutiveShifts(llvm::Function& func) {
     for (auto& [inst, rep] : replacements) {
         inst->replaceAllUsesWith(rep);
         // Also erase the inner shift if it's now dead.
-        auto* inner = llvm::dyn_cast<llvm::Instruction>(
-            llvm::cast<llvm::Instruction>(rep)->getOperand(0) == inst->getOperand(0)
-            ? inst->getOperand(0)
-            : nullptr);
+        auto* innerShift = llvm::dyn_cast<llvm::Instruction>(inst->getOperand(0));
         inst->eraseFromParent();
-        if (inner && inner->use_empty())
-            inner->eraseFromParent();
+        if (innerShift && innerShift->use_empty())
+            innerShift->eraseFromParent();
     }
     return count;
 }
