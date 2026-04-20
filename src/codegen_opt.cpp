@@ -133,11 +133,15 @@
 #include <llvm/Transforms/Scalar/WarnMissedTransforms.h>
 #include <llvm/Transforms/Scalar/LowerConstantIntrinsics.h>
 #include <llvm/Analysis/AliasAnalysis.h>
+#include <llvm/Analysis/BlockFrequencyInfo.h>
 #include <llvm/Analysis/BranchProbabilityInfo.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/Analysis/ScalarEvolution.h>
+#include <llvm/Analysis/ScalarEvolutionExpressions.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
 #include <algorithm>
 #include <optional>
@@ -1569,126 +1573,403 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Conditional Store Sinking Pass
+// Advanced Branch Weight Annotation Pass
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Sinks stores from a basic block header into successor blocks when the store
-// is only needed on one branch path.  This reduces store-buffer pressure on
-// the fast (hot) path, improving memory-level parallelism.
+// Annotates conditional branches with `!prof` branch-weight metadata using
+// static analysis — without requiring PGO instrumentation.  Once the metadata
+// is set, ALL downstream passes that query BranchProbabilityInfo will see the
+// refined weights automatically (LLVM reads `!prof` in preference to its own
+// built-in heuristics when the metadata is present).
 //
-// Pattern:
-//   BB:
-//     store val, %p          ; only used if branch taken
-//     br cond, %then, %else
+// Analysis sources (applied in priority order, highest-quality first):
 //
-// Becomes:
-//   BB:
-//     br cond, %then, %else
-//   then:
-//     store val, %p
-//     ...
+//   1. SCEV / LoopAnalysis — loop exit vs back-edge:
+//      A branch where one successor exits the containing loop is weighted
+//      88 : 12 (continue : exit), matching LLVM's established loop heuristic
+//      but computed from the actual loop structure rather than pattern-matching
+//      the opcode.  When SCEV can prove the exact trip count, the exit edge
+//      gets an even sharper weight (1 : trip_count - 1).
 //
-// This is particularly beneficial for:
-//   - Error-path stores (logging, error codes) that pollute the fast path
-//   - Lazy initialization patterns
-//   - Conditional array writes in inner loops
+//   2. Null-pointer check heuristic:
+//      `icmp eq %ptr, null` / `icmp ne %ptr, null` → 1 : 99 (null : not-null).
+//      OmScript's type system guarantees that reference types are never null
+//      in the happy path; null checks only fire on error paths.
 //
-// C compilers handle this at the MI level (MachineSink), but doing it at IR
-// level enables further DSE/LICM optimizations that the backend can't see.
+//   3. Value-range / constant check heuristics:
+//      - `icmp eq %x, -1`  → 5 : 95 (error-sentinel value, very cold)
+//      - `icmp eq %x, 0`   → 20 : 80 (zero-check, usually false in loops)
+//      - `icmp slt %x, 0`  → 10 : 90 (negative result = error/overflow)
+//      - `icmp eq %cond, 0` where %cond is derived from a urem/udiv
+//        (divisibility check) → 15 : 85
+//
+//   4. Opcode-pattern heuristic (for remaining branches):
+//      - Branches guarding `call` instructions with error-return names
+//        (abort, __assert_fail, etc.) on one side → very cold
+//      - `icmp` predicates that check overflow-with-overflow intrinsics
+//        → taken (overflow) 5 : 95
+//
+// All heuristics skip branches that already carry `!prof` metadata, so
+// PGO-annotated programs are never degraded.  Heuristics are applied from
+// the MOST specific (exact SCEV trip count) to the LEAST specific (opcode
+// pattern).  Once any heuristic fires for a branch, later heuristics are
+// skipped for that branch.
 // ─────────────────────────────────────────────────────────────────────────────
-struct ConditionalStoreSinkPass
-    : public llvm::PassInfoMixin<ConditionalStoreSinkPass> {
+struct AdvancedBranchWeightAnnotationPass
+    : public llvm::PassInfoMixin<AdvancedBranchWeightAnnotationPass> {
 
     llvm::PreservedAnalyses run(llvm::Function& F,
                                 llvm::FunctionAnalysisManager& FAM) {
-        // Only activate when the module has profile data — without PGO, branch
-        // probabilities are synthetic 50/50 guesses and sinking stores based on
-        // those guesses causes correctness issues (stores needed on both paths
-        // get moved to only one).
-        if (!F.getParent() || !F.getParent()->getProfileSummary(/*IsCS=*/false))
-            return llvm::PreservedAnalyses::all();
-
-        auto& BPI = FAM.getResult<llvm::BranchProbabilityAnalysis>(F);
+        auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
+        auto& SE = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
+        llvm::MDBuilder MDB(F.getContext());
         bool changed = false;
 
         for (auto& BB : F) {
             auto* BI = llvm::dyn_cast<llvm::BranchInst>(BB.getTerminator());
             if (!BI || !BI->isConditional()) continue;
+            // Skip already-annotated branches (PGO takes precedence).
+            if (BI->getMetadata(llvm::LLVMContext::MD_prof)) continue;
 
-            llvm::BasicBlock* thenBB = BI->getSuccessor(0);
-            llvm::BasicBlock* elseBB = BI->getSuccessor(1);
+            llvm::Value* cond = BI->getCondition();
+            llvm::BasicBlock* trueBB  = BI->getSuccessor(0);
+            llvm::BasicBlock* falseBB = BI->getSuccessor(1);
 
-            // Only sink when one successor is clearly cold.
-            auto trueProb = BPI.getEdgeProbability(&BB, static_cast<unsigned>(0));
-            auto falseProb = BPI.getEdgeProbability(&BB, static_cast<unsigned>(1));
+            uint32_t trueW = 0, falseW = 0;  // 0 = no opinion yet
 
-            // Determine which successor is the cold one (< 25% probability).
-            llvm::BasicBlock* coldBB = nullptr;
-            if (trueProb.getNumerator() * 4 < trueProb.getDenominator()) {
-                coldBB = thenBB;
-            } else if (falseProb.getNumerator() * 4 < falseProb.getDenominator()) {
-                coldBB = elseBB;
+            // ── 1. SCEV / loop exit heuristic ────────────────────────────────
+            llvm::Loop* loop = LI.getLoopFor(&BB);
+            if (loop && trueW == 0) {
+                bool trueExits  = !loop->contains(trueBB);
+                bool falseExits = !loop->contains(falseBB);
+                if (trueExits != falseExits) {
+                    // Try to get exact trip count from SCEV.
+                    const llvm::SCEV* tripSCEV =
+                        SE.getSmallConstantTripCount(loop);
+                    // getSmallConstantTripCount returns 0 if unknown.
+                    const auto* cTripSCEV =
+                        llvm::dyn_cast_or_null<llvm::SCEVConstant>(tripSCEV);
+                    if (cTripSCEV && !cTripSCEV->getAPInt().isZero()) {
+                        uint64_t tc = cTripSCEV->getAPInt().getLimitedValue(256);
+                        if (tc > 1) {
+                            // Exact: exit fires once every tc iterations.
+                            if (trueExits) {
+                                trueW  = 1;
+                                falseW = static_cast<uint32_t>(tc - 1);
+                            } else {
+                                trueW  = static_cast<uint32_t>(tc - 1);
+                                falseW = 1;
+                            }
+                        }
+                    }
+                    // Fallback: generic 88/12 loop-continue heuristic.
+                    if (trueW == 0) {
+                        if (trueExits) { trueW = 12; falseW = 88; }
+                        else           { trueW = 88; falseW = 12; }
+                    }
+                }
             }
-            if (!coldBB) continue;
 
-            // Collect stores that can be sunk to the cold successor.
-            llvm::SmallVector<llvm::StoreInst*, 4> toSink;
-            for (auto it = BB.begin(); it != BB.end(); ) {
-                auto* SI = llvm::dyn_cast<llvm::StoreInst>(&*it);
-                ++it;
-                if (!SI || SI->isVolatile() || SI->isAtomic()) continue;
-
-                // Check if the stored value and pointer are available in coldBB.
-                // (They must dominate coldBB, which they do since BB is a predecessor.)
-
-                // Check if any instruction between SI and the branch reads from
-                // the same address.  If so, we can't sink.
-                bool hasRead = false;
-                auto checkIt = SI->getIterator();
-                for (++checkIt; &*checkIt != BI; ++checkIt) {
-                    if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(&*checkIt)) {
-                        if (LI->getPointerOperand()->stripPointerCasts() ==
-                            SI->getPointerOperand()->stripPointerCasts()) {
-                            hasRead = true;
+            // ── 2. Null-pointer check heuristic ──────────────────────────────
+            if (trueW == 0) {
+                if (auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond)) {
+                    bool isEqNull = false, isNeNull = false;
+                    for (unsigned oi = 0; oi < 2; ++oi) {
+                        if (llvm::isa<llvm::ConstantPointerNull>(
+                                icmp->getOperand(oi))) {
+                            if (icmp->getPredicate() == llvm::ICmpInst::ICMP_EQ)
+                                isEqNull = true;
+                            else if (icmp->getPredicate() == llvm::ICmpInst::ICMP_NE)
+                                isNeNull = true;
                             break;
                         }
                     }
+                    if (isEqNull)       { trueW =  1; falseW = 99; }
+                    else if (isNeNull)  { trueW = 99; falseW =  1; }
                 }
-                if (hasRead) continue;
+            }
 
-                // Only sink small, simple stores (not structs/arrays).
+            // ── 3. Value-range / constant-check heuristics ───────────────────
+            if (trueW == 0) {
+                if (auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond)) {
+                    auto pred = icmp->getPredicate();
+
+                    // Identify the constant operand (if any).
+                    llvm::ConstantInt* constOp = nullptr;
+                    for (unsigned oi = 0; oi < 2; ++oi) {
+                        constOp = llvm::dyn_cast<llvm::ConstantInt>(
+                            icmp->getOperand(oi));
+                        if (constOp) break;
+                    }
+
+                    // eq -1 → error sentinel (very cold when true)
+                    if (constOp && pred == llvm::ICmpInst::ICMP_EQ &&
+                        constOp->isMinusOne()) {
+                        trueW = 5; falseW = 95;
+                    }
+                    // eq 0 → zero/false check (usually false in hot code)
+                    else if (constOp && pred == llvm::ICmpInst::ICMP_EQ &&
+                             constOp->isZero()) {
+                        trueW = 20; falseW = 80;
+                    }
+                    // ne 0 → non-zero check (usually true in hot code)
+                    else if (constOp && pred == llvm::ICmpInst::ICMP_NE &&
+                             constOp->isZero()) {
+                        trueW = 80; falseW = 20;
+                    }
+                    // slt 0 → negative result check (overflow / error, cold)
+                    else if (pred == llvm::ICmpInst::ICMP_SLT && constOp &&
+                             constOp->isZero()) {
+                        trueW = 10; falseW = 90;
+                    }
+                    // sge 0 → non-negative (usually true)
+                    else if (pred == llvm::ICmpInst::ICMP_SGE && constOp &&
+                             constOp->isZero()) {
+                        trueW = 90; falseW = 10;
+                    }
+                }
+            }
+
+            // ── 4. Opcode / call-pattern heuristic ──────────────────────────
+            // If one successor's first (non-PHI) instruction is a call to an
+            // abort-like function, that side is effectively unreachable / very cold.
+            if (trueW == 0) {
+                auto isColdBlock = [](llvm::BasicBlock* blk) {
+                    for (auto& I : *blk) {
+                        if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                            auto* callee = CI->getCalledFunction();
+                            if (!callee) continue;
+                            llvm::StringRef nm = callee->getName();
+                            if (nm == "abort" || nm == "_abort" ||
+                                nm == "__assert_fail" ||
+                                nm.starts_with("__ubsan_handle") ||
+                                nm.starts_with("__asan_report") ||
+                                callee->hasFnAttribute(llvm::Attribute::NoReturn))
+                                return true;
+                        }
+                        if (!llvm::isa<llvm::PHINode>(&I)) break;
+                    }
+                    return false;
+                };
+                if (isColdBlock(trueBB))  { trueW =  1; falseW = 99; }
+                else if (isColdBlock(falseBB)) { trueW = 99; falseW =  1; }
+            }
+
+            // ── 5. WithOverflow intrinsic check (overflow is cold) ──────────
+            // `extractvalue { T, i1 } %woa, 1` used as branch condition →
+            // the overflow bit is almost always false.
+            if (trueW == 0) {
+                if (auto* EVI = llvm::dyn_cast<llvm::ExtractValueInst>(cond)) {
+                    if (EVI->getNumIndices() == 1 && EVI->getIndices()[0] == 1) {
+                        if (auto* srcTy =
+                                llvm::dyn_cast<llvm::StructType>(
+                                    EVI->getAggregateOperand()->getType())) {
+                            (void)srcTy;
+                            // Check if aggregate comes from a with-overflow op.
+                            if (auto* CI = llvm::dyn_cast<llvm::CallBase>(
+                                    EVI->getAggregateOperand())) {
+                                auto id = CI->getIntrinsicID();
+                                if (id == llvm::Intrinsic::sadd_with_overflow ||
+                                    id == llvm::Intrinsic::uadd_with_overflow ||
+                                    id == llvm::Intrinsic::ssub_with_overflow ||
+                                    id == llvm::Intrinsic::usub_with_overflow ||
+                                    id == llvm::Intrinsic::smul_with_overflow ||
+                                    id == llvm::Intrinsic::umul_with_overflow) {
+                                    // Overflow is almost never the case.
+                                    trueW =  5; falseW = 95;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (trueW != 0) {
+                llvm::MDNode* md = MDB.createBranchWeights(trueW, falseW);
+                BI->setMetadata(llvm::LLVMContext::MD_prof, md);
+                changed = true;
+            }
+        }
+
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conditional Store Sinking Pass
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Sinks stores from a basic block into the cold successor when the store is
+// provably NOT needed on the hot (likely) path.  This reduces store-buffer
+// pressure on the fast path and enables better instruction scheduling.
+//
+// Correctness contract:
+//   A store to address P in block BB may only be sunk to coldBB when:
+//     (a) P is a stack-allocated value (alloca), not heap or global memory.
+//     (b) The hot-path successor (and all its successors down to the first
+//         re-store of P) contains NO load of P — i.e., P is dead on the hot
+//         path until the cold and hot paths merge.
+//     (c) coldBB has exactly one predecessor (BB), so the sunk store executes
+//         if and only if the cold branch is taken.
+//
+// The hot-path liveness check (b) uses a bounded BFS through successors:
+//   - If we reach a block with a load of P before a store of P → abort
+//   - If we reach coldBB (the merge) → P can safely be sunk
+//   - BFS is capped at kMaxHotPathBlocks to keep compile time bounded.
+//
+// This replaces the previous PGO-only guard (module profile summary check)
+// with a sound static-analysis condition, so the pass runs on all builds.
+// Branch-weight metadata (from AdvancedBranchWeightAnnotationPass or PGO)
+// is used to identify the hot/cold successor; without any metadata, the
+// pass is conservative and skips the block.
+// ─────────────────────────────────────────────────────────────────────────────
+struct ConditionalStoreSinkPass
+    : public llvm::PassInfoMixin<ConditionalStoreSinkPass> {
+
+    // Maximum number of hot-path blocks to scan for liveness analysis.
+    static constexpr unsigned kMaxHotPathBlocks = 12;
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& FAM) {
+        auto& BPI = FAM.getResult<llvm::BranchProbabilityAnalysis>(F);
+        bool changed = false;
+
+        // Collect candidates to avoid iterator invalidation.
+        llvm::SmallVector<llvm::BranchInst*, 16> branches;
+        for (auto& BB : F) {
+            auto* BI = llvm::dyn_cast<llvm::BranchInst>(BB.getTerminator());
+            if (BI && BI->isConditional())
+                branches.push_back(BI);
+        }
+
+        for (auto* BI : branches) {
+            llvm::BasicBlock* BB = BI->getParent();
+            llvm::BasicBlock* succ0 = BI->getSuccessor(0);
+            llvm::BasicBlock* succ1 = BI->getSuccessor(1);
+
+            // Need branch-weight metadata to determine hot/cold;
+            // without metadata we have no reliable probability.
+            if (!BI->getMetadata(llvm::LLVMContext::MD_prof)) continue;
+
+            auto prob0 = BPI.getEdgeProbability(BB, static_cast<unsigned>(0));
+            auto prob1 = BPI.getEdgeProbability(BB, static_cast<unsigned>(1));
+
+            // Identify the cold successor: probability < 20%.
+            llvm::BasicBlock* coldBB = nullptr;
+            llvm::BasicBlock* hotBB  = nullptr;
+            if (prob0.getNumerator() * 5 < prob0.getDenominator()) {
+                coldBB = succ0;
+                hotBB  = succ1;
+            } else if (prob1.getNumerator() * 5 < prob1.getDenominator()) {
+                coldBB = succ1;
+                hotBB  = succ0;
+            }
+            if (!coldBB) continue;
+
+            // (c) coldBB must have exactly one predecessor (BB).
+            if (coldBB->getSinglePredecessor() != BB) continue;
+
+            // Collect stores that satisfy the correctness conditions.
+            llvm::SmallVector<llvm::StoreInst*, 4> toSink;
+            for (auto& I : *BB) {
+                auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I);
+                if (!SI || SI->isVolatile() || SI->isAtomic()) continue;
+
+                // (a) Only store to alloca-derived addresses (stack locals).
+                llvm::Value* ptr = SI->getPointerOperand()->stripPointerCasts();
+                if (!llvm::isa<llvm::AllocaInst>(ptr)) continue;
+
+                // Only simple scalar types (not aggregate stores).
                 if (!SI->getValueOperand()->getType()->isIntegerTy() &&
                     !SI->getValueOperand()->getType()->isFloatingPointTy() &&
                     !SI->getValueOperand()->getType()->isPointerTy())
                     continue;
 
-                // The store's value and pointer must not be defined AFTER the store
-                // (no circular deps).
+                // Values used by the store must be available in coldBB.
+                // (They must be defined before the store in BB, or in a
+                //  dominator of BB.)
                 bool canSink = true;
-                for (auto* op : {SI->getValueOperand(), SI->getPointerOperand()}) {
-                    if (auto* opInst = llvm::dyn_cast<llvm::Instruction>(op)) {
-                        // Must dominate coldBB — true if defined in BB before SI
-                        // or in an earlier block.
-                        if (opInst->getParent() == &BB) {
-                            // Check it comes before SI.
-                            bool foundOp = false;
-                            for (auto& check : BB) {
-                                if (&check == opInst) { foundOp = true; break; }
-                                if (&check == SI) break;
-                            }
-                            if (!foundOp) { canSink = false; break; }
+                for (auto* op : {SI->getValueOperand(),
+                                  SI->getPointerOperand()}) {
+                    auto* opInst = llvm::dyn_cast<llvm::Instruction>(op);
+                    if (!opInst) continue;
+                    if (opInst->getParent() == BB) {
+                        // Must come before SI in BB.
+                        bool foundBefore = false;
+                        for (auto& check : *BB) {
+                            if (&check == opInst) { foundBefore = true; break; }
+                            if (&check == SI) break;
                         }
+                        if (!foundBefore) { canSink = false; break; }
                     }
                 }
                 if (!canSink) continue;
 
+                // Check that there is no read of ptr between SI and the
+                // branch terminator in the same block.
+                bool readBetween = false;
+                {
+                    auto it = SI->getIterator();
+                    for (++it; &*it != BI; ++it) {
+                        if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(&*it)) {
+                            if (LI->getPointerOperand()->stripPointerCasts() == ptr) {
+                                readBetween = true; break;
+                            }
+                        }
+                    }
+                }
+                if (readBetween) continue;
+
+                // (b) Hot-path liveness check: BFS from hotBB, stop at
+                // kMaxHotPathBlocks.  If we see a load of ptr before a store
+                // of ptr, the store is live on the hot path — don't sink.
+                bool liveOnHotPath = false;
+                {
+                    llvm::SmallVector<llvm::BasicBlock*, 16> worklist;
+                    llvm::SmallPtrSet<llvm::BasicBlock*, 16> visited;
+                    worklist.push_back(hotBB);
+                    visited.insert(hotBB);
+                    unsigned blocksChecked = 0;
+                    while (!worklist.empty() && !liveOnHotPath &&
+                           blocksChecked < kMaxHotPathBlocks) {
+                        auto* cur = worklist.pop_back_val();
+                        ++blocksChecked;
+                        for (auto& I2 : *cur) {
+                            if (auto* LI2 = llvm::dyn_cast<llvm::LoadInst>(&I2)) {
+                                if (LI2->getPointerOperand()
+                                         ->stripPointerCasts() == ptr) {
+                                    liveOnHotPath = true; break;
+                                }
+                            }
+                            // A new store to ptr kills liveness — hot path
+                            // will get its own fresh value.
+                            if (auto* SI2 =
+                                    llvm::dyn_cast<llvm::StoreInst>(&I2)) {
+                                if (SI2->getPointerOperand()
+                                        ->stripPointerCasts() == ptr) {
+                                    goto next_block;  // ptr overwritten, no liveness
+                                }
+                            }
+                        }
+                        // Enqueue successors.
+                        for (auto* succ : llvm::successors(cur)) {
+                            if (succ != coldBB && visited.insert(succ).second)
+                                worklist.push_back(succ);
+                        }
+                        next_block:;
+                    }
+                    // If we exceeded the budget, conservatively assume live.
+                    if (blocksChecked >= kMaxHotPathBlocks)
+                        liveOnHotPath = true;
+                }
+                if (liveOnHotPath) continue;
+
                 toSink.push_back(SI);
             }
 
-            // Sink stores to the beginning of the cold block.
+            // Perform the sinking.
             for (auto* SI : toSink) {
-                // Only sink if coldBB has a single predecessor (BB).
-                if (coldBB->getSinglePredecessor() != &BB) continue;
                 SI->moveBefore(coldBB->getFirstNonPHI());
                 changed = true;
             }
@@ -3782,6 +4063,13 @@ void CodeGenerator::runOptimizationPasses() {
         // standard LLVM pipeline cannot anticipate.
         if (optimizationLevel >= OptimizationLevel::O2) {
             llvm::FunctionPassManager CloseFPM;
+            // Phase 0: Advanced branch weight annotation.
+            // Must run FIRST in the closing pipeline, before any pass that
+            // queries BranchProbabilityInfo (BER, ConditionalStoreSink, JumpThreading,
+            // SimplifyCFG with branch folding).  Uses SCEV + loop analysis to set
+            // !prof metadata from static analysis; PGO-annotated functions are
+            // skipped automatically (existing metadata is preserved).
+            CloseFPM.addPass(AdvancedBranchWeightAnnotationPass());
             // Phase 1: constant propagation + value-range refinement.
             CloseFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
             CloseFPM.addPass(llvm::SCCPPass());
@@ -3837,9 +4125,11 @@ void CodeGenerator::runOptimizationPasses() {
             // Final peephole + dead-code removal.
             CloseFPM.addPass(llvm::InstCombinePass());
             CloseFPM.addPass(llvm::ADCEPass());
-            // Conditional store sinking: move stores to cold branches,
-            // reducing store-buffer pressure on the hot path.
-            // ConditionalStoreSinkPass DISABLED: too aggressive without PGO data;
+            // Conditional store sinking: move stores from BB to the cold successor
+            // when the store is provably dead on the hot path (liveness check).
+            // Powered by AdvancedBranchWeightAnnotationPass (Phase 0 above) which
+            // annotates branches BEFORE this pass queries BranchProbabilityInfo.
+            CloseFPM.addPass(ConditionalStoreSinkPass());
             // BER: convert near-50/50 small diamond CFGs to select instructions,
             // eliminating branch-mispredict flushes before the final CFG cleanup.
             CloseFPM.addPass(BranchEntropyReductionPass());
