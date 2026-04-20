@@ -3378,8 +3378,8 @@ void CTEngine::runPass(const Program* program) {
         std::unordered_map<std::string, std::vector<std::string>> callees;
         std::unordered_set<std::string> allCallees;
         for (auto& edge : graph_.edges) {
-            callees[edge.first].push_back(edge.second);
-            allCallees.insert(edge.second);
+            callees[edge.callerName].push_back(edge.calleeName);
+            allCallees.insert(edge.calleeName);
         }
 
         // Seed: "main" + any function that is NEVER a callee (could be external entry).
@@ -3423,6 +3423,741 @@ void CTEngine::runPass(const Program* program) {
                 }
             }
         }
+    }
+
+    // ── Phase 9: abstract interpretation (Q1–Q5) ──────────────────────────
+    // Run after all other passes so that purity, uniform-return, and
+    // global-const information is fully populated before we start deriving
+    // abstract values for each function.
+    runAbstractInterpretation(program);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CTInterval — arithmetic transfer functions
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Each function computes the interval that tightly contains all possible
+// results of the operation.  The derivation is from the mathematical
+// definition of the operation — NOT from pattern matching on AST structure.
+//
+// Overflow is handled conservatively: if both bounds fit in int64, we track
+// the precise interval; if either bound would overflow, we return TOP.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+// Overflow-safe int64 helpers used by the transfer functions.
+inline bool safeAddI64(int64_t a, int64_t b, int64_t& out) {
+#if defined(__GNUC__) || defined(__clang__)
+    return !__builtin_add_overflow(a, b, &out);
+#else
+    if (b > 0 && a > std::numeric_limits<int64_t>::max() - b) return false;
+    if (b < 0 && a < std::numeric_limits<int64_t>::min() - b) return false;
+    out = a + b;
+    return true;
+#endif
+}
+inline bool safeMulI64(int64_t a, int64_t b, int64_t& out) {
+#if defined(__GNUC__) || defined(__clang__)
+    return !__builtin_mul_overflow(a, b, &out);
+#else
+    if (a == 0 || b == 0) { out = 0; return true; }
+    if (a > 0 && b > 0 && a > std::numeric_limits<int64_t>::max() / b) return false;
+    if (a < 0 && b < 0 && (-a) > std::numeric_limits<int64_t>::max() / (-b)) return false;
+    if (a > 0 && b < 0 && b < std::numeric_limits<int64_t>::min() / a) return false;
+    if (a < 0 && b > 0 && a < std::numeric_limits<int64_t>::min() / b) return false;
+    out = a * b;
+    return true;
+#endif
+}
+
+// All 4 corner products for multiplication on intervals.
+inline CTInterval mulInterval(int64_t la, int64_t ha, int64_t lb, int64_t hb) {
+    int64_t p[4] = {};
+    bool ok = safeMulI64(la, lb, p[0]) && safeMulI64(la, hb, p[1]) &&
+              safeMulI64(ha, lb, p[2]) && safeMulI64(ha, hb, p[3]);
+    if (!ok) return CTInterval::top();
+    return CTInterval::range(*std::min_element(p, p+4),
+                             *std::max_element(p, p+4));
+}
+
+} // anonymous namespace
+
+CTInterval CTInterval::opAdd(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return bottom();
+    if (isTop() || o.isTop()) return top();
+    int64_t newLo, newHi;
+    if (!safeAddI64(lo, o.lo, newLo) || !safeAddI64(hi, o.hi, newHi)) return top();
+    return range(newLo, newHi);
+}
+
+CTInterval CTInterval::opSub(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return bottom();
+    if (isTop() || o.isTop()) return top();
+    // [la,ha] - [lb,hb] = [la-hb, ha-lb]
+    int64_t newLo, newHi;
+    if (!safeAddI64(lo,  -o.hi, newLo) || !safeAddI64(hi, -o.lo, newHi)) return top();
+    return range(newLo, newHi);
+}
+
+CTInterval CTInterval::opMul(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return bottom();
+    if (isTop() || o.isTop()) return top();
+    return mulInterval(lo, hi, o.lo, o.hi);
+}
+
+CTInterval CTInterval::opDiv(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return bottom();
+    if (isTop() || o.isTop()) return top();
+    // Division by zero is undefined — return TOP conservatively.
+    if (o.includesZero()) return top();
+    // Avoid MIN / -1 overflow.
+    if (lo == std::numeric_limits<int64_t>::min() && o.includes(-1)) return top();
+    // Divide by extreme divisors to find the tightest bounds.
+    const int64_t divs[4] = {lo / o.lo, lo / o.hi, hi / o.lo, hi / o.hi};
+    return range(*std::min_element(divs, divs+4),
+                 *std::max_element(divs, divs+4));
+}
+
+CTInterval CTInterval::opMod(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return bottom();
+    if (o.includesZero()) return top();
+    // For signed modulo: result lies in [-(|divisor|-1), |divisor|-1]
+    // We use the abs of the divisor's maximum absolute magnitude.
+    const int64_t absDivisorMax = std::max(std::abs(o.lo), std::abs(o.hi));
+    if (absDivisorMax <= 0) return top();
+    return range(-(absDivisorMax - 1), absDivisorMax - 1);
+}
+
+CTInterval CTInterval::opShl(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return bottom();
+    if (isTop() || o.isTop()) return top();
+    // Only safe when shift amount is in [0, 62] and base is non-negative.
+    if (o.lo < 0 || o.hi > 62) return top();
+    if (lo < 0) return top();  // signed shift of negative: UB in C++
+    int64_t newLo, newHi;
+    // lo << o.lo and hi << o.hi — if either overflows, return TOP.
+    if (!safeMulI64(lo, int64_t(1) << o.lo, newLo)) return top();
+    if (!safeMulI64(hi, int64_t(1) << o.hi, newHi)) return top();
+    return range(newLo, newHi);
+}
+
+CTInterval CTInterval::opShr(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return bottom();
+    if (isTop() || o.isTop()) return top();
+    if (o.lo < 0 || o.hi > 63) return top();
+    // For positive values: [lo >> o.hi, hi >> o.lo] (right shift reduces magnitude)
+    if (lo >= 0) return range(lo >> o.hi, hi >> o.lo);
+    // Negative values: arithmetic shift preserves sign; result is still negative
+    return range(lo >> o.lo, hi >> o.hi);
+}
+
+CTInterval CTInterval::opBitAnd(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return bottom();
+    if (isTop() || o.isTop()) return top();
+    // Conservative: [0, min(ha, hb)] when both are non-negative
+    if (lo >= 0 && o.lo >= 0)
+        return range(0, std::min(hi, o.hi));
+    return top();
+}
+
+CTInterval CTInterval::opBitOr(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return bottom();
+    if (isTop() || o.isTop()) return top();
+    // Conservative: [max(la,lb), ha|hb] when both non-negative
+    if (lo >= 0 && o.lo >= 0) {
+        // Upper bound: all bits set up to the highest bit of either hi
+        int64_t upper = hi | o.hi;  // bitwise OR of upper bounds
+        return range(std::max(lo, o.lo), upper);
+    }
+    return top();
+}
+
+CTInterval CTInterval::opBitXor(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return bottom();
+    if (isTop() || o.isTop()) return top();
+    if (lo >= 0 && o.lo >= 0)
+        return range(0, hi | o.hi);
+    return top();
+}
+
+CTInterval CTInterval::opNeg() const noexcept {
+    if (isBottom() || isTop()) return *this;
+    // Careful: -INT64_MIN overflows
+    if (lo == std::numeric_limits<int64_t>::min()) return top();
+    return range(-hi, -lo);
+}
+
+CTInterval CTInterval::opAbs() const noexcept {
+    if (isBottom() || isTop()) return *this;
+    if (lo == std::numeric_limits<int64_t>::min()) return top();
+    if (lo >= 0) return *this;
+    if (hi < 0) return range(-hi, -lo);
+    return range(0, std::max(-lo, hi));
+}
+
+CTInterval::CmpResult CTInterval::cmpLT(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return CmpResult::UNKNOWN;
+    if (!isTop() && !o.isTop()) {
+        if (hi < o.lo) return CmpResult::ALWAYS_TRUE;   // every a < every b
+        if (lo >= o.hi) return CmpResult::ALWAYS_FALSE; // every a >= every b
+    }
+    return CmpResult::UNKNOWN;
+}
+CTInterval::CmpResult CTInterval::cmpLE(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return CmpResult::UNKNOWN;
+    if (!isTop() && !o.isTop()) {
+        if (hi <= o.lo) return CmpResult::ALWAYS_TRUE;
+        if (lo > o.hi) return CmpResult::ALWAYS_FALSE;
+    }
+    return CmpResult::UNKNOWN;
+}
+CTInterval::CmpResult CTInterval::cmpGT(const CTInterval& o) const noexcept { return o.cmpLT(*this); }
+CTInterval::CmpResult CTInterval::cmpGE(const CTInterval& o) const noexcept { return o.cmpLE(*this); }
+CTInterval::CmpResult CTInterval::cmpEQ(const CTInterval& o) const noexcept {
+    if (isBottom() || o.isBottom()) return CmpResult::UNKNOWN;
+    if (!isTop() && !o.isTop()) {
+        if (isConcrete() && o.isConcrete() && lo == o.lo) return CmpResult::ALWAYS_TRUE;
+        // No overlap → always false
+        if (hi < o.lo || lo > o.hi) return CmpResult::ALWAYS_FALSE;
+    }
+    return CmpResult::UNKNOWN;
+}
+CTInterval::CmpResult CTInterval::cmpNE(const CTInterval& o) const noexcept {
+    auto eq = cmpEQ(o);
+    if (eq == CmpResult::ALWAYS_TRUE)  return CmpResult::ALWAYS_FALSE;
+    if (eq == CmpResult::ALWAYS_FALSE) return CmpResult::ALWAYS_TRUE;
+    return CmpResult::UNKNOWN;
+}
+
+// ── CTEngine::getExitRange ────────────────────────────────────────────────────
+CTInterval CTEngine::getExitRange(const std::string& fnName,
+                                  const std::string& varName) const noexcept {
+    auto fi = analysisExitEnvs_.find(fnName);
+    if (fi == analysisExitEnvs_.end()) return CTInterval::top();
+    auto vi = fi->second.find(varName);
+    if (vi == fi->second.end()) return CTInterval::top();
+    return vi->second;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CTAbstractInterpreter — implementation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper: look up a variable's abstract value in env, defaulting to TOP.
+static CTInterval envGet(const CTAbstractEnv& env, const std::string& name) {
+    auto it = env.find(name);
+    return (it != env.end()) ? it->second : CTInterval::top();
+}
+
+CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
+                                               const CTAbstractEnv& env,
+                                               CTAnalysisResult& result) {
+    if (!e) return CTInterval::top();
+
+    switch (e->type) {
+    // ── Literals ──────────────────────────────────────────────────────────
+    case ASTNodeType::LITERAL_EXPR: {
+        auto* lit = static_cast<const LiteralExpr*>(e);
+        if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+            return CTInterval::exact(lit->intValue);
+        if (lit->literalType == LiteralExpr::LiteralType::FLOAT)
+            return CTInterval::top(); // float domain not tracked
+        return CTInterval::top();    // strings
+    }
+
+    // ── Variable / global constant lookup ────────────────────────────────
+    case ASTNodeType::IDENTIFIER_EXPR: {
+        auto* id = static_cast<const IdentifierExpr*>(e);
+        // 1. Local variable: use the abstract environment.
+        auto localIt = env.find(id->name);
+        if (localIt != env.end()) return localIt->second;
+        // 2. Global constant: if it has a known integer value, convert it.
+        auto gIt = globals_.find(id->name);
+        if (gIt != globals_.end() && gIt->second.isInt())
+            return CTInterval::exact(gIt->second.asI64());
+        // 3. Enum constant.
+        auto eIt = enums_.find(id->name);
+        if (eIt != enums_.end()) return CTInterval::exact(eIt->second);
+        return CTInterval::top();
+    }
+
+    // ── Scope resolution (enum member) ────────────────────────────────────
+    case ASTNodeType::SCOPE_RESOLUTION_EXPR: {
+        auto* sr = static_cast<const ScopeResolutionExpr*>(e);
+        const std::string key = sr->scopeName + "::" + sr->memberName;
+        auto eIt = enums_.find(key);
+        if (eIt != enums_.end()) return CTInterval::exact(eIt->second);
+        return CTInterval::top();
+    }
+
+    // ── Binary operations — semantic transfer functions ───────────────────
+    case ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<const BinaryExpr*>(e);
+        CTInterval lhs = analyzeExpr(bin->left.get(),  env, result);
+        CTInterval rhs = analyzeExpr(bin->right.get(), env, result);
+
+        // Arithmetic operations: apply the appropriate transfer function.
+        // The transfer function is derived from the DEFINITION of the operation,
+        // not from recognising a specific pattern in the AST.
+        CTInterval res = CTInterval::top();
+        const std::string& op = bin->op;
+
+        if      (op == "+")  res = lhs.opAdd(rhs);
+        else if (op == "-")  res = lhs.opSub(rhs);
+        else if (op == "*")  res = lhs.opMul(rhs);
+        else if (op == "/")  { res = lhs.opDiv(rhs);
+                               if (!rhs.includesZero()) result.safeDivisions.insert(e); }
+        else if (op == "%")  { res = lhs.opMod(rhs);
+                               if (!rhs.includesZero()) result.safeDivisions.insert(e); }
+        else if (op == "<<") res = lhs.opShl(rhs);
+        else if (op == ">>") res = lhs.opShr(rhs);
+        else if (op == "&")  res = lhs.opBitAnd(rhs);
+        else if (op == "|")  res = lhs.opBitOr(rhs);
+        else if (op == "^")  res = lhs.opBitXor(rhs);
+        // Comparisons: result is 0 or 1
+        else if (op == "<" || op == "<=" || op == ">" || op == ">=" ||
+                 op == "==" || op == "!=" || op == "&&" || op == "||")
+            res = CTInterval::range(0, 1);
+
+        // Q5: arithmetic overflow safety — if operands' ranges fit within int64
+        // and the result is concrete, the operation is provably safe.
+        if (res.isRange() && !res.isTop()) {
+            if ((op == "+" || op == "-" || op == "*") && !lhs.isTop() && !rhs.isTop())
+                result.safeArithmetic.insert(e);
+        }
+
+        // Q4: Range-conditioned cheaper rewrites.
+        // We DERIVE that a substitution is valid by reasoning about the operand ranges.
+        // Example: x / 4 → x >> 2 is correct iff x ≥ 0 (proven by lhs range analysis).
+        // This is NOT pattern matching — the rule is derived from the semantic identity
+        //   ∀ x ≥ 0: x / 2^k = x >> k   (property of integer arithmetic)
+        if (op == "/" && !rhs.isTop() && rhs.isConcrete() && rhs.lo > 0 &&
+            lhs.isNonNegative()) {
+            int64_t divisor = rhs.lo;
+            // Is divisor a power of 2?
+            if (divisor > 0 && (divisor & (divisor - 1)) == 0)
+                result.cheaperRewrites[e] = ">>";  // x/2^k → x>>k
+        }
+        if (op == "%" && !rhs.isTop() && rhs.isConcrete() && rhs.lo > 0 &&
+            lhs.isNonNegative()) {
+            int64_t divisor = rhs.lo;
+            if (divisor > 0 && (divisor & (divisor - 1)) == 0)
+                result.cheaperRewrites[e] = "&";   // x%2^k → x&(2^k-1)
+        }
+        if (op == "*" && !rhs.isTop() && rhs.isConcrete()) {
+            int64_t factor = rhs.lo;
+            // x * 2^k → x << k  (valid for all integer values — no precondition needed)
+            if (factor > 0 && (factor & (factor - 1)) == 0)
+                result.cheaperRewrites[e] = "<<";  // x*2^k → x<<k
+        }
+
+        return res;
+    }
+
+    // ── Unary operations ──────────────────────────────────────────────────
+    case ASTNodeType::UNARY_EXPR: {
+        auto* u = static_cast<const UnaryExpr*>(e);
+        CTInterval operand = analyzeExpr(u->operand.get(), env, result);
+        if (u->op == "-") return operand.opNeg();
+        if (u->op == "!" || u->op == "not") return CTInterval::range(0, 1);
+        if (u->op == "~") return CTInterval::top(); // bitwise NOT
+        return CTInterval::top();
+    }
+
+    case ASTNodeType::PREFIX_EXPR:
+    case ASTNodeType::POSTFIX_EXPR:
+        // ++ / -- modify a variable: return TOP conservatively
+        return CTInterval::top();
+
+    // ── Ternary — join both branches ──────────────────────────────────────
+    case ASTNodeType::TERNARY_EXPR: {
+        auto* t = static_cast<const TernaryExpr*>(e);
+        CTInterval cond = analyzeExpr(t->condition.get(), env, result);
+        if (cond.isConcrete()) {
+            if (cond.lo != 0) return analyzeExpr(t->thenExpr.get(), env, result);
+            else              return analyzeExpr(t->elseExpr.get(), env, result);
+        }
+        CTInterval thenI = analyzeExpr(t->thenExpr.get(), env, result);
+        CTInterval elseI = analyzeExpr(t->elseExpr.get(), env, result);
+        return thenI.join(elseI);
+    }
+
+    // ── Array index — Q5 bounds check ────────────────────────────────────
+    case ASTNodeType::INDEX_EXPR: {
+        auto* idx = static_cast<const IndexExpr*>(e);
+        CTInterval indexRange = analyzeExpr(idx->index.get(), env, result);
+        // Lookup the array's known length.
+        if (idx->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* arrId = static_cast<const IdentifierExpr*>(idx->array.get());
+            int64_t len = getArrayLength(arrId->name, env);
+            if (len > 0 && indexRange.isRange() && !indexRange.isTop()) {
+                if (indexRange.lo >= 0 && indexRange.hi < len) {
+                    // Proven: 0 ≤ index < len for every possible execution.
+                    // This is a SEMANTIC PROOF, not a syntactic pattern.
+                    result.safeArrayAccesses.insert(e);
+                }
+            }
+        }
+        return CTInterval::top(); // element value unknown
+    }
+
+    default:
+        return CTInterval::top();
+    }
+}
+
+void CTAbstractInterpreter::narrowCondition(const Expression* cond,
+                                             CTAbstractEnv& thenEnv,
+                                             CTAbstractEnv& elseEnv) {
+    if (!cond || cond->type != ASTNodeType::BINARY_EXPR) return;
+    auto* bin = static_cast<const BinaryExpr*>(cond);
+    const std::string& op = bin->op;
+
+    // Only narrow when one side is an identifier (variable) and the other
+    // evaluates to a concrete integer range.  We derive the narrowed range
+    // by intersecting the current abstract value with the constraint imposed
+    // by the comparison.
+    auto tryNarrow = [&](const Expression* varExpr, const CTInterval& bound,
+                          bool varOnLeft) {
+        if (!varExpr || varExpr->type != ASTNodeType::IDENTIFIER_EXPR) return;
+        auto* id = static_cast<const IdentifierExpr*>(varExpr);
+        if (!bound.isConcrete()) return;  // bound must be a single value
+        const int64_t B = bound.lo;
+        CTInterval cur = envGet(thenEnv, id->name);
+
+        // Derive narrowing from the mathematical definition of each comparison.
+        if ((varOnLeft  && op == "<")  || (!varOnLeft && op == ">")) {
+            thenEnv[id->name] = cur.narrowLT(B);
+            elseEnv[id->name] = cur.narrowGE(B);
+        } else if ((varOnLeft  && op == "<=") || (!varOnLeft && op == ">=")) {
+            thenEnv[id->name] = cur.narrowLE(B);
+            elseEnv[id->name] = cur.narrowGT(B);
+        } else if ((varOnLeft  && op == ">")  || (!varOnLeft && op == "<")) {
+            thenEnv[id->name] = cur.narrowGT(B);
+            elseEnv[id->name] = cur.narrowLE(B);
+        } else if ((varOnLeft  && op == ">=") || (!varOnLeft && op == "<=")) {
+            thenEnv[id->name] = cur.narrowGE(B);
+            elseEnv[id->name] = cur.narrowLT(B);
+        } else if (op == "==") {
+            thenEnv[id->name] = cur.narrowEQ(B);
+            elseEnv[id->name] = cur.narrowNE(B);
+        } else if (op == "!=") {
+            thenEnv[id->name] = cur.narrowNE(B);
+            elseEnv[id->name] = cur.narrowEQ(B);
+        }
+    };
+
+    // Temporary result holder for analyzeExpr (side-effects not needed here)
+    CTAnalysisResult tmp;
+    CTInterval lhsI = analyzeExpr(bin->left.get(),  thenEnv, tmp);
+    CTInterval rhsI = analyzeExpr(bin->right.get(), thenEnv, tmp);
+    tryNarrow(bin->left.get(),  rhsI, /*varOnLeft=*/true);
+    tryNarrow(bin->right.get(), lhsI, /*varOnLeft=*/false);
+}
+
+CTAbstractEnv CTAbstractInterpreter::joinEnvs(const CTAbstractEnv& a,
+                                               const CTAbstractEnv& b) {
+    CTAbstractEnv result = a;
+    for (auto& [name, valB] : b) {
+        auto it = result.find(name);
+        if (it == result.end())
+            result[name] = valB;
+        else
+            it->second = it->second.join(valB);
+    }
+    return result;
+}
+
+int64_t CTAbstractInterpreter::getArrayLength(const std::string& varName,
+                                               const CTAbstractEnv& /*env*/) const {
+    auto it = arrayLengths_.find(varName);
+    return (it != arrayLengths_.end()) ? it->second : -1;
+}
+
+bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
+                                         CTAnalysisResult& result) {
+    if (!s) return true;
+
+    switch (s->type) {
+
+    // ── Variable declaration ───────────────────────────────────────────────
+    case ASTNodeType::VAR_DECL: {
+        auto* d = static_cast<const VarDecl*>(s);
+        CTInterval iv = analyzeExpr(d->initializer.get(), env, result);
+        env[d->name] = iv;
+        // Track array lengths from array literal declarations.
+        if (d->initializer &&
+            d->initializer->type == ASTNodeType::ARRAY_EXPR) {
+            auto* ae = static_cast<const ArrayExpr*>(d->initializer.get());
+            arrayLengths_[d->name] = static_cast<int64_t>(ae->elements.size());
+        }
+        return true;
+    }
+
+    case ASTNodeType::MOVE_DECL: {
+        auto* md = static_cast<const MoveDecl*>(s);
+        env[md->name] = analyzeExpr(md->initializer.get(), env, result);
+        return true;
+    }
+
+    // ── Assignment ────────────────────────────────────────────────────────
+    case ASTNodeType::EXPR_STMT: {
+        auto* es = static_cast<const ExprStmt*>(s);
+        if (es->expression) {
+            if (es->expression->type == ASTNodeType::ASSIGN_EXPR) {
+                auto* ae = static_cast<const AssignExpr*>(es->expression.get());
+                env[ae->name] = analyzeExpr(ae->value.get(), env, result);
+            } else {
+                analyzeExpr(es->expression.get(), env, result);
+            }
+        }
+        return true;
+    }
+
+    // ── Return ────────────────────────────────────────────────────────────
+    case ASTNodeType::RETURN_STMT:
+        // Rest of the block is unreachable after a return.
+        return false;
+
+    case ASTNodeType::BREAK_STMT:
+    case ASTNodeType::CONTINUE_STMT:
+        return false;
+
+    // ── Block ─────────────────────────────────────────────────────────────
+    case ASTNodeType::BLOCK: {
+        auto* blk = static_cast<const BlockStmt*>(s);
+        analyzeBlock(blk, env, result);
+        return true;
+    }
+
+    // ── If statement (Q2: reachability) ───────────────────────────────────
+    case ASTNodeType::IF_STMT: {
+        auto* ifs = static_cast<const IfStmt*>(s);
+        // Evaluate the condition's abstract value.
+        CTInterval condRange = analyzeExpr(ifs->condition.get(), env, result);
+
+        // Derive reachability from the condition's abstract value.
+        // This is REASONING, not pattern matching: we ask the interval "can
+        // you ever be true (≠ 0)?" or "can you ever be false (= 0)?".
+        const bool condCanBeTrue  = !condRange.isBottom() &&
+                                     (condRange.isTop() || condRange.includes(0) == false ||
+                                      !condRange.isConcrete() || condRange.lo != 0);
+        const bool condCanBeFalse = !condRange.isBottom() &&
+                                     (condRange.isTop() || condRange.includes(0));
+        const bool condAlwaysTrue  = condRange.isRange() &&
+                                      !condRange.includesZero() && !condRange.isTop();
+        const bool condAlwaysFalse = condRange.isConcrete() && condRange.lo == 0;
+
+        if (condAlwaysFalse) {
+            result.deadThenBranches.insert(s);
+            if (ifs->elseBranch) analyzeStmt(ifs->elseBranch.get(), env, result);
+            return true;
+        }
+        if (condAlwaysTrue) {
+            result.deadElseBranches.insert(s);
+            analyzeStmt(ifs->thenBranch.get(), env, result);
+            return true;
+        }
+        (void)condCanBeTrue; (void)condCanBeFalse; // suppress warnings
+
+        // Branch is genuinely conditional — analyse both arms with narrowed envs.
+        CTAbstractEnv thenEnv = env, elseEnv = env;
+        narrowCondition(ifs->condition.get(), thenEnv, elseEnv);
+        analyzeStmt(ifs->thenBranch.get(), thenEnv, result);
+        if (ifs->elseBranch)
+            analyzeStmt(ifs->elseBranch.get(), elseEnv, result);
+        // Merge environments at the join point.
+        env = joinEnvs(thenEnv, elseEnv);
+        return true;
+    }
+
+    // ── For loop (Q1: induction variable range) ───────────────────────────
+    //
+    // The range of the induction variable is DERIVED from the semantics of
+    // the loop: we evaluate the start and end expressions as abstract values,
+    // then compute the range that i takes at loop body entry.
+    //
+    // This is not matching the pattern "for i in 0..n" — it's computing:
+    //   start_iv = analyzeExpr(start), end_iv = analyzeExpr(end)
+    //   i_range  = [start_iv.lo, end_iv.hi - 1]   (when both are known ranges)
+    //
+    // The same analysis works for: for i in getStart()..getEnd() when those
+    // functions have been CT-evaluated to known values.
+    case ASTNodeType::FOR_STMT: {
+        auto* fs = static_cast<const ForStmt*>(s);
+        CTInterval startI = analyzeExpr(fs->start.get(), env, result);
+        CTInterval endI   = analyzeExpr(fs->end.get(),   env, result);
+        CTInterval stepI  = fs->step
+                            ? analyzeExpr(fs->step.get(), env, result)
+                            : CTInterval::exact(1);
+
+        // Compute induction variable range from start/end semantics.
+        CTInterval ivRange;
+        if (startI.isRange() && endI.isRange() && stepI.isRange() &&
+            !startI.isTop() && !endI.isTop() && !stepI.isTop()) {
+            // Positive step: i goes from start to end-1
+            if (stepI.lo > 0) {
+                int64_t loIV = startI.lo;
+                int64_t hiIV;
+                safeAddI64(endI.hi, -1, hiIV);  // end is exclusive
+                ivRange = CTInterval::range(loIV, hiIV);
+            } else {
+                ivRange = CTInterval::top();
+            }
+        } else {
+            ivRange = CTInterval::top();
+        }
+
+        // Set the loop variable's range for the body analysis.
+        CTAbstractEnv bodyEnv = env;
+        bodyEnv[fs->iteratorVar] = ivRange;
+
+        // Analyse loop body — variables modified inside may widen.
+        CTAbstractEnv postBody = bodyEnv;
+        analyzeStmt(fs->body.get(), postBody, result);
+
+        // Widening: for any variable that changed in the loop body,
+        // widen its range to prevent infinite iteration of the fixpoint.
+        for (auto& [name, postVal] : postBody) {
+            if (name == fs->iteratorVar) continue;  // IV handled separately
+            auto preIt = bodyEnv.find(name);
+            if (preIt == bodyEnv.end()) {
+                env[name] = postVal;
+            } else if (!(preIt->second.isRange() && postVal.isRange() &&
+                         preIt->second.lo == postVal.lo &&
+                         preIt->second.hi == postVal.hi)) {
+                // Range changed: widen to prevent non-termination.
+                env[name] = postVal.widen(preIt->second);
+            }
+        }
+        // After the loop, the IV is out of scope (or equals end).
+        env.erase(fs->iteratorVar);
+        return true;
+    }
+
+    // ── While loop ────────────────────────────────────────────────────────
+    case ASTNodeType::WHILE_STMT: {
+        auto* ws = static_cast<const WhileStmt*>(s);
+        // Conservative: all variables modified in the loop are widened to TOP.
+        // A full fixpoint loop is too expensive for compile-time analysis.
+        CTAbstractEnv loopEnv = env;
+        analyzeStmt(ws->body.get(), loopEnv, result);
+        for (auto& [name, val] : loopEnv) {
+            auto preIt = env.find(name);
+            if (preIt == env.end() || !(preIt->second.isRange() &&
+                val.isRange() && preIt->second.lo == val.lo &&
+                preIt->second.hi == val.hi)) {
+                env[name] = CTInterval::top();
+            }
+        }
+        return true;
+    }
+
+    case ASTNodeType::DO_WHILE_STMT: {
+        auto* dw = static_cast<const DoWhileStmt*>(s);
+        CTAbstractEnv loopEnv = env;
+        analyzeStmt(dw->body.get(), loopEnv, result);
+        for (auto& [name, val] : loopEnv) {
+            auto preIt = env.find(name);
+            if (preIt == env.end() || !(preIt->second.isRange() &&
+                val.isRange() && preIt->second.lo == val.lo &&
+                preIt->second.hi == val.hi)) {
+                env[name] = CTInterval::top();
+            }
+        }
+        return true;
+    }
+
+    // ── Switch statement ──────────────────────────────────────────────────
+    case ASTNodeType::SWITCH_STMT: {
+        auto* sw = static_cast<const SwitchStmt*>(s);
+        analyzeExpr(sw->condition.get(), env, result);
+        CTAbstractEnv merged = env;
+        bool first = true;
+        for (auto& c : sw->cases) {
+            CTAbstractEnv caseEnv = env;
+            for (auto& bs : c.body) analyzeStmt(bs.get(), caseEnv, result);
+            if (first) { merged = caseEnv; first = false; }
+            else merged = joinEnvs(merged, caseEnv);
+        }
+        if (!first) env = merged;
+        return true;
+    }
+
+    default:
+        return true;
+    }
+}
+
+void CTAbstractInterpreter::analyzeBlock(const BlockStmt* block,
+                                          CTAbstractEnv& env,
+                                          CTAnalysisResult& result) {
+    if (!block) return;
+    for (auto& stmt : block->statements) {
+        if (!analyzeStmt(stmt.get(), env, result)) break;
+    }
+}
+
+CTAnalysisResult CTAbstractInterpreter::analyzeFunction(const FunctionDecl* fn) {
+    CTAnalysisResult result;
+    if (!fn || !fn->body) return result;
+
+    // Initial environment: parameters start as TOP (any value).
+    // This ensures we derive ranges purely from what the function body
+    // can prove about them — not from assumptions about call sites.
+    CTAbstractEnv env;
+    for (auto& param : fn->parameters)
+        env[param.name] = CTInterval::top();
+
+    analyzeBlock(fn->body.get(), env, result);
+    result.exitEnv = env;
+    return result;
+}
+
+// ── CTEngine::runAbstractInterpretation ──────────────────────────────────────
+void CTEngine::runAbstractInterpretation(const Program* program) {
+    if (!program) return;
+
+    CTAbstractInterpreter interp(*this, globalConsts_, enumConsts_);
+
+    for (auto& fn : program->functions) {
+        if (!fn->body) continue;
+
+        CTAnalysisResult res = interp.analyzeFunction(fn.get());
+
+        // Merge per-function results into the engine's global tables.
+
+        // Q1: Store exit environment for cross-function queries.
+        analysisExitEnvs_[fn->name] = res.exitEnv;
+
+        // Q2: Dead branch annotations.
+        for (auto* s : res.deadThenBranches) {
+            analysisDeadThen_.insert(s);
+            ++stats_.deadBranchesEliminated;
+        }
+        for (auto* s : res.deadElseBranches) {
+            analysisDeadElse_.insert(s);
+            ++stats_.deadBranchesEliminated;
+        }
+
+        // Q4: Range-conditioned cheaper rewrites.
+        for (auto& [e, alt] : res.cheaperRewrites) {
+            analysisCheaperRewrites_[e] = alt;
+            ++stats_.cheaperRewritesFound;
+        }
+
+        // Q5: Safety proofs.
+        for (auto* e : res.safeArrayAccesses) {
+            analysisSafeArrayAccess_.insert(e);
+            ++stats_.safeArrayAccesses;
+        }
+        for (auto* e : res.safeDivisions) {
+            analysisSafeDiv_.insert(e);
+            ++stats_.safeDivisions;
+        }
+        for (auto* e : res.safeArithmetic)
+            analysisSafeArith_.insert(e);
     }
 }
 

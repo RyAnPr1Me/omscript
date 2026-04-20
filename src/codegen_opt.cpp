@@ -2829,6 +2829,10 @@ void CodeGenerator::runOptimizationPasses() {
         const bool earlyO3 = optimizationLevel >= OptimizationLevel::O3;
         PB.registerOptimizerEarlyEPCallback(
             [earlyO3](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
+            // O2+: Interprocedural Nullability — scan all call sites; if a pointer
+            // arg is always non-null (proven by LLVM ValueTracking), add `nonnull`.
+            // Runs FIRST so that attr-inference below sees the new attributes.
+            MPM.addPass(InterproceduralNullabilityPass());
             // O2+: Bidirectional function-attribute inference.
             // Bottom-up: propagate readnone/readonly from leaves to callers.
             MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(

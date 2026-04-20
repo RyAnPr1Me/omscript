@@ -600,6 +600,26 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 }
 
 void CodeGenerator::generateIf(IfStmt* stmt) {
+    // ── CF-CTRE abstract-interpretation dead-branch elimination (Q2) ─────
+    // Before generating any IR, query the abstract interpreter's results.
+    // If it proved (via interval analysis, not pattern matching) that the
+    // condition is always true or always false, skip the dead branch entirely.
+    // This is stronger than the LLVM-constant check below: it fires even when
+    // the condition depends on non-constant values that happen to have a known
+    // range (e.g., loop induction variables, narrowed conditional variables).
+    if (ctEngine_) {
+        if (ctEngine_->isThenBranchDead(stmt)) {
+            // Condition is always false — only generate else branch.
+            if (stmt->elseBranch) generateStatement(stmt->elseBranch.get());
+            return;
+        }
+        if (ctEngine_->isElseBranchDead(stmt)) {
+            // Condition is always true — only generate then branch.
+            generateStatement(stmt->thenBranch.get());
+            return;
+        }
+    }
+
     llvm::Value* condition = generateExpression(stmt->condition.get());
 
     // Constant condition elimination: skip dead branch when condition is known
@@ -1535,6 +1555,41 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // expressions derived from the loop counter can emit urem/udiv
             // instead of srem/sdiv.
             nonNegValues_.insert(iterAlloca);
+
+            // ── CF-CTRE Phase 9 IV range refinement ────────────────────
+            // If the abstract interpreter derived a TIGHTER range for the IV
+            // than what start/end alone tell us (e.g., because start/end are
+            // themselves expressions with a narrower abstract value), inject
+            // additional assumes to tell LLVM the tighter bounds.
+            // This feeds into SCEV, CVP, and the loop vectorizer's cost model.
+            if (ctEngine_) {
+                CTInterval ivRange = ctEngine_->getExitRange(
+                    builder->GetInsertBlock()->getParent()->getName().str(),
+                    stmt->iteratorVar);
+                // Only inject if the abstract range is tighter than what we
+                // already know from the start/end IR values.
+                if (ivRange.isRange() && !ivRange.isTop() && ivRange.lo >= 0) {
+                    llvm::ConstantInt* cLo = llvm::dyn_cast<llvm::ConstantInt>(startVal);
+                    llvm::ConstantInt* cHi = llvm::dyn_cast<llvm::ConstantInt>(endVal);
+                    const bool knowLo = cLo && cLo->getSExtValue() == ivRange.lo;
+                    const bool knowHi = cHi && cHi->getSExtValue() == ivRange.hi + 1;
+                    if (!knowLo || !knowHi) {
+                        // Reload the IV (same block — GVN will dedup the load).
+                        llvm::Value* iv2 = builder->CreateAlignedLoad(
+                            iterType, iterAlloca, llvm::MaybeAlign(8), "iter.absi");
+                        if (!knowLo) {
+                            llvm::Value* c = llvm::ConstantInt::get(iterType, ivRange.lo);
+                            llvm::Value* cond = builder->CreateICmpSGE(iv2, c, "iter.absi.lo");
+                            builder->CreateCall(assumeFn, {cond});
+                        }
+                        if (!knowHi) {
+                            llvm::Value* c = llvm::ConstantInt::get(iterType, ivRange.hi + 1);
+                            llvm::Value* cond = builder->CreateICmpSLT(iv2, c, "iter.absi.hi");
+                            builder->CreateCall(assumeFn, {cond});
+                        }
+                    }
+                }
+            }
         }
     }
 

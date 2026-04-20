@@ -7936,7 +7936,12 @@ void CodeGenerator::runCFCTRE(Program* program) {
                   << s.branchMerges          << " branch merges, "
                   << s.ternaryMerges         << " ternary merges, "
                   << s.uniformReturnFunctionsFound << " uniform-return, "
-                  << s.deadFunctionsDetected << " dead" << '\n';
+                  << s.deadFunctionsDetected << " dead\n"
+                  << "  [cfctre/absinterp] "
+                  << s.deadBranchesEliminated << " dead branches, "
+                  << s.safeArrayAccesses      << " safe array accesses, "
+                  << s.safeDivisions          << " safe divisions, "
+                  << s.cheaperRewritesFound   << " cheaper rewrites" << '\n';
     }
 
     // ── CF-CTRE-guided inline hints ────────────────────────────────────────

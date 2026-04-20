@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <map>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -33,6 +34,7 @@ namespace omscript {
 // Forward-declare AST types (defined in ast.h).
 class FunctionDecl;
 class BlockStmt;
+class IfStmt;
 class Statement;
 class Expression;
 class Program;
@@ -41,6 +43,208 @@ class ForStmt;
 // ─── CTArrayHandle ────────────────────────────────────────────────────────────
 using CTArrayHandle = uint64_t;
 static constexpr CTArrayHandle CT_NULL_HANDLE = 0;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CTInterval — signed 64-bit integer interval lattice
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// This is the abstract domain used by the CF-CTRE abstract interpreter.
+// A CTInterval represents the set of all integer values a variable can hold
+// at a given program point.  It is the foundation for answering:
+//
+//   Q1  "What values can this variable ever take?"
+//   Q2  "Which paths are actually reachable?"
+//   Q4  "Can this section be rewritten cheaper but equivalent?"
+//   Q5  "Can I prove this bug cannot happen in any execution?"
+//
+// The domain is a complete lattice with:
+//   BOTTOM  — no values (unreachable code / contradiction)
+//   [lo,hi] — concrete interval (inclusive bounds)
+//   TOP     — any 64-bit integer (unknown / not tracked)
+//
+// Transfer functions are SEMANTICALLY DERIVED from arithmetic definitions —
+// not from pattern matching.  For example, the range of `a + b` when
+// a ∈ [la, ha] and b ∈ [lb, hb] is [la+lb, ha+hb] (with overflow clamping);
+// this follows from the definition of addition, not from recognizing the "+"
+// node in the AST.
+// ═══════════════════════════════════════════════════════════════════════════════
+struct CTInterval {
+    enum class Kind : uint8_t { BOTTOM, RANGE, TOP };
+    Kind    kind{Kind::TOP};
+    int64_t lo{std::numeric_limits<int64_t>::min()};
+    int64_t hi{std::numeric_limits<int64_t>::max()};
+
+    // ── Factory helpers ───────────────────────────────────────────────────────
+    static CTInterval top()    noexcept { return {}; }
+    static CTInterval bottom() noexcept { CTInterval a; a.kind = Kind::BOTTOM; return a; }
+    static CTInterval exact(int64_t v) noexcept {
+        CTInterval a; a.kind = Kind::RANGE; a.lo = a.hi = v; return a;
+    }
+    static CTInterval range(int64_t lo, int64_t hi) noexcept {
+        if (lo > hi) return bottom();
+        CTInterval a; a.kind = Kind::RANGE; a.lo = lo; a.hi = hi; return a;
+    }
+
+    // ── Kind predicates ───────────────────────────────────────────────────────
+    bool isBottom()   const noexcept { return kind == Kind::BOTTOM; }
+    bool isRange()    const noexcept { return kind == Kind::RANGE; }
+    bool isTop()      const noexcept { return kind == Kind::TOP; }
+    bool isConcrete() const noexcept { return kind == Kind::RANGE && lo == hi; }
+
+    bool includes(int64_t v) const noexcept {
+        if (isBottom()) return false;
+        if (isTop())    return true;
+        return lo <= v && v <= hi;
+    }
+    bool includesZero() const noexcept { return includes(0); }
+    bool isNonNegative() const noexcept {
+        if (isBottom()) return true;   // vacuously true
+        if (isTop())    return false;
+        return lo >= 0;
+    }
+
+    // ── Lattice operations ────────────────────────────────────────────────────
+
+    /// Join (least upper bound): result contains all values from both.
+    CTInterval join(const CTInterval& o) const noexcept {
+        if (isBottom()) return o;
+        if (o.isBottom()) return *this;
+        if (isTop() || o.isTop()) return top();
+        return range(std::min(lo, o.lo), std::max(hi, o.hi));
+    }
+
+    /// Widening: called on loop back-edges to ensure convergence.
+    /// If the new bound extends the old bound, widen it to ±∞.
+    CTInterval widen(const CTInterval& prev) const noexcept {
+        if (isBottom()) return prev;
+        if (prev.isBottom()) return *this;
+        if (isTop()) return top();
+        if (prev.isTop()) return top();
+        const int64_t newLo = (lo < prev.lo) ? std::numeric_limits<int64_t>::min() : prev.lo;
+        const int64_t newHi = (hi > prev.hi) ? std::numeric_limits<int64_t>::max() : prev.hi;
+        if (newLo == std::numeric_limits<int64_t>::min() &&
+            newHi == std::numeric_limits<int64_t>::max()) return top();
+        return range(newLo, newHi);
+    }
+
+    // ── Narrowing operators (for branch-condition specialisation) ─────────────
+    //
+    // These are applied AFTER a branch is taken to restrict the variable's
+    // range to only the values consistent with the branch condition.
+    // The result is the INTERSECTION of the current interval with the
+    // constraint imposed by the condition — semantically derived from the
+    // definition of the comparison operator.
+
+    CTInterval narrowLT(int64_t bound) const noexcept {   // x < bound
+        if (isBottom() || isTop()) return *this;
+        if (lo >= bound) return bottom();
+        return range(lo, std::min(hi, bound - 1));
+    }
+    CTInterval narrowLE(int64_t bound) const noexcept {   // x <= bound
+        if (isBottom() || isTop()) return *this;
+        if (lo > bound) return bottom();
+        return range(lo, std::min(hi, bound));
+    }
+    CTInterval narrowGT(int64_t bound) const noexcept {   // x > bound
+        if (isBottom() || isTop()) return *this;
+        if (hi <= bound) return bottom();
+        return range(std::max(lo, bound + 1), hi);
+    }
+    CTInterval narrowGE(int64_t bound) const noexcept {   // x >= bound
+        if (isBottom() || isTop()) return *this;
+        if (hi < bound) return bottom();
+        return range(std::max(lo, bound), hi);
+    }
+    CTInterval narrowEQ(int64_t val) const noexcept {   // x == val
+        if (!includes(val)) return bottom();
+        return exact(val);
+    }
+    CTInterval narrowNE(int64_t val) const noexcept {   // x != val
+        if (!includes(val)) return *this;
+        if (isConcrete()) return bottom();        // only value, now excluded
+        if (isRange() && lo == val) return range(lo + 1, hi);
+        if (isRange() && hi == val) return range(lo, hi - 1);
+        return *this;  // conservative — can't express non-contiguous sets
+    }
+
+    // ── Comparison results ────────────────────────────────────────────────────
+    //
+    // These derive whether a comparison of two intervals is always true,
+    // always false, or indeterminate — used to answer Q2 (reachability).
+    // Semantically: `[la,ha] op [lb,hb]` is ALWAYS_TRUE when every value
+    // in A relates to every value in B by op, ALWAYS_FALSE when no pair
+    // satisfies op, and UNKNOWN otherwise.
+
+    enum class CmpResult { ALWAYS_TRUE, ALWAYS_FALSE, UNKNOWN };
+
+    CmpResult cmpLT(const CTInterval& o) const noexcept;   // this < o
+    CmpResult cmpLE(const CTInterval& o) const noexcept;   // this <= o
+    CmpResult cmpGT(const CTInterval& o) const noexcept;   // this > o
+    CmpResult cmpGE(const CTInterval& o) const noexcept;   // this >= o
+    CmpResult cmpEQ(const CTInterval& o) const noexcept;   // this == o
+    CmpResult cmpNE(const CTInterval& o) const noexcept;   // this != o
+
+    // ── Arithmetic transfer functions ─────────────────────────────────────────
+    //
+    // Each function computes the interval that contains ALL possible results
+    // of the operation when the operands range over their respective intervals.
+    // Results are SEMANTICALLY DERIVED from the definitions of the operations,
+    // not from pattern matching on AST node types.
+
+    CTInterval opAdd(const CTInterval& o) const noexcept;
+    CTInterval opSub(const CTInterval& o) const noexcept;
+    CTInterval opMul(const CTInterval& o) const noexcept;
+    CTInterval opDiv(const CTInterval& o) const noexcept;  // returns TOP if divisor ∋ 0
+    CTInterval opMod(const CTInterval& o) const noexcept;
+    CTInterval opShl(const CTInterval& o) const noexcept;
+    CTInterval opShr(const CTInterval& o) const noexcept;
+    CTInterval opBitAnd(const CTInterval& o) const noexcept;
+    CTInterval opBitOr(const CTInterval& o) const noexcept;
+    CTInterval opBitXor(const CTInterval& o) const noexcept;
+    CTInterval opNeg() const noexcept;
+    CTInterval opAbs() const noexcept;
+};
+
+// ─── CTAbstractEnv ────────────────────────────────────────────────────────────
+/// Per-function abstract environment: maps variable name → CTInterval at the
+/// current program point in the abstract interpretation.
+using CTAbstractEnv = std::unordered_map<std::string, CTInterval>;
+
+// ─── CTAnalysisResult ─────────────────────────────────────────────────────────
+/// Complete per-function analysis result produced by CTAbstractInterpreter.
+/// Answers all five reasoning questions for a single function.
+struct CTAnalysisResult {
+    /// Q1: variable ranges at every program point (stored as exit-state
+    ///     for the whole function, and also locally within loops/branches).
+    CTAbstractEnv exitEnv;
+
+    /// Q2: if-statements where the then-branch is provably unreachable
+    ///     (condition is ALWAYS_FALSE from interval analysis).
+    std::unordered_set<const Statement*> deadThenBranches;
+
+    /// Q2: if-statements where the else-branch is provably unreachable
+    ///     (condition is ALWAYS_TRUE from interval analysis).
+    std::unordered_set<const Statement*> deadElseBranches;
+
+    /// Q3: expressions proven to produce the same value as an earlier
+    ///     computation in this function — candidates for CSE.
+    ///     Maps expression pointer → its canonical CTInterval result.
+    std::unordered_map<const Expression*, CTInterval> redundantExprs;
+
+    /// Q4: binary expressions whose operand ranges make a cheaper-but-equivalent
+    ///     rewrite unconditionally safe (e.g. x/2 → x>>1 when x ≥ 0).
+    ///     The value is the name of the safe alternative operator (">>", "&", etc.).
+    std::unordered_map<const Expression*, std::string> cheaperRewrites;
+
+    /// Q5: array index expressions proven always in-bounds.
+    std::unordered_set<const Expression*> safeArrayAccesses;
+
+    /// Q5: binary div/mod expressions proven safe (divisor never zero).
+    std::unordered_set<const Expression*> safeDivisions;
+
+    /// Q5: binary add/sub/mul expressions proven to never overflow int64.
+    std::unordered_set<const Expression*> safeArithmetic;
+};
 
 // ─── CTValueKind ─────────────────────────────────────────────────────────────
 enum class CTValueKind : uint8_t {
@@ -342,6 +546,11 @@ public:
         int64_t ternaryMerges{0};    ///< Symbolic-ternary both-arm agreement folds
         int64_t uniformReturnFunctionsFound{0}; ///< Pure functions whose return is always the same constant
         int64_t deadFunctionsDetected{0};       ///< Functions unreachable from any entry point
+        // Phase 9 (abstract interpretation) counters
+        int64_t deadBranchesEliminated{0};      ///< Q2: branches proven always-dead
+        int64_t safeArrayAccesses{0};           ///< Q5: array accesses proven in-bounds
+        int64_t safeDivisions{0};               ///< Q5: divisions proven non-zero divisor
+        int64_t cheaperRewritesFound{0};        ///< Q4: range-conditioned strength reductions
     };
     const Stats& stats()      const noexcept { return stats_; }
     void         resetStats()       noexcept { stats_ = {}; }
@@ -374,6 +583,48 @@ public:
     /// Interprocedural call graph built during runPass.
     const CTGraph& graph() const noexcept { return graph_; }
 
+    // ── Abstract interpretation results (Phase 9) ─────────────────────────
+    //
+    // After runPass, the abstract interpreter has analysed every function.
+    // Codegen queries these maps to:
+    //   - Skip generating dead branches (Q2)
+    //   - Skip bounds/overflow checks for proven-safe operations (Q5)
+    //   - Apply range-conditioned rewrites the e-graph can't safely apply
+    //     without range information (Q4)
+
+    /// True if the then-branch of `ifStmt` is provably never executed.
+    bool isThenBranchDead(const Statement* ifStmt) const noexcept {
+        return analysisDeadThen_.count(ifStmt) > 0;
+    }
+    /// True if the else-branch of `ifStmt` is provably never executed.
+    bool isElseBranchDead(const Statement* ifStmt) const noexcept {
+        return analysisDeadElse_.count(ifStmt) > 0;
+    }
+    /// True if the array-index expression `indexExpr` is proven always in-bounds.
+    bool isArrayAccessSafe(const Expression* indexExpr) const noexcept {
+        return analysisSafeArrayAccess_.count(indexExpr) > 0;
+    }
+    /// True if the div/mod expression `divExpr` is proven to never divide by zero.
+    bool isDivisionSafe(const Expression* divExpr) const noexcept {
+        return analysisSafeDiv_.count(divExpr) > 0;
+    }
+    /// True if the add/sub/mul `arithExpr` is proven to never overflow int64.
+    bool isArithmeticSafe(const Expression* arithExpr) const noexcept {
+        return analysisSafeArith_.count(arithExpr) > 0;
+    }
+    /// Return the range-conditioned cheaper alternative operator for `binExpr`,
+    /// or empty string if none applies.
+    /// Example: for `x / 4` where x ≥ 0, returns ">>" (so codegen emits x >> 2).
+    const std::string& cheaperRewrite(const Expression* binExpr) const noexcept {
+        static const std::string kEmpty;
+        auto it = analysisCheaperRewrites_.find(binExpr);
+        return (it != analysisCheaperRewrites_.end()) ? it->second : kEmpty;
+    }
+    /// Return the abstract interval for variable `varName` in function `fnName`
+    /// at function exit.  Returns CTInterval::top() if unknown.
+    CTInterval getExitRange(const std::string& fnName,
+                            const std::string& varName) const noexcept;
+
 private:
     // ── Internal evaluation ───────────────────────────────────────────────
     CTValue evalExpr(CTFrame& frame, const Expression* expr);
@@ -401,6 +652,10 @@ private:
     /// Snapshot an array from the heap into a new handle (for memoisation).
     CTArrayHandle snapshotArray(CTArrayHandle src);
 
+    // ── Phase 9: Abstract interpretation (CTAbstractInterpreter) ─────────
+    // Called from runPass; populates the analysis* maps below.
+    void runAbstractInterpretation(const Program* program);
+
     // ── State ─────────────────────────────────────────────────────────────
     CTHeap heap_;
 
@@ -420,6 +675,22 @@ private:
     /// Phase 7: functions unreachable from any entry point via BFS on the call graph.
     std::unordered_set<std::string>                      deadFunctions_;
 
+    // ── Phase 9 analysis results ──────────────────────────────────────────
+    /// Q2: if-statements where the then-branch is always-dead.
+    std::unordered_set<const Statement*>  analysisDeadThen_;
+    /// Q2: if-statements where the else-branch is always-dead.
+    std::unordered_set<const Statement*>  analysisDeadElse_;
+    /// Q5: array index expressions proven always in-bounds.
+    std::unordered_set<const Expression*> analysisSafeArrayAccess_;
+    /// Q5: div/mod expressions proven non-zero divisor.
+    std::unordered_set<const Expression*> analysisSafeDiv_;
+    /// Q5: arithmetic expressions proven no-overflow.
+    std::unordered_set<const Expression*> analysisSafeArith_;
+    /// Q4: range-conditioned cheaper rewrites.
+    std::unordered_map<const Expression*, std::string> analysisCheaperRewrites_;
+    /// Q1: per-function exit ranges  fnName → (varName → CTInterval).
+    std::unordered_map<std::string, CTAbstractEnv>     analysisExitEnvs_;
+
     /// Memoisation cache: CTMemoKey → snapshot CTValue.
     std::unordered_map<CTMemoKey, CTValue, CTMemoKeyHash> memoCache_;
 
@@ -431,6 +702,79 @@ private:
 
     Stats   stats_;
     CTGraph graph_;
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CTAbstractInterpreter — per-function abstract interpretation engine
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// This class performs flow-sensitive abstract interpretation of a single
+// OmScript function body using the CTInterval lattice as the abstract domain.
+//
+// The analysis is SEMANTICALLY DRIVEN — it computes abstract values by
+// applying transfer functions to each operation, not by pattern-matching
+// on the AST structure.  The same analysis that handles:
+//   for i in 0..n  → i ∈ [0, n-1]
+// also handles:
+//   let start = f()  →  start = CT-value of f()
+//   for i in start..end  →  i ∈ [start, end-1]  (if both are concrete)
+// because both cases go through the same `analyzeExpr` → `CTInterval` path.
+//
+// Outputs per function:
+//   - Exit abstract environment (Q1)
+//   - Dead branch annotations (Q2)
+//   - Redundant expression candidates (Q3)
+//   - Range-conditioned cheaper rewrites (Q4)
+//   - Proven-safe operation sets (Q5)
+// ═══════════════════════════════════════════════════════════════════════════════
+class CTAbstractInterpreter {
+public:
+    explicit CTAbstractInterpreter(CTEngine& eng,
+                                   const std::unordered_map<std::string, CTValue>& globals,
+                                   const std::unordered_map<std::string, int64_t>& enums)
+        : engine_(eng), globals_(globals), enums_(enums) {}
+
+    /// Analyse a single function and return the complete result.
+    /// If the function body is nullptr, returns a default (all-top) result.
+    CTAnalysisResult analyzeFunction(const FunctionDecl* fn);
+
+private:
+    CTEngine& engine_;
+    const std::unordered_map<std::string, CTValue>& globals_;
+    const std::unordered_map<std::string, int64_t>& enums_;
+
+    // ── Expression analysis ───────────────────────────────────────────────
+    /// Compute the abstract interval for expression `e` in environment `env`.
+    /// Returns CTInterval::top() when the value cannot be determined.
+    CTInterval analyzeExpr(const Expression* e, const CTAbstractEnv& env,
+                           CTAnalysisResult& result);
+
+    // ── Statement analysis ────────────────────────────────────────────────
+    /// Analyse `s` and update `env` to the post-state.
+    /// Returns false if the rest of the block is unreachable (return/break).
+    bool analyzeStmt(const Statement* s, CTAbstractEnv& env,
+                     CTAnalysisResult& result);
+
+    void analyzeBlock(const BlockStmt* b, CTAbstractEnv& env,
+                      CTAnalysisResult& result);
+
+    // ── Condition narrowing ───────────────────────────────────────────────
+    /// Given a branch condition, narrow the two environments (then/else) to
+    /// reflect the constraint implied by the condition being true / false.
+    /// Both environments start as copies of the pre-condition environment.
+    void narrowCondition(const Expression* cond,
+                         CTAbstractEnv& thenEnv, CTAbstractEnv& elseEnv);
+
+    // ── Environment join ──────────────────────────────────────────────────
+    /// Join two environments at a control-flow merge point.
+    static CTAbstractEnv joinEnvs(const CTAbstractEnv& a, const CTAbstractEnv& b);
+
+    // ── Array length tracking ─────────────────────────────────────────────
+    /// Return the known compile-time length of an array variable, or -1 if unknown.
+    int64_t getArrayLength(const std::string& varName, const CTAbstractEnv& env) const;
+
+    /// Map from variable name to known array length (populated by VarDecl analysis).
+    std::unordered_map<std::string, int64_t> arrayLengths_;
 };
 
 } // namespace omscript

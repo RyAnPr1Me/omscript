@@ -828,6 +828,53 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     llvm::Value* right = generateExpression(expr->right.get());
     // Restore comparison context after both operands are generated.
     inComparisonContext_ = savedInComparison;
+
+    // ── CF-CTRE range-conditioned cheaper rewrites (Q4) ───────────────────
+    // Query the abstract interpreter's proven-valid rewrites for this exact
+    // binary expression node.  The rewrite was proven safe from the mathematical
+    // semantic identity (e.g., ∀ x ≥ 0: x / 2^k ≡ x >> k), NOT from syntactic
+    // pattern matching — the abstract interpreter derived x ≥ 0 from the
+    // program's control flow and assignments.
+    if (ctEngine_) {
+        const std::string& altOp = ctEngine_->cheaperRewrite(expr);
+        if (!altOp.empty() && !left->getType()->isVectorTy() &&
+            !right->getType()->isVectorTy()) {
+            llvm::Value* lI = toDefaultType(left);
+            llvm::Value* rI = toDefaultType(right);
+            if (altOp == ">>" && expr->op == "/") {
+                // x / 2^k → x >> k   (proven safe: x ≥ 0 by range analysis)
+                // Compute k = log2(divisor) using the IR constant.
+                if (auto* rConst = llvm::dyn_cast<llvm::ConstantInt>(rI)) {
+                    const uint64_t divisor = rConst->getZExtValue();
+                    if (divisor > 0 && (divisor & (divisor - 1)) == 0) {
+                        unsigned k = 0; uint64_t v = divisor; while (v > 1) { v >>= 1; ++k; }
+                        llvm::Value* kVal = llvm::ConstantInt::get(lI->getType(), k);
+                        return builder->CreateLShr(lI, kVal, "cdiv.shr");
+                    }
+                }
+            } else if (altOp == "&" && expr->op == "%") {
+                // x % 2^k → x & (2^k - 1)   (proven safe: x ≥ 0 by range analysis)
+                if (auto* rConst = llvm::dyn_cast<llvm::ConstantInt>(rI)) {
+                    const uint64_t divisor = rConst->getZExtValue();
+                    if (divisor > 0 && (divisor & (divisor - 1)) == 0) {
+                        llvm::Value* mask = llvm::ConstantInt::get(lI->getType(), divisor - 1);
+                        return builder->CreateAnd(lI, mask, "cmod.and");
+                    }
+                }
+            } else if (altOp == "<<" && expr->op == "*") {
+                // x * 2^k → x << k   (universally valid for integer types)
+                if (auto* rConst = llvm::dyn_cast<llvm::ConstantInt>(rI)) {
+                    const uint64_t factor = rConst->getZExtValue();
+                    if (factor > 0 && (factor & (factor - 1)) == 0) {
+                        unsigned k = 0; uint64_t v = factor; while (v > 1) { v >>= 1; ++k; }
+                        llvm::Value* kVal = llvm::ConstantInt::get(lI->getType(), k);
+                        return builder->CreateShl(lI, kVal, "cmul.shl");
+                    }
+                }
+            }
+        }
+    }
+
     // SIMD vector operations — when either operand is a vector type,
     // dispatch to LLVM vector arithmetic instructions.
     // -----------------------------------------------------------------------
