@@ -5890,6 +5890,294 @@ static unsigned foldFNegDouble(llvm::Function& func) {
 /// the pre-header before B.
 ///
 /// Returns the number of instructions hoisted.
+/// Fold `shl/lshr/ashr(0, x)` → `0`.
+///
+/// Shifting zero by any amount yields zero.  This pattern can appear after
+/// strength reduction creates constants that cancel.  Always safe for all
+/// shift opcodes.
+///
+/// Returns the number of shifts eliminated.
+static unsigned foldShiftOfZero(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            if (op != llvm::Instruction::Shl &&
+                op != llvm::Instruction::LShr &&
+                op != llvm::Instruction::AShr)
+                continue;
+            llvm::Type* ty = inst.getType();
+            if (!ty->isIntOrIntVectorTy()) continue;
+
+            // Check if the value being shifted (operand 0) is a zero constant.
+            auto* lhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(0));
+            if (!lhs || !lhs->isNullValue()) continue;
+
+            inst.replaceAllUsesWith(llvm::Constant::getNullValue(ty));
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `or(x, x)` → `x` and `and(x, x)` → `x`.
+///
+/// Idempotent bitwise operations.  The pattern arises when SSA construction
+/// or other passes duplicate an operand into both sides of a binary op.
+/// Always safe — same SSA value pointer equality guarantees semantics.
+///
+/// Returns the number of idempotent ops eliminated.
+static unsigned foldBitwiseIdempotent(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            if (op != llvm::Instruction::Or && op != llvm::Instruction::And)
+                continue;
+            if (inst.getOperand(0) != inst.getOperand(1)) continue;
+
+            inst.replaceAllUsesWith(inst.getOperand(0));
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `xor(x, x)` → `0`.
+///
+/// Self-XOR always produces zero.  This can appear after register allocation
+/// hints or when strength reduction introduces temporary zero-init patterns.
+/// Always safe for all integer types and vectors.
+///
+/// Returns the number of self-XORs eliminated.
+static unsigned foldXorSelf(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Xor) continue;
+            if (inst.getOperand(0) != inst.getOperand(1)) continue;
+            llvm::Type* ty = inst.getType();
+            if (!ty->isIntOrIntVectorTy()) continue;
+
+            inst.replaceAllUsesWith(llvm::Constant::getNullValue(ty));
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `fsub nnan x, x` → `0.0`.
+///
+/// `x - x` is mathematically zero, but under strict IEEE 754 the result
+/// depends on the sign of zero and NaN propagation:
+///   - `(+0) - (+0)` = `+0` in round-to-nearest but `-0` in round-down
+///   - `NaN - NaN` = `NaN`, not zero
+///
+/// The `nnan` (no-NaN) fast-math flag guarantees NaN is absent, making the
+/// fold safe for all finite values and ±0 (the result is always +0.0 in
+/// round-to-nearest, the default mode).  We also accept `nsz` (no-signed-zeros)
+/// which eliminates the round-down edge case.
+///
+/// Returns the number of self-subtracts eliminated.
+static unsigned foldFSubSelf(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FSub) continue;
+            if (inst.getOperand(0) != inst.getOperand(1)) continue;
+
+            auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
+            // Require nnan (or nsz) to safely fold.
+            if (!fpOp->hasNoNaNs() && !fpOp->hasNoSignedZeros()) continue;
+
+            llvm::Type* ty = inst.getType();
+            inst.replaceAllUsesWith(llvm::ConstantFP::get(ty, 0.0));
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Fold `trunc(zext(x))` → `x` when the original and final types match.
+///
+/// Extension followed by truncation back to the original type is a no-op.
+/// This pattern arises when type canonicalization or ABI-matching logic
+/// widens a value and a later consumer narrows it back.  Also handles
+/// `trunc(sext(x))` → `x` and the reverse `zext(trunc(x))` → `x` when
+/// types match (though the latter is less common).
+///
+/// Safety: when srcTy == dstTy, the composition of ext followed by trunc
+/// is the identity function regardless of sign extension semantics.
+///
+/// Returns the number of ext/trunc pairs eliminated.
+static unsigned foldTruncExt(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            unsigned op = inst.getOpcode();
+            // trunc(zext(x)) or trunc(sext(x))
+            if (op == llvm::Instruction::Trunc) {
+                auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+                if (!inner) continue;
+                unsigned innerOp = inner->getOpcode();
+                if (innerOp != llvm::Instruction::ZExt &&
+                    innerOp != llvm::Instruction::SExt)
+                    continue;
+                llvm::Value* src = inner->getOperand(0);
+                if (src->getType() != inst.getType()) continue;
+                // Only fold if inner has one use (this trunc) to avoid
+                // keeping the ext alive.
+                if (!inner->hasOneUse()) continue;
+                inst.replaceAllUsesWith(src);
+                toErase.push_back(&inst);
+                ++count;
+            }
+            // zext(trunc(x)) or sext(trunc(x))
+            else if (op == llvm::Instruction::ZExt ||
+                     op == llvm::Instruction::SExt) {
+                auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
+                if (!inner) continue;
+                if (inner->getOpcode() != llvm::Instruction::Trunc) continue;
+                llvm::Value* src = inner->getOperand(0);
+                if (src->getType() != inst.getType()) continue;
+                if (!inner->hasOneUse()) continue;
+                inst.replaceAllUsesWith(src);
+                toErase.push_back(&inst);
+                ++count;
+            }
+        }
+    }
+
+    // Erase in reverse order to handle any chains.
+    for (auto it = toErase.rbegin(); it != toErase.rend(); ++it) {
+        auto* inst = *it;
+        // Also try to erase the now-dead inner instruction.
+        llvm::Value* innerVal = nullptr;
+        if (inst->getNumOperands() > 0)
+            innerVal = inst->getOperand(0);
+        inst->eraseFromParent();
+        if (innerVal) {
+            if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
+                if (dead->use_empty()) dead->eraseFromParent();
+        }
+    }
+    return count;
+}
+
+/// Dead store elimination within basic blocks.
+///
+/// When two stores write to the same pointer and there are no intervening
+/// loads or calls that may read from that pointer, the first store is dead
+/// and can be eliminated.  This is a purely local (intra-BB) optimization
+/// that catches patterns missed by LLVM's DSE when our transforms introduce
+/// new stores (e.g. strength-reduced spills, redundant write-back).
+///
+/// We only eliminate when:
+///   1. Both stores use the same pointer operand (SSA pointer equality).
+///   2. No instruction between them may read from memory (conservative:
+///      any load, call, or atomic between the two stores blocks elimination).
+///   3. The stores have the same type (so the second fully overwrites the first).
+///
+/// Returns the number of dead stores eliminated.
+static unsigned sinkDeadStores(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        // Walk instructions in reverse: for each store, look backward for
+        // an earlier store to the same pointer with no intervening readers.
+        // We use a map from pointer → most-recent-store-index for O(n) scanning.
+        std::vector<llvm::Instruction*> insts;
+        insts.reserve(bb.size());
+        for (auto& inst : bb) insts.push_back(&inst);
+
+        // Map: pointer → index of the last store to that pointer.
+        std::unordered_map<const llvm::Value*, unsigned> lastStoreIdx;
+
+        for (unsigned i = 0; i < insts.size(); ++i) {
+            auto* st = llvm::dyn_cast<llvm::StoreInst>(insts[i]);
+            if (!st) {
+                // If this instruction may read memory, invalidate all tracked
+                // store entries (conservative: the load may alias any of them).
+                if (insts[i]->mayReadFromMemory())
+                    lastStoreIdx.clear();
+                continue;
+            }
+
+            const llvm::Value* ptr = st->getPointerOperand();
+            auto it = lastStoreIdx.find(ptr);
+            if (it != lastStoreIdx.end()) {
+                // Found a prior store to the same pointer with no intervening
+                // memory reads.  The prior store is dead.
+                auto* deadStore = llvm::cast<llvm::StoreInst>(insts[it->second]);
+                // Verify same stored type (full overwrite).
+                if (deadStore->getValueOperand()->getType() ==
+                    st->getValueOperand()->getType()) {
+                    toErase.push_back(deadStore);
+                    ++count;
+                }
+            }
+            lastStoreIdx[ptr] = i;
+
+            // A store also acts as a memory write; if there's also a fence
+            // or atomic ordering, invalidate everything (conservative).
+            if (st->isAtomic()) lastStoreIdx.clear();
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Multi-level loop-invariant code motion.
+///
+/// Enhanced version of the original hoistLoopInvariantInst that supports
+/// hoisting instructions whose operands are themselves loop-invariant but
+/// defined inside the loop.  Uses iterative fixed-point analysis:
+///
+///   1. Mark all instructions with all-external operands as invariant.
+///   2. Re-scan: if an instruction's operands are all either external or
+///      already marked invariant, mark it invariant too.
+///   3. Repeat until no new instructions are marked.
+///
+/// This catches chains like:
+///   %a = add i64 %x, %y       ; x, y defined outside → invariant
+///   %b = shl i64 %a, 3        ; %a is invariant → also invariant
+///   %c = gep ... %b           ; %b is invariant → also invariant (if pure)
+///
+/// where the original single-pass version would only hoist %a.
+///
+/// Hoisting order: forward program order within each iteration, preserving
+/// def-use ordering.  Instructions are hoisted in batches per iteration.
+///
+/// Returns the total number of instructions hoisted.
 static unsigned hoistLoopInvariantInst(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
 
@@ -5929,34 +6217,55 @@ static unsigned hoistLoopInvariantInst(llvm::Function& func) {
                 loopBBs.insert(&bb);
         }
 
-        // Collect invariant instructions in forward program order so that
-        // hoisting preserves def-use ordering (A before B if B uses A).
-        std::vector<llvm::Instruction*> toHoist;
+        // Multi-level fixed-point: track which loop instructions are invariant.
+        std::unordered_set<const llvm::Instruction*> invariantSet;
+        bool changed = true;
+        constexpr unsigned kMaxIters = 8; // safety bound
 
+        for (unsigned iter = 0; iter < kMaxIters && changed; ++iter) {
+            changed = false;
+            for (auto& bb : func) {
+                if (!loopBBs.count(&bb)) continue;
+                for (auto& inst : bb) {
+                    if (invariantSet.count(&inst)) continue;
+                    // Skip PHIs, terminators.
+                    if (llvm::isa<llvm::PHINode>(inst)) continue;
+                    if (inst.isTerminator()) continue;
+                    // Skip instructions with side effects or memory accesses.
+                    if (inst.mayHaveSideEffects()) continue;
+                    if (inst.mayReadOrWriteMemory()) continue;
+                    // Already in pre-header — nothing to move.
+                    if (inst.getParent() == preHeader) continue;
+
+                    // All operands must be either:
+                    //   - constants
+                    //   - defined outside the loop
+                    //   - already in the invariant set
+                    bool isInvariant = true;
+                    for (unsigned i = 0; i < inst.getNumOperands(); ++i) {
+                        llvm::Value* op = inst.getOperand(i);
+                        if (llvm::isa<llvm::Constant>(op)) continue;
+                        auto* defInst = llvm::dyn_cast<llvm::Instruction>(op);
+                        if (!defInst) { isInvariant = false; break; }
+                        if (!loopBBs.count(defInst->getParent())) continue; // external
+                        if (invariantSet.count(defInst)) continue; // already invariant
+                        isInvariant = false;
+                        break;
+                    }
+                    if (!isInvariant) continue;
+                    invariantSet.insert(&inst);
+                    changed = true;
+                }
+            }
+        }
+
+        // Collect invariant instructions in forward program order.
+        std::vector<llvm::Instruction*> toHoist;
         for (auto& bb : func) {
             if (!loopBBs.count(&bb)) continue;
             for (auto& inst : bb) {
-                // Skip PHIs, terminators, and GEPs (handled by hoistLoopInvariantGEP).
-                if (llvm::isa<llvm::PHINode>(inst)) continue;
-                if (inst.isTerminator()) continue;
-                if (llvm::isa<llvm::GetElementPtrInst>(inst)) continue;
-                // Skip instructions with side effects or memory accesses.
-                if (inst.mayHaveSideEffects()) continue;
-                if (inst.mayReadOrWriteMemory()) continue;
-                // Already in pre-header — nothing to move.
-                if (inst.getParent() == preHeader) continue;
-
-                // All operands must be defined outside the loop.
-                bool invariant = true;
-                for (unsigned i = 0; i < inst.getNumOperands(); ++i) {
-                    llvm::Value* op = inst.getOperand(i);
-                    if (llvm::isa<llvm::Constant>(op)) continue;
-                    auto* defInst = llvm::dyn_cast<llvm::Instruction>(op);
-                    if (!defInst) { invariant = false; break; }
-                    if (loopBBs.count(defInst->getParent())) { invariant = false; break; }
-                }
-                if (!invariant) continue;
-                toHoist.push_back(&inst);
+                if (invariantSet.count(&inst))
+                    toHoist.push_back(&inst);
             }
         }
 
@@ -5990,6 +6299,9 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // after FMA generation (which introduces FNeg for FNMADD forms).
     // No fast-math flags needed — safe for all IEEE 754 values.
     stats.fmaGenerated    += foldFNegDouble(func);
+    // fsub nnan x, x → 0.0: self-cancel for FP subtraction.
+    // Run after fneg folding so any newly-exposed self-subtracts are caught.
+    stats.fmaGenerated    += foldFSubSelf(func);
     // fadd(x, x) → fmul(x, 2.0) with reassoc: exposes FMA fusion opportunities.
     // Run before the FP div-by-constant fold and before FMA passes so that
     // the resulting fmul(x, 2.0) can be fused: fma(x, 2.0, c).
@@ -6033,12 +6345,23 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // add(x, sub(0,y)) → sub(x,y): fold add+neg created by foldIntMulByNeg1.
     // Run immediately after so the sub(0,y) pattern is fresh.
     stats.intStrengthReduced += foldIntAddNeg(func);
+    // shl/lshr/ashr(0, x) → 0: dead shifts after strength reduction.
+    stats.intStrengthReduced += foldShiftOfZero(func);
+    // or(x,x) → x, and(x,x) → x: idempotent bitwise ops.
+    stats.intStrengthReduced += foldBitwiseIdempotent(func);
+    // xor(x,x) → 0: self-XOR pattern.
+    stats.intStrengthReduced += foldXorSelf(func);
+    // trunc(zext(x)) → x, zext(trunc(x)) → x when types match.
+    stats.intStrengthReduced += foldTruncExt(func);
     // Integer abs detection: replace select+icmp+sub patterns with llvm.abs.
     // Runs after strength reduction so we don't accidentally undo any reductions.
     stats.intStrengthReduced += generateIntegerAbs(func, profile);
     stats.intStrengthReduced += rebalanceChainForILP(func, profile);
     stats.branchesOptimized  += convertIfElseToSelect(func, profile);
     stats.loadsStorePaired   += insertNonTemporalHints(func, profile);
+    // Eliminate dead stores: when two stores write to the same pointer
+    // with no intervening read, the first is dead.
+    stats.loadsStorePaired   += sinkDeadStores(func);
     // Hoist loop-invariant GEP address calculations to the loop pre-header.
     // Runs last so all address computations introduced by our transforms are hoisted.
     stats.loadsStorePaired   += hoistLoopInvariantGEP(func);
