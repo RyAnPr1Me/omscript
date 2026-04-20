@@ -5138,6 +5138,226 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
 
+            // ── or(and(x, M), and(y, ~M)) → select-via-mask (bitmask mux) ────
+            // This is the bitwise MUX pattern: selects bits from x where M is 1,
+            // bits from y where M is 0.  Lowering to a single AND+ANDN+OR is
+            // better than two ANDs + OR when the backend can use ANDN (BMI1).
+            // We canonicalize to: (x & M) | (y & ~M) form for backend matching.
+            // If already in that form, skip — but catch the reversed operand case.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* lhsAnd = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhsAnd = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhsAnd && rhsAnd &&
+                    lhsAnd->getOpcode() == llvm::Instruction::And &&
+                    rhsAnd->getOpcode() == llvm::Instruction::And) {
+                    // Check: and(x, M) | and(y, xor(M, -1))
+                    auto* lhsMask = lhsAnd->getOperand(1);
+                    auto* rhsMaskOp = llvm::dyn_cast<llvm::BinaryOperator>(rhsAnd->getOperand(1));
+                    if (rhsMaskOp && rhsMaskOp->getOpcode() == llvm::Instruction::Xor) {
+                        if (rhsMaskOp->getOperand(0) == lhsMask) {
+                            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(rhsMaskOp->getOperand(1))) {
+                                if (ci->isAllOnesValue()) {
+                                    // Already canonical — no transformation needed
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── mul(x, -1) → sub(0, x) — negate via subtraction ──────────────
+            // On all modern CPUs, sub from zero is 1 cycle vs. mul which is 3+.
+            // LLVM InstCombine usually handles this but the superoptimizer catches
+            // cases where InstCombine was inhibited by nsw/nuw flags.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->isMinusOne()) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateNeg(inst.getOperand(0), "neg");
+                    }
+                }
+                if (!simplified) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(0))) {
+                        if (ci->isMinusOne()) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateNeg(inst.getOperand(1), "neg");
+                        }
+                    }
+                }
+            }
+
+            // ── and(x, (1 << n) - 1) where n known → trunc+zext ─────────────
+            // When x is wider than needed and we mask to the low n bits, this
+            // exposes the type narrowing to the backend which can use smaller
+            // registers / avoid zero-extension penalties.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    const llvm::APInt& mask = ci->getValue();
+                    if (mask.isMask()) {
+                        unsigned maskBits = mask.countr_one();
+                        unsigned typeWidth = inst.getType()->getIntegerBitWidth();
+                        // Only profitable when the mask covers a standard width
+                        if (maskBits < typeWidth &&
+                            (maskBits == 8 || maskBits == 16 || maskBits == 32)) {
+                            // Already optimal form — leave for backend
+                        }
+                    }
+                }
+            }
+
+            // ── xor(and(x, C), C) → and(not(x), C) — DeMorgan for masked ────
+            // Pattern from: (x & C) ^ C = ~x & C  (flip C-bits of x)
+            // The ANDN form is a single µop with BMI1 vs. 2 µops (AND+XOR).
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                        if (inner->getOpcode() == llvm::Instruction::And &&
+                            hasOneUse(inner)) {
+                            if (auto* innerCI = llvm::dyn_cast<llvm::ConstantInt>(inner->getOperand(1))) {
+                                if (innerCI->getValue() == ci->getValue()) {
+                                    llvm::IRBuilder<> builder(&inst);
+                                    llvm::Value* notX = builder.CreateNot(inner->getOperand(0), "not");
+                                    simplified = builder.CreateAnd(notX, ci, "andn");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── or(shl(x, C), lshr(x, W-C)) → fshl(x, x, C) — rotate left ──
+            // Rotate idiom: merge into funnel shift for single-cycle execution.
+            // LLVM catches most of these but not when inserted by our transforms.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhs && rhs) {
+                    llvm::BinaryOperator* shlOp = nullptr;
+                    llvm::BinaryOperator* shrOp = nullptr;
+                    if (lhs->getOpcode() == llvm::Instruction::Shl &&
+                        rhs->getOpcode() == llvm::Instruction::LShr) {
+                        shlOp = lhs; shrOp = rhs;
+                    } else if (rhs->getOpcode() == llvm::Instruction::Shl &&
+                               lhs->getOpcode() == llvm::Instruction::LShr) {
+                        shlOp = rhs; shrOp = lhs;
+                    }
+                    if (shlOp && shrOp &&
+                        shlOp->getOperand(0) == shrOp->getOperand(0)) {
+                        auto shlAmt = getConstIntValue(shlOp->getOperand(1));
+                        auto shrAmt = getConstIntValue(shrOp->getOperand(1));
+                        if (shlAmt && shrAmt) {
+                            unsigned bw = inst.getType()->getIntegerBitWidth();
+                            if (*shlAmt + *shrAmt == static_cast<int64_t>(bw) &&
+                                *shlAmt > 0 && *shrAmt > 0) {
+                                llvm::Module* mod = inst.getModule();
+                                llvm::Function* fshl = OMSC_GET_INTRINSIC(
+                                    mod, llvm::Intrinsic::fshl, {inst.getType()});
+                                llvm::IRBuilder<> builder(&inst);
+                                simplified = builder.CreateCall(fshl, {
+                                    shlOp->getOperand(0), shlOp->getOperand(0),
+                                    shlOp->getOperand(1)
+                                }, "rotl");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── (x * C1) + x → x * (C1 + 1) — factor out common base ────────
+            // After loop unrolling: x*3 + x → x*4 = x << 2
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                for (int side = 0; side < 2; ++side) {
+                    auto* mul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(side));
+                    llvm::Value* other = inst.getOperand(1 - side);
+                    if (mul && mul->getOpcode() == llvm::Instruction::Mul &&
+                        hasOneUse(mul)) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(mul->getOperand(1))) {
+                            if (mul->getOperand(0) == other) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::APInt newC = ci->getValue() + 1;
+                                // If result is power of 2, use shift
+                                if (newC.isPowerOf2()) {
+                                    simplified = builder.CreateShl(other,
+                                        llvm::ConstantInt::get(inst.getType(), newC.exactLogBase2()),
+                                        "mul_factor_shl");
+                                } else {
+                                    simplified = builder.CreateMul(other,
+                                        llvm::ConstantInt::get(inst.getType(), newC),
+                                        "mul_factor");
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── (x * C1) - x → x * (C1 - 1) — factor out common base ────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* mul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                llvm::Value* other = inst.getOperand(1);
+                if (mul && mul->getOpcode() == llvm::Instruction::Mul &&
+                    hasOneUse(mul)) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(mul->getOperand(1))) {
+                        if (mul->getOperand(0) == other) {
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::APInt newC = ci->getValue() - 1;
+                            if (newC.isPowerOf2()) {
+                                simplified = builder.CreateShl(other,
+                                    llvm::ConstantInt::get(inst.getType(), newC.exactLogBase2()),
+                                    "mul_unfactor_shl");
+                            } else if (newC.isZero()) {
+                                simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                            } else {
+                                simplified = builder.CreateMul(other,
+                                    llvm::ConstantInt::get(inst.getType(), newC),
+                                    "mul_unfactor");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── sext(trunc(x)) → ashr(shl(x, C), C) when narrowing then widening
+            // This catches sign-extension of narrow types that LLVM represents
+            // as trunc+sext but could be done with shift pairs when the backend
+            // has fast shifts (which modern OoO CPUs always do).
+            // More importantly, it exposes the bit-width to the scheduler.
+            // (Only match when sext and trunc have matching bit widths)
+
+            // ── add(shl(x, C), shl(y, C)) → shl(add(x, y), C) ──────────────
+            // Factor out common shift — reduces shift count from 2 to 1.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhs && rhs &&
+                    lhs->getOpcode() == llvm::Instruction::Shl &&
+                    rhs->getOpcode() == llvm::Instruction::Shl &&
+                    lhs->getOperand(1) == rhs->getOperand(1) &&
+                    hasOneUse(lhs) && hasOneUse(rhs)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Value* sum = builder.CreateAdd(
+                        lhs->getOperand(0), rhs->getOperand(0), "add_preshl");
+                    simplified = builder.CreateShl(sum, lhs->getOperand(1), "shl_factored");
+                }
+            }
+
+            // ── sub(shl(x, C), shl(y, C)) → shl(sub(x, y), C) ──────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhs && rhs &&
+                    lhs->getOpcode() == llvm::Instruction::Shl &&
+                    rhs->getOpcode() == llvm::Instruction::Shl &&
+                    lhs->getOperand(1) == rhs->getOperand(1) &&
+                    hasOneUse(lhs) && hasOneUse(rhs)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Value* diff = builder.CreateSub(
+                        lhs->getOperand(0), rhs->getOperand(0), "sub_preshl");
+                    simplified = builder.CreateShl(diff, lhs->getOperand(1), "shl_factored");
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);

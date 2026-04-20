@@ -7362,6 +7362,145 @@ static unsigned foldExtractInsert(llvm::Function& func) {
     return count;
 }
 
+/// Fold select(cond, C1, C2) where C1 and C2 are constants and C2 = C1 + 1
+/// into add(zext(not(cond)), C1). This eliminates a conditional by converting
+/// to arithmetic. select(c, 5, 6) → add(zext(!c), 5).
+/// More generally: select(c, C1, C1+offset) → add(mul(zext(!c), offset), C1)
+/// but we only handle offset=1 and offset=-1 for single-instruction output.
+static unsigned foldSelectConsecutiveConsts(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+            auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(sel->getTrueValue());
+            auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(sel->getFalseValue());
+            if (!c1 || !c2) continue;
+            llvm::APInt diff = c2->getValue() - c1->getValue();
+            if (diff == 1) {
+                // select(c, C1, C1+1) → add(zext(!c), C1)
+                llvm::IRBuilder<> builder(sel);
+                llvm::Value* notCond = builder.CreateNot(sel->getCondition(), "notcond");
+                llvm::Value* ext = builder.CreateZExt(notCond, sel->getType(), "zext");
+                llvm::Value* result = builder.CreateAdd(ext, c1, "sel_arith");
+                sel->replaceAllUsesWith(result);
+                toErase.push_back(sel);
+                ++count;
+            } else if (diff.isAllOnes()) {
+                // select(c, C1, C1-1) → add(zext(c), C2) = add(zext(c), C1-1)
+                llvm::IRBuilder<> builder(sel);
+                llvm::Value* ext = builder.CreateZExt(sel->getCondition(), sel->getType(), "zext");
+                llvm::Value* result = builder.CreateAdd(ext, c2, "sel_arith");
+                sel->replaceAllUsesWith(result);
+                toErase.push_back(sel);
+                ++count;
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold shl(1, x) → 1 << x as a power-of-two generation, and expose it
+/// for later transforms. More importantly: and(x, shl(1, n) - 1) → bit test.
+/// shl(1, C) where C is constant → direct constant (constant fold missed cases).
+static unsigned foldShlOneConst(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Shl) continue;
+            auto* one = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(0));
+            if (!one || !one->isOne()) continue;
+            auto* shift = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
+            if (!shift) continue;
+            unsigned bw = inst.getType()->getIntegerBitWidth();
+            uint64_t sv = shift->getZExtValue();
+            if (sv >= bw) continue;
+            llvm::APInt result = llvm::APInt(bw, 1) << sv;
+            inst.replaceAllUsesWith(llvm::ConstantInt::get(inst.getType(), result));
+            toErase.push_back(&inst);
+            ++count;
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold mul(x, mul(y, C)) → mul(mul(x, y), C) when C is a power of 2.
+/// This groups the variable operands together and leaves the constant shift
+/// as the outermost operation, enabling strength reduction to a single shift.
+static unsigned foldMulAssocPow2(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
+            for (int side = 0; side < 2; ++side) {
+                auto* innerMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(side));
+                if (!innerMul || innerMul->getOpcode() != llvm::Instruction::Mul) continue;
+                if (!innerMul->hasOneUse()) continue;
+                auto* ci = llvm::dyn_cast<llvm::ConstantInt>(innerMul->getOperand(1));
+                if (!ci || !ci->getValue().isPowerOf2()) continue;
+                // mul(x, mul(y, 2^n)) → shl(mul(x, y), n)
+                llvm::Value* x = inst.getOperand(1 - side);
+                llvm::Value* y = innerMul->getOperand(0);
+                llvm::IRBuilder<> builder(&inst);
+                llvm::Value* prod = builder.CreateMul(x, y, "mul_assoc");
+                unsigned shift = ci->getValue().exactLogBase2();
+                llvm::Value* result = builder.CreateShl(prod,
+                    llvm::ConstantInt::get(inst.getType(), shift), "mul_shl");
+                inst.replaceAllUsesWith(result);
+                toErase.push_back(&inst);
+                ++count;
+                break;
+            }
+        }
+    }
+    for (auto* i : toErase) i->eraseFromParent();
+    return count;
+}
+
+/// Fold icmp(add(x, C1), C2) → icmp(x, C2-C1) for constant offsets.
+/// After loop unrolling and strength reduction, many comparisons have
+/// the form `(i + offset) < limit` which can be simplified to `i < limit - offset`.
+/// This is critical for loop bound tightening and vectorization.
+static unsigned foldCmpAddConst(llvm::Function& func) {
+    unsigned count = 0;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst);
+            if (!cmp) continue;
+            auto* add = llvm::dyn_cast<llvm::BinaryOperator>(cmp->getOperand(0));
+            if (!add || add->getOpcode() != llvm::Instruction::Add) continue;
+            if (!add->hasOneUse()) continue;
+            auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(add->getOperand(1));
+            auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(cmp->getOperand(1));
+            if (!c1 || !c2) continue;
+            // Check for overflow safety: only fold for unsigned predicates
+            // or when we can prove no overflow.
+            auto pred = cmp->getPredicate();
+            if (pred != llvm::CmpInst::ICMP_ULT &&
+                pred != llvm::CmpInst::ICMP_ULE &&
+                pred != llvm::CmpInst::ICMP_UGT &&
+                pred != llvm::CmpInst::ICMP_UGE &&
+                pred != llvm::CmpInst::ICMP_EQ &&
+                pred != llvm::CmpInst::ICMP_NE)
+                continue;
+            // Only fold when c1 is non-negative and c2 >= c1 (no underflow)
+            if (pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) {
+                if (c2->getValue().ult(c1->getValue())) continue; // would underflow
+            }
+            llvm::APInt newC2 = c2->getValue() - c1->getValue();
+            cmp->setOperand(0, add->getOperand(0));
+            cmp->setOperand(1, llvm::ConstantInt::get(cmp->getOperand(1)->getType(), newC2));
+            ++count;
+        }
+    }
+    return count;
+}
+
 /// Dead code elimination: remove instructions with no uses and no side effects.
 /// This is a cleanup pass that catches instructions left dead by our transforms.
 static unsigned eliminateDeadInstructions(llvm::Function& func) {
@@ -7521,6 +7660,16 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // FP reassociation: turn linear fadd/fmul chains into balanced trees
     // when reassoc flag is present (cuts critical path from O(n) to O(log n)).
     stats.fmaGenerated       += reassociateFPChains(func);
+
+    // ── Phase 2 HGOE overhaul transforms ────────────────────────────────────
+    // select(cond, C1, C1+1) → add(zext(!cond), C1): branchless consecutive const.
+    stats.branchesOptimized  += foldSelectConsecutiveConsts(func);
+    // shl(1, C) → constant: fold missed constant shifts.
+    stats.intStrengthReduced += foldShlOneConst(func);
+    // mul(x, mul(y, 2^k)) → shl(mul(x, y), k): associative pow2 factoring.
+    stats.intStrengthReduced += foldMulAssocPow2(func);
+    // icmp(add(x, C1), C2) → icmp(x, C2-C1): compare offset folding.
+    stats.intStrengthReduced += foldCmpAddConst(func);
 
     // Hoist loop-invariant GEP address calculations to the loop pre-header.
     // Runs last so all address computations introduced by our transforms are hoisted.

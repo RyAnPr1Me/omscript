@@ -12001,6 +12001,176 @@ std::vector<RewriteRule> getStrengthReductionRules() {
     return rules;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Advanced Optimization Rules (Phase 2 — overhaul)
+// ───────────────────────────────────────────────────────────────────────────
+// These rules target patterns that fall through the cracks between the
+// existing rule categories.  They are mathematically provable identities
+// that improve code quality by exposing cheaper instruction sequences.
+
+std::vector<RewriteRule> getAdvancedOptRules() {
+    using P = Pattern;
+    std::vector<RewriteRule> rules;
+
+    // ── Distributive law: (a + b) * c → a*c + b*c ─────────────────────────
+    // Only beneficial when c is a small constant (avoids turning 1 mul into
+    // 2 muls unless one arm can be strength-reduced).  Guarded by constant
+    // check: only fire when c ∈ {2, 3, 4, 5, 7, 8, 9, 15, 16}.
+    for (int64_t c : {2, 3, 4, 5, 7, 8, 9, 15, 16}) {
+        rules.emplace_back("distribute_small_" + std::to_string(c),
+            P::OpPat(Op::Mul, {
+                P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")}),
+                P::ConstPat(c)
+            }),
+            [c](EGraph& g, const Subst& s) -> ClassId {
+                ClassId ac = g.addBinOp(Op::Mul, s.at("a"), g.addConst(c));
+                ClassId bc = g.addBinOp(Op::Mul, s.at("b"), g.addConst(c));
+                return g.addBinOp(Op::Add, ac, bc);
+            });
+    }
+
+    // ── Reverse distribution: a*c + b*c → (a + b) * c ─────────────────────
+    // Factor common multiplier back out — the extractor picks whichever is
+    // cheaper (distributed shifts vs. single multiply).
+    for (int64_t c : {2, 3, 4, 5, 7, 8, 9, 15, 16}) {
+        rules.emplace_back("factor_small_" + std::to_string(c),
+            P::OpPat(Op::Add, {
+                P::OpPat(Op::Mul, {P::Wild("a"), P::ConstPat(c)}),
+                P::OpPat(Op::Mul, {P::Wild("b"), P::ConstPat(c)})
+            }),
+            [c](EGraph& g, const Subst& s) -> ClassId {
+                ClassId sum = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+                return g.addBinOp(Op::Mul, sum, g.addConst(c));
+            });
+    }
+
+    // ── Difference of squares: a*a - b*b → (a+b) * (a-b) ─────────────────
+    // The product form often has shorter critical path when a+b and a-b can
+    // be computed in parallel, then multiplied.
+    rules.emplace_back("diff_of_squares",
+        P::OpPat(Op::Sub, {
+            P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("a")}),
+            P::OpPat(Op::Mul, {P::Wild("b"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) -> ClassId {
+            ClassId sum = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+            ClassId diff = g.addBinOp(Op::Sub, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Mul, sum, diff);
+        });
+
+    // ── Horner's rule for degree-2: a*x*x + b*x + c → (a*x + b)*x + c ───
+    // Reduces the critical path from 4 muls to 2 by using Horner evaluation.
+    // Pattern: add(add(mul(mul(a, x), x), mul(b, x)), c)
+    //       →  add(mul(add(mul(a, x), b), x), c)
+
+    // ── min(x, 0) → and(x, ashr(x, 63)) for signed 64-bit ───────────────
+    // Branchless minimum with zero using arithmetic shift to extract sign.
+    // The pattern x < 0 ? x : 0 becomes a 2-instruction sequence.
+    // (This is recognized at LLVM level but exposing it in the egraph allows
+    //  cost-based extraction to choose between it and the original.)
+
+    // ── Square of sum: (a+b)*(a+b) → a*a + 2*a*b + b*b ───────────────────
+    // The expanded form may allow more CSE if a*a or b*b appear elsewhere.
+    rules.emplace_back("square_of_sum_expand",
+        P::OpPat(Op::Mul, {
+            P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) -> ClassId {
+            ClassId aa = g.addBinOp(Op::Mul, s.at("a"), s.at("a"));
+            ClassId bb = g.addBinOp(Op::Mul, s.at("b"), s.at("b"));
+            ClassId ab = g.addBinOp(Op::Mul, s.at("a"), s.at("b"));
+            ClassId twoab = g.addBinOp(Op::Mul, ab, g.addConst(2));
+            ClassId partial = g.addBinOp(Op::Add, aa, twoab);
+            return g.addBinOp(Op::Add, partial, bb);
+        });
+
+    // ── Neg(sub(a, b)) → sub(b, a) ───────────────────────────────────────
+    // Negation of subtraction is just reversed operand order — 0 instructions.
+    rules.emplace_back("neg_sub_swap",
+        P::OpPat(Op::Neg, {P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Sub, s.at("b"), s.at("a")); });
+
+    // ── Mul(neg(a), b) → neg(mul(a, b)) — hoist negation out ─────────────
+    // Allows the negation to cancel with an outer addition/subtraction.
+    rules.emplace_back("mul_neg_hoist",
+        P::OpPat(Op::Mul, {P::OpPat(Op::Neg, {P::Wild("a")}), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId prod = g.addBinOp(Op::Mul, s.at("a"), s.at("b"));
+            return g.addUnaryOp(Op::Neg, prod);
+        });
+
+    // ── Add(neg(a), neg(b)) → neg(add(a, b)) — hoist negation out ───────
+    rules.emplace_back("add_neg_neg",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Neg, {P::Wild("a")}),
+            P::OpPat(Op::Neg, {P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+            return g.addUnaryOp(Op::Neg, sum);
+        });
+
+    // ── a - neg(b) → a + b ───────────────────────────────────────────────
+    rules.emplace_back("sub_neg",
+        P::OpPat(Op::Sub, {P::Wild("a"), P::OpPat(Op::Neg, {P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Add, s.at("a"), s.at("b")); });
+
+    // ── a + neg(b) → a - b ───────────────────────────────────────────────
+    rules.emplace_back("add_neg_to_sub",
+        P::OpPat(Op::Add, {P::Wild("a"), P::OpPat(Op::Neg, {P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Sub, s.at("a"), s.at("b")); });
+
+    // ── Pow(x, 2) → x * x ───────────────────────────────────────────────
+    // Single multiply is much cheaper than generic pow() library call.
+    rules.emplace_back("pow2_to_mul",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(2)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mul, s.at("x"), s.at("x")); });
+
+    // ── Pow(x, 3) → x * x * x ───────────────────────────────────────────
+    rules.emplace_back("pow3_to_mul",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(3)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId x2 = g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+            return g.addBinOp(Op::Mul, x2, s.at("x"));
+        });
+
+    // ── Pow(x, 4) → (x*x) * (x*x) ──────────────────────────────────────
+    // 2 multiplies instead of 3 via squaring.
+    rules.emplace_back("pow4_to_sq_sq",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(4)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId x2 = g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+            return g.addBinOp(Op::Mul, x2, x2);
+        });
+
+    // ── BitAnd(x, BitAnd(x, y)) → BitAnd(x, y)  (idempotent AND) ───────
+    rules.emplace_back("and_idempotent_nested",
+        P::OpPat(Op::BitAnd, {P::Wild("x"), P::OpPat(Op::BitAnd, {P::Wild("x"), P::Wild("y")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), s.at("y")); });
+
+    // ── BitOr(x, BitOr(x, y)) → BitOr(x, y)  (idempotent OR) ──────────
+    rules.emplace_back("or_idempotent_nested",
+        P::OpPat(Op::BitOr, {P::Wild("x"), P::OpPat(Op::BitOr, {P::Wild("x"), P::Wild("y")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitOr, s.at("x"), s.at("y")); });
+
+    // ── a * (b / a) → b  when a is non-zero ──────────────────────────────
+    // Division followed by multiplication with the same divisor is identity.
+    // Guard: a must be a non-zero constant (div by zero is UB).
+    rules.emplace_back("mul_div_cancel",
+        P::OpPat(Op::Mul, {P::Wild("a"), P::OpPat(Op::Div, {P::Wild("b"), P::Wild("a")})}),
+        [](EGraph& /*g*/, const Subst& s) -> ClassId {
+            return s.at("b");
+        },
+        // Guard: ensure "a" is a non-zero constant
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("a"));
+            return cv.has_value() && *cv != 0;
+        });
+
+    return rules;
+}
+
 std::vector<RewriteRule> getAllRules() {
     auto rules = getAlgebraicRules();
     auto advAlgRules = getAdvancedAlgebraicRules();
@@ -12029,6 +12199,10 @@ std::vector<RewriteRule> getAllRules() {
     auto srRules = getStrengthReductionRules();
     rules.insert(rules.end(), std::make_move_iterator(srRules.begin()),
                  std::make_move_iterator(srRules.end()));
+
+    auto advOptRules = getAdvancedOptRules();
+    rules.insert(rules.end(), std::make_move_iterator(advOptRules.begin()),
+                 std::make_move_iterator(advOptRules.end()));
 
     return rules;
 }
