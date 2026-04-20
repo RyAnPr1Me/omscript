@@ -6245,6 +6245,63 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         portPressure[key]++;
     }
 
+    // ── 6a-bis. One-time precomputed per-instruction arrays ──────────────────
+    // These arrays depend only on the static instruction properties, not on
+    // the scheduling state, so they are computed once and reused every cycle.
+    //
+    // isLongLatencyCache: true for div/fdiv — should be started as early as
+    //   possible so the (shared, non-pipelined) divider stays busy while
+    //   independent work fills the rest of the pipeline.
+    // rtKeyCache:         resource-type dispatch key per instruction.  Used in
+    //   the sort comparator (tiers 6 and 6.5) and in the issue loop to look up
+    //   the appropriate PortSlot vector.  Avoids calling classifyOp() +
+    //   mapOpToResource() inside every pairwise comparison.
+    // missRiskCache:      estimated cache-miss risk for load instructions.
+    //   2 = large-stride GEP (likely L2+ access), 1 = other load, 0 = non-load.
+    std::vector<bool>     isLongLatencyCache(n, false);
+    std::vector<int>      rtKeyCache(n, 0);
+    std::vector<unsigned> missRiskCache(n, 0);
+    for (unsigned i = 0; i < n; ++i) {
+        OpClass op = classifyOp(moveable[i]);
+        isLongLatencyCache[i] = (op == OpClass::IntDiv || op == OpClass::FPDiv);
+        rtKeyCache[i] = (op == OpClass::IntMul)
+            ? kIntMulPortKey
+            : static_cast<int>(mapOpToResource(op));
+        if (llvm::isa<llvm::LoadInst>(moveable[i])) {
+            missRiskCache[i] = 1; // assume L1 hit unless proven otherwise
+            auto* ptr = llvm::cast<llvm::LoadInst>(moveable[i])->getPointerOperand();
+            if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+                for (auto it = gep->idx_begin(); it != gep->idx_end(); ++it) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(*it)) {
+                        long long off = ci->getSExtValue();
+                        if (std::abs(off) > static_cast<long long>(profile.cacheLineSize)) {
+                            missRiskCache[i] = 2; // large stride → likely L2+ miss
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Port-size cache: number of physical slots per resource-type key.
+    // Used in tier-6.5 cross-multiply comparisons (constant throughout scheduling).
+    std::unordered_map<int, unsigned> portSizeCache;
+    portSizeCache.reserve(hwPorts.size());
+    for (auto& [key, slots] : hwPorts)
+        portSizeCache[key] = static_cast<unsigned>(slots.size());
+
+    // Port-load cache: sum of nextFree across all slots for each key.
+    // Maintained incrementally when a slot is occupied, so the sort comparator
+    // can evaluate tier-6.5 in O(1) instead of iterating all slot entries.
+    std::unordered_map<int, unsigned> portLoadCache;
+    portLoadCache.reserve(hwPorts.size());
+    for (auto& [key, slots] : hwPorts) {
+        unsigned load = 0;
+        for (const auto& s : slots) load += s.nextFree;
+        portLoadCache[key] = load;
+    }
+
     // ── 6b. Detect instruction fusion opportunities ─────────────────────────
     // Fusion pairs should be scheduled adjacently when possible to enable
     // macro-op fusion (cmp+branch) or micro-op folding (load+op, GEP+load).
@@ -6344,12 +6401,35 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     unsigned totalScheduled = 0;
     unsigned maxCycle = 0;
 
+    // ── Incremental ready queue ────────────────────────────────────────────────
+    // Instead of rescanning all n instructions each cycle (O(n²) total), we
+    // maintain an unordered_set of currently-ready instructions that is updated
+    // incrementally:
+    //   • Initialised with all root instructions (inDeg == 0).
+    //   • Dispatched instructions are erased when issued.
+    //   • Newly-eligible successors (inDeg drops to 0) are inserted immediately.
+    // Each cycle builds the local `ready` vector as a snapshot of this set,
+    // reducing per-cycle scan cost from O(n) to O(|readySet|).
+    std::unordered_set<unsigned> readySet;
+    readySet.reserve(std::max(n / 4u, 8u));
+    for (unsigned i = 0; i < n; ++i)
+        if (inDeg[i] == 0) readySet.insert(i);
+
+    // Sort-cache vectors: hoisted outside the while loop so we allocate
+    // them once (n elements) rather than reallocating every scheduling cycle.
+    // Values are populated for ready instructions at the start of each cycle
+    // and are only read for instructions in the current ready list.
+    std::vector<unsigned> rfsCache(n, 0);           // register-freeing score
+    std::vector<unsigned> sdCache(n, 0);            // stall distance
+    std::vector<bool>     fusCache(n, false);       // fusion affinity
+    std::vector<unsigned> rpCache(n, 0);            // register-pressure penalty
+    std::vector<unsigned> dynEarliestStartCache(n, 0); // actual data-ready cycle
+
     while (totalScheduled < n) {
-        // Collect all ready instructions (inDeg == 0, not yet scheduled).
-        std::vector<unsigned> ready;
-        for (unsigned i = 0; i < n; ++i)
-            if (!done[i] && inDeg[i] == 0)
-                ready.push_back(i);
+        // Build this cycle's candidate list from the incremental ready set.
+        // The readySet contains exactly the instructions with inDeg == 0 that
+        // have not yet been dispatched, so no full O(n) scan is needed.
+        std::vector<unsigned> ready(readySet.begin(), readySet.end());
 
         // Guard: a non-empty ready list is guaranteed for DAGs (SSA form).
         // If we reach here with an empty ready list it means there is a cycle
@@ -6413,7 +6493,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // Sort ready instructions for maximum throughput — 10-tier priority:
         //   1. Critical path remaining (latency hiding)
         //   2. Long-latency ops first (div/fdiv — start divider early)
-        //   2b. Earliest start: among same critPath+class, sooner-startable first
+        //   2b. Dynamic earliest start: sooner data-ready cycle first (accuracy)
         //   3. Loads first (hide memory latency, may miss in cache)
         //   4. Stall distance (consumer work remaining — more = better hiding)
         //   5. Fusion affinity (schedule fusion partners adjacently)
@@ -6424,72 +6504,52 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         //   9. ROB latency preference (short-latency when ROB is under pressure)
         //  10. Instruction index (deterministic tie-break)
         //
-        // ── Helper lambdas (defined once, results cached below) ──────────────
+        // ── Precompute per-instruction metrics for this cycle's sort ─────────
+        // All metrics are stored in arrays allocated before the while loop.
+        // Reset only the slots used by the current ready list, then populate.
+        for (unsigned id : ready) {
+            rfsCache[id] = 0; sdCache[id] = 0;
+            fusCache[id] = false; rpCache[id] = 0;
+            dynEarliestStartCache[id] = 0;
+        }
+        for (unsigned id : ready) {
+            // Dynamic earliest start: actual data-ready cycle using the real
+            // issuedAt values of predecessors recorded so far.  This is more
+            // accurate than the static earliestStart (which assumed chains start
+            // at cycle 0) because it reflects port-contention delays already
+            // experienced by earlier instructions in the same schedule.
+            // For ready instructions all predecessors are done (inDeg[id]==0).
+            unsigned de = 0;
+            for (auto [p, edgeLat] : pred[id])
+                if (done[p])
+                    de = std::max(de, issuedAt[p] + edgeLat);
+            dynEarliestStartCache[id] = de;
 
-        // Register-freeing score: count of predecessors whose only remaining
-        // not-yet-scheduled user is this instruction (scheduling it frees the
-        // predecessor's result register).
-        auto regFreeScore = [&](unsigned id) -> unsigned {
-            unsigned score = 0;
-            for (auto [p, _] : pred[id]) {
+            // Register-freeing score: predecessors whose only remaining user
+            // is this instruction — scheduling it will free those registers.
+            unsigned rfs = 0;
+            for (auto [p, _x] : pred[id]) {
                 if (!done[p]) continue;
                 bool lastUser = true;
-                for (auto [s, __] : succ[p])
+                for (auto [s, _y] : succ[p])
                     if (s != id && !done[s]) { lastUser = false; break; }
-                if (lastUser) ++score;
+                if (lastUser) ++rfs;
             }
-            return score;
-        };
+            rfsCache[id] = rfs;
 
-        // Classify long-latency instructions (divisions, FP divides, sqrt)
-        // that should be scheduled as early as possible so that independent
-        // work can fill the pipeline while the divider is busy.
-        auto isLongLatencyOp = [&](unsigned id) -> bool {
-            OpClass op = classifyOp(moveable[id]);
-            return op == OpClass::IntDiv || op == OpClass::FPDiv;
-        };
+            // Stall distance: max critPath of undone successors.
+            unsigned sd = 0;
+            for (auto [s, _z] : succ[id])
+                if (!done[s]) sd = std::max(sd, critPath[s]);
+            sdCache[id] = sd;
 
-        // Compute a "stall distance" for each ready instruction: how many
-        // cycles of independent work exist between this instruction's result
-        // and its first consumer.  A higher value means more opportunity
-        // to hide the latency if we schedule it now.
-        auto stallDistance = [&](unsigned id) -> unsigned {
-            unsigned maxConsumerCrit = 0;
-            for (auto [s, _] : succ[id])
-                if (!done[s]) maxConsumerCrit = std::max(maxConsumerCrit, critPath[s]);
-            return maxConsumerCrit;
-        };
-
-        // Fusion affinity: returns true if this instruction has a fusion
-        // partner that was just scheduled, so scheduling it next enables
-        // macro-op fusion (cmp+branch) or micro-op folding (load+alu).
-        auto hasFusionAffinity = [&](unsigned id) -> bool {
-            auto it = fusionPartner.find(id);
-            if (it == fusionPartner.end()) return false;
-            return done[it->second]; // partner already scheduled
-        };
-
-        // ── Precompute per-instruction metrics for this cycle's sort ─────────
-        // Calling these lambdas inside std::sort invokes O(degree) work per
-        // comparison, totalling O(n log n × degree).  Snapshotting all values
-        // into flat arrays before sorting reduces per-comparison cost to O(1),
-        // eliminates repeated traversals of the same successor/predecessor
-        // lists, and guarantees a consistent view for the strict-weak-order
-        // requirement of std::sort.
-        std::vector<unsigned> rfsCache(n, 0);
-        std::vector<unsigned> sdCache(n, 0);
-        std::vector<bool>     fusCache(n, false);
-        std::vector<unsigned> rpCache(n, 0);
-        for (unsigned id : ready) {
-            rfsCache[id] = regFreeScore(id);
-            sdCache[id]  = stallDistance(id);
-            fusCache[id] = hasFusionAffinity(id);
+            // Fusion affinity: partner already scheduled → true.
+            {
+                auto fit = fusionPartner.find(id);
+                fusCache[id] = (fit != fusionPartner.end()) && done[fit->second];
+            }
         }
-        // Register pressure penalty — per physical register file.
-        // Uses cached regFreeScore (rfsCache) to avoid a second O(degree) walk.
-        // On all major architectures, integer and vector/FP registers are
-        // completely independent files.  A penalty only applies when scheduling
-        // this instruction would push the *appropriate* file over its budget.
+        // Register pressure penalty (separate pass — depends on rfsCache).
         for (unsigned id : ready) {
             if (moveable[id]->getType()->isVoidTy() || lat[id] == 0) continue;
             bool isVec = producesVecOrFP(moveable[id]);
@@ -6498,9 +6558,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             unsigned rfs    = rfsCache[id];
             if (live + 1 > budget + rfs) {
                 unsigned penalty = (live + 1 - rfs > budget) ? (live + 1 - rfs - budget) : 0;
-                // Dampen penalty for instructions with slack — they can be
-                // delayed to a lower-pressure point without extending the
-                // critical path.
                 if (slack[id] > 0)
                     penalty = std::max(1u, static_cast<unsigned>(
                         penalty / (1.0 + static_cast<double>(slack[id]) / policy.slackDamping)));
@@ -6513,51 +6570,30 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             if (critPath[a] != critPath[b])
                 return critPath[a] > critPath[b];
 
-            // Tier 2: long-latency operations (div, fdiv) before other ops at
-            // same critical path — start them early so the divider is busy while
-            // independent ALU/load work proceeds.
-            bool longA = isLongLatencyOp(a);
-            bool longB = isLongLatencyOp(b);
-            if (longA != longB)
-                return longA;  // long-latency first
+            // Tier 2: long-latency operations (div, fdiv) before other ops —
+            // start them early so the divider is busy while the rest proceeds.
+            // Uses isLongLatencyCache (precomputed once, O(1) lookup).
+            if (isLongLatencyCache[a] != isLongLatencyCache[b])
+                return static_cast<bool>(isLongLatencyCache[a]);
 
             // Tier 2b: among equal critPath and latency class, schedule the
-            // instruction that can start soonest.  Issuing an earlier-startable
-            // instruction first secures the best port slot for it, letting its
-            // chain complete earlier and freeing resources sooner.
-            if (earliestStart[a] != earliestStart[b])
-                return earliestStart[a] < earliestStart[b];
+            // instruction whose data is ready soonest.  This uses the actual
+            // recorded issuedAt times of predecessors (dynEarliestStartCache),
+            // which is more accurate than the static earliestStart that assumed
+            // chains start at cycle 0 — port-contention delays are reflected.
+            if (dynEarliestStartCache[a] != dynEarliestStartCache[b])
+                return dynEarliestStartCache[a] < dynEarliestStartCache[b];
 
             // Tier 3: loads first — schedule early to hide memory latency.
-            // Within loads, prefer those with potentially longer latency
-            // (likely cache misses based on access pattern analysis).
-            bool isLoadA = llvm::isa<llvm::LoadInst>(moveable[a]);
-            bool isLoadB = llvm::isa<llvm::LoadInst>(moveable[b]);
+            // Within loads, prefer those with higher cache-miss risk
+            // (precomputed in missRiskCache, O(1) lookup).
+            bool isLoadA = (missRiskCache[a] > 0);
+            bool isLoadB = (missRiskCache[b] > 0);
             if (isLoadA != isLoadB)
-                return isLoadA;  // loads before non-loads
+                return isLoadA;
             if (isLoadA && isLoadB && policy.enableCacheMissRisk) {
-                // Heuristic: loads from different base pointers are more
-                // likely to miss (different cache lines).  Loads from GEPs
-                // with large constant offsets may cross cache lines.
-                auto estimateMissRisk = [&](unsigned id) -> unsigned {
-                    auto* load = llvm::cast<llvm::LoadInst>(moveable[id]);
-                    auto* ptr = load->getPointerOperand();
-                    if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
-                        // Large constant offset → higher miss risk
-                        for (auto it = gep->idx_begin(); it != gep->idx_end(); ++it) {
-                            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(*it)) {
-                                long long off = ci->getSExtValue();
-                                if (std::abs(off) > static_cast<long long>(profile.cacheLineSize))
-                                    return 2;  // likely L2+ access
-                            }
-                        }
-                    }
-                    return 1;  // likely L1 hit
-                };
-                unsigned riskA = estimateMissRisk(a);
-                unsigned riskB = estimateMissRisk(b);
-                if (riskA != riskB)
-                    return riskA > riskB;  // higher miss risk = schedule earlier
+                if (missRiskCache[a] != missRiskCache[b])
+                    return missRiskCache[a] > missRiskCache[b];
             }
 
             // Tier 4: stall distance — prefer instructions whose consumers have
@@ -6570,31 +6606,23 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 if (fusCache[a] != fusCache[b]) return static_cast<bool>(fusCache[a]);
             }
 
-            // Tier 6: port pressure — schedule bottleneck resource first.
-            OpClass opA = classifyOp(moveable[a]);
-            OpClass opB = classifyOp(moveable[b]);
-            int rtA = (opA == OpClass::IntMul) ? kIntMulPortKey
-                : static_cast<int>(mapOpToResource(opA));
-            int rtB = (opB == OpClass::IntMul) ? kIntMulPortKey
-                : static_cast<int>(mapOpToResource(opB));
+            // Tier 6: port pressure — schedule the most-contended resource first.
+            // rtKeyCache precomputed (O(1) lookup, avoids classifyOp each comparison).
+            int rtA = rtKeyCache[a];
+            int rtB = rtKeyCache[b];
             if (portPressure[rtA] != portPressure[rtB])
                 return portPressure[rtA] > portPressure[rtB];
 
             // Tier 6.5: Port utilization balance — prefer instructions that
-            // use the least-loaded port type, evening out utilization across
-            // all execution units for better throughput.
+            // use the least-loaded port type.  portLoadCache and portSizeCache
+            // are maintained incrementally (O(1) lookup, no slot iteration).
             {
-                auto& slotsA = hwPorts[rtA];
-                auto& slotsB = hwPorts[rtB];
-                unsigned loadA = 0, loadB = 0;
-                for (const auto& s : slotsA) loadA += s.nextFree;
-                for (const auto& s : slotsB) loadB += s.nextFree;
-                // Cross-multiply to compare averages without integer division
-                // precision loss: loadA/sizeA vs loadB/sizeB ↔ loadA*sizeB vs loadB*sizeA
-                unsigned sizeA = static_cast<unsigned>(slotsA.size());
-                unsigned sizeB = static_cast<unsigned>(slotsB.size());
-                unsigned crossA = sizeB > 0 ? loadA * sizeB : 0;
-                unsigned crossB = sizeA > 0 ? loadB * sizeA : 0;
+                unsigned loadA = portLoadCache.count(rtA) ? portLoadCache.at(rtA) : 0;
+                unsigned loadB = portLoadCache.count(rtB) ? portLoadCache.at(rtB) : 0;
+                unsigned sizeA = portSizeCache.count(rtA) ? portSizeCache.at(rtA) : 1;
+                unsigned sizeB = portSizeCache.count(rtB) ? portSizeCache.at(rtB) : 1;
+                unsigned crossA = loadA * sizeB;
+                unsigned crossB = loadB * sizeA;
                 if (crossA != crossB)
                     return crossA < crossB;  // prefer less-loaded port
             }
@@ -6643,10 +6671,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 if (issued >= profile.issueWidth) break;
                 if (done[id]) continue;
 
-                OpClass opCls = classifyOp(moveable[id]);
-                int rtKey = (opCls == OpClass::IntMul)
-                    ? kIntMulPortKey
-                    : static_cast<int>(mapOpToResource(opCls));
+                // rtKeyCache precomputed once; avoids classifyOp + mapOpToResource.
+                int rtKey = rtKeyCache[id];
 
                 // Pass 0: only issue to a port type not yet used this cycle.
                 // Pass 1: issue to any port type (fill remaining slots).
@@ -6689,8 +6715,13 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                          rtKey == static_cast<int>(ResourceType::VectorALU))) {
                         pumpFactor = profile.vec512Penalty;
                     }
+                    // Update portLoadCache incrementally: subtract the old
+                    // nextFree value and add the new one so the sort comparator
+                    // can evaluate tier-6.5 in O(1) without scanning all slots.
+                    unsigned oldNextFree = slots[chosenSlot].nextFree;
                     slots[chosenSlot].nextFree =
                         startCycle + slots[chosenSlot].busyCycles * pumpFactor;
+                    portLoadCache[rtKey] += slots[chosenSlot].nextFree - oldNextFree;
                 }
 
                 issuedAt[id] = startCycle;
@@ -6701,6 +6732,9 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 ++totalScheduled;
                 ++issued;
                 scheduled.push_back(moveable[id]);
+                // Remove from the incremental ready set: this instruction is
+                // now dispatched and must not be included in future cycles.
+                readySet.erase(id);
                 issuedPortsThisCycle.insert(rtKey);
                 issuedChainsThisCycle.insert(chainId[id]);
 
@@ -6727,8 +6761,12 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 }
 
                 // Decrement in-degrees of successors.
-                for (auto [s, _] : succ[id])
-                    if (inDeg[s] > 0) --inDeg[s];
+                // Any successor whose in-degree reaches zero is now ready and
+                // is added to the incremental readySet for future cycles.
+                for (auto [s, _] : succ[id]) {
+                    if (inDeg[s] > 0 && --inDeg[s] == 0)
+                        readySet.insert(s);
+                }
 
                 // Update port pressure.
                 if (portPressure[rtKey] > 0) --portPressure[rtKey];
