@@ -638,9 +638,7 @@ struct SchedulerQuality {
     double   efficiency         = 0.0;
     /// Estimated instructions-per-cycle (IPC) achieved by the schedule.
     /// IPC = instructionsTotal / scheduledCycles.  Higher is better.
-    /// For comparison: LLVM MachineScheduler typically achieves 2.5-3.5 IPC
-    /// on modern x86 for integer code; the HGOE targets 3.0-4.0 by using
-    /// more accurate microarchitectural modeling.
+    /// Useful for comparing HGOE schedule quality against baseline schedulers.
     double   estimatedIPC       = 0.0;
     /// Number of scheduling iterations used (iterative refinement).
     unsigned refineIterations   = 0;

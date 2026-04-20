@@ -7090,13 +7090,14 @@ static unsigned foldChainedAdds(llvm::Function& func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() != llvm::Instruction::Add) continue;
             // Match: add(add(x, C1), C2)
-            for (int outerSide = 0; outerSide < 2; ++outerSide) {
+            bool folded = false;
+            for (int outerSide = 0; outerSide < 2 && !folded; ++outerSide) {
                 auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(outerSide));
                 if (!c2) continue;
                 auto* innerAdd = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1 - outerSide));
                 if (!innerAdd || innerAdd->getOpcode() != llvm::Instruction::Add) continue;
                 if (!innerAdd->hasOneUse()) continue; // don't break other users
-                for (int innerSide = 0; innerSide < 2; ++innerSide) {
+                for (int innerSide = 0; innerSide < 2 && !folded; ++innerSide) {
                     auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(innerAdd->getOperand(innerSide));
                     if (!c1) continue;
                     llvm::Value* x = innerAdd->getOperand(1 - innerSide);
@@ -7116,10 +7117,9 @@ static unsigned foldChainedAdds(llvm::Function& func) {
                     toErase.push_back(&inst);
                     toErase.push_back(innerAdd);
                     ++count;
-                    goto next_inst;
+                    folded = true;
                 }
             }
-            next_inst:;
         }
     }
     for (auto* i : toErase) i->eraseFromParent();
@@ -9271,9 +9271,12 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
         }
 
         // Log the total cost delta.
-        unsigned initialCost = estimateFuncCost(func);
-        if (initialCost < bestCost)
-            stats.totalScheduledCycles = bestCost - initialCost;
+        // bestCost was the initial cost before any transforms (only reduced on
+        // improvement), and the function's current state reflects the best
+        // schedule found.  Compute cycles saved as the difference.
+        unsigned finalCost = estimateFuncCost(func);
+        if (finalCost < bestCost)
+            stats.totalScheduledCycles = bestCost - finalCost; // cycles saved
         else
             stats.totalScheduledCycles = 0;
         stats.loopsUnrolled = stats.transforms.vectorExpanded;
