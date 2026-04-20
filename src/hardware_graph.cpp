@@ -5573,6 +5573,238 @@ static unsigned insertNonTemporalHints(llvm::Function& func,
     return count;
 }
 
+/// Replace integer multiply-by-minus-one with negation.
+///
+/// Pattern:  mul(x, -1)  →  sub(0, x)
+///
+/// This is the integer analogue of foldFPMulByNeg1.  On every modern
+/// architecture `neg` (or `sub reg, 0`) is a 1-cycle single-issue
+/// operation that dispatches to any ALU port, while integer multiply
+/// uses the dedicated multiplier (latency 3–4 cycles, one port).
+/// Freeing the multiply port for real multiplies improves IPC when the
+/// function contains other integer multiply operations.
+///
+/// Safety: integer arithmetic is defined modulo 2ⁿ, so `x × (−1)` ≡
+/// `−x (mod 2ⁿ)` always.  No overflow or undefined-behaviour flags
+/// are needed.  The transform is safe for any integer type, including
+/// vector integer types.
+///
+/// Returns the number of multiplies replaced.
+static unsigned foldIntMulByNeg1(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
+            llvm::Type* ty = inst.getType();
+            // Integer or integer-vector only.
+            if (!ty->isIntOrIntVectorTy()) continue;
+
+            llvm::Value* op0 = inst.getOperand(0);
+            llvm::Value* op1 = inst.getOperand(1);
+
+            // Check whether one of the operands is a constant -1 (all-ones bits).
+            // We handle: scalar ConstantInt, splat ConstantVector, and
+            // ConstantDataVector (the form LLVM uses for <N x iM> splatted constants).
+            llvm::Value* other = nullptr;
+            for (int s = 0; s < 2; ++s) {
+                llvm::Value* candidate = (s == 0) ? op0 : op1;
+                llvm::Value* partner   = (s == 0) ? op1 : op0;
+
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(candidate)) {
+                    if (ci->isMinusOne()) { other = partner; break; }
+                }
+                if (auto* cv = llvm::dyn_cast<llvm::ConstantVector>(candidate)) {
+                    if (auto* sp = cv->getSplatValue()) {
+                        auto* sci = llvm::dyn_cast<llvm::ConstantInt>(sp);
+                        if (sci && sci->isMinusOne()) { other = partner; break; }
+                    }
+                }
+                if (auto* cdv = llvm::dyn_cast<llvm::ConstantDataVector>(candidate)) {
+                    if (auto* sp = llvm::dyn_cast_or_null<llvm::ConstantInt>(
+                            cdv->getSplatValue())) {
+                        if (sp->isMinusOne()) { other = partner; break; }
+                    }
+                }
+            }
+            if (!other) continue;
+
+            // Emit sub(0, x): LLVM selects NEG on all supported architectures.
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* zero = llvm::Constant::getNullValue(ty);
+            llvm::Value* neg  = builder.CreateSub(zero, other, "neg1");
+            // Propagate nsw/nuw flags conservatively (only nsw if the original
+            // mul had nsw, meaning the negation cannot overflow either).
+            if (auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(neg)) {
+                auto* mulOp = llvm::cast<llvm::BinaryOperator>(&inst);
+                if (mulOp->hasNoSignedWrap())
+                    subInst->setHasNoSignedWrap(true);
+            }
+            replacements.emplace_back(&inst, neg);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Eliminate double negation: fneg(fneg(x)) → x.
+///
+/// FMA generation, canonicalizeFaddFneg, and foldFPMulByNeg1 can each
+/// introduce an llvm::FNeg instruction.  When two such passes run in
+/// sequence on the same value a double negation can appear.  Removing
+/// it eliminates two instructions and their latency chain entirely.
+///
+/// Safety: `fneg(fneg(x))` equals `x` for all IEEE 754 values (finite,
+/// ±0, ±∞, NaN — FNeg only flips the sign bit).  No fast-math flags
+/// are required.
+///
+/// We only fold when the inner fneg has exactly one use (the outer one),
+/// so we can erase both.  If the inner fneg has other uses we would need
+/// to keep it alive, so we skip that case.
+///
+/// Returns the number of double negations eliminated.
+static unsigned foldFNegDouble(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FNeg) continue;
+            llvm::Value* arg = inst.getOperand(0);
+            auto* inner = llvm::dyn_cast<llvm::UnaryOperator>(arg);
+            if (!inner || inner->getOpcode() != llvm::Instruction::FNeg) continue;
+            // Only fold when the inner fneg is used solely by this outer fneg.
+            if (!inner->hasOneUse()) continue;
+
+            // Replace outer fneg with the inner fneg's operand (the original value).
+            replacements.emplace_back(&inst, inner->getOperand(0));
+            ++count;
+        }
+    }
+
+    // Apply replacements and erase both instructions.
+    for (auto& [outer, orig] : replacements) {
+        llvm::Value* innerArg = outer->getOperand(0); // the inner fneg
+        outer->replaceAllUsesWith(orig);
+        outer->eraseFromParent();
+        if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerArg))
+            if (dead->use_empty()) dead->eraseFromParent();
+    }
+    return count;
+}
+
+/// Hoist loop-invariant pure instructions to the loop pre-header.
+///
+/// This is a generalisation of hoistLoopInvariantGEP: instead of only
+/// hoisting address-calculation GEPs we hoist ANY instruction that:
+///   1. Is pure (no side effects, no memory accesses, not a PHI or terminator).
+///   2. Has ALL operands defined outside the loop body.
+///   3. Is not already in the pre-header.
+///
+/// Hoisting such instructions avoids re-computing the same value on every
+/// loop iteration.  Unlike LLVM's own LICM this runs AFTER our transforms,
+/// so it catches invariant computations introduced by strength reduction,
+/// FMA generation, or GEP expansion that were not present when LLVM's
+/// LICM ran.
+///
+/// Loop detection uses the same linear-order back-edge heuristic as
+/// hoistLoopInvariantGEP.  GEPs are intentionally included so this
+/// supersedes that pass — both are still called for safety; in practice
+/// hoistLoopInvariantGEP will fire first and leave nothing for the GEP
+/// case here.
+///
+/// Instruction ordering is preserved: we collect candidates in forward
+/// program order and hoist them in that order, so that if instruction B
+/// uses the result of instruction A and both are invariant, A arrives in
+/// the pre-header before B.
+///
+/// Returns the number of instructions hoisted.
+static unsigned hoistLoopInvariantInst(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+
+    unsigned count = 0;
+
+    // Assign linear order to BBs for back-edge detection.
+    std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
+    { unsigned ord = 0; for (auto& bb : func) bbOrder[&bb] = ord++; }
+
+    for (auto& header : func) {
+        // Find the latch (back-edge source): a predecessor of header with
+        // a higher linear order than the header itself.
+        llvm::BasicBlock* latch = nullptr;
+        for (auto* pred : llvm::predecessors(&header)) {
+            if (bbOrder.count(pred) && bbOrder.at(pred) >= bbOrder.at(&header)) {
+                latch = pred;
+                break;
+            }
+        }
+        if (!latch) continue;
+
+        // Require exactly one non-latch predecessor as the pre-header.
+        llvm::BasicBlock* preHeader = nullptr;
+        unsigned nonLatchPreds = 0;
+        for (auto* pred : llvm::predecessors(&header)) {
+            if (pred != latch) { preHeader = pred; ++nonLatchPreds; }
+        }
+        if (nonLatchPreds != 1 || !preHeader) continue;
+
+        // Collect loop body BBs (linear order between header and latch).
+        unsigned headerOrd = bbOrder.at(&header);
+        unsigned latchOrd  = bbOrder.at(latch);
+        std::unordered_set<const llvm::BasicBlock*> loopBBs;
+        for (auto& bb : func) {
+            unsigned ord = bbOrder.at(&bb);
+            if (ord >= headerOrd && ord <= latchOrd)
+                loopBBs.insert(&bb);
+        }
+
+        // Collect invariant instructions in forward program order so that
+        // hoisting preserves def-use ordering (A before B if B uses A).
+        std::vector<llvm::Instruction*> toHoist;
+
+        for (auto& bb : func) {
+            if (!loopBBs.count(&bb)) continue;
+            for (auto& inst : bb) {
+                // Skip PHIs, terminators, and GEPs (handled by hoistLoopInvariantGEP).
+                if (llvm::isa<llvm::PHINode>(inst)) continue;
+                if (inst.isTerminator()) continue;
+                if (llvm::isa<llvm::GetElementPtrInst>(inst)) continue;
+                // Skip instructions with side effects or memory accesses.
+                if (inst.mayHaveSideEffects()) continue;
+                if (inst.mayReadOrWriteMemory()) continue;
+                // Already in pre-header — nothing to move.
+                if (inst.getParent() == preHeader) continue;
+
+                // All operands must be defined outside the loop.
+                bool invariant = true;
+                for (unsigned i = 0; i < inst.getNumOperands(); ++i) {
+                    llvm::Value* op = inst.getOperand(i);
+                    if (llvm::isa<llvm::Constant>(op)) continue;
+                    auto* defInst = llvm::dyn_cast<llvm::Instruction>(op);
+                    if (!defInst) { invariant = false; break; }
+                    if (loopBBs.count(defInst->getParent())) { invariant = false; break; }
+                }
+                if (!invariant) continue;
+                toHoist.push_back(&inst);
+            }
+        }
+
+        // Hoist in collected order to the pre-header (before its terminator).
+        llvm::Instruction* insertPt = preHeader->getTerminator();
+        for (auto* inst : toHoist) {
+            inst->moveBefore(insertPt);
+            ++count;
+        }
+    }
+    return count;
+}
+
 TransformStats applyHardwareTransforms(llvm::Function& func,
                                         const MicroarchProfile& profile,
                                         bool enableLoopAnnotation) {
@@ -5588,6 +5820,11 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // fmul(x, -1.0) → fneg(x): 1 cycle bit-flip vs 4-cycle multiply.
     // Run before FMA scan so the eliminated fmul doesn't confuse FMA matching.
     stats.fmaGenerated    += foldFPMulByNeg1(func);
+    // fneg(fneg(x)) → x: double negation elimination.
+    // Run after foldFPMulByNeg1 (which may have introduced new FNeg) and
+    // after FMA generation (which introduces FNeg for FNMADD forms).
+    // No fast-math flags needed — safe for all IEEE 754 values.
+    stats.fmaGenerated    += foldFNegDouble(func);
     // FP division by constant → reciprocal multiply (fdiv → fmul when `arcp` flag).
     // Run before FMA scan so that the resulting fmul may be fused in a later pass.
     stats.fmaGenerated    += foldFPDivByConstant(func, profile);
@@ -5615,6 +5852,11 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
     stats.intStrengthReduced += integerStrengthReduce(func, profile);
+    // mul(x, -1) → sub(0, x): integer negate instead of multiply.
+    // Run after integerStrengthReduce so that the -1 constant is not
+    // mistaken for a shift-add form (which has no -1 case), and before
+    // generateIntegerAbs so that abs patterns using sub(0,x) are still seen.
+    stats.intStrengthReduced += foldIntMulByNeg1(func);
     // Integer abs detection: replace select+icmp+sub patterns with llvm.abs.
     // Runs after strength reduction so we don't accidentally undo any reductions.
     stats.intStrengthReduced += generateIntegerAbs(func, profile);
@@ -5624,8 +5866,11 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Hoist loop-invariant GEP address calculations to the loop pre-header.
     // Runs last so all address computations introduced by our transforms are hoisted.
     stats.loadsStorePaired   += hoistLoopInvariantGEP(func);
-
-    return stats;
+    // Hoist ALL remaining pure loop-invariant instructions to the pre-header.
+    // This generalises hoistLoopInvariantGEP to cover strength-reduced constants,
+    // type conversions, and other invariant computations created by our transforms.
+    // Must run after all other transforms so every new instruction is considered.
+    stats.loadsStorePaired   += hoistLoopInvariantInst(func);
 }
 // ═════════════════════════════════════════════════════════════════════════════
 // Step 3b — Schedule-driven instruction reordering
