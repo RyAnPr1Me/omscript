@@ -5653,6 +5653,171 @@ static unsigned foldIntMulByNeg1(llvm::Function& func) {
     return count;
 }
 
+/// Fold `add(x, sub(0, y))` → `sub(x, y)`.
+///
+/// This is a direct follow-on to foldIntMulByNeg1.  That pass rewrites
+/// `mul(y, -1)` to `sub(0, y)`.  When the negated value is then added to
+/// another operand x, the net expression is `x + (-y)` = `x - y`, which is
+/// representable as a single SUB instruction.
+///
+/// Safety: modular integer arithmetic guarantees `x + (0 - y) ≡ x - y (mod 2ⁿ)`
+/// for every bit-pattern of x and y, with no exceptions.  We conservatively
+/// do NOT forward nsw/nuw from either the add or the inner sub — the resulting
+/// sub gets no overflow flags, which is the safest correct choice.
+///
+/// We only fold when the inner sub(0, y) has exactly one use (the add), so
+/// both instructions can be replaced by a single sub.  If the neg has other
+/// uses, keeping it alive is correct but we would not reduce the instruction
+/// count, so we skip that case.
+///
+/// Returns the number of add+neg pairs folded.
+static unsigned foldIntAddNeg(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Add) continue;
+            llvm::Type* ty = inst.getType();
+            if (!ty->isIntOrIntVectorTy()) continue;
+
+            llvm::Value* op0 = inst.getOperand(0);
+            llvm::Value* op1 = inst.getOperand(1);
+
+            // Try both orderings: add(x, neg) and add(neg, x).
+            for (int s = 0; s < 2; ++s) {
+                llvm::Value* negCandidate = (s == 0) ? op1 : op0;
+                llvm::Value* other        = (s == 0) ? op0 : op1;
+
+                auto* negInst = llvm::dyn_cast<llvm::BinaryOperator>(negCandidate);
+                if (!negInst) continue;
+                if (negInst->getOpcode() != llvm::Instruction::Sub) continue;
+                // Require sub(0, y) — the LHS must be the zero constant.
+                if (!llvm::isa<llvm::Constant>(negInst->getOperand(0))) continue;
+                auto* lhsC = llvm::dyn_cast<llvm::Constant>(negInst->getOperand(0));
+                if (!lhsC || !lhsC->isNullValue()) continue;
+                // Only fold when the neg is used only by this add.
+                if (!negInst->hasOneUse()) continue;
+
+                llvm::Value* y = negInst->getOperand(1);
+                llvm::IRBuilder<> builder(&inst);
+                llvm::Value* sub = builder.CreateSub(other, y, "addneg.sub");
+                replacements.emplace_back(&inst, sub);
+                ++count;
+                break;
+            }
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        // Erase the now-dead sub(0, y) first if it becomes unused.
+        llvm::Value* negArg = nullptr;
+        for (int s = 0; s < 2; ++s) {
+            auto* neg = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(s));
+            if (neg && neg->getOpcode() == llvm::Instruction::Sub &&
+                llvm::isa<llvm::Constant>(neg->getOperand(0))) {
+                auto* lhsC = llvm::dyn_cast<llvm::Constant>(neg->getOperand(0));
+                if (lhsC && lhsC->isNullValue()) { negArg = neg; break; }
+            }
+        }
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+        if (negArg) {
+            if (auto* dead = llvm::dyn_cast<llvm::Instruction>(negArg))
+                if (dead->use_empty()) dead->eraseFromParent();
+        }
+    }
+    return count;
+}
+
+/// Replace `select(cond, x, x)` with `x`.
+///
+/// When both true-value and false-value of a select are the same SSA value,
+/// the condition is irrelevant and the select is a no-op.  This pattern
+/// arises after other transforms simplify one of the two arms of a
+/// conditional to match the other arm (e.g. after strength-reduction or
+/// after convertIfElseToSelect folds the arms).
+///
+/// Safety: always correct — the result is the same regardless of the condition.
+///
+/// Returns the number of selects eliminated.
+static unsigned foldSelectSameValue(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+            if (sel->getTrueValue() != sel->getFalseValue()) continue;
+            sel->replaceAllUsesWith(sel->getTrueValue());
+            toErase.push_back(sel);
+            ++count;
+        }
+    }
+
+    for (auto* inst : toErase)
+        inst->eraseFromParent();
+    return count;
+}
+
+/// Replace `fadd(x, x)` with `fmul(x, 2.0)` when the `reassoc` fast-math
+/// flag is set.
+///
+/// `x + x = 2*x` mathematically, but under strict IEEE 754 the two forms
+/// differ only in rounding of the final result — both produce the exact
+/// mathematical value when |x| fits in the format.  The `reassoc` flag
+/// explicitly permits this kind of reassociation.
+///
+/// Benefit: `fmul(x, 2.0)` is immediately eligible for FMA fusion by the
+/// subsequent `generateFMA` scan.  e.g.:
+///
+///   fadd reassoc x, x       →   fmul x, 2.0
+///   followed by:
+///   fadd contract (fmul x, 2.0), y  →  fma(x, 2.0, y)
+///
+/// This is a net gain of one FMA instruction replacing two separate
+/// instructions (the self-add and the add-with-y).
+///
+/// We only replace when the second operand is the same SSA value as the
+/// first (pointer equality), which guarantees exact semantic equivalence
+/// under reassoc.
+///
+/// Returns the number of self-adds replaced.
+static unsigned foldFAddSelf(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FAdd) continue;
+            llvm::Value* op0 = inst.getOperand(0);
+            llvm::Value* op1 = inst.getOperand(1);
+            if (op0 != op1) continue; // must be exact same SSA value
+
+            auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
+            if (!fpOp->hasAllowReassoc()) continue;
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Type* ty = inst.getType();
+            llvm::Value* two = llvm::ConstantFP::get(ty, 2.0);
+            llvm::Value* mul = builder.CreateFMul(op0, two, "faddself.fmul");
+            // Propagate fast-math flags to the new multiply.
+            if (auto* mulInst = llvm::dyn_cast<llvm::Instruction>(mul))
+                mulInst->setFastMathFlags(fpOp->getFastMathFlags());
+
+            replacements.emplace_back(&inst, mul);
+            ++count;
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
 /// Eliminate double negation: fneg(fneg(x)) → x.
 ///
 /// FMA generation, canonicalizeFaddFneg, and foldFPMulByNeg1 can each
@@ -5825,6 +5990,14 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // after FMA generation (which introduces FNeg for FNMADD forms).
     // No fast-math flags needed — safe for all IEEE 754 values.
     stats.fmaGenerated    += foldFNegDouble(func);
+    // fadd(x, x) → fmul(x, 2.0) with reassoc: exposes FMA fusion opportunities.
+    // Run before the FP div-by-constant fold and before FMA passes so that
+    // the resulting fmul(x, 2.0) can be fused: fma(x, 2.0, c).
+    stats.fmaGenerated    += foldFAddSelf(func);
+    // Re-run FMA passes once more so fmul(x,2.0) introduced by foldFAddSelf
+    // can be immediately fused with adjacent fadd/fsub operations.
+    stats.fmaGenerated    += generateFMA(func, profile);
+    stats.fmaGenerated    += generateFMASub(func, profile);
     // FP division by constant → reciprocal multiply (fdiv → fmul when `arcp` flag).
     // Run before FMA scan so that the resulting fmul may be fused in a later pass.
     stats.fmaGenerated    += foldFPDivByConstant(func, profile);
@@ -5857,6 +6030,9 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // mistaken for a shift-add form (which has no -1 case), and before
     // generateIntegerAbs so that abs patterns using sub(0,x) are still seen.
     stats.intStrengthReduced += foldIntMulByNeg1(func);
+    // add(x, sub(0,y)) → sub(x,y): fold add+neg created by foldIntMulByNeg1.
+    // Run immediately after so the sub(0,y) pattern is fresh.
+    stats.intStrengthReduced += foldIntAddNeg(func);
     // Integer abs detection: replace select+icmp+sub patterns with llvm.abs.
     // Runs after strength reduction so we don't accidentally undo any reductions.
     stats.intStrengthReduced += generateIntegerAbs(func, profile);
@@ -5871,6 +6047,10 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // type conversions, and other invariant computations created by our transforms.
     // Must run after all other transforms so every new instruction is considered.
     stats.loadsStorePaired   += hoistLoopInvariantInst(func);
+    // select(cond, x, x) → x: eliminate selects where both arms are identical.
+    // Runs last since all other transforms (convertIfElseToSelect, foldMinMaxPatterns,
+    // foldSelectToBoolCast, etc.) may have simplified one arm to match the other.
+    stats.intStrengthReduced += foldSelectSameValue(func);
 
     return stats;
 }
