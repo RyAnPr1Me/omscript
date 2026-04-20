@@ -142,6 +142,7 @@
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/MDBuilder.h>
+#include <llvm/Transforms/Utils/ScalarEvolutionExpander.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
 #include <algorithm>
 #include <optional>
@@ -1644,22 +1645,16 @@ struct AdvancedBranchWeightAnnotationPass
                 bool falseExits = !loop->contains(falseBB);
                 if (trueExits != falseExits) {
                     // Try to get exact trip count from SCEV.
-                    const llvm::SCEV* tripSCEV =
-                        SE.getSmallConstantTripCount(loop);
                     // getSmallConstantTripCount returns 0 if unknown.
-                    const auto* cTripSCEV =
-                        llvm::dyn_cast_or_null<llvm::SCEVConstant>(tripSCEV);
-                    if (cTripSCEV && !cTripSCEV->getAPInt().isZero()) {
-                        uint64_t tc = cTripSCEV->getAPInt().getLimitedValue(256);
-                        if (tc > 1) {
-                            // Exact: exit fires once every tc iterations.
-                            if (trueExits) {
-                                trueW  = 1;
-                                falseW = static_cast<uint32_t>(tc - 1);
-                            } else {
-                                trueW  = static_cast<uint32_t>(tc - 1);
-                                falseW = 1;
-                            }
+                    uint32_t tc = SE.getSmallConstantTripCount(loop);
+                    if (tc > 1 && tc <= 256) {
+                        // Exact: exit fires once every tc iterations.
+                        if (trueExits) {
+                            trueW  = 1;
+                            falseW = static_cast<uint32_t>(tc - 1);
+                        } else {
+                            trueW  = static_cast<uint32_t>(tc - 1);
+                            falseW = 1;
                         }
                     }
                     // Fallback: generic 88/12 loop-continue heuristic.
@@ -1980,7 +1975,224 @@ struct ConditionalStoreSinkPass
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Multiply-Accumulate Pattern Detection Pass (MAC/Dot-Product)
+// Range Bounds-Check Hoist Pass
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Converts repeated per-iteration bounds-check branches inside loops into a
+// single pre-loop combined range check, then removes the now-redundant
+// per-iteration branches.  This complements the compile-time bounds-check
+// elimination in `canElideBoundsCheck` by handling patterns that the frontend
+// could not eliminate statically (e.g., loops whose bounds are not literally
+// `len(arr)` but can be proven equivalent at IR level via SCEV).
+//
+// Pattern:
+//   loop header (IV = {start, +, 1}):
+//     ...
+//     %valid = icmp ult %iv, %len     ← bounds check every iteration
+//     br %valid, %ok, %fail
+//   fail:
+//     call abort()
+//     unreachable
+//   ok:
+//     %elem = gep inbounds i64, %data, %iv
+//     load %elem
+//
+// Becomes:
+//   preheader:
+//     %pre_ok = icmp ule %end, %len   ← single pre-loop check
+//     br %pre_ok, %loop_entry, %fail
+//   loop header (IV = {start, +, 1}):
+//     ...
+//     %elem = gep inbounds i64, %data, %iv   ← no bounds check
+//     load %elem
+//
+// Algorithm:
+//   1. For each innermost loop, collect all bounds-check branches:
+//      `icmp ult IV, len; condBr %ok, %fail` where %fail ends in abort.
+//   2. If ALL bounds checks in the loop use the SAME `len` value and the
+//      SAME IV (or monotone functions of it), hoist a single check before
+//      the loop: `assert(loop_end <= len)`.
+//   3. Replace the per-iteration `condBr` with unconditional `br %ok`.
+//   4. Mark the surviving GEPs as `inbounds` (already were, but re-assert).
+//
+// This is sound because:
+//   - SCEV proves IV ∈ [start, end) within the loop.
+//   - The pre-loop check guarantees end <= len at loop entry.
+//   - Therefore IV < len for all iterations — the per-iteration check is
+//     provably always true and can be safely removed.
+//
+// The pre-loop fail block is attached so that a wrong end > len still aborts
+// at runtime; the optimization only removes the check from inside the loop.
+// ─────────────────────────────────────────────────────────────────────────────
+struct RangeBoundsCheckHoistPass
+    : public llvm::PassInfoMixin<RangeBoundsCheckHoistPass> {
+
+    // Returns true if BB is a trivial abort block:
+    //   PHINodes... printf... abort... unreachable   (or just abort + unreachable).
+    static bool isAbortBlock(llvm::BasicBlock* BB) {
+        bool sawAbort = false;
+        for (auto& I : *BB) {
+            if (llvm::isa<llvm::PHINode>(I)) continue;
+            if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                auto* callee = CI->getCalledFunction();
+                if (!callee) continue;
+                llvm::StringRef nm = callee->getName();
+                if (nm == "abort" || nm == "_abort" ||
+                    nm.starts_with("__ubsan") || nm.starts_with("__asan") ||
+                    callee->hasFnAttribute(llvm::Attribute::NoReturn))
+                    sawAbort = true;
+                continue;
+            }
+            if (llvm::isa<llvm::UnreachableInst>(I)) return sawAbort;
+            // Any other non-call instruction means the block isn't a trivial abort.
+            if (!llvm::isa<llvm::CallInst>(I)) return false;
+        }
+        return false;
+    }
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& FAM) {
+        auto& LI  = FAM.getResult<llvm::LoopAnalysis>(F);
+        auto& SE  = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
+        llvm::MDBuilder MDB(F.getContext());
+        bool changed = false;
+
+        // Collect innermost loops.
+        llvm::SmallVector<llvm::Loop*, 16> innerLoops;
+        for (auto& topLevel : LI) {
+            for (auto* L : topLevel->getLoopsInPreorder()) {
+                if (L->isInnermost())
+                    innerLoops.push_back(L);
+            }
+        }
+
+        for (auto* loop : innerLoops) {
+            // Need a preheader to insert the combined check.
+            auto* preheader = loop->getLoopPreheader();
+            if (!preheader) continue;
+
+            // Need a single exiting block for exit count computation.
+            auto* exitingBB = loop->getExitingBlock();
+            if (!exitingBB) continue;
+
+            // Collect bounds-check branches: icmp ult IV, len → condBr ok, fail.
+            // We require ALL such branches to use the SAME len value; if any
+            // check uses a different len, we skip this loop (conservative).
+            llvm::Value* sharedLen = nullptr;
+            llvm::SmallVector<std::pair<llvm::BranchInst*, llvm::BasicBlock*>, 8> checkBranches;
+
+            bool compatible = true;
+            for (auto* BB : loop->blocks()) {
+                auto* BI = llvm::dyn_cast<llvm::BranchInst>(BB->getTerminator());
+                if (!BI || !BI->isConditional()) continue;
+                auto* cmpInst = llvm::dyn_cast<llvm::ICmpInst>(BI->getCondition());
+                if (!cmpInst) continue;
+                if (cmpInst->getPredicate() != llvm::ICmpInst::ICMP_ULT) continue;
+
+                // Identify ok / fail successors.
+                llvm::BasicBlock* okBB   = BI->getSuccessor(0);
+                llvm::BasicBlock* failBB = BI->getSuccessor(1);
+                if (!isAbortBlock(failBB)) {
+                    if (!isAbortBlock(okBB)) continue;
+                    std::swap(okBB, failBB);
+                    // Swapped: predicate is ULT and fail is succ(0) — we need
+                    // succ(0) to be the fail, so check that succ(1) is ok.
+                    // With the swap above ok=succ(0) fail=succ(1) — skip if
+                    // that isn't an abort.
+                    (void)okBB;
+                    continue;
+                }
+
+                // The LHS (index) should be loop-varying; RHS (len) invariant.
+                llvm::Value* lhsV = cmpInst->getOperand(0);
+                llvm::Value* rhsV = cmpInst->getOperand(1);
+                if (!loop->isLoopInvariant(rhsV)) {
+                    std::swap(lhsV, rhsV);
+                    if (!loop->isLoopInvariant(rhsV)) continue;
+                }
+                if (loop->isLoopInvariant(lhsV)) continue;
+
+                // LHS must be an affine add-recurrence with positive step.
+                const llvm::SCEV* lhsSCEV = SE.getSCEV(lhsV);
+                if (!lhsSCEV || llvm::isa<llvm::SCEVCouldNotCompute>(lhsSCEV)) continue;
+                auto* AR = llvm::dyn_cast<llvm::SCEVAddRecExpr>(lhsSCEV);
+                if (!AR || !AR->isAffine() || AR->getLoop() != loop) continue;
+                if (!SE.isKnownPositive(AR->getStepRecurrence(SE))) continue;
+
+                // All checks must use the same len value.
+                if (!sharedLen) {
+                    sharedLen = rhsV;
+                } else if (sharedLen != rhsV) {
+                    compatible = false;
+                    break;
+                }
+
+                checkBranches.push_back({BI, BI->getSuccessor(0) == failBB ? BI->getSuccessor(1) : BI->getSuccessor(0)});
+            }
+
+            if (!compatible || checkBranches.empty() || !sharedLen) continue;
+
+            // Determine the SCEV for the AR in the first bounds check.
+            auto* firstBI = checkBranches[0].first;
+            auto* firstCmp = llvm::cast<llvm::ICmpInst>(firstBI->getCondition());
+            llvm::Value* ivVal = firstCmp->getOperand(0);
+            if (loop->isLoopInvariant(ivVal))
+                ivVal = firstCmp->getOperand(1);
+            const llvm::SCEV* ivSCEV = SE.getSCEV(ivVal);
+            auto* AR = llvm::dyn_cast<llvm::SCEVAddRecExpr>(ivSCEV);
+            if (!AR) continue;
+
+            // Compute end = start + exitCount (exclusive upper bound of IV).
+            const llvm::SCEV* exitCountSCEV = SE.getExitCount(loop, exitingBB);
+            if (!exitCountSCEV || llvm::isa<llvm::SCEVCouldNotCompute>(exitCountSCEV))
+                continue;
+            const llvm::SCEV* endSCEV =
+                SE.getAddExpr(AR->getStart(), exitCountSCEV);
+            if (!endSCEV || llvm::isa<llvm::SCEVCouldNotCompute>(endSCEV)) continue;
+
+            // Materialise `end` in the preheader.
+            llvm::SCEVExpander expander(SE, F.getParent()->getDataLayout(), "rbch");
+            llvm::Value* endVal = expander.expandCodeFor(
+                endSCEV, sharedLen->getType(),
+                preheader->getTerminator());
+
+            // Insert pre-loop guard: `br (end <= len) ? loopHeader : failBB`
+            auto* existingFailBB = checkBranches[0].first->getSuccessor(
+                isAbortBlock(checkBranches[0].first->getSuccessor(1)) ? 1 : 0);
+
+            llvm::IRBuilder<> phBuilder(preheader->getTerminator());
+            llvm::Value* safeCheck = phBuilder.CreateICmpULE(
+                endVal, sharedLen, "rbch.safe");
+            llvm::MDNode* weights = MDB.createBranchWeights(1000000, 1);
+
+            // Create a new "check" block that contains the original preheader
+            // branch (→ loop header).  The preheader will branch to it when safe.
+            llvm::BasicBlock* loopHeader = loop->getHeader();
+            llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(
+                F.getContext(), "rbch.check", &F, loopHeader);
+            // Move the preheader's original terminator into checkBB.
+            auto* origBr = preheader->getTerminator();
+            origBr->removeFromParent();
+            llvm::IRBuilder<> checkBBBuilder(checkBB);
+            checkBB->getTerminator(); // ensure empty
+            origBr->insertInto(checkBB, checkBB->end());
+            // New preheader terminator: condBr safe → checkBB, failBB.
+            phBuilder.CreateCondBr(safeCheck, checkBB, existingFailBB, weights);
+
+            // Remove per-iteration bounds checks.
+            for (auto& [BI, okBB] : checkBranches) {
+                // Replace the conditional branch with unconditional → okBB.
+                llvm::BranchInst::Create(okBB, BI);
+                BI->eraseFromParent();
+                changed = true;
+            }
+        }
+
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Detects sum-of-products patterns in loop bodies and restructures them for
@@ -4106,6 +4318,12 @@ void CodeGenerator::runOptimizationPasses() {
             // vectorizer's cost model sees the cheaper fmuladd operation.
             CloseFPM.addPass(MACPatternPass());
             CloseFPM.addPass(llvm::IRCEPass());
+            // Range bounds-check hoist: convert repeated per-iteration bounds
+            // checks into a single pre-loop check, enabling bounds-check-free
+            // loop bodies for arrays that the frontend already proven-safe.
+            // Runs AFTER IRCE (which handles the common case) to catch any
+            // remaining patterns that IRCE's heuristics left behind.
+            CloseFPM.addPass(RangeBoundsCheckHoistPass());
             CloseFPM.addPass(llvm::ConstraintEliminationPass());
             // Phase 3b: late loop unrolling.  After superoptimizer + HGOE,
             // loop bounds may have been folded to small constants.
@@ -4486,6 +4704,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // MAC pattern detection: convert fadd(fmul(a,b), acc) → fmuladd for FMA.
     FPMMax.addPass(MACPatternPass());
     FPMMax.addPass(llvm::IRCEPass());
+    // Range bounds-check hoist: hoist repeated per-iteration bounds checks to
+    // a single pre-loop check; completes bounds-check elimination for patterns
+    // that the frontend pre-scan and IRCE left behind.
+    FPMMax.addPass(RangeBoundsCheckHoistPass());
     FPMMax.addPass(llvm::ConstraintEliminationPass());
     FPMMax.addPass(llvm::GuardWideningPass());
     FPMMax.addPass(llvm::SCCPPass());
@@ -4495,8 +4717,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // exposing ILP for the OoO scheduler.
     FPMMax.addPass(TreeHeightReductionPass());
     FPMMax.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
-    // Conditional store sinking: move stores to cold branches.
-    // ConditionalStoreSinkPass DISABLED: too aggressive without PGO data;
+    // Advanced branch weight annotation for OPTMAX functions: emit !prof metadata
+    // so that BER and ConditionalStoreSink see accurate probabilities.
+    FPMMax.addPass(AdvancedBranchWeightAnnotationPass());
+    // Conditional store sinking: powered by the advanced branch weights above.
+    FPMMax.addPass(ConditionalStoreSinkPass());
     // BER: convert near-50/50 diamond CFGs to select instructions, removing
     // mispredict flushes from unpredictable branches in hot OPTMAX loops.
     FPMMax.addPass(BranchEntropyReductionPass());

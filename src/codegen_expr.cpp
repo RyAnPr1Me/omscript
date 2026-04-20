@@ -5338,6 +5338,44 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     idxVal = toDefaultType(idxVal);
 
+    // ── Fast path: range-to-pointer-arithmetic mode ──────────────────────────
+    // When we're inside a for-loop where a pointer-mode preamble was emitted
+    // for this array (data pointer pre-computed, single pre-loop bounds-check
+    // assume already emitted), use the cached data pointer directly.
+    //
+    // Conditions:
+    //   - Not a string (strings don't use the [len, e0, e1, ...] layout)
+    //   - Array is a simple identifier (named local variable)
+    //   - Index is exactly the active pointer-mode iterator (not an expression)
+    //   - We have a cached data pointer for this array name
+    //
+    // This short-circuits the full `basePtr` + `canElideBoundsCheck` path
+    // and produces: `gep inbounds i64, dataPtr, idxVal` without any branch.
+    if (!isStringExpr(expr->array.get())
+            && !loopPtrModeDataPtrs_.empty()
+            && expr->array->type == ASTNodeType::IDENTIFIER_EXPR
+            && expr->index->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& arrName =
+            static_cast<IdentifierExpr*>(expr->array.get())->name;
+        const std::string& idxName =
+            static_cast<IdentifierExpr*>(expr->index.get())->name;
+        auto ptrIt = loopPtrModeDataPtrs_.find(arrName);
+        if (ptrIt != loopPtrModeDataPtrs_.end()
+                && idxName == loopPtrModeIterVar_) {
+            // Direct pointer-arithmetic element access — no bounds check.
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), ptrIt->second, idxVal, "prl.elem.ptr");
+            auto* elemLoad = emitLoadArrayElem(elemPtr, "prl.elem");
+            if (optimizationLevel >= OptimizationLevel::O1)
+                elemLoad->setMetadata(llvm::LLVMContext::MD_noundef,
+                                      llvm::MDNode::get(*context, {}));
+            if (currentLoopAccessGroup_)
+                elemLoad->setMetadata(llvm::LLVMContext::MD_access_group,
+                                      currentLoopAccessGroup_);
+            return elemLoad;
+        }
+    }
+
     // Detect whether the base expression is a string.  Strings are raw char
     // pointers without a length header; arrays have the layout [length, e0,
     // e1, ...] and each element is 8 bytes (i64).
@@ -5509,6 +5547,30 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     inIndexAssignValueContext_ = savedInIndexAssignValue;
     newVal = toDefaultType(newVal);
     idxVal = toDefaultType(idxVal);
+
+    // ── Fast path: range-to-pointer-arithmetic mode (store) ─────────────────
+    // Mirror of the fast path in generateIndex: when the pointer preamble has
+    // been emitted for this array, use the cached data pointer directly.
+    if (!isStringExpr(expr->array.get())
+            && !loopPtrModeDataPtrs_.empty()
+            && expr->array->type == ASTNodeType::IDENTIFIER_EXPR
+            && expr->index->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& arrName =
+            static_cast<IdentifierExpr*>(expr->array.get())->name;
+        const std::string& idxName =
+            static_cast<IdentifierExpr*>(expr->index.get())->name;
+        auto ptrIt = loopPtrModeDataPtrs_.find(arrName);
+        if (ptrIt != loopPtrModeDataPtrs_.end()
+                && idxName == loopPtrModeIterVar_) {
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), ptrIt->second, idxVal, "prl.elem.ptr");
+            auto* elemStore = emitStoreArrayElem(newVal, elemPtr);
+            if (currentLoopAccessGroup_)
+                elemStore->setMetadata(llvm::LLVMContext::MD_access_group,
+                                       currentLoopAccessGroup_);
+            return newVal;
+        }
+    }
 
     // Detect whether the base is a string (raw char* without a length header).
     // Use isStringExpr() as the sole discriminator — pointer type alone is

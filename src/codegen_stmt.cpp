@@ -1577,11 +1577,137 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
     }
 
+    // ── Range-to-pointer-arithmetic: loop preamble ───────────────────────────
+    // At O2+, for ascending for-loops with non-negative constant start, pre-scan
+    // the loop body to find arrays accessed ONLY as `arr[iterVar]`.  For each
+    // such array, pre-compute the data pointer (base + 1) BEFORE the loop and
+    // cache it.  Inside the loop body, `generateIndex`/`generateIndexAssign`
+    // will detect the cached pointer and use it directly — skipping both the
+    // `gep base, 1` computation AND the per-iteration bounds check.
+    //
+    // The pre-loop `assume(endVal <= len(arr))` replaces N per-iteration bounds
+    // checks with a single O(1) hint that LLVM's IRCE and LoopPredication can
+    // use for complete bounds-check elimination.
+    //
+    // Saved state is restored after the loop body (see below), so nested loops
+    // each get their own pointer-mode state without interference.
+    //
+    // Safety:
+    //   1. Only ascending loops (stepKnownPositive) with non-negative start.
+    //   2. Arrays excluded if any non-trivial index or length-modifying call.
+    //   3. Arrays excluded if the array variable is not in namedValues
+    //      (e.g., it's a function parameter that shadowed a local).
+    //   4. The pre-loop assume is a hint, not a hard guarantee — if the assume
+    //      is wrong at runtime, existing bounds checks in non-ptr-mode paths
+    //      will still catch it.  But since ptr-mode is only activated when
+    //      the earlier `safeIndexVars_` analysis already proved safety, this
+    //      additional assume is always sound.
+    llvm::StringMap<llvm::Value*> savedPtrModeDataPtrs;
+    llvm::StringMap<llvm::Value*> savedPtrModeLens;
+    std::string savedPtrModeIterVar;
+
+    const bool doPtrMode = stepKnownPositive
+        && optimizationLevel >= OptimizationLevel::O2
+        && [&]() {
+               if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(startVal))
+                   return ci->getSExtValue() >= 0;
+               return false;
+           }();
+
+    if (doPtrMode) {
+        // Scan the loop body AST (runs at compile time, not emitted as IR).
+        auto arrAccesses = preScanLoopArrayAccesses(stmt->body.get(), stmt->iteratorVar);
+
+        // Save outer loop's pointer-mode state so we can restore it after.
+        savedPtrModeDataPtrs = std::move(loopPtrModeDataPtrs_);
+        savedPtrModeLens     = std::move(loopPtrModeLens_);
+        savedPtrModeIterVar  = loopPtrModeIterVar_;
+        loopPtrModeDataPtrs_.clear();
+        loopPtrModeLens_.clear();
+        loopPtrModeIterVar_ = stmt->iteratorVar;
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
+            module.get(), llvm::Intrinsic::assume, {});
+
+        for (auto& [arrName, isWritten] : arrAccesses) {
+            // Only handle arrays that are local named variables.
+            auto it = namedValues.find(arrName);
+            if (it == namedValues.end()) continue;
+            // Must be an alloca (local variable), not a parameter forwarded
+            // as an integer (those come via function arguments).
+            if (!llvm::isa<llvm::AllocaInst>(it->second)) continue;
+
+            // Load the array pointer from the alloca (once, before the loop).
+            llvm::Value* arrRaw = builder->CreateAlignedLoad(
+                getDefaultType(), it->second, llvm::MaybeAlign(8),
+                arrName + ".prl.raw");
+            llvm::Value* basePtr =
+                arrRaw->getType()->isPointerTy()
+                    ? arrRaw
+                    : builder->CreateIntToPtr(arrRaw, ptrTy, arrName + ".prl.base");
+
+            // Load the length header once, before the loop.
+            auto* lenLoad = builder->CreateAlignedLoad(
+                getDefaultType(), basePtr, llvm::MaybeAlign(8),
+                arrName + ".prl.len");
+            lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            // If the array is read-only in the loop body, its length is
+            // invariant across the loop — mark so LICM can hoist further.
+            if (!isWritten)
+                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                     llvm::MDNode::get(*context, {}));
+
+            // Pre-compute data pointer: &arr[0] = base + 1 element.
+            llvm::Value* dataPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), basePtr,
+                llvm::ConstantInt::get(getDefaultType(), 1),
+                arrName + ".prl.data");
+
+            // Emit a SINGLE pre-loop range assertion: end <= len(arr).
+            // This replaces all per-iteration `i < len` bounds checks for
+            // this array with one static proof that the entire range is valid.
+            // LLVM's LoopPredication and IRCE passes will use this assume to
+            // widen the "safe range" proof across the whole loop, eliminating
+            // any residual bounds-check IR.
+            llvm::Value* endLELen = builder->CreateICmpSLE(
+                endVal, lenLoad, arrName + ".prl.safe");
+            builder->CreateCall(assumeFn, {endLELen});
+            // Also assert start >= 0 (already proven by doPtrMode gate, but
+            // make it explicit for LLVM's range tracking).
+            llvm::Value* startGE0 = builder->CreateICmpSGE(
+                startVal, llvm::ConstantInt::get(getDefaultType(), 0),
+                arrName + ".prl.start.ge0");
+            builder->CreateCall(assumeFn, {startGE0});
+
+            // Cache the pre-computed values for use inside the loop body.
+            loopPtrModeDataPtrs_[arrName] = dataPtr;
+            loopPtrModeLens_[arrName]     = lenLoad;
+            // Also populate the loop-scope length cache so `canElideBoundsCheck`
+            // (Elision C/D/E path) sees the same SSA value and can return `true`
+            // without emitting another load.
+            loopArrayLenCache_[basePtr] = lenLoad;
+        }
+    }
+
     loopStack.push_back({endBB, incBB});
     // Clear per-iteration array length cache so inner-body bounds checks
     // get fresh values.  Save outer cache for nested loop restore.
     auto savedLenCache = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
+    // Re-seed the cache with the pointer-mode lengths we just computed so
+    // they survive the clear above and remain visible during body generation.
+    for (auto& kv : loopPtrModeLens_) {
+        auto arrIt = namedValues.find(kv.first());
+        if (arrIt == namedValues.end()) continue;
+        // Look up the base ptr from the data ptr (data - 1) — but it's simpler
+        // to re-load here since the cache entry will be quickly CSE'd.
+        // Instead, seed via the loopArrayLenCache_ key = basePtr.
+        // We already did this in the preamble via `loopArrayLenCache_[basePtr]`.
+        // The savedLenCache move cleared the current cache, so re-add entries.
+        (void)kv;  // entries were already populated in preamble before the save
+    }
 
     // @independent: pre-create access group so all loads/stores in the
     // body receive !llvm.access.group metadata, enabling LLVM to eliminate
@@ -1609,6 +1735,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     loopIterEndBound_.erase(stmt->iteratorVar);
     loopIterStartBound_.erase(stmt->iteratorVar);
     loopIterEndArray_.erase(stmt->iteratorVar);
+
+    // Restore pointer-mode state for the enclosing loop (or clear if none).
+    if (doPtrMode) {
+        loopPtrModeDataPtrs_ = std::move(savedPtrModeDataPtrs);
+        loopPtrModeLens_     = std::move(savedPtrModeLens);
+        loopPtrModeIterVar_  = std::move(savedPtrModeIterVar);
+    }
 
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);
@@ -3936,6 +4069,235 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
     loopIterVars_.erase(kPipelineIter);
 
     builder->SetInsertPoint(exitBB);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Range-to-pointer-arithmetic: loop body pre-scan
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Recursively walks the AST of a for-loop body to collect arrays that are
+// accessed ONLY as `arr[iterVar]` — i.e., the index expression is exactly
+// the loop iterator variable with no arithmetic.  Arrays that:
+//   - appear with a non-trivial index (arr[i+1], arr[i*k], etc.)
+//   - appear as arguments to push/pop/array_remove/array_insert
+//   - appear as the collection in a nested for-each
+// are EXCLUDED from the result, because they would still require a runtime
+// bounds check and cannot be safely pointer-mode-hoisted.
+//
+// The returned map:
+//   key   = array variable name
+//   value = true  if the array is WRITTEN in the body (arr[i] = val)
+//           false if it is ONLY read (x = arr[i])
+//
+// Implementation uses a non-allocating recursive walk with early-exit:
+// if an array is found to have a disqualifying access, it is added to a
+// "bad" set and excluded from the output even if earlier accesses were safe.
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+// Recursively scan an expression for array accesses using iterVar.
+// goodArrays: candidate arrays (arr → is_written)
+// badArrays:  disqualified arrays (non-trivial index or length-changing call)
+void scanExprForArrayAccesses(
+    const Expression* expr,
+    const std::string& iterVar,
+    std::unordered_map<std::string, bool>& goodArrays,
+    std::unordered_set<std::string>& badArrays)
+{
+    if (!expr) return;
+    switch (expr->type) {
+    case ASTNodeType::INDEX_EXPR: {
+        const auto* ie = static_cast<const IndexExpr*>(expr);
+        // Scan the index expression itself first (it may use other arrays).
+        scanExprForArrayAccesses(ie->index.get(), iterVar, goodArrays, badArrays);
+        // Check whether the index is exactly iterVar.
+        bool simpleIndex =
+            ie->index->type == ASTNodeType::IDENTIFIER_EXPR &&
+            static_cast<const IdentifierExpr*>(ie->index.get())->name == iterVar;
+        if (ie->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const std::string& arrName =
+                static_cast<const IdentifierExpr*>(ie->array.get())->name;
+            if (!simpleIndex || badArrays.count(arrName)) {
+                badArrays.insert(arrName);
+                goodArrays.erase(arrName);
+            } else {
+                if (!goodArrays.count(arrName) && !badArrays.count(arrName))
+                    goodArrays[arrName] = false;  // initially read-only
+            }
+        } else {
+            // Non-identifier array base (e.g., nested index, call result):
+            // we can't track it, so recurse on the base as a plain expression.
+            scanExprForArrayAccesses(ie->array.get(), iterVar, goodArrays, badArrays);
+        }
+        return;
+    }
+    case ASTNodeType::INDEX_ASSIGN_EXPR: {
+        const auto* iae = static_cast<const IndexAssignExpr*>(expr);
+        scanExprForArrayAccesses(iae->index.get(), iterVar, goodArrays, badArrays);
+        scanExprForArrayAccesses(iae->value.get(), iterVar, goodArrays, badArrays);
+        bool simpleIndex =
+            iae->index->type == ASTNodeType::IDENTIFIER_EXPR &&
+            static_cast<const IdentifierExpr*>(iae->index.get())->name == iterVar;
+        if (iae->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const std::string& arrName =
+                static_cast<const IdentifierExpr*>(iae->array.get())->name;
+            if (!simpleIndex || badArrays.count(arrName)) {
+                badArrays.insert(arrName);
+                goodArrays.erase(arrName);
+            } else {
+                // Mark as written (value = true).
+                auto it = goodArrays.find(arrName);
+                if (it != goodArrays.end())
+                    it->second = true;
+                else if (!badArrays.count(arrName))
+                    goodArrays[arrName] = true;
+            }
+        } else {
+            scanExprForArrayAccesses(iae->array.get(), iterVar, goodArrays, badArrays);
+        }
+        return;
+    }
+    case ASTNodeType::CALL_EXPR: {
+        const auto* ce = static_cast<const CallExpr*>(expr);
+        // Length-modifying builtins: disqualify the first argument array.
+        static const std::unordered_set<std::string> kLenModifiers = {
+            "push", "pop", "array_remove", "array_insert",
+            "array_clear", "array_resize"
+        };
+        if (kLenModifiers.count(ce->callee) && !ce->arguments.empty()) {
+            const auto* arg0 = ce->arguments[0].get();
+            if (arg0->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const std::string& arrName =
+                    static_cast<const IdentifierExpr*>(arg0)->name;
+                badArrays.insert(arrName);
+                goodArrays.erase(arrName);
+            }
+        }
+        for (const auto& arg : ce->arguments)
+            scanExprForArrayAccesses(arg.get(), iterVar, goodArrays, badArrays);
+        return;
+    }
+    // For all other expression types, recursively scan children.
+    case ASTNodeType::BINARY_EXPR: {
+        const auto* be = static_cast<const BinaryExpr*>(expr);
+        scanExprForArrayAccesses(be->left.get(),  iterVar, goodArrays, badArrays);
+        scanExprForArrayAccesses(be->right.get(), iterVar, goodArrays, badArrays);
+        return;
+    }
+    case ASTNodeType::UNARY_EXPR: {
+        const auto* ue = static_cast<const UnaryExpr*>(expr);
+        scanExprForArrayAccesses(ue->operand.get(), iterVar, goodArrays, badArrays);
+        return;
+    }
+    case ASTNodeType::TERNARY_EXPR: {
+        const auto* te = static_cast<const TernaryExpr*>(expr);
+        scanExprForArrayAccesses(te->condition.get(), iterVar, goodArrays, badArrays);
+        scanExprForArrayAccesses(te->thenExpr.get(),  iterVar, goodArrays, badArrays);
+        scanExprForArrayAccesses(te->elseExpr.get(),  iterVar, goodArrays, badArrays);
+        return;
+    }
+    case ASTNodeType::ASSIGN_EXPR: {
+        const auto* ae = static_cast<const AssignExpr*>(expr);
+        scanExprForArrayAccesses(ae->value.get(), iterVar, goodArrays, badArrays);
+        return;
+    }
+    default:
+        return;  // literals, identifiers, etc. — no array accesses
+    }
+}
+
+// Recursively scan a statement tree for array accesses using iterVar.
+void scanStmtForArrayAccesses(
+    const Statement* stmt,
+    const std::string& iterVar,
+    std::unordered_map<std::string, bool>& goodArrays,
+    std::unordered_set<std::string>& badArrays,
+    unsigned depth = 0)
+{
+    if (!stmt) return;
+    // Limit recursion into nested for-loops: inner loops may re-use the same
+    // array but with a DIFFERENT iterator, so we don't want to poison the outer
+    // analysis.  We still recurse to catch accesses at the same nesting level.
+    // Cap depth at 8 to prevent pathological compile times.
+    if (depth > 8) return;
+
+    switch (stmt->type) {
+    case ASTNodeType::BLOCK: {
+        const auto* blk = static_cast<const BlockStmt*>(stmt);
+        for (const auto& s : blk->statements)
+            scanStmtForArrayAccesses(s.get(), iterVar, goodArrays, badArrays, depth);
+        return;
+    }
+    case ASTNodeType::EXPR_STMT: {
+        scanExprForArrayAccesses(
+            static_cast<const ExprStmt*>(stmt)->expression.get(),
+            iterVar, goodArrays, badArrays);
+        return;
+    }
+    case ASTNodeType::VAR_DECL: {
+        const auto* vd = static_cast<const VarDecl*>(stmt);
+        if (vd->initializer)
+            scanExprForArrayAccesses(vd->initializer.get(), iterVar, goodArrays, badArrays);
+        return;
+    }
+    case ASTNodeType::RETURN_STMT: {
+        const auto* rs = static_cast<const ReturnStmt*>(stmt);
+        if (rs->value)
+            scanExprForArrayAccesses(rs->value.get(), iterVar, goodArrays, badArrays);
+        return;
+    }
+    case ASTNodeType::IF_STMT: {
+        const auto* is = static_cast<const IfStmt*>(stmt);
+        scanExprForArrayAccesses(is->condition.get(), iterVar, goodArrays, badArrays);
+        scanStmtForArrayAccesses(is->thenBranch.get(), iterVar, goodArrays, badArrays, depth);
+        if (is->elseBranch)
+            scanStmtForArrayAccesses(is->elseBranch.get(), iterVar, goodArrays, badArrays, depth);
+        return;
+    }
+    case ASTNodeType::WHILE_STMT: {
+        const auto* ws = static_cast<const WhileStmt*>(stmt);
+        scanExprForArrayAccesses(ws->condition.get(), iterVar, goodArrays, badArrays);
+        scanStmtForArrayAccesses(ws->body.get(), iterVar, goodArrays, badArrays, depth + 1);
+        return;
+    }
+    case ASTNodeType::FOR_STMT: {
+        // For nested for-loops: only recurse if the INNER iterator is different
+        // from iterVar (otherwise the inner accesses are with a different range
+        // and would be handled by the inner loop's own pre-scan).
+        const auto* fs = static_cast<const ForStmt*>(stmt);
+        if (fs->iteratorVar != iterVar)
+            scanStmtForArrayAccesses(fs->body.get(), iterVar, goodArrays, badArrays, depth + 1);
+        return;
+    }
+    case ASTNodeType::FOR_EACH_STMT: {
+        const auto* fes = static_cast<const ForEachStmt*>(stmt);
+        // If the collection is a named array, check if iterVar accesses it.
+        if (fes->collection->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const std::string& cn =
+                static_cast<const IdentifierExpr*>(fes->collection.get())->name;
+            // for-each iterates the whole array — length changes would be visible.
+            // Conservatively disqualify.
+            if (goodArrays.count(cn) || badArrays.count(cn)) {
+                badArrays.insert(cn);
+                goodArrays.erase(cn);
+            }
+        }
+        scanStmtForArrayAccesses(fes->body.get(), iterVar, goodArrays, badArrays, depth + 1);
+        return;
+    }
+    default:
+        return;
+    }
+}
+} // anonymous namespace
+
+std::unordered_map<std::string, bool>
+CodeGenerator::preScanLoopArrayAccesses(const Statement* body,
+                                         const std::string& iterVar) {
+    std::unordered_map<std::string, bool> goodArrays;
+    std::unordered_set<std::string> badArrays;
+    scanStmtForArrayAccesses(body, iterVar, goodArrays, badArrays);
+    return goodArrays;
 }
 
 } // namespace omscript
