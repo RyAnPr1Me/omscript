@@ -3031,6 +3031,10 @@ void CodeGenerator::runOptimizationPasses() {
             }
             CloseFPM.addPass(llvm::IRCEPass());
             CloseFPM.addPass(llvm::ConstraintEliminationPass());
+            // Phase 3b: late loop unrolling.  After superoptimizer + HGOE,
+            // loop bounds may have been folded to small constants.
+            // Re-running LoopUnroll here catches these late opportunities.
+            CloseFPM.addPass(llvm::LoopUnrollPass(llvm::LoopUnrollOptions()));
             // Phase 4: strength reduction + final peephole.
             CloseFPM.addPass(llvm::InstCombinePass());
             // RPAR: rebalance linear associative chains into O(log n) depth
