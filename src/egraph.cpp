@@ -816,6 +816,11 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     // In a DAG (no cycles), this single pass is sufficient: every child is
     // resolved before its parent is visited.  For cyclic e-graphs the follow-up
     // passes (section 4) handle residual unresolved classes.
+    //
+    // This first pass selects on PURE LATENCY cost only.  The
+    // pressure-aware refinement (section 6) needs the initial selection
+    // to estimate which children are shared (parentCount > 1) before it
+    // can compute Sethi-Ullman register pressure.
     auto tryUpdate = [&](ClassId cls) {
         for (const auto& node : classes_[cls].nodes) {
             Cost total = model.nodeCost(node);
@@ -835,7 +840,7 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
             bool better = (it == best.end())
                        || (total < it->second.cost)
                        || (total == it->second.cost && depth < it->second.depth);
-            if (better) best[cls] = {total, node, depth};
+            if (better) best[cls] = {total, total, node, depth, 1u};
         }
     };
 
@@ -893,10 +898,163 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
             if (!feasible) continue;
             if (total < bestIt->second.cost) {
                 bestIt->second.cost = total;
+                bestIt->second.effCost = total; // refreshed below by section 6
                 dagChanged = true;
             }
         }
         if (!dagChanged) break;
+    }
+
+    // ── 6. Register-pressure-aware selection refinement ─────────────────────
+    //
+    // The latency-only extraction above can pick a deep, narrow expression
+    // (e.g. a long chain of dependent fused-multiply-adds) whose evaluation
+    // forces many simultaneous live values and provokes register spills.
+    // On a register-tight target a shorter, equivalent expression — even
+    // one with slightly higher latency — is cheaper end-to-end because it
+    // avoids the spill traffic.
+    //
+    // We compute Sethi-Ullman register pressure for the currently-selected
+    // node of each e-class (taking the DAG sharing pattern into account so
+    // a value used by multiple parents is counted as 1 register that lives
+    // across the whole expression rather than a fresh evaluation per use).
+    // We then re-evaluate every alternative node in each e-class against
+    // an effective cost
+    //
+    //     effCost(node) = sum_children effCost + nodeCost(node)
+    //                   + spillPenalty * max(0, regPressure - regBudget)
+    //
+    // and switch the selection if a different node minimises effCost.
+    // Because changing one selection can change which children are shared,
+    // we iterate a small number of times (3) until the selection set is
+    // stable; in practice 1–2 rounds are enough.
+    //
+    // When the host CostModel disables pressure-awareness by setting
+    // `regBudget == 0` or `spillPenalty == 0`, this entire block reduces
+    // to a no-op refresh of effCost and the selections are left untouched
+    // — preserving the historical pure-latency behaviour exactly.
+    const Cost spillPenalty = model.spillPenalty;
+    const unsigned regBudget = model.regBudget;
+    const bool pressureAware = (regBudget > 0) && (spillPenalty > 0.0);
+
+    auto recomputePressure = [&](const ENode& node,
+                                 std::vector<unsigned>& siblingPress,
+                                 unsigned& sharedCount) {
+        siblingPress.clear();
+        sharedCount = 0;
+        for (auto child : node.children) {
+            child = find(child);
+            auto cit = best.find(child);
+            unsigned p = (cit == best.end()) ? 1u : cit->second.regPressure;
+            unsigned parents = parentCount.count(child) ? parentCount[child] : 1;
+            if (parents > 1) {
+                // Shared child: result computed once, holds 1 register
+                // across the whole expression — does not contribute to
+                // the per-sibling holding cost.
+                ++sharedCount;
+            } else {
+                siblingPress.push_back(p);
+            }
+        }
+        // Sethi-Ullman: evaluate the highest-pressure unshared child
+        // first, holding +1 register per already-evaluated sibling.
+        std::sort(siblingPress.begin(), siblingPress.end(), std::greater<unsigned>());
+        unsigned maxP = 1; // a value of at least 1 register for the result
+        for (size_t i = 0; i < siblingPress.size(); ++i) {
+            unsigned p = siblingPress[i] + static_cast<unsigned>(i);
+            if (p > maxP) maxP = p;
+        }
+        return sharedCount + maxP;
+    };
+
+    {
+        // Initial pressure pass over the latency-best selections.
+        std::vector<unsigned> siblingPress;
+        unsigned sharedCount = 0;
+        for (ClassId cls : topoOrder) {
+            auto it = best.find(cls);
+            if (it == best.end()) continue;
+            unsigned p = recomputePressure(it->second.bestNode, siblingPress, sharedCount);
+            it->second.regPressure = p;
+            unsigned excess = (p > regBudget) ? (p - regBudget) : 0u;
+            it->second.effCost = it->second.cost
+                               + (pressureAware ? spillPenalty * static_cast<Cost>(excess) : 0.0);
+        }
+    }
+
+    if (pressureAware) {
+        // Selection refinement: try alternative nodes in each e-class and
+        // switch when one yields a lower effCost.  Iterate until stable.
+        std::vector<unsigned> siblingPress;
+        unsigned sharedCount = 0;
+        for (int refineIter = 0; refineIter < 3; ++refineIter) {
+            bool selectionChanged = false;
+
+            for (ClassId cls : topoOrder) {
+                auto curIt = best.find(cls);
+                if (curIt == best.end()) continue;
+
+                // Evaluate every node in this e-class (not just the
+                // currently-selected one) under the current sharing
+                // pattern; pick the lowest-effCost option.
+                ExtractionResult bestAlt = curIt->second;
+                bool foundBetter = false;
+
+                for (const auto& node : classes_[cls].nodes) {
+                    Cost latencyCost = model.nodeCost(node);
+                    unsigned depth = 0;
+                    bool feasible = true;
+                    for (auto child : node.children) {
+                        child = find(child);
+                        auto cit = best.find(child);
+                        if (cit == best.end()) { feasible = false; break; }
+                        Cost childCost = cit->second.cost;
+                        unsigned parents = parentCount.count(child) ? parentCount[child] : 1;
+                        if (parents > 1)
+                            childCost = childCost / static_cast<Cost>(parents);
+                        latencyCost += childCost;
+                        depth = std::max(depth, cit->second.depth + 1u);
+                    }
+                    if (!feasible && !node.children.empty()) continue;
+
+                    unsigned p = recomputePressure(node, siblingPress, sharedCount);
+                    unsigned excess = (p > regBudget) ? (p - regBudget) : 0u;
+                    Cost effCost = latencyCost + spillPenalty * static_cast<Cost>(excess);
+
+                    bool better = (effCost < bestAlt.effCost)
+                               || (effCost == bestAlt.effCost && latencyCost < bestAlt.cost)
+                               || (effCost == bestAlt.effCost && latencyCost == bestAlt.cost
+                                   && depth < bestAlt.depth);
+                    if (better) {
+                        bestAlt = {latencyCost, effCost, node, depth, p};
+                        foundBetter = true;
+                    }
+                }
+
+                if (foundBetter
+                    && !(bestAlt.bestNode == curIt->second.bestNode)) {
+                    curIt->second = bestAlt;
+                    selectionChanged = true;
+                } else if (foundBetter) {
+                    // Same node, but updated cost/pressure metadata.
+                    curIt->second = bestAlt;
+                }
+            }
+
+            if (!selectionChanged) break;
+
+            // Re-derive parentCount under the new selection — sharing may
+            // have shifted as different nodes were chosen.
+            parentCount.clear();
+            for (ClassId cls : reachableVec) {
+                auto it = best.find(cls);
+                if (it == best.end()) continue;
+                for (auto child : it->second.bestNode.children) {
+                    child = find(child);
+                    parentCount[child]++;
+                }
+            }
+        }
     }
 
     return best;

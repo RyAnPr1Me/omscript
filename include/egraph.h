@@ -275,10 +275,42 @@ static constexpr Cost INFINITE_COST = 1e18;
 
 /// Cost model that considers instruction latency, memory access, and
 /// instruction-level parallelism for x86-64 targets.
+///
+/// In addition to per-node latency, the model carries the **register
+/// budget** (number of architectural GPRs available to hold simultaneous
+/// live values) and the **spill penalty** (added cost per excess live
+/// value beyond the budget).  These two parameters drive the
+/// register-pressure-aware extraction pass: when an extracted DAG would
+/// exceed the budget, the extractor pays a spill penalty per excess
+/// register and may flip the selection toward a node that produces an
+/// equivalent value with a shallower (lower-pressure) sub-tree.
+///
+/// Defaults model a generic x86-64 host:
+///   - 13 callee-clobbered + caller-saved GPRs available to a leaf
+///     function (16 architectural - RSP - RBP - 1 frame/scratch reserve).
+///   - 5 cycles per spill (conservative L1 round-trip for a stack slot
+///     reload).
+///
+/// HGOE may construct a `CostModel` with target-specific values from a
+/// resolved `MicroarchProfile` (e.g. AArch64 has 31 GPRs → regBudget=27,
+/// in-order Cortex-A55 has higher spill cost ~8, etc.).
 struct CostModel {
     /// Returns the cost of a single e-node, not counting children.
     /// The extraction algorithm adds children costs to get total cost.
     Cost nodeCost(const ENode& node) const;
+
+    /// Number of architectural registers the extractor may assume are
+    /// available to hold simultaneously-live values.  When the
+    /// pressure of a candidate sub-DAG exceeds this, each excess
+    /// live value costs `spillPenalty` cycles.  Set to 0 to disable
+    /// register-pressure-aware extraction (the extractor then uses
+    /// pure latency cost, matching the historical behaviour).
+    unsigned regBudget = 13;
+
+    /// Cost added per excess simultaneously-live value beyond
+    /// `regBudget`.  Models a stack-slot spill+reload round-trip.
+    /// A value of 0 disables the pressure penalty.
+    Cost spillPenalty = 5.0;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -455,12 +487,36 @@ private:
     void foldConstants(ClassId cls);
 
     /// Internal: extract helper returning cost + best node per class.
+    ///
+    /// The extractor selects, for each e-class, the e-node that minimises
+    /// the **effective cost** — a linear combination of latency cost and
+    /// spill penalty derived from estimated register pressure.  When the
+    /// host cost model has `spillPenalty == 0` or `regBudget == 0`, the
+    /// pressure terms drop out and selection is purely latency-driven.
     struct ExtractionResult {
-        Cost cost;
+        Cost cost;          ///< Pure latency cost (sum of node + children costs,
+                            ///< with DAG-sharing discount applied).
+        Cost effCost = 0;   ///< Effective cost = cost + spillPenalty *
+                            ///< max(0, regPressure - regBudget).  This is
+                            ///< the metric the selection refinement
+                            ///< minimises after the initial latency-only
+                            ///< extraction has produced an estimate of
+                            ///< parent counts (= sharing structure).
         ENode bestNode;
-        unsigned depth = 0; ///< Critical-path depth (0 = leaf). Used as tie-breaker:
-                             ///< when two options have equal cost, prefer the shallower
-                             ///< one to reduce register pressure and expose more ILP.
+        unsigned depth = 0; ///< Critical-path depth (0 = leaf).  Used as a
+                            ///< secondary tie-breaker after effCost/cost.
+        unsigned regPressure = 1; ///< Sethi-Ullman simultaneous-live-value
+                            ///< estimate for evaluating this sub-DAG.  For
+                            ///< a leaf this is 1; for an internal node
+                            ///< with k unshared children sorted by
+                            ///< descending pressure p_i, it is
+                            ///< sharedCount + max_i (p_i + i - 1), capturing
+                            ///< the registers held for already-evaluated
+                            ///< siblings while later siblings are computed.
+                            ///< Shared children (parentCount > 1 in the
+                            ///< extracted DAG) contribute exactly one
+                            ///< register each because their result is
+                            ///< computed once and reused.
     };
     std::unordered_map<ClassId, ExtractionResult>
     extractAll(ClassId root, const CostModel& model);
