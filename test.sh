@@ -63,7 +63,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=61
+NUM_BENCHMARKS=85
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -128,6 +128,30 @@ BENCH_NAME=(
     "unless_until"       # 59 — unless / until control-flow sugar
     "triangular_sum"     # 60 — sum 0+1+2+…+(n-1) closed-form idiom
     "chain_hash_rol"     # 61 — chained rotate-left hash (near-pow2 multiply)
+    "comptime_table"     # 62 — comptime {} CRC32 lookup table
+    "enum_dispatch"      # 63 — enum + when 4-state machine
+    "loop_fuse"          # 64 — @loop(fuse=true) adjacent loop fusion
+    "parallel_reduce"    # 65 — parallel for elementwise transform
+    "str_interp"         # 66 — $"..." string interpolation vs snprintf
+    "type_casts"         # 67 — i32/u8/u16 integer type-cast chain
+    "repeat_acc"         # 68 — repeat(N) loop form
+    "guard_filter"       # 69 — guard else { continue } filter
+    "null_coalesce"      # 70 — ?? operator with array default lookup
+    "bytes_crc"          # 71 — 0x"..." bytes literal CRC
+    "chained_cmp"        # 72 — chained comparisons lo <= x < hi
+    "defer_scope"        # 73 — defer statement for cleanup
+    "generic_clamp"      # 74 — generic function clamp<T>
+    "foreach_str"        # 75 — for (c in string) char iteration
+    "ownership"          # 76 — move / freeze / reborrow ownership forms
+    "loop_tile"          # 77 — @loop(tile=N) 2D loop cache-blocking tiling
+    "preprocessor"       # 78 — #define parametric macros
+    "forever_loop"       # 79 — forever {} / loop {} infinite loops with break
+    "register_hint"      # 80 — register var hint vs plain var
+    "assume_hint"        # 81 — assume(cond) compiler hint for bounds elision
+    "explicit_unroll"    # 82 — @loop(unroll=8) explicit unroll factor
+    "with_scope"         # 83 — with (var x = expr) scoped binding
+    "error_hotpath"      # 84 — throw/catch with non-throwing hot path
+    "trig_math"          # 85 — sin/cos/floor/ceil/round builtins
 )
 
 BENCH_DESC=(
@@ -193,6 +217,30 @@ BENCH_DESC=(
     "unless/until control-flow: unless skip + until countdown, N iterations"
     "triangular sum 0..n-1: tests closed-form loop idiom recognition"
     "chained rotate-left hash: tests near-power-of-2 multiply strength reduction"
+    "comptime{} CRC32 table: 256-entry polynomial table built entirely at compile time"
+    "enum + when dispatch: 4-state machine with enum constants, when case arms"
+    "@loop(fuse=true): two adjacent loops fused into one body by the compiler"
+    "parallel for elementwise transform: parallel keyword + @loop(independent=true)"
+    "String interpolation $\"{k}{v}\": vs C snprintf two-integer format"
+    "i32/u8/u16 cast chain: narrow-width integer type-cast dispatch in a tight loop"
+    "repeat(N) loop: counted loop form vs for-in; tests repeat codegen vs for codegen"
+    "guard else { continue }: early-continue guard pattern vs C if(!cond) continue"
+    "?? null coalescing: zero-coalesce array lookup with default vs C ternary"
+    "0x\"..\" bytes literal: 16-byte hex literal seed → CRC polynomial loop"
+    "Chained comparison lo<=x<hi: two-sided range filter vs explicit && chain in C"
+    "defer invalidate: deferred cleanup annotation vs C explicit malloc/free per iter"
+    "Generic clamp<T>: type-parameterized min/max clamp vs C typed inline helpers"
+    "foreach (c in string): char classification over 53-char string, N outer iters"
+    "move/freeze/reborrow: ownership-annotated hot loop; tests noalias+dereferenceable attrs"
+    "@loop(tile=32) 2D column-sum: explicit cache-blocking tiling annotation vs C manual tile"
+    "#define parametric macro SQUARE/MAX: macro-expanded vs inlined C #define"
+    "forever{}/loop{}: infinite-loop-with-break vs C for(;;); tests desugaring overhead"
+    "register var hint: register acc in tight loop; tests mem2reg promotion quality"
+    "assume(n>0): lower-bound assumption enables tighter bounds elision in the inner loop"
+    "@loop(unroll=8): explicit 8-way unroll annotation vs compiler-default unrolling"
+    "with (var buf=array_fill(N,0)) scoped allocation: tests zero-overhead scoped binding"
+    "throw/catch hot path: tight loop where throw never fires; zero-cost exception overhead"
+    "sin/cos/floor/ceil/round: trig + rounding builtins vs C math.h equivalents"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -259,6 +307,30 @@ BENCH_N=(
     10000000  # 59  unless_until
     50000000  # 60  triangular_sum
     10000000  # 61  chain_hash_rol
+    10000000  # 62  comptime_table
+    10000000  # 63  enum_dispatch
+     2000000  # 64  loop_fuse
+     5000000  # 65  parallel_reduce
+      500000  # 66  str_interp
+    10000000  # 67  type_casts
+    10000000  # 68  repeat_acc
+    10000000  # 69  guard_filter
+    10000000  # 70  null_coalesce
+     5000000  # 71  bytes_crc
+    10000000  # 72  chained_cmp
+     2000000  # 73  defer_scope
+     5000000  # 74  generic_clamp
+      200000  # 75  foreach_str
+    10000000  # 76  ownership
+     1000000  # 77  loop_tile   (1000*1000 tile-loop)
+    10000000  # 78  preprocessor
+    10000000  # 79  forever_loop
+    10000000  # 80  register_hint
+    10000000  # 81  assume_hint
+    10000000  # 82  explicit_unroll
+     5000000  # 83  with_scope
+    10000000  # 84  error_hotpath
+     2000000  # 85  trig_math
 )
 
 BOTTLENECK_LABELS=(
@@ -324,6 +396,30 @@ BOTTLENECK_LABELS=(
     "unless/until sugar: same codegen as if(!cond)/while(!cond) with no overhead"
     "triangular sum: loop sum 0..N-1 closed-form → n*(n-1)/2 (superopt idiom)"
     "chain_hash_rol: near-pow2 multiplies in hash chain → shift+add/sub strength reduction"
+    "comptime{} table: CF-CTRE fully evaluates loop at compile time → zero runtime table-build cost"
+    "enum+when: jump-table vs branch-tree; enum constant propagation quality"
+    "@loop(fuse=true): loop fusion reduces memory traffic vs two separate pass loops"
+    "parallel for: @loop(independent=true) enables wider SIMD vectorization width"
+    "str_interp: $\"{expr}\" allocation overhead vs snprintf stack buffer"
+    "i32/u8/u16 casts: narrow-width truncation + zero-extension codegen quality"
+    "repeat(N): counted loop codegen quality (branch vs cmp vs dec-jnz) vs for-in"
+    "guard else {continue}: branch-to-predicate conversion; guard elision when provably true"
+    "?? coalescing: select(x!=0,x,y) → cmov strength; zero-check elimination"
+    "bytes literal CRC: known-constant seed polynomial fold; CRC bit-loop codegen"
+    "chained comparison: desugar to (lo<=x)&&(x<hi) → single range compare LLVM idiom"
+    "defer invalidate: zero runtime cost; tests that defer does not inhibit optimizations"
+    "generic clamp<T>: specialization per type; monomorphized vs C typed helper quality"
+    "for-in over string: strlen-driven iteration vs char-pointer loop; LLVM strlen fold"
+    "move/freeze/reborrow: noalias+dereferenceable attributes → alias-free load/store chains"
+    "@loop(tile=32): tiled inner loop improves L1 cache reuse vs two nested loops"
+    "#define macros: macro expansion at parse time; no extra IR overhead vs C preprocessor"
+    "forever/loop desugaring: identical branch target to while(1)/for(;;) with no overhead"
+    "register var: mem2reg phi-node form vs alloca form; eliminates load/store IR roundtrips"
+    "assume(cond): emits llvm.assume; SCEV widens induction range for vectorizer"
+    "@loop(unroll=8): forces 8-way unrolled loop body; better ILP than compiler-default"
+    "with scoped binding: zero runtime cost; tests that scoped alloc does not inhibit opts"
+    "throw/catch hot path: zero-cost exception overhead on non-throwing path"
+    "sin/cos/floor/ceil/round: LLVM intrinsic lowering quality vs libc math.h calls"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -1673,6 +1769,544 @@ fn bench_chainhashrol(@prefetch n:int) -> int {
     return (h1 ^ h2) & 0x7FFFFFFF;
 }
 
+
+// ── 62. comptime_table ───────────────────────────────────────
+// A CRC32-style lookup table built entirely inside a comptime {} block.
+// CF-CTRE evaluates the 256-entry nested loop at compile time, embedding
+// the result as a global constant — zero runtime table-construction cost.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
+@hot @flatten @unroll @vectorize @static @nounwind @const_eval
+fn bench_comptime(@prefetch n:int) -> int {
+    const CRC_TABLE:int[] = comptime {
+        var t:int[] = array_fill(256, 0);
+        for (i:int in 0...256) {
+            var r:int = i;
+            for (j:int in 0...8) {
+                if ((r & 1) != 0) { r = (r >>> 1) ^ 0xEDB88320; }
+                else { r = r >>> 1; }
+            }
+            t[i] = r;
+        }
+        return t;
+    };
+    var crc:int = 0xFFFFFFFF;
+    for (i:int in 0...n) {
+        var byte:int = i & 0xFF;
+        crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xFF];
+    }
+    invalidate n;
+    return crc ^ 0xFFFFFFFF;
+}
+
+// ── 63. enum_dispatch ────────────────────────────────────────
+// 4-state enum machine; each iteration dispatches on the current state
+// via a when statement using enum constants.  Tests enum constant
+// propagation (State_IDLE == 0, State_RUN == 1, etc.) and jump-table
+// vs branch-tree codegen quality for when with enum arms.
+enum BenchState { IDLE, RUN, WAIT, DONE }
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @static @nounwind
+fn bench_enum_dispatch(@prefetch n:int) -> int {
+    var acc:int = 0;
+    var state:int = BenchState_IDLE;
+    for (i:int in 0...n) {
+        when (state) {
+            BenchState_IDLE => { acc += i;    state = BenchState_RUN; }
+            BenchState_RUN  => { acc ^= i;    state = (i % 3 == 0) ? BenchState_WAIT : BenchState_RUN; }
+            BenchState_WAIT => { acc -= 1;    state = BenchState_DONE; }
+            _               => { acc += 2;    state = BenchState_IDLE; }
+        }
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 64. loop_fuse ────────────────────────────────────────────
+// Two adjacent @loop(fuse=true) loops over the same range are merged
+// by the compiler into a single pass.  The fused form has better cache
+// locality than two separate passes over n elements.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
+@hot @vectorize @flatten @static @nounwind
+fn bench_loopfuse(@prefetch n:int) -> int {
+    var a:int[] = array_fill(n, 0);
+    var b:int[] = array_fill(n, 0);
+    for (i:int in 0...n) @loop(fuse=true) {
+        a[i] = (i * 3 + 1) % 1000;
+    }
+    for (i:int in 0...n) @loop(fuse=true) {
+        b[i] = (i * 7 + 2) % 1000;
+    }
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        sum += a[i] + b[i];
+    }
+    invalidate a; invalidate b; invalidate n;
+    return sum;
+}
+
+// ── 65. parallel_reduce ──────────────────────────────────────
+// Elementwise src[i]*src[i]+src[i] stored into dst[i], each iteration
+// independent.  The `parallel` keyword asserts independence and emits
+// llvm.loop.parallel_accesses metadata, enabling wider SIMD than the
+// auto-vectorizer would choose without the hint.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
+@hot @flatten @vectorize @unroll @static @nounwind
+fn bench_parallel(@prefetch n:int) -> int {
+    var src:int[] = array_fill(n, 0);
+    var dst:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        src[i] = (i * 7 + 3) % 10000;
+    }
+    parallel for (i:int in 0...n) {
+        dst[i] = src[i] * src[i] + src[i];
+    }
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        sum += dst[i];
+    }
+    invalidate src; invalidate dst; invalidate n;
+    return sum;
+}
+
+// ── 66. str_interp ───────────────────────────────────────────
+// String interpolation $"k{k}v{v}" builds a short key string each
+// iteration.  Tests snprintf-style allocation overhead and whether the
+// compiler can fold the known-format constant-length prefix.
+@optmax(safety=relaxed)
+@hot @flatten @static @nounwind
+fn bench_strinterp(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        var s:string = $"k{i % 1000}v{i % 997}";
+        acc += str_len(s);
+        invalidate s;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 67. type_casts ───────────────────────────────────────────
+// Narrow integer type-cast chain: i32(x), u8(x), u16(x) applied to
+// a loop counter.  Tests the OM integer type-cast dispatch (type-namespace
+// cast functions) and LLVM truncation + zero-extension codegen quality.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @vectorize @static @nounwind
+fn bench_typecasts(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        var x:i32 = i32(i);
+        var y:u8  = u8(i >> 4);
+        var z:u16 = u16(i >> 2);
+        acc += x + y + z;
+        acc = acc & 0x7FFFFFFF;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 68. repeat_acc ───────────────────────────────────────────
+// Counted accumulator loop using the `repeat(N)` keyword.
+// Tests that repeat generates equivalent code to for-in (same
+// trip count, same induction variable, no extra overhead).
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @static @nounwind
+fn bench_repeat(@prefetch n:int) -> int {
+    var acc:int = 0;
+    var i:int = 0;
+    repeat (n) {
+        acc = (acc * 3 + i) % 1000000007;
+        i += 1;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 69. guard_filter ─────────────────────────────────────────
+// `guard (cond) else { continue; }` early-continue filter loop.
+// Tests that guard desugars to the same IR as `if (!cond) continue;`
+// and that the branch-to-predicate pass can vectorize the surviving
+// accumulation.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @pure @static @nounwind
+fn bench_guard(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        guard (i % 3 != 0) else { continue; }
+        guard (i % 5 != 0) else { continue; }
+        acc += i;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 70. null_coalesce ────────────────────────────────────────
+// `arr[idx] ?? (idx + 1)` — returns the array value if non-zero,
+// otherwise the fallback.  Tests select(x!=0, x, y) → cmov strength
+// reduction and zero-check elimination when value is provably non-zero.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
+@hot @flatten @unroll @vectorize @static @nounwind
+fn bench_nullcoalesce(@prefetch n:int) -> int {
+    var arr:int[] = array_fill(1000, 0);
+    for (i:int in 0...1000) {
+        arr[i] = (i % 7 == 0) ? 0 : (i * 3 % 997 + 1);
+    }
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        var idx:int = i % 1000;
+        acc += arr[idx] ?? (idx + 1);
+    }
+    invalidate arr; invalidate n;
+    return acc;
+}
+
+// ── 71. bytes_crc ────────────────────────────────────────────
+// A 16-byte hex bytes literal seeds the CRC polynomial; the loop
+// processes each byte with a bit-by-bit CRC.  Tests that 0x"..."
+// literals are folded to compile-time constant arrays and that the
+// byte-loop accesses the known-constant data without runtime overhead.
+@optmax(aggressive_vec=true, memory={noalias=true}, safety=relaxed)
+@hot @flatten @unroll @static @nounwind
+fn bench_bytescrc(@prefetch n:int) -> int {
+    var data:int[] = 0x"DEADBEEFCAFEBABE0102030405060708";
+    var dlen:int = len(data);
+    var poly:int = 0xEDB88320;
+    var crc:int = 0xFFFFFFFF;
+    for (i:int in 0...n) {
+        var byte:int = data[i % dlen];
+        crc ^= byte;
+        for (j:int in 0...8) {
+            if ((crc & 1) != 0) { crc = (crc >>> 1) ^ poly; }
+            else { crc = crc >>> 1; }
+        }
+    }
+    invalidate n;
+    return crc ^ 0xFFFFFFFF;
+}
+
+// ── 72. chained_cmp ──────────────────────────────────────────
+// Chained comparison `LO <= x < HI` and `0 < x < 100` desugars to
+// `(LO <= x) && (x < HI)` — tests that the compiler recognises the
+// LLVM range-check idiom and elides a branch.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @pure @vectorize @static @nounwind
+fn bench_chainedcmp(@prefetch n:int) -> int {
+    var acc:int = 0;
+    var LO:int = n / 4;
+    var HI:int = 3 * n / 4;
+    for (i:int in 0...n) {
+        var x:int = (i * 7 + 13) % n;
+        if (LO <= x < HI) { acc += x; }
+        if (0 < x < 100)  { acc ^= x; }
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 73. defer_scope ──────────────────────────────────────────
+// Each iteration allocates a 64-element scratch buffer and uses
+// `defer invalidate buf;` for cleanup.  The defer fires at the end
+// of the enclosing block.  Tests that defer generates zero extra
+// overhead vs an explicit invalidate after use.
+@hot @inline @static @nounwind
+fn process_chunk_om(data:int[], size:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...size) {
+        sum += data[i];
+    }
+    return sum;
+}
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true}, safety=relaxed)
+@hot @flatten @static @nounwind
+fn bench_defer(@prefetch n:int) -> int {
+    const CHUNK:int = 64;
+    var acc:int = 0;
+    var iters:int = n / CHUNK;
+    for (k:int in 0...iters) {
+        var buf:int[] = array_fill(CHUNK, 0);
+        defer invalidate buf;
+        for (j:int in 0...CHUNK) {
+            buf[j] = (j * k + j * 3 + 1) % 997;
+        }
+        acc += process_chunk_om(buf, CHUNK);
+        acc = acc % 1000000007;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 74. generic_clamp ────────────────────────────────────────
+// Type-parameterized clamp<T> applied to both int and float values.
+// Tests OM generic function monomorphization: one source definition
+// produces two specializations (int and double) — both should be
+// as efficient as hand-written typed C inline helpers.
+@hot @inline @static @nounwind @pure
+fn clamp_val<T>(x: T, lo: T, hi: T) -> T {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @static @nounwind
+fn bench_generics(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        var x:int = (i * 7 + 3) % 2000 - 1000;
+        acc += clamp_val(x, -500, 500);
+        var fx:double = to_float(i) * 0.001 - 0.5;
+        acc += to_int(clamp_val(fx, -0.3, 0.3) * 1000.0);
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 75. foreach_str ──────────────────────────────────────────
+// `for (c in s)` iterates over the character codes of a string.
+// Each outer iteration classifies each of the 53 characters.
+// Tests strlen-driven loop bound and per-byte character access
+// quality vs a C char-pointer loop.
+@optmax(aggressive_vec=true, safety=relaxed)
+@hot @flatten @static @nounwind
+fn bench_foreach_str(@prefetch n:int) -> int {
+    var s:string = "Hello, OmScript! ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        for (c:int in s) {
+            if (c >= 65 && c <= 90)   { acc += 1; }
+            elif (c >= 97 && c <= 122) { acc += 2; }
+            else                       { acc += c & 1; }
+        }
+    }
+    invalidate n;
+    return acc;
+}
+
+
+// ── 76. ownership ────────────────────────────────────────────
+// Demonstrates move / freeze / reborrow ownership forms in a
+// hot computational loop.  `freeze arr` makes `arr` immutable and
+// emits `dereferenceable(N)` + `noalias` on all subsequent loads.
+// `borrow arr` asserts the view does not alias any other live pointer.
+// `reborrow view` takes a temporary alias-free view for the reduction.
+// The ownership annotations allow the vectorizer to generate wider
+// SIMD loads without runtime alias checks.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
+@hot @flatten @vectorize @unroll @static @nounwind
+fn bench_ownership(@prefetch n:int) -> int {
+    var arr:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        arr[i] = (i * 7 + 3) % 10000;
+    }
+    freeze arr;
+    borrow arr;
+    reborrow var view:int[] = arr;
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        sum += view[i];
+    }
+    move arr;
+    invalidate n;
+    return sum;
+}
+
+// ── 77. loop_tile ────────────────────────────────────────────
+// 2D column-sum loop with @loop(tile=32) cache-blocking hint.
+// The outer loop over columns (j) is tiled into 32-column strips
+// so that each strip's data fits in L1.  Tests that the tiling
+// annotation reduces memory pressure vs a plain nested loop.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
+@hot @flatten @vectorize @static @nounwind
+fn bench_looptile(n:int) -> int {
+    const ROWS:int = 1000;
+    const COLS:int = 1000;
+    var mat:int[] = array_fill(ROWS * COLS, 0);
+    for (i:int in 0...ROWS) {
+        for (j:int in 0...COLS) {
+            mat[i * COLS + j] = (i + j * 3 + 1) % 997;
+        }
+    }
+    var col_sum:int[] = array_fill(COLS, 0);
+    @loop(tile=32)
+    for (j:int in 0...COLS) {
+        for (i:int in 0...ROWS) {
+            col_sum[j] += mat[i * COLS + j];
+        }
+    }
+    var acc:int = 0;
+    for (j:int in 0...COLS) {
+        acc += col_sum[j] % 997;
+    }
+    invalidate mat; invalidate col_sum;
+    return acc;
+}
+
+// ── 78. preprocessor ─────────────────────────────────────────
+// Parametric macros SQUARE(x) and MAX3(a,b,c) defined via #define
+// are expanded at parse time.  Tests that macro-expanded code
+// generates the same IR quality as C #define-expanded code.
+#define BENCH_SQUARE(x) ((x) * (x))
+#define BENCH_MAX3(a, b, c) ((a) > (b) ? ((a) > (c) ? (a) : (c)) : ((b) > (c) ? (b) : (c)))
+#define BENCH_ABS(x) ((x) < 0 ? -(x) : (x))
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @pure @vectorize @static @nounwind
+fn bench_preprocessor(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        var x:int = (i % 1000) - 500;
+        acc += BENCH_SQUARE(x % 100);
+        acc += BENCH_MAX3(i % 97, i % 53, i % 31);
+        acc += BENCH_ABS(x);
+        acc = acc % 1000000007;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 79. forever_loop ─────────────────────────────────────────
+// `forever {}` (alias for `loop {}`) is an infinite loop that breaks
+// on a condition.  Desugars to the same CFG as `while (true)`.
+// Tests that forever/loop desugaring does not introduce any extra
+// branch or overhead compared to an equivalent while loop.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @pure @static @nounwind
+fn bench_forever(@prefetch n:int) -> int {
+    var acc:int = 0;
+    var i:int = 0;
+    forever {
+        if (i >= n) { break; }
+        acc = (acc + i * i) % 1000000007;
+        i += 1;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 80. register_hint ────────────────────────────────────────
+// `register var` forces the variable into SSA form (phi-node path,
+// no alloca/load/store pair).  Tests that the hint produces IR that
+// mem2reg would produce anyway, enabling downstream loop opts.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @pure @static @nounwind
+fn bench_register(@prefetch n:int) -> int {
+    register var acc:int = 0;
+    register var a:int = 1;
+    register var b:int = 2;
+    for (i:int in 0...n) {
+        acc = (acc + a * b + i) % 1000000007;
+        a = b;
+        b = acc & 1023;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 81. assume_hint ──────────────────────────────────────────
+// `assume(n > 0)` emits `llvm.assume(i1 true)` telling SCEV that
+// the loop executes at least once and n > 0, enabling the vectorizer
+// to use a wider induction range without a zero-trip guard.
+// Tests that assume allows tighter scalar/vectorizer range analysis.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true, prefetch=true})
+@hot @flatten @vectorize @unroll @static @nounwind
+fn bench_assume(@prefetch n:int) -> int {
+    assume(n > 0);
+    var arr:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        arr[i] = (i * 13 + 7) % 10000;
+    }
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        assume(arr[i] >= 0);
+        sum += arr[i];
+    }
+    invalidate arr; invalidate n;
+    return sum;
+}
+
+// ── 82. explicit_unroll ──────────────────────────────────────
+// `@loop(unroll=8)` forces an 8-way explicit unroll of the loop body.
+// The unrolled body provides 8 independent instruction chains, letting
+// the OOO backend overlap memory latencies.  Tests whether the
+// explicit hint beats the compiler-default unroll decision.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @pure @static @nounwind
+fn bench_explicit_unroll(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) @loop(unroll=8) {
+        acc += (i * i) % 997;
+        acc ^= (i << 3);
+        acc += i & 255;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 83. with_scope ───────────────────────────────────────────
+// `with (var buf = array_fill(m, 0))` creates a scoped binding:
+// buf is only valid inside the with block.  The compiler uses this
+// to tighten lifetime and may stack-allocate the buffer when escape
+// analysis proves it doesn't outlive the block.
+@optmax(fast_math=true, aggressive_vec=true, memory={noalias=true}, safety=relaxed)
+@hot @flatten @static @nounwind
+fn bench_with_scope(@prefetch n:int) -> int {
+    const M:int = 64;
+    var iters:int = n / M;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        with (var buf:int[] = array_fill(M, 0)) {
+            for (j:int in 0...M) {
+                buf[j] = (j * k + j * 7 + 1) % 997;
+            }
+            var s:int = 0;
+            for (j:int in 0...M) {
+                s += buf[j];
+            }
+            acc += s % 1000000007;
+        }
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 84. error_hotpath ────────────────────────────────────────
+// `throw` / `catch(N)` error handling with a non-throwing hot path.
+// Tests that catch-site landing pads do not degrade hot-path codegen.
+// The throw condition (i < 0) is never true for positive inputs, so
+// the compiler should prove the throw is unreachable and remove it.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @pure @static @nounwind
+fn safe_divide(x:int, y:int) -> int {
+    if (y == 0) { throw -1; }
+    return x / y;
+}
+fn bench_error_hotpath(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        var r:int = catch(-1) { safe_divide(i * 3, i % 97 + 1); };
+        acc += r;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 85. trig_math ────────────────────────────────────────────
+// Trigonometric and rounding builtins: sin, cos, floor, ceil, round.
+// Tests LLVM intrinsic lowering quality (llvm.sin.f64, llvm.floor.f64
+// etc.) vs libm call overhead in C.  fast_math=true allows
+// approximations and enables FP reassociation for the accumulator.
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @flatten @unroll @static @nounwind
+fn bench_trig(@prefetch n:int) -> int {
+    var acc:double = 0.0;
+    for (i:int in 0...n) {
+        var fi:double = to_float(i) * 0.001;
+        acc += sin(fi);
+        acc += cos(fi);
+        acc += floor(fi * 10.0 + 0.5);
+        acc += ceil(fi * 7.0 - 0.3);
+        acc += round(fi * 13.0);
+    }
+    return to_int(acc);
+}
+
 // ── main dispatch ─────────────────────────────────────────────
 fn main() -> int {
     var test_id:int = input();
@@ -1741,6 +2375,30 @@ fn main() -> int {
         case 59: print(bench_unlessuntil(n));     break;
         case 60: print(bench_trisum(n));          break;
         case 61: print(bench_chainhashrol(n));    break;
+        case 62: print(bench_comptime(n));        break;
+        case 63: print(bench_enum_dispatch(n));   break;
+        case 64: print(bench_loopfuse(n));        break;
+        case 65: print(bench_parallel(n));        break;
+        case 66: print(bench_strinterp(n));       break;
+        case 67: print(bench_typecasts(n));       break;
+        case 68: print(bench_repeat(n));          break;
+        case 69: print(bench_guard(n));           break;
+        case 70: print(bench_nullcoalesce(n));    break;
+        case 71: print(bench_bytescrc(n));        break;
+        case 72: print(bench_chainedcmp(n));      break;
+        case 73: print(bench_defer(n));           break;
+        case 74: print(bench_generics(n));        break;
+        case 75: print(bench_foreach_str(n));     break;
+        case 76: print(bench_ownership(n));        break;
+        case 77: print(bench_looptile(n));         break;
+        case 78: print(bench_preprocessor(n));     break;
+        case 79: print(bench_forever(n));          break;
+        case 80: print(bench_register(n));         break;
+        case 81: print(bench_assume(n));           break;
+        case 82: print(bench_explicit_unroll(n));  break;
+        case 83: print(bench_with_scope(n));       break;
+        case 84: print(bench_error_hotpath(n));    break;
+        case 85: print(bench_trig(n));             break;
         default: print(0);
     }
     invalidate n;
@@ -2801,7 +3459,381 @@ static long bench_chainhashrol(long n) {
     return (h1 ^ h2) & 0x7FFFFFFF;
 }
 
+
+/* 62 ── comptime_table ─────────────────────────────────────────────────────── */
+/* C equivalent: static const CRC32 lookup table (same algorithm, pre-computed */
+/* as a compile-time constant array like OM comptime{} does).                   */
+/* Build the 256-entry CRC32 polynomial table once at startup (equivalent to
+   what OM's comptime{} block does at compile time). */
+static unsigned long CRC_TABLE_C[256];
+static void build_crc_table_c(void) {
+    for (int i = 0; i < 256; i++) {
+        unsigned long r = (unsigned long)i;
+        for (int j = 0; j < 8; j++)
+            r = (r & 1) ? ((r >> 1) ^ 0xEDB88320UL) : (r >> 1);
+        CRC_TABLE_C[i] = r;
+    }
+}
+static long bench_comptime(long n) {
+    unsigned long crc = 0xFFFFFFFFUL;
+    for (long i = 0; i < n; i++) {
+        unsigned long byte = (unsigned long)(i & 0xFF);
+        crc = (crc >> 8) ^ CRC_TABLE_C[(crc ^ byte) & 0xFF];
+    }
+    return (long)(crc ^ 0xFFFFFFFFUL);
+}
+
+/* 63 ── enum_dispatch ──────────────────────────────────────── */
+typedef enum { BS_IDLE=0, BS_RUN=1, BS_WAIT=2, BS_DONE=3 } BenchState;
+static long bench_enum_dispatch(long n) {
+    long acc = 0;
+    int state = BS_IDLE;
+    for (long i = 0; i < n; i++) {
+        switch (state) {
+            case BS_IDLE: acc += i;   state = BS_RUN;  break;
+            case BS_RUN:  acc ^= i;   state = (i % 3 == 0) ? BS_WAIT : BS_RUN; break;
+            case BS_WAIT: acc -= 1;   state = BS_DONE; break;
+            default:      acc += 2;   state = BS_IDLE; break;
+        }
+    }
+    return acc;
+}
+
+/* 64 ── loop_fuse ─────────────────────────────────────────── */
+/* C baseline: two separate loops (unfused); same final result. */
+static long bench_loopfuse(long n) {
+    long *a = malloc(n * sizeof(long));
+    long *b = malloc(n * sizeof(long));
+    for (long i = 0; i < n; i++) a[i] = (i * 3 + 1) % 1000;
+    for (long i = 0; i < n; i++) b[i] = (i * 7 + 2) % 1000;
+    long sum = 0;
+    for (long i = 0; i < n; i++) sum += a[i] + b[i];
+    free(a); free(b);
+    return sum;
+}
+
+/* 65 ── parallel_reduce ───────────────────────────────────── */
+/* C equivalent: plain sequential elementwise transform. */
+static long bench_parallel(long n) {
+    long *src = malloc(n * sizeof(long));
+    long *dst = malloc(n * sizeof(long));
+    for (long i = 0; i < n; i++) src[i] = (i * 7 + 3) % 10000;
+    for (long i = 0; i < n; i++) dst[i] = src[i] * src[i] + src[i];
+    long sum = 0;
+    for (long i = 0; i < n; i++) sum += dst[i];
+    free(src); free(dst);
+    return sum;
+}
+
+/* 66 ── str_interp ─────────────────────────────────────────── */
+/* C: snprintf two integers into a stack buffer, accumulate lengths. */
+static long bench_strinterp(long n) {
+    long acc = 0;
+    char buf[32];
+    for (long i = 0; i < n; i++) {
+        int len = snprintf(buf, sizeof(buf), "k%ldv%ld", i % 1000, i % 997);
+        acc += len;
+    }
+    return acc;
+}
+
+/* 67 ── type_casts ─────────────────────────────────────────── */
+/* C: explicit (int32_t), (uint8_t), (uint16_t) casts — identical IR. */
+#include <stdint.h>
+static long bench_typecasts(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++) {
+        int32_t  x = (int32_t)i;
+        uint8_t  y = (uint8_t)(i >> 4);
+        uint16_t z = (uint16_t)(i >> 2);
+        acc += x + y + z;
+        acc &= 0x7FFFFFFFL;
+    }
+    return acc;
+}
+
+/* 68 ── repeat_acc ─────────────────────────────────────────── */
+/* C: plain for loop — matches OM repeat(N) { } semantics. */
+static long bench_repeat(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++)
+        acc = (acc * 3 + i) % 1000000007L;
+    return acc;
+}
+
+/* 69 ── guard_filter ───────────────────────────────────────── */
+/* C: if (!cond) continue — desugared form of guard else { continue; }. */
+static long bench_guard(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++) {
+        if (i % 3 == 0) continue;
+        if (i % 5 == 0) continue;
+        acc += i;
+    }
+    return acc;
+}
+
+/* 70 ── null_coalesce ──────────────────────────────────────── */
+/* C: v ? v : (idx+1) — ternary equivalent of ?? operator. */
+static long bench_nullcoalesce(long n) {
+    long arr[1000];
+    for (int i = 0; i < 1000; i++)
+        arr[i] = (i % 7 == 0) ? 0 : (i * 3 % 997 + 1);
+    long acc = 0;
+    for (long i = 0; i < n; i++) {
+        long idx = i % 1000;
+        long v = arr[idx];
+        acc += v ? v : (idx + 1);
+    }
+    return acc;
+}
+
+/* 71 ── bytes_crc ──────────────────────────────────────────── */
+/* C: static const byte array (matches OM 0x"..." bytes literal). */
+static long bench_bytescrc(long n) {
+    static const unsigned char data[16] = {
+        0xDE,0xAD,0xBE,0xEF,0xCA,0xFE,0xBA,0xBE,
+        0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08
+    };
+    const int dlen = 16;
+    unsigned long poly = 0xEDB88320UL;
+    unsigned long crc = 0xFFFFFFFFUL;
+    for (long i = 0; i < n; i++) {
+        unsigned long byte = data[i % dlen];
+        crc ^= byte;
+        for (int j = 0; j < 8; j++) {
+            if (crc & 1) crc = (crc >> 1) ^ poly;
+            else         crc >>= 1;
+        }
+    }
+    return (long)(crc ^ 0xFFFFFFFFUL);
+}
+
+/* 72 ── chained_cmp ────────────────────────────────────────── */
+/* C: explicit && for two-sided range test. */
+static long bench_chainedcmp(long n) {
+    long acc = 0;
+    long LO = n / 4;
+    long HI = 3 * n / 4;
+    for (long i = 0; i < n; i++) {
+        long x = (i * 7 + 13) % n;
+        if (x >= LO && x < HI) acc += x;
+        if (x > 0   && x < 100) acc ^= x;
+    }
+    return acc;
+}
+
+/* 73 ── defer_scope ────────────────────────────────────────── */
+/* C: explicit malloc + free; matches OM defer invalidate pattern. */
+static long process_chunk_c2(long *data, long size) {
+    long sum = 0;
+    for (long i = 0; i < size; i++) sum += data[i];
+    return sum;
+}
+static long bench_defer(long n) {
+    const long CHUNK = 64;
+    long acc = 0;
+    long iters = n / CHUNK;
+    for (long k = 0; k < iters; k++) {
+        long *buf = malloc(CHUNK * sizeof(long));
+        for (long j = 0; j < CHUNK; j++) buf[j] = (j * k + j * 3 + 1) % 997;
+        acc += process_chunk_c2(buf, CHUNK);
+        acc %= 1000000007L;
+        free(buf);
+    }
+    return acc;
+}
+
+/* 74 ── generic_clamp ──────────────────────────────────────── */
+/* C: separate typed inline helpers — matches OM generic clamp<T>. */
+static inline long  clamp_l(long x, long lo, long hi)    { return x < lo ? lo : (x > hi ? hi : x); }
+static inline double clamp_d(double x, double lo, double hi) { return x < lo ? lo : (x > hi ? hi : x); }
+static long bench_generics(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++) {
+        long x = (i * 7 + 3) % 2000 - 1000;
+        acc += clamp_l(x, -500L, 500L);
+        double fx = (double)i * 0.001 - 0.5;
+        acc += (long)(clamp_d(fx, -0.3, 0.3) * 1000.0);
+    }
+    return acc;
+}
+
+/* 75 ── foreach_str ────────────────────────────────────────── */
+/* C: char-pointer loop — matches OM for(c in s) semantics. */
+static long bench_foreach_str(long n) {
+    const char *s = "Hello, OmScript! ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    size_t slen = strlen(s);
+    long acc = 0;
+    for (long i = 0; i < n; i++) {
+        for (size_t j = 0; j < slen; j++) {
+            unsigned char c = (unsigned char)s[j];
+            if      (c >= 'A' && c <= 'Z') acc += 1;
+            else if (c >= 'a' && c <= 'z') acc += 2;
+            else                            acc += c & 1;
+        }
+    }
+    return acc;
+}
+
+
+/* 76 ── ownership ─────────────────────────────────────────── */
+/* C: __restrict__ + const pointer; equivalent to OM freeze+borrow. */
+static long bench_ownership(long n) {
+    long *arr = malloc(n * sizeof(long));
+    for (long i = 0; i < n; i++) arr[i] = (i * 7 + 3) % 10000;
+    const long * restrict view = arr;
+    long sum = 0;
+    for (long i = 0; i < n; i++) sum += view[i];
+    free(arr);
+    return sum;
+}
+
+/* 77 ── loop_tile ──────────────────────────────────────────── */
+/* C: manually tiled column-sum loop with TILE=32 strip-mining. */
+static long bench_looptile(long n) {
+    const long ROWS = 1000, COLS = 1000;
+    long *mat      = calloc((size_t)(ROWS * COLS), sizeof(long));
+    long *col_sum  = calloc((size_t)COLS, sizeof(long));
+    for (long i = 0; i < ROWS; i++)
+        for (long j = 0; j < COLS; j++)
+            mat[i * COLS + j] = (i + j * 3 + 1) % 997;
+    const long TILE = 32;
+    for (long jj = 0; jj < COLS; jj += TILE)
+        for (long i  = 0; i  < ROWS; i++)
+            for (long j = jj; j < jj + TILE && j < COLS; j++)
+                col_sum[j] += mat[i * COLS + j];
+    long acc = 0;
+    for (long j = 0; j < COLS; j++) acc += col_sum[j] % 997;
+    free(mat); free(col_sum);
+    return acc;
+}
+
+/* 78 ── preprocessor ───────────────────────────────────────── */
+/* C: identical #define macros; tests macro-expansion code quality. */
+#define C_BENCH_SQUARE(x) ((x) * (x))
+#define C_BENCH_MAX3(a, b, c) ((a) > (b) ? ((a) > (c) ? (a) : (c)) : ((b) > (c) ? (b) : (c)))
+#define C_BENCH_ABS(x) ((x) < 0 ? -(x) : (x))
+static long bench_preprocessor(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        long x = (i % 1000) - 500;
+        acc += C_BENCH_SQUARE(x % 100);
+        acc += C_BENCH_MAX3(i % 97, i % 53, i % 31);
+        acc += C_BENCH_ABS(x);
+        acc %= 1000000007L;
+    }
+    return acc;
+}
+
+/* 79 ── forever_loop ───────────────────────────────────────── */
+/* C: for (;;) with break — identical desugared form. */
+static long bench_forever(long n) {
+    long acc = 0;
+    long i = 0;
+    for (;;) {
+        if (i >= n) break;
+        acc = (acc + i * i) % 1000000007L;
+        i++;
+    }
+    return acc;
+}
+
+/* 80 ── register_hint ──────────────────────────────────────── */
+/* C: register keyword (advisory; modern compilers ignore it). */
+static long bench_register(long n) {
+    register long acc = 0;
+    register long a = 1;
+    register long b = 2;
+    for (long i = 0; i < n; i++) {
+        acc = (acc + a * b + i) % 1000000007L;
+        a = b;
+        b = acc & 1023;
+    }
+    return acc;
+}
+
+/* 81 ── assume_hint ────────────────────────────────────────── */
+/* C: __builtin_assume (clang) or __builtin_unreachable guard (gcc). */
+static long bench_assume(long n) {
+    __builtin_assume(n > 0);
+    long *arr = malloc((size_t)n * sizeof(long));
+    for (long i = 0; i < n; i++) arr[i] = (i * 13 + 7) % 10000;
+    long sum = 0;
+    for (long i = 0; i < n; i++) sum += arr[i];
+    free(arr);
+    return sum;
+}
+
+/* 82 ── explicit_unroll ─────────────────────────────────────── */
+/* C: manual 8-way unrolled loop. */
+static long bench_explicit_unroll(long n) {
+    long acc = 0;
+    long limit = n - (n % 8);
+    long i;
+    for (i = 1; i <= limit; i += 8) {
+        acc += ((i+0)*(i+0)) % 997; acc ^= ((i+0) << 3); acc += (i+0) & 255;
+        acc += ((i+1)*(i+1)) % 997; acc ^= ((i+1) << 3); acc += (i+1) & 255;
+        acc += ((i+2)*(i+2)) % 997; acc ^= ((i+2) << 3); acc += (i+2) & 255;
+        acc += ((i+3)*(i+3)) % 997; acc ^= ((i+3) << 3); acc += (i+3) & 255;
+        acc += ((i+4)*(i+4)) % 997; acc ^= ((i+4) << 3); acc += (i+4) & 255;
+        acc += ((i+5)*(i+5)) % 997; acc ^= ((i+5) << 3); acc += (i+5) & 255;
+        acc += ((i+6)*(i+6)) % 997; acc ^= ((i+6) << 3); acc += (i+6) & 255;
+        acc += ((i+7)*(i+7)) % 997; acc ^= ((i+7) << 3); acc += (i+7) & 255;
+    }
+    for (; i < n; i++) { acc += (i*i) % 997; acc ^= (i << 3); acc += i & 255; }
+    return acc;
+}
+
+/* 83 ── with_scope ─────────────────────────────────────────── */
+/* C: malloc inside block + free at end — same semantics as OM with. */
+static long bench_with_scope(long n) {
+    const long M = 64;
+    long iters = n / M;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        {
+            long *buf = malloc((size_t)M * sizeof(long));
+            for (long j = 0; j < M; j++) buf[j] = (j * k + j * 7 + 1) % 997;
+            long s = 0;
+            for (long j = 0; j < M; j++) s += buf[j];
+            acc += s % 1000000007L;
+            free(buf);
+        }
+    }
+    return acc;
+}
+
+/* 84 ── error_hotpath ──────────────────────────────────────── */
+/* C: branch-on-zero guard without exceptions. */
+static inline long safe_divide_c(long x, long y) {
+    if (y == 0) return -1;
+    return x / y;
+}
+static long bench_error_hotpath(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++)
+        acc += safe_divide_c(i * 3, i % 97 + 1);
+    return acc;
+}
+
+/* 85 ── trig_math ─────────────────────────────────────────── */
+/* C: libm sin/cos/floor/ceil/round — same operations as OM builtins. */
+static long bench_trig(long n) {
+    double acc = 0.0;
+    for (long i = 0; i < n; i++) {
+        double fi = (double)i * 0.001;
+        acc += sin(fi);
+        acc += cos(fi);
+        acc += floor(fi * 10.0 + 0.5);
+        acc += ceil(fi * 7.0 - 0.3);
+        acc += round(fi * 13.0);
+    }
+    return (long)acc;
+}
+
 int main(void) {
+    build_crc_table_c();
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
     long r = 0;
@@ -2868,6 +3900,30 @@ int main(void) {
         case 59: r = bench_unlessuntil(n);        break;
         case 60: r = bench_trisum(n);              break;
         case 61: r = bench_chainhashrol(n);        break;
+        case 62: r = bench_comptime(n);            break;
+        case 63: r = bench_enum_dispatch(n);       break;
+        case 64: r = bench_loopfuse(n);            break;
+        case 65: r = bench_parallel(n);            break;
+        case 66: r = bench_strinterp(n);           break;
+        case 67: r = bench_typecasts(n);           break;
+        case 68: r = bench_repeat(n);              break;
+        case 69: r = bench_guard(n);               break;
+        case 70: r = bench_nullcoalesce(n);        break;
+        case 71: r = bench_bytescrc(n);            break;
+        case 72: r = bench_chainedcmp(n);          break;
+        case 73: r = bench_defer(n);               break;
+        case 74: r = bench_generics(n);            break;
+        case 75: r = bench_foreach_str(n);         break;
+        case 76: r = bench_ownership(n);           break;
+        case 77: r = bench_looptile(n);            break;
+        case 78: r = bench_preprocessor(n);        break;
+        case 79: r = bench_forever(n);             break;
+        case 80: r = bench_register(n);            break;
+        case 81: r = bench_assume(n);              break;
+        case 82: r = bench_explicit_unroll(n);     break;
+        case 83: r = bench_with_scope(n);          break;
+        case 84: r = bench_error_hotpath(n);       break;
+        case 85: r = bench_trig(n);                break;
     }
     printf("%ld\n", r);
     return 0;
