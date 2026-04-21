@@ -956,22 +956,21 @@ static bool isTilingProfitable(const SCoP& scop,
     // itself has meaningful compute cost (tiling is not worth it for trivial
     // bodies with only a handful of cheap instructions).
     //
-    // We sum the estimated cost of instructions in the SCoP's statements and
-    // require the average cost per iteration to exceed a small threshold.
-    // This prevents tiling single-load loops (e.g. array search) where the
-    // loop-overhead amortisation gain does not justify the code-size increase.
+    // Sum the estimated cost of all instructions across all SCoP statements
+    // (this is the cost of one iteration of the loop body), then require a
+    // minimum total before tiling: very cheap loops (e.g. single-load array
+    // scans) see no benefit from tiling, while the extra loop overhead and
+    // code-size increase are real costs.
     if (config.costModel && !scop.stmts.empty()) {
-        double totalCost = 0.0;
-        unsigned instrCount = 0;
+        double totalBodyCost = 0.0;
         for (const auto& stmt : scop.stmts) {
             for (llvm::Instruction& I : *stmt.bb) {
-                totalCost += config.costModel->instructionCost(&I);
-                ++instrCount;
+                totalBodyCost += config.costModel->instructionCost(&I);
             }
         }
-        // Require at least 2.0 cycles average per iteration (heuristic).
-        const double avgCost = instrCount > 0 ? totalCost / instrCount : 0.0;
-        if (avgCost < 2.0) return false;
+        // Require at least 4.0 cycles total body cost per iteration.
+        // Below this threshold the tiling overhead is unlikely to be recovered.
+        if (totalBodyCost < 4.0) return false;
     }
 
     return true;
@@ -1755,6 +1754,10 @@ LoopLegalityResult checkLoopLegality(llvm::Loop* outerLoop,
     SCoP scop;
     if (!detectScop(outerLoop, SE, LI, config, scop)) return result;
     if (!scop.valid) return result;
+
+    // SCoP was detected — mark it so callers can distinguish "no SCoP" from
+    // "SCoP detected but transform is illegal".
+    result.scopDetected = true;
 
     const unsigned depth = scop.depth();
 

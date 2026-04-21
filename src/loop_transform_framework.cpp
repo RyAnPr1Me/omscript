@@ -144,18 +144,16 @@ UnifiedLoopTransformer::execute(const LoopTransformRequest& req,
     case LoopTransform::Fusion:
     case LoopTransform::Fission:
         // Fusion and fission legality depends on adjacent loop compatibility;
-        // polyopt checks both in its full SCoP pass.  Treat checkLoopLegality
-        // returning skewing-legal as a proxy that the SCoP was detected.
-        transformAllowed = polyLegality.tiling; // SCoP is valid
+        // polyopt checks both in its full SCoP pass.  Require that a SCoP was
+        // detected (meaning the loop is affine and amenable to polyopt) before
+        // attempting the transform.
+        transformAllowed = polyLegality.scopDetected;
         break;
     }
 
     if (!transformAllowed) {
-        // No SCoP detected (all-false polyLegality) or this transform is illegal.
-        const bool noScop = !polyLegality.interchange && !polyLegality.tiling &&
-                            !polyLegality.reversal && !polyLegality.skewing;
-        result.status = noScop ? LoopTransformStatus::SkippedNoSCoP
-                               : LoopTransformStatus::SkippedIllegal;
+        result.status = polyLegality.scopDetected ? LoopTransformStatus::SkippedIllegal
+                                                  : LoopTransformStatus::SkippedNoSCoP;
         return result;
     }
 

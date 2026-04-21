@@ -163,7 +163,9 @@ enum class LoopTransform : uint8_t {
 enum class LegalityVerdict : uint8_t {
     Legal   = 0, ///< Transform is definitely safe to apply
     Illegal = 1, ///< Transform is definitely unsafe (would change semantics)
-    Unknown = 2, ///< Cannot determine; treat conservatively as Illegal
+    Unknown = 2, ///< Cannot determine from available information;
+                 ///  callers should defer to fine-grained analysis (e.g. polyopt)
+                 ///  rather than treating this as Illegal.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

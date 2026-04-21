@@ -237,6 +237,11 @@ struct OmPolyOptFunctionPass
 /// Result of a loop-nest legality check for all supported transformations.
 /// Produced by checkLoopLegality() for a specific outermost loop.
 struct LoopLegalityResult {
+    /// True when the outermost loop is part of a detectable affine SCoP.
+    /// When false, all transform-specific fields are also false (SCoP
+    /// extraction failed — no polyhedral analysis was performed).
+    bool scopDetected = false;
+
     bool interchange = false; ///< Loop interchange is legal for this nest
     bool tiling      = false; ///< Loop tiling is legal for this nest
     bool reversal    = false; ///< Inner-loop reversal is legal
