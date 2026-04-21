@@ -16,6 +16,7 @@
 #include <deque>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -478,23 +479,118 @@ void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& 
 }
 
 void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationContext& ctx) {
-    // Synthesize ValueRange facts from CFCTRE results already stored in ctx.
-    // This pass does not walk the AST; it derives bounds purely from the
-    // uniform-return and constIntReturn facts set by syncFactsToContext.
+    // Synthesize ValueRange facts from CFCTRE results AND simple AST patterns.
+    // Phase 1: constant returns (from CFCTRE).
+    // Phase 2: structural patterns in the return expression.
     if (!program) {
         ctx.validity().rangeAnalysis = true;
         return;
     }
+
     for (const auto& func : program->functions) {
         FunctionFacts& ff = ctx.mutableFacts(func->name);
         if (ff.returnRange.has_value()) continue; // already populated
 
+        // Phase 1: point range from known-constant return.
         if (ff.constIntReturn.has_value()) {
-            const int64_t v = *ff.constIntReturn;
-            ff.returnRange = ValueRange{v, v};
-        } else if (ff.uniformCTReturn.has_value() && ff.uniformCTReturn->isInt()) {
+            ff.returnRange = ValueRange{*ff.constIntReturn, *ff.constIntReturn};
+            continue;
+        }
+        if (ff.uniformCTReturn.has_value() && ff.uniformCTReturn->isInt()) {
             const int64_t v = ff.uniformCTReturn->asI64();
             ff.returnRange = ValueRange{v, v};
+            continue;
+        }
+
+        // Phase 2: structural analysis of the function body.
+        // Only attempt this when the function has exactly one return statement
+        // and no branching that could produce multiple distinct return values.
+        // We look for common non-trivial idioms:
+        //   return expr % C          → range [0, C-1]   (for C > 0)
+        //   return abs(expr)         → range [0, INT64_MAX]
+        //   return clamp(expr, lo,hi)→ range [lo, hi]   (for constant lo, hi)
+        if (!func->body || func->body->statements.empty()) continue;
+
+        // Count return statements and collect the unique return expression.
+        const Expression* retExpr = nullptr;
+        int retCount = 0;
+        std::function<void(const Statement*)> countReturns =
+            [&](const Statement* stmt) {
+                if (!stmt) return;
+                if (stmt->type == ASTNodeType::RETURN_STMT) {
+                    ++retCount;
+                    auto* rs = static_cast<const ReturnStmt*>(stmt);
+                    retExpr = rs->value.get();
+                } else if (stmt->type == ASTNodeType::BLOCK) {
+                    auto* blk = static_cast<const BlockStmt*>(stmt);
+                    for (const auto& s : blk->statements)
+                        countReturns(s.get());
+                } else if (stmt->type == ASTNodeType::IF_STMT) {
+                    auto* ifs = static_cast<const IfStmt*>(stmt);
+                    countReturns(ifs->thenBranch.get());
+                    countReturns(ifs->elseBranch.get());
+                } else if (stmt->type == ASTNodeType::WHILE_STMT) {
+                    countReturns(static_cast<const WhileStmt*>(stmt)->body.get());
+                } else if (stmt->type == ASTNodeType::DO_WHILE_STMT) {
+                    countReturns(static_cast<const DoWhileStmt*>(stmt)->body.get());
+                }
+            };
+        for (const auto& s : func->body->statements)
+            countReturns(s.get());
+
+        if (retCount != 1 || !retExpr) continue; // multiple exits or void
+
+        // Helper: try to read a literal int from an expression.
+        auto litInt = [](const Expression* e) -> std::optional<int64_t> {
+            if (!e) return {};
+            if (e->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<const LiteralExpr*>(e);
+                if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+                    return lit->intValue;
+            }
+            return {};
+        };
+
+        // Pattern: return expr % C  (integer modulo by positive constant)
+        if (retExpr->type == ASTNodeType::BINARY_EXPR) {
+            auto* bin = static_cast<const BinaryExpr*>(retExpr);
+            if (bin->op == "%") {
+                if (auto c = litInt(bin->right.get())) {
+                    // c == 1: result is always 0 (trivial but valid range [0,0])
+                    // c == 0: undefined behaviour — skip
+                    if (*c > 0) {
+                        ff.returnRange = ValueRange{0, *c - 1};
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Pattern: return abs(expr)
+        if (retExpr->type == ASTNodeType::CALL_EXPR) {
+            auto* call = static_cast<const CallExpr*>(retExpr);
+            if (call->callee == "abs" && call->arguments.size() == 1) {
+                ff.returnRange = ValueRange{0, std::numeric_limits<int64_t>::max()};
+                continue;
+            }
+            // Pattern: return clamp(expr, lo, hi)
+            if (call->callee == "clamp" && call->arguments.size() == 3) {
+                auto lo = litInt(call->arguments[1].get());
+                auto hi = litInt(call->arguments[2].get());
+                if (lo && hi && *lo <= *hi) {
+                    ff.returnRange = ValueRange{*lo, *hi};
+                    continue;
+                }
+            }
+            // Pattern: return max(0, expr) or max(expr, 0) → range [0, INT64_MAX]
+            if (call->callee == "max" && call->arguments.size() == 2) {
+                auto lo0 = litInt(call->arguments[0].get());
+                auto lo1 = litInt(call->arguments[1].get());
+                if ((lo0 && *lo0 == 0) || (lo1 && *lo1 == 0)) {
+                    ff.returnRange = ValueRange{0, std::numeric_limits<int64_t>::max()};
+                    continue;
+                }
+            }
         }
     }
     ctx.validity().rangeAnalysis = true;

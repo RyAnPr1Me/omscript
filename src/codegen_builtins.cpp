@@ -717,6 +717,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // The second argument (is_int_min_poison) is false for safe behavior
         auto* result = builder->CreateCall(absIntrinsic, {arg, builder->getFalse()}, "absval");
         nonNegValues_.insert(result);
+        // Emit !range [0, INT64_MAX) so CVP/LVI/InstCombine can use this
+        // knowledge globally — e.g. fold `abs(x) >= 0` → true, or propagate
+        // non-negativity across PHI nodes.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         return result;
     }
 
@@ -896,8 +901,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* result = builder->CreateCall(sminIntrinsic, {a, b}, "minval");
         // min(a, b) is non-negative when both inputs are non-negative.
         // This enables nsw on downstream add/mul operations.
-        if (nonNegValues_.count(a) && nonNegValues_.count(b))
+        if (nonNegValues_.count(a) && nonNegValues_.count(b)) {
             nonNegValues_.insert(result);
+            // Emit !range metadata so LLVM passes see the non-negativity.
+            if (optimizationLevel >= OptimizationLevel::O1)
+                result->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
         return result;
     }
 
@@ -928,8 +937,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* result = builder->CreateCall(smaxIntrinsic, {a, b}, "maxval");
         // max(a, b) is non-negative when either input is non-negative:
         // if a >= 0 then max(a, b) >= a >= 0.
-        if (nonNegValues_.count(a) || nonNegValues_.count(b))
+        if (nonNegValues_.count(a) || nonNegValues_.count(b)) {
             nonNegValues_.insert(result);
+            // Emit !range metadata so LLVM passes see the non-negativity.
+            if (optimizationLevel >= OptimizationLevel::O1)
+                result->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
         return result;
     }
 
@@ -9141,14 +9154,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // without requiring inlining.  Only applicable to i64-returning functions.
     if (optCtx_ && callee->getReturnType()->isIntegerTy(64)) {
         if (auto rng = optCtx_->returnRange(expr->callee)) {
-            if (rng->isNarrowed() && !rng->isEmpty() &&
-                rng->hi < std::numeric_limits<int64_t>::max()) {
+            if (rng->isNarrowed() && !rng->isEmpty()) {
                 llvm::Type* i64 = getDefaultType();
+                // LLVM range metadata uses a half-open interval [lo, hi_excl).
+                // When hi == INT64_MAX, hi_excl overflows; use INT64_MIN as the
+                // exclusive end — LLVM interprets that as a wrapping range that
+                // covers [lo, INT64_MAX] inclusive.
+                const int64_t hiExcl =
+                    (rng->hi == std::numeric_limits<int64_t>::max())
+                        ? std::numeric_limits<int64_t>::min()
+                        : rng->hi + 1;
                 auto* rangeMD = llvm::MDNode::get(*context, {
                     llvm::ConstantAsMetadata::get(
                         llvm::ConstantInt::get(i64, rng->lo, /*isSigned=*/true)),
                     llvm::ConstantAsMetadata::get(
-                        llvm::ConstantInt::get(i64, rng->hi + 1, /*isSigned=*/true))
+                        llvm::ConstantInt::get(i64, hiExcl, /*isSigned=*/true))
                 });
                 callResult->setMetadata(llvm::LLVMContext::MD_range, rangeMD);
             }
