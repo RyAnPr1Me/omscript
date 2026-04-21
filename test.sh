@@ -63,7 +63,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=59
+NUM_BENCHMARKS=61
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -126,6 +126,8 @@ BENCH_NAME=(
     "array_slice_sum"    # 57 — array_slice with constant bounds + sum
     "str_split_count"    # 58 — str_split on delimited string, count pieces
     "unless_until"       # 59 — unless / until control-flow sugar
+    "triangular_sum"     # 60 — sum 0+1+2+…+(n-1) closed-form idiom
+    "chain_hash_rol"     # 61 — chained rotate-left hash (near-pow2 multiply)
 )
 
 BENCH_DESC=(
@@ -189,6 +191,8 @@ BENCH_DESC=(
     "array_slice(arr, 0, 16): constant-bounds slice + sum, N/16 iters"
     "str_split on 16-field comma-delimited record, count+sum pieces, N/16 iters"
     "unless/until control-flow: unless skip + until countdown, N iterations"
+    "triangular sum 0..n-1: tests closed-form loop idiom recognition"
+    "chained rotate-left hash: tests near-power-of-2 multiply strength reduction"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -253,6 +257,8 @@ BENCH_N=(
     1600000   # 57  array_slice_sum  (N/16 slices of 16 elements)
     160000    # 58  str_split_count  (N/16 splits of 16-field record)
     10000000  # 59  unless_until
+    50000000  # 60  triangular_sum
+    10000000  # 61  chain_hash_rol
 )
 
 BOTTLENECK_LABELS=(
@@ -316,6 +322,8 @@ BOTTLENECK_LABELS=(
     "array_slice constant-bounds fast path: skips 4 clamp ops vs runtime bounds"
     "str_split allocation overhead for fixed delimiter and fixed-size records"
     "unless/until sugar: same codegen as if(!cond)/while(!cond) with no overhead"
+    "triangular sum: loop sum 0..N-1 closed-form → n*(n-1)/2 (superopt idiom)"
+    "chain_hash_rol: near-pow2 multiplies in hash chain → shift+add/sub strength reduction"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -1633,6 +1641,38 @@ fn bench_unlessuntil(@prefetch n:int) -> int {
     return acc;
 }
 
+// ── 60. triangular_sum ───────────────────────────────────────
+// Computes the sum 0+1+2+...+(n-1) in a tight loop.
+// The superoptimizer's triangular-sum idiom recognizer should replace
+// the loop with the closed-form n*(n-1)/2, eliminating the entire loop.
+@hot @pure @static @nounwind
+fn bench_trisum(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        acc = acc + i;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 61. chain_hash_rol ───────────────────────────────────────
+// A chained hash using multiplies by 33 (= 32+1 = 2^5+1) and 31 (= 32-1 = 2^5-1),
+// which are near-power-of-2 constants the mul-strength-reduction pass replaces
+// with shl+add and shl-sub respectively.
+// djb2-style: hash = hash * 33 ^ i   (xor folded for mixing)
+// alternate:  hash = hash * 31 + i   (Bernstein variant)
+@hot @static @nounwind
+fn bench_chainhashrol(@prefetch n:int) -> int {
+    var h1:int = 5381;
+    var h2:int = 5381;
+    for (i:int in 0...n) {
+        h1 = (h1 * 33) ^ (i & 255);
+        h2 = (h2 * 31) + (i & 255);
+    }
+    invalidate n;
+    return (h1 ^ h2) & 0x7FFFFFFF;
+}
+
 // ── main dispatch ─────────────────────────────────────────────
 fn main() -> int {
     var test_id:int = input();
@@ -1699,6 +1739,8 @@ fn main() -> int {
         case 57: print(bench_arrayslicesum(n));   break;
         case 58: print(bench_strsplitcount(n));   break;
         case 59: print(bench_unlessuntil(n));     break;
+        case 60: print(bench_trisum(n));          break;
+        case 61: print(bench_chainhashrol(n));    break;
         default: print(0);
     }
     invalidate n;
@@ -2738,6 +2780,27 @@ static long bench_unlessuntil(long n) {
     return acc;
 }
 
+/* ── 60. triangular_sum ───────────────────────────────────────────────────── */
+/* Sum 0+1+2+…+(n-1).  C compiler applies closed-form via SCEV; OM superopt    */
+/* replaces the loop body with n*(n-1)/2 using the triangular-sum idiom.        */
+static long bench_trisum(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++) acc += i;
+    return acc;
+}
+
+/* ── 61. chain_hash_rol ───────────────────────────────────────────────────── */
+/* djb2-style hash using multiplies by 33 and 31 (near-power-of-2 constants).  */
+/* C at -O2 uses imul; OM superopt replaces with shl+add / shl-sub sequences.   */
+static long bench_chainhashrol(long n) {
+    long h1 = 5381, h2 = 5381;
+    for (long i = 0; i < n; i++) {
+        h1 = (h1 * 33) ^ (i & 255);
+        h2 = (h2 * 31) + (i & 255);
+    }
+    return (h1 ^ h2) & 0x7FFFFFFF;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -2803,6 +2866,8 @@ int main(void) {
         case 57: r = bench_arrayslicesum(n);      break;
         case 58: r = bench_strsplitcount(n);      break;
         case 59: r = bench_unlessuntil(n);        break;
+        case 60: r = bench_trisum(n);              break;
+        case 61: r = bench_chainhashrol(n);        break;
     }
     printf("%ld\n", r);
     return 0;

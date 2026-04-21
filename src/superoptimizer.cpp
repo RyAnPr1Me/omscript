@@ -5405,6 +5405,127 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
 
+            // ── (a + b) - a → b  /  (b + a) - a → b  [add-sub cancellation] ─────
+            // Pattern: sub(add(A, B), A) → B   or   sub(add(A, B), B) → A
+            // Also handles: sub(add(B, A), A) → B  (commutative)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* addOp = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                llvm::Value* subRHS = inst.getOperand(1);
+                if (addOp && addOp->getOpcode() == llvm::Instruction::Add
+                    && hasOneUse(addOp)) {
+                    llvm::Value* A = addOp->getOperand(0);
+                    llvm::Value* B = addOp->getOperand(1);
+                    if (A == subRHS)      simplified = B;
+                    else if (B == subRHS) simplified = A;
+                }
+            }
+
+            // ── a + (b - a) → b  /  (b - a) + a → b  [sub-add cancellation] ──────
+            // Pattern: add(A, sub(B, A)) → B   (already exists as add(x, sub(y, x)))
+            // Additional: add(sub(B, A), A) → B
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                // Try both orderings: sub(B, A) + A and A + sub(B, A)
+                for (int side = 0; side < 2 && !simplified; ++side) {
+                    auto* subOp = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(side));
+                    llvm::Value* other = inst.getOperand(1 - side);
+                    if (subOp && subOp->getOpcode() == llvm::Instruction::Sub
+                        && hasOneUse(subOp)) {
+                        // sub(B, A) + A → B
+                        if (subOp->getOperand(1) == other) {
+                            simplified = subOp->getOperand(0);
+                        }
+                    }
+                }
+            }
+
+            // ── (a - b) + (b - c) → a - c  [telescoping sub chain] ───────────────
+            // Pattern: add(sub(A, B), sub(B, C)) → sub(A, C)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                auto* lhsSub = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhsSub = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhsSub && rhsSub &&
+                    lhsSub->getOpcode() == llvm::Instruction::Sub &&
+                    rhsSub->getOpcode() == llvm::Instruction::Sub &&
+                    lhsSub->getOperand(1) == rhsSub->getOperand(0) &&
+                    hasOneUse(lhsSub) && hasOneUse(rhsSub)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateSub(
+                        lhsSub->getOperand(0), rhsSub->getOperand(1), "telescope_sub");
+                }
+            }
+
+            // ── mul(x, 2^k) → shl(x, k)  [multiply by exact power-of-2] ──────────
+            // LLVM InstCombine handles this at -O1+, but post-superopt passes may
+            // create new multiplies that haven't been through InstCombine.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                for (int side = 0; side < 2 && !simplified; ++side) {
+                    auto c = getConstIntValue(inst.getOperand(side));
+                    if (!c || *c == 0) continue;
+                    uint64_t cv = static_cast<uint64_t>(*c);
+                    if (cv > 1 && (cv & (cv - 1)) == 0) {  // exact power of 2
+                        unsigned shamt = static_cast<unsigned>(__builtin_ctzll(cv));
+                        unsigned bw = inst.getType()->getIntegerBitWidth();
+                        if (shamt < bw) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateShl(
+                                inst.getOperand(1 - side),
+                                llvm::ConstantInt::get(inst.getType(), shamt),
+                                "mul2shl");
+                        }
+                    }
+                }
+            }
+
+            // ── mul(x, 2^k + 1) → shl(x, k) + x  [near-power-of-2 multiply] ──────
+            // 2 ops (shl + add) vs 1 multiply at 3-cycle latency.
+            // Also catches: mul(x, 2^k - 1) → shl(x, k) - x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                for (int side = 0; side < 2 && !simplified; ++side) {
+                    auto c = getConstIntValue(inst.getOperand(side));
+                    if (!c || *c <= 0) continue;
+                    uint64_t cv = static_cast<uint64_t>(*c);
+                    llvm::Value* x = inst.getOperand(1 - side);
+                    unsigned bw = inst.getType()->getIntegerBitWidth();
+                    // Check 2^k + 1
+                    uint64_t cv1 = cv - 1;
+                    if (cv1 > 1 && (cv1 & (cv1 - 1)) == 0) {
+                        unsigned shamt = static_cast<unsigned>(__builtin_ctzll(cv1));
+                        if (shamt > 0 && shamt < bw) {
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::Value* shl = builder.CreateShl(
+                                x, llvm::ConstantInt::get(inst.getType(), shamt), "npo2shl");
+                            simplified = builder.CreateAdd(shl, x, "npo2add");
+                        }
+                    }
+                    // Check 2^k - 1
+                    if (!simplified) {
+                        uint64_t cv2 = cv + 1;
+                        if (cv2 > 2 && (cv2 & (cv2 - 1)) == 0) {
+                            unsigned shamt = static_cast<unsigned>(__builtin_ctzll(cv2));
+                            if (shamt > 1 && shamt < bw) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* shl = builder.CreateShl(
+                                    x, llvm::ConstantInt::get(inst.getType(), shamt), "npo2shl");
+                                simplified = builder.CreateSub(shl, x, "npo2sub");
+                            }
+                        }
+                    }
+                    // Check 2^a + 2^b  (a != b, a > b > 0)
+                    if (!simplified && __builtin_popcountll(cv) == 2) {
+                        unsigned lo = static_cast<unsigned>(__builtin_ctzll(cv));
+                        unsigned hi = 63u - static_cast<unsigned>(__builtin_clzll(cv));
+                        if (lo > 0 && hi > lo && hi < bw) {
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::Value* slo = builder.CreateShl(
+                                x, llvm::ConstantInt::get(inst.getType(), lo), "pp2lo");
+                            llvm::Value* shi = builder.CreateShl(
+                                x, llvm::ConstantInt::get(inst.getType(), hi), "pp2hi");
+                            simplified = builder.CreateAdd(slo, shi, "pp2add");
+                        }
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);
@@ -7138,6 +7259,203 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Triangular sum loop idiom recognition
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect loops of the form:
+///   for (i = 0; i < n; i++) { acc += i; }
+/// and replace with the closed-form triangular number formula:
+///   acc = n * (n - 1) / 2
+///
+/// The loop has exactly two PHI nodes in the header:
+///   - induction variable:   i_next = i + 1
+///   - accumulator:          acc_next = acc + i     (or acc + i*k for linear sum)
+///
+/// Replacement: n*(n-1)/2 (exact, no overflow for n < 2^32).
+/// Uses an arithmetic shift right by 1 to implement the divide-by-2 cheaply.
+///
+/// This fires after the loop is lowered from OmScript's `for (i in 0...n)` to
+/// the standard LLVM canonical loop form.
+[[gnu::hot]] static unsigned recognizeTriangularSumLoops(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+    unsigned count = 0;
+
+    llvm::LLVMContext& ctx = func.getContext();
+    llvm::Module* M = func.getParent();
+    llvm::Type* i64Ty = llvm::Type::getInt64Ty(ctx);
+    (void)M;
+
+    for (auto& bb : func) {
+        // Must have exactly 2 phi nodes
+        unsigned phiCount = 0;
+        llvm::PHINode* iPhi = nullptr;   // induction variable (0, 1, 2, ...)
+        llvm::PHINode* accPhi = nullptr; // accumulator
+        for (auto& phi : bb.phis()) {
+            ++phiCount;
+            if (phiCount > 2) break;
+            (iPhi ? accPhi : iPhi) = &phi;
+        }
+        if (phiCount != 2 || !iPhi || !accPhi) continue;
+
+        // Only handle i64 (OmScript's default integer type)
+        if (!iPhi->getType()->isIntegerTy(64)) continue;
+        if (!accPhi->getType()->isIntegerTy(64)) continue;
+
+        // Both PHIs must have exactly 2 incoming values (preheader + latch)
+        if (iPhi->getNumIncomingValues() != 2) continue;
+        if (accPhi->getNumIncomingValues() != 2) continue;
+
+        // Helper: find (init_value, next_instruction, preheader_block) for a phi
+        auto getPhiEdges = [&](llvm::PHINode* phi) ->
+            std::tuple<llvm::Value*, llvm::Value*, llvm::BasicBlock*> {
+            for (unsigned idx = 0; idx < 2; ++idx) {
+                llvm::BasicBlock* inBB = phi->getIncomingBlock(idx);
+                // If the predecessor is a successor of bb, it is the latch
+                bool isLatch = false;
+                for (auto* succ : llvm::successors(&bb))
+                    if (succ == inBB || inBB == &bb) { isLatch = true; break; }
+                if (isLatch)
+                    return {phi->getIncomingValue(1-idx),
+                            phi->getIncomingValue(idx),
+                            phi->getIncomingBlock(1-idx)};
+            }
+            return {nullptr, nullptr, nullptr};
+        };
+
+        auto [iInit, iNext, iPreBB] = getPhiEdges(iPhi);
+        auto [accInit, accNext, accPreBB] = getPhiEdges(accPhi);
+        if (!iInit || !iNext || !iPreBB) continue;
+        if (!accInit || !accNext) continue;
+
+        // iInit must be 0 and accInit must be 0
+        auto* iInitCI = llvm::dyn_cast<llvm::ConstantInt>(iInit);
+        auto* accInitCI = llvm::dyn_cast<llvm::ConstantInt>(accInit);
+        if (!iInitCI || !iInitCI->isZero()) continue;
+        if (!accInitCI || !accInitCI->isZero()) continue;
+
+        // iNext must be add(iPhi, 1)
+        auto* iNextInst = llvm::dyn_cast<llvm::BinaryOperator>(iNext);
+        if (!iNextInst || iNextInst->getOpcode() != llvm::Instruction::Add) continue;
+        {
+            bool iIsOp0 = iNextInst->getOperand(0) == iPhi;
+            bool iIsOp1 = iNextInst->getOperand(1) == iPhi;
+            if (!iIsOp0 && !iIsOp1) continue;
+            llvm::Value* step = iIsOp0 ? iNextInst->getOperand(1) : iNextInst->getOperand(0);
+            if (!isConstInt(step, 1)) continue;
+        }
+
+        // accNext must be add(accPhi, iPhi) or add(iPhi, accPhi)
+        auto* accNextInst = llvm::dyn_cast<llvm::BinaryOperator>(accNext);
+        if (!accNextInst || accNextInst->getOpcode() != llvm::Instruction::Add) continue;
+        {
+            bool accIsOp0 = accNextInst->getOperand(0) == accPhi;
+            bool accIsOp1 = accNextInst->getOperand(1) == accPhi;
+            if (!accIsOp0 && !accIsOp1) continue;
+            llvm::Value* addend = accIsOp0 ? accNextInst->getOperand(1)
+                                           : accNextInst->getOperand(0);
+            if (addend != iPhi) continue;
+        }
+
+        // No side effects in the block (other than phi / branch / the two adds)
+        bool hasSideEffects = false;
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::PHINode>(&inst) || llvm::isa<llvm::BranchInst>(&inst))
+                continue;
+            if (&inst == iNextInst || &inst == accNextInst) continue;
+            if (inst.mayHaveSideEffects()) { hasSideEffects = true; break; }
+        }
+        if (hasSideEffects) continue;
+
+        // Find exit block and accumulator result
+        llvm::BasicBlock* exitBB = nullptr;
+        for (auto* succ : llvm::successors(&bb))
+            if (succ != &bb) { exitBB = succ; break; }
+        if (!exitBB) continue;
+
+        // Find the loop's trip count n from the exit branch condition:
+        //   br (i < n), bb, exitBB   →   n is the bound
+        auto* brInst = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator());
+        if (!brInst || !brInst->isConditional()) continue;
+        auto* icmpCond = llvm::dyn_cast<llvm::ICmpInst>(brInst->getCondition());
+        if (!icmpCond) continue;
+
+        // Accept: icmp slt iPhi, n  (loop while i < n)
+        //    and: icmp ult iPhi, n
+        //    and: icmp sgt n, iPhi  (swapped)
+        llvm::Value* tripCount = nullptr;
+        {
+            auto pred = icmpCond->getPredicate();
+            llvm::Value* lhs = icmpCond->getOperand(0);
+            llvm::Value* rhs = icmpCond->getOperand(1);
+            // Normalize: put iPhi on left
+            if (rhs == iPhi) {
+                std::swap(lhs, rhs);
+                pred = llvm::ICmpInst::getSwappedPredicate(pred);
+            }
+            if (lhs == iPhi &&
+                (pred == llvm::ICmpInst::ICMP_SLT ||
+                 pred == llvm::ICmpInst::ICMP_ULT)) {
+                tripCount = rhs;
+            }
+        }
+        if (!tripCount) continue;
+
+        // Find accumulator's LCSSA phi in exitBB
+        llvm::Value* resultVal = nullptr;
+        for (auto& phi2 : exitBB->phis()) {
+            for (unsigned idx = 0; idx < phi2.getNumIncomingValues(); ++idx) {
+                if (phi2.getIncomingBlock(idx) == &bb &&
+                    (phi2.getIncomingValue(idx) == accPhi ||
+                     phi2.getIncomingValue(idx) == accNext)) {
+                    resultVal = &phi2;
+                    break;
+                }
+            }
+            if (resultVal) break;
+        }
+        if (!resultVal) continue;
+
+        // Emit closed-form: n*(n-1)/2 in the preheader
+        //   = (n * (n - 1)) >> 1   (exact for non-negative n)
+        llvm::IRBuilder<> builder(iPreBB->getTerminator());
+        llvm::Value* n = tripCount;
+        llvm::Value* nm1 = builder.CreateSub(
+            n, llvm::ConstantInt::get(i64Ty, 1), "tri.nm1");
+        llvm::Value* prod = builder.CreateMul(n, nm1, "tri.prod", /*NUW=*/false, /*NSW=*/true);
+        llvm::Value* tri = builder.CreateAShr(
+            prod, llvm::ConstantInt::get(i64Ty, 1), "tri.sum");
+
+        // Replace the accumulator result with the closed form
+        resultVal->replaceAllUsesWith(tri);
+
+        // Bypass the loop: redirect the preheader branch to exitBB
+        auto* preTerm = iPreBB->getTerminator();
+        if (auto* preBr = llvm::dyn_cast<llvm::BranchInst>(preTerm)) {
+            if (preBr->isConditional()) {
+                for (unsigned idx = 0; idx < preBr->getNumSuccessors(); ++idx) {
+                    if (preBr->getSuccessor(idx) == &bb) {
+                        preBr->setSuccessor(idx, exitBB);
+                        // Patch exitBB PHIs that came from bb → now from iPreBB
+                        for (auto& phi2 : exitBB->phis()) {
+                            for (unsigned j = 0; j < phi2.getNumIncomingValues(); ++j) {
+                                if (phi2.getIncomingBlock(j) == &bb) {
+                                    phi2.addIncoming(phi2.getIncomingValue(j), iPreBB);
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        ++count;
+    }
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Loop strength reduction — convert i*C to incremental addition
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -8022,10 +8340,12 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     // single hardware instructions:
     //   popcount loop: while(x){c+=x&1;x>>=1} → llvm.ctpop(x_init)
     //   floor-log2 loop: while(x>1){x>>=1;r++} → 63 - llvm.ctlz(x_init)
+    //   triangular sum: for(i=0;i<n;i++){acc+=i;} → n*(n-1)/2
     // Runs before all other phases so that the replaced loops are dead and
     // DCE can clean them up.  The loop body is dead-code-eliminated in Phase 5.
     if (config.enableIdiomRecognition) {
         unsigned loopIdioms = recognizeLoopIdioms(func);
+        loopIdioms += recognizeTriangularSumLoops(func);
         stats.idiomsReplaced += loopIdioms;
     }
 
