@@ -112,7 +112,7 @@ BuildResult BuildSystem::build(const BuildIO& io) {
 
     if (!io.quiet) {
         std::cout << "   Compiling " << manifest_.name
-                  << " v" << manifest_.manifest_version_or_empty()
+                  << " v" << manifest_.version
                   << " (" << profileName_ << ")\n";
     }
 
@@ -197,6 +197,12 @@ bool BuildSystem::runCompiler(const std::string& entryPath,
     compiler.setSuperoptimize(profile_.superopt);
     compiler.setSuperoptLevel(profile_.superoptLevel);
     compiler.setHardwareGraphOpt(profile_.hgoe);
+    compiler.setStaticLinking(profile_.staticLink);
+    compiler.setStackProtector(profile_.stackProtector);
+    if (!marchCpu_.empty())   compiler.setMarch(marchCpu_);
+    if (!mtuneCpu_.empty())   compiler.setMtune(mtuneCpu_);
+    if (!pgoGenPath_.empty()) compiler.setPGOGen(pgoGenPath_);
+    if (!pgoUsePath_.empty()) compiler.setPGOUse(pgoUsePath_);
 
     try {
         compiler.compile(entryPath, outPath);

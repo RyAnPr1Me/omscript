@@ -30,6 +30,8 @@ BuildProfile BuildProfile::makeDebug() {
     p.parallelize   = false;
     p.hgoe          = false;
     p.wholeProgram  = false;
+    p.stackProtector= false;
+    p.staticLink    = false;
     p.outDir        = "target/debug";
     return p;
 }
@@ -51,6 +53,8 @@ BuildProfile BuildProfile::makeRelease() {
     p.parallelize   = true;
     p.hgoe          = true;
     p.wholeProgram  = true;
+    p.stackProtector= false;
+    p.staticLink    = false;
     p.outDir        = "target/release";
     return p;
 }
@@ -172,6 +176,10 @@ static void applyProfileKey(BuildProfile& p,
         if (parseTomlBool(val, b)) p.hgoe = b;
     } else if (key == "whole_program") {
         if (parseTomlBool(val, b)) p.wholeProgram = b;
+    } else if (key == "stack_protector") {
+        if (parseTomlBool(val, b)) p.stackProtector = b;
+    } else if (key == "static_link" || key == "static") {
+        if (parseTomlBool(val, b)) p.staticLink = b;
     }
     // Unknown keys are silently ignored for forward compatibility.
 }

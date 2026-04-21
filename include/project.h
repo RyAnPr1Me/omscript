@@ -94,6 +94,12 @@ struct BuildProfile {
     /// propagation.  Implied by opt_level >= 2 in the release profile.
     bool wholeProgram             = false;
 
+    /// Enable the stack protector (-fstack-protector).
+    bool stackProtector           = false;
+
+    /// Link statically (-static).
+    bool staticLink               = false;
+
     /// Output directory for this profile relative to the project root,
     /// e.g. "target/debug" or "target/release".
     std::string outDir;

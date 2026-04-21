@@ -94,6 +94,11 @@ set(SRC
     src/compiler.cpp
     src/main.cpp
 
+    # Build system (project manifest, dependency graph, build orchestrator)
+    src/project.cpp
+    src/build_graph.cpp
+    src/build_system.cpp
+
     # Runtime
     runtime/value.cpp
 

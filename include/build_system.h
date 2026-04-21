@@ -79,6 +79,27 @@ public:
     /// Return the active BuildProfile (valid after prepare()).
     const BuildProfile& profile() const noexcept { return profile_; }
 
+    /// Replace the active profile.  Call after prepare() to apply CLI flag
+    /// overrides on top of the profile loaded from oms.toml.
+    void setProfile(BuildProfile prof) { profile_ = std::move(prof); }
+
+    /// Override the output binary path.  Default: target/<profile>/<name>.
+    /// Call after prepare() when the user passes -o on the command line.
+    void setOutputPath(const std::string& path) { outputPath_ = path; }
+
+    /// Forward -march=<cpu> to the underlying Compiler (not stored in the
+    /// profile because it is a target property, not a build-profile property).
+    void setMarch(std::string cpu) { marchCpu_ = std::move(cpu); }
+
+    /// Forward -mtune=<cpu> to the underlying Compiler.
+    void setMtune(std::string cpu) { mtuneCpu_ = std::move(cpu); }
+
+    /// Enable PGO instrumentation generation (--pgo-gen=<path>).
+    void setPGOGen(std::string path) { pgoGenPath_ = std::move(path); }
+
+    /// Enable PGO profile-use optimisation (--pgo-use=<path>).
+    void setPGOUse(std::string path) { pgoUsePath_ = std::move(path); }
+
     /// Return the parsed manifest (valid after prepare()).
     const OmsManifest& manifest() const noexcept { return manifest_; }
 
@@ -102,6 +123,10 @@ private:
     std::string  outputPath_; ///< <targetDir_>/<manifest_.name>
     std::string  targetDir_;  ///< <projectDir_>/target/<profileName_>
     std::string  cacheDir_;   ///< <targetDir_>/cache
+    std::string  marchCpu_;
+    std::string  mtuneCpu_;
+    std::string  pgoGenPath_;
+    std::string  pgoUsePath_;
     bool         prepared_ = false;
 };
 

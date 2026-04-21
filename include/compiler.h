@@ -112,6 +112,27 @@ class Compiler {
         debug_ = enable;
     }
 
+    /// Enable or disable E-graph equality-saturation (default: true at O2+).
+    void setEGraphOptimize(bool enable) {
+        egraph_ = enable;
+    }
+
+    /// Enable or disable the superoptimizer pass (default: true at O2+).
+    void setSuperoptimize(bool enable) {
+        superopt_ = enable;
+    }
+
+    /// Set superoptimizer aggressiveness 0–3 (default: 2).
+    void setSuperoptLevel(unsigned level) {
+        superoptLevel_ = level;
+        superopt_ = (level > 0);
+    }
+
+    /// Enable or disable the Hardware Graph Optimization Engine (default: true).
+    void setHardwareGraphOpt(bool enable) {
+        hgoe_ = enable;
+    }
+
   private:
     std::string readFile(const std::string& filename);
     bool verbose_ = false;
@@ -131,6 +152,10 @@ class Compiler {
     bool loopOptimize_ = true;
     bool parallelize_ = true;
     bool debug_ = false;
+    bool egraph_ = true;
+    bool superopt_ = true;
+    unsigned superoptLevel_ = 2;
+    bool hgoe_ = true;
     std::string pgoGenPath_;
     std::string pgoUsePath_;
 };
