@@ -3860,24 +3860,55 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         endArg = toDefaultType(endArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "slice.arrptr");
-                llvm::Value* sliceLenLoad = emitLoadArrayLen(arrPtr, "slice.arrlen");
+        llvm::Value* sliceLenLoad = emitLoadArrayLen(arrPtr, "slice.arrlen");
         llvm::Value* arrLen = sliceLenLoad;
+
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        // Clamp start: max(0, min(start, arrLen))
-        llvm::Value* startNeg = builder->CreateICmpSLT(startArg, zero, "slice.startneg");
-        startArg = builder->CreateSelect(startNeg, zero, startArg, "slice.startclamp");
-        llvm::Value* startOver = builder->CreateICmpSGT(startArg, arrLen, "slice.startover");
-        startArg = builder->CreateSelect(startOver, arrLen, startArg, "slice.startfinal");
-        // Clamp end: max(start, min(end, arrLen))
-        llvm::Value* endNeg = builder->CreateICmpSLT(endArg, startArg, "slice.endneg");
-        endArg = builder->CreateSelect(endNeg, startArg, endArg, "slice.endclamp");
-        llvm::Value* endOver = builder->CreateICmpSGT(endArg, arrLen, "slice.endover");
-        endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // ── Partial constant-bounds optimisation ──────────────────────────────
+        // When start is a compile-time constant ≥ 0, the two start-clamping
+        // comparisons are provably dead and can be elided:
+        //   - startNeg = icmp slt K, 0  →  always false for K ≥ 0
+        //   - startOver = icmp sgt K, arrLen  →  only fires if arrLen < K,
+        //     but we handle that via the end clamp below (sliceLen goes to 0).
+        // The end-vs-arrLen clamp is always needed for safety.
+        // When end is also a compile-time constant ≥ start, the endNeg check
+        // (end < start) is also dead and can be dropped.
+        auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startArg);
+        auto* endCI   = llvm::dyn_cast<llvm::ConstantInt>(endArg);
+
+        if (startCI && startCI->getSExtValue() >= 0) {
+            // start is non-negative constant: skip the 2 start-clamp ops.
+            // startFinal = clamp to arrLen still needed if start > arrLen:
+            llvm::Value* startOver = builder->CreateICmpSGT(startArg, arrLen, "slice.startover");
+            startArg = builder->CreateSelect(startOver, arrLen, startArg, "slice.startfinal");
+
+            if (endCI && endCI->getSExtValue() >= startCI->getSExtValue()) {
+                // end is also non-negative constant ≥ start: skip endNeg clamp.
+                llvm::Value* endOver = builder->CreateICmpSGT(endArg, arrLen, "slice.endover");
+                endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
+            } else {
+                // end is runtime: clamp end to [start, arrLen].
+                llvm::Value* endNeg = builder->CreateICmpSLT(endArg, startArg, "slice.endneg");
+                endArg = builder->CreateSelect(endNeg, startArg, endArg, "slice.endclamp");
+                llvm::Value* endOver = builder->CreateICmpSGT(endArg, arrLen, "slice.endover");
+                endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
+            }
+        } else {
+            // General path: clamp both start and end.
+            llvm::Value* startNeg = builder->CreateICmpSLT(startArg, zero, "slice.startneg");
+            startArg = builder->CreateSelect(startNeg, zero, startArg, "slice.startclamp");
+            llvm::Value* startOver = builder->CreateICmpSGT(startArg, arrLen, "slice.startover");
+            startArg = builder->CreateSelect(startOver, arrLen, startArg, "slice.startfinal");
+            llvm::Value* endNeg = builder->CreateICmpSLT(endArg, startArg, "slice.endneg");
+            endArg = builder->CreateSelect(endNeg, startArg, endArg, "slice.endclamp");
+            llvm::Value* endOver = builder->CreateICmpSGT(endArg, arrLen, "slice.endover");
+            endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
+        }
 
         llvm::Value* sliceLen = builder->CreateSub(endArg, startArg, "slice.len");
-        // Allocate: (sliceLen + 1) * 8
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
         llvm::Value* buf = emitAllocArray(sliceLen, "slice");
         // Copy elements: arr[start+1..end+1) to buf[1..)
         llvm::Value* srcIdx = builder->CreateAdd(startArg, one, "slice.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
