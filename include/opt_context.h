@@ -317,6 +317,28 @@ public:
         return sc;
     }
 
+    /// Build the egraph::EGraphOptContext from our config and pure-user-funcs.
+    /// This is what all internal optimize* calls use.
+    egraph::EGraphOptContext toOptContext() const noexcept {
+        egraph::EGraphOptContext ctx;
+        ctx.config        = toSaturationConfig();
+        ctx.pureUserFuncs = pureUserFuncs_.empty() ? nullptr : &pureUserFuncs_;
+        return ctx;
+    }
+
+    // ── Pure-user-function registry ───────────────────────────────────────
+
+    /// Replace the set of known-pure user-defined function names.
+    /// Called by the Orchestrator after the purity pass so that the e-graph
+    /// can include expressions involving these functions.
+    void setPureUserFuncs(std::unordered_set<std::string> funcs) {
+        pureUserFuncs_ = std::move(funcs);
+    }
+
+    const std::unordered_set<std::string>& pureUserFuncs() const noexcept {
+        return pureUserFuncs_;
+    }
+
     // ── Entry points ──────────────────────────────────────────────────────
 
     /// Optimize a single AST expression.  Returns the simplified expression
@@ -337,8 +359,9 @@ public:
     void resetStats() noexcept { stats_.reset(); }
 
 private:
-    EGraphConfig config_;
-    EGraphStats  stats_;
+    EGraphConfig                    config_;
+    EGraphStats                     stats_;
+    std::unordered_set<std::string> pureUserFuncs_;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

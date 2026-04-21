@@ -266,38 +266,19 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
 
 /// Optimize a single AST expression using e-graph equality saturation.
 /// Returns the optimized expression (may be the same if no improvement found).
-std::unique_ptr<Expression> optimizeExpression(const Expression* expr) {
-    if (!expr) return nullptr;
-
-    SaturationConfig config;
-    config.maxNodes = 10000;
-    config.maxIterations = 15;
-    config.enableConstantFolding = true;
-
-    EGraph graph(config);
-    const ClassId root = astToEGraph(graph, expr);
-
-    // Run equality saturation with all rules.
-    // The rule set is constant across the lifetime of the process, so we build
-    // it once and reuse it for every expression.  C++11 guarantees that the
-    // initialisation of a function-local static is thread-safe.
-    static const std::vector<RewriteRule> kAllRules = getAllRules();
-    graph.saturate(kAllRules);
-
-    // Extract the optimal expression
-    const CostModel model;
-    std::unordered_map<ClassId, ENode> cache;
-    return eNodeToAST(graph, root, model, cache);
-}
+/// Core implementation: optimize an expression using a provided EGraphOptContext.
+/// This is the single implementation used by all public entry points.
+static std::unique_ptr<Expression> optimizeExpressionImpl(const Expression* expr,
+                                                           const EGraphOptContext& ctx);
 
 /// Recursively optimize all expressions within a statement.
-static void optimizeStatement(Statement* stmt);
+static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx);
 
 /// Check whether an expression tree can be fully represented in the e-graph.
 /// Returns false if any sub-expression would degenerate into an opaque variable
 /// (e.g. IndexExpr, unsupported binary operators like ??), which would cause
 /// the reconstructed AST to reference non-existent variables like __opaque.
-static bool canRepresentInEGraph(const Expression* expr) {
+static bool canRepresentInEGraph(const Expression* expr, const EGraphOptContext& ctx) {
     if (!expr) return true;
 
     switch (expr->type) {
@@ -327,26 +308,26 @@ static bool canRepresentInEGraph(const Expression* expr) {
             if (isStringLit(bin->left.get()) || isStringLit(bin->right.get()))
                 return false;
         }
-        return canRepresentInEGraph(bin->left.get()) &&
-               canRepresentInEGraph(bin->right.get());
+        return canRepresentInEGraph(bin->left.get(), ctx) &&
+               canRepresentInEGraph(bin->right.get(), ctx);
     }
 
     case ASTNodeType::UNARY_EXPR: {
         auto* un = static_cast<const UnaryExpr*>(expr);
         if (un->op != "-" && un->op != "~" && un->op != "!") return false;
-        return canRepresentInEGraph(un->operand.get());
+        return canRepresentInEGraph(un->operand.get(), ctx);
     }
 
     case ASTNodeType::TERNARY_EXPR: {
         auto* tern = static_cast<const TernaryExpr*>(expr);
-        return canRepresentInEGraph(tern->condition.get()) &&
-               canRepresentInEGraph(tern->thenExpr.get()) &&
-               canRepresentInEGraph(tern->elseExpr.get());
+        return canRepresentInEGraph(tern->condition.get(), ctx) &&
+               canRepresentInEGraph(tern->thenExpr.get(), ctx) &&
+               canRepresentInEGraph(tern->elseExpr.get(), ctx);
     }
 
     case ASTNodeType::CALL_EXPR: {
         auto* call = static_cast<const CallExpr*>(expr);
-        // Only allow known-pure builtins (no side effects, no I/O).
+        // Allow known-pure builtins (no side effects, no I/O).
         // Functions like print, input, swap, reverse, assert are excluded
         // because they have observable side effects that the e-graph's
         // rewrite rules could incorrectly eliminate or reorder.
@@ -356,10 +337,13 @@ static bool canRepresentInEGraph(const Expression* expr) {
             "to_int", "to_float", "typeof", "log2", "gcd",
             "char_at", "str_eq", "str_find", "floor", "ceil", "round"
         };
-        if (pureBuiltins.find(call->callee) == pureBuiltins.end())
+        const bool isKnownPure =
+            (pureBuiltins.count(call->callee) > 0) ||
+            (ctx.pureUserFuncs && ctx.pureUserFuncs->count(call->callee) > 0);
+        if (!isKnownPure)
             return false;
         for (const auto& arg : call->arguments) {
-            if (!canRepresentInEGraph(arg.get())) return false;
+            if (!canRepresentInEGraph(arg.get(), ctx)) return false;
         }
         return true;
     }
@@ -367,11 +351,11 @@ static bool canRepresentInEGraph(const Expression* expr) {
     // MoveExpr / BorrowExpr — delegate to inner expression.
     case ASTNodeType::MOVE_EXPR: {
         auto* mv = static_cast<const MoveExpr*>(expr);
-        return canRepresentInEGraph(mv->source.get());
+        return canRepresentInEGraph(mv->source.get(), ctx);
     }
     case ASTNodeType::BORROW_EXPR: {
         auto* bw = static_cast<const BorrowExpr*>(expr);
-        return canRepresentInEGraph(bw->source.get());
+        return canRepresentInEGraph(bw->source.get(), ctx);
     }
 
     default:
@@ -380,32 +364,47 @@ static bool canRepresentInEGraph(const Expression* expr) {
     }
 }
 
-/// Optimize an expression in-place by replacing with the e-graph result.
-static std::unique_ptr<Expression> tryOptimize(std::unique_ptr<Expression> expr) {
+/// Core implementation: optimize one expression using the provided context.
+static std::unique_ptr<Expression> optimizeExpressionImpl(const Expression* expr,
+                                                           const EGraphOptContext& ctx) {
     if (!expr) return nullptr;
 
-    // Only optimize pure expressions (no side effects)
-    // Skip calls, assignments, and other effectful operations
+    EGraph graph(ctx.config);
+    const ClassId root = astToEGraph(graph, expr);
+
+    // The rule set is constant across the lifetime of the process, so we build
+    // it once and reuse it for every expression.  C++11 guarantees thread-safe
+    // initialisation of function-local statics.
+    static const std::vector<RewriteRule> kAllRules = getAllRules();
+    graph.saturate(kAllRules);
+
+    const CostModel model;
+    std::unordered_map<ClassId, ENode> cache;
+    return eNodeToAST(graph, root, model, cache);
+}
+
+/// Optimize an expression in-place by replacing with the e-graph result.
+static std::unique_ptr<Expression> tryOptimize(std::unique_ptr<Expression> expr,
+                                                const EGraphOptContext& ctx) {
+    if (!expr) return nullptr;
+
     switch (expr->type) {
     case ASTNodeType::BINARY_EXPR:
     case ASTNodeType::UNARY_EXPR:
     case ASTNodeType::LITERAL_EXPR:
     case ASTNodeType::IDENTIFIER_EXPR:
     case ASTNodeType::TERNARY_EXPR: {
-        // Guard: skip expressions containing sub-expressions that the e-graph
-        // cannot represent (e.g. array index, null coalesce ??).  Without this
-        // check, the e-graph would introduce opaque variable references like
-        // __opaque or __binop_?? that break codegen.
-        if (!canRepresentInEGraph(expr.get()))
+        // Guard: skip expressions that contain sub-expressions the e-graph
+        // cannot model (e.g. array index, null coalesce ??).
+        if (!canRepresentInEGraph(expr.get(), ctx))
             return expr;
-        // Preserve source location from the original expression so that error
-        // messages from the codegen still include line/column information.
-        const int origLine = expr->line;
+        // Preserve source location so error messages keep line/column info.
+        const int origLine   = expr->line;
         const int origColumn = expr->column;
-        auto optimized = optimizeExpression(expr.get());
+        auto optimized = optimizeExpressionImpl(expr.get(), ctx);
         if (optimized) {
             if (optimized->line == 0) {
-                optimized->line = origLine;
+                optimized->line   = origLine;
                 optimized->column = origColumn;
             }
             return optimized;
@@ -417,92 +416,119 @@ static std::unique_ptr<Expression> tryOptimize(std::unique_ptr<Expression> expr)
     }
 }
 
-static void optimizeStatement(Statement* stmt) {
+static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx) {
     if (!stmt) return;
 
     switch (stmt->type) {
     case ASTNodeType::VAR_DECL: {
         auto* varDecl = static_cast<VarDecl*>(stmt);
         if (varDecl->initializer) {
-            varDecl->initializer = tryOptimize(std::move(varDecl->initializer));
+            varDecl->initializer = tryOptimize(std::move(varDecl->initializer), ctx);
         }
         break;
     }
     case ASTNodeType::RETURN_STMT: {
         auto* ret = static_cast<ReturnStmt*>(stmt);
         if (ret->value) {
-            ret->value = tryOptimize(std::move(ret->value));
+            ret->value = tryOptimize(std::move(ret->value), ctx);
         }
         break;
     }
     case ASTNodeType::EXPR_STMT: {
         auto* exprStmt = static_cast<ExprStmt*>(stmt);
         if (exprStmt->expression) {
-            exprStmt->expression = tryOptimize(std::move(exprStmt->expression));
+            exprStmt->expression = tryOptimize(std::move(exprStmt->expression), ctx);
         }
         break;
     }
     case ASTNodeType::IF_STMT: {
         auto* ifStmt = static_cast<IfStmt*>(stmt);
         if (ifStmt->condition) {
-            ifStmt->condition = tryOptimize(std::move(ifStmt->condition));
+            ifStmt->condition = tryOptimize(std::move(ifStmt->condition), ctx);
         }
-        optimizeStatement(ifStmt->thenBranch.get());
-        optimizeStatement(ifStmt->elseBranch.get());
+        optimizeStatementImpl(ifStmt->thenBranch.get(), ctx);
+        optimizeStatementImpl(ifStmt->elseBranch.get(), ctx);
         break;
     }
     case ASTNodeType::WHILE_STMT: {
         auto* whileStmt = static_cast<WhileStmt*>(stmt);
         if (whileStmt->condition) {
-            whileStmt->condition = tryOptimize(std::move(whileStmt->condition));
+            whileStmt->condition = tryOptimize(std::move(whileStmt->condition), ctx);
         }
-        optimizeStatement(whileStmt->body.get());
+        optimizeStatementImpl(whileStmt->body.get(), ctx);
         break;
     }
     case ASTNodeType::DO_WHILE_STMT: {
         auto* doWhile = static_cast<DoWhileStmt*>(stmt);
-        optimizeStatement(doWhile->body.get());
+        optimizeStatementImpl(doWhile->body.get(), ctx);
         if (doWhile->condition) {
-            doWhile->condition = tryOptimize(std::move(doWhile->condition));
+            doWhile->condition = tryOptimize(std::move(doWhile->condition), ctx);
         }
         break;
     }
     case ASTNodeType::BLOCK: {
         auto* block = static_cast<BlockStmt*>(stmt);
         for (auto& s : block->statements) {
-            optimizeStatement(s.get());
+            optimizeStatementImpl(s.get(), ctx);
         }
         break;
     }
     case ASTNodeType::MOVE_DECL: {
         auto* moveDecl = static_cast<MoveDecl*>(stmt);
         if (moveDecl->initializer) {
-            moveDecl->initializer = tryOptimize(std::move(moveDecl->initializer));
+            moveDecl->initializer = tryOptimize(std::move(moveDecl->initializer), ctx);
         }
         break;
     }
     case ASTNodeType::INVALIDATE_STMT:
-        // Nothing to optimize for invalidate statements.
         [[fallthrough]];
     default:
         break;
     }
 }
 
-/// Optimize an entire function's body using e-graph equality saturation.
-void optimizeFunction(FunctionDecl* func) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Public API — context-aware overloads
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::unique_ptr<Expression> optimizeExpression(const Expression* expr,
+                                                const EGraphOptContext& ctx) {
+    if (!expr) return nullptr;
+    if (!canRepresentInEGraph(expr, ctx)) return nullptr;
+    return optimizeExpressionImpl(expr, ctx);
+}
+
+void optimizeFunction(FunctionDecl* func, const EGraphOptContext& ctx) {
     if (!func || !func->body) return;
     for (auto& stmt : func->body->statements) {
-        optimizeStatement(stmt.get());
+        optimizeStatementImpl(stmt.get(), ctx);
     }
 }
 
-/// Optimize all functions in a program using e-graph equality saturation.
-void optimizeProgram(Program* program) {
+void optimizeProgram(Program* program, const EGraphOptContext& ctx) {
     if (!program) return;
     for (auto& func : program->functions) {
-        optimizeFunction(func.get());
+        optimizeFunction(func.get(), ctx);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public API — legacy overloads (delegate to context-aware versions)
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::unique_ptr<Expression> optimizeExpression(const Expression* expr) {
+    static const EGraphOptContext kDefault;
+    return optimizeExpression(expr, kDefault);
+}
+
+void optimizeFunction(FunctionDecl* func) {
+    static const EGraphOptContext kDefault;
+    optimizeFunction(func, kDefault);
+}
+
+void optimizeProgram(Program* program) {
+    static const EGraphOptContext kDefault;
+    optimizeProgram(program, kDefault);
 }
 
 } // namespace egraph

@@ -459,6 +459,17 @@ void OptimizationOrchestrator::runCFCTRE(Program* program, OptimizationContext& 
 }
 
 void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& ctx) {
+    // Before running the e-graph, populate the pure-user-functions set so
+    // the optimizer can include expressions containing calls to those functions.
+    // A pure function always returns the same value for the same arguments, so
+    // algebraic rules (distributivity, commutativity, etc.) can fire across
+    // call boundaries — e.g. 2*f(x) + 3*f(x) → 5*f(x).
+    std::unordered_set<std::string> pureUserFuncs;
+    for (const auto& [name, ff] : ctx.allFacts()) {
+        if (ff.isPure) pureUserFuncs.insert(name);
+    }
+    ctx.egraph().setPureUserFuncs(std::move(pureUserFuncs));
+
     // Delegate the level/flag guard to CodeGenerator (it knows enableEGraph_).
     // If the guard passes, CodeGenerator configures the subsystem from its own
     // settings and then calls ctx.egraph().optimizeProgram().

@@ -491,7 +491,33 @@ class Program;
 // ─────────────────────────────────────────────────────────────────────────────
 namespace egraph {
 
+/// Context for the AST-level e-graph optimizer.
+///
+/// Carries:
+///   config         — saturation parameters (node limit, iteration limit, …)
+///   pureUserFuncs  — names of user-defined functions that are pure.
+///                    Expressions containing calls to these functions are
+///                    eligible for e-graph optimization because a pure call
+///                    with the same arguments is always equivalent, enabling
+///                    algebraic rules (e.g. distributivity) to fire across
+///                    call boundaries.
+struct EGraphOptContext {
+    SaturationConfig                       config;
+    const std::unordered_set<std::string>* pureUserFuncs = nullptr; // non-owning
+};
+
+/// Optimize a single AST expression with an explicit context.
+std::unique_ptr<Expression> optimizeExpression(const Expression* expr,
+                                                const EGraphOptContext& ctx);
+
+/// Optimize all expressions in a function body with an explicit context.
+void optimizeFunction(FunctionDecl* func, const EGraphOptContext& ctx);
+
+/// Optimize all functions in a program with an explicit context.
+void optimizeProgram(Program* program, const EGraphOptContext& ctx);
+
 /// Optimize a single AST expression using e-graph equality saturation.
+/// Uses default saturation parameters and no user-function purity context.
 std::unique_ptr<Expression> optimizeExpression(const Expression* expr);
 
 /// Optimize all expressions in a function body.

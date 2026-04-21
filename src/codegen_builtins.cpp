@@ -1,9 +1,11 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <unordered_set>
 
 // Apply maximum compiler optimizations to this hot path.
@@ -9133,6 +9135,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // and LICM to hoist pure calls out of loops.
     if (callee->hasFnAttribute(llvm::Attribute::Speculatable)) {
         callResult->addFnAttr(llvm::Attribute::Speculatable);
+    }
+    // Emit !range metadata when a narrowed value range is known for this callee.
+    // This allows LLVM's CVP/LVI passes to propagate tighter bounds into callers
+    // without requiring inlining.  Only applicable to i64-returning functions.
+    if (optCtx_ && callee->getReturnType()->isIntegerTy(64)) {
+        if (auto rng = optCtx_->returnRange(expr->callee)) {
+            if (rng->isNarrowed() && !rng->isEmpty() &&
+                rng->hi < std::numeric_limits<int64_t>::max()) {
+                llvm::Type* i64 = getDefaultType();
+                auto* rangeMD = llvm::MDNode::get(*context, {
+                    llvm::ConstantAsMetadata::get(
+                        llvm::ConstantInt::get(i64, rng->lo, /*isSigned=*/true)),
+                    llvm::ConstantAsMetadata::get(
+                        llvm::ConstantInt::get(i64, rng->hi + 1, /*isSigned=*/true))
+                });
+                callResult->setMetadata(llvm::LLVMContext::MD_range, rangeMD);
+            }
+        }
     }
     // Propagate non-negativity from the callee: if the callee's return value
     // has !range [0, INT64_MAX) metadata, mark the result as non-negative.
