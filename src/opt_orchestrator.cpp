@@ -481,17 +481,150 @@ void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& 
 void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationContext& ctx) {
     // Synthesize ValueRange facts from CFCTRE results AND simple AST patterns.
     // Phase 1: constant returns (from CFCTRE).
-    // Phase 2: structural patterns in the return expression.
+    // Phase 2: structural patterns — collect ALL return expressions recursively,
+    //          compute a conservative ValueRange for each, and join them.
+    //          This handles multi-return functions (if-else, early returns, etc.)
+    //          which previously received no range information at all.
     if (!program) {
         ctx.validity().rangeAnalysis = true;
         return;
     }
 
+    // Helper: try to read a literal int from an expression.
+    auto litInt = [](const Expression* e) -> std::optional<int64_t> {
+        if (!e) return {};
+        if (e->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<const LiteralExpr*>(e);
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+                return lit->intValue;
+        }
+        return {};
+    };
+
+    // Try to compute a ValueRange for a single return expression.
+    // Returns nullopt when no bound can be proven.
+    std::function<std::optional<ValueRange>(const Expression*)> exprRange;
+    exprRange = [&](const Expression* e) -> std::optional<ValueRange> {
+        if (!e) return {};
+
+        // Literal integer → exact point range.
+        if (auto v = litInt(e))
+            return ValueRange{*v, *v};
+
+        // Unary negation of a literal: -N → [-N, -N]
+        if (e->type == ASTNodeType::UNARY_EXPR) {
+            auto* ue = static_cast<const UnaryExpr*>(e);
+            if (ue->op == "-") {
+                if (auto v = litInt(ue->operand.get()))
+                    return ValueRange{-*v, -*v};
+            }
+        }
+
+        if (e->type == ASTNodeType::BINARY_EXPR) {
+            auto* bin = static_cast<const BinaryExpr*>(e);
+            // return expr % C → [0, C-1]  (when C is a positive literal)
+            if (bin->op == "%") {
+                if (auto c = litInt(bin->right.get())) {
+                    if (*c > 0) return ValueRange{0, *c - 1};
+                }
+            }
+            // return a + b → join(range(a), range(b)) only when both are in [0, N]
+            // (conservative: only emit if we know both sides are non-negative constants
+            //  or one side is a non-negative constant and the other is non-negative)
+            if (bin->op == "+") {
+                auto lr = exprRange(bin->left.get());
+                auto rr = exprRange(bin->right.get());
+                if (lr && rr && lr->lo >= 0 && rr->lo >= 0) {
+                    // Sum of two non-negative ranges.
+                    // Overflow guard: cap at INT64_MAX.
+                    int64_t lo = lr->lo + rr->lo;
+                    int64_t hi = (rr->hi <= std::numeric_limits<int64_t>::max() - lr->hi)
+                                     ? lr->hi + rr->hi
+                                     : std::numeric_limits<int64_t>::max();
+                    return ValueRange{lo, hi};
+                }
+            }
+        }
+
+        if (e->type == ASTNodeType::CALL_EXPR) {
+            auto* call = static_cast<const CallExpr*>(e);
+            // abs(x) → [0, INT64_MAX]
+            if (call->callee == "abs" && call->arguments.size() == 1)
+                return ValueRange{0, std::numeric_limits<int64_t>::max()};
+            // clamp(x, lo, hi) → [lo, hi]
+            if (call->callee == "clamp" && call->arguments.size() == 3) {
+                auto lo = litInt(call->arguments[1].get());
+                auto hi = litInt(call->arguments[2].get());
+                if (lo && hi && *lo <= *hi)
+                    return ValueRange{*lo, *hi};
+            }
+            // max(0, x) or max(x, 0) → [0, INT64_MAX]
+            if (call->callee == "max" && call->arguments.size() == 2) {
+                auto lo0 = litInt(call->arguments[0].get());
+                auto lo1 = litInt(call->arguments[1].get());
+                if ((lo0 && *lo0 == 0) || (lo1 && *lo1 == 0))
+                    return ValueRange{0, std::numeric_limits<int64_t>::max()};
+            }
+            // min(C, x) or min(x, C) for a positive C → [-INT64_MAX, C]
+            if (call->callee == "min" && call->arguments.size() == 2) {
+                auto c0 = litInt(call->arguments[0].get());
+                auto c1 = litInt(call->arguments[1].get());
+                if (c0) return ValueRange{std::numeric_limits<int64_t>::min(), *c0};
+                if (c1) return ValueRange{std::numeric_limits<int64_t>::min(), *c1};
+            }
+        }
+
+        return {}; // unknown
+    };
+
+    // Collect all return expressions from a function body (recursively).
+    // Also sets `hasUnboundReturn` if any return expression can't be bounded.
+    std::function<void(const Statement*, std::vector<const Expression*>&, bool&)>
+        collectReturns = [&](const Statement* s,
+                             std::vector<const Expression*>& rets,
+                             bool& hasUnboundReturn) {
+        if (!s) return;
+        switch (s->type) {
+        case ASTNodeType::RETURN_STMT: {
+            auto* rs = static_cast<const ReturnStmt*>(s);
+            if (rs->value) rets.push_back(rs->value.get());
+            else hasUnboundReturn = true; // void return
+            break;
+        }
+        case ASTNodeType::BLOCK: {
+            auto* blk = static_cast<const BlockStmt*>(s);
+            for (const auto& child : blk->statements)
+                collectReturns(child.get(), rets, hasUnboundReturn);
+            break;
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifs = static_cast<const IfStmt*>(s);
+            collectReturns(ifs->thenBranch.get(), rets, hasUnboundReturn);
+            collectReturns(ifs->elseBranch.get(), rets, hasUnboundReturn);
+            break;
+        }
+        case ASTNodeType::WHILE_STMT:
+            collectReturns(static_cast<const WhileStmt*>(s)->body.get(), rets, hasUnboundReturn);
+            break;
+        case ASTNodeType::DO_WHILE_STMT:
+            collectReturns(static_cast<const DoWhileStmt*>(s)->body.get(), rets, hasUnboundReturn);
+            break;
+        case ASTNodeType::FOR_STMT:
+            collectReturns(static_cast<const ForStmt*>(s)->body.get(), rets, hasUnboundReturn);
+            break;
+        case ASTNodeType::FOR_EACH_STMT:
+            collectReturns(static_cast<const ForEachStmt*>(s)->body.get(), rets, hasUnboundReturn);
+            break;
+        default:
+            break;
+        }
+    };
+
     for (const auto& func : program->functions) {
         FunctionFacts& ff = ctx.mutableFacts(func->name);
         if (ff.returnRange.has_value()) continue; // already populated
 
-        // Phase 1: point range from known-constant return.
+        // Phase 1: point range from known-constant return (CFCTRE result).
         if (ff.constIntReturn.has_value()) {
             ff.returnRange = ValueRange{*ff.constIntReturn, *ff.constIntReturn};
             continue;
@@ -502,96 +635,28 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
             continue;
         }
 
-        // Phase 2: structural analysis of the function body.
-        // Only attempt this when the function has exactly one return statement
-        // and no branching that could produce multiple distinct return values.
-        // We look for common non-trivial idioms:
-        //   return expr % C          → range [0, C-1]   (for C > 0)
-        //   return abs(expr)         → range [0, INT64_MAX]
-        //   return clamp(expr, lo,hi)→ range [lo, hi]   (for constant lo, hi)
+        // Phase 2: structural analysis across ALL return statements.
         if (!func->body || func->body->statements.empty()) continue;
 
-        // Count return statements and collect the unique return expression.
-        const Expression* retExpr = nullptr;
-        int retCount = 0;
-        std::function<void(const Statement*)> countReturns =
-            [&](const Statement* stmt) {
-                if (!stmt) return;
-                if (stmt->type == ASTNodeType::RETURN_STMT) {
-                    ++retCount;
-                    auto* rs = static_cast<const ReturnStmt*>(stmt);
-                    retExpr = rs->value.get();
-                } else if (stmt->type == ASTNodeType::BLOCK) {
-                    auto* blk = static_cast<const BlockStmt*>(stmt);
-                    for (const auto& s : blk->statements)
-                        countReturns(s.get());
-                } else if (stmt->type == ASTNodeType::IF_STMT) {
-                    auto* ifs = static_cast<const IfStmt*>(stmt);
-                    countReturns(ifs->thenBranch.get());
-                    countReturns(ifs->elseBranch.get());
-                } else if (stmt->type == ASTNodeType::WHILE_STMT) {
-                    countReturns(static_cast<const WhileStmt*>(stmt)->body.get());
-                } else if (stmt->type == ASTNodeType::DO_WHILE_STMT) {
-                    countReturns(static_cast<const DoWhileStmt*>(stmt)->body.get());
-                }
-            };
+        std::vector<const Expression*> retExprs;
+        bool hasUnboundReturn = false;
         for (const auto& s : func->body->statements)
-            countReturns(s.get());
+            collectReturns(s.get(), retExprs, hasUnboundReturn);
 
-        if (retCount != 1 || !retExpr) continue; // multiple exits or void
+        if (retExprs.empty() || hasUnboundReturn) continue;
 
-        // Helper: try to read a literal int from an expression.
-        auto litInt = [](const Expression* e) -> std::optional<int64_t> {
-            if (!e) return {};
-            if (e->type == ASTNodeType::LITERAL_EXPR) {
-                auto* lit = static_cast<const LiteralExpr*>(e);
-                if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
-                    return lit->intValue;
-            }
-            return {};
-        };
-
-        // Pattern: return expr % C  (integer modulo by positive constant)
-        if (retExpr->type == ASTNodeType::BINARY_EXPR) {
-            auto* bin = static_cast<const BinaryExpr*>(retExpr);
-            if (bin->op == "%") {
-                if (auto c = litInt(bin->right.get())) {
-                    // c == 1: result is always 0 (trivial but valid range [0,0])
-                    // c == 0: undefined behaviour — skip
-                    if (*c > 0) {
-                        ff.returnRange = ValueRange{0, *c - 1};
-                        continue;
-                    }
-                }
-            }
+        // Compute range for each return expression and join them.
+        // If any return can't be bounded, the whole function range is unknown.
+        std::optional<ValueRange> joined;
+        bool allBounded = true;
+        for (const Expression* re : retExprs) {
+            auto rng = exprRange(re);
+            if (!rng) { allBounded = false; break; }
+            joined = joined ? std::optional(ValueRange::join(*joined, *rng)) : rng;
         }
 
-        // Pattern: return abs(expr)
-        if (retExpr->type == ASTNodeType::CALL_EXPR) {
-            auto* call = static_cast<const CallExpr*>(retExpr);
-            if (call->callee == "abs" && call->arguments.size() == 1) {
-                ff.returnRange = ValueRange{0, std::numeric_limits<int64_t>::max()};
-                continue;
-            }
-            // Pattern: return clamp(expr, lo, hi)
-            if (call->callee == "clamp" && call->arguments.size() == 3) {
-                auto lo = litInt(call->arguments[1].get());
-                auto hi = litInt(call->arguments[2].get());
-                if (lo && hi && *lo <= *hi) {
-                    ff.returnRange = ValueRange{*lo, *hi};
-                    continue;
-                }
-            }
-            // Pattern: return max(0, expr) or max(expr, 0) → range [0, INT64_MAX]
-            if (call->callee == "max" && call->arguments.size() == 2) {
-                auto lo0 = litInt(call->arguments[0].get());
-                auto lo1 = litInt(call->arguments[1].get());
-                if ((lo0 && *lo0 == 0) || (lo1 && *lo1 == 0)) {
-                    ff.returnRange = ValueRange{0, std::numeric_limits<int64_t>::max()};
-                    continue;
-                }
-            }
-        }
+        if (allBounded && joined && joined->isNarrowed())
+            ff.returnRange = *joined;
     }
     ctx.validity().rangeAnalysis = true;
 }
