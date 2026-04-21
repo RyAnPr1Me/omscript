@@ -228,6 +228,18 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
 
     classes_.push_back(std::move(cls));
 
+    // Maintain the use-list for incremental rebuild: every distinct child
+    // class records this new class as one of its users.  Duplicates are
+    // permitted (cheap to add, harmless when iterated; the dirty queue
+    // dedupes via `dirtyMark_`).
+    parents_.emplace_back();  // parents_[id] = {} initially
+    for (ClassId child : node.children) {
+        ClassId c = find(child);
+        if (c < parents_.size()) {
+            parents_[c].push_back(id);
+        }
+    }
+
     hashcons_[node] = id;
     totalNodes_++;
 
@@ -304,7 +316,35 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
     // the merged class is non-negative (they represent the same value).
     classes_[a].isNonNeg = classes_[a].isNonNeg || classes_[b].isNonNeg;
 
+    // ── Incremental-rebuild bookkeeping ──────────────────────────────────
+    // The survivor itself is dirty (its node list grew with possibly
+    // non-canonical children).  Every class that USED `b` as a child still
+    // carries the stale id `b` in its node tuples, so its hashcons key is
+    // stale and must be re-canonicalized.  We migrate the use-list from `b`
+    // to `a` (the new canonical) and mark every member dirty.
+    ++mergeCount_;
+    markDirty(a);
+    if (b < parents_.size()) {
+        for (ClassId user : parents_[b]) {
+            // `find(user)` may differ from `user` if `user` was itself
+            // already merged — markDirty resolves that.
+            markDirty(user);
+            // Re-home this user under `a` so a future merge of `a` cascades.
+            if (a < parents_.size()) parents_[a].push_back(user);
+        }
+        parents_[b].clear();
+    }
+
     return a;
+}
+
+void EGraph::markDirty(ClassId id) {
+    id = find(id);
+    if (id >= classes_.size()) return;
+    if (dirtyMark_.size() <= id) dirtyMark_.resize(id + 1, false);
+    if (dirtyMark_[id]) return;
+    dirtyMark_[id] = true;
+    dirty_.push_back(id);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -320,29 +360,97 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
 }
 
 void EGraph::rebuild() {
-    // Rebuild the hashcons table: re-canonicalize all nodes after merges.
-    hashcons_.clear();
-    for (ClassId i = 0; i < classes_.size(); ++i) {
-        ClassId canonical = find(i);
-        if (canonical != i) continue; // Skip non-canonical classes
+    // ── Fast path: nothing dirty → no work needed ─────────────────────────
+    // The previous implementation rebuilt every class on every iteration of
+    // saturate(), which is O(total_nodes) work per iteration whether or not
+    // any merges happened.  By tracking a per-class dirty bit through
+    // `merge()`, we now skip iterations whose only side effect was to
+    // confirm a fixpoint (this hits on the LAST iteration of every
+    // saturation where `merges == 0`).
+    //
+    // SOUNDNESS: the dirty bit is set ONLY by `merge()` and cleared ONLY
+    // here.  No other code path can stale a hashcons entry: `add()`
+    // canonicalizes children before insertion, and existing class ids
+    // never become invalid (parent_ only grows).  Therefore "dirty empty"
+    // ⇒ all hashcons entries are still canonical and no class needs
+    // re-canonicalization.
+    if (dirty_.empty()) return;
 
-        for (auto& node : classes_[i].nodes) {
-            node = canonicalize(std::move(node));
-            hashcons_[node] = i;
-        }
+    // Drain the dirty marker — we are about to do a full rebuild that
+    // visits every class, so any previously-marked dirt is paid off.
+    // Future merges (including those triggered by congruence-closure
+    // inside this rebuild) will re-mark dirty for the NEXT call.
+    for (ClassId id : dirty_) {
+        if (id < dirtyMark_.size()) dirtyMark_[id] = false;
+    }
+    dirty_.clear();
 
-        // Deduplicate nodes within the class
-        std::unordered_set<ENode, ENodeHash> seen;
-        std::vector<ENode> unique;
-        for (auto& node : classes_[i].nodes) {
-            if (seen.insert(node).second) {
+    // ── Full rebuild with congruence-closure cascading ───────────────────
+    //
+    // For each canonical class, re-canonicalize all of its nodes (their
+    // children may now point to merged class ids) and rebuild the hashcons
+    // table.  A hidden congruence shows up as two distinct classes whose
+    // canonical ENode keys collide in the hashcons; we collect those into
+    // `pendingMerges` and apply them AFTER the per-class loop completes,
+    // which avoids iterator invalidation on `classes_[i].nodes` (merge()
+    // appends victim nodes onto the survivor).  Each induced merge can
+    // expose further congruences, so we iterate until stable.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        hashcons_.clear();
+        std::vector<std::pair<ClassId, ClassId>> pendingMerges;
+
+        for (ClassId i = 0; i < classes_.size(); ++i) {
+            if (find(i) != i) continue;  // skip non-canonical
+
+            // Re-canonicalize every node in this class.
+            for (auto& node : classes_[i].nodes) {
+                node = canonicalize(std::move(node));
+            }
+
+            // Within-class dedup.  While building the dedup'd list, also
+            // detect cross-class congruence via the rebuilt hashcons_.
+            std::unordered_set<ENode, ENodeHash> seen;
+            seen.reserve(classes_[i].nodes.size());
+            std::vector<ENode> unique;
+            unique.reserve(classes_[i].nodes.size());
+            for (auto& node : classes_[i].nodes) {
+                if (!seen.insert(node).second) continue;  // duplicate
+
+                auto it = hashcons_.find(node);
+                if (it != hashcons_.end()) {
+                    ClassId other = find(it->second);
+                    if (other != i) {
+                        // Defer the merge: doing it here would invalidate
+                        // our iteration over `classes_[i].nodes`.
+                        pendingMerges.emplace_back(i, other);
+                    }
+                }
+                hashcons_[node] = i;
                 unique.push_back(std::move(node));
             }
+            classes_[i].nodes = std::move(unique);
         }
-        classes_[i].nodes = std::move(unique);
+
+        // Apply pending merges and decide whether to repeat the rebuild.
+        for (auto [a, b] : pendingMerges) {
+            ClassId ca = find(a), cb = find(b);
+            if (ca != cb) {
+                merge(ca, cb);
+                changed = true;
+            }
+        }
     }
 
-    // Update total node count
+    // Drain dirt produced by congruence-closure merges above (we have
+    // already paid for the rescan that would observe them).
+    for (ClassId id : dirty_) {
+        if (id < dirtyMark_.size()) dirtyMark_[id] = false;
+    }
+    dirty_.clear();
+
+    // Recount total nodes.
     totalNodes_ = 0;
     for (ClassId i = 0; i < classes_.size(); ++i) {
         if (find(i) == i) {

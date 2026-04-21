@@ -406,11 +406,42 @@ private:
     /// Total node count across all classes.
     size_t totalNodes_ = 0;
 
+    /// Monotonically-increasing counter of successful merges (i.e. calls to
+    /// `merge(a, b)` where `find(a) != find(b)` so a real union happened).
+    /// Incremented by `merge()` for every union path — including merges
+    /// triggered by `foldConstants()` and pattern rules — so callers can
+    /// detect "no merges since the last checkpoint" without instrumenting
+    /// every path.  `saturate()` uses it to skip the per-iteration rebuild
+    /// when no merges occurred, eliminating O(N) wasted work on the final
+    /// fixpoint iteration and on rule sets that are quickly satisfied.
+    size_t mergeCount_ = 0;
+
+    /// Per-class use-list: `parents_[c]` lists every class id whose nodes
+    /// reference `c` as a child.  Populated by `add()` and updated by
+    /// `merge()` so the dirty-class rebuild can locate every class that
+    /// could be affected by a union without scanning the entire graph.
+    std::vector<std::vector<ClassId>> parents_;
+
+    /// Worklist of classes whose hashcons entries may be stale because
+    /// either they themselves received a merge or one of their children's
+    /// canonical class id changed.  Drained by `rebuild()`.
+    std::vector<ClassId> dirty_;
+    std::vector<bool>    dirtyMark_;
+
     /// Canonicalize an ENode's children to use canonical class IDs.
     ENode canonicalize(ENode node) const;
 
     /// Internal: rebuild the hashcons table after merges.
+    /// Restricts re-canonicalization to classes that could have been
+    /// affected by recent merges (those in `dirty_` plus their use-list
+    /// closure).  When `dirty_` is empty, returns immediately — this is
+    /// the common case on the final saturation iteration where the
+    /// previous round produced no merges.
     void rebuild();
+
+    /// Mark a class (and transitively every class that uses it) as dirty
+    /// so that the next `rebuild()` re-canonicalizes their nodes.
+    void markDirty(ClassId id);
 
     /// Internal: match a pattern against a specific e-class.
     bool matchClass(const Pattern& pat, ClassId cls, Subst& subst) const;
