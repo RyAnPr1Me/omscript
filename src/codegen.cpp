@@ -5926,12 +5926,21 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<CallExpr*>(e);
             // Zero-arg constant-returning functions (classified by pre-pass).
+            // Prefer the unified OptimizationContext; fall back to private map
+            // when optCtx_ is not yet available (called during analysis passes).
             if (call->arguments.empty()) {
-                auto it = constIntReturnFunctions_.find(call->callee);
-                if (it != constIntReturnFunctions_.end()) return it->second;
+                if (optCtx_) {
+                    if (auto v = optCtx_->constIntReturn(call->callee)) return *v;
+                } else {
+                    auto it = constIntReturnFunctions_.find(call->callee);
+                    if (it != constIntReturnFunctions_.end()) return it->second;
+                }
             }
             // Recursive @const_eval call
-            if (!constEvalFunctions_.count(call->callee))
+            const bool isConstEval = optCtx_
+                ? optCtx_->isConstFoldable(call->callee)
+                : (constEvalFunctions_.count(call->callee) > 0);
+            if (!isConstEval)
                 return std::nullopt;
             auto declIt = functionDecls_.find(call->callee);
             if (declIt == functionDecls_.end()) return std::nullopt;
@@ -7025,13 +7034,22 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
     case ASTNodeType::CALL_EXPR: {
         auto* call = static_cast<CallExpr*>(expr);
         // Zero-arg: pre-classified constant-returning functions.
+        // Prefer the unified OptimizationContext; fall back to private maps
+        // when optCtx_ is not yet available (called during analysis passes).
         if (call->arguments.empty()) {
-            auto iit = constIntReturnFunctions_.find(call->callee);
-            if (iit != constIntReturnFunctions_.end())
-                return ConstValue::fromInt(iit->second);
-            auto sit = constStringReturnFunctions_.find(call->callee);
-            if (sit != constStringReturnFunctions_.end())
-                return ConstValue::fromStr(sit->second);
+            if (optCtx_) {
+                if (auto v = optCtx_->constIntReturn(call->callee))
+                    return ConstValue::fromInt(*v);
+                if (auto v = optCtx_->constStringReturn(call->callee))
+                    return ConstValue::fromStr(*v);
+            } else {
+                auto iit = constIntReturnFunctions_.find(call->callee);
+                if (iit != constIntReturnFunctions_.end())
+                    return ConstValue::fromInt(iit->second);
+                auto sit = constStringReturnFunctions_.find(call->callee);
+                if (sit != constStringReturnFunctions_.end())
+                    return ConstValue::fromStr(sit->second);
+            }
         }
         // Try to fold all args to constants.
         std::vector<ConstValue> foldedArgs;
@@ -7168,10 +7186,19 @@ CodeGenerator::tryConstEvalFull(
             auto eit = enumConstants_.find(id->name);
             if (eit != enumConstants_.end())
                 return ConstValue::fromInt(static_cast<int64_t>(eit->second));
-            auto iit = constIntReturnFunctions_.find(id->name);
-            if (iit != constIntReturnFunctions_.end()) return ConstValue::fromInt(iit->second);
-            auto sit = constStringReturnFunctions_.find(id->name);
-            if (sit != constStringReturnFunctions_.end()) return ConstValue::fromStr(sit->second);
+            // Prefer the unified OptimizationContext; fall back to private maps
+            // when optCtx_ is not yet available (called during analysis passes).
+            if (optCtx_) {
+                if (auto v = optCtx_->constIntReturn(id->name))
+                    return ConstValue::fromInt(*v);
+                if (auto v = optCtx_->constStringReturn(id->name))
+                    return ConstValue::fromStr(*v);
+            } else {
+                auto iit = constIntReturnFunctions_.find(id->name);
+                if (iit != constIntReturnFunctions_.end()) return ConstValue::fromInt(iit->second);
+                auto sit = constStringReturnFunctions_.find(id->name);
+                if (sit != constStringReturnFunctions_.end()) return ConstValue::fromStr(sit->second);
+            }
             // Global const variables (constIntFolds_ / constStringFolds_):
             // functions may reference file-level constants not in their argEnv.
             auto git = constIntFolds_.find(id->name);
@@ -7374,14 +7401,23 @@ CodeGenerator::tryConstEvalFull(
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<CallExpr*>(e);
 
-            // Zero-arg pre-classified functions
+            // Zero-arg pre-classified functions.
+            // Prefer the unified OptimizationContext; fall back to private maps
+            // when optCtx_ is not yet available (called during analysis passes).
             if (call->arguments.empty()) {
-                auto iit = constIntReturnFunctions_.find(call->callee);
-                if (iit != constIntReturnFunctions_.end())
-                    return ConstValue::fromInt(iit->second);
-                auto sit = constStringReturnFunctions_.find(call->callee);
-                if (sit != constStringReturnFunctions_.end())
-                    return ConstValue::fromStr(sit->second);
+                if (optCtx_) {
+                    if (auto v = optCtx_->constIntReturn(call->callee))
+                        return ConstValue::fromInt(*v);
+                    if (auto v = optCtx_->constStringReturn(call->callee))
+                        return ConstValue::fromStr(*v);
+                } else {
+                    auto iit = constIntReturnFunctions_.find(call->callee);
+                    if (iit != constIntReturnFunctions_.end())
+                        return ConstValue::fromInt(iit->second);
+                    auto sit = constStringReturnFunctions_.find(call->callee);
+                    if (sit != constStringReturnFunctions_.end())
+                        return ConstValue::fromStr(sit->second);
+                }
             }
 
             // Evaluate all arguments.
