@@ -84,6 +84,7 @@ set(SRC
     src/egraph_optimizer.cpp
     src/superoptimizer.cpp
     src/hardware_graph.cpp
+    src/polyopt.cpp
 
     # Optimization architecture (orchestrator + unified context)
     src/opt_context.cpp

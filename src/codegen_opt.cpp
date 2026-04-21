@@ -2,6 +2,7 @@
 #include "diagnostic.h"
 #include "hardware_graph.h"
 #include "superoptimizer.h"
+#include "polyopt.h"
 #include <iostream>
 #include <unordered_set>
 #include <llvm/ADT/StringMap.h>
@@ -3023,6 +3024,15 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::InstCombinePass());
             FPM.addPass(llvm::LoopSimplifyPass());
             FPM.addPass(llvm::LCSSAPass());
+            // OmPolyOpt: polyhedral loop optimizer.  Runs after loop normalization
+            // (LoopSimplify + LCSSA) so that loop bounds and induction variables
+            // are in canonical form.  Performs dependence analysis (Fourier-Motzkin
+            // elimination), selects legal+profitable transformations (tiling,
+            // interchange, skewing, reversal), and rewrites the loop nest IR.
+            // Runs before the vectorizer so the inner (point) loops are amenable
+            // to auto-vectorization.  Enabled at O2+ with -floop-optimize.
+            if (loopOptOrO3)
+                FPM.addPass(omscript::polyopt::OmPolyOptFunctionPass());
             FPM.addPass(llvm::createFunctionToLoopPassAdaptor(llvm::LoopRotatePass()));
             FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
                 llvm::LICMPass(llvm::LICMOptions()), /*UseMemorySSA=*/true));
