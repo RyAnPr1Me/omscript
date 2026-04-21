@@ -294,30 +294,26 @@ class CodeGenerator {
     }
 
     // ── Analysis result accessors (used by OptimizationOrchestrator) ──────
+    // These delegate to OptimizationContext (the single authoritative store).
 
-    /// True when @p name is in the const-eval function set.
+    /// True when @p name is classified as const-foldable (auto-detected or @const_eval).
     [[nodiscard]] bool isConstEvalFunction(const std::string& name) const noexcept {
-        return constEvalFunctions_.count(name) > 0;
+        return optCtx_ && optCtx_->isConstFoldable(name);
     }
 
     /// Return the always-constant integer return value for @p name, if known.
     [[nodiscard]] std::optional<int64_t> getConstIntReturn(const std::string& name) const noexcept {
-        auto it = constIntReturnFunctions_.find(name);
-        if (it == constIntReturnFunctions_.end()) return std::nullopt;
-        return static_cast<int64_t>(it->second);
+        return optCtx_ ? optCtx_->constIntReturn(name) : std::nullopt;
     }
 
     /// Return the always-constant string return value for @p name, if known.
     [[nodiscard]] std::optional<std::string> getConstStringReturn(const std::string& name) const noexcept {
-        auto it = constStringReturnFunctions_.find(name);
-        if (it == constStringReturnFunctions_.end()) return std::nullopt;
-        return std::string(it->second);
+        return optCtx_ ? optCtx_->constStringReturn(name) : std::nullopt;
     }
 
     /// Return the effect summary for @p name (default if not analysed).
     [[nodiscard]] FunctionEffects getFunctionEffects(const std::string& name) const noexcept {
-        auto it = functionEffects_.find(name);
-        return (it != functionEffects_.end()) ? it->second : FunctionEffects{};
+        return optCtx_ ? optCtx_->effects(name) : FunctionEffects{};
     }
 
     // ── Pre-pass entry points (also called by OptimizationOrchestrator) ───
@@ -673,31 +669,6 @@ class CodeGenerator {
     /// string builtins: `const s = "hello"; var n = len(s);` folds to 5.
     llvm::StringMap<std::string> constStringFolds_;
 
-    /// Functions determined at compile time to always return the same integer
-    /// constant (zero-parameter, pure body with only const-decls + return).
-    /// Populated by analyzeConstantReturnValues() before any function codegen.
-    /// Enables folding of: abs(f()), min(f(), 5), for (i in 0..f()) { }.
-    llvm::StringMap<int64_t> constIntReturnFunctions_;
-
-    /// Functions determined at compile time to always return the same string
-    /// constant (zero-parameter, pure body with only const-decls + return).
-    /// Populated by analyzeConstantReturnValues() before any function codegen.
-    /// Enables folding of: len(f()), f() + "suffix", const s = f(); len(s).
-    llvm::StringMap<std::string> constStringReturnFunctions_;
-
-    /// Set of function names marked with @const_eval.
-    /// When called with all-constant integer arguments, the compiler evaluates
-    /// the function body at compile time using AST-level interpretation,
-    /// returning a compile-time constant.  This is similar to C++20's consteval
-    /// but automatically falls back to runtime codegen when arguments are not
-    /// constant.
-    llvm::StringSet<> constEvalFunctions_;
-
-    /// Per-function effect summaries populated by inferFunctionEffects().
-    /// Keyed by function name.  Used to automatically apply LLVM attributes
-    /// (readonly, readnone, nosync, willreturn) and to warn on @pure misuse.
-    std::unordered_map<std::string, FunctionEffects> functionEffects_;
-
     /// Evaluate a @const_eval function at compile time.
     /// Returns std::nullopt if the function body is too complex for the
     /// compile-time interpreter (falls back to runtime codegen).
@@ -728,8 +699,8 @@ class CodeGenerator {
     ///   - integer / string / array literals
     ///   - identifiers tracked in constIntFolds_ or constStringFolds_
     ///   - enum constants and scope-resolution expressions
-    ///   - zero-arg calls to functions in constIntReturnFunctions_ /
-    ///     constStringReturnFunctions_
+    ///   - zero-arg calls to zero-parameter constant-returning functions
+    ///     (queried from OptimizationContext)
     ///   - recursive evaluation of multi-arg user functions via tryConstEvalFull
     ///   - arithmetic / concat / array indexing on any of the above
     ///   - pipe expressions (x |> f → f(x))

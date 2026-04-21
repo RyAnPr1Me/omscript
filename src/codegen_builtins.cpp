@@ -8871,40 +8871,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     // Short-circuit calls to zero-parameter pure functions whose return value
     // is a compile-time constant (classified by analyzeConstantReturnValues).
-    // Query the unified OptimizationContext (canonical surface after prepasses).
-    if (expr->arguments.empty() && !inOptMaxFunction) {
-        if (optCtx_) {
-            if (auto iv = optCtx_->constIntReturn(expr->callee)) {
-                auto* ci = llvm::ConstantInt::get(getDefaultType(), *iv);
-                if (*iv >= 0) nonNegValues_.insert(ci);
-                return ci;
-            }
-            if (auto sv = optCtx_->constStringReturn(expr->callee)) {
-                llvm::GlobalVariable* gv = internString(*sv);
-                stringReturningFunctions_.insert(expr->callee);
-                return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                    gv->getValueType(), gv,
-                    llvm::ArrayRef<llvm::Constant*>{
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
-            }
-        } else {
-            auto intIt = constIntReturnFunctions_.find(expr->callee);
-            if (intIt != constIntReturnFunctions_.end()) {
-                auto* ci = llvm::ConstantInt::get(getDefaultType(), intIt->second);
-                if (intIt->second >= 0) nonNegValues_.insert(ci);
-                return ci;
-            }
-            auto strIt = constStringReturnFunctions_.find(expr->callee);
-            if (strIt != constStringReturnFunctions_.end()) {
-                llvm::GlobalVariable* gv = internString(strIt->second);
-                stringReturningFunctions_.insert(expr->callee);
-                return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                    gv->getValueType(), gv,
-                    llvm::ArrayRef<llvm::Constant*>{
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
-            }
+    if (expr->arguments.empty() && !inOptMaxFunction && optCtx_) {
+        if (auto iv = optCtx_->constIntReturn(expr->callee)) {
+            auto* ci = llvm::ConstantInt::get(getDefaultType(), *iv);
+            if (*iv >= 0) nonNegValues_.insert(ci);
+            return ci;
+        }
+        if (auto sv = optCtx_->constStringReturn(expr->callee)) {
+            llvm::GlobalVariable* gv = internString(*sv);
+            stringReturningFunctions_.insert(expr->callee);
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
         }
     }
 

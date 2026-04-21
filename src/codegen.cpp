@@ -5015,7 +5015,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // @const_eval: mark the function for compile-time evaluation when
         // called with all-constant arguments.  At the LLVM level, mark it
         // as pure + inline so that any fallback runtime call is efficient.
-        constEvalFunctions_.insert(func->name);
         if (optCtx_) optCtx_->mutableFacts(func->name).isConstFoldable = true;
         function->addFnAttr(llvm::Attribute::InlineHint);
         function->setOnlyReadsMemory();
@@ -5927,20 +5926,13 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<CallExpr*>(e);
             // Zero-arg constant-returning functions (classified by pre-pass).
-            // Prefer the unified OptimizationContext; fall back to private map
-            // when optCtx_ is not yet available (called during analysis passes).
             if (call->arguments.empty()) {
                 if (optCtx_) {
                     if (auto v = optCtx_->constIntReturn(call->callee)) return *v;
-                } else {
-                    auto it = constIntReturnFunctions_.find(call->callee);
-                    if (it != constIntReturnFunctions_.end()) return it->second;
                 }
             }
             // Recursive @const_eval call
-            const bool isConstEval = optCtx_
-                ? optCtx_->isConstFoldable(call->callee)
-                : (constEvalFunctions_.count(call->callee) > 0);
+            const bool isConstEval = optCtx_ && optCtx_->isConstFoldable(call->callee);
             if (!isConstEval)
                 return std::nullopt;
             auto declIt = functionDecls_.find(call->callee);
@@ -6860,7 +6852,7 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     return std::nullopt;
 }
 // using all statically-known information (constIntFolds_, constStringFolds_,
-// constIntReturnFunctions_, constStringReturnFunctions_, enumConstants_).
+// OptimizationContext constant-return facts, enumConstants_).
 // This is the "call-site evaluator" — it knows about constants in the CURRENT
 // function's scope and delegates to tryConstEvalFull for nested calls.
 //
@@ -7035,21 +7027,13 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
     case ASTNodeType::CALL_EXPR: {
         auto* call = static_cast<CallExpr*>(expr);
         // Zero-arg: pre-classified constant-returning functions.
-        // Prefer the unified OptimizationContext; fall back to private maps
-        // when optCtx_ is not yet available (called during analysis passes).
+        // Query OptimizationContext for zero-arg constant-returning functions.
         if (call->arguments.empty()) {
             if (optCtx_) {
                 if (auto v = optCtx_->constIntReturn(call->callee))
                     return ConstValue::fromInt(*v);
                 if (auto v = optCtx_->constStringReturn(call->callee))
                     return ConstValue::fromStr(*v);
-            } else {
-                auto iit = constIntReturnFunctions_.find(call->callee);
-                if (iit != constIntReturnFunctions_.end())
-                    return ConstValue::fromInt(iit->second);
-                auto sit = constStringReturnFunctions_.find(call->callee);
-                if (sit != constStringReturnFunctions_.end())
-                    return ConstValue::fromStr(sit->second);
             }
         }
         // Try to fold all args to constants.
@@ -7187,18 +7171,12 @@ CodeGenerator::tryConstEvalFull(
             auto eit = enumConstants_.find(id->name);
             if (eit != enumConstants_.end())
                 return ConstValue::fromInt(static_cast<int64_t>(eit->second));
-            // Prefer the unified OptimizationContext; fall back to private maps
-            // when optCtx_ is not yet available (called during analysis passes).
+            // Query OptimizationContext for zero-arg constant-returning functions.
             if (optCtx_) {
                 if (auto v = optCtx_->constIntReturn(id->name))
                     return ConstValue::fromInt(*v);
                 if (auto v = optCtx_->constStringReturn(id->name))
                     return ConstValue::fromStr(*v);
-            } else {
-                auto iit = constIntReturnFunctions_.find(id->name);
-                if (iit != constIntReturnFunctions_.end()) return ConstValue::fromInt(iit->second);
-                auto sit = constStringReturnFunctions_.find(id->name);
-                if (sit != constStringReturnFunctions_.end()) return ConstValue::fromStr(sit->second);
             }
             // Global const variables (constIntFolds_ / constStringFolds_):
             // functions may reference file-level constants not in their argEnv.
@@ -7402,22 +7380,13 @@ CodeGenerator::tryConstEvalFull(
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<CallExpr*>(e);
 
-            // Zero-arg pre-classified functions.
-            // Prefer the unified OptimizationContext; fall back to private maps
-            // when optCtx_ is not yet available (called during analysis passes).
+            // Zero-arg pre-classified constant-returning functions.
             if (call->arguments.empty()) {
                 if (optCtx_) {
                     if (auto v = optCtx_->constIntReturn(call->callee))
                         return ConstValue::fromInt(*v);
                     if (auto v = optCtx_->constStringReturn(call->callee))
                         return ConstValue::fromStr(*v);
-                } else {
-                    auto iit = constIntReturnFunctions_.find(call->callee);
-                    if (iit != constIntReturnFunctions_.end())
-                        return ConstValue::fromInt(iit->second);
-                    auto sit = constStringReturnFunctions_.find(call->callee);
-                    if (sit != constStringReturnFunctions_.end())
-                        return ConstValue::fromStr(sit->second);
                 }
             }
 
@@ -7801,7 +7770,7 @@ CodeGenerator::tryConstEvalFull(
 //   fn a() { return "hello"; }          // classified in iteration 1
 //   fn b() { return a() + " world"; }   // classified in iteration 2 (uses a)
 //
-// Results are stored in constStringReturnFunctions_ and constIntReturnFunctions_.
+// Results are stored in the unified OptimizationContext (optCtx_).
 void CodeGenerator::analyzeConstantReturnValues(Program* program) {
     if (optimizationLevel < OptimizationLevel::O1) return;
 
@@ -7811,8 +7780,9 @@ void CodeGenerator::analyzeConstantReturnValues(Program* program) {
         for (auto& func : program->functions) {
             const std::string& fname = func->name;
             if (!func->body || !func->parameters.empty()) continue;
-            if (constStringReturnFunctions_.count(fname) ||
-                constIntReturnFunctions_.count(fname)) continue;
+            // Skip functions already classified in a previous iteration.
+            if (optCtx_ && (optCtx_->constIntReturn(fname) ||
+                            optCtx_->constStringReturn(fname))) continue;
 
             // Evaluate with empty arg environment (zero-parameter function).
             static const std::unordered_map<std::string, ConstValue> emptyEnv;
@@ -7820,10 +7790,8 @@ void CodeGenerator::analyzeConstantReturnValues(Program* program) {
             if (!result) continue;
 
             if (result->kind == ConstValue::Kind::Integer) {
-                constIntReturnFunctions_[fname] = result->intVal;
                 if (optCtx_) optCtx_->mutableFacts(fname).constIntReturn = result->intVal;
             } else if (result->kind == ConstValue::Kind::String) {
-                constStringReturnFunctions_[fname] = result->strVal;
                 if (optCtx_) optCtx_->mutableFacts(fname).constStringReturn = result->strVal;
             } else {
                 // Array or other compound type — not representable as a simple
@@ -7845,9 +7813,8 @@ void CodeGenerator::analyzeConstantReturnValues(Program* program) {
 //   - ctEngine_->executeFunction(...)  — memoised CT evaluation
 //   - ctEngine_->evalComptimeBlock(...)— block-level CT evaluation
 //
-// Also propagates CT results back into the CodeGenerator's legacy fold maps
-// (constIntReturnFunctions_, constStringReturnFunctions_) so that the
-// existing tryFoldExprToConst / tryConstEvalFull machinery benefits from
+// Also propagates CT results back into OptimizationContext so that
+// the existing tryFoldExprToConst / tryConstEvalFull machinery benefits from
 // CF-CTRE's richer analysis.
 // ─────────────────────────────────────────────────────────────────────────────
 void CodeGenerator::runCFCTRE(Program* program) {
@@ -7874,7 +7841,7 @@ void CodeGenerator::runCFCTRE(Program* program) {
     // pre-evaluates zero-arg pure functions, builds the call graph).
     ctEngine_->runPass(program);
 
-    // Back-propagate CF-CTRE results into the legacy fold tables so the
+    // Back-propagate CF-CTRE zero-arg results into OptimizationContext so the
     // existing tryFoldExprToConst / tryConstEvalFull helpers remain effective.
     for (auto& fn : program->functions) {
         if (!fn->parameters.empty()) continue;
@@ -7883,25 +7850,20 @@ void CodeGenerator::runCFCTRE(Program* program) {
         auto result = ctEngine_->executeFunction(fn->name, {});
         if (!result) continue;
         if (result->isInt() &&
-            !constIntReturnFunctions_.count(fn->name)) {
-            constIntReturnFunctions_[fn->name] = result->asI64();
+            !(optCtx_ && optCtx_->constIntReturn(fn->name))) {
             if (optCtx_) optCtx_->mutableFacts(fn->name).constIntReturn = result->asI64();
         } else if (result->isString() &&
-                   !constStringReturnFunctions_.count(fn->name)) {
-            constStringReturnFunctions_[fn->name] = result->asStr();
+                   !(optCtx_ && optCtx_->constStringReturn(fn->name))) {
             if (optCtx_) optCtx_->mutableFacts(fn->name).constStringReturn = result->asStr();
         }
     }
 
     // Back-propagate Phase 7 (uniform return values) — functions with parameters
     // that always return the same constant, proven by symbolic argument evaluation.
-    // These are added to the same fold tables as zero-arg functions above.
     for (auto& [name, ctVal] : ctEngine_->uniformReturnValues()) {
-        if (ctVal.isInt() && !constIntReturnFunctions_.count(name)) {
-            constIntReturnFunctions_[name] = ctVal.asI64();
+        if (ctVal.isInt() && !(optCtx_ && optCtx_->constIntReturn(name))) {
             if (optCtx_) optCtx_->mutableFacts(name).constIntReturn = ctVal.asI64();
-        } else if (ctVal.isString() && !constStringReturnFunctions_.count(name)) {
-            constStringReturnFunctions_[name] = ctVal.asStr();
+        } else if (ctVal.isString() && !(optCtx_ && optCtx_->constStringReturn(name))) {
             if (optCtx_) optCtx_->mutableFacts(name).constStringReturn = ctVal.asStr();
         }
     }
@@ -8109,10 +8071,10 @@ CodeGenerator::buildComptimeEnv() const {
 
 // autoDetectConstEvalFunctions: identify user-defined functions with parameters
 // that are "pure" (no I/O, no global mutations, arithmetic/logic/conditional
-// bodies only) and register them in constEvalFunctions_.  This enables the
-// existing tryConstEval/tryConstEvalFull machinery to fold calls to these
-// functions at compile time when all arguments are constants, without requiring
-// explicit @const_eval annotations.
+// bodies only) and register them as const-foldable in OptimizationContext.
+// This enables the existing tryConstEval/tryConstEvalFull machinery to fold
+// calls to these functions at compile time when all arguments are constants,
+// without requiring explicit @const_eval annotations.
 //
 // Purity is detected via a fixed-point analysis:
 //   - A function is pure if its body contains only pure statements/expressions
@@ -8121,7 +8083,7 @@ CodeGenerator::buildComptimeEnv() const {
 //     conservatively marking mutually-recursive functions as not pure
 //
 // Runs at O1+ after analyzeConstantReturnValues so that zero-arg const funcs
-// are already in constIntReturnFunctions_ and can be recognized as pure calls.
+// are already in OptimizationContext and can be recognized as pure calls.
 void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
     if (!program || optimizationLevel < OptimizationLevel::O1) return;
 
@@ -8138,18 +8100,12 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
     // Track which user functions are currently known-pure.
     std::unordered_set<std::string> knownPure;
 
-    // Seed with functions already in constEvalFunctions_ (explicit @const_eval).
-    for (auto it = constEvalFunctions_.begin(); it != constEvalFunctions_.end(); ++it) {
-        knownPure.insert(it->getKey().str());
-    }
-    // Seed with zero-arg functions already analyzed as const-return.
-    // Query both the private maps (written during pre-passes) and optCtx_ (may
-    // have been written directly by earlier passes in this compilation).
-    for (const auto& kv : constIntReturnFunctions_) {
-        knownPure.insert(kv.first().str());
-    }
-    for (const auto& kv : constStringReturnFunctions_) {
-        knownPure.insert(kv.first().str());
+    // Seed with explicitly @const_eval-annotated functions (from AST) and any
+    // functions already classified as const-foldable / const-returning by
+    // earlier passes (e.g., analyzeConstantReturnValues already ran).
+    for (const auto& func : program->functions) {
+        if (func->hintConstEval)
+            knownPure.insert(func->name);
     }
     if (optCtx_) {
         for (const auto& [name, ff] : optCtx_->allFacts()) {
@@ -8311,7 +8267,7 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         changed = false;
         for (const auto& func : program->functions) {
             const std::string& fname = func->name;
-            // Skip functions already known pure or already in constEvalFunctions_.
+            // Skip functions already known pure.
             if (knownPure.count(fname)) continue;
             // Must have a body to analyze.
             if (!func->body) continue;
@@ -8333,7 +8289,6 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
 
             if (bodyIsPure) {
                 knownPure.insert(fname);
-                constEvalFunctions_.insert(fname);
                 if (optCtx_) optCtx_->mutableFacts(fname).isConstFoldable = true;
                 changed = true;
             }
@@ -8374,6 +8329,9 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
     for (const auto& f : program->functions)
         allFuncs[f->name] = f.get();
 
+    // Local effects map for the fixed-point loop — avoids touching the member.
+    std::unordered_map<std::string, FunctionEffects> funcEffects;
+
     // Helper: classify one expression's effects into a FunctionEffects.
     // Forward-declared as std::function so it can recurse.
     std::function<FunctionEffects(const Expression*, const std::string&)> exprEffects;
@@ -8411,9 +8369,9 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
                 fx.readsMemory  = true;
                 fx.writesMemory = true;
             } else {
-                // Callee effects propagated from functionEffects_ (fixed-point)
-                auto it = functionEffects_.find(call->callee);
-                if (it != functionEffects_.end()) {
+                // Callee effects propagated from funcEffects (fixed-point)
+                auto it = funcEffects.find(call->callee);
+                if (it != funcEffects.end()) {
                     fx.readsMemory  = fx.readsMemory  || it->second.readsMemory;
                     fx.writesMemory = fx.writesMemory || it->second.writesMemory;
                     fx.hasIO        = fx.hasIO        || it->second.hasIO;
@@ -8611,7 +8569,7 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
     // Fixed-point iteration over the call graph.
     // Initialise all user functions with empty effects; iterate until stable.
     for (const auto& f : program->functions)
-        functionEffects_[f->name] = FunctionEffects{};
+        funcEffects[f->name] = FunctionEffects{};
 
     bool changed = true;
     while (changed) {
@@ -8626,7 +8584,7 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
                 computed.hasIO        = computed.hasIO        || fx.hasIO;
                 computed.hasMutation  = computed.hasMutation  || fx.hasMutation;
             }
-            FunctionEffects& prev = functionEffects_[f->name];
+            FunctionEffects& prev = funcEffects[f->name];
             if (computed.readsMemory  != prev.readsMemory  ||
                 computed.writesMemory != prev.writesMemory ||
                 computed.hasIO        != prev.hasIO        ||
@@ -8640,7 +8598,7 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
     // Propagate stable effects into OptimizationContext so IR emission can
     // query a single surface without waiting for syncFactsToContext.
     if (optCtx_) {
-        for (const auto& kv : functionEffects_) {
+        for (const auto& kv : funcEffects) {
             optCtx_->mutableFacts(kv.first).effects = kv.second;
         }
     }
@@ -8648,18 +8606,9 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
     // Warn if @pure is applied to a function that has detectable side effects.
     for (const auto& f : program->functions) {
         if (!f->hintPure) continue;
-        // Prefer optCtx_ (already written above); fall back to private map.
-        const FunctionEffects* fxp = nullptr;
-        FunctionEffects tmpFx;
-        if (optCtx_) {
-            tmpFx = optCtx_->effects(f->name);
-            fxp = &tmpFx;
-        } else {
-            auto it = functionEffects_.find(f->name);
-            if (it == functionEffects_.end()) continue;
-            fxp = &it->second;
-        }
-        const FunctionEffects& fx = *fxp;
+        auto it = funcEffects.find(f->name);
+        if (it == funcEffects.end()) continue;
+        const FunctionEffects& fx = it->second;
         if (fx.hasIO) {
             std::cerr << "[warning] @pure function '" << f->name
                       << "' performs I/O — @pure annotation may be incorrect\n";
