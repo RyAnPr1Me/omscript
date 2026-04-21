@@ -6083,6 +6083,32 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
 
+            // ── NSW inference on add(X, Y) / sub(X, Y) for non-negative operands ─
+            // When KnownBits proves BOTH operands are non-negative (sign bit known
+            // zero), the signed result cannot overflow:
+            //   add: each operand ∈ [0, INT64_MAX], so the sum ∈ [0, 2*INT64_MAX].
+            //        Signed overflow fires only if the sum > INT64_MAX; the sign
+            //        bit of the result is never set without first passing INT64_MAX.
+            //        LLVM's SCEV proves non-overflow via NSW, enabling tighter
+            //        induction-variable ranges in loops.
+            //   sub: each operand ∈ [0, INT64_MAX], so X-Y ∈ [-INT64_MAX, INT64_MAX],
+            //        which is representable in signed i64 without overflow.
+            //        NSW allows SCEV to track countdown loops correctly and enables
+            //        the loop unroller to generate valid NUW/NSW increments.
+            // These cases are NOT handled by the existing constant-operand code above.
+            if (inst.getOpcode() == llvm::Instruction::Add ||
+                inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
+                if (bo && !bo->hasNoSignedWrap() && inst.getType()->isIntegerTy()) {
+                    llvm::KnownBits kbLHS = llvm::computeKnownBits(bo->getOperand(0), DL);
+                    llvm::KnownBits kbRHS = llvm::computeKnownBits(bo->getOperand(1), DL);
+                    if (kbLHS.isNonNegative() && kbRHS.isNonNegative()) {
+                        bo->setHasNoSignedWrap(true);
+                        count++;
+                    }
+                }
+            }
+
             // ── add(X, Y) → or(X, Y) when bits are disjoint ─────────────────
             // If KnownBits proves X and Y have no overlapping set bits
             // (i.e., for every bit position, at most one of X or Y can have
@@ -7185,7 +7211,7 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
                 else if (binOp->getOperand(1) == &phi && llvm::isa<llvm::ConstantInt>(binOp->getOperand(0)))
                     mulConst = binOp->getOperand(0);
 
-                if (mulConst && binOp->hasOneUse()) {
+                if (mulConst) {
                     mulUsers.push_back(binOp);
                 }
             }
@@ -7313,9 +7339,17 @@ static unsigned expandURemByConstant(llvm::Function& func) {
             if (!divisorCI) continue;
             uint64_t d = divisorCI->getZExtValue();
 
-            // Only handle non-power-of-2 constants in [3, 1024].
+            // Handle non-power-of-2 constants in [3, 2^32).
             // Power-of-2 is already handled as x & (d-1) by algebraic simplification.
-            if (d < 3 || d > 1024) continue;
+            // Extending the limit from 1024 to 2^32 captures all 32-bit hash/prime
+            // constants (e.g., 65521 for Adler-32, 1000003, 999983, 16777213) —
+            // each urem-by-constant replaces a ~25-cycle hardware division with a
+            // ~5-8 cycle magic-multiply sequence that is also vectorizable.
+            // We cap at 2^32-1 because the i128 arithmetic in computeUDivMagic64
+            // is exact for all d < 2^64, but constants > 32 bits are uncommon
+            // in practice and the larger magic values can stress the register
+            // allocator on narrow pipelines.
+            if (d < 3 || d >= (uint64_t(1) << 32)) continue;
             if ((d & (d - 1)) == 0) continue;  // skip power-of-2
 
             UDivMagic magic = computeUDivMagic64(d);

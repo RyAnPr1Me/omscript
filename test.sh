@@ -1260,7 +1260,7 @@ fn bench_strprefix(@prefetch n:int) -> int {
 @optmax(aggressive_vec=true, safety=relaxed)
 @hot @flatten @static @nounwind
 fn bench_dictlookup(@prefetch n:int) -> int {
-    var m = map_new();
+    var m:int = map_new();
     for (i:int in 0...n) {
         var k:int = (i * 2654435761) % 1000;
         var prev:int = map_get(m, k, 0);
@@ -1464,13 +1464,13 @@ fn bench_arraypred(@prefetch n:int) -> int {
 fn bench_opoverload(@prefetch n:int) -> int {
     var acc:int = 0;
     for (i:int in 0...n) {
-        var a = Vec2 { x: (i * 3) % 1000, y: (i * 7 + 1) % 1000 };
-        var b = Vec2 { x: (i * 5 + 2) % 1000, y: (i * 11 + 3) % 1000 };
-        var s = a + b;
-        var d = a - b;
+        var a:int = Vec2 { x: (i * 3) % 1000, y: (i * 7 + 1) % 1000 };
+        var b:int = Vec2 { x: (i * 5 + 2) % 1000, y: (i * 11 + 3) % 1000 };
+        var s:int = a + b;
+        var d:int = a - b;
         var dp:int = a ** b;
         var cmp:int = a <=> b;
-        var w = a |> b;
+        var w:int = a |> b;
         acc += s.x + s.y + d.x + d.y + dp + cmp + w.x + w.y;
     }
     invalidate n;
