@@ -62,6 +62,28 @@ struct OptStats {
     unsigned independentLoops = 0; ///< Loops annotated with @independent
     unsigned allocatorFuncs   = 0; ///< User functions annotated as @allocator
 
+    // ── CF-CTRE / abstract-interpretation statistics ──────────────────────
+    // Populated from CTEngine::stats() at print time when a CT engine is
+    // available.  Surface the analysis evidence the optimizer collected, so
+    // users can see which proofs/folds the engine made and which did not fire.
+    unsigned pureFunctions       = 0; ///< Pure user functions detected by purity analysis
+    unsigned uniformReturnFns    = 0; ///< Pure functions with always-the-same constant return
+    unsigned deadFunctions       = 0; ///< Functions unreachable from any entry point
+    unsigned loopsReasoned       = 0; ///< For-loops handled by closed-form symbolic reasoning
+    unsigned branchMerges        = 0; ///< Path-sensitive branch merges (symbolic-IF folds)
+    unsigned partialEvalFolds    = 0; ///< Partial-specialisation cache hits
+    unsigned algebraicFolds      = 0; ///< Algebraic identity simplifications (x+0, x-x, …)
+    unsigned constraintFolds     = 0; ///< Branch-constraint folds (range narrowing)
+    unsigned deadBranches        = 0; ///< Branches proven always-dead by abstract interpretation
+    unsigned safeArrayAccesses   = 0; ///< Array accesses proven in-bounds
+    unsigned safeDivisions       = 0; ///< Divisions proven non-zero divisor
+    unsigned cheaperRewrites     = 0; ///< Range-conditioned strength reductions
+
+    // ── Missed-opportunity hints ─────────────────────────────────────────
+    // Higher-level diagnostic counts the user can act on:
+    unsigned almostPureFns       = 0; ///< @pure-annotated functions whose body looks impure
+    unsigned untaggedPureFns     = 0; ///< Pure functions without an explicit @pure annotation
+
     void print() const {
         std::cout << "\n[opt-report] Optimization statistics:\n"
                   << "  const-folded expressions : " << constFolded << "\n"
@@ -71,6 +93,39 @@ struct OptStats {
                   << "  borrows frozen           : " << borrowsFrozen << "\n"
                   << "  independent loops        : " << independentLoops << "\n"
                   << "  allocator wrappers       : " << allocatorFuncs << "\n";
+
+        // Only print the CF-CTRE block when at least one CT-engine counter is
+        // non-zero (avoids visual clutter for pipelines that don't run CTRE).
+        const bool anyCtre = pureFunctions | uniformReturnFns | deadFunctions
+                           | loopsReasoned | branchMerges | partialEvalFolds
+                           | algebraicFolds | constraintFolds | deadBranches
+                           | safeArrayAccesses | safeDivisions | cheaperRewrites;
+        if (anyCtre) {
+            std::cout << "  --- compile-time reasoning ---\n"
+                      << "  pure functions           : " << pureFunctions << "\n"
+                      << "  uniform-return functions : " << uniformReturnFns << "\n"
+                      << "  dead functions           : " << deadFunctions << "\n"
+                      << "  loops reasoned (O(1))    : " << loopsReasoned << "\n"
+                      << "  branch merges            : " << branchMerges << "\n"
+                      << "  partial-eval folds       : " << partialEvalFolds << "\n"
+                      << "  algebraic folds          : " << algebraicFolds << "\n"
+                      << "  constraint folds         : " << constraintFolds << "\n"
+                      << "  dead branches            : " << deadBranches << "\n"
+                      << "  safe array accesses      : " << safeArrayAccesses << "\n"
+                      << "  safe divisions           : " << safeDivisions << "\n"
+                      << "  cheaper rewrites         : " << cheaperRewrites << "\n";
+        }
+
+        // Missed opportunities — only show when there is something actionable.
+        if (almostPureFns || untaggedPureFns) {
+            std::cout << "  --- optimization opportunities ---\n";
+            if (untaggedPureFns)
+                std::cout << "  unannotated pure fns     : " << untaggedPureFns
+                          << "  (consider adding @pure)\n";
+            if (almostPureFns)
+                std::cout << "  @pure with impure body   : " << almostPureFns
+                          << "  (annotation may be incorrect)\n";
+        }
     }
 };
 

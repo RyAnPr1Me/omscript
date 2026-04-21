@@ -4799,6 +4799,25 @@ void CodeGenerator::generate(Program* program) {
 
     // Print optimization statistics when verbose mode is enabled.
     if (verbose_) {
+        // Pull in CF-CTRE / abstract-interpretation statistics so they appear
+        // in the consolidated [opt-report] block.  These are computed by the
+        // CTEngine during runCFCTRE() and would otherwise only be visible in
+        // the [cfctre] verbose lines.
+        if (ctEngine_) {
+            const auto& s = ctEngine_->stats();
+            optStats_.pureFunctions     = static_cast<unsigned>(s.pureFunctionsDetected);
+            optStats_.uniformReturnFns  = static_cast<unsigned>(s.uniformReturnFunctionsFound);
+            optStats_.deadFunctions     = static_cast<unsigned>(s.deadFunctionsDetected);
+            optStats_.loopsReasoned     = static_cast<unsigned>(s.loopsReasoned);
+            optStats_.branchMerges      = static_cast<unsigned>(s.branchMerges + s.ternaryMerges);
+            optStats_.partialEvalFolds  = static_cast<unsigned>(s.partialEvalFolds);
+            optStats_.algebraicFolds    = static_cast<unsigned>(s.algebraicFolds);
+            optStats_.constraintFolds   = static_cast<unsigned>(s.constraintFolds);
+            optStats_.deadBranches      = static_cast<unsigned>(s.deadBranchesEliminated);
+            optStats_.safeArrayAccesses = static_cast<unsigned>(s.safeArrayAccesses);
+            optStats_.safeDivisions     = static_cast<unsigned>(s.safeDivisions);
+            optStats_.cheaperRewrites   = static_cast<unsigned>(s.cheaperRewritesFound);
+        }
         optStats_.print();
     }
 }
@@ -8630,18 +8649,30 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
         }
     }
 
-    // Warn if @pure is applied to a function that has detectable side effects.
+    // Warn if @pure is applied to a function that has detectable side effects,
+    // and count both kinds of opportunity: @pure mismatches and untagged-pure
+    // functions (could benefit from explicit @pure annotation).
     for (const auto& f : program->functions) {
-        if (!f->hintPure) continue;
         auto it = funcEffects.find(f->name);
         if (it == funcEffects.end()) continue;
         const FunctionEffects& fx = it->second;
-        if (fx.hasIO) {
-            std::cerr << "[warning] @pure function '" << f->name
-                      << "' performs I/O — @pure annotation may be incorrect\n";
-        } else if (fx.writesMemory || fx.hasMutation) {
-            std::cerr << "[warning] @pure function '" << f->name
-                      << "' mutates memory — @pure annotation may be incorrect\n";
+        const bool actuallyPure   = fx.isReadNone() && !fx.hasIO && !fx.hasMutation;
+
+        if (f->hintPure) {
+            if (fx.hasIO) {
+                std::cerr << "[warning] @pure function '" << f->name
+                          << "' performs I/O — @pure annotation may be incorrect\n";
+                ++optStats_.almostPureFns;
+            } else if (fx.writesMemory || fx.hasMutation) {
+                std::cerr << "[warning] @pure function '" << f->name
+                          << "' mutates memory — @pure annotation may be incorrect\n";
+                ++optStats_.almostPureFns;
+            }
+        } else if (actuallyPure && !f->parameters.empty()) {
+            // Function is pure by analysis but lacks the @pure hint.
+            // Skip parameterless functions because they're already folded to
+            // global constants and don't benefit further from @pure.
+            ++optStats_.untaggedPureFns;
         }
     }
 }
