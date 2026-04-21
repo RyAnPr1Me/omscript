@@ -268,6 +268,24 @@ struct AnalysisValidity {
         }
     }
 
+    /// Mark the analysis fact identified by @p fact as valid (freshly produced).
+    /// Used by PassScheduler::applyInvalidation() to re-validate the facts a
+    /// pass just produced after the dependency-graph cascade — the cascade may
+    /// have transitively invalidated a fact that the pass itself provides
+    /// (e.g. synthesis depends on purity and also invalidates purity).
+    /// Unknown fact names are silently ignored.
+    void markValid(std::string_view fact) noexcept {
+        if (fact == "string_types")      { stringTypes     = true; return; }
+        if (fact == "array_types")       { arrayTypes      = true; return; }
+        if (fact == "constant_returns")  { constantReturns = true; return; }
+        if (fact == "purity")            { purity          = true; return; }
+        if (fact == "effects")           { effects         = true; return; }
+        if (fact == "synthesis")         { synthesis       = true; return; }
+        if (fact == "cfctre")            { cfctre          = true; return; }
+        if (fact == "egraph")            { egraph          = true; return; }
+        if (fact == "range_analysis")    { rangeAnalysis   = true; return; }
+    }
+
     /// Attach a dependency graph so that invalidating a fact also invalidates
     /// all transitively dependent facts.  Non-owning pointer.
     void setDependencyGraph(const AnalysisDependencyGraph* graph) noexcept {
