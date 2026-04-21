@@ -31,9 +31,11 @@
 ///     Provides a single query surface for codegen to ask questions like
 ///     "is this function pure?" without knowing which analysis pass answered.
 
-#include "ast.h"     // FunctionEffects, OptMaxConfig, etc.
-#include "cfctre.h"  // CTValue, CTEngine
-#include "egraph.h"  // EGraph, SaturationConfig, egraph::optimizeProgram, etc.
+#include "ast.h"      // FunctionEffects, OptMaxConfig, etc.
+#include "cfctre.h"   // CTValue, CTEngine
+#include "egraph.h"   // EGraph, SaturationConfig, egraph::optimizeProgram, etc.
+#include "opt_pass.h" // AnalysisKey, PassContract, IRInvariant
+#include <any>
 #include <limits>
 #include <optional>
 #include <string>
@@ -238,6 +240,106 @@ struct AnalysisValidity {
         if (fact == "range_analysis")   return rangeAnalysis;
         return false; // unknown fact — conservatively not valid
     }
+
+    /// Mark the analysis fact identified by @p fact as invalid (stale).
+    /// Called by PassScheduler::applyInvalidation() after a transformation pass.
+    /// Unknown fact names are silently ignored.
+    void invalidate(std::string_view fact) noexcept {
+        if (fact == "string_types")      { stringTypes     = false; return; }
+        if (fact == "array_types")       { arrayTypes      = false; return; }
+        if (fact == "constant_returns")  { constantReturns = false; return; }
+        if (fact == "purity")            { purity          = false; return; }
+        if (fact == "effects")           { effects         = false; return; }
+        if (fact == "synthesis")         { synthesis       = false; return; }
+        if (fact == "cfctre")            { cfctre          = false; return; }
+        if (fact == "egraph")            { egraph          = false; return; }
+        if (fact == "range_analysis")    { rangeAnalysis   = false; return; }
+        // unknown fact: no-op (conservative)
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AnalysisCache — typed analysis result store with invalidation
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// A typed, key-value cache for analysis results.  Keys are AnalysisKey strings
+/// (the same tokens used in AnalysisFact and AnalysisValidity).  Values are
+/// stored as std::any so heterogeneous analysis results (dependence summaries,
+/// alias sets, SCEV facts, etc.) can be cached without a common base class.
+///
+/// **Usage**
+/// ```cpp
+/// cache.put<DependenceSummary>("dep_summary", std::move(ds));
+/// const auto* ds = cache.get<DependenceSummary>("dep_summary");
+/// cache.invalidate("dep_summary");
+/// cache.invalidateByContract(passContract);
+/// ```
+///
+/// **Thread safety**: NOT thread-safe.  Owned by OptimizationContext and
+/// accessed single-threaded during the pre-pass pipeline.
+class AnalysisCache {
+public:
+    AnalysisCache()  = default;
+    ~AnalysisCache() = default;
+
+    // Non-copyable (large state).
+    AnalysisCache(const AnalysisCache&)            = delete;
+    AnalysisCache& operator=(const AnalysisCache&) = delete;
+
+    // Movable.
+    AnalysisCache(AnalysisCache&&)            = default;
+    AnalysisCache& operator=(AnalysisCache&&) = default;
+
+    /// Store a value of type T under key @p k.
+    /// Replaces any existing value for that key.
+    template<class T>
+    void put(const AnalysisKey& k, T value) {
+        store_[k] = std::move(value);
+    }
+
+    /// Retrieve a const pointer to the stored value of type T for key @p k.
+    /// Returns nullptr if the key is not found or the stored type is not T.
+    template<class T>
+    const T* get(const AnalysisKey& k) const noexcept {
+        auto it = store_.find(k);
+        if (it == store_.end()) return nullptr;
+        return std::any_cast<T>(&it->second);
+    }
+
+    /// Retrieve a mutable pointer to the stored value of type T for key @p k.
+    /// Returns nullptr if the key is not found or the stored type is not T.
+    template<class T>
+    T* get(const AnalysisKey& k) noexcept {
+        auto it = store_.find(k);
+        if (it == store_.end()) return nullptr;
+        return std::any_cast<T>(&it->second);
+    }
+
+    /// Return true if the cache contains an entry for key @p k.
+    bool has(const AnalysisKey& k) const noexcept {
+        return store_.count(k) > 0;
+    }
+
+    /// Remove the cached value for key @p k (if present).
+    void invalidate(const AnalysisKey& k) noexcept {
+        store_.erase(k);
+    }
+
+    /// Remove all cached values whose keys appear in @p contract.invalidates_facts.
+    void invalidateByContract(const PassContract& contract) noexcept {
+        for (const auto& key : contract.invalidates_facts) {
+            store_.erase(key);
+        }
+    }
+
+    /// Remove all cached values.
+    void clear() noexcept { store_.clear(); }
+
+    /// Return the number of entries currently in the cache.
+    size_t size() const noexcept { return store_.size(); }
+
+private:
+    std::unordered_map<AnalysisKey, std::any> store_;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -487,11 +589,21 @@ public:
     EGraphSubsystem&       egraph()       noexcept { return egraph_; }
     const EGraphSubsystem& egraph() const noexcept { return egraph_; }
 
+    // ── Analysis cache ────────────────────────────────────────────────────
+    ///
+    /// The typed analysis cache stores heterogeneous analysis results keyed by
+    /// AnalysisKey strings.  PassScheduler::applyInvalidation() evicts entries
+    /// for any fact that a transformation pass declares as invalidated, ensuring
+    /// cached results are never used after the underlying analysis becomes stale.
+    AnalysisCache&       cache()       noexcept { return cache_; }
+    const AnalysisCache& cache() const noexcept { return cache_; }
+
 private:
     std::unordered_map<std::string, FunctionFacts> facts_;
     AnalysisValidity validity_;
     CTEngine*        ctEngine_ = nullptr;
     EGraphSubsystem  egraph_;
+    AnalysisCache    cache_;
 };
 
 } // namespace omscript

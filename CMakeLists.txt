@@ -89,6 +89,7 @@ set(SRC
     # Optimization architecture (orchestrator + unified context)
     src/opt_context.cpp
     src/opt_orchestrator.cpp
+    src/optimization_manager.cpp
 
     # Driver
     src/preprocessor.cpp

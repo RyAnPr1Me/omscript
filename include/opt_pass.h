@@ -173,6 +173,74 @@ namespace PassId {
     extern uint32_t kRangeAnalysis;
 } // namespace PassId
 
+// ─────────────────────────────────────────────────────────────────────────────
+// AnalysisKey — type alias for analysis fact identifier strings
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// An AnalysisKey is the string name of a piece of analysis state.  It matches
+/// the string constants in AnalysisFact (e.g. "purity") and the keys used by
+/// AnalysisValidity.  Using a typedef makes intent explicit and allows future
+/// migration to a stronger handle type.
+using AnalysisKey = std::string;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IRInvariant — structural invariants of LLVM IR that passes establish or consume
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// IR invariants describe *structural* properties of the LLVM IR (as opposed to
+/// analysis *facts* about program semantics).  They are consumed by passes that
+/// require the IR to be in a specific shape (e.g. loop vectorizer needs
+/// LoopSimplify) and established by normalization passes that guarantee that shape.
+///
+/// Passes declare consumed invariants in PassContract::requires_inv and
+/// established invariants in PassContract::establishes_inv.  Passes that
+/// break an invariant (e.g. a loop transform that rewrites induction variables)
+/// must list it in PassContract::invalidates_inv so the scheduler knows to
+/// re-run normalization before any subsequent consumer.
+enum class IRInvariant : uint32_t {
+    LoopSimplify  = 0, ///< Loops have dedicated preheaders and a single backedge
+    LCSSA         = 1, ///< Loop-Closed SSA form (uses of loop-defined values exit through PHIs)
+    CanonicalIV   = 2, ///< Induction variables are in canonical form (IndVarSimplify done)
+    SimplifiedCFG = 3, ///< Control-flow graph is simplified (SimplifyCFGPass done)
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PassContract — extended pass descriptor with IR invariant declarations
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// A PassContract is the complete, machine-verifiable specification of a pass's
+/// preconditions, postconditions, and side effects.  It extends the
+/// requires/provides/invalidates model of PassMetadata with IR-structural
+/// invariant declarations so the PassScheduler can:
+///
+///   • Reject or skip passes whose preconditions are unsatisfied.
+///   • Automatically invalidate stale analysis facts and IR invariants after
+///     any pass that modifies the IR.
+///   • Enable safe pass reordering and composition without manual bookkeeping.
+///
+/// Currently PassContract is an adjunct to PassMetadata; future work will
+/// migrate to it as the sole pass descriptor.
+struct PassContract {
+    /// Analysis facts required before this pass runs.
+    std::vector<AnalysisKey> requires_facts;
+
+    /// Analysis facts produced (or updated) after this pass runs.
+    std::vector<AnalysisKey> provides_facts;
+
+    /// Analysis facts invalidated (made stale) when this pass transforms the IR.
+    std::vector<AnalysisKey> invalidates_facts;
+
+    /// IR invariants that must hold before this pass runs.
+    std::vector<IRInvariant> requires_inv;
+
+    /// IR invariants that this pass guarantees hold after it runs.
+    std::vector<IRInvariant> establishes_inv;
+
+    /// IR invariants that this pass breaks (must be re-established before the
+    /// next consumer that requires them).
+    std::vector<IRInvariant> invalidates_inv;
+};
+
 } // namespace omscript
 
 #endif // OPT_PASS_H

@@ -87,6 +87,9 @@ namespace llvm {
 class Function;
 class Module;
 class Loop;
+class ScalarEvolution;
+class DominatorTree;
+class LoopInfo;
 } // namespace llvm
 
 namespace omscript {
@@ -208,6 +211,36 @@ struct OmPolyOptFunctionPass
     llvm::PreservedAnalyses run(llvm::Function& F,
                                 llvm::FunctionAnalysisManager& FAM);
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legality query API
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Result of a loop-nest legality check for all supported transformations.
+/// Produced by checkLoopLegality() for a specific outermost loop.
+struct LoopLegalityResult {
+    bool interchange = false; ///< Loop interchange is legal for this nest
+    bool tiling      = false; ///< Loop tiling is legal for this nest
+    bool reversal    = false; ///< Inner-loop reversal is legal
+    bool skewing     = false; ///< Skewing with factor 1 is legal
+};
+
+/// Check the legality of all loop transformations for a given outermost loop.
+///
+/// Performs SCoP detection, dependence analysis (Fourier-Motzkin), and runs
+/// the internal legality predicates for interchange, tiling, reversal, and
+/// skewing.  Requires that the function containing @p outerLoop is in
+/// LoopSimplify + LCSSA form.
+///
+/// Returns all-false if @p outerLoop is null or is not a detectable SCoP.
+///
+/// This function is exposed so that OptimizationManager::legality() can
+/// pre-screen loops before committing to the full polyopt pass.
+LoopLegalityResult checkLoopLegality(llvm::Loop* outerLoop,
+                                      llvm::ScalarEvolution& SE,
+                                      llvm::DominatorTree& DT,
+                                      llvm::LoopInfo& LI,
+                                      const PolyOptConfig& config = PolyOptConfig{});
 
 } // namespace polyopt
 } // namespace omscript

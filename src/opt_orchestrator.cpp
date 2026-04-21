@@ -10,6 +10,7 @@
 
 #include "opt_orchestrator.h"
 #include "codegen.h"   // CodeGenerator + OptimizationLevel
+#include "optimization_manager.h" // PassScheduler
 
 #include <cassert>
 #include <chrono>
@@ -351,6 +352,15 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
     const auto& reg   = PassRegistry::instance();
     const auto  order = reg.topologicalOrder(); // dependency-sorted IDs
 
+    // Construct a PassScheduler for this pipeline run.  In debug builds,
+    // the scheduler operates in strict mode: precondition failures are hard
+    // assertions rather than warnings (they indicate a programming error in
+    // the pass metadata or topological ordering).
+    PassScheduler scheduler = PassScheduler(ctx);
+#ifndef NDEBUG
+    scheduler.setStrictMode(true);
+#endif
+
     const auto tPipelineStart = std::chrono::steady_clock::now();
 
     for (uint32_t id : order) {
@@ -361,26 +371,20 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         if (it == dispatch.end()) continue; // pass has no wrapper (IR-level pass, etc.)
 
         // ── Skip already-valid passes (runInvalidated mode) ────────────
-        if (skipValid) {
-            bool allProvided = true;
-            for (const char* fact : meta->provides_) {
-                if (!ctx.validity().isValid(fact)) { allProvided = false; break; }
-            }
-            if (allProvided) {
-                ++stats_.passesSkipped;
-                continue;
-            }
+        if (skipValid && scheduler.allProvidedValid(*meta)) {
+            ++stats_.passesSkipped;
+            continue;
         }
 
-        // ── Precondition guard ─────────────────────────────────────────
-        // If a required fact is not yet valid, the pass ordering is wrong.
-        // Emit a warning rather than aborting so release builds are robust.
-        for (const char* req : meta->requires_) {
-            if (!ctx.validity().isValid(req)) {
-                std::cerr << "[omscript][opt] WARNING: pass '" << meta->name
-                          << "' requires fact '" << req
-                          << "' which is not yet valid — pass ordering may be incorrect\n";
-            }
+        // ── Precondition check ─────────────────────────────────────────
+        // checkPreconditions() warns (or asserts in strict mode) and returns
+        // false if any required fact is not valid.  In release mode, skipping
+        // a pass with unmet prerequisites is conservative and correct: the
+        // fact declared in provides_ will remain invalid, so no downstream
+        // consumer can accidentally use the stale data.
+        if (!scheduler.checkPreconditions(*meta)) {
+            ++stats_.passesSkipped;
+            continue;
         }
 
         // ── Time and run the pass ──────────────────────────────────────
@@ -388,6 +392,15 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         it->second(program, ctx);
         const auto tEnd   = std::chrono::steady_clock::now();
         const double ms   = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+
+        // ── Apply invalidation ─────────────────────────────────────────
+        // After a transformation pass (e.g. synthesis) modifies the AST,
+        // the facts it declared in invalidates_ must be marked stale so
+        // that any downstream pass or code-generation query that reads those
+        // facts will see them as needing recomputation.  Without this step,
+        // purity/effects facts computed before synthesis remain marked as
+        // valid even though the synthesized AST may have different semantics.
+        scheduler.applyInvalidation(*meta);
 
         stats_.passTimings.push_back({std::string(meta->name), ms});
         ++stats_.passesRun;

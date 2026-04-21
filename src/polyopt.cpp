@@ -1667,5 +1667,61 @@ OmPolyOptFunctionPass::run(llvm::Function& F,
     return llvm::PreservedAnalyses::none();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Public legality query API
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// checkLoopLegality() is exposed so that OptimizationManager::legality() (and
+// other callers with access to LLVM loop analyses) can pre-screen a loop nest
+// for all supported transformations in one pass, without committing to the full
+// polyopt pipeline.  This is useful when a high-level check (effect safety
+// from LegalityService) passes but the caller wants to know whether the
+// polyhedral dependences allow the specific transforms it intends to apply.
+//
+// The function intentionally reuses the internal static helpers (detectScop,
+// computeDependences, isInterchangeLegal, isTilingLegal, isReversalLegal,
+// isSkewingLegal) which are defined in this TU.
+
+LoopLegalityResult checkLoopLegality(llvm::Loop* outerLoop,
+                                      llvm::ScalarEvolution& SE,
+                                      llvm::DominatorTree& DT,
+                                      llvm::LoopInfo& LI,
+                                      const PolyOptConfig& config) {
+    LoopLegalityResult result;
+    if (!outerLoop) return result;
+
+    // Attempt SCoP detection.  If the loop nest is not a valid static control
+    // part, we cannot perform dependence analysis, so all fields remain false.
+    SCoP scop;
+    if (!detectScop(outerLoop, SE, LI, config, scop)) return result;
+    if (!scop.valid) return result;
+
+    const unsigned depth = scop.depth();
+
+    // Single-level loops: only reversal applies.
+    if (depth < 1) return result;
+
+    auto deps = computeDependences(scop);
+
+    if (depth == 1) {
+        // For a single loop, only reversal is a per-dimension check.
+        result.reversal = isReversalLegal(deps, 0);
+        return result;
+    }
+
+    // Multi-level nest: check all applicable transforms using the two innermost
+    // (or only) loop levels.  This mirrors the typical case in processLoop().
+    const unsigned inner = depth - 1;
+    const unsigned outer = depth - 2;
+
+    result.interchange = isInterchangeLegal(deps, outer, inner, depth);
+    result.tiling      = isTilingLegal(deps, outer, inner, depth);
+    result.reversal    = isReversalLegal(deps, inner);
+    result.skewing     = isSkewingLegal(deps, outer, inner, /*factor=*/1, depth);
+
+    return result;
+}
+
 } // namespace polyopt
 } // namespace omscript
+

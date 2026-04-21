@@ -1,6 +1,7 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
+#include "optimization_manager.h" // OptimizationManager, CostModel
 #include "superoptimizer.h"
 #include "polyopt.h"
 #include <iostream>
@@ -2585,12 +2586,31 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
 #endif
 }
 
+// ── Canonical loop barrier helper ─────────────────────────────────────────────
+// Adds LoopSimplify + LCSSA to a FunctionPassManager to ensure loops are in
+// canonical form (dedicated preheader, single backedge, loop-closed SSA).
+// This pair is required before IndVarSimplify, OmPolyOpt, and the loop
+// vectorizer, and appears in multiple phases and functions in this file.
+// Centralising it here ensures the sequence stays consistent.
+static void addCanonicalLoopBarrier(llvm::FunctionPassManager& FPM) {
+    FPM.addPass(llvm::LoopSimplifyPass());
+    FPM.addPass(llvm::LCSSAPass());
+}
+
 void CodeGenerator::runOptimizationPasses() {
     // Ensure the native target is initialized before we try to create a
     // TargetMachine.  These calls are idempotent and fast after the first.
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
+
+    // ── OptimizationManager setup ─────────────────────────────────────────
+    // The OptimizationManager owns the shared cost model and legality service
+    // used across the IR-level pipeline.  The cost model is initially the
+    // default (built-in x86-64 latency table); if a hardware profile is
+    // available (HGOE active), it is replaced with a hardware-accurate model.
+    omscript::OptimizationManager optMgr;
+    optMgr.setCostModel(omscript::createDefaultCostModel());
 
     // Set the target triple on the module.
     const std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
@@ -3022,8 +3042,7 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
             FPM.addPass(llvm::PromotePass());
             FPM.addPass(llvm::InstCombinePass());
-            FPM.addPass(llvm::LoopSimplifyPass());
-            FPM.addPass(llvm::LCSSAPass());
+            addCanonicalLoopBarrier(FPM);
             // OmPolyOpt: polyhedral loop optimizer.  Runs after loop normalization
             // (LoopSimplify + LCSSA) so that loop bounds and induction variables
             // are in canonical form.  Performs dependence analysis (Fourier-Motzkin
@@ -4101,10 +4120,12 @@ void CodeGenerator::runOptimizationPasses() {
             superConfig.synthesis.maxInstructions = 5;
             superConfig.synthesis.costThreshold = 0.9;
         }
-        // Unified cost model: when a hardware profile is available, wire the
-        // hardware-accurate latency data into the superoptimizer so that all
-        // cost-driven decisions (synthesis candidate selection, idiom cost
-        // comparison, replacement gating) use the same source as the HGOE.
+        // Unified cost model: when a hardware profile is available, install a
+        // hardware-accurate cost model into the OptimizationManager so that all
+        // cost-driven decisions in the pipeline (superoptimizer synthesis,
+        // polyopt profitability, HGOE) share the same latency source.
+        // The model is set into superConfig.costModel so that superoptimizeFunction
+        // picks it up via the CostModel interface rather than the legacy costFn.
         if (hgoe::shouldActivate(hgoe::HGOEConfig{marchCpu_, mtuneCpu_})) {
             std::string resolvedCpu = marchCpu_.empty() ? mtuneCpu_ : marchCpu_;
             if (resolvedCpu == "native")
@@ -4113,9 +4134,17 @@ void CodeGenerator::runOptimizationPasses() {
             if (profileOpt) {
                 // Capture profile by value — no lifetime dependency on any graph.
                 hgoe::MicroarchProfile capturedProfile = *profileOpt;
-                superConfig.costFn = [capturedProfile](const llvm::Instruction* i) {
-                    return hgoe::instrCostFromProfile(i, capturedProfile);
+                // Install into the OptimizationManager as the shared cost oracle.
+                struct HGOECostModel final : public omscript::CostModel {
+                    hgoe::MicroarchProfile profile;
+                    explicit HGOECostModel(hgoe::MicroarchProfile p) : profile(std::move(p)) {}
+                    double instructionCost(const llvm::Instruction* i) const override {
+                        return hgoe::instrCostFromProfile(i, profile);
+                    }
                 };
+                optMgr.setCostModel(std::make_unique<HGOECostModel>(capturedProfile));
+                // Wire the shared model into the superoptimizer config.
+                superConfig.costModel = optMgr.costModel();
             }
         }
         auto superStats = superopt::superoptimizeModule(*module, superConfig);
@@ -4437,8 +4466,7 @@ void CodeGenerator::runOptimizationPasses() {
             CloseFPM.addPass(MemoryAccessPhaseReorderPass());
             CloseFPM.addPass(llvm::InstCombinePass());
             // Phase 3: loop normalization + invariant hoisting.
-            CloseFPM.addPass(llvm::LoopSimplifyPass());
-            CloseFPM.addPass(llvm::LCSSAPass());
+            addCanonicalLoopBarrier(CloseFPM);
             {
                 llvm::LoopPassManager LPMClose;
                 LPMClose.addPass(llvm::IndVarSimplifyPass());
@@ -4751,8 +4779,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // hoist loads that the legacy version would conservatively skip.
     // SimpleLoopUnswitch creates loop-invariant-condition specialisations.
     // IndVarSimplify canonicalizes induction variables for the vectorizer.
-    FPMMax.addPass(llvm::LoopSimplifyPass());
-    FPMMax.addPass(llvm::LCSSAPass());
+    addCanonicalLoopBarrier(FPMMax);
     {
         llvm::LoopPassManager LPM;
         LPM.addPass(llvm::LoopRotatePass());
@@ -4779,8 +4806,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // performs standard unrolling (OptLevel=3 = aggressive threshold/factor).
     // ForgetAllSCEVInLoopUnroll=true forces SCEV to recompute trip counts after
     // each unrolling step, giving the next step accurate information.
-    FPMMax.addPass(llvm::LoopSimplifyPass());
-    FPMMax.addPass(llvm::LCSSAPass());
+    addCanonicalLoopBarrier(FPMMax);
     {
         llvm::LoopPassManager LPM;
         LPM.addPass(llvm::LoopFlattenPass());
@@ -4872,8 +4898,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // LoopDistribute splits independent memory-access patterns into separate
     // loops, each of which the vectorizer can handle cleanly.  LoopFuse merges
     // small adjacent loops to amortise loop overhead.
-    FPMMax.addPass(llvm::LoopSimplifyPass());
-    FPMMax.addPass(llvm::LCSSAPass());
+    addCanonicalLoopBarrier(FPMMax);
     FPMMax.addPass(llvm::AlignmentFromAssumptionsPass());
     {
         llvm::LoopPassManager LPM;
@@ -4909,8 +4934,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // InstCombine picks up the residual opportunities.
     FPMMax.addPass(llvm::AggressiveInstCombinePass());
     FPMMax.addPass(llvm::InstCombinePass());
-    FPMMax.addPass(llvm::LoopSimplifyPass());
-    FPMMax.addPass(llvm::LCSSAPass());
+    addCanonicalLoopBarrier(FPMMax);
     {
         llvm::LoopPassManager LPM;
         LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
