@@ -669,6 +669,18 @@ private:
     /// Snapshot an array from the heap into a new handle (for memoisation).
     CTArrayHandle snapshotArray(CTArrayHandle src);
 
+    /// Narrow variable ranges along the then/else branches of an `if`
+    /// based on simple comparison constraints in the condition expression.
+    /// Updates `thenF.constraints` / `elseF.constraints` in place.
+    void narrowBranchConstraints(const Expression* cond,
+                                 CTFrame& thenF,
+                                 CTFrame& elseF) const;
+
+    /// Build a partial-specialisation cache key for (fnName, args), supporting
+    /// mixed concrete/symbolic argument vectors.
+    std::string partialSpecKey(const std::string& fnName,
+                               const std::vector<CTValue>& args) const;
+
     // ── Phase 9: Abstract interpretation (CTAbstractInterpreter) ─────────
     // Called from runPass; populates the analysis* maps below.
     void runAbstractInterpretation(const Program* program);
