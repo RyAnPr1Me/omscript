@@ -162,6 +162,7 @@ namespace PassId {
     uint32_t kSynthesis       = 0;
     uint32_t kCFCTRE          = 0;
     uint32_t kEGraph          = 0;
+    uint32_t kRangeAnalysis   = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -268,6 +269,17 @@ static void registerAllPasses() {
         // semantics-preserving.
         {},
     });
+
+    PassId::kRangeAnalysis = reg.registerPass({
+        0,
+        "range_analysis",
+        "Synthesize integer return-value ranges from CFCTRE uniform-return and constIntReturn facts",
+        PassPhase::ASTTransform,
+        PassKind::Analysis,
+        {AnalysisFact::kPurity, AnalysisFact::kEffects, AnalysisFact::kCFCTRE},
+        {AnalysisFact::kRangeAnalysis},
+        {},
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,6 +344,7 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         {PassId::kSynthesis,       [this](Program* p, OptimizationContext& c){ runSynthesis(p, c); }},
         {PassId::kCFCTRE,          [this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); }},
         {PassId::kEGraph,          [this](Program* p, OptimizationContext& c){ runEGraph(p, c); }},
+        {PassId::kRangeAnalysis,   [this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); }},
     };
 
     const auto& reg   = PassRegistry::instance();
@@ -451,6 +464,29 @@ void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& 
     // settings and then calls ctx.egraph().optimizeProgram().
     codegen_->runEGraphPass(program, ctx);
     ctx.validity().egraph = true;
+}
+
+void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationContext& ctx) {
+    // Synthesize ValueRange facts from CFCTRE results already stored in ctx.
+    // This pass does not walk the AST; it derives bounds purely from the
+    // uniform-return and constIntReturn facts set by syncFactsToContext.
+    if (!program) {
+        ctx.validity().rangeAnalysis = true;
+        return;
+    }
+    for (const auto& func : program->functions) {
+        FunctionFacts& ff = ctx.mutableFacts(func->name);
+        if (ff.returnRange.has_value()) continue; // already populated
+
+        if (ff.constIntReturn.has_value()) {
+            const int64_t v = *ff.constIntReturn;
+            ff.returnRange = ValueRange{v, v};
+        } else if (ff.uniformCTReturn.has_value() && ff.uniformCTReturn->isInt()) {
+            const int64_t v = ff.uniformCTReturn->asI64();
+            ff.returnRange = ValueRange{v, v};
+        }
+    }
+    ctx.validity().rangeAnalysis = true;
 }
 
 // ── syncFactsToContext ────────────────────────────────────────────────────────

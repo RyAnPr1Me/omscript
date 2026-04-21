@@ -15,6 +15,7 @@
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
+#include <llvm/IR/ConstantRange.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/MDBuilder.h>
@@ -5268,6 +5269,26 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     if (optimizationLevel >= OptimizationLevel::O2 && !inOptMaxFunction) {
         function->addFnAttr(llvm::Attribute::NoSync);
     }
+
+    // Emit range return attribute when a narrowed ValueRange is known for
+    // this function.  The range attribute constrains the return value's
+    // integer interval for LLVM's CVP/LVI passes, enabling tighter bounds
+    // propagation into callers without requiring inlining.
+    // Only applied to i64-returning functions (the primary integer type).
+    // getWithRange requires LLVM 19+.
+#if LLVM_VERSION_MAJOR >= 19
+    if (optCtx_ && function->getReturnType()->isIntegerTy(64)) {
+        if (auto rng = optCtx_->returnRange(func->name)) {
+            if (rng->isNarrowed() && !rng->isEmpty() &&
+                rng->hi < std::numeric_limits<int64_t>::max()) {
+                llvm::APInt apLo(64, static_cast<uint64_t>(rng->lo), /*isSigned=*/true);
+                llvm::APInt apHi(64, static_cast<uint64_t>(rng->hi + 1), /*isSigned=*/true);
+                function->addRetAttr(llvm::Attribute::getWithRange(
+                    *context, llvm::ConstantRange(apLo, apHi)));
+            }
+        }
+    }
+#endif
 
     // @unroll / @nounroll: per-function loop unrolling control.
     // These are stored and applied to every loop emitted within this function.

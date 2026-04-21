@@ -1048,7 +1048,8 @@ std::vector<RewriteRule> getAlgebraicRules() {
         P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("x")}),
         [](EGraph& g, const Subst&) { return g.addConst(0); });
 
-    // ── Modulo by power of 2: x % 2 → x & 1 ────────────────────────────
+    // ── Modulo by power of 2: x % 2^n → x & (2^n - 1) ──────────────────
+    // For all n in [1, 30]: x % (2^n) → x & (2^n - 1)
     // NOTE: This is technically only correct for non-negative x when using
     // signed semantics.  However, the codegen already emits the corrected
     // signed-mod sequence for power-of-2 divisors via the sign-bit fixup
@@ -1056,86 +1057,15 @@ std::vector<RewriteRule> getAlgebraicRules() {
     // in the abstract integer domain where the e-graph tracks equivalent
     // representations — the extraction cost model selects bitwise AND
     // only when it's cheaper.
-    rules.emplace_back("mod_2_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1));
-        });
-    rules.emplace_back("mod_4_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(4)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(3));
-        });
-    rules.emplace_back("mod_8_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(8)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(7));
-        });
-    rules.emplace_back("mod_16_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(16)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(15));
-        });
-    rules.emplace_back("mod_32_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(32)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(31));
-        });
-    rules.emplace_back("mod_64_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(64)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(63));
-        });
-    rules.emplace_back("mod_128_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(128)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(127));
-        });
-    rules.emplace_back("mod_256_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(256)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(255));
-        });
-    rules.emplace_back("mod_512_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(512)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(511));
-        });
-    rules.emplace_back("mod_1024_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(1024)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1023));
-        });
-    rules.emplace_back("mod_2048_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2048)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(2047));
-        });
-    rules.emplace_back("mod_4096_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(4096)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(4095));
-        });
-    rules.emplace_back("mod_8192_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(8192)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(8191));
-        });
-    rules.emplace_back("mod_16384_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(16384)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(16383));
-        });
-    rules.emplace_back("mod_32768_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(32768)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(32767));
-        });
-    rules.emplace_back("mod_65536_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(65536)}),
-        [](EGraph& g, const Subst& s) {
-            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(65535));
-        });
+    for (int n = 1; n <= 30; ++n) {
+        long long pow2 = 1LL << n;
+        long long mask = pow2 - 1;
+        rules.emplace_back("mod_pow2_" + std::to_string(n),
+            P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(pow2)}),
+            [mask](EGraph& g, const Subst& s) {
+                return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(mask));
+            });
+    }
 
     // ── Negation distribution: -(a - b) → b - a ─────────────────────────
     rules.emplace_back("neg_sub_to_swap",
@@ -12185,6 +12115,46 @@ std::vector<RewriteRule> getAdvancedOptRules() {
         [](const EGraph& g, const Subst& s) -> bool {
             auto cv = g.getConstValue(s.at("a"));
             return cv.has_value() && *cv != 0;
+        });
+
+    // ── (a << n) + (b << n) → (a + b) << n ───────────────────────────────
+    // Factor common shift amounts to enable further simplification.
+    rules.emplace_back("shl_factor_add",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Shl, {P::Wild("a"), P::Wild("n")}),
+            P::OpPat(Op::Shl, {P::Wild("b"), P::Wild("n")})
+        }),
+        [](EGraph& g, const Subst& s) -> ClassId {
+            ClassId sum = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Shl, sum, s.at("n"));
+        });
+
+    // ── (a << n) - (b << n) → (a - b) << n ───────────────────────────────
+    rules.emplace_back("shl_factor_sub",
+        P::OpPat(Op::Sub, {
+            P::OpPat(Op::Shl, {P::Wild("a"), P::Wild("n")}),
+            P::OpPat(Op::Shl, {P::Wild("b"), P::Wild("n")})
+        }),
+        [](EGraph& g, const Subst& s) -> ClassId {
+            ClassId diff = g.addBinOp(Op::Sub, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Shl, diff, s.at("n"));
+        });
+
+    // ── Horner's method for degree-2: a*x*x + b*x → x*(a*x + b) ─────────
+    // Reduces 3 multiplications to 2 by Horner evaluation.
+    // Pattern: (a*x)*x + b*x  →  (a*x + b) * x
+    rules.emplace_back("horner_deg2_ab",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Mul, {
+                P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("x")}),
+                P::Wild("x")
+            }),
+            P::OpPat(Op::Mul, {P::Wild("b"), P::Wild("x")})
+        }),
+        [](EGraph& g, const Subst& s) -> ClassId {
+            ClassId ax  = g.addBinOp(Op::Mul, s.at("a"), s.at("x"));
+            ClassId axb = g.addBinOp(Op::Add, ax, s.at("b"));
+            return g.addBinOp(Op::Mul, axb, s.at("x"));
         });
 
     return rules;

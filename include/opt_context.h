@@ -34,6 +34,7 @@
 #include "ast.h"     // FunctionEffects, OptMaxConfig, etc.
 #include "cfctre.h"  // CTValue, CTEngine
 #include "egraph.h"  // EGraph, SaturationConfig, egraph::optimizeProgram, etc.
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -123,6 +124,46 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ValueRange — inclusive interval for an integer expression
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// Tracks a conservative closed interval [lo, hi] for an integer value.
+/// Used to record known bounds on function return values and to guide
+/// the backend in emitting tighter LLVM !range metadata.
+struct ValueRange {
+    int64_t lo = std::numeric_limits<int64_t>::min(); ///< Inclusive lower bound
+    int64_t hi = std::numeric_limits<int64_t>::max(); ///< Inclusive upper bound
+
+    /// True when the range has been narrowed below the full i64 range.
+    bool isNarrowed() const noexcept {
+        return lo > std::numeric_limits<int64_t>::min() ||
+               hi < std::numeric_limits<int64_t>::max();
+    }
+
+    /// Intersect two ranges: the tightest bound satisfying both constraints.
+    static ValueRange intersect(const ValueRange& a, const ValueRange& b) noexcept {
+        return {std::max(a.lo, b.lo), std::min(a.hi, b.hi)};
+    }
+
+    /// Join two ranges: the widest bound covering both.
+    static ValueRange join(const ValueRange& a, const ValueRange& b) noexcept {
+        return {std::min(a.lo, b.lo), std::max(a.hi, b.hi)};
+    }
+
+    /// True when the range is empty (no value satisfies it).
+    bool isEmpty() const noexcept { return lo > hi; }
+
+    /// True when the value is always non-negative.
+    bool isNonNeg() const noexcept { return lo >= 0; }
+
+    /// True when the value is a single known constant.
+    bool isConst() const noexcept { return lo == hi; }
+
+    /// Return the constant value when isConst() is true.
+    int64_t constVal() const noexcept { return lo; }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // FunctionFacts — per-function analysis results
 // ─────────────────────────────────────────────────────────────────────────────
 ///
@@ -145,6 +186,9 @@ struct FunctionFacts {
 
     // ── CF-CTRE: was this function successfully CT-evaluated? ─────────────
     bool foldedByCFCTRE = false; ///< Had ≥1 successful compile-time call
+
+    // ── Value range for the return value ─────────────────────────────────
+    std::optional<ValueRange> returnRange; ///< Known bounds on the return value
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -164,6 +208,7 @@ struct AnalysisValidity {
     bool synthesis      = false; ///< runSynthesisPass() has run
     bool cfctre         = false; ///< runCFCTRE() has run
     bool egraph         = false; ///< egraph::optimizeProgram() has run
+    bool rangeAnalysis  = false; ///< Value range analysis has run
 
     /// Mark all facts invalid (call when the AST is modified).
     void invalidateAll() noexcept { *this = {}; }
@@ -175,6 +220,7 @@ struct AnalysisValidity {
         purity          = false;
         effects         = false;
         cfctre          = false;
+        rangeAnalysis   = false;
     }
 
     /// Return true if the analysis fact identified by @p fact is currently valid.
@@ -189,6 +235,7 @@ struct AnalysisValidity {
         if (fact == "synthesis")        return synthesis;
         if (fact == "cfctre")           return cfctre;
         if (fact == "egraph")           return egraph;
+        if (fact == "range_analysis")   return rangeAnalysis;
         return false; // unknown fact — conservatively not valid
     }
 };
@@ -369,6 +416,13 @@ public:
         auto it = facts_.find(funcName);
         if (it == facts_.end()) return std::nullopt;
         return it->second.uniformCTReturn;
+    }
+
+    /// Return the known integer return range for @p funcName, if available.
+    std::optional<ValueRange> returnRange(const std::string& funcName) const noexcept {
+        auto it = facts_.find(funcName);
+        if (it == facts_.end()) return std::nullopt;
+        return it->second.returnRange;
     }
 
     /// True when @p funcName is unreachable from any entry point.

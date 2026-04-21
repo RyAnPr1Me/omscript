@@ -116,6 +116,7 @@ private:
     void runSynthesis      (Program* program, OptimizationContext& ctx);
     void runCFCTRE         (Program* program, OptimizationContext& ctx);
     void runEGraph         (Program* program, OptimizationContext& ctx);
+    void runRangeAnalysis  (Program* program, OptimizationContext& ctx);
 
     /// Copy analysis results from the CodeGenerator's per-pass output into
     /// the unified OptimizationContext so callers can query a single surface.
