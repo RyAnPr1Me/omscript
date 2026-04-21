@@ -7542,12 +7542,34 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
 
         if (transformed) {
             // Replace the switch with an unconditional branch to the merge block.
-            // Remove the switch's entries from PHI nodes in case blocks.
+            //
+            // Step 1: Remove switchBB as a predecessor of each case/default block.
+            // This makes those blocks unreachable (they had no other predecessor).
+            // NOTE: removePredecessor on the case blocks is a no-op for their PHIs
+            // (they have none), but it is required to maintain correct predecessor
+            // lists so that later passes don't treat the case blocks as reachable.
             for (auto& caseIt : sw->cases()) {
                 llvm::BasicBlock* caseBB = caseIt.getCaseSuccessor();
                 caseBB->removePredecessor(switchBB);
             }
             defaultBB->removePredecessor(switchBB);
+
+            // Step 2: Remove mergeBB's stale PHI entries from now-dead case/default
+            // blocks.  After step 1, the case/default blocks lost their only
+            // predecessor.  They still have an unconditional branch to mergeBB, so
+            // mergeBB still lists them as predecessors — but those edges are dead.
+            // Calling mergeBB->removePredecessor(caseBB) strips the dead incoming
+            // entries from every PHI in mergeBB, leaving only the new entry added
+            // above via phi.addIncoming(result, switchBB).
+            // Without this step, PHIs with stale dead-block entries confuse
+            // IPSCCP / SCCP: they see multiple lattice-conflicting inputs and
+            // conservatively fold the PHI to "overdefined" (=bottom), which
+            // in practice produces 0 after constant propagation.
+            for (auto& caseIt : sw->cases()) {
+                llvm::BasicBlock* caseBB = caseIt.getCaseSuccessor();
+                mergeBB->removePredecessor(caseBB);
+            }
+            mergeBB->removePredecessor(defaultBB);
 
             builder.CreateBr(mergeBB);
             sw->eraseFromParent();

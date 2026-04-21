@@ -1553,7 +1553,7 @@ fn bench_dowhile(@prefetch n:int) -> int {
 // Tests jump-table / branch-tree codegen for `when` vs C's switch.
 // Uses @novectorize to avoid LLVM auto-vectorization of the
 // switch+lookup-table pattern (which can produce wrong results).
-@novectorize @static @nounwind
+@novectorize @nounroll @static @nounwind
 fn bench_whenmatch(@prefetch n:int) -> int {
     var bins:int[] = array_fill(7, 0);
     for (i:int in 0...n) {
