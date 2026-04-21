@@ -11,6 +11,7 @@
 #endif
 
 #include "polyopt.h"
+#include "optimization_manager.h" // LegalityService, CostModel, LegalityVerdict
 
 #include <llvm/Analysis/DependenceAnalysis.h>
 #include <llvm/Analysis/IVDescriptors.h>
@@ -947,8 +948,32 @@ static bool isTilingProfitable(const SCoP& scop,
                        static_cast<uint64_t>(tileInner) * elemBytes;
     uint64_t untiledWS = N * M * elemBytes;
 
-    // Profitable if tiled working set fits in L1 and untiled doesn't
-    return tiledWS <= l1 / 2 && untiledWS > l1;
+    // Primary check: tiled working set fits in L1 and untiled doesn't
+    const bool cacheCheck = tiledWS <= l1 / 2 && untiledWS > l1;
+    if (!cacheCheck) return false;
+
+    // Secondary check: if a CostModel is available, verify that the loop body
+    // itself has meaningful compute cost (tiling is not worth it for trivial
+    // bodies with only a handful of cheap instructions).
+    //
+    // Sum the estimated cost of all instructions across all SCoP statements
+    // (this is the cost of one iteration of the loop body), then require a
+    // minimum total before tiling: very cheap loops (e.g. single-load array
+    // scans) see no benefit from tiling, while the extra loop overhead and
+    // code-size increase are real costs.
+    if (config.costModel && !scop.stmts.empty()) {
+        double totalBodyCost = 0.0;
+        for (const auto& stmt : scop.stmts) {
+            for (llvm::Instruction& I : *stmt.bb) {
+                totalBodyCost += config.costModel->instructionCost(&I);
+            }
+        }
+        // Require at least 4.0 cycles total body cost per iteration.
+        // Below this threshold the tiling overhead is unlikely to be recovered.
+        if (totalBodyCost < 4.0) return false;
+    }
+
+    return true;
 }
 
 /// Select tile sizes for a loop nest given cache parameters.
@@ -1603,6 +1628,28 @@ PolyOptStats optimizeFunction(llvm::Function& F, const PolyOptConfig& config) {
     PolyOptStats stats;
     if (F.isDeclaration()) return stats;
 
+    // ── LegalityService early-out ─────────────────────────────────────────
+    // Before building the expensive LLVM analysis managers and attempting SCoP
+    // extraction, ask the shared LegalityService whether the function is even
+    // a candidate for loop transforms.
+    //
+    // canTransformFunction() uses LLVM function attributes (nofree, nosync,
+    // willreturn) as a proxy for the OmScript-level FunctionEffects.  An
+    // Illegal verdict means the function has observable I/O or is non-
+    // terminating — transforms would change semantics, so we skip entirely.
+    // An Unknown verdict (the common case for functions not yet attributed)
+    // means we fall through to the full polyhedral analysis.
+    if (config.legality) {
+        const auto verdict = config.legality->canTransformFunction(F);
+        if (verdict == LegalityVerdict::Illegal) {
+            if (config.verbose) {
+                llvm::errs() << "[polyopt] skipping " << F.getName()
+                             << ": LegalityService returned Illegal\n";
+            }
+            return stats;
+        }
+    }
+
     // Build analyses using a temporary PassBuilder + managers.
     // This avoids the complex manual construction of ScalarEvolution
     // (which requires TargetLibraryInfo + AssumptionCache).
@@ -1651,6 +1698,18 @@ OmPolyOptFunctionPass::run(llvm::Function& F,
                             llvm::FunctionAnalysisManager& FAM) {
     if (F.isDeclaration()) return llvm::PreservedAnalyses::all();
 
+    // ── LegalityService early-out ─────────────────────────────────────────
+    // The OmPolyOptFunctionPass runs inside the LLVM pass manager where
+    // OmScript AST-level FunctionEffects are not available.  Use the IR-level
+    // attribute check (nofree, nosync, willreturn) to rule out functions that
+    // provably cannot benefit from loop transforms.
+    if (config.legality) {
+        const auto verdict = config.legality->canTransformFunction(F);
+        if (verdict == LegalityVerdict::Illegal) {
+            return llvm::PreservedAnalyses::all();
+        }
+    }
+
     // Use analyses from the pass manager — no need to rebuild them.
     auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
     auto& SE = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
@@ -1667,5 +1726,65 @@ OmPolyOptFunctionPass::run(llvm::Function& F,
     return llvm::PreservedAnalyses::none();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Public legality query API
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// checkLoopLegality() is exposed so that OptimizationManager::legality() (and
+// other callers with access to LLVM loop analyses) can pre-screen a loop nest
+// for all supported transformations in one pass, without committing to the full
+// polyopt pipeline.  This is useful when a high-level check (effect safety
+// from LegalityService) passes but the caller wants to know whether the
+// polyhedral dependences allow the specific transforms it intends to apply.
+//
+// The function intentionally reuses the internal static helpers (detectScop,
+// computeDependences, isInterchangeLegal, isTilingLegal, isReversalLegal,
+// isSkewingLegal) which are defined in this TU.
+
+LoopLegalityResult checkLoopLegality(llvm::Loop* outerLoop,
+                                      llvm::ScalarEvolution& SE,
+                                      llvm::DominatorTree& DT,
+                                      llvm::LoopInfo& LI,
+                                      const PolyOptConfig& config) {
+    LoopLegalityResult result;
+    if (!outerLoop) return result;
+
+    // Attempt SCoP detection.  If the loop nest is not a valid static control
+    // part, we cannot perform dependence analysis, so all fields remain false.
+    SCoP scop;
+    if (!detectScop(outerLoop, SE, LI, config, scop)) return result;
+    if (!scop.valid) return result;
+
+    // SCoP was detected — mark it so callers can distinguish "no SCoP" from
+    // "SCoP detected but transform is illegal".
+    result.scopDetected = true;
+
+    const unsigned depth = scop.depth();
+
+    // If the SCoP has no loop dimensions (depth == 0), no transforms apply.
+    if (depth == 0) return result;
+
+    auto deps = computeDependences(scop);
+
+    if (depth == 1) {
+        // For a single loop, only reversal is applicable.
+        result.reversal = isReversalLegal(deps, 0);
+        return result;
+    }
+
+    // Multi-level nest: check all applicable transforms using the two innermost
+    // (or only) loop levels.  This mirrors the typical case in processLoop().
+    const unsigned inner = depth - 1;
+    const unsigned outer = depth - 2;
+
+    result.interchange = isInterchangeLegal(deps, outer, inner, depth);
+    result.tiling      = isTilingLegal(deps, outer, inner, depth);
+    result.reversal    = isReversalLegal(deps, inner);
+    result.skewing     = isSkewingLegal(deps, outer, inner, /*factor=*/1, depth);
+
+    return result;
+}
+
 } // namespace polyopt
 } // namespace omscript
+

@@ -43,6 +43,11 @@ class Value;
 #include <optional>
 
 namespace omscript {
+// Forward declaration — avoids including optimization_manager.h from this header
+// while still allowing SuperoptimizerConfig to hold a non-owning pointer to the
+// shared cost model interface.
+class CostModel;
+
 namespace superopt {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,6 +152,13 @@ struct SuperoptimizerConfig {
     /// same source as the Hardware Graph Optimization Engine.
     /// Thread-safe as long as each thread uses its own SuperoptimizerConfig.
     std::function<double(const llvm::Instruction*)> costFn;
+
+    /// Shared cost model interface (preferred over costFn when set).
+    /// When non-null, instructionCost() queries this before falling back to
+    /// costFn and then to the built-in latency table.  This integrates the
+    /// superoptimizer with the unified OptimizationManager cost oracle.
+    /// Non-owning pointer — the caller is responsible for lifetime management.
+    const omscript::CostModel* costModel = nullptr;
 };
 
 /// Statistics from a superoptimizer run.

@@ -35,6 +35,7 @@
 
 #include "opt_context.h"
 #include "opt_pass.h"
+#include "optimization_manager.h" // OptimizationManager
 #include <vector>
 
 namespace omscript {
@@ -53,9 +54,17 @@ public:
     /// @param codegen   Non-owning pointer to the CodeGenerator that owns the
     ///                  pass implementations (preAnalyzeStringTypes, etc.).
     ///                  Must outlive the Orchestrator.
+    /// @param manager   Optional non-owning pointer to a shared
+    ///                  OptimizationManager.  When provided, the orchestrator
+    ///                  uses manager->createScheduler(ctx) to obtain a
+    ///                  PassScheduler that respects the manager's strict-mode
+    ///                  setting and shares the manager's dependency graph.
+    ///                  When nullptr (the default), a standalone PassScheduler
+    ///                  is created from ctx directly.
     explicit OptimizationOrchestrator(OptimizationLevel optLevel,
                                       bool verbose,
-                                      CodeGenerator* codegen) noexcept;
+                                      CodeGenerator* codegen,
+                                      OptimizationManager* manager = nullptr) noexcept;
 
     ~OptimizationOrchestrator() = default;
 
@@ -83,6 +92,22 @@ public:
     /// Used in incremental compilation scenarios where a small transform has
     /// invalidated a subset of facts.
     void runInvalidated(Program* program, OptimizationContext& ctx);
+
+    // ── Demand-driven execution ───────────────────────────────────────────
+
+    /// Ensure that @p factKey is valid in @p ctx.
+    ///
+    /// Runs the minimum set of passes required to make @p factKey valid,
+    /// recursively satisfying prerequisites first.  Unlike runPrepasses (which
+    /// runs the full pipeline), this method only runs what is needed for the
+    /// requested fact.
+    ///
+    /// @returns true  if @p factKey is valid on return.
+    /// @returns false if the fact cannot be computed (no registered producer,
+    ///                circular dependency, or a prerequisite could not be met).
+    bool runToProvide(const std::string& factKey,
+                      Program* program,
+                      OptimizationContext& ctx);
 
     // ── Statistics ────────────────────────────────────────────────────────
 
@@ -131,10 +156,11 @@ private:
     void runPassPipeline(Program* program, OptimizationContext& ctx, bool skipValid);
 
     // ── State ─────────────────────────────────────────────────────────────
-    OptimizationLevel optLevel_;
-    bool              verbose_;
-    CodeGenerator*    codegen_;   // non-owning
-    RunStats          stats_;
+    OptimizationLevel   optLevel_;
+    bool                verbose_;
+    CodeGenerator*      codegen_;   // non-owning
+    OptimizationManager* manager_;  // non-owning; may be nullptr
+    RunStats            stats_;
 };
 
 } // namespace omscript

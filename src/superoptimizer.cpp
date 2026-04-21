@@ -19,6 +19,7 @@
 #endif
 
 #include "superoptimizer.h"
+#include "optimization_manager.h" // CostModel interface
 #include <llvm/Config/llvm-config.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/CFG.h>
@@ -8328,8 +8329,26 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
 
     // Install the hardware cost model for this function's optimization session.
     // g_costFn is thread-local so parallel superoptimizeModule calls are safe.
+    //
+    // Priority order:
+    //   1. config.costModel — the unified CostModel interface from OptimizationManager
+    //   2. config.costFn    — the legacy std::function<> (backward compatibility)
+    //   3. nullptr          — fall back to the built-in latency table
+    //
+    // When costModel is set, we wrap it in a local std::function so that
+    // g_costFn (which holds a const pointer to std::function) can point to it.
+    // The local wrapper lives on the stack and is valid for the duration of
+    // this function; CostGuard restores the previous value on exit.
     const auto* prevFn = g_costFn;
-    g_costFn = config.costFn ? &config.costFn : nullptr;
+    std::function<double(const llvm::Instruction*)> costModelFn;
+    if (config.costModel) {
+        costModelFn = [m = config.costModel](const llvm::Instruction* inst) {
+            return m->instructionCost(inst);
+        };
+        g_costFn = &costModelFn;
+    } else {
+        g_costFn = config.costFn ? &config.costFn : nullptr;
+    }
     struct CostGuard {
         const std::function<double(const llvm::Instruction*)>** slot;
         const std::function<double(const llvm::Instruction*)>* prev;

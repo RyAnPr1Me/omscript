@@ -10,6 +10,7 @@
 
 #include "opt_orchestrator.h"
 #include "codegen.h"   // CodeGenerator + OptimizationLevel
+#include "optimization_manager.h" // PassScheduler
 
 #include <cassert>
 #include <chrono>
@@ -288,9 +289,10 @@ static void registerAllPasses() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 OptimizationOrchestrator::OptimizationOrchestrator(OptimizationLevel optLevel,
-                                                    bool verbose,
-                                                    CodeGenerator* codegen) noexcept
-    : optLevel_(optLevel), verbose_(verbose), codegen_(codegen) {
+                                                     bool verbose,
+                                                     CodeGenerator* codegen,
+                                                     OptimizationManager* manager) noexcept
+    : optLevel_(optLevel), verbose_(verbose), codegen_(codegen), manager_(manager) {
     registerAllPasses();
 }
 
@@ -310,6 +312,45 @@ void OptimizationOrchestrator::runInvalidated(Program* program, OptimizationCont
     stats_ = {};
     runPassPipeline(program, ctx, /*skipValid=*/true);
     syncFactsToContext(program, ctx);
+}
+
+// ── runToProvide ──────────────────────────────────────────────────────────────
+//
+// Demand-driven entry point: runs the minimum set of passes needed to ensure
+// that factKey is valid in ctx.  Delegates to PassScheduler::runToProvide()
+// after building the same dispatch map as runPassPipeline.
+
+bool OptimizationOrchestrator::runToProvide(const std::string& factKey,
+                                             Program* program,
+                                             OptimizationContext& ctx) {
+    using Runner = std::function<void(Program*, OptimizationContext&)>;
+    const std::unordered_map<uint32_t, Runner> dispatch = {
+        {PassId::kStringTypes,     [this](Program* p, OptimizationContext& c){ runStringTypes(p, c); }},
+        {PassId::kArrayTypes,      [this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); }},
+        {PassId::kConstantReturns, [this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); }},
+        {PassId::kPurity,          [this](Program* p, OptimizationContext& c){ runPurity(p, c); }},
+        {PassId::kEffects,         [this](Program* p, OptimizationContext& c){ runEffects(p, c); }},
+        {PassId::kSynthesis,       [this](Program* p, OptimizationContext& c){ runSynthesis(p, c); }},
+        {PassId::kCFCTRE,          [this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); }},
+        {PassId::kEGraph,          [this](Program* p, OptimizationContext& c){ runEGraph(p, c); }},
+        {PassId::kRangeAnalysis,   [this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); }},
+    };
+
+    // Attach the dependency graph (same as runPassPipeline does for static runs).
+    static const AnalysisDependencyGraph kDefaultDepGraph =
+        AnalysisDependencyGraph::createDefault();
+    ctx.setDependencyGraph(&kDefaultDepGraph);
+
+    PassScheduler scheduler = manager_
+        ? manager_->createScheduler(ctx)
+        : PassScheduler(ctx);
+#ifndef NDEBUG
+    if (!manager_) scheduler.setStrictMode(true);
+#endif
+
+    const bool ok = scheduler.runToProvide(factKey, program, dispatch);
+    if (ok) syncFactsToContext(program, ctx);
+    return ok;
 }
 
 // ── runPassPipeline ───────────────────────────────────────────────────────────
@@ -335,8 +376,7 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
     // Maps a stable PassId to the per-pass wrapper that runs the work.
     // Built once per call (IDs are assigned at static-init time, so they are
     // stable for the lifetime of the process).
-    using Runner = std::function<void(Program*, OptimizationContext&)>;
-    const std::unordered_map<uint32_t, Runner> dispatch = {
+    const std::unordered_map<uint32_t, PassScheduler::Runner> dispatch = {
         {PassId::kStringTypes,     [this](Program* p, OptimizationContext& c){ runStringTypes(p, c); }},
         {PassId::kArrayTypes,      [this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); }},
         {PassId::kConstantReturns, [this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); }},
@@ -351,6 +391,26 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
     const auto& reg   = PassRegistry::instance();
     const auto  order = reg.topologicalOrder(); // dependency-sorted IDs
 
+    // Install the standard analysis dependency graph so that invalidating one
+    // fact automatically cascades to all facts computed from it.  The graph is
+    // created once and stored as a static to avoid repeated allocation across
+    // pipeline runs.  The non-owning pointers in AnalysisValidity and
+    // AnalysisCache point into this static.
+    static const AnalysisDependencyGraph kDefaultDepGraph =
+        AnalysisDependencyGraph::createDefault();
+    ctx.setDependencyGraph(&kDefaultDepGraph);
+
+    // Construct a PassScheduler for this pipeline run.
+    // When an OptimizationManager is available, use it as the factory so the
+    // scheduler inherits the manager's strict-mode policy.  Otherwise fall back
+    // to a standalone scheduler constructed from ctx.
+    PassScheduler scheduler = manager_
+        ? manager_->createScheduler(ctx)
+        : PassScheduler(ctx);
+#ifndef NDEBUG
+    if (!manager_) scheduler.setStrictMode(true);
+#endif
+
     const auto tPipelineStart = std::chrono::steady_clock::now();
 
     for (uint32_t id : order) {
@@ -361,26 +421,20 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         if (it == dispatch.end()) continue; // pass has no wrapper (IR-level pass, etc.)
 
         // ── Skip already-valid passes (runInvalidated mode) ────────────
-        if (skipValid) {
-            bool allProvided = true;
-            for (const char* fact : meta->provides_) {
-                if (!ctx.validity().isValid(fact)) { allProvided = false; break; }
-            }
-            if (allProvided) {
-                ++stats_.passesSkipped;
-                continue;
-            }
+        if (skipValid && scheduler.allProvidedValid(*meta)) {
+            ++stats_.passesSkipped;
+            continue;
         }
 
-        // ── Precondition guard ─────────────────────────────────────────
-        // If a required fact is not yet valid, the pass ordering is wrong.
-        // Emit a warning rather than aborting so release builds are robust.
-        for (const char* req : meta->requires_) {
-            if (!ctx.validity().isValid(req)) {
-                std::cerr << "[omscript][opt] WARNING: pass '" << meta->name
-                          << "' requires fact '" << req
-                          << "' which is not yet valid — pass ordering may be incorrect\n";
-            }
+        // ── Precondition check ─────────────────────────────────────────
+        // checkPreconditions() warns (or asserts in strict mode) and returns
+        // false if any required fact is not valid.  In release mode, skipping
+        // a pass with unmet prerequisites is conservative and correct: the
+        // fact declared in provides_ will remain invalid, so no downstream
+        // consumer can accidentally use the stale data.
+        if (!scheduler.checkPreconditions(*meta)) {
+            ++stats_.passesSkipped;
+            continue;
         }
 
         // ── Time and run the pass ──────────────────────────────────────
@@ -388,6 +442,15 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         it->second(program, ctx);
         const auto tEnd   = std::chrono::steady_clock::now();
         const double ms   = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+
+        // ── Apply invalidation ─────────────────────────────────────────
+        // After a transformation pass (e.g. synthesis) modifies the AST,
+        // the facts it declared in invalidates_ must be marked stale so
+        // that any downstream pass or code-generation query that reads those
+        // facts will see them as needing recomputation.  Without this step,
+        // purity/effects facts computed before synthesis remain marked as
+        // valid even though the synthesized AST may have different semantics.
+        scheduler.applyInvalidation(*meta);
 
         stats_.passTimings.push_back({std::string(meta->name), ms});
         ++stats_.passesRun;

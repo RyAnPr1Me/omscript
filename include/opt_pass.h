@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -172,6 +173,172 @@ namespace PassId {
     extern uint32_t kEGraph;
     extern uint32_t kRangeAnalysis;
 } // namespace PassId
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AnalysisKey — type alias for analysis fact identifier strings
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// An AnalysisKey is the string name of a piece of analysis state.  It matches
+/// the string constants in AnalysisFact (e.g. "purity") and the keys used by
+/// AnalysisValidity.  Using a typedef makes intent explicit and allows future
+/// migration to a stronger handle type.
+using AnalysisKey = std::string;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IRInvariant — structural invariants of LLVM IR that passes establish or consume
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// IR invariants describe *structural* properties of the LLVM IR (as opposed to
+/// analysis *facts* about program semantics).  They are consumed by passes that
+/// require the IR to be in a specific shape (e.g. loop vectorizer needs
+/// LoopSimplify) and established by normalization passes that guarantee that shape.
+///
+/// Passes declare consumed invariants in PassContract::requires_inv and
+/// established invariants in PassContract::establishes_inv.  Passes that
+/// break an invariant (e.g. a loop transform that rewrites induction variables)
+/// must list it in PassContract::invalidates_inv so the scheduler knows to
+/// re-run normalization before any subsequent consumer.
+enum class IRInvariant : uint32_t {
+    LoopSimplify  = 0, ///< Loops have dedicated preheaders and a single backedge
+    LCSSA         = 1, ///< Loop-Closed SSA form (uses of loop-defined values exit through PHIs)
+    CanonicalIV   = 2, ///< Induction variables are in canonical form (IndVarSimplify done)
+    SimplifiedCFG = 3, ///< Control-flow graph is simplified (SimplifyCFGPass done)
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PassContract — extended pass descriptor with IR invariant declarations
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// A PassContract is the complete, machine-verifiable specification of a pass's
+/// preconditions, postconditions, and side effects.  It extends the
+/// requires/provides/invalidates model of PassMetadata with IR-structural
+/// invariant declarations so the PassScheduler can:
+///
+///   • Reject or skip passes whose preconditions are unsatisfied.
+///   • Automatically invalidate stale analysis facts and IR invariants after
+///     any pass that modifies the IR.
+///   • Enable safe pass reordering and composition without manual bookkeeping.
+///
+/// Currently PassContract is an adjunct to PassMetadata; future work will
+/// migrate to it as the sole pass descriptor.
+struct PassContract {
+    /// Analysis facts required before this pass runs.
+    std::vector<AnalysisKey> requires_facts;
+
+    /// Analysis facts produced (or updated) after this pass runs.
+    std::vector<AnalysisKey> provides_facts;
+
+    /// Analysis facts invalidated (made stale) when this pass transforms the IR.
+    std::vector<AnalysisKey> invalidates_facts;
+
+    /// IR invariants that must hold before this pass runs.
+    std::vector<IRInvariant> requires_inv;
+
+    /// IR invariants that this pass guarantees hold after it runs.
+    std::vector<IRInvariant> establishes_inv;
+
+    /// IR invariants that this pass breaks (must be re-established before the
+    /// next consumer that requires them).
+    std::vector<IRInvariant> invalidates_inv;
+
+    /// IR invariants that this pass provably preserves (does not break).
+    /// Provided as explicit documentation and as input to future scheduler
+    /// verification tools.  Semantically: any invariant listed here MUST NOT
+    /// appear in invalidates_inv and will remain established after this pass
+    /// completes, even if the pass modifies the IR.
+    std::vector<IRInvariant> preserves_inv;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AnalysisDependencyGraph — tracks which analyses depend on which
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// The dependency graph records "A depends on B" edges, meaning that if fact B
+/// is invalidated, fact A must also be invalidated (because A was computed using
+/// B as an input).  This enables automatic cascading invalidation: callers only
+/// need to invalidate the direct target; the graph propagates to all transitive
+/// dependents.
+///
+/// ## OmScript standard dependencies (see createDefault()):
+///   constant_returns → (none)
+///   purity           → constant_returns
+///   effects          → purity
+///   synthesis        → purity, effects          (and itself invalidates them)
+///   cfctre           → purity, effects, synthesis
+///   egraph           → cfctre
+///   range_analysis   → purity, effects, cfctre
+///
+/// ## Invalidation semantics
+/// When fact B is invalidated:
+///   1. All direct dependents of B (facts A where A→B edge exists) are
+///      transitively invalidated.
+///   2. Invalidation stops at facts with no registered dependents.
+///
+/// ## Thread safety
+/// Mutation (addDependency) is NOT thread-safe.  The graph is expected to be
+/// built once (in a single-threaded static-init context) and thereafter used
+/// read-only from multiple threads.
+class AnalysisDependencyGraph {
+public:
+    AnalysisDependencyGraph() = default;
+
+    /// Register that @p dependent requires @p dependency to be valid.
+    /// When @p dependency is invalidated, @p dependent will also be
+    /// invalidated via cascading.
+    void addDependency(const std::string& dependent,
+                       const std::string& dependency) {
+        // dependents_[dependency] = {all facts that directly depend on it}
+        dependents_[dependency].insert(dependent);
+    }
+
+    /// Return every fact that must be invalidated when @p key is invalidated.
+    /// Includes @p key itself, plus all transitive dependents (BFS).
+    std::vector<std::string> getAllDependents(const std::string& key) const {
+        std::vector<std::string> result;
+        std::unordered_set<std::string> visited;
+        std::vector<std::string> queue;
+        queue.push_back(key);
+        while (!queue.empty()) {
+            std::string cur = std::move(queue.back());
+            queue.pop_back();
+            if (!visited.insert(cur).second) continue;
+            result.push_back(cur);
+            auto it = dependents_.find(cur);
+            if (it == dependents_.end()) continue;
+            for (const auto& dep : it->second) {
+                if (!visited.count(dep)) queue.push_back(dep);
+            }
+        }
+        return result;
+    }
+
+    /// Return the direct dependents of @p key (not transitive).
+    const std::unordered_set<std::string>* directDependents(
+        const std::string& key) const noexcept {
+        auto it = dependents_.find(key);
+        return (it != dependents_.end()) ? &it->second : nullptr;
+    }
+
+    /// True if any dependency edge involves @p key (as a dependency or as a
+    /// dependent).
+    bool contains(const std::string& key) const noexcept {
+        if (dependents_.count(key)) return true;
+        for (const auto& [k, deps] : dependents_) {
+            if (deps.count(key)) return true;
+        }
+        return false;
+    }
+
+    /// Create the standard OmScript analysis dependency graph.
+    /// Must be called after static initialisation of AnalysisFact constants.
+    static AnalysisDependencyGraph createDefault();
+
+private:
+    /// Key   = analysis fact that was invalidated
+    /// Value = set of analysis facts that directly depend on it (and must
+    ///         therefore also be invalidated when the key is invalidated)
+    std::unordered_map<std::string, std::unordered_set<std::string>> dependents_;
+};
 
 } // namespace omscript
 

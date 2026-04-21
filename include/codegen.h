@@ -14,6 +14,7 @@
 #include "cfctre.h"
 #include "diagnostic.h"
 #include "opt_context.h"
+#include "optimization_manager.h"
 #include <functional>
 #include <iostream>
 #include <llvm/ADT/DenseSet.h>
@@ -1402,6 +1403,12 @@ class CodeGenerator {
     /// Created at the start of generate() and populated by the Orchestrator
     /// as pre-passes complete.  Used for fast O(1) queries during IR emission.
     std::unique_ptr<OptimizationContext> optCtx_;
+
+    // ── Shared optimization manager ────────────────────────────────────────
+    /// Created at the start of generate() and shared between the AST-level
+    /// OptimizationOrchestrator and the IR-level runOptimizationPasses() so
+    /// that both layers use the same cost model and legality service.
+    std::unique_ptr<OptimizationManager> optMgr_;
 
     // ── CF-CTRE integration ────────────────────────────────────────────────
     /// Shared CF-CTRE engine.  Initialised once in generateProgram() before
