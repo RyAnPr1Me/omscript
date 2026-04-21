@@ -455,9 +455,19 @@ void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& 
 
 // ── syncFactsToContext ────────────────────────────────────────────────────────
 //
-// After all pre-passes have run, copy analysis results out of CodeGenerator's
-// internal maps into the unified OptimizationContext so the rest of the
-// pipeline queries a single surface.
+// Completes the FunctionFacts stored in OptimizationContext by filling in
+// derived facts and CF-CTRE results that are not written directly by the
+// individual analysis passes.
+//
+// Note: raw analysis facts (isConstFoldable, constIntReturn, constStringReturn,
+// effects) are now written directly into OptimizationContext by the analysis
+// passes themselves (Phase F), so this function only needs to:
+//   1. Re-assert raw facts from CodeGenerator as a safety net (ensures facts
+//      set before optCtx_ was wired up — e.g. @const_eval in generateFunction —
+//      are still visible).
+//   2. Compute derived facts (isPure) that depend on the raw facts.
+//   3. Populate CF-CTRE results (isDead, foldedByCFCTRE, uniformCTReturn) that
+//      are only available after runCFCTRE() completes.
 
 void OptimizationOrchestrator::syncFactsToContext(Program* program,
                                                    OptimizationContext& ctx) const {
@@ -467,21 +477,26 @@ void OptimizationOrchestrator::syncFactsToContext(Program* program,
         const std::string& name = func->name;
         FunctionFacts& ff = ctx.mutableFacts(name);
 
-        // ── Const-eval membership ─────────────────────────────────────────
-        ff.isConstFoldable = codegen_->isConstEvalFunction(name);
-
-        // ── Constant return values ────────────────────────────────────────
-        if (auto v = codegen_->getConstIntReturn(name)) {
-            ff.constIntReturn = v;
+        // ── Safety-net: assert raw facts from CodeGenerator accessors ─────
+        // Analysis passes now write these directly, but functions declared
+        // with @const_eval before optCtx_ was live (e.g. during early IR
+        // emission) may not have been written yet.
+        if (!ff.isConstFoldable)
+            ff.isConstFoldable = codegen_->isConstEvalFunction(name);
+        if (!ff.constIntReturn)
+            ff.constIntReturn = codegen_->getConstIntReturn(name);
+        if (!ff.constStringReturn)
+            ff.constStringReturn = codegen_->getConstStringReturn(name);
+        if (!ff.effects.readsMemory && !ff.effects.writesMemory &&
+            !ff.effects.hasIO      && !ff.effects.hasMutation) {
+            const FunctionEffects inferred = codegen_->getFunctionEffects(name);
+            if (inferred.readsMemory || inferred.writesMemory ||
+                inferred.hasIO       || inferred.hasMutation) {
+                ff.effects = inferred;
+            }
         }
-        if (auto v = codegen_->getConstStringReturn(name)) {
-            ff.constStringReturn = v;
-        }
 
-        // ── Effect summary ────────────────────────────────────────────────
-        ff.effects = codegen_->getFunctionEffects(name);
-
-        // ── Purity: readnone AND constFoldable both qualify as "pure" ─────
+        // ── Derived: purity ───────────────────────────────────────────────
         ff.isPure = ff.effects.isReadNone() || ff.isConstFoldable;
 
         // ── CF-CTRE: dead-function detection ─────────────────────────────

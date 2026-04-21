@@ -5016,6 +5016,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // called with all-constant arguments.  At the LLVM level, mark it
         // as pure + inline so that any fallback runtime call is efficient.
         constEvalFunctions_.insert(func->name);
+        if (optCtx_) optCtx_->mutableFacts(func->name).isConstFoldable = true;
         function->addFnAttr(llvm::Attribute::InlineHint);
         function->setOnlyReadsMemory();
         function->setDoesNotThrow();
@@ -7820,8 +7821,10 @@ void CodeGenerator::analyzeConstantReturnValues(Program* program) {
 
             if (result->kind == ConstValue::Kind::Integer) {
                 constIntReturnFunctions_[fname] = result->intVal;
+                if (optCtx_) optCtx_->mutableFacts(fname).constIntReturn = result->intVal;
             } else if (result->kind == ConstValue::Kind::String) {
                 constStringReturnFunctions_[fname] = result->strVal;
+                if (optCtx_) optCtx_->mutableFacts(fname).constStringReturn = result->strVal;
             } else {
                 // Array or other compound type — not representable as a simple
                 // constant return value; skip without registering.
@@ -7882,9 +7885,11 @@ void CodeGenerator::runCFCTRE(Program* program) {
         if (result->isInt() &&
             !constIntReturnFunctions_.count(fn->name)) {
             constIntReturnFunctions_[fn->name] = result->asI64();
+            if (optCtx_) optCtx_->mutableFacts(fn->name).constIntReturn = result->asI64();
         } else if (result->isString() &&
                    !constStringReturnFunctions_.count(fn->name)) {
             constStringReturnFunctions_[fn->name] = result->asStr();
+            if (optCtx_) optCtx_->mutableFacts(fn->name).constStringReturn = result->asStr();
         }
     }
 
@@ -7892,10 +7897,13 @@ void CodeGenerator::runCFCTRE(Program* program) {
     // that always return the same constant, proven by symbolic argument evaluation.
     // These are added to the same fold tables as zero-arg functions above.
     for (auto& [name, ctVal] : ctEngine_->uniformReturnValues()) {
-        if (ctVal.isInt() && !constIntReturnFunctions_.count(name))
+        if (ctVal.isInt() && !constIntReturnFunctions_.count(name)) {
             constIntReturnFunctions_[name] = ctVal.asI64();
-        else if (ctVal.isString() && !constStringReturnFunctions_.count(name))
+            if (optCtx_) optCtx_->mutableFacts(name).constIntReturn = ctVal.asI64();
+        } else if (ctVal.isString() && !constStringReturnFunctions_.count(name)) {
             constStringReturnFunctions_[name] = ctVal.asStr();
+            if (optCtx_) optCtx_->mutableFacts(name).constStringReturn = ctVal.asStr();
+        }
     }
 
     // Apply Phase 8 dead-function hints: mark unreachable functions as cold
@@ -8135,11 +8143,19 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         knownPure.insert(it->getKey().str());
     }
     // Seed with zero-arg functions already analyzed as const-return.
+    // Query both the private maps (written during pre-passes) and optCtx_ (may
+    // have been written directly by earlier passes in this compilation).
     for (const auto& kv : constIntReturnFunctions_) {
         knownPure.insert(kv.first().str());
     }
     for (const auto& kv : constStringReturnFunctions_) {
         knownPure.insert(kv.first().str());
+    }
+    if (optCtx_) {
+        for (const auto& [name, ff] : optCtx_->allFacts()) {
+            if (ff.constIntReturn || ff.constStringReturn || ff.isConstFoldable)
+                knownPure.insert(name);
+        }
     }
 
     // Helpers to check purity of AST nodes (forward-declared via lambdas).
@@ -8318,6 +8334,7 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
             if (bodyIsPure) {
                 knownPure.insert(fname);
                 constEvalFunctions_.insert(fname);
+                if (optCtx_) optCtx_->mutableFacts(fname).isConstFoldable = true;
                 changed = true;
             }
         }
@@ -8620,12 +8637,29 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
         }
     }
 
+    // Propagate stable effects into OptimizationContext so IR emission can
+    // query a single surface without waiting for syncFactsToContext.
+    if (optCtx_) {
+        for (const auto& kv : functionEffects_) {
+            optCtx_->mutableFacts(kv.first).effects = kv.second;
+        }
+    }
+
     // Warn if @pure is applied to a function that has detectable side effects.
     for (const auto& f : program->functions) {
         if (!f->hintPure) continue;
-        auto it = functionEffects_.find(f->name);
-        if (it == functionEffects_.end()) continue;
-        const FunctionEffects& fx = it->second;
+        // Prefer optCtx_ (already written above); fall back to private map.
+        const FunctionEffects* fxp = nullptr;
+        FunctionEffects tmpFx;
+        if (optCtx_) {
+            tmpFx = optCtx_->effects(f->name);
+            fxp = &tmpFx;
+        } else {
+            auto it = functionEffects_.find(f->name);
+            if (it == functionEffects_.end()) continue;
+            fxp = &it->second;
+        }
+        const FunctionEffects& fx = *fxp;
         if (fx.hasIO) {
             std::cerr << "[warning] @pure function '" << f->name
                       << "' performs I/O — @pure annotation may be incorrect\n";
