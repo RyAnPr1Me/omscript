@@ -4451,7 +4451,6 @@ constexpr int kAINarrowDepthBudget = 6;
 }
 
 void CTAbstractInterpreter::narrowCondition(const Expression* cond,
-    
                                              CTAbstractEnv& thenEnv,
                                              CTAbstractEnv& elseEnv) {
     if (!cond) return;
