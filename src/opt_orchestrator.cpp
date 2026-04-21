@@ -289,9 +289,10 @@ static void registerAllPasses() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 OptimizationOrchestrator::OptimizationOrchestrator(OptimizationLevel optLevel,
-                                                    bool verbose,
-                                                    CodeGenerator* codegen) noexcept
-    : optLevel_(optLevel), verbose_(verbose), codegen_(codegen) {
+                                                     bool verbose,
+                                                     CodeGenerator* codegen,
+                                                     OptimizationManager* manager) noexcept
+    : optLevel_(optLevel), verbose_(verbose), codegen_(codegen), manager_(manager) {
     registerAllPasses();
 }
 
@@ -311,6 +312,45 @@ void OptimizationOrchestrator::runInvalidated(Program* program, OptimizationCont
     stats_ = {};
     runPassPipeline(program, ctx, /*skipValid=*/true);
     syncFactsToContext(program, ctx);
+}
+
+// ── runToProvide ──────────────────────────────────────────────────────────────
+//
+// Demand-driven entry point: runs the minimum set of passes needed to ensure
+// that factKey is valid in ctx.  Delegates to PassScheduler::runToProvide()
+// after building the same dispatch map as runPassPipeline.
+
+bool OptimizationOrchestrator::runToProvide(const std::string& factKey,
+                                             Program* program,
+                                             OptimizationContext& ctx) {
+    using Runner = std::function<void(Program*, OptimizationContext&)>;
+    const std::unordered_map<uint32_t, Runner> dispatch = {
+        {PassId::kStringTypes,     [this](Program* p, OptimizationContext& c){ runStringTypes(p, c); }},
+        {PassId::kArrayTypes,      [this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); }},
+        {PassId::kConstantReturns, [this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); }},
+        {PassId::kPurity,          [this](Program* p, OptimizationContext& c){ runPurity(p, c); }},
+        {PassId::kEffects,         [this](Program* p, OptimizationContext& c){ runEffects(p, c); }},
+        {PassId::kSynthesis,       [this](Program* p, OptimizationContext& c){ runSynthesis(p, c); }},
+        {PassId::kCFCTRE,          [this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); }},
+        {PassId::kEGraph,          [this](Program* p, OptimizationContext& c){ runEGraph(p, c); }},
+        {PassId::kRangeAnalysis,   [this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); }},
+    };
+
+    // Attach the dependency graph (same as runPassPipeline does for static runs).
+    static const AnalysisDependencyGraph kDefaultDepGraph =
+        AnalysisDependencyGraph::createDefault();
+    ctx.setDependencyGraph(&kDefaultDepGraph);
+
+    PassScheduler scheduler = manager_
+        ? manager_->createScheduler(ctx)
+        : PassScheduler(ctx);
+#ifndef NDEBUG
+    if (!manager_) scheduler.setStrictMode(true);
+#endif
+
+    const bool ok = scheduler.runToProvide(factKey, program, dispatch);
+    if (ok) syncFactsToContext(program, ctx);
+    return ok;
 }
 
 // ── runPassPipeline ───────────────────────────────────────────────────────────
@@ -336,8 +376,7 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
     // Maps a stable PassId to the per-pass wrapper that runs the work.
     // Built once per call (IDs are assigned at static-init time, so they are
     // stable for the lifetime of the process).
-    using Runner = std::function<void(Program*, OptimizationContext&)>;
-    const std::unordered_map<uint32_t, Runner> dispatch = {
+    const std::unordered_map<uint32_t, PassScheduler::Runner> dispatch = {
         {PassId::kStringTypes,     [this](Program* p, OptimizationContext& c){ runStringTypes(p, c); }},
         {PassId::kArrayTypes,      [this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); }},
         {PassId::kConstantReturns, [this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); }},
@@ -352,13 +391,24 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
     const auto& reg   = PassRegistry::instance();
     const auto  order = reg.topologicalOrder(); // dependency-sorted IDs
 
-    // Construct a PassScheduler for this pipeline run.  In debug builds,
-    // the scheduler operates in strict mode: precondition failures are hard
-    // assertions rather than warnings (they indicate a programming error in
-    // the pass metadata or topological ordering).
-    PassScheduler scheduler = PassScheduler(ctx);
+    // Install the standard analysis dependency graph so that invalidating one
+    // fact automatically cascades to all facts computed from it.  The graph is
+    // created once and stored as a static to avoid repeated allocation across
+    // pipeline runs.  The non-owning pointers in AnalysisValidity and
+    // AnalysisCache point into this static.
+    static const AnalysisDependencyGraph kDefaultDepGraph =
+        AnalysisDependencyGraph::createDefault();
+    ctx.setDependencyGraph(&kDefaultDepGraph);
+
+    // Construct a PassScheduler for this pipeline run.
+    // When an OptimizationManager is available, use it as the factory so the
+    // scheduler inherits the manager's strict-mode policy.  Otherwise fall back
+    // to a standalone scheduler constructed from ctx.
+    PassScheduler scheduler = manager_
+        ? manager_->createScheduler(ctx)
+        : PassScheduler(ctx);
 #ifndef NDEBUG
-    scheduler.setStrictMode(true);
+    if (!manager_) scheduler.setStrictMode(true);
 #endif
 
     const auto tPipelineStart = std::chrono::steady_clock::now();

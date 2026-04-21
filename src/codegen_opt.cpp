@@ -2605,12 +2605,19 @@ void CodeGenerator::runOptimizationPasses() {
     llvm::InitializeNativeTargetAsmParser();
 
     // ── OptimizationManager setup ─────────────────────────────────────────
-    // The OptimizationManager owns the shared cost model and legality service
-    // used across the IR-level pipeline.  The cost model is initially the
-    // default (built-in x86-64 latency table); if a hardware profile is
-    // available (HGOE active), it is replaced with a hardware-accurate model.
-    omscript::OptimizationManager optMgr;
-    optMgr.setCostModel(omscript::createDefaultCostModel());
+    // Reuse the shared OptimizationManager that was created in generate() and
+    // is stored in optMgr_.  If for some reason it is null (e.g. standalone
+    // IR-only use), fall back to a local manager with the default cost model.
+    //
+    // The manager owns the shared cost model and legality service used across
+    // the IR-level pipeline.  The cost model is initially the default (built-in
+    // x86-64 latency table); if a hardware profile is available (HGOE active),
+    // it is replaced with a hardware-accurate model.
+    if (!optMgr_) {
+        optMgr_ = std::make_unique<omscript::OptimizationManager>();
+        optMgr_->setCostModel(omscript::createDefaultCostModel());
+    }
+    omscript::OptimizationManager& optMgr = *optMgr_;
 
     // Set the target triple on the module.
     const std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
@@ -3034,8 +3041,15 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2) {
         const bool loopOpt = enableLoopOptimize_;
         const bool loopOptOrO3 = loopOpt || (optimizationLevel >= OptimizationLevel::O3);
+        // Capture service pointers from the shared OptimizationManager.
+        // These pointers are stable for the lifetime of runOptimizationPasses()
+        // (the pass manager runs synchronously within the same call), so
+        // capturing raw pointers is safe.
+        const omscript::LegalityService* legalitySvc = &optMgr.legality();
+        const omscript::CostModel*       costModelPtr = optMgr.costModel();
         PB.registerVectorizerStartEPCallback(
-            [loopOptOrO3](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
+            [loopOptOrO3, legalitySvc, costModelPtr](
+                llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
             if (loopOptOrO3) FPM.addPass(llvm::LoopDistributePass());
             FPM.addPass(llvm::LoopLoadEliminationPass());
             if (loopOptOrO3) FPM.addPass(llvm::LoopFusePass());
@@ -3050,8 +3064,16 @@ void CodeGenerator::runOptimizationPasses() {
             // interchange, skewing, reversal), and rewrites the loop nest IR.
             // Runs before the vectorizer so the inner (point) loops are amenable
             // to auto-vectorization.  Enabled at O2+ with -floop-optimize.
-            if (loopOptOrO3)
-                FPM.addPass(omscript::polyopt::OmPolyOptFunctionPass());
+            //
+            // The LegalityService and CostModel from the shared OptimizationManager
+            // are injected here so polyopt shares the same profitability oracle and
+            // legality surface as the superoptimizer and the rest of the pipeline.
+            if (loopOptOrO3) {
+                omscript::polyopt::PolyOptConfig polyConfig;
+                polyConfig.legality  = legalitySvc;
+                polyConfig.costModel = costModelPtr;
+                FPM.addPass(omscript::polyopt::OmPolyOptFunctionPass(polyConfig));
+            }
             FPM.addPass(llvm::createFunctionToLoopPassAdaptor(llvm::LoopRotatePass()));
             FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
                 llvm::LICMPass(llvm::LICMOptions()), /*UseMemorySSA=*/true));

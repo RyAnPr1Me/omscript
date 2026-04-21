@@ -4424,11 +4424,17 @@ void CodeGenerator::generate(Program* program) {
     //
     // Behavior is identical to the previous inline sequence; the Orchestrator
     // simply makes the dependency graph explicit and facts centrally available.
+    //
+    // A shared OptimizationManager is created here and stored in optMgr_ so
+    // that the IR-level pipeline (runOptimizationPasses) can share the same
+    // cost model and legality service without constructing a second manager.
     optCtx_ = std::make_unique<OptimizationContext>();
     optCtx_->setCTEngine(ctEngine_.get());
+    optMgr_ = std::make_unique<OptimizationManager>();
+    optMgr_->setCostModel(createDefaultCostModel());
 
     {
-        OptimizationOrchestrator orch(optimizationLevel, verbose_, this);
+        OptimizationOrchestrator orch(optimizationLevel, verbose_, this, optMgr_.get());
         orch.runPrepasses(program, *optCtx_);
     }
 

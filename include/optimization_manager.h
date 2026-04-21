@@ -42,7 +42,10 @@
 
 #include "opt_context.h"   // AnalysisCache, PassContract, OptimizationContext
 #include "opt_pass.h"      // PassMetadata, AnalysisKey, IRInvariant
+#include <functional>
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // Forward declarations — avoids pulling in heavy LLVM headers for translation
@@ -53,10 +56,57 @@ class Loop;
 class Function;
 } // namespace llvm
 
+// Forward declaration for demand-driven scheduling.
+namespace omscript { class Program; }
+
 namespace omscript {
 
 // Forward declaration — FunctionEffects is defined in ast.h, included via
 // opt_context.h → ast.h.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PipelineStage — the ordered pipeline stages of the unified optimizer
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// Each stage corresponds to a distinct compilation phase with a defined
+/// analysis and transformation mandate.  The OptimizationManager coordinates
+/// cross-stage interactions (cost model, legality, analysis cache) while the
+/// stage enum provides a stable vocabulary for labelling passes, scheduling
+/// requests, and progress diagnostics.
+///
+/// Stage ordering is:
+///   AST_ANALYSIS → AST_TRANSFORM → IR_CANONICALIZE → LOOP_TRANSFORM
+///   → IR_MIDEND → LATE_SUPEROPT_HGOE
+///
+/// Passes that belong to a stage declare it in PassMetadata::phase (which maps
+/// to these stages via the PassPhase enum in opt_pass.h).
+enum class PipelineStage : uint8_t {
+    /// Read-only analyses of the OmScript AST: string/array type pre-analysis,
+    /// constant-return detection, purity inference, effect inference.
+    AST_ANALYSIS = 0,
+
+    /// Semantics-preserving AST transformations: synthesis expansion, CF-CTRE,
+    /// e-graph equality saturation, range analysis.
+    AST_TRANSFORM = 1,
+
+    /// LLVM IR normalization that must hold as invariants for all subsequent
+    /// loop transforms: LoopSimplify, LCSSA, IndVarSimplify, SimplifyCFG.
+    IR_CANONICALIZE = 2,
+
+    /// Polyhedral and structural loop transforms: interchange, tiling, skewing,
+    /// reversal, fusion, fission.  All transforms go through the unified
+    /// LoopTransformFramework (see loop_transform_framework.h).
+    LOOP_TRANSFORM = 3,
+
+    /// LLVM midend scalar + vectorization pipeline: inlining, IPSCCP, GVN,
+    /// DSE, vectorization, SLP, post-vec cleanup.
+    IR_MIDEND = 4,
+
+    /// Late peephole + synthesis: superoptimizer idiom replacement, synthesis
+    /// candidate selection, HGOE hardware-guided emission, post-pipeline
+    /// simplification.
+    LATE_SUPEROPT_HGOE = 5,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CostModel — abstract instruction cost interface
@@ -175,6 +225,24 @@ public:
     virtual LegalityVerdict checkLegality(
         LoopTransform transform,
         const LoopLegalityContext& ctx) const noexcept;
+
+    /// IR-level function legality check using LLVM function attributes.
+    ///
+    /// This overload is called by the polyhedral pass when OmScript's AST-level
+    /// FunctionEffects are not available (e.g. when running as a standalone LLVM
+    /// pass without the full OmScript context).  It synthesises a conservative
+    /// legality verdict from the LLVM function's memory-effect attributes:
+    ///
+    ///   • nofree + nosync   → Legal  (no I/O or global mutation visible in IR)
+    ///   • willreturn absent → Unknown (function may not terminate — conservatively
+    ///                          skip transforms to avoid divergence)
+    ///   • otherwise         → Unknown (cannot rule out I/O / mutation)
+    ///
+    /// Note: a Legal verdict from this check is weaker than one from
+    /// canTransformLoops() with valid FunctionEffects — dependence analysis in
+    /// polyopt must still confirm that the specific transform is safe.
+    virtual LegalityVerdict canTransformFunction(
+        const llvm::Function& F) const noexcept;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,8 +262,17 @@ public:
 ///      (PassMetadata::requires_) are valid.  In debug builds (strict mode)
 ///      this is a hard assertion; in release builds the pass is skipped with a
 ///      diagnostic warning.
+///
+///   3. **Demand-driven execution** — runToProvide() accepts a target fact key
+///      and a dispatch map, then runs the minimum set of passes required to
+///      compute that fact (recursively satisfying prerequisites first).  This
+///      enables on-demand analysis: a downstream consumer can request a fact
+///      without knowing the full pipeline order.
 class PassScheduler {
 public:
+    /// Callable type for pass wrappers stored in the dispatch map.
+    using Runner = std::function<void(Program*, OptimizationContext&)>;
+
     explicit PassScheduler(OptimizationContext& ctx) noexcept : ctx_(ctx) {}
 
     /// Set strict mode.  Default: false (release), true in debug builds.
@@ -212,13 +289,40 @@ public:
     /// Apply the invalidation declared in @p meta after a pass completes.
     /// Marks each fact in meta.invalidates_ as invalid in ctx.validity()
     /// and removes the corresponding entry from ctx.cache().
+    /// Cascades through the dependency graph if one is attached to ctx.
     void applyInvalidation(const PassMetadata& meta) noexcept;
 
     /// Return true if all facts in meta.provides_ are already valid.
     /// Used by runInvalidated to skip passes that are still up-to-date.
     bool allProvidedValid(const PassMetadata& meta) const noexcept;
 
+    /// Demand-driven execution: run the minimum set of passes to ensure
+    /// @p targetFact is valid.  Prerequisites are resolved recursively before
+    /// the producing pass runs.
+    ///
+    /// @param targetFact  The analysis fact that must be valid on return.
+    /// @param program     The AST being compiled (passed through to each pass).
+    /// @param dispatch    Map from PassId → runner callable.  Only passes whose
+    ///                    IDs appear in this map will be executed.
+    ///
+    /// @returns true  if @p targetFact is valid after the call.
+    /// @returns false if the fact cannot be computed (no registered producer,
+    ///                or a producer's preconditions could not be satisfied).
+    ///
+    /// **Cycle detection**: runToProvide() tracks the call stack via an
+    /// in-progress set and returns false if a circular dependency is detected,
+    /// rather than recursing infinitely.
+    bool runToProvide(const std::string& targetFact,
+                      Program* program,
+                      const std::unordered_map<uint32_t, Runner>& dispatch);
+
 private:
+    /// Internal recursive worker for runToProvide.
+    bool runToProvideImpl(const std::string& targetFact,
+                          Program* program,
+                          const std::unordered_map<uint32_t, Runner>& dispatch,
+                          std::unordered_set<std::string>& inProgress);
+
     OptimizationContext& ctx_;
     bool strict_ = false;
 };

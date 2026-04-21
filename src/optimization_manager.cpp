@@ -2,9 +2,15 @@
 /// @brief Implementation of OptimizationManager, PassScheduler, LegalityService.
 
 #include "optimization_manager.h"
-#include "superoptimizer.h" // superopt::instructionCost — used by DefaultCostModel
+#include "opt_orchestrator.h"  // PassRegistry, PassMetadata
+#include "superoptimizer.h"    // superopt::instructionCost — used by DefaultCostModel
 #include <cassert>
 #include <iostream>
+#include <unordered_set>
+
+// LLVM headers needed for LegalityService::canTransformFunction.
+#include <llvm/IR/Function.h>
+#include <llvm/IR/Attributes.h>
 
 namespace omscript {
 
@@ -78,6 +84,37 @@ LegalityVerdict LegalityService::checkLegality(
     return LegalityVerdict::Unknown;
 }
 
+LegalityVerdict LegalityService::canTransformFunction(
+    const llvm::Function& F) const noexcept
+{
+    // Use LLVM function attributes as an IR-level proxy for the effect summary.
+    // These are set by codegen when inferMemoryEffects() runs after IR emission.
+    //
+    // nofree:  function does not free memory — no I/O that depends on freeing
+    // nosync:  function does not perform synchronising operations (no I/O sync)
+    //
+    // Together, nofree+nosync is a strong indicator that the function has no
+    // observable I/O side effects and loop transforms are likely safe (subject
+    // to the fine-grained dependence check in polyopt).
+    //
+    // Absence of willreturn means the function may not terminate; transforms
+    // that change loop trip counts or introduce new loops could change termination
+    // behaviour — conservatively Unknown.
+    const bool noFree  = F.hasFnAttribute(llvm::Attribute::NoFree);
+    const bool noSync  = F.hasFnAttribute(llvm::Attribute::NoSync);
+    const bool willRet = F.hasFnAttribute(llvm::Attribute::WillReturn);
+
+    if (!willRet) {
+        // Cannot verify termination; be conservative.
+        return LegalityVerdict::Unknown;
+    }
+    if (noFree && noSync) {
+        return LegalityVerdict::Legal;
+    }
+    // Either noFree or noSync is missing: potential I/O/sync effects.
+    return LegalityVerdict::Unknown;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PassScheduler
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,6 +156,126 @@ bool PassScheduler::allProvidedValid(const PassMetadata& meta) const noexcept {
         if (!ctx_.validity().isValid(fact)) return false;
     }
     return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PassScheduler::runToProvide — demand-driven fact computation
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool PassScheduler::runToProvide(
+    const std::string& targetFact,
+    Program* program,
+    const std::unordered_map<uint32_t, Runner>& dispatch)
+{
+    std::unordered_set<std::string> inProgress;
+    return runToProvideImpl(targetFact, program, dispatch, inProgress);
+}
+
+bool PassScheduler::runToProvideImpl(
+    const std::string& targetFact,
+    Program* program,
+    const std::unordered_map<uint32_t, Runner>& dispatch,
+    std::unordered_set<std::string>& inProgress)
+{
+    // Already valid — nothing to do.
+    if (ctx_.validity().isValid(targetFact)) return true;
+
+    // Cycle detection: if we are already in the process of computing this
+    // fact (from a recursive call), there is a dependency cycle in the pass
+    // registry.  Return false rather than infinite recursion.
+    if (!inProgress.insert(targetFact).second) {
+        std::cerr << "[omscript][opt] CYCLE: circular dependency detected "
+                     "while computing fact '" << targetFact << "'\n";
+        return false;
+    }
+
+    const auto& reg = PassRegistry::instance();
+
+    // Find the pass that produces targetFact.
+    const PassMetadata* producer = nullptr;
+    for (const auto& meta : reg.all()) {
+        for (const char* fact : meta.provides_) {
+            if (fact == targetFact) { producer = &meta; break; }
+        }
+        if (producer) break;
+    }
+
+    if (!producer) {
+        inProgress.erase(targetFact);
+        return false; // no registered producer
+    }
+
+    // Recursively satisfy prerequisites.
+    for (const char* req : producer->requires_) {
+        if (!ctx_.validity().isValid(req)) {
+            if (!runToProvideImpl(req, program, dispatch, inProgress)) {
+                inProgress.erase(targetFact);
+                return false;
+            }
+        }
+    }
+
+    // Check the dispatch map before running.
+    auto it = dispatch.find(producer->id);
+    if (it == dispatch.end()) {
+        inProgress.erase(targetFact);
+        return false; // pass has no runner in this context
+    }
+
+    // Verify preconditions (should be satisfied by the recursive calls above).
+    if (!checkPreconditions(*producer)) {
+        inProgress.erase(targetFact);
+        return false;
+    }
+
+    // Run the pass.
+    it->second(program, ctx_);
+    applyInvalidation(*producer);
+
+    inProgress.erase(targetFact);
+    return ctx_.validity().isValid(targetFact);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AnalysisDependencyGraph::createDefault
+// ─────────────────────────────────────────────────────────────────────────────
+
+/* static */
+AnalysisDependencyGraph AnalysisDependencyGraph::createDefault() {
+    AnalysisDependencyGraph g;
+    namespace F = AnalysisFact;
+
+    // purity depends on constant_returns:
+    //   if constant_returns changes, purity may need to be re-run
+    g.addDependency(F::kPurity, F::kConstantReturns);
+
+    // effects depends on purity:
+    //   if purity is invalidated, effect summaries (which track pure calls)
+    //   must also be considered stale
+    g.addDependency(F::kEffects, F::kPurity);
+
+    // synthesis depends on purity and effects:
+    //   synthesis uses purity/effect facts to decide which functions to expand
+    g.addDependency(F::kSynthesis, F::kPurity);
+    g.addDependency(F::kSynthesis, F::kEffects);
+
+    // cfctre depends on purity, effects, and synthesis:
+    //   CF-CTRE uses all three to evaluate cross-function constants
+    g.addDependency(F::kCFCTRE, F::kPurity);
+    g.addDependency(F::kCFCTRE, F::kEffects);
+    g.addDependency(F::kCFCTRE, F::kSynthesis);
+
+    // egraph depends on cfctre:
+    //   e-graph uses compile-time evaluation results from CF-CTRE
+    g.addDependency(F::kEGraph, F::kCFCTRE);
+
+    // range_analysis depends on purity, effects, and cfctre:
+    //   range inference uses function effects and CF-CTRE uniform-return facts
+    g.addDependency(F::kRangeAnalysis, F::kPurity);
+    g.addDependency(F::kRangeAnalysis, F::kEffects);
+    g.addDependency(F::kRangeAnalysis, F::kCFCTRE);
+
+    return g;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

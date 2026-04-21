@@ -11,6 +11,7 @@
 #endif
 
 #include "polyopt.h"
+#include "optimization_manager.h" // LegalityService, CostModel, LegalityVerdict
 
 #include <llvm/Analysis/DependenceAnalysis.h>
 #include <llvm/Analysis/IVDescriptors.h>
@@ -947,8 +948,33 @@ static bool isTilingProfitable(const SCoP& scop,
                        static_cast<uint64_t>(tileInner) * elemBytes;
     uint64_t untiledWS = N * M * elemBytes;
 
-    // Profitable if tiled working set fits in L1 and untiled doesn't
-    return tiledWS <= l1 / 2 && untiledWS > l1;
+    // Primary check: tiled working set fits in L1 and untiled doesn't
+    const bool cacheCheck = tiledWS <= l1 / 2 && untiledWS > l1;
+    if (!cacheCheck) return false;
+
+    // Secondary check: if a CostModel is available, verify that the loop body
+    // itself has meaningful compute cost (tiling is not worth it for trivial
+    // bodies with only a handful of cheap instructions).
+    //
+    // We sum the estimated cost of instructions in the SCoP's statements and
+    // require the average cost per iteration to exceed a small threshold.
+    // This prevents tiling single-load loops (e.g. array search) where the
+    // loop-overhead amortisation gain does not justify the code-size increase.
+    if (config.costModel && !scop.stmts.empty()) {
+        double totalCost = 0.0;
+        unsigned instrCount = 0;
+        for (const auto& stmt : scop.stmts) {
+            for (llvm::Instruction& I : *stmt.bb) {
+                totalCost += config.costModel->instructionCost(&I);
+                ++instrCount;
+            }
+        }
+        // Require at least 2.0 cycles average per iteration (heuristic).
+        const double avgCost = instrCount > 0 ? totalCost / instrCount : 0.0;
+        if (avgCost < 2.0) return false;
+    }
+
+    return true;
 }
 
 /// Select tile sizes for a loop nest given cache parameters.
@@ -1603,6 +1629,28 @@ PolyOptStats optimizeFunction(llvm::Function& F, const PolyOptConfig& config) {
     PolyOptStats stats;
     if (F.isDeclaration()) return stats;
 
+    // ── LegalityService early-out ─────────────────────────────────────────
+    // Before building the expensive LLVM analysis managers and attempting SCoP
+    // extraction, ask the shared LegalityService whether the function is even
+    // a candidate for loop transforms.
+    //
+    // canTransformFunction() uses LLVM function attributes (nofree, nosync,
+    // willreturn) as a proxy for the OmScript-level FunctionEffects.  An
+    // Illegal verdict means the function has observable I/O or is non-
+    // terminating — transforms would change semantics, so we skip entirely.
+    // An Unknown verdict (the common case for functions not yet attributed)
+    // means we fall through to the full polyhedral analysis.
+    if (config.legality) {
+        const auto verdict = config.legality->canTransformFunction(F);
+        if (verdict == LegalityVerdict::Illegal) {
+            if (config.verbose) {
+                llvm::errs() << "[polyopt] skipping " << F.getName()
+                             << ": LegalityService returned Illegal\n";
+            }
+            return stats;
+        }
+    }
+
     // Build analyses using a temporary PassBuilder + managers.
     // This avoids the complex manual construction of ScalarEvolution
     // (which requires TargetLibraryInfo + AssumptionCache).
@@ -1650,6 +1698,18 @@ llvm::PreservedAnalyses
 OmPolyOptFunctionPass::run(llvm::Function& F,
                             llvm::FunctionAnalysisManager& FAM) {
     if (F.isDeclaration()) return llvm::PreservedAnalyses::all();
+
+    // ── LegalityService early-out ─────────────────────────────────────────
+    // The OmPolyOptFunctionPass runs inside the LLVM pass manager where
+    // OmScript AST-level FunctionEffects are not available.  Use the IR-level
+    // attribute check (nofree, nosync, willreturn) to rule out functions that
+    // provably cannot benefit from loop transforms.
+    if (config.legality) {
+        const auto verdict = config.legality->canTransformFunction(F);
+        if (verdict == LegalityVerdict::Illegal) {
+            return llvm::PreservedAnalyses::all();
+        }
+    }
 
     // Use analyses from the pass manager — no need to rebuild them.
     auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);

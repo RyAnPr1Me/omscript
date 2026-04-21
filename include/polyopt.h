@@ -93,6 +93,11 @@ class LoopInfo;
 } // namespace llvm
 
 namespace omscript {
+
+// Forward declarations for the service pointers added to PolyOptConfig.
+class LegalityService;
+class CostModel;
+
 namespace polyopt {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,6 +151,19 @@ struct PolyOptConfig {
 
     /// Emit verbose diagnostics about SCoP detection and transformations.
     bool verbose = false;
+
+    // ── Shared service pointers (optional; do not own) ────────────────────
+
+    /// High-level transform safety oracle from OptimizationManager.
+    /// When non-null, optimizeFunction() calls
+    /// legality->canTransformFunction(F) before any SCoP extraction.
+    /// An Illegal verdict skips the function; Unknown proceeds normally.
+    const LegalityService* legality = nullptr;
+
+    /// Shared instruction cost oracle from OptimizationManager.
+    /// When non-null, the profitability model uses this to estimate
+    /// the savings from a transform in addition to the cache-miss model.
+    const CostModel* costModel = nullptr;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -90,6 +90,7 @@ set(SRC
     src/opt_context.cpp
     src/opt_orchestrator.cpp
     src/optimization_manager.cpp
+    src/loop_transform_framework.cpp
 
     # Driver
     src/preprocessor.cpp

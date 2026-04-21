@@ -243,19 +243,42 @@ struct AnalysisValidity {
 
     /// Mark the analysis fact identified by @p fact as invalid (stale).
     /// Called by PassScheduler::applyInvalidation() after a transformation pass.
+    /// If a dependency graph is attached, all transitive dependents of @p fact
+    /// are also marked invalid (cascading invalidation).
     /// Unknown fact names are silently ignored.
     void invalidate(std::string_view fact) noexcept {
-        if (fact == "string_types")      { stringTypes     = false; return; }
-        if (fact == "array_types")       { arrayTypes      = false; return; }
-        if (fact == "constant_returns")  { constantReturns = false; return; }
-        if (fact == "purity")            { purity          = false; return; }
-        if (fact == "effects")           { effects         = false; return; }
-        if (fact == "synthesis")         { synthesis       = false; return; }
-        if (fact == "cfctre")            { cfctre          = false; return; }
-        if (fact == "egraph")            { egraph          = false; return; }
-        if (fact == "range_analysis")    { rangeAnalysis   = false; return; }
-        // unknown fact: no-op (conservative)
+        // Helper to mark one fact flag false.
+        auto markInvalid = [this](std::string_view f) noexcept {
+            if (f == "string_types")      { stringTypes     = false; return; }
+            if (f == "array_types")       { arrayTypes      = false; return; }
+            if (f == "constant_returns")  { constantReturns = false; return; }
+            if (f == "purity")            { purity          = false; return; }
+            if (f == "effects")           { effects         = false; return; }
+            if (f == "synthesis")         { synthesis       = false; return; }
+            if (f == "cfctre")            { cfctre          = false; return; }
+            if (f == "egraph")            { egraph          = false; return; }
+            if (f == "range_analysis")    { rangeAnalysis   = false; return; }
+        };
+
+        if (depGraph_) {
+            const auto deps = depGraph_->getAllDependents(std::string(fact));
+            for (const auto& d : deps) markInvalid(d);
+        } else {
+            markInvalid(fact);
+        }
     }
+
+    /// Attach a dependency graph so that invalidating a fact also invalidates
+    /// all transitively dependent facts.  Non-owning pointer.
+    void setDependencyGraph(const AnalysisDependencyGraph* graph) noexcept {
+        depGraph_ = graph;
+    }
+    const AnalysisDependencyGraph* dependencyGraph() const noexcept {
+        return depGraph_;
+    }
+
+private:
+    const AnalysisDependencyGraph* depGraph_ = nullptr;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -321,15 +344,33 @@ public:
     }
 
     /// Remove the cached value for key @p k (if present).
+    /// If a dependency graph has been attached (via setDependencyGraph()),
+    /// all transitive dependents of @p k are also evicted.
     void invalidate(const AnalysisKey& k) noexcept {
-        store_.erase(k);
+        if (depGraph_) {
+            for (const auto& dep : depGraph_->getAllDependents(k))
+                store_.erase(dep);
+        } else {
+            store_.erase(k);
+        }
     }
 
     /// Remove all cached values whose keys appear in @p contract.invalidates_facts.
+    /// Cascades through the dependency graph (if attached) for each key.
     void invalidateByContract(const PassContract& contract) noexcept {
-        for (const auto& key : contract.invalidates_facts) {
-            store_.erase(key);
-        }
+        for (const auto& key : contract.invalidates_facts)
+            invalidate(key); // uses graph-aware invalidate
+    }
+
+    /// Attach a dependency graph so that invalidating a fact also invalidates
+    /// all facts that were computed using it.  Non-owning pointer: the graph
+    /// must outlive the cache.  Passing nullptr detaches any existing graph.
+    void setDependencyGraph(const AnalysisDependencyGraph* graph) noexcept {
+        depGraph_ = graph;
+    }
+
+    const AnalysisDependencyGraph* dependencyGraph() const noexcept {
+        return depGraph_;
     }
 
     /// Remove all cached values.
@@ -340,6 +381,7 @@ public:
 
 private:
     std::unordered_map<AnalysisKey, std::any> store_;
+    const AnalysisDependencyGraph*            depGraph_ = nullptr;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -597,6 +639,27 @@ public:
     /// cached results are never used after the underlying analysis becomes stale.
     AnalysisCache&       cache()       noexcept { return cache_; }
     const AnalysisCache& cache() const noexcept { return cache_; }
+
+    // ── Analysis dependency graph ─────────────────────────────────────────
+    ///
+    /// When attached, the dependency graph is shared between AnalysisValidity
+    /// and AnalysisCache so that invalidating a single fact cascades to all
+    /// facts that were computed from it — without callers needing to enumerate
+    /// the transitive closure manually.
+    ///
+    /// The graph is typically set once at construction time (from the default
+    /// graph created by AnalysisDependencyGraph::createDefault()) and remains
+    /// constant for the lifetime of the context.
+    ///
+    /// Non-owning: the caller is responsible for ensuring the graph outlives
+    /// this context.  Pass nullptr to detach.
+    void setDependencyGraph(const AnalysisDependencyGraph* graph) noexcept {
+        validity_.setDependencyGraph(graph);
+        cache_.setDependencyGraph(graph);
+    }
+    const AnalysisDependencyGraph* dependencyGraph() const noexcept {
+        return cache_.dependencyGraph();
+    }
 
 private:
     std::unordered_map<std::string, FunctionFacts> facts_;

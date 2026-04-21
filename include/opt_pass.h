@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -239,6 +240,104 @@ struct PassContract {
     /// IR invariants that this pass breaks (must be re-established before the
     /// next consumer that requires them).
     std::vector<IRInvariant> invalidates_inv;
+
+    /// IR invariants that this pass provably preserves (does not break).
+    /// Provided as explicit documentation and as input to future scheduler
+    /// verification tools.  Semantically: any invariant listed here MUST NOT
+    /// appear in invalidates_inv and will remain established after this pass
+    /// completes, even if the pass modifies the IR.
+    std::vector<IRInvariant> preserves_inv;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AnalysisDependencyGraph — tracks which analyses depend on which
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// The dependency graph records "A depends on B" edges, meaning that if fact B
+/// is invalidated, fact A must also be invalidated (because A was computed using
+/// B as an input).  This enables automatic cascading invalidation: callers only
+/// need to invalidate the direct target; the graph propagates to all transitive
+/// dependents.
+///
+/// ## OmScript standard dependencies (see createDefault()):
+///   constant_returns → (none)
+///   purity           → constant_returns
+///   effects          → purity
+///   synthesis        → purity, effects          (and itself invalidates them)
+///   cfctre           → purity, effects, synthesis
+///   egraph           → cfctre
+///   range_analysis   → purity, effects, cfctre
+///
+/// ## Invalidation semantics
+/// When fact B is invalidated:
+///   1. All direct dependents of B (facts A where A→B edge exists) are
+///      transitively invalidated.
+///   2. Invalidation stops at facts with no registered dependents.
+///
+/// ## Thread safety
+/// Mutation (addDependency) is NOT thread-safe.  The graph is expected to be
+/// built once (in a single-threaded static-init context) and thereafter used
+/// read-only from multiple threads.
+class AnalysisDependencyGraph {
+public:
+    AnalysisDependencyGraph() = default;
+
+    /// Register that @p dependent requires @p dependency to be valid.
+    /// When @p dependency is invalidated, @p dependent will also be
+    /// invalidated via cascading.
+    void addDependency(const std::string& dependent,
+                       const std::string& dependency) {
+        // dependents_[dependency] = {all facts that directly depend on it}
+        dependents_[dependency].insert(dependent);
+    }
+
+    /// Return every fact that must be invalidated when @p key is invalidated.
+    /// Includes @p key itself, plus all transitive dependents (BFS).
+    std::vector<std::string> getAllDependents(const std::string& key) const {
+        std::vector<std::string> result;
+        std::unordered_set<std::string> visited;
+        std::vector<std::string> queue;
+        queue.push_back(key);
+        while (!queue.empty()) {
+            std::string cur = std::move(queue.back());
+            queue.pop_back();
+            if (!visited.insert(cur).second) continue;
+            result.push_back(cur);
+            auto it = dependents_.find(cur);
+            if (it == dependents_.end()) continue;
+            for (const auto& dep : it->second) {
+                if (!visited.count(dep)) queue.push_back(dep);
+            }
+        }
+        return result;
+    }
+
+    /// Return the direct dependents of @p key (not transitive).
+    const std::unordered_set<std::string>* directDependents(
+        const std::string& key) const noexcept {
+        auto it = dependents_.find(key);
+        return (it != dependents_.end()) ? &it->second : nullptr;
+    }
+
+    /// True if any dependency edge involves @p key (as a dependency or as a
+    /// dependent).
+    bool contains(const std::string& key) const noexcept {
+        if (dependents_.count(key)) return true;
+        for (const auto& [k, deps] : dependents_) {
+            if (deps.count(key)) return true;
+        }
+        return false;
+    }
+
+    /// Create the standard OmScript analysis dependency graph.
+    /// Must be called after static initialisation of AnalysisFact constants.
+    static AnalysisDependencyGraph createDefault();
+
+private:
+    /// Key   = analysis fact that was invalidated
+    /// Value = set of analysis facts that directly depend on it (and must
+    ///         therefore also be invalidated when the key is invalidated)
+    std::unordered_map<std::string, std::unordered_set<std::string>> dependents_;
 };
 
 } // namespace omscript
