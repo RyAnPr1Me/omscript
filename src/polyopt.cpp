@@ -1698,13 +1698,13 @@ LoopLegalityResult checkLoopLegality(llvm::Loop* outerLoop,
 
     const unsigned depth = scop.depth();
 
-    // Single-level loops: only reversal applies.
-    if (depth < 1) return result;
+    // If the SCoP has no loop dimensions (depth == 0), no transforms apply.
+    if (depth == 0) return result;
 
     auto deps = computeDependences(scop);
 
     if (depth == 1) {
-        // For a single loop, only reversal is a per-dimension check.
+        // For a single loop, only reversal is applicable.
         result.reversal = isReversalLegal(deps, 0);
         return result;
     }
