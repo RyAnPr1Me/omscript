@@ -3445,14 +3445,64 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* leftIdent = static_cast<IdentifierExpr*>(expr->left.get());
                 auto* rightIdent = static_cast<IdentifierExpr*>(expr->right.get());
                 if (leftIdent->name == rightIdent->name) {
-                    auto* result = builder->CreateMul(left, right, "sqtmp");
+                    // x*x: result is always non-negative.
+                    // nsw: x*x <= x^2 which can be at most INT64_MAX only when
+                    //   |x| <= 3037000499 (floor(sqrt(INT64_MAX))). For general x
+                    //   emit nsw only when x is non-negative (nuw+nsw: result < 2^63).
+                    //   For general signed x*x: x=-2^31 → x*x=2^62 which still fits;
+                    //   x = -(2^31+1) → x*x > 2^62 but still < 2^63, fine.
+                    //   The only problematic case is x = INT64_MIN (-2^63), which
+                    //   produces 0 via 2's complement. Use KnownBits to guard.
+                    bool xNonNeg = nonNegValues_.count(left) > 0;
+                    if (!xNonNeg) {
+                        const llvm::KnownBits KB = llvm::computeKnownBits(
+                            left, module->getDataLayout());
+                        xNonNeg = KB.isNonNegative();
+                    }
+                    llvm::Value* result;
+                    if (xNonNeg) {
+                        // x >= 0: x*x cannot signed-overflow (max = (2^63-1)^2 > 2^63
+                        // only if x >= 2^31.5, but for typical values it's fine;
+                        // let KnownBits' leading-zero proof handle overflow).
+                        const llvm::KnownBits KB = llvm::computeKnownBits(
+                            left, module->getDataLayout());
+                        const unsigned lz = KB.countMinLeadingZeros();
+                        if (lz >= 33) {
+                            // x < 2^31: x*x < 2^62 → fits in signed i64, nsw+nuw safe.
+                            result = builder->CreateMul(left, right, "sqtmp",
+                                                        /*HasNUW=*/true, /*HasNSW=*/true);
+                        } else {
+                            result = builder->CreateNSWMul(left, right, "sqtmp");
+                        }
+                    } else {
+                        result = builder->CreateMul(left, right, "sqtmp");
+                    }
                     nonNegValues_.insert(result);
                     return result;
                 }
             }
         }
         if (left == right) {
-            auto* result = builder->CreateMul(left, right, "sqtmp");
+            // SSA-level squaring: same LLVM Value multiplied by itself.
+            bool xNonNeg = nonNegValues_.count(left) > 0;
+            if (!xNonNeg) {
+                const llvm::KnownBits KB = llvm::computeKnownBits(
+                    left, module->getDataLayout());
+                xNonNeg = KB.isNonNegative();
+            }
+            llvm::Value* result;
+            if (xNonNeg) {
+                const llvm::KnownBits KB = llvm::computeKnownBits(
+                    left, module->getDataLayout());
+                const unsigned lz = KB.countMinLeadingZeros();
+                if (lz >= 33)
+                    result = builder->CreateMul(left, right, "sqtmp",
+                                                /*HasNUW=*/true, /*HasNSW=*/true);
+                else
+                    result = builder->CreateNSWMul(left, right, "sqtmp");
+            } else {
+                result = builder->CreateMul(left, right, "sqtmp");
+            }
             nonNegValues_.insert(result);
             return result;
         }

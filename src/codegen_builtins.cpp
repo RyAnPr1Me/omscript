@@ -9171,6 +9171,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                         llvm::ConstantInt::get(i64, hiExcl, /*isSigned=*/true))
                 });
                 callResult->setMetadata(llvm::LLVMContext::MD_range, rangeMD);
+                // If the range lower bound is non-negative, mark the call
+                // result non-negative so downstream operations (div/mod,
+                // comparisons) can use faster unsigned variants without
+                // relying solely on !range metadata propagation.
+                if (rng->lo >= 0)
+                    nonNegValues_.insert(callResult);
             }
         }
     }
