@@ -13,6 +13,7 @@
 #include "ast.h"
 #include "cfctre.h"
 #include "diagnostic.h"
+#include "opt_context.h"
 #include <functional>
 #include <iostream>
 #include <llvm/ADT/DenseSet.h>
@@ -280,6 +281,68 @@ class CodeGenerator {
     [[nodiscard]] const OptStats& getOptStats() const noexcept {
         return optStats_;
     }
+
+    // ── Unified optimization context ──────────────────────────────────────
+    //
+    // Provides access to all analysis facts accumulated during the pre-pass
+    // sequence.  Populated by the OptimizationOrchestrator before IR emission
+    // begins; queries are valid from the start of IR codegen onward.
+
+    /// Return the unified optimization context (non-null after generate()).
+    [[nodiscard]] const OptimizationContext* optimizationContext() const noexcept {
+        return optCtx_.get();
+    }
+
+    // ── Analysis result accessors (used by OptimizationOrchestrator) ──────
+    // These delegate to OptimizationContext (the single authoritative store).
+
+    /// True when @p name is classified as const-foldable (auto-detected or @const_eval).
+    [[nodiscard]] bool isConstEvalFunction(const std::string& name) const noexcept {
+        return optCtx_ && optCtx_->isConstFoldable(name);
+    }
+
+    /// Return the always-constant integer return value for @p name, if known.
+    [[nodiscard]] std::optional<int64_t> getConstIntReturn(const std::string& name) const noexcept {
+        return optCtx_ ? optCtx_->constIntReturn(name) : std::nullopt;
+    }
+
+    /// Return the always-constant string return value for @p name, if known.
+    [[nodiscard]] std::optional<std::string> getConstStringReturn(const std::string& name) const noexcept {
+        return optCtx_ ? optCtx_->constStringReturn(name) : std::nullopt;
+    }
+
+    /// Return the effect summary for @p name (default if not analysed).
+    [[nodiscard]] FunctionEffects getFunctionEffects(const std::string& name) const noexcept {
+        return optCtx_ ? optCtx_->effects(name) : FunctionEffects{};
+    }
+
+    // ── Pre-pass entry points (also called by OptimizationOrchestrator) ───
+    //
+    // These are declared public so the orchestrator can sequence them
+    // externally without requiring friend access.  They were previously
+    // private implementation details; elevating them to the public surface
+    // is intentional: they are stable, well-defined analysis passes that
+    // external tooling may wish to invoke selectively (e.g. for incremental
+    // recompilation, testing, or IDE integration).
+
+    void preAnalyzeStringTypes(Program* program);
+    void preAnalyzeArrayTypes(Program* program);
+    void analyzeConstantReturnValues(Program* program);
+    void autoDetectConstEvalFunctions(Program* program);
+    void inferFunctionEffects(Program* program);
+
+    /// Conditional wrapper for the e-graph pre-pass.  Checks the optimization
+    /// level and enableEGraph_ flag, then configures ctx.egraph() based on
+    /// the current level and calls ctx.egraph().optimizeProgram().
+    /// Called by the Orchestrator which owns the OptimizationContext.
+    void runEGraphPass(Program* program, OptimizationContext& ctx);
+
+    /// Public-facing wrapper for runSynthesisPass that the Orchestrator calls.
+    /// Delegates to the free function declared in synthesize.h.
+    void runSynthesisPass(Program* program, bool verbose);
+
+    /// Public-facing wrapper for the CF-CTRE pre-pass (was private).
+    void runCFCTRE(Program* program);
 
   private:
     std::unique_ptr<llvm::LLVMContext> context;
@@ -606,31 +669,6 @@ class CodeGenerator {
     /// string builtins: `const s = "hello"; var n = len(s);` folds to 5.
     llvm::StringMap<std::string> constStringFolds_;
 
-    /// Functions determined at compile time to always return the same integer
-    /// constant (zero-parameter, pure body with only const-decls + return).
-    /// Populated by analyzeConstantReturnValues() before any function codegen.
-    /// Enables folding of: abs(f()), min(f(), 5), for (i in 0..f()) { }.
-    llvm::StringMap<int64_t> constIntReturnFunctions_;
-
-    /// Functions determined at compile time to always return the same string
-    /// constant (zero-parameter, pure body with only const-decls + return).
-    /// Populated by analyzeConstantReturnValues() before any function codegen.
-    /// Enables folding of: len(f()), f() + "suffix", const s = f(); len(s).
-    llvm::StringMap<std::string> constStringReturnFunctions_;
-
-    /// Set of function names marked with @const_eval.
-    /// When called with all-constant integer arguments, the compiler evaluates
-    /// the function body at compile time using AST-level interpretation,
-    /// returning a compile-time constant.  This is similar to C++20's consteval
-    /// but automatically falls back to runtime codegen when arguments are not
-    /// constant.
-    llvm::StringSet<> constEvalFunctions_;
-
-    /// Per-function effect summaries populated by inferFunctionEffects().
-    /// Keyed by function name.  Used to automatically apply LLVM attributes
-    /// (readonly, readnone, nosync, willreturn) and to warn on @pure misuse.
-    std::unordered_map<std::string, FunctionEffects> functionEffects_;
-
     /// Evaluate a @const_eval function at compile time.
     /// Returns std::nullopt if the function body is too complex for the
     /// compile-time interpreter (falls back to runtime codegen).
@@ -661,8 +699,8 @@ class CodeGenerator {
     ///   - integer / string / array literals
     ///   - identifiers tracked in constIntFolds_ or constStringFolds_
     ///   - enum constants and scope-resolution expressions
-    ///   - zero-arg calls to functions in constIntReturnFunctions_ /
-    ///     constStringReturnFunctions_
+    ///   - zero-arg calls to zero-parameter constant-returning functions
+    ///     (queried from OptimizationContext)
     ///   - recursive evaluation of multi-arg user functions via tryConstEvalFull
     ///   - arithmetic / concat / array indexing on any of the above
     ///   - pipe expressions (x |> f → f(x))
@@ -1108,41 +1146,6 @@ class CodeGenerator {
     // isStringArrayExpr: returns true if the expression is known to be an array
     //   whose elements are string pointers (uses stringArrayVars_ lookup).
     bool isStringArrayExpr(Expression* expr) const;
-    // preAnalyzeStringTypes: iterative pre-pass over the full program AST to
-    //   populate stringReturningFunctions_ and funcParamStringTypes_ before
-    //   any function body is generated.
-    void preAnalyzeStringTypes(Program* program);
-    // preAnalyzeArrayTypes: mirror of preAnalyzeStringTypes for array types.
-    //   Populates arrayReturningFunctions_ and funcParamArrayTypes_ from
-    //   explicit [] annotations and call-site argument types.  Results let
-    //   isStringExpr() correctly return false for variables assigned from
-    //   array-returning function calls, and keep arrayVars_ accurate across
-    //   function boundaries.
-    void preAnalyzeArrayTypes(Program* program);
-    // analyzeConstantReturnValues: pre-pass over the full program AST that
-    //   identifies zero-parameter, pure functions whose return value is always
-    //   the same compile-time constant (string or integer).  Results are stored
-    //   in constStringReturnFunctions_ and constIntReturnFunctions_ and used by
-    //   len(), tryFoldStringConcat(), and const-variable initialization to fold
-    //   cross-function calls at compile time.
-    void analyzeConstantReturnValues(Program* program);
-    // autoDetectConstEvalFunctions: companion pass to analyzeConstantReturnValues
-    //   that identifies user-defined functions with parameters that are "pure"
-    //   (no I/O, no global mutations, only arithmetic/logical/conditional ops) and
-    //   registers them in constEvalFunctions_.  This enables the existing
-    //   tryConstEval/tryConstEvalFull machinery to fold calls to these functions
-    //   at compile time when all arguments are constants — without requiring an
-    //   explicit @const_eval annotation.
-    void autoDetectConstEvalFunctions(Program* program);
-    // inferFunctionEffects: AST-level pass that computes a FunctionEffects
-    //   summary for every user function.  Results are stored in
-    //   functionEffects_ and used during function codegen to:
-    //     1. Automatically apply LLVM readonly/readnone/nosync/willreturn
-    //        attributes when the body has no detectable effects.
-    //     2. Emit a diagnostic warning when @pure is annotated on a function
-    //        whose inferred effects include I/O or memory mutation.
-    //   Runs at O1+ after analyzeConstantReturnValues.
-    void inferFunctionEffects(Program* program);
     // isPreAnalysisStringExpr: lightweight AST-only string check used by the
     //   pre-analysis (no access to namedValues; uses stringReturningFunctions_
     //   and paramStringIndices to track string parameters).
@@ -1395,6 +1398,11 @@ class CodeGenerator {
     void runOptimizationPasses();
     void optimizeOptMaxFunctions();
 
+    // ── Unified optimization context (owned by CodeGenerator) ─────────────
+    /// Created at the start of generate() and populated by the Orchestrator
+    /// as pre-passes complete.  Used for fast O(1) queries during IR emission.
+    std::unique_ptr<OptimizationContext> optCtx_;
+
     // ── CF-CTRE integration ────────────────────────────────────────────────
     /// Shared CF-CTRE engine.  Initialised once in generateProgram() before
     /// any function body is compiled.  Provides cross-function compile-time
@@ -1420,11 +1428,6 @@ class CodeGenerator {
     /// buildComptimeEnv() to populate the env passed to evalComptimeBlock().
     /// Cleared at the start of each function and on assignment (generateAssign).
     llvm::StringMap<int64_t> scopeComptimeInts_;
-
-    /// Run the CF-CTRE pass: register all functions / enum constants / global
-    /// consts, then execute runPass() to pre-evaluate pure functions and
-    /// populate the memoisation cache.  Called from generateProgram().
-    void runCFCTRE(Program* program);
 
     /// Convert a CTValue produced by ctEngine_ to the CodeGenerator's internal
     /// ConstValue representation (used for bridging to existing fold helpers).

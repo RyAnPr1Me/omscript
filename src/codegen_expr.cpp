@@ -620,12 +620,9 @@ bool CodeGenerator::tryFoldStringConcat(Expression* expr, std::string& out) cons
     }
     if (expr->type == ASTNodeType::CALL_EXPR) {
         auto* call = static_cast<CallExpr*>(expr);
-        if (call->arguments.empty()) {
-            auto it = constStringReturnFunctions_.find(call->callee);
-            if (it != constStringReturnFunctions_.end()) {
-                out += it->second;
-                return true;
-            }
+        if (call->arguments.empty() && optCtx_) {
+            auto v = optCtx_->constStringReturn(call->callee);
+            if (v) { out += *v; return true; }
         }
         return false;
     }

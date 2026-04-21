@@ -378,15 +378,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
         }
         // Propagate integer constant from a zero-param constant-returning fn:
-        // `const n = get_n()` where get_n() is in constIntReturnFunctions_
+        // `const n = get_n()` where get_n() is classified in OptimizationContext
         // should record n as a compile-time constant integer.
         if (stmt->isConst && stmt->initializer &&
             stmt->initializer->type == ASTNodeType::CALL_EXPR) {
             auto* callInit = static_cast<CallExpr*>(stmt->initializer.get());
-            if (callInit->arguments.empty()) {
-                auto it = constIntReturnFunctions_.find(callInit->callee);
-                if (it != constIntReturnFunctions_.end())
-                    constIntFolds_.try_emplace(stmt->name, it->second);
+            if (callInit->arguments.empty() && optCtx_) {
+                auto v = optCtx_->constIntReturn(callInit->callee);
+                if (v) constIntFolds_.try_emplace(stmt->name, *v);
             }
         }
         // Track whether this variable holds a string value so that print(),

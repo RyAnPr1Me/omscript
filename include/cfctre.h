@@ -568,7 +568,7 @@ public:
     /// their arguments (detected by evaluating with symbolic parameters in Phase 6).
     /// Key = function name; Value = the uniform return value.
     /// The codegen uses this to fold all call sites to the constant and to
-    /// populate constIntReturnFunctions_ / constStringReturnFunctions_.
+    /// populate the OptimizationContext constant-return facts.
     const std::unordered_map<std::string, CTValue>& uniformReturnValues() const noexcept {
         return uniformReturnValues_;
     }

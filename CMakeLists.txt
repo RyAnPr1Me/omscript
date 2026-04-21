@@ -85,6 +85,10 @@ set(SRC
     src/superoptimizer.cpp
     src/hardware_graph.cpp
 
+    # Optimization architecture (orchestrator + unified context)
+    src/opt_context.cpp
+    src/opt_orchestrator.cpp
+
     # Driver
     src/preprocessor.cpp
     src/compiler.cpp
