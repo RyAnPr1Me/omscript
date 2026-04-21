@@ -2350,12 +2350,160 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return builder->CreateAdd(shl9, shl8, "mul768", nf, ns);
             }
             // ── Extended multiply-by-constant patterns (3-instruction) ─────────
+            case 23: {
+                // n*23 → (n<<5) - (n<<3) - n  (= 32n - 8n - n)
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul23.shl5");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul23.shl3");
+                auto* t = builder->CreateSub(shl5, shl3, "mul23.t", nf, ns);
+                return builder->CreateSub(t, base, "mul23", nf, ns);
+            }
+            case 43: {
+                // n*43 → (n<<6) - (n<<5) + (n<<3) + n  is 4-instr; use:
+                // n*43 → (n<<4) + (n<<3) + (n<<1) + n  = (n*16 + n*8 + n*2 + n)
+                // Better: n*43 → (n<<6) - (n<<4) - (n<<2) - n  = 64n-16n-4n-n = 43n (4-instr)
+                // Optimal 3-instr: n*43 → (n<<5) + (n<<3) + (n<<1) + n needs 4 ops
+                // Use: (n*44) - n  = (n<<4)*11/4 ... actually:
+                // n*43 = n*32 + n*8 + n*2 + n = 4 shifts but 3 adds → 4 instr total
+                // Best 3-instr: n*43 = (n<<6) - (n<<4) - (n<<1) - n? = 64-16-2-1=45 no
+                // n*43: 43 = 32+8+2+1 → 3 adds, 4 shifts → skip (not 2-instr reducible)
+                // Actually optimal: n*43 = (n<<3+1)*5 + ... nope
+                // Just use: n*44 - n = (n<<2)*11 - n → still recurses
+                // Simple: n*43 = (n<<6) - (n<<5) + (n<<3) + n + n? = 64-32+8+2*1+?
+                // Safest 3-op: (n<<3 + n)<<2 + (n<<3+n) + n*2 nope
+                // n*43 = ((n<<2)+n)*8 + (n<<1)+n = 5*8*n + 3n = 40n+3n → 2 adds
+                // (n<<2+n) = 5n, 5n<<3 = 40n, 40n + (n<<1) + n = 40n+3n ✓ (3-instr)
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul43.shl2");
+                auto* n5   = builder->CreateAdd(shl2, base, "mul43.n5", nf, ns);  // 5n
+                auto* n40  = builder->CreateShl(n5, mkShift(3), "mul43.n40");     // 40n
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul43.shl1");
+                auto* t    = builder->CreateAdd(n40, shl1, "mul43.t", nf, ns);    // 42n
+                return builder->CreateAdd(t, base, "mul43", nf, ns);              // 43n
+            }
+            case 45: {
+                // n*45 → (n<<6) - (n<<5) + (n<<3) + n  but simpler:
+                // n*45 = (n*5)*9 = ((n<<2)+n)*9 = ((n<<2)+n)<<3 + ((n<<2)+n)
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul45.shl2");
+                auto* n5   = builder->CreateAdd(shl2, base, "mul45.n5", nf, ns);  // 5n
+                auto* n40  = builder->CreateShl(n5, mkShift(3), "mul45.n40");     // 40n
+                return builder->CreateAdd(n40, n5, "mul45", nf, ns);              // 45n
+            }
+            case 53: {
+                // n*53 = (n*54) - n = ((n*27)<<1) - n
+                // n*27 = (n*32) - (n*4) - n = (n<<5) - (n<<2) - n  [3-instr]
+                // So n*53 = ((n<<5)-(n<<2)-n)<<1 - n [4-instr total]
+                // Better: n*53 = (n<<6) - (n<<3) - (n<<2) + (n<<1) - ... too long
+                // Optimal: n*53 = (n<<4)*(3+...) ... try:
+                // n*53 = (n<<5 + n)<<1 - n = (n*33<<1) - n?  = 66n-n=65n nope
+                // n*53 = (n<<6) - (n<<3) - (n<<1) - n = 64-8-2-1=53 ✓ (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul53.shl6");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul53.shl3");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul53.shl1");
+                auto* t    = builder->CreateSub(shl6, shl3, "mul53.t", nf, ns);   // 56n
+                auto* t2   = builder->CreateSub(t, shl1, "mul53.t2", nf, ns);     // 54n
+                return builder->CreateSub(t2, base, "mul53", nf, ns);             // 53n
+            }
+            case 58: {
+                // n*58 = (n<<6) - (n<<2) - (n<<1)  = 64n-4n-2n = 58n (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul58.shl6");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul58.shl2");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul58.shl1");
+                auto* t    = builder->CreateSub(shl6, shl2, "mul58.t", nf, ns);   // 60n
+                return builder->CreateSub(t, shl1, "mul58", nf, ns);              // 58n
+            }
+            case 59: {
+                // n*59 = (n<<6) - (n<<2) - n  = 64n-4n-n = 59n (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul59.shl6");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul59.shl2");
+                auto* t    = builder->CreateSub(shl6, shl2, "mul59.t", nf, ns);   // 60n
+                return builder->CreateSub(t, base, "mul59", nf, ns);              // 59n
+            }
+            case 61: {
+                // n*61 = (n<<6) - (n<<1) - n  = 64n-2n-n = 61n (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul61.shl6");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul61.shl1");
+                auto* t    = builder->CreateSub(shl6, shl1, "mul61.t", nf, ns);   // 62n
+                return builder->CreateSub(t, base, "mul61", nf, ns);              // 61n
+            }
             case 57: {
                 // n*57 → (n<<6) - (n<<3) + n  (= 64n - 8n + n)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul57.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul57.shl3");
                 auto* t = builder->CreateSub(shl6, shl3, "mul57.t", nf, ns);
                 return builder->CreateAdd(t, base, "mul57", nf, ns);
+            }
+            case 67: {
+                // n*67 = (n<<6) + (n<<1) + n  = 64n+2n+n = 67n (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul67.shl6");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul67.shl1");
+                auto* t    = builder->CreateAdd(shl6, shl1, "mul67.t", nf, ns);   // 66n
+                return builder->CreateAdd(t, base, "mul67", nf, ns);              // 67n
+            }
+            case 69: {
+                // n*69 = (n<<6) + (n<<2) + n  = 64n+4n+n = 69n (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul69.shl6");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul69.shl2");
+                auto* t    = builder->CreateAdd(shl6, shl2, "mul69.t", nf, ns);   // 68n
+                return builder->CreateAdd(t, base, "mul69", nf, ns);              // 69n
+            }
+            case 71: {
+                // n*71 = (n<<6) + (n<<3) - n  = 64n+8n-n = 71n (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul71.shl6");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul71.shl3");
+                auto* t    = builder->CreateAdd(shl6, shl3, "mul71.t", nf, ns);   // 72n
+                return builder->CreateSub(t, base, "mul71", nf, ns);              // 71n
+            }
+            case 73: {
+                // n*73 = (n<<6) + (n<<3) + n  = 64n+8n+n = 73n (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul73.shl6");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul73.shl3");
+                auto* t    = builder->CreateAdd(shl6, shl3, "mul73.t", nf, ns);   // 72n
+                return builder->CreateAdd(t, base, "mul73", nf, ns);              // 73n
+            }
+            case 74: {
+                // n*74 = (n<<6) + (n<<3) + (n<<1)  = 64n+8n+2n = 74n (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul74.shl6");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul74.shl3");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul74.shl1");
+                auto* t    = builder->CreateAdd(shl6, shl3, "mul74.t", nf, ns);   // 72n
+                return builder->CreateAdd(t, shl1, "mul74", nf, ns);              // 74n
+            }
+            case 75: {
+                // n*75 = (n*25)*3 = ((n<<5)-(n<<3)+n)*3  but also:
+                // n*75 = (n<<6) + (n<<3) + (n<<1) + n  = 64+8+2+1=75 (3 adds, 3 shifts, too many)
+                // Better: n*75 = (n<<7) - (n<<5) - (n<<2) - n? = 128-32-4-1=91 nope
+                // n*75 = (n<<2+n)*15 = 5n*15 = 5n*(n<<4-n) → too recursive
+                // n*75 = (n<<6) + (n<<4) - (n<<2) - n? = 64+16-4-1=75 ✓ (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul75.shl6");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul75.shl4");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul75.shl2");
+                auto* t    = builder->CreateAdd(shl6, shl4, "mul75.t", nf, ns);   // 80n
+                auto* t2   = builder->CreateSub(t, shl2, "mul75.t2", nf, ns);     // 76n
+                return builder->CreateSub(t2, base, "mul75", nf, ns);             // 75n
+            }
+            case 76: {
+                // n*76 = (n<<6) + (n<<4) - (n<<2) = 64+16-4=76 (3-instr)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul76.shl6");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul76.shl4");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul76.shl2");
+                auto* t    = builder->CreateAdd(shl6, shl4, "mul76.t", nf, ns);   // 80n
+                return builder->CreateSub(t, shl2, "mul76", nf, ns);              // 76n
+            }
+            case 77: {
+                // n*77 = (n<<6) + (n<<4) - (n<<2) + n = 64+16-4+1=77 (4-instr)
+                // Better: n*77 = (n<<7) - (n<<5) - (n<<4) - (n<<2) - n?
+                // = 128-32-16-4-1=75 nope
+                // n*77 = (n<<7) - (n<<5) - (n<<4) + (n<<2) - n?
+                // = 128-32-16+4-1=83 nope
+                // n*77 = 7*11*n = (n*7)*11  but 7=8-1, 11=8+2+1:
+                // n7 = (n<<3)-n; n7*11: n7*(8+2+1) = n7<<3 + n7<<1 + n7 (3 more)
+                // total: 5 ops — not better.
+                // Best: n*77 = (n<<6) + (n<<3) + (n<<2) + n = 64+8+4+1=77 (3-instr adds)
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul77.shl6");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul77.shl3");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul77.shl2");
+                auto* t    = builder->CreateAdd(shl6, shl3, "mul77.t", nf, ns);   // 72n
+                auto* t2   = builder->CreateAdd(t, shl2, "mul77.t2", nf, ns);     // 76n
+                return builder->CreateAdd(t2, base, "mul77", nf, ns);             // 77n
             }
             case 1023: {
                 // n*1023 → (n<<10) - n  (= 1024n - n)
