@@ -4985,8 +4985,24 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
         if (!eNonNeg)
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(elseVal))
                 eNonNeg = !ci->isNegative();
-        if (tNonNeg && eNonNeg)
+        if (tNonNeg && eNonNeg) {
             nonNegValues_.insert(sel);
+            // Inject @llvm.assume(sel >= 0) at O2+: !range is not valid on
+            // SelectInst, but an assume gives CVP/LVI the same information.
+            // Only emit when the select is integral and non-trivially derived
+            // (constant propagation would already have eliminated the select).
+            if (optimizationLevel >= OptimizationLevel::O2 &&
+                sel->getType()->isIntegerTy(64) &&
+                !llvm::isa<llvm::ConstantInt>(sel)) {
+                llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+                    module.get(), llvm::Intrinsic::assume, {});
+                llvm::Value* isNN = builder->CreateICmpSGE(
+                    sel,
+                    llvm::ConstantInt::get(getDefaultType(), 0),
+                    "sel.nonneg");
+                builder->CreateCall(assumeFn, {isNN});
+            }
+        }
         return sel;
     }
 
@@ -5044,8 +5060,13 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     if (!elseNonNeg)
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(elseVal))
             elseNonNeg = !ci->isNegative();
-    if (thenNonNeg && elseNonNeg)
+    if (thenNonNeg && elseNonNeg) {
         nonNegValues_.insert(phi);
+        // Note: !range metadata is NOT valid on PHINode in LLVM — it is only
+        // valid on load, call, and invoke.  Non-negativity is propagated via
+        // nonNegValues_ instead; LLVM's value-tracking (KnownBits analysis)
+        // will pick it up through the PHI if both incoming values carry it.
+    }
 
     return phi;
 }
