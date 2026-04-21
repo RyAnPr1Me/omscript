@@ -96,6 +96,13 @@ bash run_tests.sh
 
 # Run a single example manually
 ./build/omsc run examples/fibonacci.om
+
+# Test project-mode commands
+./build/omsc init my_test_project /tmp/my_test_project
+cd /tmp/my_test_project
+omsc build
+omsc build --release
+omsc clean
 ```
 
 ### Coverage Workflow
@@ -217,8 +224,15 @@ Source (.om files)
 ### Compiler Driver
 | File | Purpose |
 |------|---------|
-| `src/compiler.cpp` / `include/compiler.h` | Top-level driver: preprocessing, parsing, codegen invocation, optimization, linking. Entry point for `omsc`. |
-| `src/main.cpp` | CLI argument parsing, `omsc run/compile/check/emit-ir` dispatch. |
+| `src/compiler.cpp` / `include/compiler.h` | Top-level driver: preprocessing, parsing, codegen invocation, optimization, linking. Entry point for `omsc`. Exposes all compiler flags via setters (`setEGraphOptimize`, `setSuperoptimize`, `setSuperoptLevel`, `setHardwareGraphOpt`, etc.). |
+| `src/main.cpp` | CLI argument parsing, `omsc run/compile/check/emit-ir/build/init/clean` dispatch. Includes project-mode detection via `oms.toml` and explicit-flag tracking for profile overrides. |
+
+### Build System
+| File | Purpose |
+|------|---------|
+| `include/project.h` / `src/project.cpp` | `OmsManifest` and `BuildProfile` data structures. Minimal TOML parser for `oms.toml`. `initProject()`, `loadProjectContext()`, `makeEphemeralProject()` helpers. `BuildProfile::makeDebug()` / `makeRelease()` factory methods. |
+| `include/build_graph.h` / `src/build_graph.cpp` | `BuildGraph` (import scanner + FNV-1a fingerprinting), `BuildCache` (persistent `.fingerprint` file), `hashProfile()`, `hashManifest()`. Computes deterministic build fingerprints for incremental compilation. |
+| `include/build_system.h` / `src/build_system.cpp` | `BuildSystem` orchestrator: loads manifest, selects profile, checks fingerprint, invokes `Compiler`, writes cache. `setProfile()` allows CLI flag overrides on top of the profile. |
 
 ### Frontend
 | File | Purpose |

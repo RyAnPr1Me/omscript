@@ -63,7 +63,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=54
+NUM_BENCHMARKS=61
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -121,6 +121,13 @@ BENCH_NAME=(
     "array_predicates"   # 52 — array_any / array_every / array_count with lambdas
     "op_overload"        # 53 — struct operator overloading + creation (<=>, **, |>)
     "matmul_cm"          # 54 — column-major matrix multiply via mat_new / mat_mul
+    "do_while"           # 55 — do-while loop: digit-sum via repeated divmod
+    "when_match"         # 56 — 8-way when dispatch (pattern match)
+    "array_slice_sum"    # 57 — array_slice with constant bounds + sum
+    "str_split_count"    # 58 — str_split on delimited string, count pieces
+    "unless_until"       # 59 — unless / until control-flow sugar
+    "triangular_sum"     # 60 — sum 0+1+2+…+(n-1) closed-form idiom
+    "chain_hash_rol"     # 61 — chained rotate-left hash (near-pow2 multiply)
 )
 
 BENCH_DESC=(
@@ -179,6 +186,13 @@ BENCH_DESC=(
     "array_any/array_every/array_count lambdas on 128-elem array; N/128 outer iters"
     "Vec2 operator overloading (+,-,==) and creation (<=>,**,|>) — N iterations"
     "Column-major matrix multiply N×N via mat_new / mat_mul (column-saxpy inner loop)"
+    "do-while digit-sum: iterate divmod until x=0 (body executes at least once)"
+    "8-way when dispatch: accumulate by remainder class each iteration"
+    "array_slice(arr, 0, 16): constant-bounds slice + sum, N/16 iters"
+    "str_split on 16-field comma-delimited record, count+sum pieces, N/16 iters"
+    "unless/until control-flow: unless skip + until countdown, N iterations"
+    "triangular sum 0..n-1: tests closed-form loop idiom recognition"
+    "chained rotate-left hash: tests near-power-of-2 multiply strength reduction"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -238,6 +252,13 @@ BENCH_N=(
     2000000   # 52  array_predicates
     5000000   # 53  op_overload
     250       # 54  matmul_cm (250x250 column-major mat_mul)
+    10000000  # 55  do_while
+    10000000  # 56  when_match
+    1600000   # 57  array_slice_sum  (N/16 slices of 16 elements)
+    160000    # 58  str_split_count  (N/16 splits of 16-field record)
+    10000000  # 59  unless_until
+    50000000  # 60  triangular_sum
+    10000000  # 61  chain_hash_rol
 )
 
 BOTTLENECK_LABELS=(
@@ -296,6 +317,13 @@ BOTTLENECK_LABELS=(
     "array_any + array_every + array_count with lambdas on a fixed array, N outer iters"
     "struct operator overloading (+,-,==) and creation (<=>,**,|>) dispatch overhead"
     "column-major mat_mul inner loop vectorization vs row-major C baseline"
+    "do-while loop: body-first execution, compiler must not hoist condition check"
+    "8-way when dispatch: jump-table / branch codegen quality vs C switch"
+    "array_slice constant-bounds fast path: skips 4 clamp ops vs runtime bounds"
+    "str_split allocation overhead for fixed delimiter and fixed-size records"
+    "unless/until sugar: same codegen as if(!cond)/while(!cond) with no overhead"
+    "triangular sum: loop sum 0..N-1 closed-form → n*(n-1)/2 (superopt idiom)"
+    "chain_hash_rol: near-pow2 multiplies in hash chain → shift+add/sub strength reduction"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -1260,7 +1288,7 @@ fn bench_strprefix(@prefetch n:int) -> int {
 @optmax(aggressive_vec=true, safety=relaxed)
 @hot @flatten @static @nounwind
 fn bench_dictlookup(@prefetch n:int) -> int {
-    var m = map_new();
+    var m:int = map_new();
     for (i:int in 0...n) {
         var k:int = (i * 2654435761) % 1000;
         var prev:int = map_get(m, k, 0);
@@ -1464,13 +1492,13 @@ fn bench_arraypred(@prefetch n:int) -> int {
 fn bench_opoverload(@prefetch n:int) -> int {
     var acc:int = 0;
     for (i:int in 0...n) {
-        var a = Vec2 { x: (i * 3) % 1000, y: (i * 7 + 1) % 1000 };
-        var b = Vec2 { x: (i * 5 + 2) % 1000, y: (i * 11 + 3) % 1000 };
-        var s = a + b;
-        var d = a - b;
+        var a:int = Vec2 { x: (i * 3) % 1000, y: (i * 7 + 1) % 1000 };
+        var b:int = Vec2 { x: (i * 5 + 2) % 1000, y: (i * 11 + 3) % 1000 };
+        var s:int = a + b;
+        var d:int = a - b;
         var dp:int = a ** b;
         var cmp:int = a <=> b;
-        var w = a |> b;
+        var w:int = a |> b;
         acc += s.x + s.y + d.x + d.y + dp + cmp + w.x + w.y;
     }
     invalidate n;
@@ -1503,6 +1531,146 @@ fn bench_matmul_cm(n:int) -> int {
     }
     invalidate n;
     return sum;
+}
+
+// ── 55. do_while ─────────────────────────────────────────────
+// Compute the digit sum of each integer 1..n using a do-while loop.
+// The do-while guarantees the body runs at least once (single-digit
+// numbers still enter the loop), testing that the compiler emits the
+// body-first CFG rather than hoisting the condition check.
+@optmax(fast_math=true, aggressive_vec=false, safety=relaxed)
+@hot @pure @static @nounwind
+fn bench_dowhile(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        var x:int = i;
+        var s:int = 0;
+        do {
+            s += x % 10;
+            x /= 10;
+        } while (x > 0);
+        acc += s;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 56. when_match ───────────────────────────────────────────
+// 7-way histogram using the `when` pattern-match statement.
+// Each iteration dispatches on i%7 and increments a histogram bin.
+// Tests jump-table / branch-tree codegen for `when` vs C's switch.
+// Uses @novectorize to avoid LLVM auto-vectorization of the
+// switch+lookup-table pattern (which can produce wrong results).
+@novectorize @nounroll @static @nounwind
+fn bench_whenmatch(@prefetch n:int) -> int {
+    var bins:int[] = array_fill(7, 0);
+    for (i:int in 0...n) {
+        var r:int = i % 7;
+        when (r) {
+            0 => { bins[0] = bins[0] + 1; }
+            1 => { bins[1] = bins[1] + 1; }
+            2 => { bins[2] = bins[2] + 1; }
+            3 => { bins[3] = bins[3] + 1; }
+            4 => { bins[4] = bins[4] + 1; }
+            5 => { bins[5] = bins[5] + 1; }
+            _ => { bins[6] = bins[6] + 1; }
+        }
+    }
+    var sum:int = 0;
+    for (j:int in 0...7) { sum = sum + bins[j] * (j + 1); }
+    invalidate n;
+    return sum;
+}
+
+// ── 57. array_slice_sum ───────────────────────────────────────
+// Repeatedly slice a fixed 32-element array with constant bounds
+// [0:16] and sum the result.  Tests the constant-bounds fast path
+// in the compiler's array_slice codegen (skips 4 clamp ops).
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+@hot @static @nounwind
+fn bench_arrayslicesum(@prefetch n:int) -> int {
+    var arr:int[] = array_fill(32, 0);
+    for (j:int in 0...32) { arr[j] = j + 1; }
+    var iters:int = n / 16;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        var s:int[] = array_slice(arr, 0, 16);
+        for (j:int in 0...16) { acc += s[j]; }
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 58. str_split_count ───────────────────────────────────────
+// Split a fixed 16-field comma-delimited record N/16 times.
+// Counts and sums the number of pieces to prevent DCE.
+// Tests str_split allocation overhead and string-length computation.
+@hot @static @nounwind
+fn bench_strsplitcount(@prefetch n:int) -> int {
+    var record:str = "10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160";
+    var iters:int = n / 16;
+    var acc:int = 0;
+    for (k:int in 0...iters) {
+        var parts:str[] = str_split(record, ",");
+        acc += len(parts);
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 59. unless_until ─────────────────────────────────────────
+// Stress-test unless (= if !cond) and until (= while !cond) sugar.
+// Each iteration: unless (i % 4 != 0) adds i; until (j >= 4) increments
+// j.  Verifies the desugared form produces the same code as an equivalent
+// if/while loop with no extra overhead.
+@optmax(fast_math=true, aggressive_vec=false, safety=relaxed)
+@hot @pure @static @nounwind
+fn bench_unlessuntil(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        unless (i % 4 != 0) {
+            acc += i;
+        }
+        var j:int = 0;
+        until (j >= 4) {
+            acc += j;
+            j++;
+        }
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 60. triangular_sum ───────────────────────────────────────
+// Computes the sum 0+1+2+...+(n-1) in a tight loop.
+// The superoptimizer's triangular-sum idiom recognizer should replace
+// the loop with the closed-form n*(n-1)/2, eliminating the entire loop.
+@hot @pure @static @nounwind
+fn bench_trisum(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        acc = acc + i;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 61. chain_hash_rol ───────────────────────────────────────
+// A chained hash using multiplies by 33 (= 32+1 = 2^5+1) and 31 (= 32-1 = 2^5-1),
+// which are near-power-of-2 constants the mul-strength-reduction pass replaces
+// with shl+add and shl-sub respectively.
+// djb2-style: hash = hash * 33 ^ i   (xor folded for mixing)
+// alternate:  hash = hash * 31 + i   (Bernstein variant)
+@hot @static @nounwind
+fn bench_chainhashrol(@prefetch n:int) -> int {
+    var h1:int = 5381;
+    var h2:int = 5381;
+    for (i:int in 0...n) {
+        h1 = (h1 * 33) ^ (i & 255);
+        h2 = (h2 * 31) + (i & 255);
+    }
+    invalidate n;
+    return (h1 ^ h2) & 0x7FFFFFFF;
 }
 
 // ── main dispatch ─────────────────────────────────────────────
@@ -1566,6 +1734,13 @@ fn main() -> int {
         case 52: print(bench_arraypred(n));      break;
         case 53: print(bench_opoverload(n));     break;
         case 54: print(bench_matmul_cm(n));      break;
+        case 55: print(bench_dowhile(n));         break;
+        case 56: print(bench_whenmatch(n));       break;
+        case 57: print(bench_arrayslicesum(n));   break;
+        case 58: print(bench_strsplitcount(n));   break;
+        case 59: print(bench_unlessuntil(n));     break;
+        case 60: print(bench_trisum(n));          break;
+        case 61: print(bench_chainhashrol(n));    break;
         default: print(0);
     }
     invalidate n;
@@ -2529,6 +2704,103 @@ static long bench_matmul_cm(long n) {
     return sum;
 }
 
+/* ── 55. do_while ──────────────────────────────────────────────────────────── */
+/* Digit-sum loop using do-while to match OmScript semantics exactly.          */
+static long bench_dowhile(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        long x = i, s = 0;
+        do { s += x % 10; x /= 10; } while (x > 0);
+        acc += s;
+    }
+    return acc;
+}
+
+/* ── 56. when_match ────────────────────────────────────────────────────────── */
+/* 7-bin histogram via switch matching the OM when dispatch benchmark.          */
+static long bench_whenmatch(long n) {
+    long bins[7] = {0, 0, 0, 0, 0, 0, 0};
+    for (long i = 0; i < n; i++) {
+        int r = (int)(i % 7);
+        switch (r) {
+            case 0: bins[0]++; break;
+            case 1: bins[1]++; break;
+            case 2: bins[2]++; break;
+            case 3: bins[3]++; break;
+            case 4: bins[4]++; break;
+            case 5: bins[5]++; break;
+            default: bins[6]++; break;
+        }
+    }
+    long sum = 0;
+    for (int j = 0; j < 7; j++) sum += bins[j] * (j + 1);
+    return sum;
+}
+
+/* ── 57. array_slice_sum ───────────────────────────────────────────────────── */
+/* Slice first 16 elements of a 32-element array and sum them.                  */
+static long bench_arrayslicesum(long n) {
+    long arr[32];
+    for (int j = 0; j < 32; j++) arr[j] = j + 1;
+    long iters = n / 16;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        /* simulate array_slice(arr, 0, 16): copy first 16 elements */
+        long s[16];
+        memcpy(s, arr, 16 * sizeof(long));
+        for (int j = 0; j < 16; j++) acc += s[j];
+    }
+    return acc;
+}
+
+/* ── 58. str_split_count ───────────────────────────────────────────────────── */
+/* Count comma-separated fields in a fixed 16-field record, N/16 times.         */
+static long bench_strsplitcount(long n) {
+    const char* record = "10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160";
+    long iters = n / 16;
+    long acc = 0;
+    for (long k = 0; k < iters; k++) {
+        /* count commas + 1 */
+        int count = 1;
+        for (const char* p = record; *p; p++) if (*p == ',') count++;
+        acc += count;
+    }
+    return acc;
+}
+
+/* ── 59. unless_until ─────────────────────────────────────────────────────── */
+/* unless (= if !cond) and until (= while !cond) matching OM semantics.         */
+static long bench_unlessuntil(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++) {
+        if (!(i % 4 != 0)) acc += i;  /* unless (i % 4 != 0) */
+        long j = 0;
+        while (!(j >= 4)) { acc += j; j++; }  /* until (j >= 4) */
+    }
+    return acc;
+}
+
+/* ── 60. triangular_sum ───────────────────────────────────────────────────── */
+/* Sum 0+1+2+…+(n-1).  C compiler applies closed-form via SCEV; OM superopt    */
+/* replaces the loop body with n*(n-1)/2 using the triangular-sum idiom.        */
+static long bench_trisum(long n) {
+    long acc = 0;
+    for (long i = 0; i < n; i++) acc += i;
+    return acc;
+}
+
+/* ── 61. chain_hash_rol ───────────────────────────────────────────────────── */
+/* djb2-style hash using multiplies by 33 and 31 (near-power-of-2 constants).  */
+/* C at -O2 uses imul; OM superopt replaces with shl+add / shl-sub sequences.   */
+static long bench_chainhashrol(long n) {
+    long h1 = 5381, h2 = 5381;
+    for (long i = 0; i < n; i++) {
+        h1 = (h1 * 33) ^ (i & 255);
+        h2 = (h2 * 31) + (i & 255);
+    }
+    return (h1 ^ h2) & 0x7FFFFFFF;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -2589,6 +2861,13 @@ int main(void) {
         case 52: r = bench_arraypred(n);         break;
         case 53: r = bench_opoverload(n);        break;
         case 54: r = bench_matmul_cm(n);         break;
+        case 55: r = bench_dowhile(n);            break;
+        case 56: r = bench_whenmatch(n);          break;
+        case 57: r = bench_arrayslicesum(n);      break;
+        case 58: r = bench_strsplitcount(n);      break;
+        case 59: r = bench_unlessuntil(n);        break;
+        case 60: r = bench_trisum(n);              break;
+        case 61: r = bench_chainhashrol(n);        break;
     }
     printf("%ld\n", r);
     return 0;

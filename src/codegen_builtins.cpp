@@ -1,9 +1,11 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <unordered_set>
 
 // Apply maximum compiler optimizations to this hot path.
@@ -715,6 +717,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // The second argument (is_int_min_poison) is false for safe behavior
         auto* result = builder->CreateCall(absIntrinsic, {arg, builder->getFalse()}, "absval");
         nonNegValues_.insert(result);
+        // Emit !range [0, INT64_MAX) so CVP/LVI/InstCombine can use this
+        // knowledge globally — e.g. fold `abs(x) >= 0` → true, or propagate
+        // non-negativity across PHI nodes.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         return result;
     }
 
@@ -894,8 +901,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* result = builder->CreateCall(sminIntrinsic, {a, b}, "minval");
         // min(a, b) is non-negative when both inputs are non-negative.
         // This enables nsw on downstream add/mul operations.
-        if (nonNegValues_.count(a) && nonNegValues_.count(b))
+        if (nonNegValues_.count(a) && nonNegValues_.count(b)) {
             nonNegValues_.insert(result);
+            // Emit !range metadata so LLVM passes see the non-negativity.
+            if (optimizationLevel >= OptimizationLevel::O1)
+                result->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
         return result;
     }
 
@@ -926,8 +937,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* result = builder->CreateCall(smaxIntrinsic, {a, b}, "maxval");
         // max(a, b) is non-negative when either input is non-negative:
         // if a >= 0 then max(a, b) >= a >= 0.
-        if (nonNegValues_.count(a) || nonNegValues_.count(b))
+        if (nonNegValues_.count(a) || nonNegValues_.count(b)) {
             nonNegValues_.insert(result);
+            // Emit !range metadata so LLVM passes see the non-negativity.
+            if (optimizationLevel >= OptimizationLevel::O1)
+                result->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
         return result;
     }
 
@@ -3845,24 +3860,55 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         endArg = toDefaultType(endArg);
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "slice.arrptr");
-                llvm::Value* sliceLenLoad = emitLoadArrayLen(arrPtr, "slice.arrlen");
+        llvm::Value* sliceLenLoad = emitLoadArrayLen(arrPtr, "slice.arrlen");
         llvm::Value* arrLen = sliceLenLoad;
+
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        // Clamp start: max(0, min(start, arrLen))
-        llvm::Value* startNeg = builder->CreateICmpSLT(startArg, zero, "slice.startneg");
-        startArg = builder->CreateSelect(startNeg, zero, startArg, "slice.startclamp");
-        llvm::Value* startOver = builder->CreateICmpSGT(startArg, arrLen, "slice.startover");
-        startArg = builder->CreateSelect(startOver, arrLen, startArg, "slice.startfinal");
-        // Clamp end: max(start, min(end, arrLen))
-        llvm::Value* endNeg = builder->CreateICmpSLT(endArg, startArg, "slice.endneg");
-        endArg = builder->CreateSelect(endNeg, startArg, endArg, "slice.endclamp");
-        llvm::Value* endOver = builder->CreateICmpSGT(endArg, arrLen, "slice.endover");
-        endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // ── Partial constant-bounds optimisation ──────────────────────────────
+        // When start is a compile-time constant ≥ 0, the two start-clamping
+        // comparisons are provably dead and can be elided:
+        //   - startNeg = icmp slt K, 0  →  always false for K ≥ 0
+        //   - startOver = icmp sgt K, arrLen  →  only fires if arrLen < K,
+        //     but we handle that via the end clamp below (sliceLen goes to 0).
+        // The end-vs-arrLen clamp is always needed for safety.
+        // When end is also a compile-time constant ≥ start, the endNeg check
+        // (end < start) is also dead and can be dropped.
+        auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startArg);
+        auto* endCI   = llvm::dyn_cast<llvm::ConstantInt>(endArg);
+
+        if (startCI && startCI->getSExtValue() >= 0) {
+            // start is non-negative constant: skip the 2 start-clamp ops.
+            // startFinal = clamp to arrLen still needed if start > arrLen:
+            llvm::Value* startOver = builder->CreateICmpSGT(startArg, arrLen, "slice.startover");
+            startArg = builder->CreateSelect(startOver, arrLen, startArg, "slice.startfinal");
+
+            if (endCI && endCI->getSExtValue() >= startCI->getSExtValue()) {
+                // end is also non-negative constant ≥ start: skip endNeg clamp.
+                llvm::Value* endOver = builder->CreateICmpSGT(endArg, arrLen, "slice.endover");
+                endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
+            } else {
+                // end is runtime: clamp end to [start, arrLen].
+                llvm::Value* endNeg = builder->CreateICmpSLT(endArg, startArg, "slice.endneg");
+                endArg = builder->CreateSelect(endNeg, startArg, endArg, "slice.endclamp");
+                llvm::Value* endOver = builder->CreateICmpSGT(endArg, arrLen, "slice.endover");
+                endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
+            }
+        } else {
+            // General path: clamp both start and end.
+            llvm::Value* startNeg = builder->CreateICmpSLT(startArg, zero, "slice.startneg");
+            startArg = builder->CreateSelect(startNeg, zero, startArg, "slice.startclamp");
+            llvm::Value* startOver = builder->CreateICmpSGT(startArg, arrLen, "slice.startover");
+            startArg = builder->CreateSelect(startOver, arrLen, startArg, "slice.startfinal");
+            llvm::Value* endNeg = builder->CreateICmpSLT(endArg, startArg, "slice.endneg");
+            endArg = builder->CreateSelect(endNeg, startArg, endArg, "slice.endclamp");
+            llvm::Value* endOver = builder->CreateICmpSGT(endArg, arrLen, "slice.endover");
+            endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
+        }
 
         llvm::Value* sliceLen = builder->CreateSub(endArg, startArg, "slice.len");
-        // Allocate: (sliceLen + 1) * 8
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
         llvm::Value* buf = emitAllocArray(sliceLen, "slice");
         // Copy elements: arr[start+1..end+1) to buf[1..)
         llvm::Value* srcIdx = builder->CreateAdd(startArg, one, "slice.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -9133,6 +9179,37 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // and LICM to hoist pure calls out of loops.
     if (callee->hasFnAttribute(llvm::Attribute::Speculatable)) {
         callResult->addFnAttr(llvm::Attribute::Speculatable);
+    }
+    // Emit !range metadata when a narrowed value range is known for this callee.
+    // This allows LLVM's CVP/LVI passes to propagate tighter bounds into callers
+    // without requiring inlining.  Only applicable to i64-returning functions.
+    if (optCtx_ && callee->getReturnType()->isIntegerTy(64)) {
+        if (auto rng = optCtx_->returnRange(expr->callee)) {
+            if (rng->isNarrowed() && !rng->isEmpty()) {
+                llvm::Type* i64 = getDefaultType();
+                // LLVM range metadata uses a half-open interval [lo, hi_excl).
+                // When hi == INT64_MAX, hi_excl overflows; use INT64_MIN as the
+                // exclusive end — LLVM interprets that as a wrapping range that
+                // covers [lo, INT64_MAX] inclusive.
+                const int64_t hiExcl =
+                    (rng->hi == std::numeric_limits<int64_t>::max())
+                        ? std::numeric_limits<int64_t>::min()
+                        : rng->hi + 1;
+                auto* rangeMD = llvm::MDNode::get(*context, {
+                    llvm::ConstantAsMetadata::get(
+                        llvm::ConstantInt::get(i64, rng->lo, /*isSigned=*/true)),
+                    llvm::ConstantAsMetadata::get(
+                        llvm::ConstantInt::get(i64, hiExcl, /*isSigned=*/true))
+                });
+                callResult->setMetadata(llvm::LLVMContext::MD_range, rangeMD);
+                // If the range lower bound is non-negative, mark the call
+                // result non-negative so downstream operations (div/mod,
+                // comparisons) can use faster unsigned variants without
+                // relying solely on !range metadata propagation.
+                if (rng->lo >= 0)
+                    nonNegValues_.insert(callResult);
+            }
+        }
     }
     // Propagate non-negativity from the callee: if the callee's return value
     // has !range [0, INT64_MAX) metadata, mark the result as non-negative.

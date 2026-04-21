@@ -1,9 +1,11 @@
 #include "codegen.h"
 #include "compiler.h"
+#include "build_system.h"
 #include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
 #include "preprocessor.h"
+#include "project.h"
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -1427,9 +1429,15 @@ void printUsage(const char* progName) {
               << "\n\n"
                  "Usage: "
               << progName
-              << " [command] <file.om> [options]\n"
+              << " [command] [<file.om>] [options]\n"
                  "\n"
-                 "Commands:\n"
+                 "Project commands (use inside a project directory with oms.toml):\n"
+                 "  init [name]      Create a new OmScript project (oms.toml + src/main.om)\n"
+                 "  build            Compile the project (default profile: debug)\n"
+                 "  run              Compile and run the project\n"
+                 "  clean            Remove build artifacts for the active profile\n"
+                 "\n"
+                 "Single-file commands (pass a .om source file directly):\n"
                  "  build, compile   Compile to executable (default)\n"
                  "  run              Compile and run\n"
                  "  check            Validate syntax\n"
@@ -1441,16 +1449,20 @@ void printUsage(const char* progName) {
                  "  install          Install omsc to your PATH\n"
                  "  update           Update to latest version\n"
                  "\n"
+                 "Profile / build options:\n"
+                 "  --release        Use the release profile (whole-program O3, strip)\n"
+                 "  --profile <name> Use a named profile from oms.toml\n"
+                 "\n"
                  "Options:\n"
-                 "  -o <file>        Output file (default: a.out)\n"
-                 "  -O0/1/2/3       Optimization level (default: -O2)\n"
+                 "  -o <file>        Output file (default: a.out / target/<profile>/<name>)\n"
+                 "  -O0/1/2/3       Optimization level (default: from profile)\n"
                  "  -V, --verbose    Verbose output\n"
                  "  -q, --quiet      Suppress non-error output\n"
                  "  --emit-obj       Emit object file only\n"
                  "  --dry-run        Validate without writing files\n"
                  "  --time           Show timing breakdown\n"
                  "\n"
-                 "Codegen:\n"
+                 "Codegen (override profile defaults):\n"
                  "  -march=<cpu>     Target CPU (default: native)\n"
                  "  -mtune=<cpu>     Tuning CPU (default: -march)\n"
                  "  -flto            Full link-time optimization\n"
@@ -1471,7 +1483,9 @@ void printUsage(const char* progName) {
                  "  -static          Static linking\n"
                  "  -s, --strip      Strip symbols\n"
                  "\n"
-                 "Use -fno-<flag> to disable any -f flag (e.g. -fno-lto, -fno-vectorize).\n";
+                 "Use -fno-<flag> to disable any -f flag (e.g. -fno-lto, -fno-vectorize).\n"
+                 "\n"
+                 "All codegen flags override the profile default when passed explicitly.\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -2155,7 +2169,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install, Uninstall, Check, Pkg };
+    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install, Uninstall, Check, Pkg, Init };
 
     int argIndex = 1;
     bool verbose = false;
@@ -2183,6 +2197,36 @@ int main(int argc, char* argv[]) {
     unsigned flagSuperoptLevel = 2;
     bool flagHGOE = true;
     bool flagDebug = false;
+
+    // Profile selection for project-mode commands.
+    std::string profileName;  // empty = use default ("debug")
+    bool releaseProfile = false; // shortcut for --profile release
+
+    // Tracks which flags the user set *explicitly* on the command line.
+    // In project mode the profile supplies the defaults; only explicitly-set
+    // flags override the profile so that e.g. `omsc build --release -fno-egraph`
+    // uses release settings except with e-graph disabled.
+    struct ExplicitFlags {
+        bool optLevel      = false;
+        bool marchCpu      = false;
+        bool mtuneCpu      = false;
+        bool lto           = false;
+        bool pic           = false;
+        bool fastMath      = false;
+        bool optMax        = false;
+        bool vectorize     = false;
+        bool unrollLoops   = false;
+        bool loopOptimize  = false;
+        bool parallelize   = false;
+        bool egraph        = false;
+        bool superopt      = false;
+        bool superoptLevel = false;
+        bool hgoe          = false;
+        bool debug         = false;
+        bool strip         = false;
+        bool staticLink    = false;
+        bool stackProtector= false;
+    } explicitFlags;
     const auto tryParseOptimizationFlag = [](const std::string& arg) -> std::optional<omscript::OptimizationLevel> {
         if (arg == "-Ofast") {
             return omscript::OptimizationLevel::O3;
@@ -2201,99 +2245,124 @@ int main(int argc, char* argv[]) {
     const auto tryParseTargetOrFeatureFlag = [&](const std::string& arg) -> bool {
         if (arg.rfind("-march=", 0) == 0) {
             marchCpu = arg.substr(7);
+            explicitFlags.marchCpu = true;
             return true;
         }
         if (arg.rfind("-mtune=", 0) == 0) {
             mtuneCpu = arg.substr(7);
+            explicitFlags.mtuneCpu = true;
             return true;
         }
         if (arg == "-flto") {
             flagLTO = true;
+            explicitFlags.lto = true;
             return true;
         }
         if (arg == "-fno-lto") {
             flagLTO = false;
+            explicitFlags.lto = true;
             return true;
         }
         if (arg == "-fpic") {
             flagPIC = true;
+            explicitFlags.pic = true;
             return true;
         }
         if (arg == "-fno-pic") {
             flagPIC = false;
+            explicitFlags.pic = true;
             return true;
         }
         if (arg == "-ffast-math") {
             flagFastMath = true;
+            explicitFlags.fastMath = true;
             return true;
         }
         if (arg == "-fno-fast-math") {
             flagFastMath = false;
+            explicitFlags.fastMath = true;
             return true;
         }
         if (arg == "-foptmax") {
             flagOptMax = true;
+            explicitFlags.optMax = true;
             return true;
         }
         if (arg == "-fno-optmax") {
             flagOptMax = false;
+            explicitFlags.optMax = true;
             return true;
         }
         if (arg == "-fstack-protector") {
             flagStackProtector = true;
+            explicitFlags.stackProtector = true;
             return true;
         }
         if (arg == "-fno-stack-protector") {
             flagStackProtector = false;
+            explicitFlags.stackProtector = true;
             return true;
         }
         if (arg == "-fvectorize") {
             flagVectorize = true;
+            explicitFlags.vectorize = true;
             return true;
         }
         if (arg == "-fno-vectorize") {
             flagVectorize = false;
+            explicitFlags.vectorize = true;
             return true;
         }
         if (arg == "-funroll-loops") {
             flagUnrollLoops = true;
+            explicitFlags.unrollLoops = true;
             return true;
         }
         if (arg == "-fno-unroll-loops") {
             flagUnrollLoops = false;
+            explicitFlags.unrollLoops = true;
             return true;
         }
         if (arg == "-floop-optimize") {
             flagLoopOptimize = true;
+            explicitFlags.loopOptimize = true;
             return true;
         }
         if (arg == "-fno-loop-optimize") {
             flagLoopOptimize = false;
+            explicitFlags.loopOptimize = true;
             return true;
         }
         if (arg == "-fparallelize") {
             flagParallelize = true;
+            explicitFlags.parallelize = true;
             return true;
         }
         if (arg == "-fno-parallelize") {
             flagParallelize = false;
+            explicitFlags.parallelize = true;
             return true;
         }
         if (arg == "-fegraph") {
             flagEGraph = true;
+            explicitFlags.egraph = true;
             return true;
         }
         if (arg == "-fno-egraph") {
             flagEGraph = false;
+            explicitFlags.egraph = true;
             return true;
         }
         if (arg == "-fsuperopt") {
             flagSuperopt = true;
+            explicitFlags.superopt = true;
             return true;
         }
         if (arg == "-fno-superopt") {
             flagSuperopt = false;
             flagSuperoptLevel = 0;
+            explicitFlags.superopt = true;
+            explicitFlags.superoptLevel = true;
             return true;
         }
         if (arg.substr(0, 17) == "-fsuperopt-level=") {
@@ -2307,26 +2376,33 @@ int main(int argc, char* argv[]) {
                           << "' (expected 0-3)\n";
                 return false;
             }
+            explicitFlags.superopt = true;
+            explicitFlags.superoptLevel = true;
             return true;
         }
         if (arg == "-fhgoe") {
             flagHGOE = true;
+            explicitFlags.hgoe = true;
             return true;
         }
         if (arg == "-fno-hgoe") {
             flagHGOE = false;
+            explicitFlags.hgoe = true;
             return true;
         }
         if (arg == "-static") {
             flagStatic = true;
+            explicitFlags.staticLink = true;
             return true;
         }
         if (arg == "-s" || arg == "--strip") {
             flagStrip = true;
+            explicitFlags.strip = true;
             return true;
         }
         if (arg == "-g" || arg == "--debug") {
             flagDebug = true;
+            explicitFlags.debug = true;
             return true;
         }
         return false;
@@ -2365,8 +2441,24 @@ int main(int argc, char* argv[]) {
             argIndex++;
             continue;
         }
+        if (arg == "--release") {
+            releaseProfile = true;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--profile" && argIndex + 1 < argc) {
+            profileName = argv[++argIndex];
+            argIndex++;
+            continue;
+        }
+        if (arg.rfind("--profile=", 0) == 0) {
+            profileName = arg.substr(10);
+            argIndex++;
+            continue;
+        }
         if (auto parsedOpt = tryParseOptimizationFlag(arg)) {
             optLevel = *parsedOpt;
+            explicitFlags.optLevel = true;
             argIndex++;
             continue;
         }
@@ -2379,8 +2471,16 @@ int main(int argc, char* argv[]) {
 
     std::string firstArg = argIndex < argc ? argv[argIndex] : "";
     if (firstArg.empty()) {
-        std::cerr << "Error: no input file specified (run '" << argv[0] << " --help' for usage)\n";
-        return 1;
+        // No command or file given — check for a project before showing usage.
+        std::error_code _ec;
+        const auto ctx = omscript::loadProjectContext(
+            std::filesystem::current_path(_ec).string());
+        if (!ctx.has_value()) {
+            std::cerr << "Error: no input file specified (run '" << argv[0] << " --help' for usage)\n";
+            return 1;
+        }
+        // Treat bare `omsc` inside a project directory as `omsc build`.
+        firstArg = "build";
     }
     Command command = Command::Compile;
     bool commandMatched = false;
@@ -2432,6 +2532,10 @@ int main(int argc, char* argv[]) {
         command = Command::Clean;
         argIndex++;
         commandMatched = true;
+    } else if (firstArg == "init" || firstArg == "--init") {
+        command = Command::Init;
+        argIndex++;
+        commandMatched = true;
     }
 
     if (!commandMatched && !firstArg.empty() && firstArg[0] != '-') {
@@ -2477,6 +2581,25 @@ int main(int argc, char* argv[]) {
             std::cerr << "Error: " << e.what() << "\n";
             return 1;
         }
+    }
+
+    // ── init command ────────────────────────────────────────────────────────
+    if (command == Command::Init) {
+        std::string initName;
+        std::string initDir = ".";
+        for (int i = argIndex; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (!a.empty() && a[0] != '-') {
+                if (initName.empty())       initName = a;
+                else if (initDir == ".")    initDir  = a;
+            }
+        }
+        if (initName.empty()) {
+            std::error_code ec;
+            initName = std::filesystem::current_path(ec).filename().string();
+            if (initName.empty() || ec) initName = "hello";
+        }
+        return omscript::initProject(initDir, initName) ? 0 : 1;
     }
 
     std::string sourceFile;
@@ -2535,9 +2658,27 @@ int main(int argc, char* argv[]) {
             dryRun = true;
             continue;
         }
+        if (!parsingRunArgs && arg == "--release") {
+            releaseProfile = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--profile") {
+            if (i + 1 < argc) {
+                profileName = argv[++i];
+            } else {
+                std::cerr << "Error: --profile requires an argument\n";
+                return 1;
+            }
+            continue;
+        }
+        if (!parsingRunArgs && arg.rfind("--profile=", 0) == 0) {
+            profileName = arg.substr(10);
+            continue;
+        }
         if (!parsingRunArgs) {
             if (auto parsedOpt = tryParseOptimizationFlag(arg)) {
                 optLevel = *parsedOpt;
+                explicitFlags.optLevel = true;
                 continue;
             }
         }
@@ -2582,6 +2723,23 @@ int main(int argc, char* argv[]) {
     }
 
     if (command == Command::Clean) {
+        // Project-mode clean: when no explicit -o was given and an oms.toml
+        // exists in the current directory (or a parent), delegate to
+        // BuildSystem which removes the entire target/<profile>/ tree.
+        if (!outputSpecified) {
+            std::error_code _ec;
+            const auto ctx = omscript::loadProjectContext(
+                std::filesystem::current_path(_ec).string());
+            if (ctx.has_value()) {
+                const std::string pname =
+                    releaseProfile ? "release"
+                    : (profileName.empty() ? "debug" : profileName);
+                omscript::BuildSystem bs(ctx->rootDir, pname);
+                const omscript::BuildIO io{verbose, quiet, showTiming};
+                return bs.clean(io) ? 0 : 1;
+            }
+        }
+        // Single-file / explicit clean (original behaviour).
         bool removedAny = false;
         auto removeIfPresent = [&](const std::string& path) {
             std::error_code ec;
@@ -2608,6 +2766,76 @@ int main(int argc, char* argv[]) {
     }
 
     if (sourceFile.empty()) {
+        // ── Project mode ────────────────────────────────────────────────
+        // When no source file is given on the command line, look for an
+        // oms.toml project manifest starting from the current directory.
+        if (command == Command::Compile || command == Command::Run) {
+            std::error_code _ec;
+            const auto ctx = omscript::loadProjectContext(
+                std::filesystem::current_path(_ec).string());
+            if (!ctx.has_value()) {
+                std::cerr << "Error: no input file specified and no oms.toml found.\n"
+                          << "Run 'omsc init' to create a new project, "
+                             "or specify a source file.\n";
+                return 1;
+            }
+
+            // Resolve the active profile name.
+            const std::string pname =
+                releaseProfile ? "release"
+                : (profileName.empty() ? "debug" : profileName);
+
+            omscript::BuildSystem bs(ctx->rootDir, pname);
+            const omscript::BuildIO io{verbose, quiet, showTiming};
+            if (!bs.prepare(io)) return 1;
+
+            // Apply explicit CLI flag overrides on top of the profile loaded
+            // from oms.toml.  Only flags the user actually passed are applied.
+            {
+                omscript::BuildProfile eff = bs.profile();
+                if (explicitFlags.optLevel)       eff.optLevel       = optLevel;
+                if (explicitFlags.lto)             eff.lto            = flagLTO;
+                if (explicitFlags.fastMath)        eff.fastMath       = flagFastMath;
+                if (explicitFlags.optMax)          eff.optMax         = flagOptMax;
+                if (explicitFlags.vectorize)       eff.vectorize      = flagVectorize;
+                if (explicitFlags.unrollLoops)     eff.unrollLoops    = flagUnrollLoops;
+                if (explicitFlags.loopOptimize)    eff.loopOptimize   = flagLoopOptimize;
+                if (explicitFlags.parallelize)     eff.parallelize    = flagParallelize;
+                if (explicitFlags.egraph)          eff.egraph         = flagEGraph;
+                if (explicitFlags.superopt)        eff.superopt       = flagSuperopt;
+                if (explicitFlags.superoptLevel)   eff.superoptLevel  = flagSuperoptLevel;
+                if (explicitFlags.hgoe)            eff.hgoe           = flagHGOE;
+                if (explicitFlags.debug)           eff.debugInfo      = flagDebug;
+                if (explicitFlags.strip)           eff.strip          = flagStrip;
+                if (explicitFlags.staticLink)      eff.staticLink     = flagStatic;
+                if (explicitFlags.stackProtector)  eff.stackProtector = flagStackProtector;
+                bs.setProfile(eff);
+            }
+            if (!marchCpu.empty()) bs.setMarch(marchCpu);
+            if (!mtuneCpu.empty()) bs.setMtune(mtuneCpu);
+            if (outputSpecified)   bs.setOutputPath(outputFile);
+
+            const auto result = bs.build(io);
+            if (!result.success) return 1;
+
+            if (command == Command::Run) {
+                llvm::SmallVector<llvm::StringRef, 8> argRefs;
+                argRefs.push_back(result.outputPath);
+                for (const auto& a : runArgs) argRefs.push_back(a);
+                const int rc =
+                    llvm::sys::ExecuteAndWait(result.outputPath, argRefs);
+                if (rc < 0) {
+                    std::cerr << "Error: program terminated by signal "
+                              << (-rc) << "\n";
+                    return 128 + (-rc);
+                }
+                if (rc != 0 && !quiet) {
+                    std::cout << "Program exited with code " << rc << "\n";
+                }
+                return rc;
+            }
+            return 0;
+        }
         std::cerr << "Error: no input file specified\n";
         printUsage(argv[0]);
         return 1;

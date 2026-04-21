@@ -257,26 +257,15 @@ const BuiltinEffects& BuiltinEffectTable::get(const std::string& name) noexcept 
 std::unique_ptr<Expression> EGraphSubsystem::optimizeExpression(const Expression* expr) {
     if (!expr) return nullptr;
 
-    // Pass our configuration to the low-level entry point.
-    const egraph::SaturationConfig sc = toSaturationConfig();
-
-    // Build a per-expression EGraph with our config.
-    egraph::EGraph graph(sc);
     ++stats_.expressionsAttempted;
 
-    // Attempt to represent the expression; skip if it contains nodes the
-    // e-graph cannot model (e.g. index expressions, opaque calls).
-    // egraph::optimizeExpression already handles this internally, but we need
-    // to count skipped vs attempted here, so we call through the same path
-    // and compare the result pointer.
-    auto result = egraph::optimizeExpression(expr);
+    // Build context from our configuration and registered pure user functions.
+    const egraph::EGraphOptContext ctx = toOptContext();
+    auto result = egraph::optimizeExpression(expr, ctx);
 
     if (!result) {
         ++stats_.expressionsSkipped;
     } else {
-        // Count a simplification if the extracted result differs from the
-        // original (uses a simple structural pointer comparison via the
-        // result being a freshly-allocated unique_ptr).
         ++stats_.expressionsSimplified;
     }
     return result;
@@ -286,7 +275,8 @@ void EGraphSubsystem::optimizeFunction(FunctionDecl* func) {
     if (!func || !func->body) return;
 
     const unsigned before = stats_.expressionsSimplified;
-    egraph::optimizeFunction(func);
+    const egraph::EGraphOptContext ctx = toOptContext();
+    egraph::optimizeFunction(func, ctx);
     if (stats_.expressionsSimplified > before) {
         ++stats_.functionsChanged;
     }
@@ -296,8 +286,13 @@ void EGraphSubsystem::optimizeProgram(Program* program) {
     if (!program) return;
     stats_.reset();
 
+    const egraph::EGraphOptContext ctx = toOptContext();
     for (auto& func : program->functions) {
-        optimizeFunction(func.get());
+        const unsigned before = stats_.expressionsSimplified;
+        egraph::optimizeFunction(func.get(), ctx);
+        if (stats_.expressionsSimplified > before) {
+            ++stats_.functionsChanged;
+        }
     }
 }
 

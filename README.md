@@ -521,6 +521,92 @@ var x = 10; /* inline */
 | `unreachable()` | Mark as unreachable (UB if executed) |
 | `expect(val, expected)` | Branch prediction hint |
 
+## Project Workflow (recommended)
+
+OmScript supports a project-oriented workflow with `oms.toml` manifests — similar
+to Cargo (Rust) or Go modules.
+
+### Create a project
+
+```bash
+omsc init my_app          # create ./my_app/ with oms.toml + src/main.om
+omsc init my_app ./path   # create project in a specific directory
+```
+
+### Build & run
+
+```bash
+cd my_app
+
+omsc build                # compile (debug profile)
+omsc build --release      # compile (release profile: O3, whole-program, strip)
+omsc build --profile bench  # use a custom profile from oms.toml
+
+omsc run                  # build + run (debug)
+omsc run --release        # build + run (release)
+
+omsc clean                # remove target/debug/
+omsc clean --release      # remove target/release/
+```
+
+Build artifacts land in `target/debug/<name>` or `target/release/<name>`.
+Incremental builds skip recompilation when source content + manifest + profile
+are all unchanged (fingerprinted with FNV-1a).
+
+### Override profile flags on the command line
+
+All codegen flags work on top of the selected profile — they override only the
+fields they match, leaving the rest at their profile defaults:
+
+```bash
+omsc build --release -fno-egraph          # release, but e-graph disabled
+omsc build -O3 -march=znver4              # debug profile at O3 + custom CPU
+omsc build --profile bench -fsuperopt-level=3
+omsc run   --release -fno-superopt        # fastest release without superopt
+```
+
+### oms.toml reference
+
+```toml
+[project]
+name    = "my_app"
+version = "0.1.0"
+entry   = "src/main.om"   # relative to project root
+
+[profile.debug]
+opt_level     = 0
+egraph        = false
+superopt      = false
+debug_info    = true
+whole_program = false
+
+[profile.release]
+opt_level      = 3
+egraph         = true
+superopt       = true
+superopt_level = 2       # 0–3
+whole_program  = true    # whole-program optimizer
+strip          = true
+lto            = false
+fast_math      = false
+
+[dependencies]
+my_lib = "../my_lib"    # local path dependency
+```
+
+### Single-file mode (unchanged)
+
+All existing single-file commands continue to work unchanged:
+
+```bash
+omsc source.om -o output          # compile directly
+omsc run source.om -O3 -fno-egraph
+omsc check source.om
+omsc emit-ir source.om
+```
+
+---
+
 ## Building
 
 ### Prerequisites

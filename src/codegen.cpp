@@ -15,6 +15,7 @@
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
+#include <llvm/IR/ConstantRange.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/MDBuilder.h>
@@ -5269,6 +5270,26 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoSync);
     }
 
+    // Emit range return attribute when a narrowed ValueRange is known for
+    // this function.  The range attribute constrains the return value's
+    // integer interval for LLVM's CVP/LVI passes, enabling tighter bounds
+    // propagation into callers without requiring inlining.
+    // Only applied to i64-returning functions (the primary integer type).
+    // getWithRange requires LLVM 19+.
+#if LLVM_VERSION_MAJOR >= 19
+    if (optCtx_ && function->getReturnType()->isIntegerTy(64)) {
+        if (auto rng = optCtx_->returnRange(func->name)) {
+            if (rng->isNarrowed() && !rng->isEmpty() &&
+                rng->hi < std::numeric_limits<int64_t>::max()) {
+                llvm::APInt apLo(64, static_cast<uint64_t>(rng->lo), /*isSigned=*/true);
+                llvm::APInt apHi(64, static_cast<uint64_t>(rng->hi + 1), /*isSigned=*/true);
+                function->addRetAttr(llvm::Attribute::getWithRange(
+                    *context, llvm::ConstantRange(apLo, apHi)));
+            }
+        }
+    }
+#endif
+
     // @unroll / @nounroll: per-function loop unrolling control.
     // These are stored and applied to every loop emitted within this function.
     currentFuncHintUnroll_ = func->hintUnroll;
@@ -8746,46 +8767,135 @@ static bool exprUsesVar(Expression* expr, const std::string& varName) {
 
 /// Returns true if varName escapes in any statement in the block (from stmtIdx onwards).
 static bool varEscapesInBlock(const BlockStmt* block, const std::string& varName,
-                               size_t startIdx) {
-    for (size_t i = startIdx; i < block->statements.size(); ++i) {
-        const Statement* s = block->statements[i].get();
-        // Return: escapes if returned
-        if (auto* ret = dynamic_cast<const ReturnStmt*>(s)) {
-            if (ret->value && exprUsesVar(ret->value.get(), varName)) return true;
-        }
-        // VarDecl initializer: could be assigned to another variable and passed
-        if (auto* vd = dynamic_cast<const VarDecl*>(s)) {
-            if (vd->initializer && exprUsesVar(vd->initializer.get(), varName)) return true;
-        }
-        // ExprStmt: call args
-        if (auto* es = dynamic_cast<const ExprStmt*>(s)) {
-            if (exprUsesVar(es->expression.get(), varName)) {
-                // Check if it's a call expression with varName as arg
-                if (es->expression->type == ASTNodeType::CALL_EXPR) {
-                    auto* call = static_cast<CallExpr*>(es->expression.get());
-                    for (auto& arg : call->arguments) {
-                        if (exprUsesVar(arg.get(), varName)) return true;
-                    }
+                               size_t startIdx);
+
+/// Returns true if varName appears in a position that causes escape within
+/// any nested statement (if/while/for bodies, etc.)
+static bool varEscapesInStmt(const Statement* s, const std::string& varName) {
+    if (!s) return false;
+    // Return: escapes if returned
+    if (auto* ret = dynamic_cast<const ReturnStmt*>(s)) {
+        return ret->value && exprUsesVar(ret->value.get(), varName);
+    }
+    // VarDecl initializer: could be assigned to another variable and passed
+    if (auto* vd = dynamic_cast<const VarDecl*>(s)) {
+        return vd->initializer && exprUsesVar(vd->initializer.get(), varName);
+    }
+    // ExprStmt: call args or assignment
+    if (auto* es = dynamic_cast<const ExprStmt*>(s)) {
+        if (exprUsesVar(es->expression.get(), varName)) {
+            if (es->expression->type == ASTNodeType::CALL_EXPR) {
+                auto* call = static_cast<CallExpr*>(es->expression.get());
+                for (auto& arg : call->arguments) {
+                    if (exprUsesVar(arg.get(), varName)) return true;
                 }
             }
+            // Assignment of varName to another variable escapes it
+            if (es->expression->type == ASTNodeType::ASSIGN_EXPR) {
+                auto* asgn = static_cast<AssignExpr*>(es->expression.get());
+                if (exprUsesVar(asgn->value.get(), varName)) return true;
+            }
         }
+    }
+    // Recurse into nested control flow so uses inside if/while/for are found.
+    if (auto* blk = dynamic_cast<const BlockStmt*>(s)) {
+        return varEscapesInBlock(blk, varName, 0);
+    }
+    if (auto* ifs = dynamic_cast<const IfStmt*>(s)) {
+        return varEscapesInStmt(ifs->thenBranch.get(), varName) ||
+               varEscapesInStmt(ifs->elseBranch.get(), varName);
+    }
+    if (auto* ws = dynamic_cast<const WhileStmt*>(s)) {
+        return exprUsesVar(ws->condition.get(), varName) ||
+               varEscapesInStmt(ws->body.get(), varName);
+    }
+    if (auto* dws = dynamic_cast<const DoWhileStmt*>(s)) {
+        return exprUsesVar(dws->condition.get(), varName) ||
+               varEscapesInStmt(dws->body.get(), varName);
+    }
+    if (auto* fs = dynamic_cast<const ForStmt*>(s)) {
+        return varEscapesInStmt(fs->body.get(), varName);
+    }
+    if (auto* fes = dynamic_cast<const ForEachStmt*>(s)) {
+        return varEscapesInStmt(fes->body.get(), varName);
+    }
+    return false;
+}
+
+static bool varEscapesInBlock(const BlockStmt* block, const std::string& varName,
+                               size_t startIdx) {
+    for (size_t i = startIdx; i < block->statements.size(); ++i) {
+        if (varEscapesInStmt(block->statements[i].get(), varName)) return true;
     }
     return false;
 }
 
 bool CodeGenerator::doesVarEscapeCurrentScope(const std::string& varName) const {
     if (!currentFuncDecl_ || !currentFuncDecl_->body) return true; // conservative
-    // Find the VarDecl statement index for this variable.
+    // Search all scopes in the function body for the VarDecl of this variable,
+    // then check all subsequent statements (including nested blocks) for escape.
     const BlockStmt* body = currentFuncDecl_->body.get();
-    for (size_t i = 0; i < body->statements.size(); ++i) {
-        const auto* vd = dynamic_cast<const VarDecl*>(body->statements[i].get());
-        if (vd && vd->name == varName) {
-            return varEscapesInBlock(body, varName, i + 1);
+
+    // Helper: recursively find the block containing the VarDecl.
+    // Returns {block, decl_index} if found, or nullopt.
+    std::function<std::optional<std::pair<const BlockStmt*, size_t>>(const BlockStmt*)>
+        findDecl = [&](const BlockStmt* blk)
+            -> std::optional<std::pair<const BlockStmt*, size_t>> {
+        for (size_t i = 0; i < blk->statements.size(); ++i) {
+            const Statement* s = blk->statements[i].get();
+            if (auto* vd = dynamic_cast<const VarDecl*>(s)) {
+                if (vd->name == varName)
+                    return std::make_pair(blk, i);
+            }
+            // Search inside nested blocks.
+            if (auto* nested = dynamic_cast<const BlockStmt*>(s)) {
+                if (auto r = findDecl(nested)) return r;
+            }
+            if (auto* ifs = dynamic_cast<const IfStmt*>(s)) {
+                if (ifs->thenBranch) {
+                    if (auto* tb = dynamic_cast<const BlockStmt*>(ifs->thenBranch.get()))
+                        if (auto r = findDecl(tb)) return r;
+                }
+                if (ifs->elseBranch) {
+                    if (auto* eb = dynamic_cast<const BlockStmt*>(ifs->elseBranch.get()))
+                        if (auto r = findDecl(eb)) return r;
+                }
+            }
+            if (auto* ws = dynamic_cast<const WhileStmt*>(s)) {
+                if (auto* wb = dynamic_cast<const BlockStmt*>(ws->body.get()))
+                    if (auto r = findDecl(wb)) return r;
+            }
+            if (auto* fs = dynamic_cast<const ForStmt*>(s)) {
+                if (auto* fb = dynamic_cast<const BlockStmt*>(fs->body.get()))
+                    if (auto r = findDecl(fb)) return r;
+            }
+            if (auto* fes = dynamic_cast<const ForEachStmt*>(s)) {
+                if (auto* feb = dynamic_cast<const BlockStmt*>(fes->body.get()))
+                    if (auto r = findDecl(feb)) return r;
+            }
         }
+        return {};
+    };
+
+    if (auto found = findDecl(body)) {
+        const BlockStmt* declBlock = found->first;
+        const size_t declIdx = found->second;
+        // Check the rest of the declaring block AND the enclosing function body
+        // for any escaping use after the declaration.
+        if (varEscapesInBlock(declBlock, varName, declIdx + 1)) return true;
+        // If the var was declared in a nested block, also check the rest of
+        // the top-level function body (statements after the containing
+        // if/while/for that holds declBlock) — conservative: just scan all
+        // top-level statements for any use.
+        if (declBlock != body) {
+            return varEscapesInBlock(body, varName, 0);
+        }
+        return false;
     }
-    // Not at top-level: assume it might escape.
+    // Not found: conservative.
     return true;
 }
+
 
 
 

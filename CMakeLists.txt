@@ -84,6 +84,7 @@ set(SRC
     src/egraph_optimizer.cpp
     src/superoptimizer.cpp
     src/hardware_graph.cpp
+    src/polyopt.cpp
 
     # Optimization architecture (orchestrator + unified context)
     src/opt_context.cpp
@@ -93,6 +94,11 @@ set(SRC
     src/preprocessor.cpp
     src/compiler.cpp
     src/main.cpp
+
+    # Build system (project manifest, dependency graph, build orchestrator)
+    src/project.cpp
+    src/build_graph.cpp
+    src/build_system.cpp
 
     # Runtime
     runtime/value.cpp
