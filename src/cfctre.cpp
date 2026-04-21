@@ -169,6 +169,14 @@ void CTValue::appendMemoHash(std::string& out) const {
     case CTValueKind::UNINITIALIZED:
         out.push_back('?');
         return;
+    case CTValueKind::SYMBOLIC: {
+        // Include the symId so that different symbolic variables produce different
+        // cache keys (needed for the partial-specialisation cache).
+        char buf[16];
+        const int n = std::snprintf(buf, sizeof(buf), "SYM:%u", symId);
+        out.append(buf, static_cast<size_t>(n));
+        return;
+    }
     }
     out.push_back('?');
 }
@@ -178,6 +186,19 @@ std::string CTValue::memoHash() const {
     result.reserve(24);                     // typical: "I:-1234567890" fits in SSO
     appendMemoHash(result);
     return result;
+}
+
+// ── Global symbolic-ID counter ────────────────────────────────────────────────
+// Thread-local so different compiler threads never collide on symIds.  We use
+// a simple incrementing counter rather than a global atomic so symId assignment
+// is branch-free and has zero inter-thread contention.
+static thread_local uint32_t g_symIdCounter{0};
+
+CTValue CTValue::symbolic() noexcept {
+    CTValue r;
+    r.kind  = CTValueKind::SYMBOLIC;
+    r.symId = ++g_symIdCounter;
+    return r;
 }
 
 bool CTValue::operator==(const CTValue& o) const noexcept {
@@ -190,6 +211,12 @@ bool CTValue::operator==(const CTValue& o) const noexcept {
     case CTValueKind::CONCRETE_STRING: return str == o.str;
     case CTValueKind::CONCRETE_ARRAY:  return arr == o.arr;
     case CTValueKind::UNINITIALIZED:   return true;
+    case CTValueKind::SYMBOLIC:
+        // Two symbolic values are "equal" iff they refer to the same symbolic
+        // variable (same symId, both non-zero).  This allows the branch-merge
+        // in IF_STMT to avoid re-marking a variable as symbolic when both
+        // branches left it unchanged.
+        return symId != 0 && symId == o.symId;
     }
     return false;
 }
@@ -225,6 +252,7 @@ void CTHeap::store(CTArrayHandle h, int64_t idx, CTValue val) {
     CTArray& arr = it->second;
     if (idx < 0 || static_cast<uint64_t>(idx) >= arr.len) return;
     arr.data[static_cast<size_t>(idx)] = std::move(val);
+    mutableHandles_.insert(h);   // Phase E: mark written
 }
 
 bool CTHeap::push(CTArrayHandle h, CTValue val) {
@@ -233,6 +261,7 @@ bool CTHeap::push(CTArrayHandle h, CTValue val) {
     CTArray& arr = it->second;
     arr.data.push_back(std::move(val));
     ++arr.len;
+    mutableHandles_.insert(h);   // Phase E: mark written
     return true;
 }
 
@@ -247,6 +276,11 @@ bool CTHeap::exists(CTArrayHandle h) const {
 
 void CTHeap::freeArray(CTArrayHandle h) {
     arrays_.erase(h);
+    mutableHandles_.erase(h);   // Phase E: clean up mutability record
+}
+
+bool CTHeap::isImmutable(CTArrayHandle h) const noexcept {
+    return arrays_.count(h) && !mutableHandles_.count(h);
 }
 
 const CTArray* CTHeap::get(CTArrayHandle h) const {
@@ -304,6 +338,11 @@ uint64_t CTEngine::arrayLength(CTArrayHandle h) const {
 CTArrayHandle CTEngine::snapshotArray(CTArrayHandle src) {
     const CTArray* orig = heap_.get(src);
     if (!orig) return CT_NULL_HANDLE;
+    // Phase E: immutable arrays can be aliased directly — no copy needed.
+    // Since no one will ever call store() on an immutable handle, sharing
+    // the underlying data is safe and avoids O(n) heap allocation during
+    // memoisation of large constant arrays.
+    if (heap_.isImmutable(src)) return src;
     const CTArrayHandle dst = heap_.alloc(orig->len);
     CTArray* copy = heap_.getMut(dst);
     copy->data = orig->data;
@@ -477,7 +516,20 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         auto* id = static_cast<const IdentifierExpr*>(e);
         // 1. Local variable (incl. function parameters).
         auto it = frame.locals.find(id->name);
-        if (it != frame.locals.end()) return it->second;
+        if (it != frame.locals.end()) {
+            // If the local is symbolic but we have a branch constraint that
+            // narrows it to an exact concrete value, fold it here.  This
+            // enables constant folding inside if-branch bodies even when the
+            // variable is symbolic in the outer frame.
+            if (it->second.isSymbolic()) {
+                auto cit = frame.constraints.find(id->name);
+                if (cit != frame.constraints.end() && cit->second.isConcrete()) {
+                    ++stats_.constraintFolds;
+                    return CTValue::fromI64(cit->second.lo);
+                }
+            }
+            return it->second;
+        }
         // 2. Enum constant.
         auto eit = enumConsts_.find(id->name);
         if (eit != enumConsts_.end()) return CTValue::fromI64(eit->second);
@@ -688,37 +740,85 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
 CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const CTValue& rhs) {
     if (!lhs.isKnown() || !rhs.isKnown()) return CTValue::uninit();
 
-    // Partial-evaluation: propagate SYMBOLIC through binary ops.
-    // For most ops, one SYMBOLIC operand makes the result SYMBOLIC.
-    // Exceptions (absorbers that yield CONCRETE regardless of the other operand):
-    //   x * 0  = 0,   0 * x  = 0
-    //   x & 0  = 0,   0 & x  = 0
-    //   x ** 0 = 1   (anything to the 0th power = 1)
-    //   x && false = false  (already handled by short-circuit in evalExpr for "&&")
-    //   x || true  = true   (already handled by short-circuit in evalExpr for "||")
+    // ── Algebraic identities (Phase B) ───────────────────────────────────────
+    // When exactly one operand is symbolic and the other is a concrete special
+    // value (identity element or absorbing element), we can fold without needing
+    // to know the value of the symbolic operand.
+    //
+    // These are SEMANTICALLY DERIVED from the algebraic laws, not from pattern
+    // matching on AST structure.  Each rule is annotated with the algebraic
+    // justification.
+    //
+    // Also covers SAME-IDENTITY rules: when both operands are the SAME symbolic
+    // variable (same non-zero symId), certain operations reduce to a constant.
     if (lhs.isSymbolic() || rhs.isSymbolic()) {
+        const bool lSym = lhs.isSymbolic();
+        const bool rSym = rhs.isSymbolic();
+        // Helper lambdas for concise concrete-side checks.
+        auto lInt = [&](int64_t v) { return lhs.isConcrete() && lhs.isInt() && lhs.asI64() == v; };
+        auto rInt = [&](int64_t v) { return rhs.isConcrete() && rhs.isInt() && rhs.asI64() == v; };
+        // Same symbolic variable?
+        const bool sameVar = lSym && rSym && lhs.symId != 0 && lhs.symId == rhs.symId;
+
+        // ── Additive identity: x + 0 = x, 0 + x = x ─────────────────────
+        if (op == "+") {
+            if (lSym && rInt(0)) { ++stats_.algebraicFolds; return lhs; }
+            if (rSym && lInt(0)) { ++stats_.algebraicFolds; return rhs; }
+        }
+        // ── Subtractive: x - 0 = x, x - x = 0 ───────────────────────────
+        if (op == "-") {
+            if (lSym && rInt(0))  { ++stats_.algebraicFolds; return lhs; }
+            if (sameVar)          { ++stats_.algebraicFolds; return CTValue::fromI64(0); }
+        }
+        // ── Multiplicative identity: x * 1 = x, 1 * x = x ───────────────
         if (op == "*") {
             if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
             if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
+            if (lSym && rInt(1))  { ++stats_.algebraicFolds; return lhs; }
+            if (rSym && lInt(1))  { ++stats_.algebraicFolds; return rhs; }
         }
-        if (op == "&") {
-            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
-            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
+        // ── Division identity: x / 1 = x ─────────────────────────────────
+        if (op == "/" || op == "/=") {
+            if (lSym && rInt(1))  { ++stats_.algebraicFolds; return lhs; }
         }
+        // ── Power: x ** 0 = 1, x ** 1 = x ───────────────────────────────
         if (op == "**") {
             if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(1);
+            if (lSym && rInt(1))  { ++stats_.algebraicFolds; return lhs; }
         }
-        // Bitwise OR with all-ones annihilates the other operand → -1.
-        if (op == "|") {
+        // ── Bitwise AND: x & 0 = 0, x & -1 = x, x & x = x ──────────────
+        if (op == "&" || op == "&=") {
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
+            if (lSym && rInt(-1)) { ++stats_.algebraicFolds; return lhs; }
+            if (rSym && lInt(-1)) { ++stats_.algebraicFolds; return rhs; }
+            if (sameVar)          { ++stats_.algebraicFolds; return lhs; }
+        }
+        // ── Bitwise OR: x | 0 = x, x | -1 = -1, x | x = x ──────────────
+        if (op == "|" || op == "|=") {
             if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == -1) return CTValue::fromI64(-1);
             if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == -1) return CTValue::fromI64(-1);
+            if (lSym && rInt(0))  { ++stats_.algebraicFolds; return lhs; }
+            if (rSym && lInt(0))  { ++stats_.algebraicFolds; return rhs; }
+            if (sameVar)          { ++stats_.algebraicFolds; return lhs; }
         }
-        // Modulo by ±1 is always 0, regardless of the dividend.
-        if (op == "%" || op == "mod") {
+        // ── Bitwise XOR: x ^ 0 = x, 0 ^ x = x, x ^ x = 0 ───────────────
+        if (op == "^" || op == "^=") {
+            if (lSym && rInt(0))  { ++stats_.algebraicFolds; return lhs; }
+            if (rSym && lInt(0))  { ++stats_.algebraicFolds; return rhs; }
+            if (sameVar)          { ++stats_.algebraicFolds; return CTValue::fromI64(0); }
+        }
+        // ── Shifts: x >> 0 = x, x << 0 = x, x >>> 0 = x ─────────────────
+        if (op == ">>" || op == ">>=" || op == "<<" || op == "<<=" || op == ">>>") {
+            if (lSym && rInt(0))  { ++stats_.algebraicFolds; return lhs; }
+        }
+        // ── Modulo: x % ±1 = 0 ───────────────────────────────────────────
+        if (op == "%" || op == "mod" || op == "%=") {
             if (rhs.isConcrete() && rhs.isInt() &&
                 (rhs.asI64() == 1 || rhs.asI64() == -1))
                 return CTValue::fromI64(0);
         }
+
         return CTValue::symbolic();
     }
 
@@ -905,7 +1005,38 @@ CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
     auto it = functions_.find(fnName);
     if (it != functions_.end() && it->second &&
         it->second->body && args.size() == it->second->parameters.size()) {
+
+        // ── Phase D: partial-specialisation cache lookup ──────────────────
+        // Before executing, check whether we have a cached concrete result for
+        // this (fnName, arg-pattern) combination.  Covers the case where some
+        // args are symbolic but the function was previously found to produce a
+        // concrete result for this exact mix of concrete/symbolic arguments.
+        const std::string specKey = partialSpecKey(fnName, args);
+        {
+            auto sit = specCache_.find(specKey);
+            if (sit != specCache_.end()) {
+                ++stats_.partialEvalFolds;
+                CTValue cached = sit->second;
+                if (cached.isArray() && cached.arr != CT_NULL_HANDLE)
+                    cached.arr = snapshotArray(cached.arr);
+                return cached;
+            }
+        }
+
         auto result = executeFunction(it->second, args);
+
+        // If the result is concrete and at least one arg was symbolic,
+        // cache in specCache_ so future partial-eval calls hit immediately.
+        if (result && result->isConcrete()) {
+            const bool hasSymbolic = std::any_of(args.begin(), args.end(),
+                                                 [](const CTValue& a){ return a.isSymbolic(); });
+            if (hasSymbolic) {
+                CTValue toCache = *result;
+                if (toCache.isArray() && toCache.arr != CT_NULL_HANDLE)
+                    toCache.arr = snapshotArray(toCache.arr);
+                specCache_[specKey] = std::move(toCache);
+            }
+        }
         return result.value_or(CTValue::uninit());
     }
 
@@ -2565,12 +2696,19 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             // Fork A: then-branch.
             CTFrame thenF = frame;
             thenF.hasReturned = false; thenF.didBreak = false; thenF.didContinue = false;
+            // Narrow variable ranges inside each branch based on the branch condition.
+            // E.g., if cond is (x > 5) we add x → [6, INT64_MAX] to thenF.constraints
+            // and x → [INT64_MIN, 5] to elseF.constraints.  These constraints are used
+            // in IDENTIFIER_EXPR to resolve symbolic variables to concrete values when
+            // the interval narrows to a single point.
+            CTFrame elsePreF = frame;   // pre-narrow else frame (shared setup)
+            elsePreF.hasReturned = false; elsePreF.didBreak = false; elsePreF.didContinue = false;
+            narrowBranchConstraints(ifs->condition.get(), thenF, elsePreF);
             bool thenOk = evalStmt(thenF, ifs->thenBranch.get());
             const int64_t fuelAfterThen = fuel_;
 
-            // Fork B: else-branch (or identity if absent).
-            CTFrame elseF = frame;
-            elseF.hasReturned = false; elseF.didBreak = false; elseF.didContinue = false;
+            // Fork B: else-branch (already narrowed by narrowBranchConstraints above).
+            CTFrame& elseF = elsePreF;
             fuel_ = savedFuel;
             bool elseOk = true;
             if (ifs->elseBranch)
@@ -2956,6 +3094,128 @@ void CTEngine::executeTile(CTFrame& frame,
 
         frame.didContinue = false;
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTEngine::narrowBranchConstraints
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Given the condition expression of an if-statement and two frame copies
+// (then-branch frame and else-branch frame), this function extracts simple
+// linear inequality/equality constraints on named variables and adds them to
+// the respective frame's constraint maps.
+//
+// Supported patterns (LHS must be a variable identifier, RHS a concrete int):
+//   var op literal       e.g.  x < 10,  y == 5
+//   literal op var       e.g.  0 < x   (equivalent to x > 0)
+//
+// The constraint is expressed as a CTInterval and stored in
+//   frame.constraints[varName]
+// which is checked in evalExpr IDENTIFIER_EXPR to fold the symbolic variable
+// to its concrete value when the interval is a single point.
+void CTEngine::narrowBranchConstraints(const Expression* cond,
+                                        CTFrame& thenF,
+                                        CTFrame& elseF) const
+{
+    if (!cond || cond->type != ASTNodeType::BINARY_EXPR) return;
+    auto* bin = static_cast<const BinaryExpr*>(cond);
+    const std::string& op = bin->op;
+
+    // Only handle simple comparison operators.
+    static const std::unordered_set<std::string> kCmpOps{
+        "==", "!=", "<", "<=", ">", ">="
+    };
+    if (!kCmpOps.count(op)) return;
+
+    // Determine which side is a variable identifier and which side is concrete.
+    const Expression* varSide  = nullptr;
+    const Expression* valSide  = nullptr;
+    std::string       effectiveOp = op; // may be flipped for symmetry
+
+    if (bin->left->type  == ASTNodeType::IDENTIFIER_EXPR &&
+        bin->right->type == ASTNodeType::LITERAL_EXPR) {
+        varSide = bin->left.get();
+        valSide = bin->right.get();
+    } else if (bin->right->type == ASTNodeType::IDENTIFIER_EXPR &&
+               bin->left->type  == ASTNodeType::LITERAL_EXPR) {
+        varSide = bin->right.get();
+        valSide = bin->left.get();
+        // Flip operator for `literal op var` → `var flipped(op) literal`.
+        if (op == "<")  effectiveOp = ">";
+        else if (op == "<=") effectiveOp = ">=";
+        else if (op == ">")  effectiveOp = "<";
+        else if (op == ">=") effectiveOp = "<=";
+        // == and != are symmetric
+    } else {
+        return; // complex expression — skip
+    }
+
+    auto* id  = static_cast<const IdentifierExpr*>(varSide);
+    auto* lit = static_cast<const LiteralExpr*>(valSide);
+    if (lit->literalType != LiteralExpr::LiteralType::INTEGER) return;
+
+    const std::string& varName = id->name;
+    const int64_t      bound   = static_cast<int64_t>(lit->intValue);
+
+    // Start from the widest possible interval and narrow.
+    const CTInterval full = CTInterval::top();
+    CTInterval thenIv, elseIv;
+
+    if (effectiveOp == "==") {
+        thenIv = full.narrowEQ(bound);
+        elseIv = full.narrowNE(bound);
+    } else if (effectiveOp == "!=") {
+        thenIv = full.narrowNE(bound);
+        elseIv = full.narrowEQ(bound);
+    } else if (effectiveOp == "<") {
+        thenIv = full.narrowLT(bound);
+        elseIv = full.narrowGE(bound);
+    } else if (effectiveOp == "<=") {
+        thenIv = full.narrowLE(bound);
+        elseIv = full.narrowGT(bound);
+    } else if (effectiveOp == ">") {
+        thenIv = full.narrowGT(bound);
+        elseIv = full.narrowLE(bound);
+    } else if (effectiveOp == ">=") {
+        thenIv = full.narrowGE(bound);
+        elseIv = full.narrowLT(bound);
+    } else {
+        return;
+    }
+
+    // Only store non-top constraints (storing TOP is a no-op).
+    if (!thenIv.isTop() && !thenIv.isBottom())
+        thenF.constraints[varName] = thenIv;
+    if (!elseIv.isTop() && !elseIv.isBottom())
+        elseF.constraints[varName] = elseIv;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTEngine::partialSpecKey
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Builds a partial-specialization cache key for the given (fnName, args) pair.
+// Unlike memoCache_ (which only stores results for all-concrete args), the
+// specCache_ stores concrete results even when some args are symbolic —
+// as long as the result is concrete.  Two calls with the same fnName and the
+// SAME concrete values for concrete positions AND the SAME symIds for symbolic
+// positions will produce the same key.
+//
+// Format: "fnName|H1,H2,...Hn" where Hi is:
+//   - memoHash() for concrete args
+//   - "SYM:id" for symbolic args (so sym-3 != sym-7 but two uses of sym-3 agree)
+std::string CTEngine::partialSpecKey(const std::string& fnName,
+                                      const std::vector<CTValue>& args) const
+{
+    std::string key;
+    key.reserve(fnName.size() + args.size() * 16 + 2);
+    key.append(fnName);
+    key.push_back('|');
+    for (const auto& a : args) {
+        a.appendMemoHash(key);   // handles SYMBOLIC via the symId path added in Phase A
+        key.push_back(',');
+    }
+    return key;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3430,6 +3690,149 @@ void CTEngine::runPass(const Program* program) {
     // global-const information is fully populated before we start deriving
     // abstract values for each function.
     runAbstractInterpretation(program);
+
+    // ── Phase 10: inter-call-site pre-evaluation ──────────────────────────
+    //
+    // Walk every function body looking for call expressions whose arguments
+    // are all compile-time constants (integer/float/string literals, or names
+    // registered in globalConsts_/enumConsts_) calling a pure user function.
+    // For each such call site we evaluate the callee immediately, populating
+    // memoCache_ so that the codegen's call-site folding (which also goes
+    // through executeFunction) gets instant cache hits rather than re-executing.
+    //
+    // This is more aggressive than Phase 4 (zero-arg functions only) and
+    // complements Phase 7 (symbolic-arg uniform-return detection): it covers
+    // all-concrete multi-arg calls without requiring the codegen to drive the
+    // evaluation.
+    //
+    // The walk reuses the Phase 5 call-expression visitor pattern.
+    {
+        // Helper: try to resolve a single expression to a CTValue using only
+        // the already-known constants (no frame execution — just literal and
+        // global/enum lookup).  Returns nullopt for anything more complex.
+        auto tryResolveLiteral = [&](const Expression* ex) -> std::optional<CTValue> {
+            if (!ex) return std::nullopt;
+            if (ex->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<const LiteralExpr*>(ex);
+                if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
+                    return CTValue::fromI64(static_cast<int64_t>(lit->intValue));
+                if (lit->literalType == LiteralExpr::LiteralType::FLOAT)
+                    return CTValue::fromF64(lit->floatValue);
+                return CTValue::fromString(lit->stringValue);
+            }
+            if (ex->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* id = static_cast<const IdentifierExpr*>(ex);
+                auto git = globalConsts_.find(id->name);
+                if (git != globalConsts_.end() && git->second.isConcrete())
+                    return git->second;
+                auto eit = enumConsts_.find(id->name);
+                if (eit != enumConsts_.end())
+                    return CTValue::fromI64(eit->second);
+            }
+            if (ex->type == ASTNodeType::SCOPE_RESOLUTION_EXPR) {
+                auto* sr = static_cast<const ScopeResolutionExpr*>(ex);
+                const std::string flat = sr->scopeName + "_" + sr->memberName;
+                auto eit = enumConsts_.find(flat);
+                if (eit != enumConsts_.end()) return CTValue::fromI64(eit->second);
+            }
+            return std::nullopt;
+        };
+
+        std::function<void(const Expression*)> walkCallSites = [&](const Expression* ex) {
+            if (!ex) return;
+            if (ex->type == ASTNodeType::CALL_EXPR) {
+                auto* call = static_cast<const CallExpr*>(ex);
+                // Only handle calls to registered pure user functions.
+                if (pureFunctions_.count(call->callee) && functions_.count(call->callee)) {
+                    std::vector<CTValue> resolvedArgs;
+                    resolvedArgs.reserve(call->arguments.size());
+                    bool allConcrete = true;
+                    for (auto& arg : call->arguments) {
+                        auto v = tryResolveLiteral(arg.get());
+                        if (!v) { allConcrete = false; break; }
+                        resolvedArgs.push_back(*v);
+                    }
+                    if (allConcrete) {
+                        // Evaluate with concrete args; result will be stored in memoCache_.
+                        auto result = executeFunction(call->callee, resolvedArgs);
+                        if (result) ++stats_.callSitesFolded;
+                    }
+                }
+                for (auto& arg : call->arguments) walkCallSites(arg.get());
+                return;
+            }
+            // Recurse into sub-expressions.
+            switch (ex->type) {
+            case ASTNodeType::BINARY_EXPR: {
+                auto* b = static_cast<const BinaryExpr*>(ex);
+                walkCallSites(b->left.get()); walkCallSites(b->right.get()); break; }
+            case ASTNodeType::UNARY_EXPR: {
+                auto* u = static_cast<const UnaryExpr*>(ex);
+                walkCallSites(u->operand.get()); break; }
+            case ASTNodeType::TERNARY_EXPR: {
+                auto* t = static_cast<const TernaryExpr*>(ex);
+                walkCallSites(t->condition.get()); walkCallSites(t->thenExpr.get());
+                walkCallSites(t->elseExpr.get()); break; }
+            case ASTNodeType::INDEX_EXPR: {
+                auto* i = static_cast<const IndexExpr*>(ex);
+                walkCallSites(i->array.get()); walkCallSites(i->index.get()); break; }
+            case ASTNodeType::ARRAY_EXPR: {
+                auto* a = static_cast<const ArrayExpr*>(ex);
+                for (auto& el : a->elements) walkCallSites(el.get()); break; }
+            case ASTNodeType::ASSIGN_EXPR: {
+                auto* a = static_cast<const AssignExpr*>(ex);
+                walkCallSites(a->value.get()); break; }
+            default: break;
+            }
+        };
+
+        std::function<void(const Statement*)> walkStmtCallSites = [&](const Statement* st) {
+            if (!st) return;
+            switch (st->type) {
+            case ASTNodeType::EXPR_STMT:
+                walkCallSites(static_cast<const ExprStmt*>(st)->expression.get()); break;
+            case ASTNodeType::RETURN_STMT:
+                walkCallSites(static_cast<const ReturnStmt*>(st)->value.get()); break;
+            case ASTNodeType::VAR_DECL:
+                walkCallSites(static_cast<const VarDecl*>(st)->initializer.get()); break;
+            case ASTNodeType::BLOCK:
+                for (auto& s2 : static_cast<const BlockStmt*>(st)->statements)
+                    walkStmtCallSites(s2.get()); break;
+            case ASTNodeType::IF_STMT: {
+                auto* ifs = static_cast<const IfStmt*>(st);
+                walkCallSites(ifs->condition.get());
+                walkStmtCallSites(ifs->thenBranch.get());
+                walkStmtCallSites(ifs->elseBranch.get()); break; }
+            case ASTNodeType::FOR_STMT: {
+                auto* fs = static_cast<const ForStmt*>(st);
+                walkCallSites(fs->start.get()); walkCallSites(fs->end.get());
+                if (fs->step) walkCallSites(fs->step.get());
+                walkStmtCallSites(fs->body.get()); break; }
+            case ASTNodeType::WHILE_STMT: {
+                auto* ws = static_cast<const WhileStmt*>(st);
+                walkCallSites(ws->condition.get());
+                walkStmtCallSites(ws->body.get()); break; }
+            case ASTNodeType::FOR_EACH_STMT: {
+                auto* fes = static_cast<const ForEachStmt*>(st);
+                walkCallSites(fes->collection.get());
+                walkStmtCallSites(fes->body.get()); break; }
+            case ASTNodeType::SWITCH_STMT: {
+                auto* sw = static_cast<const SwitchStmt*>(st);
+                walkCallSites(sw->condition.get());
+                for (auto& c : sw->cases) {
+                    if (c.value) walkCallSites(c.value.get());
+                    for (auto& bs : c.body) walkStmtCallSites(bs.get()); }
+                break; }
+            default: break;
+            }
+        };
+
+        for (auto& fn : program->functions) {
+            if (!fn->body) continue;
+            for (auto& stmt : fn->body->statements)
+                walkStmtCallSites(stmt.get());
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

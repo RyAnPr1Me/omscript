@@ -276,6 +276,7 @@ struct CTValue {
 
     std::string   str;                      ///< Valid when kind == CONCRETE_STRING
     CTArrayHandle arr{CT_NULL_HANDLE};      ///< Valid when kind == CONCRETE_ARRAY
+    uint32_t      symId{0};                 ///< Non-zero for SYMBOLIC values; unique per created symbolic
 
     // ── Factory helpers ───────────────────────────────────────────────────
     static CTValue fromU64(uint64_t v)    noexcept;
@@ -285,7 +286,7 @@ struct CTValue {
     static CTValue fromString(std::string s);
     static CTValue fromArray(CTArrayHandle h) noexcept;
     static CTValue uninit()    noexcept { return CTValue{}; }
-    static CTValue symbolic()  noexcept { CTValue r; r.kind = CTValueKind::SYMBOLIC; return r; }
+    static CTValue symbolic()  noexcept; ///< Returns a fresh symbolic value with unique symId
 
     // ── Kind predicates ───────────────────────────────────────────────────
     bool isKnown()     const noexcept { return kind != CTValueKind::UNINITIALIZED; }
@@ -359,6 +360,10 @@ public:
     /// True if the handle is valid (was allocated and not freed).
     bool exists(CTArrayHandle h) const;
 
+    /// True if no store() or push() has been called on this handle since alloc().
+    /// Immutable arrays can be safely aliased (snapshotArray is a no-op for them).
+    bool isImmutable(CTArrayHandle h) const noexcept;
+
     /// Free array `h`; future accesses return uninit.
     void freeArray(CTArrayHandle h);
 
@@ -374,6 +379,8 @@ private:
     /// over handles, which matters for snapshot/serialisation of heap state.
     std::map<CTArrayHandle, CTArray> arrays_;
     uint64_t nextHandle_{1};
+    /// Handles that have been mutated via store() or push() after alloc().
+    std::unordered_set<CTArrayHandle> mutableHandles_;
 };
 
 // ─── CTFrame ─────────────────────────────────────────────────────────────────
@@ -400,6 +407,11 @@ struct CTFrame {
     /// Used as implicit return for `comptime { expr; }` blocks.
     CTValue lastBareExpr;
     bool    hasLastBare{false};
+
+    /// Constraint set: varName → narrow interval from the branch condition that
+    /// led into this frame path.  Applied in IDENTIFIER_EXPR to concretise symbolic
+    /// variables whose range has been narrowed to a single value.
+    std::unordered_map<std::string, CTInterval> constraints;
 };
 
 // ─── Memoisation key ─────────────────────────────────────────────────────────
@@ -551,6 +563,11 @@ public:
         int64_t safeArrayAccesses{0};           ///< Q5: array accesses proven in-bounds
         int64_t safeDivisions{0};               ///< Q5: divisions proven non-zero divisor
         int64_t cheaperRewritesFound{0};        ///< Q4: range-conditioned strength reductions
+        // Phase A/B/C/D/F additional stats
+        int64_t algebraicFolds{0};              ///< Algebraic identity simplifications (x+0, x-x, etc.)
+        int64_t constraintFolds{0};             ///< Branch-constraint folds (symbolic → concrete from narrowing)
+        int64_t partialEvalFolds{0};            ///< Partial specialisation cache hits
+        int64_t callSitesFolded{0};             ///< Phase 10: literal call sites pre-evaluated
     };
     const Stats& stats()      const noexcept { return stats_; }
     void         resetStats()       noexcept { stats_ = {}; }
@@ -693,6 +710,11 @@ private:
 
     /// Memoisation cache: CTMemoKey → snapshot CTValue.
     std::unordered_map<CTMemoKey, CTValue, CTMemoKeyHash> memoCache_;
+
+    /// Partial-specialization cache: partialSpecKey → concrete CTValue.
+    /// Caches concrete results produced when some args are symbolic,
+    /// keyed by fnName + per-arg pattern (concrete hash OR symId for symbolic args).
+    std::unordered_map<std::string, CTValue> specCache_;
 
     /// Recursion depth guard.
     int currentDepth_{0};
