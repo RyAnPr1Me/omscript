@@ -629,12 +629,28 @@ std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
         const auto& bucket = classesByOp_[opIdx];
         if (bucket.empty()) return results;  // no classes contain this op
 
-        std::vector<bool> seen(classes_.size(), false);
+        // Generation-stamped dedup: avoids the per-call O(N) allocate-
+        // and-fill of a `vector<bool>`.  With ~hundreds of rules per
+        // saturation iteration and tens of thousands of e-classes, the
+        // old fresh-vector-per-call cost compounded; the stamped buffer
+        // grows once and is reused across every match() call for the
+        // lifetime of the EGraph.
+        if (matchSeen_.size() < classes_.size()) {
+            matchSeen_.resize(classes_.size(), 0);
+        }
+        if (++matchSeenGen_ == 0) {
+            // Generation wrapped — clear once and restart at 1.
+            std::fill(matchSeen_.begin(), matchSeen_.end(), 0);
+            matchSeenGen_ = 1;
+        }
+        const uint32_t gen = matchSeenGen_;
+
         for (ClassId raw : bucket) {
             if (raw >= classes_.size()) continue;
             ClassId canonical = const_cast<EGraph*>(this)->find(raw);
-            if (canonical >= seen.size() || seen[canonical]) continue;
-            seen[canonical] = true;
+            if (canonical >= matchSeen_.size()) continue;
+            if (matchSeen_[canonical] == gen) continue;
+            matchSeen_[canonical] = gen;
 
             Subst subst;
             if (matchClassCommutative(pat, canonical, subst)) {

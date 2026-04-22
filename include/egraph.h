@@ -483,6 +483,16 @@ private:
     static constexpr size_t kNumOps = static_cast<size_t>(Op::Nop) + 1;
     std::array<std::vector<ClassId>, kNumOps> classesByOp_;
 
+    /// Generation-stamped scratch buffer used by `match()` (and any other
+    /// per-call de-dup over canonical class ids) to avoid the per-call
+    /// `std::vector<bool>(classes_.size(), false)` allocate-and-fill.  The
+    /// buffer grows monotonically; each call bumps `matchSeenGen_` and
+    /// considers an entry "seen" iff it equals the current generation.
+    /// On generation overflow we zero the buffer once and reset the
+    /// counter.  Mutable because `match()` is `const`.
+    mutable std::vector<uint32_t> matchSeen_;
+    mutable uint32_t              matchSeenGen_ = 0;
+
     /// Cheap O(1) test for "does the e-graph contain at least one
     /// e-class with a node of op `op`?" — used by `applyRules` to skip
     /// rules whose LHS root op cannot possibly match.  Buckets are
