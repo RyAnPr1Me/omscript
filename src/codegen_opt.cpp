@@ -2559,6 +2559,50 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
         opt.DataSections = true;
     }
 
+    // ── Machine-level interprocedural / outlining optimizations ────────────
+    // EnableMachineOutliner (O2+):
+    //   The MachineOutliner pass (run after register allocation) scans the
+    //   module for repeated machine-instruction sequences across functions
+    //   and replaces them with calls to a shared outlined helper.  This
+    //   shrinks the .text segment, improves i-cache density, and is purely
+    //   semantics-preserving — it operates on already-codegen'd MachineIR
+    //   so it cannot change program behavior.  Mature on x86-64 and AArch64
+    //   in LLVM ≥14; off-by-default upstream only because some embedded
+    //   targets historically lacked support.  Pairs naturally with the
+    //   FunctionSections layout enabled above: the linker can place the
+    //   outlined helper near its hottest caller.
+    //
+    // EnableMachineFunctionSplitter (O2+ with PGO-use):
+    //   At MachineFunction lowering, splits each function into a hot
+    //   `.text.hot.<name>` and a cold `.text.unlikely.<name>` section
+    //   based on profile-derived block frequencies.  Cold blocks (error
+    //   handlers, slow paths) are physically separated so the hot path
+    //   uses contiguous cache lines.  Requires PGO data to be meaningful;
+    //   only enable when `--pgo-use=` was supplied.
+    //
+    // EnableIPRA (O3):
+    //   Interprocedural Register Allocation.  The backend computes the
+    //   actual register-clobber set of each function (rather than the
+    //   conservative ABI clobber list) and propagates it to callers, so
+    //   the register allocator can keep values live in callee-saved
+    //   registers across calls that don't actually touch them.  Eliminates
+    //   caller-save spill/reload pairs around small leaf calls — a real
+    //   IPC win on call-heavy compute code.  Restricted to O3 because the
+    //   bottom-up call-graph traversal during MI lowering adds compile
+    //   time, and because it requires the whole module to be available
+    //   (incompatible with separate-compilation linking semantics if any
+    //   call escapes to an external function — the backend handles that
+    //   correctly by falling back to ABI clobbers for unknown callees).
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        opt.EnableMachineOutliner = true;
+        if (!pgoUsePath_.empty()) {
+            opt.EnableMachineFunctionSplitter = true;
+        }
+    }
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        opt.EnableIPRA = true;
+    }
+
     const std::optional<llvm::Reloc::Model> RM = usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
 
     std::string cpu;
