@@ -5096,7 +5096,19 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     FPMMax.addPass(llvm::DSEPass());
     FPMMax.addPass(llvm::MemCpyOptPass());
     FPMMax.addPass(llvm::NewGVNPass());
-    FPMMax.addPass(llvm::InstSimplifyPass());
+    // After NewGVN merges values from across the unrolled/vectorized body,
+    // many new InstCombine-foldable patterns appear: redundant bitcasts and
+    // truncs around vector operands, equivalent-but-syntactically-different
+    // expressions, and fused-arith opportunities from now-CSE'd subterms.
+    // The previous pipeline ran only InstSimplify here, which is strictly
+    // weaker than InstCombine (it does not rewrite — only constant-folds and
+    // matches a small set of identities), so it left these patterns on the
+    // table.  VectorCombine then cleans up the insertelement/extractelement
+    // chains that the SLP/LoadStoreVectorizer produced in Phase 4 once
+    // NewGVN has de-duplicated their operands, which is exactly when those
+    // chains become foldable.
+    FPMMax.addPass(llvm::InstCombinePass());
+    FPMMax.addPass(llvm::VectorCombinePass());
     FPMMax.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
     FPMMax.addPass(llvm::LoopSinkPass());
     FPMMax.addPass(llvm::ADCEPass());
