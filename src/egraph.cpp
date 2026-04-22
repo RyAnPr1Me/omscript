@@ -865,9 +865,15 @@ void EGraph::foldConstants(ClassId cls) {
         // on real programs (most classes hold only Var/Const/Call/etc.).
         //
         // Buckets are append-only and may carry stale or duplicate ids;
-        // canonicalise via `find()` and de-duplicate per iteration with
-        // a `std::vector<bool>` sized to the current class count — same
-        // discipline as `match()`.
+        // canonicalise via `find()` and de-duplicate per iteration using
+        // the same generation-stamped scratch buffer that `match()` uses.
+        // Reuse is sound: this folding pass runs between applyRules() and
+        // rebuild(), and applyRules() has fully returned by now — there
+        // is no concurrent matcher invocation that could observe a
+        // mid-pass generation.  This eliminates the per-iteration
+        // `vector<bool>(classes_.size(), false)` allocate-and-fill, which
+        // on programs with tens of thousands of e-classes was a measurable
+        // share of saturate()'s overhead.
         if (config_.enableConstantFolding) {
             static constexpr Op kFoldableOps[] = {
                 // Binary arithmetic / bitwise / comparison
@@ -877,7 +883,14 @@ void EGraph::foldConstants(ClassId cls) {
                 // Unary
                 Op::Neg, Op::BitNot, Op::LogNot,
             };
-            std::vector<bool> seen(classes_.size(), false);
+            if (matchSeen_.size() < classes_.size()) {
+                matchSeen_.resize(classes_.size(), 0);
+            }
+            if (++matchSeenGen_ == 0) {
+                std::fill(matchSeen_.begin(), matchSeen_.end(), 0);
+                matchSeenGen_ = 1;
+            }
+            const uint32_t gen = matchSeenGen_;
             for (Op op : kFoldableOps) {
                 const auto idx = static_cast<size_t>(op);
                 if (idx >= classesByOp_.size()) continue;
@@ -885,8 +898,9 @@ void EGraph::foldConstants(ClassId cls) {
                 for (ClassId raw : bucket) {
                     if (raw >= classes_.size()) continue;
                     ClassId canonical = find(raw);
-                    if (canonical >= seen.size() || seen[canonical]) continue;
-                    seen[canonical] = true;
+                    if (canonical >= matchSeen_.size()) continue;
+                    if (matchSeen_[canonical] == gen) continue;
+                    matchSeen_[canonical] = gen;
                     foldConstants(canonical);
                 }
             }
