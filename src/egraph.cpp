@@ -840,11 +840,38 @@ void EGraph::foldConstants(ClassId cls) {
 
         size_t merges = applyRules(rules);
 
-        // Constant folding pass
+        // ── Constant folding pass — bucket-driven ──────────────────────
+        // Only e-classes containing at least one foldable op can possibly
+        // fold this iteration.  Walking the targeted op buckets via the
+        // per-op class index built in `add()`/`merge()` replaces the old
+        // O(num_classes) scan with O(sum of foldable-op bucket sizes),
+        // which is typically a small fraction of the total class count
+        // on real programs (most classes hold only Var/Const/Call/etc.).
+        //
+        // Buckets are append-only and may carry stale or duplicate ids;
+        // canonicalise via `find()` and de-duplicate per iteration with
+        // a `std::vector<bool>` sized to the current class count — same
+        // discipline as `match()`.
         if (config_.enableConstantFolding) {
-            for (ClassId i = 0; i < classes_.size(); ++i) {
-                if (find(i) == i) {
-                    foldConstants(i);
+            static constexpr Op kFoldableOps[] = {
+                // Binary arithmetic / bitwise / comparison
+                Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Mod,
+                Op::BitAnd, Op::BitOr, Op::BitXor, Op::Shl, Op::Shr,
+                Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge,
+                // Unary
+                Op::Neg, Op::BitNot, Op::LogNot,
+            };
+            std::vector<bool> seen(classes_.size(), false);
+            for (Op op : kFoldableOps) {
+                const auto idx = static_cast<size_t>(op);
+                if (idx >= classesByOp_.size()) continue;
+                const auto& bucket = classesByOp_[idx];
+                for (ClassId raw : bucket) {
+                    if (raw >= classes_.size()) continue;
+                    ClassId canonical = find(raw);
+                    if (canonical >= seen.size() || seen[canonical]) continue;
+                    seen[canonical] = true;
+                    foldConstants(canonical);
                 }
             }
         }
