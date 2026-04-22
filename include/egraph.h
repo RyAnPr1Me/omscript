@@ -494,13 +494,20 @@ private:
     /// Internal: constant folding pass on an e-class.
     void foldConstants(ClassId cls);
 
-    /// Internal: extract helper returning cost + best node per class.
+public:
+    /// Extract helper returning cost + best node per class.
     ///
     /// The extractor selects, for each e-class, the e-node that minimises
     /// the **effective cost** — a linear combination of latency cost and
     /// spill penalty derived from estimated register pressure.  When the
     /// host cost model has `spillPenalty == 0` or `regBudget == 0`, the
     /// pressure terms drop out and selection is purely latency-driven.
+    ///
+    /// Made public so that the AST bridge in `egraph_optimizer.cpp` can
+    /// call `extractAll(root, model)` exactly once and reuse the
+    /// resulting per-class best-node map for the linear-time recursive
+    /// AST conversion.  The previous flow re-ran extractAll for every
+    /// visited class via `EGraph::extract`, yielding O(N²) behaviour.
     struct ExtractionResult {
         Cost cost;          ///< Pure latency cost (sum of node + children costs,
                             ///< with DAG-sharing discount applied).
