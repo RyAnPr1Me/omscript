@@ -155,6 +155,10 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
     } else if (node.op == Op::ConstF) {
         cls.isNonNeg = (node.fvalue >= 0.0);
         cls.isFloat = true;
+        // `isInt` defaults to false; explicitly noted here so the
+        // mutual exclusivity with the `Op::Const` branch above is
+        // clear at the point of declaration.
+        cls.isInt = false;
     } else if (node.children.size() >= 2) {
         // Propagate isNonNeg through operations where it's provable.
         // This is critical for relational rules (div_pow2_nonneg,
@@ -623,6 +627,7 @@ std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
         const auto opIdx = static_cast<size_t>(pat.op);
         if (opIdx >= classesByOp_.size()) return results;
         const auto& bucket = classesByOp_[opIdx];
+        if (bucket.empty()) return results;  // no classes contain this op
 
         std::vector<bool> seen(classes_.size(), false);
         for (ClassId raw : bucket) {
@@ -792,6 +797,18 @@ void EGraph::foldConstants(ClassId cls) {
 
     for (const auto& rule : rules) {
         if (atNodeLimit()) break;
+
+        // ── Op-bucket early-skip ────────────────────────────────────────
+        // If the rule's LHS root is an OpMatch and no e-class contains a
+        // node of that op, the rule cannot possibly produce any matches.
+        // `match()` would discover this internally and return an empty
+        // vector, but we save the function-call overhead and the empty-
+        // vector allocation by checking the bucket directly.  This is a
+        // measurable win on rule libraries with hundreds of fp_* /
+        // strength-reduction rules where most ops are absent in any
+        // given expression.
+        if (rule.lhs.kind == Pattern::Kind::OpMatch && !hasOp(rule.lhs.op))
+            continue;
 
         auto matches = match(rule.lhs);
         for (auto& [cls, subst] : matches) {
@@ -1286,20 +1303,23 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
                 }
                 if (!ancestorsOk) continue;
 
-                // ── OP-COMPATIBILITY GUARD ──
-                // E-class membership is supposed to imply semantic
-                // equivalence across all ops, but some upstream
-                // rewriters in this codebase occasionally insert nodes
-                // whose op is type-incorrect for the value the class
-                // represents (e.g. an integer `<<` shift node alongside
-                // float `*2.0` after associative rewrites).  Flipping to
-                // such a node compiles into a downstream type error.
-                // Until the rewriter's type-soundness invariant is
-                // tightened, restrict refinement to candidates that
-                // share the latency-best pick's primary op — this still
-                // captures the common register-pressure win (commuted
-                // operand orderings of the same op) while sidestepping
-                // the type-mixing hazard.
+                // ── OP-COMPATIBILITY GUARD (defence-in-depth) ──
+                // The fp_*-rule type-soundness invariant is now enforced
+                // upstream by `EClass::isFloat` propagation and the
+                // float-rule guard installed in `getAllRules()`, so a
+                // class will not normally contain a mix of integer and
+                // float-typed nodes.  This guard is *kept* as a
+                // defence-in-depth measure: it ensures that even if a
+                // future rewrite rule re-introduces such a mix (for
+                // example a hypothetical mixed-int-float distribute
+                // rule), refinement will not flip to a candidate whose
+                // op or arity differs from the latency-best pick.
+                // Together with the SCC + ancestor checks above, this
+                // also bounds the candidate selection DAG: refinement
+                // only picks among same-op same-arity nodes that all
+                // sit in strictly-earlier SCCs, so the resulting
+                // selection graph is provably acyclic and same-shape
+                // with the latency-only baseline.
                 if (node.op != curIt->second.bestNode.op) continue;
                 if (node.children.size()
                     != curIt->second.bestNode.children.size()) continue;

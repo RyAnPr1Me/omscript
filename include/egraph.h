@@ -483,6 +483,17 @@ private:
     static constexpr size_t kNumOps = static_cast<size_t>(Op::Nop) + 1;
     std::array<std::vector<ClassId>, kNumOps> classesByOp_;
 
+    /// Cheap O(1) test for "does the e-graph contain at least one
+    /// e-class with a node of op `op`?" — used by `applyRules` to skip
+    /// rules whose LHS root op cannot possibly match.  Buckets are
+    /// append-only so a non-empty bucket is sufficient even if some
+    /// entries are stale (the appended id was the canonical class at
+    /// add-time and is still reachable via `find()`).
+    bool hasOp(Op op) const noexcept {
+        const auto idx = static_cast<size_t>(op);
+        return idx < classesByOp_.size() && !classesByOp_[idx].empty();
+    }
+
     /// Canonicalize an ENode's children to use canonical class IDs.
     ENode canonicalize(ENode node) const;
 
