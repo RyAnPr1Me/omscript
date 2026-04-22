@@ -404,6 +404,106 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // Builtins are accepted whether they were parsed as std::foo() or bare
     // foo() to preserve compatibility with existing programs and tests.
 
+    // ── alloc<T>(x) — compile-time smart allocator ───────────────────────────
+    // Syntax: alloc<T>(count)  where T is a type and count is the element count.
+    // Returns a ptr<T> pointing to `count` contiguous elements of type T.
+    //
+    // Allocation policy (decided entirely at compile time — no runtime branch):
+    //   • count is a compile-time constant AND count*sizeof(T) ≤ 4096 bytes
+    //     → stack allocation via alloca in the function entry block.
+    //       The alloca is aligned to the type's ABI alignment.
+    //   • otherwise (dynamic count or too large) → heap via malloc or
+    //     aligned_alloc when ABI alignment > 16 bytes.
+    //
+    // Because the decision is made during IR emission (before any runtime code
+    // runs), there is zero branch overhead and the allocator choice is visible
+    // to all LLVM optimization passes (LICM, alias analysis, DSE, etc.).
+    if (expr->callee.size() > 6 &&
+        expr->callee.rfind("alloc<", 0) == 0 && expr->callee.back() == '>') {
+        const std::string elemTypeName = expr->callee.substr(6, expr->callee.size() - 7);
+        llvm::Type* elemTy = resolveAnnotatedType(elemTypeName);
+        const llvm::DataLayout& DL = module->getDataLayout();
+        const uint64_t elemSize  = DL.getTypeAllocSize(elemTy);
+        const llvm::Align elemAlign = DL.getABITypeAlign(elemTy);
+
+        if (expr->arguments.size() != 1)
+            codegenError("alloc<T> expects exactly one argument (element count)", expr);
+
+        llvm::Value* countVal = generateExpression(expr->arguments[0].get());
+        countVal = builder->CreateIntCast(countVal, getDefaultType(),
+                                          /*isSigned=*/true, "alloc.cnt");
+
+        // ── Compile-time stack allocation ────────────────────────────────────
+        // Only when count is a compile-time ConstantInt AND total bytes ≤ 4096.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(countVal)) {
+            const uint64_t count = ci->getZExtValue();
+            const uint64_t totalBytes = count * elemSize;
+            constexpr uint64_t kStackThreshold = 4096;
+
+            if (count > 0 && totalBytes <= kStackThreshold) {
+                // Place the alloca in the function entry block so mem2reg /
+                // SROA can reason about it across all basic blocks.
+                llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                llvm::IRBuilder<> entryB(&fn->getEntryBlock(),
+                                         fn->getEntryBlock().begin());
+                auto* arrayTy = llvm::ArrayType::get(elemTy, count);
+                auto* stackAlloc = entryB.CreateAlloca(arrayTy, nullptr,
+                                                       "stkalloc." + elemTypeName);
+                stackAlloc->setAlignment(elemAlign);
+
+                // Emit lifetime.start to scope the allocation tightly and
+                // allow DSE/LICM to treat it as a bounded object.
+                const uint64_t lifeSz = DL.getTypeAllocSize(arrayTy);
+                auto* lifeSzVal = llvm::ConstantInt::get(
+                    llvm::Type::getInt64Ty(*context), lifeSz);
+                auto* lifetimeStart = OMSC_GET_INTRINSIC(
+                    module.get(), llvm::Intrinsic::lifetime_start,
+                    {llvm::PointerType::getUnqual(*context)});
+                builder->CreateCall(lifetimeStart, {lifeSzVal, stackAlloc});
+
+                // Return pointer to first element (GEP through [N x T]* → T*).
+                auto* zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
+                auto* ptr = builder->CreateInBoundsGEP(arrayTy, stackAlloc,
+                                                       {zero, zero}, "stkalloc.ptr");
+                // Record the backing alloca so invalidate can end its lifetime.
+                lastStackAllocBacking_ = stackAlloc;
+                return ptr;
+            }
+        }
+
+        // ── Compile-time heap allocation ─────────────────────────────────────
+        // Total size = count * sizeof(T), rounded up to a multiple of alignment
+        // when using aligned_alloc (required by C11).
+        llvm::Value* totalSize = builder->CreateMul(
+            countVal,
+            llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(elemSize)),
+            "halloc.sz", /*HasNUW=*/true);
+
+        llvm::Value* heapPtr;
+        if (elemAlign.value() > 16) {
+            // Round totalSize up to the next multiple of alignment so that
+            // aligned_alloc's precondition (size % align == 0) is satisfied.
+            const uint64_t alignBytes = elemAlign.value();
+            llvm::Value* alignVal = llvm::ConstantInt::get(getDefaultType(),
+                                                           static_cast<int64_t>(alignBytes));
+            // roundUp(sz, a) = (sz + a - 1) & ~(a - 1)  — valid since a is pow2.
+            llvm::Value* alignMinus1 = llvm::ConstantInt::get(getDefaultType(),
+                                                               static_cast<int64_t>(alignBytes - 1));
+            llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(),
+                                                        static_cast<int64_t>(~(alignBytes - 1)));
+            llvm::Value* roundedSize = builder->CreateAnd(
+                builder->CreateAdd(totalSize, alignMinus1, "halloc.roundup"),
+                mask, "halloc.rounded");
+            heapPtr = builder->CreateCall(getOrDeclareAlignedAlloc(),
+                                          {alignVal, roundedSize}, "halloc.ptr");
+        } else {
+            heapPtr = builder->CreateCall(getOrDeclareMalloc(),
+                                          {totalSize}, "halloc.ptr");
+        }
+        lastStackAllocBacking_ = nullptr; // heap allocation has no backing alloca
+        return heapPtr;
+    }
+
     // ── Width-typed integer intrinsics (__tw_<op>_<N>) ───────────────────────
     // Generated by the parser for iN::op(args) where N < 64. Uses the narrower
     // LLVM intrinsic directly — avoids zext-to-i64, i64-intrinsic, trunc.

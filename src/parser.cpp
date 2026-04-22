@@ -1462,7 +1462,8 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
                 break;
             case ASTNodeType::CALL_EXPR: {
                 const std::string& callee = static_cast<const CallExpr*>(init)->callee;
-                valid = (callee == "malloc" || callee == "realloc" || callee == "calloc");
+                valid = (callee == "malloc" || callee == "realloc" || callee == "calloc" ||
+                         (callee.rfind("alloc<", 0) == 0 && callee.back() == '>'));
                 break;
             }
             case ASTNodeType::LITERAL_EXPR: {
@@ -3407,6 +3408,29 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         expr->line = token.line;
         expr->column = token.column;
         return expr;
+    }
+
+    // alloc<T>(x) — smart typed allocator.
+    // Decides stack vs heap at compile time based on whether x is a
+    // compile-time constant and fits within the stack threshold.
+    // Returns a ptr<T> pointing to x contiguous elements of type T.
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "alloc" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LT) {
+        const Token kw = advance(); // consume 'alloc'
+        advance();                  // consume '<'
+        std::string elemTypeName = parseTypeAnnotation();
+        consume(TokenType::GT, "Expected '>' after type in alloc<T>(...)");
+        consume(TokenType::LPAREN, "Expected '(' after alloc<T>");
+        auto countExpr = parseExpression();
+        consume(TokenType::RPAREN, "Expected ')' after count in alloc<T>(...)");
+        // Encode the element type in the callee name so codegen can recover it
+        // without modifying the CallExpr AST.  Pattern: "alloc<T>" with one arg.
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(std::move(countExpr));
+        auto call = std::make_unique<CallExpr>("alloc<" + elemTypeName + ">", std::move(args));
+        call->line   = kw.line;
+        call->column = kw.column;
+        return call;
     }
 
     // sizeof(T) — compile-time byte size of a type.

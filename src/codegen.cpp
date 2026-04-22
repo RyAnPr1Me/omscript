@@ -1602,6 +1602,33 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     return fn;
 }
 
+// aligned_alloc(size_t alignment, size_t size) -> void*
+// Used by alloc<T>(n) when the element type's ABI alignment exceeds 16 bytes
+// (e.g., SIMD vector types).  The C11 aligned_alloc function requires that
+// `size` be a multiple of `alignment`; callers must ensure this.
+llvm::Function* CodeGenerator::getOrDeclareAlignedAlloc() {
+    if (auto* fn = module->getFunction("aligned_alloc"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {getDefaultType(), getDefaultType()}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage,
+                                                "aligned_alloc", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoBuiltin);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 1, std::nullopt));
+    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
+                                       static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
+                                                             llvm::AllocFnKind::Uninitialized)));
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleMemOnly()));
+    return fn;
+}
+
 llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     if (auto* fn = module->getFunction("calloc"))
         return fn;

@@ -862,6 +862,20 @@ class CodeGenerator {
     /// Empty for untyped `ptr` variables.
     llvm::StringMap<std::string> ptrElemTypes_;
 
+    /// Subset of ptrVarNames_ whose stored value is heap-allocated (malloc /
+    /// alloc<T> with large/dynamic count).  `invalidate` on these emits free().
+    llvm::StringSet<> heapPtrVarNames_;
+
+    /// Maps ptr variable name → the backing AllocaInst for stack-allocated
+    /// alloc<T>(N) pointers, so that `invalidate` can emit lifetime.end on the
+    /// actual storage (not just the pointer variable's own alloca slot).
+    llvm::StringMap<llvm::AllocaInst*> stackPtrBackingAlloca_;
+
+    /// Scratch field: set by generateCall for alloc<T> to pass the backing
+    /// AllocaInst to the enclosing VarDecl codegen so it can be registered in
+    /// stackPtrBackingAlloca_.  Reset to nullptr after each use.
+    llvm::AllocaInst* lastStackAllocBacking_ = nullptr;
+
     /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
     bool currentFuncHintUnroll_ = false;
     bool currentFuncHintNoUnroll_ = false;
@@ -1301,6 +1315,7 @@ class CodeGenerator {
     // multiple built-in handlers.
     llvm::Function* getOrDeclareStrlen();
     llvm::Function* getOrDeclareMalloc();
+    llvm::Function* getOrDeclareAlignedAlloc();
     llvm::Function* getOrDeclareCalloc();
     llvm::Function* getOrDeclareStrcpy();
     llvm::Function* getOrDeclareStrcat();

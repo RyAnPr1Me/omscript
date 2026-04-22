@@ -226,6 +226,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     // Track `ptr` / `ptr<T>` variables so isStringExpr() can exclude them
     // from the string pointer category (both use pointer-typed allocas).
+    // Also track heap vs stack allocation origin for `invalidate`.
     {
         const std::string& tn = stmt->typeName;
         const bool isPtr = (tn == "ptr" || tn.rfind("ptr<", 0) == 0);
@@ -237,9 +238,40 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             } else {
                 ptrElemTypes_.erase(stmt->name); // untyped ptr has no element type
             }
+            // Determine heap vs stack origin for invalidate:
+            //   • alloc<T> with small constant count → stack (lastStackAllocBacking_ set)
+            //   • alloc<T> with large/dynamic count  → heap (lastStackAllocBacking_ null)
+            //   • malloc / realloc / calloc           → heap
+            //   • &var / null / other                 → neither (no automatic free)
+            if (stmt->initializer) {
+                if (lastStackAllocBacking_) {
+                    // Stack allocation: record the backing alloca for lifetime.end.
+                    stackPtrBackingAlloca_[stmt->name] = lastStackAllocBacking_;
+                    heapPtrVarNames_.erase(stmt->name);
+                    lastStackAllocBacking_ = nullptr;
+                } else if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+                    auto* call = static_cast<CallExpr*>(stmt->initializer.get());
+                    const bool isHeapAlloc =
+                        call->callee == "malloc" || call->callee == "realloc" ||
+                        call->callee == "calloc" ||
+                        (call->callee.rfind("alloc<", 0) == 0 && call->callee.back() == '>');
+                    if (isHeapAlloc) {
+                        heapPtrVarNames_.insert(stmt->name);
+                        stackPtrBackingAlloca_.erase(stmt->name);
+                    } else {
+                        heapPtrVarNames_.erase(stmt->name);
+                        stackPtrBackingAlloca_.erase(stmt->name);
+                    }
+                } else {
+                    heapPtrVarNames_.erase(stmt->name);
+                    stackPtrBackingAlloca_.erase(stmt->name);
+                }
+            }
         } else {
             ptrVarNames_.erase(stmt->name);
             ptrElemTypes_.erase(stmt->name);
+            heapPtrVarNames_.erase(stmt->name);
+            stackPtrBackingAlloca_.erase(stmt->name);
         }
     }
 
@@ -3220,8 +3252,10 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     const bool isHeapArray  = arrayVars_.count(name) > 0 &&
                                !stackAllocatedArrays_.count(name);
     const bool isHeapDict   = dictVarNames_.count(name) > 0;
+    // ptr variables whose value was heap-allocated (malloc / heap alloc<T>).
+    const bool isHeapPtr    = heapPtrVarNames_.count(name) > 0;
 
-    if (isHeapString || isHeapArray || isHeapDict) {
+    if (isHeapString || isHeapArray || isHeapDict || isHeapPtr) {
         // Load the heap pointer from the alloca (i64 stored as int, ptr cast needed).
         auto* allocaInst2 = llvm::dyn_cast<llvm::AllocaInst>(alloca);
         if (allocaInst2) {
@@ -3235,6 +3269,27 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
             // Emit free().  The compiler already knows free() is
             // InaccessibleOrArgMemOnly so this is safe to CSE/hoist.
             builder->CreateCall(getOrDeclareFree(), {heapPtr});
+        }
+    }
+
+    // For stack-allocated alloc<T> pointers: end the lifetime of the backing
+    // alloca so LLVM knows the stack slot is dead and can reuse it.
+    {
+        auto backingIt = stackPtrBackingAlloca_.find(name);
+        if (backingIt != stackPtrBackingAlloca_.end()) {
+            auto* backingAlloca = backingIt->second;
+            if (backingAlloca) {
+                const uint64_t backingSz =
+                    module->getDataLayout().getTypeAllocSize(
+                        backingAlloca->getAllocatedType());
+                auto* backingSzVal = llvm::ConstantInt::get(
+                    llvm::Type::getInt64Ty(*context), backingSz);
+                auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(
+                    module.get(), llvm::Intrinsic::lifetime_end,
+                    {llvm::PointerType::getUnqual(*context)});
+                builder->CreateCall(lifetimeEnd, {backingSzVal, backingAlloca});
+            }
+            stackPtrBackingAlloca_.erase(backingIt);
         }
     }
 
