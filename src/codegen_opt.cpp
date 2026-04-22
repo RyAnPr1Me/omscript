@@ -4296,6 +4296,37 @@ void CodeGenerator::runOptimizationPasses() {
                     std::cout << "    Superoptimizer pass 2: "
                               << total2 << " additional optimizations" << '\n';
                 }
+
+                // Lightweight cleanup after pass 2.  Without this, pass-2
+                // outputs (algebraic folds, idiom replacements, branch
+                // simplifications) reach the HGOE and the final closing
+                // pipeline un-cleaned: the SCCP/CVP/NewGVN/DSE chain that
+                // cleaned up after pass 1 has already finished and won't be
+                // re-entered until the very end of the pipeline (after HGOE).
+                //
+                // Use a *minimal* cleanup — SCCP + InstCombine + ADCE +
+                // SimplifyCFG — rather than the full pass-1 cleanup chain
+                // (NewGVN, DSE, MemCpyOpt are O(NlogN) and pass 2 produces
+                // far fewer changes since synthesis is disabled).  This keeps
+                // compile time bounded while still folding constants exposed
+                // by pass-2 idiom replacement and removing the dead remnants
+                // pass-2 algebraic folds leave behind, so HGOE sees a clean
+                // IR for its hardware-aware transforms.
+                if (total2 > 0) {
+                    std::vector<llvm::Function*> smallFuncs2;
+                    for (auto& func : *module) {
+                        if (!func.isDeclaration() && func.getInstructionCount() <= 2000)
+                            smallFuncs2.push_back(&func);
+                    }
+                    if (!smallFuncs2.empty()) {
+                        llvm::FunctionPassManager PSuperFPM2;
+                        PSuperFPM2.addPass(llvm::SCCPPass());
+                        PSuperFPM2.addPass(llvm::InstCombinePass());
+                        PSuperFPM2.addPass(llvm::ADCEPass());
+                        PSuperFPM2.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                        runPostFPMOnFuncs(std::move(PSuperFPM2), std::move(smallFuncs2));
+                    }
+                }
             }
         }
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSuperopt_) {
