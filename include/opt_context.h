@@ -211,6 +211,7 @@ struct AnalysisValidity {
     bool cfctre         = false; ///< runCFCTRE() has run
     bool egraph         = false; ///< egraph::optimizeProgram() has run
     bool rangeAnalysis  = false; ///< Value range analysis has run
+    bool rlc            = false; ///< Region Lifetime Coalescing pass has run
 
     /// Mark all facts invalid (call when the AST is modified).
     void invalidateAll() noexcept { *this = {}; }
@@ -238,6 +239,7 @@ struct AnalysisValidity {
         if (fact == "cfctre")           return cfctre;
         if (fact == "egraph")           return egraph;
         if (fact == "range_analysis")   return rangeAnalysis;
+        if (fact == "rlc")              return rlc;
         return false; // unknown fact — conservatively not valid
     }
 
@@ -258,6 +260,7 @@ struct AnalysisValidity {
             if (f == "cfctre")            { cfctre          = false; return; }
             if (f == "egraph")            { egraph          = false; return; }
             if (f == "range_analysis")    { rangeAnalysis   = false; return; }
+            if (f == "rlc")               { rlc             = false; return; }
         };
 
         if (depGraph_) {

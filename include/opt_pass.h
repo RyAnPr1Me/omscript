@@ -68,6 +68,7 @@ namespace AnalysisFact {
     inline constexpr const char* kCFCTRE          = "cfctre";
     inline constexpr const char* kEGraph          = "egraph";
     inline constexpr const char* kRangeAnalysis   = "range_analysis";
+    inline constexpr const char* kRLC             = "rlc";
 } // namespace AnalysisFact
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,6 +173,7 @@ namespace PassId {
     extern uint32_t kCFCTRE;
     extern uint32_t kEGraph;
     extern uint32_t kRangeAnalysis;
+    extern uint32_t kRLC;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
