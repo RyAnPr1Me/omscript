@@ -1816,7 +1816,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return diff;
     }
 
-    // ptr ± int: advance/retreat by n bytes via byte-level GEP.
+    // ptr ± int: advance/retreat by n bytes (untyped) or n elements (typed ptr<T>).
     if ((expr->op == "+" || expr->op == "-") && left->getType()->isPointerTy()) {
         const llvm::DataLayout& DL = module->getDataLayout();
         llvm::Type* idxTy = DL.getIndexType(left->getType());
@@ -1830,8 +1830,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             offset = builder->CreateNeg(offset, "ptrarith.neg");
         // Sign-extend / truncate to the target pointer index type.
         offset = builder->CreateIntCast(offset, idxTy, /*isSigned=*/true, "ptrarith.idx");
-        // Byte-wise GEP: i8 element type, one byte per index unit.
-        return builder->CreateGEP(llvm::Type::getInt8Ty(*context), left, offset, "ptrarith");
+
+        // Determine the GEP element type:
+        //   ptr<T>  → use T (advance sizeof(T) bytes per index unit — C-style)
+        //   ptr     → use i8 (advance 1 byte per index unit — byte semantics)
+        llvm::Type* gepElemTy = llvm::Type::getInt8Ty(*context);
+        if (expr->left->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<const IdentifierExpr*>(expr->left.get());
+            auto it = ptrElemTypes_.find(id->name);
+            if (it != ptrElemTypes_.end())
+                gepElemTy = resolveAnnotatedType(it->second);
+        }
+        return builder->CreateGEP(gepElemTy, left, offset, "ptrarith");
     }
 
     if (expr->op == "+") {
@@ -4765,8 +4775,22 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         llvm::Value* ptr = operand;
         if (!ptr->getType()->isPointerTy())
             ptr = builder->CreateIntToPtr(ptr, llvm::PointerType::getUnqual(*context), "deref.itop");
-        // Load as the default integer type (i64).
-        return builder->CreateLoad(getDefaultType(), ptr, "deref");
+        // For typed pointers (ptr<T>), load with the correct element type so
+        // the load instruction has the right width and signedness.
+        // For untyped `ptr`, fall back to the default integer type (i64).
+        llvm::Type* loadTy = getDefaultType();
+        if (expr->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<IdentifierExpr*>(expr->operand.get());
+            auto it = ptrElemTypes_.find(id->name);
+            if (it != ptrElemTypes_.end()) {
+                loadTy = resolveAnnotatedType(it->second);
+            }
+        }
+        auto* loaded = builder->CreateLoad(loadTy, ptr, "deref");
+        // Widen narrower integers to i64 so downstream arithmetic stays uniform.
+        if (loadTy->isIntegerTy() && loadTy != getDefaultType())
+            return builder->CreateSExt(loaded, getDefaultType(), "deref.widen");
+        return loaded;
     }
 
     codegenError("Unknown unary operator: " + expr->op, expr);

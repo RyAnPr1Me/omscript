@@ -852,6 +852,16 @@ class CodeGenerator {
     /// dict["key"] index expressions through map_get IR instead of array IR.
     llvm::StringSet<> dictVarNames_;
 
+    /// Variables declared with type `ptr` or `ptr<T>`.  Used to exclude them
+    /// from isStringExpr() — pointer-typed allocas would otherwise be
+    /// misidentified as string variables and routed through strlen/strcat paths.
+    llvm::StringSet<> ptrVarNames_;
+
+    /// Element type string for typed pointer variables (`ptr<T>`).
+    /// Maps variable name → inner type annotation (e.g., "i64", "i32[]").
+    /// Empty for untyped `ptr` variables.
+    llvm::StringMap<std::string> ptrElemTypes_;
+
     /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
     bool currentFuncHintUnroll_ = false;
     bool currentFuncHintNoUnroll_ = false;

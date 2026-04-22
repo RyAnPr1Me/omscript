@@ -224,6 +224,25 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             dictVarNames_.insert(stmt->name);
     }
 
+    // Track `ptr` / `ptr<T>` variables so isStringExpr() can exclude them
+    // from the string pointer category (both use pointer-typed allocas).
+    {
+        const std::string& tn = stmt->typeName;
+        const bool isPtr = (tn == "ptr" || tn.rfind("ptr<", 0) == 0);
+        if (isPtr) {
+            ptrVarNames_.insert(stmt->name);
+            if (tn.rfind("ptr<", 0) == 0 && tn.back() == '>') {
+                // Extract inner element type: ptr<T> → T
+                ptrElemTypes_[stmt->name] = tn.substr(4, tn.size() - 5);
+            } else {
+                ptrElemTypes_.erase(stmt->name); // untyped ptr has no element type
+            }
+        } else {
+            ptrVarNames_.erase(stmt->name);
+            ptrElemTypes_.erase(stmt->name);
+        }
+    }
+
     // Track array variables so isStringExpr() can distinguish array pointers
     // from string pointers (both now use pointer-typed allocas).
     {

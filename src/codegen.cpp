@@ -980,7 +980,7 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (!ann.empty() && ann[0] == '&') {
         ann = ann.substr(1);
     }
-    if (ann == "ptr")
+    if (ann == "ptr" || (ann.rfind("ptr<", 0) == 0 && ann.back() == '>'))
         return llvm::PointerType::getUnqual(*context);
     if (ann == "float" || ann == "double")
         return getFloatType();                                  // f64
@@ -4074,7 +4074,8 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         // for arrays/structs/dicts, we must exclude those to avoid false
         // positives that would misroute array indexing to strlen-based paths.
         if (arrayVars_.count(id->name) || dictVarNames_.count(id->name)
-            || structVars_.count(id->name) || stringArrayVars_.count(id->name))
+            || structVars_.count(id->name) || stringArrayVars_.count(id->name)
+            || ptrVarNames_.count(id->name))
             return false;
         auto it = namedValues.find(id->name);
         if (it != namedValues.end() && it->second) {

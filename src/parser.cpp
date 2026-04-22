@@ -726,6 +726,14 @@ std::string Parser::parseTypeAnnotation() {
         advance(); // consume ']'
         typeName += "[]";
     }
+    // Support ptr<T> generic pointer annotation: ptr<i64>, ptr<i32[]>, ptr<ptr<i32>>, etc.
+    // Uses <T> angle-bracket syntax (LT / GT tokens).
+    if (typeName == "ptr" && check(TokenType::LT)) {
+        advance(); // consume '<'
+        std::string inner = parseTypeAnnotation(); // recursively parse element type
+        consume(TokenType::GT, "Expected '>' to close ptr<T> type parameter");
+        typeName = "ptr<" + inner + ">";
+    }
     // Support dict[KeyType, ValType] generic annotation (e.g., dict[str, int])
     // Only activates when the type name is exactly "dict" followed by '[' with
     // non-empty content — avoids any collision with the existing type[] handling.
@@ -1445,7 +1453,7 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     //   ptr-arithmetic    (BinaryExpr e.g. p + n, p - n)
     //   another ptr var   (IdentifierExpr)
     // Literal non-zero integers, floats, and strings are always rejected.
-    if (typeName == "ptr" && initializer) {
+    if ((typeName == "ptr" || typeName.rfind("ptr<", 0) == 0) && initializer) {
         bool valid = false;
         const Expression* init = initializer.get();
         switch (init->type) {
@@ -3421,7 +3429,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             byteSize = 4;
         else if (typeName == "i64" || typeName == "u64" || typeName == "int" ||
                  typeName == "uint" || typeName == "float" || typeName == "double" ||
-                 typeName == "ptr" || typeName == "string" || typeName == "bigint")
+                 typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 ||
+                 typeName == "string" || typeName == "bigint")
             byteSize = 8;
         else if (typeName == "i128" || typeName == "u128")
             byteSize = 16;
