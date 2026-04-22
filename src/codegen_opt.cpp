@@ -5041,6 +5041,19 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     FPMMax.addPass(llvm::AlignmentFromAssumptionsPass());
     {
         llvm::LoopPassManager LPM;
+        // Re-rotate loops before LICM.  Phase 2.5 (LoopUnroll/UnrollAndJam)
+        // and all of Phase 3 (SimplifyCFG with hyperblock then aggressive
+        // opts, JumpThreading, DFAJumpThreading, SpeculativeExecution,
+        // BranchEntropyReduction's select↔branch conversions, and
+        // ConditionalStoreSink) mutate the CFG aggressively and can leave
+        // loops in non-rotated form (test-at-top / for-style) where the
+        // header guard is not loop-invariant.  Both LoopVersioningLICM and
+        // LICM require rotated do-while form to hoist invariants out of
+        // the header — without rotation they silently no-op on those loops
+        // and Phase 4's load-hoisting work is wasted.  LoopRotate is
+        // idempotent, near-free on already-rotated loops, and is what
+        // LLVM's own PassBuilderPipelines.cpp does before every LICM call.
+        LPM.addPass(llvm::LoopRotatePass());
         LPM.addPass(llvm::IndVarSimplifyPass());
         LPM.addPass(llvm::LoopVersioningLICMPass());
         LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
