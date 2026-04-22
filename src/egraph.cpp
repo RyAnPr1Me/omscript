@@ -18,6 +18,7 @@
 
 #include "egraph.h"
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <llvm/Support/ErrorHandling.h>
@@ -812,6 +813,136 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
         for (ClassId cls : reachableVec) dfs(cls);
     }
 
+    // ── 2b. Strongly Connected Components (Tarjan's algorithm) ──────────────
+    //
+    // Classes in the same SCC are mutually reachable through one or more
+    // candidate-node child edges.  Such cycles arise routinely from
+    // commutative / associative / inverse rewrites (e.g. `a+b ≡ b+a`
+    // produces an e-class whose nodes reference each other transitively).
+    //
+    // The latency-best selection in sections 3-5 is cycle-tolerant by
+    // construction: it ignores back-edges in the topological DFS and
+    // falls back to whichever node was first costed for an unresolved
+    // child.  The pressure-aware *refinement* below, however, is free to
+    // pick any e-node from any e-class — so we MUST guard against
+    // selecting a node whose chosen children would form a cycle in the
+    // resulting extraction DAG.  (A cyclic selection makes
+    // egraph_optimizer.cpp::eNodeToAST recurse without termination —
+    // confirmed via ASan stack-overflow on examples/destructure_test.om
+    // before this guard was in place.)
+    //
+    // Tarjan's algorithm produces an SCC numbering in REVERSE topological
+    // order of the condensation DAG: for any forward edge u → v,
+    //     sccOf[v] <= sccOf[u].
+    // With strict inequality iff v is in a strictly-earlier SCC (i.e. a
+    // *strict ancestor* of u in the condensation).  The refinement loop
+    // exploits this in two complementary ways:
+    //
+    //   (a) ANCESTOR CHECK — when evaluating an alternative e-node for
+    //       class `cls`, every child class must satisfy
+    //           sccOf[child] < sccOf[cls],
+    //       guaranteeing the child has already been finalised by the
+    //       bottom-up pass and that the alternative cannot transitively
+    //       reach back into `cls`.
+    //
+    //   (b) SCC CONDENSATION — same-SCC edges are precisely the cyclic
+    //       edges of the original e-graph.  Forbidding them collapses
+    //       each SCC to a single "frozen" representative whose selection
+    //       is locked to whatever the cycle-tolerant latency pass chose.
+    //       Refinement then operates on the condensation DAG, which is
+    //       acyclic by construction, so the proof of monotone progress
+    //       holds and the extracted tree is guaranteed finite.
+    //
+    // Tarjan is implemented iteratively to avoid blowing the host call
+    // stack on pathological inputs (the recursive topo DFS above is
+    // tolerated only because it is post-order with cycle pruning; SCC
+    // computation needs the full recursion structure on cyclic inputs).
+    std::unordered_map<ClassId, int> sccOf;
+    sccOf.reserve(reachable.size());
+    {
+        std::unordered_map<ClassId, int> dfsIndex;
+        std::unordered_map<ClassId, int> lowlink;
+        std::unordered_set<ClassId>      onStack;
+        std::vector<ClassId>             tarjanStack;
+        int idxCtr = 0;
+        int sccCtr = 0;
+
+        // Iterative Tarjan: each stack frame carries (node, child-iterator
+        // position).  The "phase" field distinguishes the initial visit
+        // (phase 0) from the post-recursion lowlink fold (phase 1).
+        struct Frame {
+            ClassId node;
+            size_t  childIdx;
+            ClassId pendingChild;
+            int     phase;
+        };
+        std::vector<Frame> frames;
+        frames.reserve(reachableVec.size());
+
+        for (ClassId rootCls : reachableVec) {
+            if (dfsIndex.count(rootCls)) continue;
+            frames.push_back({rootCls, 0, 0, 0});
+
+            while (!frames.empty()) {
+                Frame& f = frames.back();
+                ClassId v = f.node;
+
+                if (f.phase == 0) {
+                    // First entry — assign index/lowlink and mark on-stack.
+                    dfsIndex[v] = idxCtr;
+                    lowlink[v]  = idxCtr;
+                    ++idxCtr;
+                    tarjanStack.push_back(v);
+                    onStack.insert(v);
+                    f.phase = 1;
+                }
+
+                // Resume from where we paused on a previous frame.
+                if (f.phase == 2) {
+                    // A recursive child call just returned; fold lowlink.
+                    auto cit = lowlink.find(f.pendingChild);
+                    if (cit != lowlink.end())
+                        lowlink[v] = std::min(lowlink[v], cit->second);
+                    f.phase = 1;
+                    ++f.childIdx;
+                }
+
+                bool descended = false;
+                const auto& kids = children[v];
+                while (f.childIdx < kids.size()) {
+                    ClassId w = kids[f.childIdx];
+                    auto iit = dfsIndex.find(w);
+                    if (iit == dfsIndex.end()) {
+                        // Recurse iteratively into w; resume here when done.
+                        f.pendingChild = w;
+                        f.phase = 2;
+                        frames.push_back({w, 0, 0, 0});
+                        descended = true;
+                        break;
+                    } else if (onStack.count(w)) {
+                        lowlink[v] = std::min(lowlink[v], iit->second);
+                    }
+                    ++f.childIdx;
+                }
+                if (descended) continue;
+
+                // All children processed — close v.  If v is the root of
+                // an SCC, pop everything above it on tarjanStack into one.
+                if (lowlink[v] == dfsIndex[v]) {
+                    while (true) {
+                        ClassId w = tarjanStack.back();
+                        tarjanStack.pop_back();
+                        onStack.erase(w);
+                        sccOf[w] = sccCtr;
+                        if (w == v) break;
+                    }
+                    ++sccCtr;
+                }
+                frames.pop_back();
+            }
+        }
+    }
+
     // ── 3. Single-pass bottom-up extraction in topological order ─────────────
     // In a DAG (no cycles), this single pass is sufficient: every child is
     // resolved before its parent is visited.  For cyclic e-graphs the follow-up
@@ -917,49 +1048,65 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     // We compute Sethi-Ullman register pressure for the currently-selected
     // node of each e-class (taking the DAG sharing pattern into account so
     // a value used by multiple parents is counted as 1 register that lives
-    // across the whole expression rather than a fresh evaluation per use).
-    // We then re-evaluate every alternative node in each e-class against
-    // an effective cost
+    // across the whole expression rather than a fresh evaluation per use)
+    // and store it as metadata on each ExtractionResult.  We then perform
+    // a SINGLE bottom-up refinement pass that, for every e-class, considers
+    // candidate e-nodes whose every child lives in a strictly-earlier SCC
+    // of the e-graph and selects whichever yields the lowest effective cost
     //
     //     effCost(node) = sum_children effCost + nodeCost(node)
-    //                   + spillPenalty * max(0, regPressure - regBudget)
+    //                   + spillPenalty * max(0, regPressure - regBudget).
     //
-    // and switch the selection if a different node minimises effCost.
-    // Because changing one selection can change which children are shared,
-    // we iterate a small number of times (3) until the selection set is
-    // stable; in practice 1–2 rounds are enough.
+    // SOUNDNESS — see the long comment alongside the SCC computation in
+    // section 2b.  Briefly:
+    //
+    //   * ANCESTOR + SCC CONDENSATION CHECK: an alternative is feasible
+    //     only when every child satisfies sccOf[child] < sccOf[cls].
+    //     Same-SCC children would close a cycle in the selection DAG and
+    //     could make the recursive extraction in
+    //     egraph_optimizer.cpp::eNodeToAST loop forever.
+    //
+    //   * STRICT IMPROVEMENT: an alternative replaces the current pick
+    //     only when its effective cost is strictly lower (with depth as a
+    //     secondary tie-breaker) — this guarantees monotone progress and
+    //     deterministic results across runs.
+    //
+    //   * SINGLE PASS: we do not iterate to a moving fixpoint with a
+    //     refreshed `parentCount`.  A second pass with shifted sharing
+    //     could invalidate ancestor relationships established in the
+    //     first.  The single-pass design captures the dominant
+    //     register-pressure win while keeping the proof simple.
     //
     // When the host CostModel disables pressure-awareness by setting
-    // `regBudget == 0` or `spillPenalty == 0`, this entire block reduces
-    // to a no-op refresh of effCost and the selections are left untouched
-    // — preserving the historical pure-latency behaviour exactly.
+    // `regBudget == 0` or `spillPenalty == 0`, the refinement loop is
+    // skipped and we only refresh the metadata — preserving the
+    // historical pure-latency behaviour exactly.
     const Cost spillPenalty = model.spillPenalty;
     const unsigned regBudget = model.regBudget;
     const bool pressureAware = (regBudget > 0) && (spillPenalty > 0.0);
 
-    auto recomputePressure = [&](const ENode& node,
-                                 std::vector<unsigned>& siblingPress,
-                                 unsigned& sharedCount) {
-        siblingPress.clear();
-        sharedCount = 0;
+    // Sethi-Ullman pressure for `node` given the current `best` selections
+    // for its children and the DAG sharing structure in `parentCount`.
+    auto computePressure = [&](const ENode& node) -> unsigned {
+        std::vector<unsigned> siblingPress;
+        siblingPress.reserve(node.children.size());
+        unsigned sharedCount = 0;
         for (auto child : node.children) {
             child = find(child);
             auto cit = best.find(child);
             unsigned p = (cit == best.end()) ? 1u : cit->second.regPressure;
-            unsigned parents = parentCount.count(child) ? parentCount[child] : 1;
+            unsigned parents = parentCount.count(child) ? parentCount[child] : 1u;
             if (parents > 1) {
-                // Shared child: result computed once, holds 1 register
-                // across the whole expression — does not contribute to
-                // the per-sibling holding cost.
+                // Shared value: lives in 1 register across the whole
+                // expression rather than contributing to per-sibling
+                // holding cost.
                 ++sharedCount;
             } else {
                 siblingPress.push_back(p);
             }
         }
-        // Sethi-Ullman: evaluate the highest-pressure unshared child
-        // first, holding +1 register per already-evaluated sibling.
         std::sort(siblingPress.begin(), siblingPress.end(), std::greater<unsigned>());
-        unsigned maxP = 1; // a value of at least 1 register for the result
+        unsigned maxP = 1; // floor — this node's own result occupies 1 register
         for (size_t i = 0; i < siblingPress.size(); ++i) {
             unsigned p = siblingPress[i] + static_cast<unsigned>(i);
             if (p > maxP) maxP = p;
@@ -967,92 +1114,144 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
         return sharedCount + maxP;
     };
 
-    {
-        // Initial pressure pass over the latency-best selections.
-        std::vector<unsigned> siblingPress;
-        unsigned sharedCount = 0;
-        for (ClassId cls : topoOrder) {
-            auto it = best.find(cls);
-            if (it == best.end()) continue;
-            unsigned p = recomputePressure(it->second.bestNode, siblingPress, sharedCount);
-            it->second.regPressure = p;
-            unsigned excess = (p > regBudget) ? (p - regBudget) : 0u;
-            it->second.effCost = it->second.cost
-                               + (pressureAware ? spillPenalty * static_cast<Cost>(excess) : 0.0);
-        }
+    // ── Initial pressure-metadata pass (always runs) ─────────────────────
+    // Even with refinement disabled, this populates regPressure / effCost
+    // so downstream consumers (HGOE schedulers, diagnostic dumpers, ...)
+    // see consistent values.
+    for (ClassId cls : topoOrder) {
+        auto it = best.find(cls);
+        if (it == best.end()) continue;
+        unsigned p = computePressure(it->second.bestNode);
+        it->second.regPressure = p;
+        unsigned excess = (p > regBudget) ? (p - regBudget) : 0u;
+        it->second.effCost = it->second.cost
+                           + (pressureAware ? spillPenalty * static_cast<Cost>(excess) : 0.0);
     }
 
-    if (pressureAware) {
-        // Selection refinement: try alternative nodes in each e-class and
-        // switch when one yields a lower effCost.  Iterate until stable.
-        std::vector<unsigned> siblingPress;
-        unsigned sharedCount = 0;
-        for (int refineIter = 0; refineIter < 3; ++refineIter) {
-            bool selectionChanged = false;
+    // ── Single-pass bottom-up pressure-aware refinement ──────────────────
+    //
+    // The refinement is gated behind an opt-in env var (OMSC_EGRAPH_PRESSURE_REFINE=1)
+    // because at the time of writing the upstream rewriter occasionally
+    // populates an e-class with a node whose op/operand types are not
+    // strictly equivalent to the value the class represents (e.g. an
+    // integer shift node alongside a float multiply after associative
+    // rewrites).  The latency-only extraction in sections 3-5 is robust
+    // to this because it only re-uses the ALREADY-SELECTED node of each
+    // class; the refinement below, by design, considers EVERY node, and
+    // therefore exposes such mis-classified members as downstream type
+    // errors.
+    //
+    // The SCC / ancestor / op-match guards above eliminate the
+    // *infinite-recursion* hazard (extraction is now provably finite),
+    // so the infrastructure is sound and ready to enable once the
+    // rewriter's type-soundness invariant is tightened.  Until then,
+    // production builds get the metadata pass (regPressure / effCost
+    // populated for downstream schedulers) without the risky flips.
+    static const bool kRefineEnabled = []() {
+        const char* env = std::getenv("OMSC_EGRAPH_PRESSURE_REFINE");
+        return env && env[0] == '1';
+    }();
 
-            for (ClassId cls : topoOrder) {
-                auto curIt = best.find(cls);
-                if (curIt == best.end()) continue;
+    if (pressureAware && kRefineEnabled) {
+        for (ClassId cls : topoOrder) {
+            auto curIt = best.find(cls);
+            if (curIt == best.end()) continue;
+            if (cls >= classes_.size()) continue;
+            if (find(cls) != cls) continue;  // skip non-canonical defensively
 
-                // Evaluate every node in this e-class (not just the
-                // currently-selected one) under the current sharing
-                // pattern; pick the lowest-effCost option.
-                ExtractionResult bestAlt = curIt->second;
-                bool foundBetter = false;
+            auto curSccIt = sccOf.find(cls);
+            if (curSccIt == sccOf.end()) continue;
+            const int curScc = curSccIt->second;
 
-                for (const auto& node : classes_[cls].nodes) {
-                    Cost latencyCost = model.nodeCost(node);
-                    unsigned depth = 0;
-                    bool feasible = true;
-                    for (auto child : node.children) {
-                        child = find(child);
-                        auto cit = best.find(child);
-                        if (cit == best.end()) { feasible = false; break; }
-                        Cost childCost = cit->second.cost;
-                        unsigned parents = parentCount.count(child) ? parentCount[child] : 1;
-                        if (parents > 1)
-                            childCost = childCost / static_cast<Cost>(parents);
-                        latencyCost += childCost;
-                        depth = std::max(depth, cit->second.depth + 1u);
+            const auto& candidates = classes_[cls].nodes;
+            if (candidates.empty()) continue;
+
+            Cost   bestEff   = curIt->second.effCost;
+            Cost   bestLat   = curIt->second.cost;
+            unsigned bestDep = curIt->second.depth;
+            unsigned bestPr  = curIt->second.regPressure;
+            ENode flippedNode;
+            bool flipped = false;
+
+            for (const auto& node : candidates) {
+                // ── ANCESTOR + SCC CONDENSATION CHECK ──
+                // Refinement may select this candidate only if every
+                // child class is in a strictly-earlier SCC.  Leaf nodes
+                // (no children) trivially satisfy this.
+                bool ancestorsOk = true;
+                for (auto child : node.children) {
+                    child = find(child);
+                    auto sit = sccOf.find(child);
+                    if (sit == sccOf.end() || sit->second >= curScc) {
+                        ancestorsOk = false;
+                        break;
                     }
-                    if (!feasible && !node.children.empty()) continue;
-
-                    unsigned p = recomputePressure(node, siblingPress, sharedCount);
-                    unsigned excess = (p > regBudget) ? (p - regBudget) : 0u;
-                    Cost effCost = latencyCost + spillPenalty * static_cast<Cost>(excess);
-
-                    bool better = (effCost < bestAlt.effCost)
-                               || (effCost == bestAlt.effCost && latencyCost < bestAlt.cost)
-                               || (effCost == bestAlt.effCost && latencyCost == bestAlt.cost
-                                   && depth < bestAlt.depth);
-                    if (better) {
-                        bestAlt = {latencyCost, effCost, node, depth, p};
-                        foundBetter = true;
+                    // Child must also have a finalised cost (guaranteed
+                    // by the strict-SCC check + topological processing,
+                    // but verified defensively).
+                    if (best.find(child) == best.end()) {
+                        ancestorsOk = false;
+                        break;
                     }
                 }
+                if (!ancestorsOk) continue;
 
-                if (foundBetter
-                    && !(bestAlt.bestNode == curIt->second.bestNode)) {
-                    curIt->second = bestAlt;
-                    selectionChanged = true;
-                } else if (foundBetter) {
-                    // Same node, but updated cost/pressure metadata.
-                    curIt->second = bestAlt;
+                // ── OP-COMPATIBILITY GUARD ──
+                // E-class membership is supposed to imply semantic
+                // equivalence across all ops, but some upstream
+                // rewriters in this codebase occasionally insert nodes
+                // whose op is type-incorrect for the value the class
+                // represents (e.g. an integer `<<` shift node alongside
+                // float `*2.0` after associative rewrites).  Flipping to
+                // such a node compiles into a downstream type error.
+                // Until the rewriter's type-soundness invariant is
+                // tightened, restrict refinement to candidates that
+                // share the latency-best pick's primary op — this still
+                // captures the common register-pressure win (commuted
+                // operand orderings of the same op) while sidestepping
+                // the type-mixing hazard.
+                if (node.op != curIt->second.bestNode.op) continue;
+                if (node.children.size()
+                    != curIt->second.bestNode.children.size()) continue;
+
+                // Latency cost under the established sharing pattern.
+                Cost latencyCost = model.nodeCost(node);
+                unsigned depth = 0;
+                for (auto child : node.children) {
+                    child = find(child);
+                    auto cit = best.find(child);
+                    Cost childCost = cit->second.cost;
+                    unsigned parents = parentCount.count(child)
+                                         ? parentCount[child] : 1u;
+                    if (parents > 1)
+                        childCost = childCost / static_cast<Cost>(parents);
+                    latencyCost += childCost;
+                    depth = std::max(depth, cit->second.depth + 1u);
+                }
+
+                unsigned p = computePressure(node);
+                unsigned excess = (p > regBudget) ? (p - regBudget) : 0u;
+                Cost effCost = latencyCost + spillPenalty * static_cast<Cost>(excess);
+
+                // STRICT improvement — ties keep the latency-best pick.
+                bool better = (effCost < bestEff)
+                           || (effCost == bestEff && depth < bestDep);
+                if (better) {
+                    bestEff     = effCost;
+                    bestLat     = latencyCost;
+                    bestDep     = depth;
+                    bestPr      = p;
+                    flippedNode = node;
+                    flipped     = true;
                 }
             }
 
-            if (!selectionChanged) break;
-
-            // Re-derive parentCount under the new selection — sharing may
-            // have shifted as different nodes were chosen.
-            parentCount.clear();
-            for (ClassId cls : reachableVec) {
-                auto it = best.find(cls);
-                if (it == best.end()) continue;
-                for (auto child : it->second.bestNode.children) {
-                    child = find(child);
-                    parentCount[child]++;
-                }
+            if (flipped) {
+                curIt->second.cost        = bestLat;
+                curIt->second.effCost     = bestEff;
+                curIt->second.bestNode    = flippedNode;
+                curIt->second.depth       = bestDep;
+                curIt->second.regPressure = bestPr;
             }
         }
     }
