@@ -139,7 +139,10 @@ enum class BuiltinId : uint8_t {
     MAT_ROWS,     ///< mat_rows(m)              → number of rows
     MAT_COLS,     ///< mat_cols(m)              → number of columns
     MAT_MUL,      ///< mat_mul(a,b)             → C = A × B (column-major result)
-    MAT_TRANSP    ///< mat_transp(m)            → transpose of m (new allocation)
+    MAT_TRANSP,   ///< mat_transp(m)            → transpose of m (new allocation)
+    // ── Region management builtins (RLC pass support) ────────────────────────
+    NEW_REGION,   ///< newRegion()        → opaque region handle (malloc arena head)
+    ALLOC         ///< alloc(r, size)     → allocate `size` bytes in region r
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -365,6 +368,9 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"mat_cols",   BuiltinId::MAT_COLS},
     {"mat_mul",    BuiltinId::MAT_MUL},
     {"mat_transp", BuiltinId::MAT_TRANSP},
+    // Region management
+    {"newRegion",  BuiltinId::NEW_REGION},
+    {"alloc",      BuiltinId::ALLOC},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -8901,6 +8907,57 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             });
         arrayReturningFunctions_.insert("mat_mul");
         return builder->CreatePtrToInt(cBuf, getDefaultType(), "matm.result");
+    }
+
+    // ── newRegion() ── create a region handle (malloc-backed arena pointer) ──
+    // Returns a pointer-sized integer that serves as the region's identity.
+    // The RLC pass may coalesce two region variables into one, removing this
+    // call entirely after transformation.  At runtime, newRegion() allocates a
+    // small header block via malloc so that the region handle is a valid,
+    // unique pointer (useful for identity checks and future arena growth).
+    if (bid == BuiltinId::NEW_REGION) {
+        validateArgCount(expr, "newRegion", 0);
+        // Emit: call i8* @malloc(i64 8)  (8-byte region header)
+        llvm::Function* mallocFn = llvm::cast<llvm::Function>(
+            module->getOrInsertFunction(
+                "malloc",
+                llvm::FunctionType::get(
+                    llvm::PointerType::getUnqual(*context),
+                    {llvm::Type::getInt64Ty(*context)},
+                    false))
+            .getCallee());
+        auto* hdr = builder->CreateCall(
+            mallocFn,
+            {llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 8)},
+            "region.hdr");
+        // Return as a pointer-sized integer so it fits in the default i64 type.
+        return builder->CreatePtrToInt(hdr, getDefaultType(), "region.handle");
+    }
+
+    // ── alloc(region, size) ── allocate `size` bytes via malloc ──────────────
+    // In the un-coalesced baseline, alloc() simply calls malloc(size).
+    // After the RLC pass coalesces regions, both alloc(r1,...) and alloc(r2,...)
+    // use the same region handle, and their backing memory is already unified;
+    // the semantics remain correct because the handle is just an identity tag.
+    if (bid == BuiltinId::ALLOC) {
+        validateArgCount(expr, "alloc", 2);
+        // Second argument is the size.
+        llvm::Value* sizeVal = generateExpression(expr->arguments[1].get());
+        if (!sizeVal->getType()->isIntegerTy())
+            sizeVal = builder->CreatePtrToInt(sizeVal, getDefaultType(), "alloc.sz");
+        llvm::Function* mallocFn = llvm::cast<llvm::Function>(
+            module->getOrInsertFunction(
+                "malloc",
+                llvm::FunctionType::get(
+                    llvm::PointerType::getUnqual(*context),
+                    {llvm::Type::getInt64Ty(*context)},
+                    false))
+            .getCallee());
+        auto* ptr = builder->CreateCall(
+            mallocFn,
+            {builder->CreateIntCast(sizeVal, llvm::Type::getInt64Ty(*context), false, "alloc.sz64")},
+            "region.alloc");
+        return builder->CreatePtrToInt(ptr, getDefaultType(), "region.ptr");
     }
 
     if (inOptMaxFunction) {

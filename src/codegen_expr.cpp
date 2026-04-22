@@ -4684,21 +4684,27 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     deadVars_.erase(expr->name);
     deadVarReason_.erase(expr->name);
 
-    // Type conversion if the alloca type and value type differ
-    auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
-    if (alloca) {
-        llvm::Type* allocaType = alloca->getAllocatedType();
-        if (allocaType->isDoubleTy() && value->getType()->isIntegerTy()) {
+    // Type conversion if the alloca type and value type differ.
+    // Also handle GlobalVariable targets (same conversion logic, different cast).
+    llvm::AllocaInst* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    llvm::Type* targetType = nullptr;
+    if (allocaInst) {
+        targetType = allocaInst->getAllocatedType();
+    } else if (auto* gv = llvm::dyn_cast<llvm::GlobalVariable>(it->second)) {
+        targetType = gv->getValueType();
+    }
+    if (targetType) {
+        if (targetType->isDoubleTy() && value->getType()->isIntegerTy()) {
             value = builder->CreateSIToFP(value, getFloatType(), "itof");
-        } else if (allocaType->isIntegerTy() && value->getType()->isDoubleTy()) {
-            value = builder->CreateFPToSI(value, allocaType, "ftoi");
-        } else if (allocaType->isIntegerTy() && value->getType()->isPointerTy()) {
-            value = builder->CreatePtrToInt(value, allocaType, "ptoi");
-        } else if (allocaType->isPointerTy() && value->getType()->isIntegerTy()) {
+        } else if (targetType->isIntegerTy() && value->getType()->isDoubleTy()) {
+            value = builder->CreateFPToSI(value, targetType, "ftoi");
+        } else if (targetType->isIntegerTy() && value->getType()->isPointerTy()) {
+            value = builder->CreatePtrToInt(value, targetType, "ptoi");
+        } else if (targetType->isPointerTy() && value->getType()->isIntegerTy()) {
             value = builder->CreateIntToPtr(value, llvm::PointerType::getUnqual(*context), "itop");
-        } else if (allocaType->isIntegerTy() && value->getType()->isIntegerTy() &&
-                   allocaType != value->getType()) {
-            value = convertTo(value, allocaType);
+        } else if (targetType->isIntegerTy() && value->getType()->isIntegerTy() &&
+                   targetType != value->getType()) {
+            value = convertTo(value, targetType);
         }
     }
 
@@ -4721,7 +4727,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     // subsequent loads can benefit from unsigned operations and NSW flags.
     // When the value might be negative, remove the alloca from nonNegValues_
     // to prevent unsound optimizations.
-    if (alloca && alloca->getAllocatedType()->isIntegerTy()) {
+    if (allocaInst && allocaInst->getAllocatedType()->isIntegerTy()) {
         bool valNonNeg = nonNegValues_.count(value) > 0;
         if (!valNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(value))
@@ -4742,7 +4748,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
                 if (ri->getOpcode() == llvm::Instruction::URem) {
                     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ri->getOperand(1))) {
                         if (ci->getSExtValue() > 1) {
-                            allocaUpperBound_[alloca] = ci->getSExtValue();
+                            allocaUpperBound_[allocaInst] = ci->getSExtValue();
                             return;
                         }
                     }
@@ -4752,12 +4758,12 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
                         ri->getOperand(0));
                     auto it2 = allocaUpperBound_.find(srcAlloca);
                     if (srcAlloca && it2 != allocaUpperBound_.end()) {
-                        allocaUpperBound_[alloca] = it2->second;
+                        allocaUpperBound_[allocaInst] = it2->second;
                         return;
                     }
                 }
             }
-            allocaUpperBound_.erase(alloca);
+            allocaUpperBound_.erase(allocaInst);
         };
         updateBound(value);
     }

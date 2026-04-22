@@ -5409,6 +5409,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     catchTable_.clear();
     catchDefaultBB_ = nullptr;
 
+    // Expose all global variables inside this function so that reads,
+    // writes, and assignments resolve through the normal namedValues path.
+    for (auto& entry : globalVars_) {
+        namedValues[entry.getKey().str()] = entry.getValue();
+    }
+
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
     auto paramArrIt = funcParamArrayTypes_.find(func->name);
