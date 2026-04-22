@@ -4616,6 +4616,23 @@ void CodeGenerator::runOptimizationPasses() {
             // loop bounds may have been folded to small constants.
             // Re-running LoopUnroll here catches these late opportunities.
             CloseFPM.addPass(llvm::LoopUnrollPass(llvm::LoopUnrollOptions()));
+            // Post-unroll redundancy elimination.  Loop unrolling duplicates
+            // the body N times, creating cross-iteration redundant GEPs,
+            // identical address computations, and repeated IV arithmetic
+            // that InstCombine cannot eliminate (it works locally on a
+            // single instruction's operands; it does not perform congruence
+            // analysis across the unrolled copies).  Without a CSE step
+            // here, the downstream SLPVectorizer sees redundant scalar
+            // chains under different SSA names and either bundles them
+            // inefficiently or fails to bundle at all.  EarlyCSE with
+            // MemorySSA is the right tool: it's near-linear, exploits the
+            // already-computed MemorySSA from the LICM pass above, and
+            // collapses the duplicated trees into single canonical
+            // instructions that the vectorizer can match into bundles.
+            // This mirrors the GCC -O3 second-tree-opt-round pattern and
+            // LLVM's ThinLTO pipeline, both of which re-run CSE after late
+            // unrolling for the same reason.
+            CloseFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
             // Phase 4: strength reduction + final peephole.
             CloseFPM.addPass(llvm::InstCombinePass());
             // RPAR: rebalance linear associative chains into O(log n) depth
