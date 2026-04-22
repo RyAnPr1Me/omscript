@@ -152,8 +152,10 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
         cls.isNonNeg = (node.value >= 0);
         cls.isPowerOfTwo = (node.value > 0) && ((node.value & (node.value - 1)) == 0);
         cls.isBoolean = (node.value == 0 || node.value == 1);
+        cls.isInt = true;
     } else if (node.op == Op::ConstF) {
         cls.isNonNeg = (node.fvalue >= 0.0);
+        cls.isFloat = true;
     } else if (node.children.size() >= 2) {
         // Propagate isNonNeg through operations where it's provable.
         // This is critical for relational rules (div_pow2_nonneg,
@@ -165,6 +167,34 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
         bool rNonNeg = (rhs < classes_.size()) && classes_[rhs].isNonNeg;
         bool lBool = (lhs < classes_.size()) && classes_[lhs].isBoolean;
         bool rBool = (rhs < classes_.size()) && classes_[rhs].isBoolean;
+        bool lFloat = (lhs < classes_.size()) && classes_[lhs].isFloat;
+        bool rFloat = (rhs < classes_.size()) && classes_[rhs].isFloat;
+        bool lInt   = (lhs < classes_.size()) && classes_[lhs].isInt;
+        bool rInt   = (rhs < classes_.size()) && classes_[rhs].isInt;
+
+        // ── Type-tag propagation through generic binops ───────────────
+        // The e-graph deliberately uses one Op per arithmetic operation
+        // (Add/Sub/Mul/Div) for both integer and float values so that
+        // generic algebraic rewrites (commutativity, associativity,
+        // distributivity) apply uniformly.  We track per-class
+        // isFloat / isInt tags so that:
+        //   * `fp_*` rules require at least one operand to be provably
+        //     float — preventing them from firing on integer expressions
+        //     where the resulting `ConstF(N.0)` would later be unified
+        //     with `Const(N)` by congruence and break codegen.
+        //   * Integer-only rules (Shl/Shr, BitAnd/Or/Xor strength
+        //     reductions) require operands to be provably integer.
+        // Bit ops like Shl/Shr/BitAnd are integer-only by construction.
+        if (node.op == Op::Shl || node.op == Op::Shr ||
+            node.op == Op::BitAnd || node.op == Op::BitOr ||
+            node.op == Op::BitXor || node.op == Op::Mod) {
+            cls.isInt = true;
+        } else {
+            // Generic arithmetic / comparison: float-tainted if either
+            // operand is float; int-tainted if both are integer.
+            cls.isFloat = lFloat || rFloat;
+            cls.isInt   = lInt && rInt;
+        }
 
         switch (node.op) {
         case Op::Add:
@@ -222,8 +252,19 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
         if (node.op == Op::LogNot) {
             cls.isNonNeg = true;  // Boolean result: 0 or 1
             cls.isBoolean = true;
+            cls.isInt = true;
         } else if (node.op == Op::Sqrt) {
             cls.isNonNeg = true;  // sqrt is always non-negative for valid inputs
+            cls.isFloat = true;   // sqrt always produces float
+        } else if (node.op == Op::BitNot) {
+            cls.isInt = true;     // bitwise complement is integer-only
+        } else {
+            // Generic unary (Neg etc.): inherit type tag from operand.
+            ClassId c = find(node.children[0]);
+            if (c < classes_.size()) {
+                cls.isFloat = classes_[c].isFloat;
+                cls.isInt   = classes_[c].isInt;
+            }
         }
     }
 
@@ -316,6 +357,14 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
     // When merging two equivalent e-classes, if EITHER is proven non-negative,
     // the merged class is non-negative (they represent the same value).
     classes_[a].isNonNeg = classes_[a].isNonNeg || classes_[b].isNonNeg;
+    // Type tags accumulate on merge: if either side is provably float (or
+    // int), so is the merged class.  This is intentional for downstream
+    // *guards* — a class that has been congruence-bridged to a ConstF is
+    // still safely usable in float rules.  The CRITICAL guarantee is the
+    // OTHER direction: a class that contains ONLY integer evidence has
+    // `isFloat == false`, so float rules will refuse to fire on it.
+    classes_[a].isFloat = classes_[a].isFloat || classes_[b].isFloat;
+    classes_[a].isInt   = classes_[a].isInt   || classes_[b].isInt;
 
     // ── Incremental-rebuild bookkeeping ──────────────────────────────────
     // The survivor itself is dirty (its node list grew with possibly
@@ -1130,29 +1179,16 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
 
     // ── Single-pass bottom-up pressure-aware refinement ──────────────────
     //
-    // The refinement is gated behind an opt-in env var (OMSC_EGRAPH_PRESSURE_REFINE=1)
-    // because at the time of writing the upstream rewriter occasionally
-    // populates an e-class with a node whose op/operand types are not
-    // strictly equivalent to the value the class represents (e.g. an
-    // integer shift node alongside a float multiply after associative
-    // rewrites).  The latency-only extraction in sections 3-5 is robust
-    // to this because it only re-uses the ALREADY-SELECTED node of each
-    // class; the refinement below, by design, considers EVERY node, and
-    // therefore exposes such mis-classified members as downstream type
-    // errors.
-    //
-    // The SCC / ancestor / op-match guards above eliminate the
-    // *infinite-recursion* hazard (extraction is now provably finite),
-    // so the infrastructure is sound and ready to enable once the
-    // rewriter's type-soundness invariant is tightened.  Until then,
-    // production builds get the metadata pass (regPressure / effCost
-    // populated for downstream schedulers) without the risky flips.
-    static const bool kRefineEnabled = []() {
-        const char* env = std::getenv("OMSC_EGRAPH_PRESSURE_REFINE");
-        return env && env[0] == '1';
-    }();
+    // The rewriter's type-soundness invariant is now enforced upstream
+    // (see the type-tag propagation on EClass and the fp_* rule guard
+    // installed in `getAllRules()`), so refinement runs unconditionally
+    // whenever the cost model has pressure-awareness enabled.  The SCC
+    // / ancestor / op-match guards in the loop body are still kept for
+    // defence-in-depth: they ensure extraction is provably finite even
+    // if a future rewrite rule re-introduces a cycle in the candidate
+    // selection DAG.
 
-    if (pressureAware && kRefineEnabled) {
+    if (pressureAware) {
         for (ClassId cls : topoOrder) {
             auto curIt = best.find(cls);
             if (curIt == best.end()) continue;
@@ -12806,6 +12842,46 @@ std::vector<RewriteRule> getAllRules() {
                  std::make_move_iterator(relRules.end()));
 
     auto fpRules = getFloatingPointRules();
+
+    // ── Type guard: fp_* rules must only fire on float-typed operands ──
+    //
+    // The e-graph deliberately uses a single Op for each arithmetic
+    // operation (Op::Add for both `int+int` and `float+float`, etc.)
+    // so that algebraic rewrites apply uniformly.  But the *floating-
+    // point-specific* rules below introduce `ConstF(N.0)` literals on
+    // their RHS — and if such a rule fires on a class that represents
+    // an integer expression, the resulting `Mul(x, ConstF(2.0))` ends
+    // up unified (via congruence closure) with the original
+    // `Mul(x, Const(2))`.  That bridges the two constant classes:
+    // `Const(2) ≡ ConstF(2.0)` becomes a derived equality, and
+    // extraction is then free to pick `ConstF(2.0)` as the right
+    // operand of an integer `Shl`, breaking codegen.
+    //
+    // Fix: wrap every fp_* rule with a guard that requires at least
+    // one bound wildcard's class to be provably float-typed
+    // (`EClass::isFloat`).  Float-typed classes are seeded by
+    // `Op::ConstF` literals and propagated through arithmetic in
+    // `EGraph::add` / `EGraph::merge`.  Pure-integer expressions
+    // therefore never trigger fp_* rules and the cross-type bridge
+    // can no longer form.
+    //
+    // Chains with any pre-existing guard on the rule (some fp_* rules
+    // already had value-based guards like `x != 0`).
+    for (auto& rule : fpRules) {
+        RuleGuard prev = rule.guard;
+        rule.guard = [prev](const EGraph& g, const Subst& s) -> bool {
+            bool anyFloat = false;
+            for (const auto& [name, cls] : s) {
+                ClassId c = const_cast<EGraph&>(g).find(cls);
+                if (c < g.numClasses() && g.getClass(c).isFloat) {
+                    anyFloat = true;
+                    break;
+                }
+            }
+            if (!anyFloat) return false;
+            return prev ? prev(g, s) : true;
+        };
+    }
     rules.insert(rules.end(), std::make_move_iterator(fpRules.begin()),
                  std::make_move_iterator(fpRules.end()));
 

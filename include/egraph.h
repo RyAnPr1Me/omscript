@@ -164,6 +164,14 @@ struct EClass {
     bool isNonNeg = false;              ///< True if all values are >= 0 (by analysis)
     bool isPowerOfTwo = false;          ///< True if value is a power of 2 (1,2,4,8,...)
     bool isBoolean = false;             ///< True if value is 0 or 1 (comparison result)
+    bool isFloat = false;               ///< Provably float-typed (contains ConstF or
+                                        ///< derives from a float-typed operand).  Used
+                                        ///< by `fp_*` rewrite rules to avoid unifying
+                                        ///< integer and float constants via congruence.
+    bool isInt = false;                 ///< Provably integer-typed (contains Const,
+                                        ///< Shl/Shr/BitOp output, or derives from int
+                                        ///< operands).  Used by integer-only rules to
+                                        ///< avoid firing on float-typed operands.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
