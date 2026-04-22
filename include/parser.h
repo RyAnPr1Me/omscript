@@ -90,7 +90,8 @@ class Parser {
     /// Parse an import statement and return the imported program.
     void parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                      std::vector<std::unique_ptr<EnumDecl>>& enums,
-                     std::vector<std::unique_ptr<StructDecl>>& structs);
+                     std::vector<std::unique_ptr<StructDecl>>& structs,
+                     std::vector<std::unique_ptr<VarDecl>>& globals);
 
     const Token& peek(int offset = 0) const noexcept;
     Token advance() noexcept;
@@ -139,6 +140,7 @@ class Parser {
     std::unique_ptr<StructDecl> parseStructDecl();
     std::unique_ptr<Expression> parseStructLiteral(const std::string& name, int line, int col);
     std::unique_ptr<Statement> parseExprStmt();
+    std::unique_ptr<VarDecl> parseGlobalDecl();
 
     /// Known struct names for parsing struct literals.
     std::unordered_set<std::string> structNames_;
@@ -147,6 +149,14 @@ class Parser {
     /// Used by tryMatchCustomOperator() to recognize multi-token operators
     /// (e.g. "<=>" defined as fn operator<=>(other: T)) at expression-parse time.
     std::set<std::string> customOperatorSymbols_;
+
+    /// importedGlobalVars_[alias][varName] = mangledName
+    /// Populated when an import brings in global variables.
+    /// mangledName = alias + "__" + varName
+    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> importedGlobalVars_;
+
+    /// Globals from imported files, drained into Program by parse().
+    std::vector<std::unique_ptr<VarDecl>> pendingGlobals_;
 
     /// Pre-scan all tokens for `operator SYMBOL (` patterns and populate
     /// customOperatorSymbols_ before the main parse pass.

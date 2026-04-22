@@ -3,6 +3,7 @@
 #include "egraph.h"
 #include "opt_context.h"
 #include "opt_orchestrator.h"
+#include "rlc_pass.h"
 #include "synthesize.h"
 #include <climits>
 #include <cmath>
@@ -677,6 +678,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "asin",
                                                                 "assert",
                                                                 "assume",
+                                                                "alloc",
                                                                 "atan",
                                                                 "atan2",
                                                                 "bitreverse",
@@ -742,6 +744,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "min",
                                                                 "min_float",
                                                                 "number_to_string",
+                                                                "newRegion",
                                                                 "pop",
                                                                 "popcount",
                                                                 "pow",
@@ -4442,6 +4445,9 @@ void CodeGenerator::generate(Program* program) {
         std::cout << "  [codegen] Generating LLVM IR for " << program->functions.size()
                   << " functions..." << '\n';
     }
+
+    // Emit LLVM global variables for all program-level global declarations.
+    generateGlobals(program);
 
     // Generate all function bodies
     for (auto& func : program->functions) {
@@ -9048,6 +9054,56 @@ void CodeGenerator::fuseLoops(BlockStmt* block) {
         optStats_.loopsFused++;
         // Don't advance i — try to fuse again with the next statement.
     }
+}
+
+void CodeGenerator::generateGlobals(Program* program) {
+    if (!program) return;
+    for (const auto& gv : program->globals) {
+        if (!gv) continue;
+        // Determine the LLVM symbol name: mangled if from another file.
+        const std::string llvmName = gv->globalNamespace.empty()
+            ? gv->name
+            : gv->globalNamespace + "__" + gv->name;
+
+        // Determine the LLVM type: use the annotation if present, else i64.
+        llvm::Type* ty = gv->typeName.empty()
+            ? getDefaultType()
+            : resolveAnnotatedType(gv->typeName);
+
+        // Build a constant initializer.
+        llvm::Constant* initVal = llvm::Constant::getNullValue(ty);
+        if (gv->initializer) {
+            if (gv->initializer->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<LiteralExpr*>(gv->initializer.get());
+                if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                    initVal = llvm::ConstantInt::get(ty, static_cast<uint64_t>(lit->intValue), true);
+                } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+                    if (ty->isFloatingPointTy())
+                        initVal = llvm::ConstantFP::get(ty, lit->floatValue);
+                    else
+                        initVal = llvm::ConstantInt::get(ty, static_cast<uint64_t>(lit->floatValue), true);
+                }
+                // String or other: fall back to null (runtime init unsupported for top-level globals)
+            }
+            // Non-literal initializers at top level: zero-init the global.
+        }
+
+        auto* llvmGV = new llvm::GlobalVariable(
+            *module,
+            ty,
+            gv->isConst,                              // isConstant
+            llvm::GlobalValue::ExternalLinkage,
+            initVal,
+            llvmName
+        );
+        llvmGV->setAlignment(llvm::MaybeAlign(8));
+        globalVars_[llvmName] = llvmGV;
+    }
+}
+
+void CodeGenerator::runRLCPass(Program* program, bool verbose) {
+    const RLCStats stats = omscript::runRLCPass(program, verbose);
+    optStats_.regionsCoalesced += stats.regionsCoalesced;
 }
 
 } // namespace omscript

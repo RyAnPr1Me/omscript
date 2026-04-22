@@ -310,13 +310,24 @@ std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
     std::vector<std::unique_ptr<StructDecl>> structs;
+    std::vector<std::unique_ptr<VarDecl>> globals;
     bool optMaxTagActive = false;
     bool fileNoAlias = false;
 
     while (!isAtEnd()) {
         if (match(TokenType::IMPORT)) {
             try {
-                parseImport(functions, enums, structs);
+                parseImport(functions, enums, structs, globals);
+            } catch (const std::exception& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
+        if (check(TokenType::GLOBAL)) {
+            try {
+                auto gv = parseGlobalDecl();
+                globals.push_back(std::move(gv));
             } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -527,12 +538,19 @@ std::unique_ptr<Program> Parser::parse() {
     }
     lambdaFunctions_.clear();
 
-    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias);
+    // Drain pending globals from imports
+    for (auto& pg : pendingGlobals_) {
+        globals.push_back(std::move(pg));
+    }
+    pendingGlobals_.clear();
+
+    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias, std::move(globals));
 }
 
 void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                          std::vector<std::unique_ptr<EnumDecl>>& enums,
-                         std::vector<std::unique_ptr<StructDecl>>& structs) {
+                         std::vector<std::unique_ptr<StructDecl>>& structs,
+                         std::vector<std::unique_ptr<VarDecl>>& /*globals*/) {
     const Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
 
     // Optional alias: import "file" as alias
@@ -637,6 +655,21 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     // Import enum names for scope resolution
     for (const auto& name : importParser.enumNames_) {
         enumNames_.insert(name);
+    }
+
+    // Import global variables: derive the alias stem if none was given.
+    std::string globalAlias = alias;
+    if (globalAlias.empty()) {
+        // Derive stem from the filename (no directory, no extension)
+        // e.g. "math.om" → "math",  "lib/utils.om" → "utils"
+        globalAlias = std::filesystem::path(filename).stem().string();
+    }
+    for (auto& gv : importedProgram->globals) {
+        if (!gv) continue;
+        const std::string mangledName = globalAlias + "__" + gv->name;
+        importedGlobalVars_[globalAlias][gv->name] = mangledName;
+        gv->globalNamespace = globalAlias;
+        pendingGlobals_.push_back(std::move(gv));
     }
 }
 
@@ -1122,6 +1155,30 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         decl->column = kw.column;
         return decl;
     }
+    // global var/const — declare a program-wide variable inside a function body.
+    // Syntax: global var name[:type] [= expr];
+    if (match(TokenType::GLOBAL)) {
+        const Token kw = tokens[current - 1];
+        const bool isConst = check(TokenType::CONST);
+        if (!match(TokenType::VAR) && !match(TokenType::CONST)) {
+            error("Expected 'var' or 'const' after 'global'");
+        }
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'global var'");
+        std::string typeName;
+        if (match(TokenType::COLON)) {
+            typeName = parseTypeAnnotation();
+        }
+        std::unique_ptr<Expression> init = nullptr;
+        if (match(TokenType::ASSIGN)) {
+            init = parseExpression();
+        }
+        consume(TokenType::SEMICOLON, "Expected ';' after global variable declaration");
+        auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
+        decl->isGlobal = true;
+        decl->line = kw.line;
+        decl->column = kw.column;
+        return decl;
+    }
     if (match(TokenType::PREFETCH)) {
         const Token kw = tokens[current - 1];
 
@@ -1373,6 +1430,29 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
     decl->line = name.line;
     decl->column = name.column;
+    return decl;
+}
+
+std::unique_ptr<VarDecl> Parser::parseGlobalDecl() {
+    const Token kw = advance(); // consume 'global'
+    const bool isConst = check(TokenType::CONST);
+    if (!match(TokenType::VAR) && !match(TokenType::CONST)) {
+        error("Expected 'var' or 'const' after 'global'");
+    }
+    const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'global var'");
+    std::string typeName;
+    if (match(TokenType::COLON)) {
+        typeName = parseTypeAnnotation();
+    }
+    std::unique_ptr<Expression> init = nullptr;
+    if (match(TokenType::ASSIGN)) {
+        init = parseExpression();
+    }
+    consume(TokenType::SEMICOLON, "Expected ';' after global variable declaration");
+    auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
+    decl->isGlobal = true;
+    decl->line = kw.line;
+    decl->column = kw.column;
     return decl;
 }
 
@@ -3632,8 +3712,22 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 }
             }
 
-            // Not a call: single-level → classic enum member access.
+            // Not a call: single-level → check for imported global, then classic enum member access.
             if (depth == 1) {
+                // Priority: cross-file global variable access (e.g. math::PI)
+                {
+                    auto gvNsIt = importedGlobalVars_.find(segments[0]);
+                    if (gvNsIt != importedGlobalVars_.end()) {
+                        auto gvIt = gvNsIt->second.find(segments[1]);
+                        if (gvIt != gvNsIt->second.end()) {
+                            auto e = std::make_unique<IdentifierExpr>(gvIt->second);
+                            e->line = token.line;
+                            e->column = token.column;
+                            return e;
+                        }
+                    }
+                }
+                // Fallback: classic enum member access
                 auto e = std::make_unique<ScopeResolutionExpr>(segments[0], segments[1]);
                 e->line = token.line;
                 e->column = token.column;

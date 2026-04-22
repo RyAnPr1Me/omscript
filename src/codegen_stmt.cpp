@@ -27,6 +27,38 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         codegenError("Variable declaration outside of function", stmt);
     }
 
+    // When the variable is declared global (inside a function), create a
+    // module-level GlobalVariable instead of a stack alloca.
+    if (stmt->isGlobal) {
+        const std::string llvmName = stmt->globalNamespace.empty()
+            ? stmt->name
+            : stmt->globalNamespace + "__" + stmt->name;
+        // If already created (e.g., by generateGlobals), just record it.
+        if (auto* existing = module->getGlobalVariable(llvmName)) {
+            namedValues[stmt->name] = existing;
+            globalVars_[llvmName] = existing;
+            return;
+        }
+        llvm::Type* ty = stmt->typeName.empty() ? getDefaultType() : resolveAnnotatedType(stmt->typeName);
+        auto* gv = new llvm::GlobalVariable(
+            *module, ty,
+            stmt->isConst,
+            llvm::GlobalValue::ExternalLinkage,
+            llvm::Constant::getNullValue(ty),
+            llvmName);
+        gv->setAlignment(llvm::MaybeAlign(8));
+        globalVars_[llvmName] = gv;
+        namedValues[stmt->name] = gv;
+        // If there is an initializer, generate it and store into the global.
+        if (stmt->initializer) {
+            llvm::Value* initVal = generateExpression(stmt->initializer.get());
+            if (initVal->getType() != ty)
+                initVal = builder->CreateIntCast(initVal, ty, true, "gvinit");
+            builder->CreateStore(initVal, gv);
+        }
+        return;
+    }
+
     // Resolve the alloca type from the type annotation if present.
     llvm::Type* allocaType = stmt->typeName.empty()
                                  ? getDefaultType()

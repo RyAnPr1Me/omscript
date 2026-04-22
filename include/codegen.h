@@ -61,6 +61,7 @@ struct OptStats {
     unsigned borrowsFrozen    = 0; ///< Variables frozen (freeze + alias propagation)
     unsigned independentLoops = 0; ///< Loops annotated with @independent
     unsigned allocatorFuncs   = 0; ///< User functions annotated as @allocator
+    unsigned regionsCoalesced = 0; ///< Region pairs coalesced by the RLC pass
 
     // ── CF-CTRE / abstract-interpretation statistics ──────────────────────
     // Populated from CTEngine::stats() at print time when a CT engine is
@@ -92,7 +93,8 @@ struct OptStats {
                   << "  loops fused              : " << loopsFused << "\n"
                   << "  borrows frozen           : " << borrowsFrozen << "\n"
                   << "  independent loops        : " << independentLoops << "\n"
-                  << "  allocator wrappers       : " << allocatorFuncs << "\n";
+                  << "  allocator wrappers       : " << allocatorFuncs << "\n"
+                  << "  regions coalesced (RLC)  : " << regionsCoalesced << "\n";
 
         // Only print the CF-CTRE block when at least one CT-engine counter is
         // non-zero (avoids visual clutter for pipelines that don't run CTRE).
@@ -400,6 +402,11 @@ class CodeGenerator {
     /// Public-facing wrapper for the CF-CTRE pre-pass (was private).
     void runCFCTRE(Program* program);
 
+    /// Run the Region Lifetime Coalescing pass (AST-level transformation).
+    /// Detects invalidate-based region lifetime patterns and coalesces
+    /// temporally disjoint regions to eliminate redundant allocations.
+    void runRLCPass(Program* program, bool verbose);
+
   private:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
@@ -441,6 +448,11 @@ class CodeGenerator {
     /// Enables zero-cost bounds check elision for arr[i] inside such loops:
     /// the loop condition i < len(arr) already proves the index is valid.
     llvm::StringMap<std::string> loopIterEndArray_;
+
+    /// LLVM global variable registry: name → GlobalVariable*.
+    /// Populated by generateGlobals() and used by generateIdentifier() /
+    /// generateScopeResolution() to resolve global variable references.
+    llvm::StringMap<llvm::GlobalVariable*> globalVars_;
 
     /// Maps array variable name → the AllocaInst of the variable passed as
     /// size to array_fill(sizeVar, val).  Enables bounds check elision when
@@ -967,6 +979,7 @@ class CodeGenerator {
 
     // Statement generators
     void generateVarDecl(VarDecl* stmt);
+    void generateGlobals(Program* program);
     void generateReturn(ReturnStmt* stmt);
     void generateIf(IfStmt* stmt);
     void generateWhile(WhileStmt* stmt);

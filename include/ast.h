@@ -266,6 +266,8 @@ class VarDecl : public Statement {
     bool isConst;
     std::string typeName;
     bool isRegister = false; ///< `register var` — force variable into CPU register via mem2reg
+    bool isGlobal = false;          ///< Declared with the `global` keyword
+    std::string globalNamespace;    ///< Non-empty when imported: the alias under which this global lives (e.g. "foo")
 
     VarDecl(const std::string& n, std::unique_ptr<Expression> init, bool cnst = false, const std::string& type = "")
         : Statement(ASTNodeType::VAR_DECL), name(n), initializer(std::move(init)), isConst(cnst), typeName(type) {}
@@ -645,11 +647,13 @@ class Program : public ASTNode {
     std::vector<std::unique_ptr<EnumDecl>> enums;
     std::vector<std::unique_ptr<StructDecl>> structs;
     bool fileNoAlias = false;  ///< @noalias file directive: all pointers are noalias
+    std::vector<std::unique_ptr<VarDecl>> globals; ///< Top-level global variable declarations
 
     Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {},
-            std::vector<std::unique_ptr<StructDecl>> strcts = {}, bool noAlias = false)
+            std::vector<std::unique_ptr<StructDecl>> strcts = {}, bool noAlias = false,
+            std::vector<std::unique_ptr<VarDecl>> globs = {})
         : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)),
-          structs(std::move(strcts)), fileNoAlias(noAlias) {}
+          structs(std::move(strcts)), fileNoAlias(noAlias), globals(std::move(globs)) {}
 };
 
 // ---------------------------------------------------------------------------

@@ -287,6 +287,7 @@ struct AnalysisValidity {
         if (fact == "cfctre")            { cfctre          = true; return; }
         if (fact == "egraph")            { egraph          = true; return; }
         if (fact == "range_analysis")    { rangeAnalysis   = true; return; }
+        if (fact == "rlc")              { rlc             = true; return; }
     }
 
     /// Attach a dependency graph so that invalidating a fact also invalidates

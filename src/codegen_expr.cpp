@@ -432,6 +432,16 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
                      "Use field access with '.' instead", expr);
     }
 
+    // Check if this is a cross-file global variable reference (foo::varname).
+    {
+        const std::string mangledName = scope + "__" + member;
+        auto gvIt = globalVars_.find(mangledName);
+        if (gvIt != globalVars_.end()) {
+            auto* gv = gvIt->second;
+            return builder->CreateLoad(gv->getValueType(), gv, mangledName);
+        }
+    }
+
     // Unknown scope: provide a helpful error message
     std::string msg = "'" + scope + "' is not a valid scope for '::' operator. "
                       "Expected an enum name";
@@ -457,6 +467,14 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         auto enumIt = enumConstants_.find(expr->name);
         if (enumIt != enumConstants_.end()) {
             return llvm::ConstantInt::get(getDefaultType(), enumIt->second);
+        }
+        // Fallback: check module-level global variables.
+        {
+            auto gvIt = globalVars_.find(expr->name);
+            if (gvIt != globalVars_.end()) {
+                auto* gv = gvIt->second;
+                return builder->CreateLoad(gv->getValueType(), gv, expr->name);
+            }
         }
         // Build "did you mean?" suggestion from known variables.
         std::string msg = "Unknown variable: " + expr->name;
