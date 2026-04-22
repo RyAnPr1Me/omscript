@@ -7731,18 +7731,55 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // icmp(add(x, C1), C2) → icmp(x, C2-C1): compare offset folding.
     stats.intStrengthReduced += foldCmpAddConst(func);
 
+    // select(cond, x, x) → x: eliminate selects where both arms are identical.
+    // Run BEFORE the loop-invariant hoists so any value that becomes available
+    // after select-collapse is itself eligible for hoisting.  Earlier transforms
+    // (convertIfElseToSelect, foldMinMaxPatterns, foldSelectToBoolCast,
+    // foldConstantSelect, foldSelectConsecutiveConsts) frequently simplify one
+    // arm to match the other, leaving exactly the pattern this fold targets.
+    stats.intStrengthReduced += foldSelectSameValue(func);
+
     // Hoist loop-invariant GEP address calculations to the loop pre-header.
-    // Runs last so all address computations introduced by our transforms are hoisted.
+    // Runs after the bulk of the strength-reduction transforms so all address
+    // computations introduced by our transforms are considered.
     stats.loadsStorePaired   += hoistLoopInvariantGEP(func);
     // Hoist ALL remaining pure loop-invariant instructions to the pre-header.
     // This generalises hoistLoopInvariantGEP to cover strength-reduced constants,
     // type conversions, and other invariant computations created by our transforms.
-    // Must run after all other transforms so every new instruction is considered.
+    // Runs AFTER foldSelectSameValue so that values exposed by select-collapse
+    // are considered for hoisting.
     stats.loadsStorePaired   += hoistLoopInvariantInst(func);
-    // select(cond, x, x) → x: eliminate selects where both arms are identical.
-    // Runs last since all other transforms (convertIfElseToSelect, foldMinMaxPatterns,
-    // foldSelectToBoolCast, etc.) may have simplified one arm to match the other.
-    stats.intStrengthReduced += foldSelectSameValue(func);
+
+    // ── Phase K convergence sweep ───────────────────────────────────────────
+    // The transform sequence above is linear-single-pass: each fold runs once,
+    // in a fixed order chosen so the most common "pre-condition" producers run
+    // before the consumers.  But many later transforms create patterns that an
+    // earlier-positioned fold would have caught:
+    //
+    //   * `foldChainedAdds` collapses add chains and may produce `add(x, 0)`
+    //     when the merged constant cancels — `foldIdentityOps` ran earlier and
+    //     would have erased it.
+    //   * `foldGEPArithmetic` and `foldMulPow2` produce constant operands that
+    //     `foldBitwiseWithConstants` would have folded.
+    //   * `foldRedundantPHIs` runs early; later transforms (rotate idiom, FMA
+    //     generation, select-sinking) can produce new trivially-redundant PHIs.
+    //   * `convertIfElseToSelect` + `foldSelectSameValue` may leave a
+    //     `select(cond, C, C)` that constant-folds via `foldConstantSelect`.
+    //   * Hoisting can leave behind `not(not(x))` chains whose inner `not` was
+    //     hoisted out of the loop while the outer remained — `foldDoubleNot`
+    //     would collapse them.
+    //
+    // Re-run the cheapest, purely-local O(N) folds once more.  These passes
+    // each scan the function once and return immediately when they find no
+    // pattern, so the cost when the main sequence already reached fixed-point
+    // is one linear scan per fold (≈microseconds for typical functions).  The
+    // expensive transforms (FMA generation, software-pipelining, prefetch
+    // insertion, branch layout, scheduling) are NOT repeated.
+    stats.intStrengthReduced += foldIdentityOps(func);
+    stats.intStrengthReduced += foldBitwiseWithConstants(func);
+    stats.intStrengthReduced += foldConstantSelect(func);
+    stats.intStrengthReduced += foldRedundantPHIs(func);
+    stats.intStrengthReduced += foldDoubleNot(func);
 
     // Final dead code elimination: sweep up instructions left dead by all
     // preceding transforms.  Must run absolutely last.

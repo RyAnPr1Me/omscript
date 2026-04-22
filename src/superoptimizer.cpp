@@ -8530,6 +8530,36 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
         }
     }
 
+    // Phase 4.5: Post-synthesis cleanup (Phase K convergence pass).
+    //
+    // Enumerative synthesis in Phase 4 emits brand-new instruction sequences
+    // (e.g. multiplicative-inverse divides, popcount-via-Mul64-magic, byte
+    // permutation chains) that none of the earlier algebraic / canonicalization
+    // passes have ever seen.  A typical synthesis output is a 3-4 instruction
+    // sequence containing a constant multiply, a shift, and an `and` mask —
+    // these very often expose:
+    //
+    //   * new identity ops (and(x, -1), shl(x, 0)) that `applyAlgebraicSimplifications`
+    //     would fold,
+    //   * constant operands whose `KnownBits` allow narrowing or NUW/NSW flag
+    //     attachment in `applyKnownBitsNarrowing` (which then unlocks downstream
+    //     LLVM InstCombine/loop-vectorizer optimizations),
+    //   * comparison-against-constant patterns reachable by
+    //     `applyComparisonCanonicalization`,
+    //   * trivial PHIs created when synthesis replaced a value used across a
+    //     control-flow merge — caught by `propagatePhiConstants`.
+    //
+    // Without this pass the synthesis output reaches Phase 5 DCE and then the
+    // LLVM backend in its raw, un-cleaned form.  Gated on `synthReplacements > 0`
+    // so the cost is exactly zero when synthesis was disabled, skipped (function
+    // too large), or simply found nothing to replace.
+    if (config.enableSynthesis && stats.synthReplacements > 0 && config.enableAlgebraic) {
+        stats.algebraicSimplified += applyAlgebraicSimplifications(func);
+        stats.algebraicSimplified += applyComparisonCanonicalization(func);
+        stats.algebraicSimplified += propagatePhiConstants(func);
+        stats.algebraicSimplified += applyKnownBitsNarrowing(func);
+    }
+
     // Phase 5: Dead code elimination — clean up instructions made dead by
     // previous phases (idiom replacement, algebraic simplification, synthesis).
     if (config.enableDeadCodeElim) {
