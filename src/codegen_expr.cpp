@@ -1779,23 +1779,59 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // copies and allows SCEV to use unsigned induction variable ranges.
 
     // ── Pointer arithmetic ────────────────────────────────────────────────────
-    // When the left operand is a pointer (ptr type), emit byte-level GEP rather
-    // than integer add/sub.  This preserves pointer provenance through LLVM's
-    // alias analysis and produces correct TBAA/AA metadata.
+    // OmScript's `ptr` type is intentionally untyped (analogous to void* in C).
+    // Pointer arithmetic is therefore byte-based: `p + n` advances by n bytes,
+    // `p - n` retreats by n bytes, and `p - q` yields the signed byte distance.
+    //
+    // Design rationale:
+    //   • OmScript has no pointer type parameters (no T*), so there is no
+    //     element size to divide or multiply by at the language level.
+    //   • Users who need element-count semantics write `p + n * sizeof(T)`.
+    //   • Byte-granularity matches the semantics of `malloc`/`free` and is
+    //     consistent with every other pointer operation in the language.
+    //
+    // Implementation notes:
+    //   • We use getIndexType() / getIntPtrType() (target pointer-sized integer)
+    //     instead of hardcoding i64 so the code is correct on non-64-bit targets.
+    //   • CreateInBoundsGEP is NOT used: we cannot statically prove that
+    //     user-supplied offsets stay within the allocated object, so the
+    //     conservative (no inbounds) form avoids UB.
+    //   • Float offsets are silently truncated via FPToSI; the language does
+    //     not define float-typed pointer offsets as meaningful.
+    //
+    // IMPORTANT: check ptr - ptr BEFORE ptr - int, because if both operands are
+    // pointers the first branch would otherwise treat the right pointer as an
+    // integer offset (wrong).
+
+    // ptr - ptr: signed byte distance between two pointers (ptrdiff_t semantics).
+    if (expr->op == "-" && left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
+        const llvm::DataLayout& DL = module->getDataLayout();
+        llvm::Type* intptrTy = DL.getIntPtrType(*context);
+        auto* lInt = builder->CreatePtrToInt(left,  intptrTy, "ptrdiff.l");
+        auto* rInt = builder->CreatePtrToInt(right, intptrTy, "ptrdiff.r");
+        auto* diff = builder->CreateSub(lInt, rInt, "ptrdiff");
+        // Widen to default i64 if the target uses a narrower pointer type.
+        if (diff->getType() != getDefaultType())
+            diff = builder->CreateSExt(diff, getDefaultType(), "ptrdiff.ext");
+        return diff;
+    }
+
+    // ptr ± int: advance/retreat by n bytes via byte-level GEP.
     if ((expr->op == "+" || expr->op == "-") && left->getType()->isPointerTy()) {
+        const llvm::DataLayout& DL = module->getDataLayout();
+        llvm::Type* idxTy = DL.getIndexType(left->getType());
+
         llvm::Value* offset = right;
-        if (!offset->getType()->isIntegerTy())
-            offset = builder->CreateFPToSI(offset, getDefaultType(), "ptrarith.ftoi");
+        // Float offset → integer truncation (float offsets are not meaningful).
+        if (offset->getType()->isDoubleTy() || offset->getType()->isFloatTy())
+            offset = builder->CreateFPToSI(offset, idxTy, "ptrarith.ftoi");
+        // Negate before casting to avoid sign-extension artefacts.
         if (expr->op == "-")
             offset = builder->CreateNeg(offset, "ptrarith.neg");
-        offset = builder->CreateIntCast(offset, llvm::Type::getInt64Ty(*context), true, "ptrarith.idx");
+        // Sign-extend / truncate to the target pointer index type.
+        offset = builder->CreateIntCast(offset, idxTy, /*isSigned=*/true, "ptrarith.idx");
+        // Byte-wise GEP: i8 element type, one byte per index unit.
         return builder->CreateGEP(llvm::Type::getInt8Ty(*context), left, offset, "ptrarith");
-    }
-    // ptr - ptr: distance in bytes
-    if (expr->op == "-" && right->getType()->isPointerTy() && left->getType()->isPointerTy()) {
-        auto* lInt = builder->CreatePtrToInt(left,  getDefaultType(), "ptrdiff.l");
-        auto* rInt = builder->CreatePtrToInt(right, getDefaultType(), "ptrdiff.r");
-        return builder->CreateSub(lInt, rInt, "ptrdiff");
     }
 
     if (expr->op == "+") {
