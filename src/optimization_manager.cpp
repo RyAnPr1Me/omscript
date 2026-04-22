@@ -149,6 +149,15 @@ void PassScheduler::applyInvalidation(const PassMetadata& meta) noexcept {
         // returned by ctx.cache().get<T>(fact) after the transformation.
         ctx_.cache().invalidate(fact);
     }
+    // The dependency-graph cascade can transitively invalidate facts that the
+    // pass JUST PROVIDED (because the pass itself depends on the inputs it
+    // declared as invalidated — e.g. synthesis depends on purity, and also
+    // invalidates purity, so cascading from purity reaches synthesis).  Re-mark
+    // provides_ facts valid: they were freshly computed by this pass run and
+    // remain valid until a subsequent transformation invalidates them.
+    for (const char* fact : meta.provides_) {
+        ctx_.validity().markValid(fact);
+    }
 }
 
 bool PassScheduler::allProvidedValid(const PassMetadata& meta) const noexcept {

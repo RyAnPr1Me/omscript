@@ -426,13 +426,25 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
             continue;
         }
 
-        // ── Precondition check ─────────────────────────────────────────
-        // checkPreconditions() warns (or asserts in strict mode) and returns
-        // false if any required fact is not valid.  In release mode, skipping
-        // a pass with unmet prerequisites is conservative and correct: the
-        // fact declared in provides_ will remain invalid, so no downstream
-        // consumer can accidentally use the stale data.
-        if (!scheduler.checkPreconditions(*meta)) {
+        // ── Precondition check & recovery ───────────────────────────────
+        // checkPreconditions() warns (or asserts in strict mode) if any
+        // required fact is invalid.  This commonly happens when an earlier
+        // pass in the topological order invalidates a fact that this pass
+        // requires (e.g. `synthesis` invalidates `purity`/`effects`, but
+        // `cfctre` requires both).  Rather than skip the pass — which would
+        // leave the produced fact invalid and silently disable downstream
+        // analyses — we attempt to recompute the missing prerequisites
+        // on-demand via the demand-driven scheduler.
+        bool prereqsOk = true;
+        for (const char* req : meta->requires_) {
+            if (ctx.validity().isValid(req)) continue;
+            // Try to satisfy the missing requirement by re-running its producer.
+            if (!scheduler.runToProvide(req, program, dispatch)) {
+                prereqsOk = false;
+                break;
+            }
+        }
+        if (!prereqsOk || !scheduler.checkPreconditions(*meta)) {
             ++stats_.passesSkipped;
             continue;
         }

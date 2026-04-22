@@ -113,6 +113,20 @@ struct CTInterval {
         return range(std::min(lo, o.lo), std::max(hi, o.hi));
     }
 
+    /// Meet (greatest lower bound, set intersection): result contains only
+    /// values present in BOTH intervals.  Returns BOTTOM when ranges don't
+    /// overlap.  Used to combine constraints from compound conditions like
+    /// `A && B` where both narrowings apply on the then-branch.
+    CTInterval intersect(const CTInterval& o) const noexcept {
+        if (isBottom() || o.isBottom()) return bottom();
+        if (isTop()) return o;
+        if (o.isTop()) return *this;
+        const int64_t newLo = std::max(lo, o.lo);
+        const int64_t newHi = std::min(hi, o.hi);
+        if (newLo > newHi) return bottom();
+        return range(newLo, newHi);
+    }
+
     /// Widening: called on loop back-edges to ensure convergence.
     /// If the new bound extends the old bound, widen it to ±∞.
     CTInterval widen(const CTInterval& prev) const noexcept {
@@ -136,22 +150,28 @@ struct CTInterval {
     // definition of the comparison operator.
 
     CTInterval narrowLT(int64_t bound) const noexcept {   // x < bound
-        if (isBottom() || isTop()) return *this;
+        if (isBottom()) return *this;
+        if (bound == std::numeric_limits<int64_t>::min()) return bottom();
+        if (isTop()) return range(std::numeric_limits<int64_t>::min(), bound - 1);
         if (lo >= bound) return bottom();
         return range(lo, std::min(hi, bound - 1));
     }
     CTInterval narrowLE(int64_t bound) const noexcept {   // x <= bound
-        if (isBottom() || isTop()) return *this;
+        if (isBottom()) return *this;
+        if (isTop()) return range(std::numeric_limits<int64_t>::min(), bound);
         if (lo > bound) return bottom();
         return range(lo, std::min(hi, bound));
     }
     CTInterval narrowGT(int64_t bound) const noexcept {   // x > bound
-        if (isBottom() || isTop()) return *this;
+        if (isBottom()) return *this;
+        if (bound == std::numeric_limits<int64_t>::max()) return bottom();
+        if (isTop()) return range(bound + 1, std::numeric_limits<int64_t>::max());
         if (hi <= bound) return bottom();
         return range(std::max(lo, bound + 1), hi);
     }
     CTInterval narrowGE(int64_t bound) const noexcept {   // x >= bound
-        if (isBottom() || isTop()) return *this;
+        if (isBottom()) return *this;
+        if (isTop()) return range(bound, std::numeric_limits<int64_t>::max());
         if (hi < bound) return bottom();
         return range(std::max(lo, bound), hi);
     }
@@ -668,6 +688,18 @@ private:
 
     /// Snapshot an array from the heap into a new handle (for memoisation).
     CTArrayHandle snapshotArray(CTArrayHandle src);
+
+    /// Narrow variable ranges along the then/else branches of an `if`
+    /// based on simple comparison constraints in the condition expression.
+    /// Updates `thenF.constraints` / `elseF.constraints` in place.
+    void narrowBranchConstraints(const Expression* cond,
+                                 CTFrame& thenF,
+                                 CTFrame& elseF) const;
+
+    /// Build a partial-specialisation cache key for (fnName, args), supporting
+    /// mixed concrete/symbolic argument vectors.
+    std::string partialSpecKey(const std::string& fnName,
+                               const std::vector<CTValue>& args) const;
 
     // ── Phase 9: Abstract interpretation (CTAbstractInterpreter) ─────────
     // Called from runPass; populates the analysis* maps below.

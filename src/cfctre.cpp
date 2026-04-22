@@ -2252,6 +2252,30 @@ static LRLinear lrLinearize(
         return {};
     }
 
+    // ── Built-in calls over loop-invariant operands ──────────────────────
+    // Recognize abs(c), min(a, b), max(a, b) when their argument(s) reduce to
+    // a loop-invariant LRLinear (a == 0).  This significantly broadens loop
+    // reasoning coverage: previously a single `min(x, c)` inside a loop body
+    // would force the analyzer to bail out and fall back to direct iteration.
+    case ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<const CallExpr*>(e);
+        const std::string& fn = call->callee;
+        if (fn == "abs" && call->arguments.size() == 1) {
+            LRLinear A = lrLinearize(call->arguments[0].get(), iv, snap, modVars);
+            if (!A.valid || A.a != 0) return {};   // only invariant operand
+            int64_t v = A.b;
+            return {true, 0, v < 0 ? -v : v};
+        }
+        if ((fn == "min" || fn == "max") && call->arguments.size() == 2) {
+            LRLinear A = lrLinearize(call->arguments[0].get(), iv, snap, modVars);
+            LRLinear B = lrLinearize(call->arguments[1].get(), iv, snap, modVars);
+            if (!A.valid || !B.valid || A.a != 0 || B.a != 0) return {};
+            int64_t v = (fn == "min") ? std::min(A.b, B.b) : std::max(A.b, B.b);
+            return {true, 0, v};
+        }
+        return {};
+    }
+
     default:
         return {};
     }
@@ -2259,10 +2283,10 @@ static LRLinear lrLinearize(
 
 // ── Per-iteration effect on one scalar variable ───────────────────────────
 struct LREffect {
-    enum class Kind { ADD, MUL, XOR, AND, OR, SET, INCR, DECR };
+    enum class Kind { ADD, MUL, XOR, AND, OR, SET, INCR, DECR, MIN, MAX };
     Kind        kind;
     std::string var;
-    int64_t     a{0};   // coefficient of loop var (for ADD / SET)
+    int64_t     a{0};   // coefficient of loop var (for ADD / SET / MIN / MAX)
     int64_t     b{0};   // constant part           (all ops)
 };
 
@@ -2451,6 +2475,34 @@ static bool lrAnalyzeBody(
                 }
             }
 
+            // x = min(x, expr)  /  x = max(x, expr)  /  x = min(expr, x) etc.
+            // Reduction patterns: pre-iteration value of x is reduced with
+            // a loop-invariant or linear expression every iteration.
+            if (rhs->type == ASTNodeType::CALL_EXPR) {
+                auto* call = static_cast<const CallExpr*>(rhs);
+                const std::string& fn = call->callee;
+                if ((fn == "min" || fn == "max") && call->arguments.size() == 2) {
+                    auto isSelfArg = [&](const Expression* e) -> bool {
+                        return e->type == ASTNodeType::IDENTIFIER_EXPR &&
+                               static_cast<const IdentifierExpr*>(e)->name == varName;
+                    };
+                    bool sl = isSelfArg(call->arguments[0].get());
+                    bool sr = isSelfArg(call->arguments[1].get());
+                    if (sl || sr) {
+                        const Expression* otherExpr =
+                            sl ? call->arguments[1].get() : call->arguments[0].get();
+                        LRLinear o = lrLinearize(otherExpr, iv, snap, modVars);
+                        if (!o.valid) return false;
+                        // Encode (a, b) of the other-side expression into the effect.
+                        // a == 0 → pure invariant; a != 0 → linear in iv.
+                        effects.push_back({
+                            (fn == "min") ? LREffect::Kind::MIN : LREffect::Kind::MAX,
+                            varName, o.a, o.b});
+                        continue;
+                    }
+                }
+            }
+
             // Pure SET:  x = expr  (RHS must not reference varName itself,
             // which lrLinearize enforces via modVars containing varName).
             LRLinear rhs_info = lrLinearize(rhs, iv, snap, modVars);
@@ -2563,6 +2615,33 @@ static void lrApplyEffects(
                 static_cast<int64_t>(
                     static_cast<uint64_t>(eff.a) * static_cast<uint64_t>(lastIV) +
                     static_cast<uint64_t>(eff.b)));
+            break;
+        }
+
+        case LREffect::Kind::MIN:
+        case LREffect::Kind::MAX: {
+            // x = min/max(x, a*iv + b) for k = 0..N-1.
+            // Since a*iv + b is monotonic in iv (or constant when a == 0),
+            // the reduced value over [0, N-1] occurs at one of the endpoints.
+            // Use signed __int128 to avoid intermediate signed overflow.
+            const __int128 ivFirst128 = static_cast<__int128>(start);
+            const __int128 ivLast128  = ivFirst128 +
+                static_cast<__int128>(step) * static_cast<__int128>(N - 1);
+            const __int128 a128 = static_cast<__int128>(eff.a);
+            const __int128 b128 = static_cast<__int128>(eff.b);
+            // Wrap intermediate products via uint64 cast (matches OmScript
+            // wrapping arithmetic — same convention used by the SET case).
+            const int64_t valFirst = static_cast<int64_t>(
+                static_cast<uint64_t>(static_cast<int64_t>(a128 * ivFirst128 + b128)));
+            const int64_t valLast  = static_cast<int64_t>(
+                static_cast<uint64_t>(static_cast<int64_t>(a128 * ivLast128  + b128)));
+            int64_t reduced = (eff.kind == LREffect::Kind::MIN)
+                ? std::min(valFirst, valLast)
+                : std::max(valFirst, valLast);
+            int64_t out = (eff.kind == LREffect::Kind::MIN)
+                ? std::min(cur, reduced)
+                : std::max(cur, reduced);
+            frame.locals[eff.var] = CTValue::fromI64(out);
             break;
         }
         }
@@ -3113,81 +3192,234 @@ void CTEngine::executeTile(CTFrame& frame,
 //   frame.constraints[varName]
 // which is checked in evalExpr IDENTIFIER_EXPR to fold the symbolic variable
 // to its concrete value when the interval is a single point.
+// ─────────────────────────────────────────────────────────────────────────────
+// CTEngine::narrowBranchConstraints — internal helpers
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The public narrowBranchConstraints supports compound conditions:
+//   • A && B          — both narrowings applied on then-branch (intersection).
+//                       No narrowing on else (only one of A, B must be false).
+//   • A || B          — both narrowings applied on else-branch (each negated).
+//                       No narrowing on then (only one of A, B must be true).
+//   • !A              — swaps then/else of A.
+//   • Atomic compares — `var ∘ literal` and `var ∘ var` (when constraint info
+//                       on at least one variable is concrete).
+//
+// Compound conditions are decomposed recursively up to a small depth budget
+// (kCompoundDepthBudget) to avoid pathological nesting.  This significantly
+// improves Q2 dead-branch detection for typical guard expressions like
+// `if (i >= 0 && i < n)` and `if (x < 0 || x > 100)`.
+
+namespace {
+constexpr int kCompoundDepthBudget = 6;
+
+// Atomic narrowing: handle one comparison (varName op literal) with optional
+// variable-to-variable refinement using existing constraints.  Updates the
+// thenC/elseC out-maps with the new bounds for the affected variable(s),
+// intersecting with any pre-existing constraint to compose with outer guards.
+inline void mergeConstraint(
+    std::unordered_map<std::string, omscript::CTInterval>& dst,
+    const std::string& var,
+    const omscript::CTInterval& iv)
+{
+    if (iv.isTop()) return;          // adds nothing
+    auto it = dst.find(var);
+    if (it == dst.end()) {
+        if (!iv.isBottom()) dst[var] = iv;
+        else                dst[var] = omscript::CTInterval::bottom();
+        return;
+    }
+    it->second = it->second.intersect(iv);
+}
+
+// Lookup the current concrete bound for `id` from an existing constraint set.
+// Returns CTInterval::top() if no information is available.
+inline omscript::CTInterval lookupConstraint(
+    const std::unordered_map<std::string, omscript::CTInterval>& src,
+    const std::string& var)
+{
+    auto it = src.find(var);
+    return (it != src.end()) ? it->second : omscript::CTInterval::top();
+}
+} // namespace
+
 void CTEngine::narrowBranchConstraints(const Expression* cond,
                                         CTFrame& thenF,
                                         CTFrame& elseF) const
 {
-    if (!cond || cond->type != ASTNodeType::BINARY_EXPR) return;
-    auto* bin = static_cast<const BinaryExpr*>(cond);
-    const std::string& op = bin->op;
+    if (!cond) return;
 
-    // Only handle simple comparison operators.
-    static const std::unordered_set<std::string> kCmpOps{
-        "==", "!=", "<", "<=", ">", ">="
+    // ── Recursive worker — builds new constraint deltas without mutating frames
+    // until the recursion completes, so we can apply A∧B / A∨B correctly.
+    std::function<void(const Expression*,
+                       std::unordered_map<std::string, CTInterval>&,
+                       std::unordered_map<std::string, CTInterval>&,
+                       int)> walk;
+    walk = [&](const Expression* c,
+               std::unordered_map<std::string, CTInterval>& thenC,
+               std::unordered_map<std::string, CTInterval>& elseC,
+               int depth)
+    {
+        if (!c || depth > kCompoundDepthBudget) return;
+
+        // ── Logical NOT: !A swaps then/else narrowings of A ────────────────
+        if (c->type == ASTNodeType::UNARY_EXPR) {
+            auto* un = static_cast<const UnaryExpr*>(c);
+            if (un->op == "!") {
+                walk(un->operand.get(), elseC, thenC, depth + 1);
+            }
+            return;
+        }
+
+        if (c->type != ASTNodeType::BINARY_EXPR) return;
+        auto* bin = static_cast<const BinaryExpr*>(c);
+        const std::string& op = bin->op;
+
+        // ── Logical AND: both narrowings apply on then; nothing on else ───
+        if (op == "&&") {
+            std::unordered_map<std::string, CTInterval> dummyElse;
+            walk(bin->left.get(),  thenC, dummyElse, depth + 1);
+            walk(bin->right.get(), thenC, dummyElse, depth + 1);
+            return;
+        }
+        // ── Logical OR: both narrowings apply on else; nothing on then ───
+        if (op == "||") {
+            std::unordered_map<std::string, CTInterval> dummyThen;
+            walk(bin->left.get(),  dummyThen, elseC, depth + 1);
+            walk(bin->right.get(), dummyThen, elseC, depth + 1);
+            return;
+        }
+
+        // ── Atomic comparison ──────────────────────────────────────────────
+        static const std::unordered_set<std::string> kCmpOps{
+            "==", "!=", "<", "<=", ">", ">="
+        };
+        if (!kCmpOps.count(op)) return;
+
+        // Helper: from `op`, derive (then-narrow, else-narrow) on a CTInterval
+        // applied to a numeric bound.
+        auto deriveNarrow = [](const std::string& cmpOp, int64_t bound,
+                                const CTInterval& start)
+            -> std::pair<CTInterval, CTInterval>
+        {
+            if (cmpOp == "==") return {start.narrowEQ(bound), start.narrowNE(bound)};
+            if (cmpOp == "!=") return {start.narrowNE(bound), start.narrowEQ(bound)};
+            if (cmpOp == "<")  return {start.narrowLT(bound), start.narrowGE(bound)};
+            if (cmpOp == "<=") return {start.narrowLE(bound), start.narrowGT(bound)};
+            if (cmpOp == ">")  return {start.narrowGT(bound), start.narrowLE(bound)};
+            if (cmpOp == ">=") return {start.narrowGE(bound), start.narrowLT(bound)};
+            return {start, start};
+        };
+
+        // Resolve each side to either an identifier name or a concrete int.
+        auto resolveSide = [&](const Expression* side,
+                                std::string& varName,
+                                int64_t& litVal,
+                                bool& isVar,
+                                bool& isLit)
+        {
+            isVar = isLit = false;
+            if (!side) return;
+            if (side->type == ASTNodeType::IDENTIFIER_EXPR) {
+                isVar = true;
+                varName = static_cast<const IdentifierExpr*>(side)->name;
+                // Promote known concrete locals/globals/enums to literals.
+                CTInterval iv = lookupConstraint(thenC, varName);
+                if (iv.isTop()) iv = lookupConstraint(thenF.constraints, varName);
+                if (iv.isConcrete()) { isLit = true; litVal = iv.lo; }
+                else {
+                    auto lit = thenF.locals.find(varName);
+                    if (lit != thenF.locals.end() && lit->second.isInt()) {
+                        isLit = true;
+                        litVal = lit->second.asI64();
+                    } else {
+                        auto gIt = globalConsts_.find(varName);
+                        if (gIt != globalConsts_.end() && gIt->second.isInt()) {
+                            isLit = true;
+                            litVal = gIt->second.asI64();
+                        } else {
+                            auto eIt = enumConsts_.find(varName);
+                            if (eIt != enumConsts_.end()) {
+                                isLit = true;
+                                litVal = eIt->second;
+                            }
+                        }
+                    }
+                }
+            } else if (side->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<const LiteralExpr*>(side);
+                if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                    isLit = true;
+                    litVal = static_cast<int64_t>(lit->intValue);
+                }
+            }
+        };
+
+        std::string lName, rName;
+        int64_t     lVal = 0,  rVal = 0;
+        bool lIsVar=false, lIsLit=false, rIsVar=false, rIsLit=false;
+        resolveSide(bin->left.get(),  lName, lVal, lIsVar, lIsLit);
+        resolveSide(bin->right.get(), rName, rVal, rIsVar, rIsLit);
+
+        const CTInterval full = CTInterval::top();
+
+        // Case A: var ∘ literal  →  narrow the variable.
+        if (lIsVar && rIsLit) {
+            auto [t, e] = deriveNarrow(op, rVal, full);
+            mergeConstraint(thenC, lName, t);
+            mergeConstraint(elseC, lName, e);
+        }
+        // Case B: literal ∘ var  →  flip the operator and narrow the variable.
+        else if (rIsVar && lIsLit) {
+            std::string flipped = op;
+            if      (op == "<")  flipped = ">";
+            else if (op == "<=") flipped = ">=";
+            else if (op == ">")  flipped = "<";
+            else if (op == ">=") flipped = "<=";
+            auto [t, e] = deriveNarrow(flipped, lVal, full);
+            mergeConstraint(thenC, rName, t);
+            mergeConstraint(elseC, rName, e);
+        }
+        // Case C: var ∘ var with one side known concrete → narrow the other.
+        else if (lIsVar && rIsVar) {
+            if (rIsLit) { // right side resolved to a known int via constraints
+                auto [t, e] = deriveNarrow(op, rVal, full);
+                mergeConstraint(thenC, lName, t);
+                mergeConstraint(elseC, lName, e);
+            }
+            if (lIsLit) {
+                std::string flipped = op;
+                if      (op == "<")  flipped = ">";
+                else if (op == "<=") flipped = ">=";
+                else if (op == ">")  flipped = "<";
+                else if (op == ">=") flipped = "<=";
+                auto [t, e] = deriveNarrow(flipped, lVal, full);
+                mergeConstraint(thenC, rName, t);
+                mergeConstraint(elseC, rName, e);
+            }
+        }
+        // Other patterns (compound expressions on either side) are not yet
+        // narrowed; fall through silently (conservative).
     };
-    if (!kCmpOps.count(op)) return;
 
-    // Determine which side is a variable identifier and which side is concrete.
-    const Expression* varSide  = nullptr;
-    const Expression* valSide  = nullptr;
-    std::string       effectiveOp = op; // may be flipped for symmetry
+    // Build local working maps so compound walking can compose results.
+    std::unordered_map<std::string, CTInterval> thenC, elseC;
+    walk(cond, thenC, elseC, 0);
 
-    if (bin->left->type  == ASTNodeType::IDENTIFIER_EXPR &&
-        bin->right->type == ASTNodeType::LITERAL_EXPR) {
-        varSide = bin->left.get();
-        valSide = bin->right.get();
-    } else if (bin->right->type == ASTNodeType::IDENTIFIER_EXPR &&
-               bin->left->type  == ASTNodeType::LITERAL_EXPR) {
-        varSide = bin->right.get();
-        valSide = bin->left.get();
-        // Flip operator for `literal op var` → `var flipped(op) literal`.
-        if (op == "<")  effectiveOp = ">";
-        else if (op == "<=") effectiveOp = ">=";
-        else if (op == ">")  effectiveOp = "<";
-        else if (op == ">=") effectiveOp = "<=";
-        // == and != are symmetric
-    } else {
-        return; // complex expression — skip
+    // Commit non-trivial deltas back to the frames, intersecting with any
+    // prior constraint (preserves outer-guard narrowing).
+    for (auto& [var, iv] : thenC) {
+        if (iv.isTop()) continue;
+        auto it = thenF.constraints.find(var);
+        thenF.constraints[var] =
+            (it == thenF.constraints.end()) ? iv : it->second.intersect(iv);
     }
-
-    auto* id  = static_cast<const IdentifierExpr*>(varSide);
-    auto* lit = static_cast<const LiteralExpr*>(valSide);
-    if (lit->literalType != LiteralExpr::LiteralType::INTEGER) return;
-
-    const std::string& varName = id->name;
-    const int64_t      bound   = static_cast<int64_t>(lit->intValue);
-
-    // Start from the widest possible interval and narrow.
-    const CTInterval full = CTInterval::top();
-    CTInterval thenIv, elseIv;
-
-    if (effectiveOp == "==") {
-        thenIv = full.narrowEQ(bound);
-        elseIv = full.narrowNE(bound);
-    } else if (effectiveOp == "!=") {
-        thenIv = full.narrowNE(bound);
-        elseIv = full.narrowEQ(bound);
-    } else if (effectiveOp == "<") {
-        thenIv = full.narrowLT(bound);
-        elseIv = full.narrowGE(bound);
-    } else if (effectiveOp == "<=") {
-        thenIv = full.narrowLE(bound);
-        elseIv = full.narrowGT(bound);
-    } else if (effectiveOp == ">") {
-        thenIv = full.narrowGT(bound);
-        elseIv = full.narrowLE(bound);
-    } else if (effectiveOp == ">=") {
-        thenIv = full.narrowGE(bound);
-        elseIv = full.narrowLT(bound);
-    } else {
-        return;
+    for (auto& [var, iv] : elseC) {
+        if (iv.isTop()) continue;
+        auto it = elseF.constraints.find(var);
+        elseF.constraints[var] =
+            (it == elseF.constraints.end()) ? iv : it->second.intersect(iv);
     }
-
-    // Only store non-top constraints (storing TOP is a no-op).
-    if (!thenIv.isTop() && !thenIv.isBottom())
-        thenF.constraints[varName] = thenIv;
-    if (!elseIv.isTop() && !elseIv.isBottom())
-        elseF.constraints[varName] = elseIv;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4210,53 +4442,94 @@ CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
     }
 }
 
+// Helper for compound condition narrowing (used by narrowCondition).
+// Decomposes A && B, A || B, and !A recursively before narrowing atomic
+// comparisons.  Same propagation rules as CTEngine::narrowBranchConstraints
+// but operating on a CTAbstractEnv (per-function abstract domain).
+namespace {
+constexpr int kAINarrowDepthBudget = 6;
+}
+
 void CTAbstractInterpreter::narrowCondition(const Expression* cond,
                                              CTAbstractEnv& thenEnv,
                                              CTAbstractEnv& elseEnv) {
-    if (!cond || cond->type != ASTNodeType::BINARY_EXPR) return;
-    auto* bin = static_cast<const BinaryExpr*>(cond);
-    const std::string& op = bin->op;
+    if (!cond) return;
 
-    // Only narrow when one side is an identifier (variable) and the other
-    // evaluates to a concrete integer range.  We derive the narrowed range
-    // by intersecting the current abstract value with the constraint imposed
-    // by the comparison.
-    auto tryNarrow = [&](const Expression* varExpr, const CTInterval& bound,
-                          bool varOnLeft) {
-        if (!varExpr || varExpr->type != ASTNodeType::IDENTIFIER_EXPR) return;
-        auto* id = static_cast<const IdentifierExpr*>(varExpr);
-        if (!bound.isConcrete()) return;  // bound must be a single value
-        const int64_t B = bound.lo;
-        CTInterval cur = envGet(thenEnv, id->name);
+    // ── Compound dispatcher ────────────────────────────────────────────────
+    std::function<void(const Expression*, CTAbstractEnv&, CTAbstractEnv&, int)> walk;
+    walk = [&](const Expression* c, CTAbstractEnv& thenE, CTAbstractEnv& elseE, int depth) {
+        if (!c || depth > kAINarrowDepthBudget) return;
 
-        // Derive narrowing from the mathematical definition of each comparison.
-        if ((varOnLeft  && op == "<")  || (!varOnLeft && op == ">")) {
-            thenEnv[id->name] = cur.narrowLT(B);
-            elseEnv[id->name] = cur.narrowGE(B);
-        } else if ((varOnLeft  && op == "<=") || (!varOnLeft && op == ">=")) {
-            thenEnv[id->name] = cur.narrowLE(B);
-            elseEnv[id->name] = cur.narrowGT(B);
-        } else if ((varOnLeft  && op == ">")  || (!varOnLeft && op == "<")) {
-            thenEnv[id->name] = cur.narrowGT(B);
-            elseEnv[id->name] = cur.narrowLE(B);
-        } else if ((varOnLeft  && op == ">=") || (!varOnLeft && op == "<=")) {
-            thenEnv[id->name] = cur.narrowGE(B);
-            elseEnv[id->name] = cur.narrowLT(B);
-        } else if (op == "==") {
-            thenEnv[id->name] = cur.narrowEQ(B);
-            elseEnv[id->name] = cur.narrowNE(B);
-        } else if (op == "!=") {
-            thenEnv[id->name] = cur.narrowNE(B);
-            elseEnv[id->name] = cur.narrowEQ(B);
+        // !A: swap then/else of A.
+        if (c->type == ASTNodeType::UNARY_EXPR) {
+            auto* un = static_cast<const UnaryExpr*>(c);
+            if (un->op == "!") {
+                walk(un->operand.get(), elseE, thenE, depth + 1);
+            }
+            return;
         }
+
+        if (c->type != ASTNodeType::BINARY_EXPR) return;
+        auto* bin = static_cast<const BinaryExpr*>(c);
+        const std::string& op = bin->op;
+
+        // A && B: both narrowings on then; nothing on else.
+        if (op == "&&") {
+            CTAbstractEnv dummyElse = elseE;
+            walk(bin->left.get(),  thenE, dummyElse, depth + 1);
+            walk(bin->right.get(), thenE, dummyElse, depth + 1);
+            return;
+        }
+        // A || B: both narrowings on else; nothing on then.
+        if (op == "||") {
+            CTAbstractEnv dummyThen = thenE;
+            walk(bin->left.get(),  dummyThen, elseE, depth + 1);
+            walk(bin->right.get(), dummyThen, elseE, depth + 1);
+            return;
+        }
+
+        // Atomic comparison (var ∘ literal, literal ∘ var, var ∘ var).
+        auto narrowAtomic = [&](const Expression* varExpr, const CTInterval& bound,
+                                 bool varOnLeft) {
+            if (!varExpr || varExpr->type != ASTNodeType::IDENTIFIER_EXPR) return;
+            auto* id = static_cast<const IdentifierExpr*>(varExpr);
+            if (!bound.isConcrete()) return;
+            const int64_t B = bound.lo;
+            CTInterval cur = envGet(thenE, id->name);
+            CTInterval newThen = cur, newElse = cur;
+            if ((varOnLeft  && op == "<")  || (!varOnLeft && op == ">")) {
+                newThen = cur.narrowLT(B); newElse = cur.narrowGE(B);
+            } else if ((varOnLeft  && op == "<=") || (!varOnLeft && op == ">=")) {
+                newThen = cur.narrowLE(B); newElse = cur.narrowGT(B);
+            } else if ((varOnLeft  && op == ">")  || (!varOnLeft && op == "<")) {
+                newThen = cur.narrowGT(B); newElse = cur.narrowLE(B);
+            } else if ((varOnLeft  && op == ">=") || (!varOnLeft && op == "<=")) {
+                newThen = cur.narrowGE(B); newElse = cur.narrowLT(B);
+            } else if (op == "==") {
+                newThen = cur.narrowEQ(B); newElse = cur.narrowNE(B);
+            } else if (op == "!=") {
+                newThen = cur.narrowNE(B); newElse = cur.narrowEQ(B);
+            } else {
+                return;
+            }
+            // Compose with anything previously deduced for this variable in this
+            // pass via intersection (compound conditions stack tighter bounds).
+            auto tIt = thenE.find(id->name);
+            thenE[id->name] = (tIt == thenE.end()) ? newThen
+                                                   : tIt->second.intersect(newThen);
+            auto eIt = elseE.find(id->name);
+            elseE[id->name] = (eIt == elseE.end()) ? newElse
+                                                   : eIt->second.intersect(newElse);
+        };
+
+        CTAnalysisResult tmp;
+        CTInterval lhsI = analyzeExpr(bin->left.get(),  thenE, tmp);
+        CTInterval rhsI = analyzeExpr(bin->right.get(), thenE, tmp);
+        narrowAtomic(bin->left.get(),  rhsI, /*varOnLeft=*/true);
+        narrowAtomic(bin->right.get(), lhsI, /*varOnLeft=*/false);
     };
 
-    // Temporary result holder for analyzeExpr (side-effects not needed here)
-    CTAnalysisResult tmp;
-    CTInterval lhsI = analyzeExpr(bin->left.get(),  thenEnv, tmp);
-    CTInterval rhsI = analyzeExpr(bin->right.get(), thenEnv, tmp);
-    tryNarrow(bin->left.get(),  rhsI, /*varOnLeft=*/true);
-    tryNarrow(bin->right.get(), lhsI, /*varOnLeft=*/false);
+    walk(cond, thenEnv, elseEnv, 0);
 }
 
 CTAbstractEnv CTAbstractInterpreter::joinEnvs(const CTAbstractEnv& a,
@@ -4367,6 +4640,43 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         // Branch is genuinely conditional — analyse both arms with narrowed envs.
         CTAbstractEnv thenEnv = env, elseEnv = env;
         narrowCondition(ifs->condition.get(), thenEnv, elseEnv);
+
+        // After narrowing compound/atomic conditions, check whether any
+        // variable was narrowed to BOTTOM — that means the condition is
+        // unsatisfiable on that branch, so the branch is provably dead.
+        //
+        // SOUNDNESS: we only flag a branch as dead from narrowing when the
+        // contradicting variable was TOP in the ENTRY env.  This restricts the
+        // signal to "the compound condition itself is a tautological
+        // contradiction" (e.g. `x >= 100 && x < 50`).  We deliberately do NOT
+        // trust narrowed-to-BOTTOM evidence when the variable already had a
+        // concrete or narrow value, because abstract interpretation analyses
+        // loop bodies in a single pass before widening, so a stale concrete
+        // value (e.g. `i = exact(1)` before reaching the loop back-edge) could
+        // otherwise produce a spurious dead-branch annotation.
+        auto bottomFromTopVarOnly = [&](const CTAbstractEnv& narrowed) -> bool {
+            for (auto& [name, iv] : narrowed) {
+                if (!iv.isBottom()) continue;
+                auto eIt = env.find(name);
+                // Variable was TOP (or absent) before narrowing → the
+                // contradiction must come from the condition itself.
+                if (eIt == env.end() || eIt->second.isTop()) return true;
+            }
+            return false;
+        };
+        if (bottomFromTopVarOnly(thenEnv)) {
+            result.deadThenBranches.insert(s);
+            if (ifs->elseBranch) analyzeStmt(ifs->elseBranch.get(), elseEnv, result);
+            env = elseEnv;
+            return true;
+        }
+        if (bottomFromTopVarOnly(elseEnv)) {
+            result.deadElseBranches.insert(s);
+            analyzeStmt(ifs->thenBranch.get(), thenEnv, result);
+            env = thenEnv;
+            return true;
+        }
+
         analyzeStmt(ifs->thenBranch.get(), thenEnv, result);
         if (ifs->elseBranch)
             analyzeStmt(ifs->elseBranch.get(), elseEnv, result);

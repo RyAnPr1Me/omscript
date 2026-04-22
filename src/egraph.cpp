@@ -151,8 +151,14 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
         cls.isNonNeg = (node.value >= 0);
         cls.isPowerOfTwo = (node.value > 0) && ((node.value & (node.value - 1)) == 0);
         cls.isBoolean = (node.value == 0 || node.value == 1);
+        cls.isInt = true;
     } else if (node.op == Op::ConstF) {
         cls.isNonNeg = (node.fvalue >= 0.0);
+        cls.isFloat = true;
+        // `isInt` defaults to false; explicitly noted here so the
+        // mutual exclusivity with the `Op::Const` branch above is
+        // clear at the point of declaration.
+        cls.isInt = false;
     } else if (node.children.size() >= 2) {
         // Propagate isNonNeg through operations where it's provable.
         // This is critical for relational rules (div_pow2_nonneg,
@@ -164,6 +170,34 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
         bool rNonNeg = (rhs < classes_.size()) && classes_[rhs].isNonNeg;
         bool lBool = (lhs < classes_.size()) && classes_[lhs].isBoolean;
         bool rBool = (rhs < classes_.size()) && classes_[rhs].isBoolean;
+        bool lFloat = (lhs < classes_.size()) && classes_[lhs].isFloat;
+        bool rFloat = (rhs < classes_.size()) && classes_[rhs].isFloat;
+        bool lInt   = (lhs < classes_.size()) && classes_[lhs].isInt;
+        bool rInt   = (rhs < classes_.size()) && classes_[rhs].isInt;
+
+        // ── Type-tag propagation through generic binops ───────────────
+        // The e-graph deliberately uses one Op per arithmetic operation
+        // (Add/Sub/Mul/Div) for both integer and float values so that
+        // generic algebraic rewrites (commutativity, associativity,
+        // distributivity) apply uniformly.  We track per-class
+        // isFloat / isInt tags so that:
+        //   * `fp_*` rules require at least one operand to be provably
+        //     float — preventing them from firing on integer expressions
+        //     where the resulting `ConstF(N.0)` would later be unified
+        //     with `Const(N)` by congruence and break codegen.
+        //   * Integer-only rules (Shl/Shr, BitAnd/Or/Xor strength
+        //     reductions) require operands to be provably integer.
+        // Bit ops like Shl/Shr/BitAnd are integer-only by construction.
+        if (node.op == Op::Shl || node.op == Op::Shr ||
+            node.op == Op::BitAnd || node.op == Op::BitOr ||
+            node.op == Op::BitXor || node.op == Op::Mod) {
+            cls.isInt = true;
+        } else {
+            // Generic arithmetic / comparison: float-tainted if either
+            // operand is float; int-tainted if both are integer.
+            cls.isFloat = lFloat || rFloat;
+            cls.isInt   = lInt && rInt;
+        }
 
         switch (node.op) {
         case Op::Add:
@@ -221,12 +255,44 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
         if (node.op == Op::LogNot) {
             cls.isNonNeg = true;  // Boolean result: 0 or 1
             cls.isBoolean = true;
+            cls.isInt = true;
         } else if (node.op == Op::Sqrt) {
             cls.isNonNeg = true;  // sqrt is always non-negative for valid inputs
+            cls.isFloat = true;   // sqrt always produces float
+        } else if (node.op == Op::BitNot) {
+            cls.isInt = true;     // bitwise complement is integer-only
+        } else {
+            // Generic unary (Neg etc.): inherit type tag from operand.
+            ClassId c = find(node.children[0]);
+            if (c < classes_.size()) {
+                cls.isFloat = classes_[c].isFloat;
+                cls.isInt   = classes_[c].isInt;
+            }
         }
     }
 
     classes_.push_back(std::move(cls));
+
+    // Per-op class index: O(1) bucket append so `match()` can iterate
+    // only classes that actually contain a node of the rule's root op.
+    {
+        const auto opIdx = static_cast<size_t>(node.op);
+        if (opIdx < classesByOp_.size()) {
+            classesByOp_[opIdx].push_back(id);
+        }
+    }
+
+    // Maintain the use-list for incremental rebuild: every distinct child
+    // class records this new class as one of its users.  Duplicates are
+    // permitted (cheap to add, harmless when iterated; the dirty queue
+    // dedupes via `dirtyMark_`).
+    parents_.emplace_back();  // parents_[id] = {} initially
+    for (ClassId child : node.children) {
+        ClassId c = find(child);
+        if (c < parents_.size()) {
+            parents_[c].push_back(id);
+        }
+    }
 
     hashcons_[node] = id;
     totalNodes_++;
@@ -289,8 +355,22 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
     // b merges into a
     parent_[b] = a;
 
-    // Move all nodes from b into a
+    // Move all nodes from b into a, and update the per-op class index so
+    // that any op `b` carried (but `a` did not) will surface `a` in the
+    // matcher's bucket walk.  We record the set of ops `a` already had
+    // BEFORE moving — appending `a` for those would create harmless but
+    // wasted bucket entries.
+    std::array<bool, kNumOps> aHadOp{};
+    for (const auto& n : classes_[a].nodes) {
+        const auto idx = static_cast<size_t>(n.op);
+        if (idx < kNumOps) aHadOp[idx] = true;
+    }
     for (auto& node : classes_[b].nodes) {
+        const auto idx = static_cast<size_t>(node.op);
+        if (idx < kNumOps && !aHadOp[idx]) {
+            classesByOp_[idx].push_back(a);
+            aHadOp[idx] = true;  // avoid duplicate append for repeat ops
+        }
         classes_[a].nodes.push_back(std::move(node));
     }
     classes_[b].nodes.clear();
@@ -303,8 +383,44 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
     // When merging two equivalent e-classes, if EITHER is proven non-negative,
     // the merged class is non-negative (they represent the same value).
     classes_[a].isNonNeg = classes_[a].isNonNeg || classes_[b].isNonNeg;
+    // Type tags accumulate on merge: if either side is provably float (or
+    // int), so is the merged class.  This is intentional for downstream
+    // *guards* — a class that has been congruence-bridged to a ConstF is
+    // still safely usable in float rules.  The CRITICAL guarantee is the
+    // OTHER direction: a class that contains ONLY integer evidence has
+    // `isFloat == false`, so float rules will refuse to fire on it.
+    classes_[a].isFloat = classes_[a].isFloat || classes_[b].isFloat;
+    classes_[a].isInt   = classes_[a].isInt   || classes_[b].isInt;
+
+    // ── Incremental-rebuild bookkeeping ──────────────────────────────────
+    // The survivor itself is dirty (its node list grew with possibly
+    // non-canonical children).  Every class that USED `b` as a child still
+    // carries the stale id `b` in its node tuples, so its hashcons key is
+    // stale and must be re-canonicalized.  We migrate the use-list from `b`
+    // to `a` (the new canonical) and mark every member dirty.
+    ++mergeCount_;
+    markDirty(a);
+    if (b < parents_.size()) {
+        for (ClassId user : parents_[b]) {
+            // `find(user)` may differ from `user` if `user` was itself
+            // already merged — markDirty resolves that.
+            markDirty(user);
+            // Re-home this user under `a` so a future merge of `a` cascades.
+            if (a < parents_.size()) parents_[a].push_back(user);
+        }
+        parents_[b].clear();
+    }
 
     return a;
+}
+
+void EGraph::markDirty(ClassId id) {
+    id = find(id);
+    if (id >= classes_.size()) return;
+    if (dirtyMark_.size() <= id) dirtyMark_.resize(id + 1, false);
+    if (dirtyMark_[id]) return;
+    dirtyMark_[id] = true;
+    dirty_.push_back(id);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -320,29 +436,97 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
 }
 
 void EGraph::rebuild() {
-    // Rebuild the hashcons table: re-canonicalize all nodes after merges.
-    hashcons_.clear();
-    for (ClassId i = 0; i < classes_.size(); ++i) {
-        ClassId canonical = find(i);
-        if (canonical != i) continue; // Skip non-canonical classes
+    // ── Fast path: nothing dirty → no work needed ─────────────────────────
+    // The previous implementation rebuilt every class on every iteration of
+    // saturate(), which is O(total_nodes) work per iteration whether or not
+    // any merges happened.  By tracking a per-class dirty bit through
+    // `merge()`, we now skip iterations whose only side effect was to
+    // confirm a fixpoint (this hits on the LAST iteration of every
+    // saturation where `merges == 0`).
+    //
+    // SOUNDNESS: the dirty bit is set ONLY by `merge()` and cleared ONLY
+    // here.  No other code path can stale a hashcons entry: `add()`
+    // canonicalizes children before insertion, and existing class ids
+    // never become invalid (parent_ only grows).  Therefore "dirty empty"
+    // ⇒ all hashcons entries are still canonical and no class needs
+    // re-canonicalization.
+    if (dirty_.empty()) return;
 
-        for (auto& node : classes_[i].nodes) {
-            node = canonicalize(std::move(node));
-            hashcons_[node] = i;
-        }
+    // Drain the dirty marker — we are about to do a full rebuild that
+    // visits every class, so any previously-marked dirt is paid off.
+    // Future merges (including those triggered by congruence-closure
+    // inside this rebuild) will re-mark dirty for the NEXT call.
+    for (ClassId id : dirty_) {
+        if (id < dirtyMark_.size()) dirtyMark_[id] = false;
+    }
+    dirty_.clear();
 
-        // Deduplicate nodes within the class
-        std::unordered_set<ENode, ENodeHash> seen;
-        std::vector<ENode> unique;
-        for (auto& node : classes_[i].nodes) {
-            if (seen.insert(node).second) {
+    // ── Full rebuild with congruence-closure cascading ───────────────────
+    //
+    // For each canonical class, re-canonicalize all of its nodes (their
+    // children may now point to merged class ids) and rebuild the hashcons
+    // table.  A hidden congruence shows up as two distinct classes whose
+    // canonical ENode keys collide in the hashcons; we collect those into
+    // `pendingMerges` and apply them AFTER the per-class loop completes,
+    // which avoids iterator invalidation on `classes_[i].nodes` (merge()
+    // appends victim nodes onto the survivor).  Each induced merge can
+    // expose further congruences, so we iterate until stable.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        hashcons_.clear();
+        std::vector<std::pair<ClassId, ClassId>> pendingMerges;
+
+        for (ClassId i = 0; i < classes_.size(); ++i) {
+            if (find(i) != i) continue;  // skip non-canonical
+
+            // Re-canonicalize every node in this class.
+            for (auto& node : classes_[i].nodes) {
+                node = canonicalize(std::move(node));
+            }
+
+            // Within-class dedup.  While building the dedup'd list, also
+            // detect cross-class congruence via the rebuilt hashcons_.
+            std::unordered_set<ENode, ENodeHash> seen;
+            seen.reserve(classes_[i].nodes.size());
+            std::vector<ENode> unique;
+            unique.reserve(classes_[i].nodes.size());
+            for (auto& node : classes_[i].nodes) {
+                if (!seen.insert(node).second) continue;  // duplicate
+
+                auto it = hashcons_.find(node);
+                if (it != hashcons_.end()) {
+                    ClassId other = find(it->second);
+                    if (other != i) {
+                        // Defer the merge: doing it here would invalidate
+                        // our iteration over `classes_[i].nodes`.
+                        pendingMerges.emplace_back(i, other);
+                    }
+                }
+                hashcons_[node] = i;
                 unique.push_back(std::move(node));
             }
+            classes_[i].nodes = std::move(unique);
         }
-        classes_[i].nodes = std::move(unique);
+
+        // Apply pending merges and decide whether to repeat the rebuild.
+        for (auto [a, b] : pendingMerges) {
+            ClassId ca = find(a), cb = find(b);
+            if (ca != cb) {
+                merge(ca, cb);
+                changed = true;
+            }
+        }
     }
 
-    // Update total node count
+    // Drain dirt produced by congruence-closure merges above (we have
+    // already paid for the rescan that would observe them).
+    for (ClassId id : dirty_) {
+        if (id < dirtyMark_.size()) dirtyMark_[id] = false;
+    }
+    dirty_.clear();
+
+    // Recount total nodes.
     totalNodes_ = 0;
     for (ClassId i = 0; i < classes_.size(); ++i) {
         if (find(i) == i) {
@@ -428,6 +612,55 @@ void EGraph::rebuild() {
 
 std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
     std::vector<std::pair<ClassId, Subst>> results;
+
+    // ── Fast path: rule's root pattern matches a specific op ─────────────
+    // Walk only the bucket of classes that contain at least one node of
+    // that op, instead of the entire e-class array.  This is the hot
+    // path during equality saturation: the e-graph typically has tens of
+    // thousands of classes but most ops have small buckets.
+    //
+    // Buckets may carry stale or duplicate ids (entries are append-only;
+    // see `classesByOp_` declaration).  We canonicalise via `find()` and
+    // de-duplicate per call using a small `seen` bitset sized to the
+    // current class count.
+    if (pat.kind == Pattern::Kind::OpMatch) {
+        const auto opIdx = static_cast<size_t>(pat.op);
+        if (opIdx >= classesByOp_.size()) return results;
+        const auto& bucket = classesByOp_[opIdx];
+        if (bucket.empty()) return results;  // no classes contain this op
+
+        // Generation-stamped dedup: avoids the per-call O(N) allocate-
+        // and-fill of a `vector<bool>`.  With ~hundreds of rules per
+        // saturation iteration and tens of thousands of e-classes, the
+        // old fresh-vector-per-call cost compounded; the stamped buffer
+        // grows once and is reused across every match() call for the
+        // lifetime of the EGraph.
+        if (matchSeen_.size() < classes_.size()) {
+            matchSeen_.resize(classes_.size(), 0);
+        }
+        if (++matchSeenGen_ == 0) {
+            // Generation wrapped — clear once and restart at 1.
+            std::fill(matchSeen_.begin(), matchSeen_.end(), 0);
+            matchSeenGen_ = 1;
+        }
+        const uint32_t gen = matchSeenGen_;
+
+        for (ClassId raw : bucket) {
+            if (raw >= classes_.size()) continue;
+            ClassId canonical = const_cast<EGraph*>(this)->find(raw);
+            if (canonical >= matchSeen_.size()) continue;
+            if (matchSeen_[canonical] == gen) continue;
+            matchSeen_[canonical] = gen;
+
+            Subst subst;
+            if (matchClassCommutative(pat, canonical, subst)) {
+                results.emplace_back(canonical, std::move(subst));
+            }
+        }
+        return results;
+    }
+
+    // ── Slow path: wildcard at root (degenerate; matches every class) ──
     for (ClassId i = 0; i < classes_.size(); ++i) {
         ClassId canonical = const_cast<EGraph*>(this)->find(i);
         if (canonical != i) continue; // Skip non-canonical
@@ -581,6 +814,18 @@ void EGraph::foldConstants(ClassId cls) {
     for (const auto& rule : rules) {
         if (atNodeLimit()) break;
 
+        // ── Op-bucket early-skip ────────────────────────────────────────
+        // If the rule's LHS root is an OpMatch and no e-class contains a
+        // node of that op, the rule cannot possibly produce any matches.
+        // `match()` would discover this internally and return an empty
+        // vector, but we save the function-call overhead and the empty-
+        // vector allocation by checking the bucket directly.  This is a
+        // measurable win on rule libraries with hundreds of fp_* /
+        // strength-reduction rules where most ops are absent in any
+        // given expression.
+        if (rule.lhs.kind == Pattern::Kind::OpMatch && !hasOp(rule.lhs.op))
+            continue;
+
         auto matches = match(rule.lhs);
         for (auto& [cls, subst] : matches) {
             if (atNodeLimit()) break;
@@ -611,11 +856,52 @@ void EGraph::foldConstants(ClassId cls) {
 
         size_t merges = applyRules(rules);
 
-        // Constant folding pass
+        // ── Constant folding pass — bucket-driven ──────────────────────
+        // Only e-classes containing at least one foldable op can possibly
+        // fold this iteration.  Walking the targeted op buckets via the
+        // per-op class index built in `add()`/`merge()` replaces the old
+        // O(num_classes) scan with O(sum of foldable-op bucket sizes),
+        // which is typically a small fraction of the total class count
+        // on real programs (most classes hold only Var/Const/Call/etc.).
+        //
+        // Buckets are append-only and may carry stale or duplicate ids;
+        // canonicalise via `find()` and de-duplicate per iteration using
+        // the same generation-stamped scratch buffer that `match()` uses.
+        // Reuse is sound: this folding pass runs between applyRules() and
+        // rebuild(), and applyRules() has fully returned by now — there
+        // is no concurrent matcher invocation that could observe a
+        // mid-pass generation.  This eliminates the per-iteration
+        // `vector<bool>(classes_.size(), false)` allocate-and-fill, which
+        // on programs with tens of thousands of e-classes was a measurable
+        // share of saturate()'s overhead.
         if (config_.enableConstantFolding) {
-            for (ClassId i = 0; i < classes_.size(); ++i) {
-                if (find(i) == i) {
-                    foldConstants(i);
+            static constexpr Op kFoldableOps[] = {
+                // Binary arithmetic / bitwise / comparison
+                Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Mod,
+                Op::BitAnd, Op::BitOr, Op::BitXor, Op::Shl, Op::Shr,
+                Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge,
+                // Unary
+                Op::Neg, Op::BitNot, Op::LogNot,
+            };
+            if (matchSeen_.size() < classes_.size()) {
+                matchSeen_.resize(classes_.size(), 0);
+            }
+            if (++matchSeenGen_ == 0) {
+                std::fill(matchSeen_.begin(), matchSeen_.end(), 0);
+                matchSeenGen_ = 1;
+            }
+            const uint32_t gen = matchSeenGen_;
+            for (Op op : kFoldableOps) {
+                const auto idx = static_cast<size_t>(op);
+                if (idx >= classesByOp_.size()) continue;
+                const auto& bucket = classesByOp_[idx];
+                for (ClassId raw : bucket) {
+                    if (raw >= classes_.size()) continue;
+                    ClassId canonical = find(raw);
+                    if (canonical >= matchSeen_.size()) continue;
+                    if (matchSeen_[canonical] == gen) continue;
+                    matchSeen_[canonical] = gen;
+                    foldConstants(canonical);
                 }
             }
         }
@@ -704,10 +990,145 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
         for (ClassId cls : reachableVec) dfs(cls);
     }
 
+    // ── 2b. Strongly Connected Components (Tarjan's algorithm) ──────────────
+    //
+    // Classes in the same SCC are mutually reachable through one or more
+    // candidate-node child edges.  Such cycles arise routinely from
+    // commutative / associative / inverse rewrites (e.g. `a+b ≡ b+a`
+    // produces an e-class whose nodes reference each other transitively).
+    //
+    // The latency-best selection in sections 3-5 is cycle-tolerant by
+    // construction: it ignores back-edges in the topological DFS and
+    // falls back to whichever node was first costed for an unresolved
+    // child.  The pressure-aware *refinement* below, however, is free to
+    // pick any e-node from any e-class — so we MUST guard against
+    // selecting a node whose chosen children would form a cycle in the
+    // resulting extraction DAG.  (A cyclic selection makes
+    // egraph_optimizer.cpp::eNodeToAST recurse without termination —
+    // confirmed via ASan stack-overflow on examples/destructure_test.om
+    // before this guard was in place.)
+    //
+    // Tarjan's algorithm produces an SCC numbering in REVERSE topological
+    // order of the condensation DAG: for any forward edge u → v,
+    //     sccOf[v] <= sccOf[u].
+    // With strict inequality iff v is in a strictly-earlier SCC (i.e. a
+    // *strict ancestor* of u in the condensation).  The refinement loop
+    // exploits this in two complementary ways:
+    //
+    //   (a) ANCESTOR CHECK — when evaluating an alternative e-node for
+    //       class `cls`, every child class must satisfy
+    //           sccOf[child] < sccOf[cls],
+    //       guaranteeing the child has already been finalised by the
+    //       bottom-up pass and that the alternative cannot transitively
+    //       reach back into `cls`.
+    //
+    //   (b) SCC CONDENSATION — same-SCC edges are precisely the cyclic
+    //       edges of the original e-graph.  Forbidding them collapses
+    //       each SCC to a single "frozen" representative whose selection
+    //       is locked to whatever the cycle-tolerant latency pass chose.
+    //       Refinement then operates on the condensation DAG, which is
+    //       acyclic by construction, so the proof of monotone progress
+    //       holds and the extracted tree is guaranteed finite.
+    //
+    // Tarjan is implemented iteratively to avoid blowing the host call
+    // stack on pathological inputs (the recursive topo DFS above is
+    // tolerated only because it is post-order with cycle pruning; SCC
+    // computation needs the full recursion structure on cyclic inputs).
+    std::unordered_map<ClassId, int> sccOf;
+    sccOf.reserve(reachable.size());
+    {
+        std::unordered_map<ClassId, int> dfsIndex;
+        std::unordered_map<ClassId, int> lowlink;
+        std::unordered_set<ClassId>      onStack;
+        std::vector<ClassId>             tarjanStack;
+        int idxCtr = 0;
+        int sccCtr = 0;
+
+        // Iterative Tarjan: each stack frame carries (node, child-iterator
+        // position).  The "phase" field distinguishes the initial visit
+        // (phase 0) from the post-recursion lowlink fold (phase 1).
+        struct Frame {
+            ClassId node;
+            size_t  childIdx;
+            ClassId pendingChild;
+            int     phase;
+        };
+        std::vector<Frame> frames;
+        frames.reserve(reachableVec.size());
+
+        for (ClassId rootCls : reachableVec) {
+            if (dfsIndex.count(rootCls)) continue;
+            frames.push_back({rootCls, 0, 0, 0});
+
+            while (!frames.empty()) {
+                Frame& f = frames.back();
+                ClassId v = f.node;
+
+                if (f.phase == 0) {
+                    // First entry — assign index/lowlink and mark on-stack.
+                    dfsIndex[v] = idxCtr;
+                    lowlink[v]  = idxCtr;
+                    ++idxCtr;
+                    tarjanStack.push_back(v);
+                    onStack.insert(v);
+                    f.phase = 1;
+                }
+
+                // Resume from where we paused on a previous frame.
+                if (f.phase == 2) {
+                    // A recursive child call just returned; fold lowlink.
+                    auto cit = lowlink.find(f.pendingChild);
+                    if (cit != lowlink.end())
+                        lowlink[v] = std::min(lowlink[v], cit->second);
+                    f.phase = 1;
+                    ++f.childIdx;
+                }
+
+                bool descended = false;
+                const auto& kids = children[v];
+                while (f.childIdx < kids.size()) {
+                    ClassId w = kids[f.childIdx];
+                    auto iit = dfsIndex.find(w);
+                    if (iit == dfsIndex.end()) {
+                        // Recurse iteratively into w; resume here when done.
+                        f.pendingChild = w;
+                        f.phase = 2;
+                        frames.push_back({w, 0, 0, 0});
+                        descended = true;
+                        break;
+                    } else if (onStack.count(w)) {
+                        lowlink[v] = std::min(lowlink[v], iit->second);
+                    }
+                    ++f.childIdx;
+                }
+                if (descended) continue;
+
+                // All children processed — close v.  If v is the root of
+                // an SCC, pop everything above it on tarjanStack into one.
+                if (lowlink[v] == dfsIndex[v]) {
+                    while (true) {
+                        ClassId w = tarjanStack.back();
+                        tarjanStack.pop_back();
+                        onStack.erase(w);
+                        sccOf[w] = sccCtr;
+                        if (w == v) break;
+                    }
+                    ++sccCtr;
+                }
+                frames.pop_back();
+            }
+        }
+    }
+
     // ── 3. Single-pass bottom-up extraction in topological order ─────────────
     // In a DAG (no cycles), this single pass is sufficient: every child is
     // resolved before its parent is visited.  For cyclic e-graphs the follow-up
     // passes (section 4) handle residual unresolved classes.
+    //
+    // This first pass selects on PURE LATENCY cost only.  The
+    // pressure-aware refinement (section 6) needs the initial selection
+    // to estimate which children are shared (parentCount > 1) before it
+    // can compute Sethi-Ullman register pressure.
     auto tryUpdate = [&](ClassId cls) {
         for (const auto& node : classes_[cls].nodes) {
             Cost total = model.nodeCost(node);
@@ -727,7 +1148,7 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
             bool better = (it == best.end())
                        || (total < it->second.cost)
                        || (total == it->second.cost && depth < it->second.depth);
-            if (better) best[cls] = {total, node, depth};
+            if (better) best[cls] = {total, total, node, depth, 1u};
         }
     };
 
@@ -785,10 +1206,221 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
             if (!feasible) continue;
             if (total < bestIt->second.cost) {
                 bestIt->second.cost = total;
+                bestIt->second.effCost = total; // refreshed below by section 6
                 dagChanged = true;
             }
         }
         if (!dagChanged) break;
+    }
+
+    // ── 6. Register-pressure-aware selection refinement ─────────────────────
+    //
+    // The latency-only extraction above can pick a deep, narrow expression
+    // (e.g. a long chain of dependent fused-multiply-adds) whose evaluation
+    // forces many simultaneous live values and provokes register spills.
+    // On a register-tight target a shorter, equivalent expression — even
+    // one with slightly higher latency — is cheaper end-to-end because it
+    // avoids the spill traffic.
+    //
+    // We compute Sethi-Ullman register pressure for the currently-selected
+    // node of each e-class (taking the DAG sharing pattern into account so
+    // a value used by multiple parents is counted as 1 register that lives
+    // across the whole expression rather than a fresh evaluation per use)
+    // and store it as metadata on each ExtractionResult.  We then perform
+    // a SINGLE bottom-up refinement pass that, for every e-class, considers
+    // candidate e-nodes whose every child lives in a strictly-earlier SCC
+    // of the e-graph and selects whichever yields the lowest effective cost
+    //
+    //     effCost(node) = sum_children effCost + nodeCost(node)
+    //                   + spillPenalty * max(0, regPressure - regBudget).
+    //
+    // SOUNDNESS — see the long comment alongside the SCC computation in
+    // section 2b.  Briefly:
+    //
+    //   * ANCESTOR + SCC CONDENSATION CHECK: an alternative is feasible
+    //     only when every child satisfies sccOf[child] < sccOf[cls].
+    //     Same-SCC children would close a cycle in the selection DAG and
+    //     could make the recursive extraction in
+    //     egraph_optimizer.cpp::eNodeToAST loop forever.
+    //
+    //   * STRICT IMPROVEMENT: an alternative replaces the current pick
+    //     only when its effective cost is strictly lower (with depth as a
+    //     secondary tie-breaker) — this guarantees monotone progress and
+    //     deterministic results across runs.
+    //
+    //   * SINGLE PASS: we do not iterate to a moving fixpoint with a
+    //     refreshed `parentCount`.  A second pass with shifted sharing
+    //     could invalidate ancestor relationships established in the
+    //     first.  The single-pass design captures the dominant
+    //     register-pressure win while keeping the proof simple.
+    //
+    // When the host CostModel disables pressure-awareness by setting
+    // `regBudget == 0` or `spillPenalty == 0`, the refinement loop is
+    // skipped and we only refresh the metadata — preserving the
+    // historical pure-latency behaviour exactly.
+    const Cost spillPenalty = model.spillPenalty;
+    const unsigned regBudget = model.regBudget;
+    const bool pressureAware = (regBudget > 0) && (spillPenalty > 0.0);
+
+    // Sethi-Ullman pressure for `node` given the current `best` selections
+    // for its children and the DAG sharing structure in `parentCount`.
+    auto computePressure = [&](const ENode& node) -> unsigned {
+        std::vector<unsigned> siblingPress;
+        siblingPress.reserve(node.children.size());
+        unsigned sharedCount = 0;
+        for (auto child : node.children) {
+            child = find(child);
+            auto cit = best.find(child);
+            unsigned p = (cit == best.end()) ? 1u : cit->second.regPressure;
+            unsigned parents = parentCount.count(child) ? parentCount[child] : 1u;
+            if (parents > 1) {
+                // Shared value: lives in 1 register across the whole
+                // expression rather than contributing to per-sibling
+                // holding cost.
+                ++sharedCount;
+            } else {
+                siblingPress.push_back(p);
+            }
+        }
+        std::sort(siblingPress.begin(), siblingPress.end(), std::greater<unsigned>());
+        unsigned maxP = 1; // floor — this node's own result occupies 1 register
+        for (size_t i = 0; i < siblingPress.size(); ++i) {
+            unsigned p = siblingPress[i] + static_cast<unsigned>(i);
+            if (p > maxP) maxP = p;
+        }
+        return sharedCount + maxP;
+    };
+
+    // ── Initial pressure-metadata pass (always runs) ─────────────────────
+    // Even with refinement disabled, this populates regPressure / effCost
+    // so downstream consumers (HGOE schedulers, diagnostic dumpers, ...)
+    // see consistent values.
+    for (ClassId cls : topoOrder) {
+        auto it = best.find(cls);
+        if (it == best.end()) continue;
+        unsigned p = computePressure(it->second.bestNode);
+        it->second.regPressure = p;
+        unsigned excess = (p > regBudget) ? (p - regBudget) : 0u;
+        it->second.effCost = it->second.cost
+                           + (pressureAware ? spillPenalty * static_cast<Cost>(excess) : 0.0);
+    }
+
+    // ── Single-pass bottom-up pressure-aware refinement ──────────────────
+    //
+    // The rewriter's type-soundness invariant is now enforced upstream
+    // (see the type-tag propagation on EClass and the fp_* rule guard
+    // installed in `getAllRules()`), so refinement runs unconditionally
+    // whenever the cost model has pressure-awareness enabled.  The SCC
+    // / ancestor / op-match guards in the loop body are still kept for
+    // defence-in-depth: they ensure extraction is provably finite even
+    // if a future rewrite rule re-introduces a cycle in the candidate
+    // selection DAG.
+
+    if (pressureAware) {
+        for (ClassId cls : topoOrder) {
+            auto curIt = best.find(cls);
+            if (curIt == best.end()) continue;
+            if (cls >= classes_.size()) continue;
+            if (find(cls) != cls) continue;  // skip non-canonical defensively
+
+            auto curSccIt = sccOf.find(cls);
+            if (curSccIt == sccOf.end()) continue;
+            const int curScc = curSccIt->second;
+
+            const auto& candidates = classes_[cls].nodes;
+            if (candidates.empty()) continue;
+
+            Cost   bestEff   = curIt->second.effCost;
+            Cost   bestLat   = curIt->second.cost;
+            unsigned bestDep = curIt->second.depth;
+            unsigned bestPr  = curIt->second.regPressure;
+            ENode flippedNode;
+            bool flipped = false;
+
+            for (const auto& node : candidates) {
+                // ── ANCESTOR + SCC CONDENSATION CHECK ──
+                // Refinement may select this candidate only if every
+                // child class is in a strictly-earlier SCC.  Leaf nodes
+                // (no children) trivially satisfy this.
+                bool ancestorsOk = true;
+                for (auto child : node.children) {
+                    child = find(child);
+                    auto sit = sccOf.find(child);
+                    if (sit == sccOf.end() || sit->second >= curScc) {
+                        ancestorsOk = false;
+                        break;
+                    }
+                    // Child must also have a finalised cost (guaranteed
+                    // by the strict-SCC check + topological processing,
+                    // but verified defensively).
+                    if (best.find(child) == best.end()) {
+                        ancestorsOk = false;
+                        break;
+                    }
+                }
+                if (!ancestorsOk) continue;
+
+                // ── OP-COMPATIBILITY GUARD (defence-in-depth) ──
+                // The fp_*-rule type-soundness invariant is now enforced
+                // upstream by `EClass::isFloat` propagation and the
+                // float-rule guard installed in `getAllRules()`, so a
+                // class will not normally contain a mix of integer and
+                // float-typed nodes.  This guard is *kept* as a
+                // defence-in-depth measure: it ensures that even if a
+                // future rewrite rule re-introduces such a mix (for
+                // example a hypothetical mixed-int-float distribute
+                // rule), refinement will not flip to a candidate whose
+                // op or arity differs from the latency-best pick.
+                // Together with the SCC + ancestor checks above, this
+                // also bounds the candidate selection DAG: refinement
+                // only picks among same-op same-arity nodes that all
+                // sit in strictly-earlier SCCs, so the resulting
+                // selection graph is provably acyclic and same-shape
+                // with the latency-only baseline.
+                if (node.op != curIt->second.bestNode.op) continue;
+                if (node.children.size()
+                    != curIt->second.bestNode.children.size()) continue;
+
+                // Latency cost under the established sharing pattern.
+                Cost latencyCost = model.nodeCost(node);
+                unsigned depth = 0;
+                for (auto child : node.children) {
+                    child = find(child);
+                    auto cit = best.find(child);
+                    Cost childCost = cit->second.cost;
+                    unsigned parents = parentCount.count(child)
+                                         ? parentCount[child] : 1u;
+                    if (parents > 1)
+                        childCost = childCost / static_cast<Cost>(parents);
+                    latencyCost += childCost;
+                    depth = std::max(depth, cit->second.depth + 1u);
+                }
+
+                unsigned p = computePressure(node);
+                unsigned excess = (p > regBudget) ? (p - regBudget) : 0u;
+                Cost effCost = latencyCost + spillPenalty * static_cast<Cost>(excess);
+
+                // STRICT improvement — ties keep the latency-best pick.
+                bool better = (effCost < bestEff)
+                           || (effCost == bestEff && depth < bestDep);
+                if (better) {
+                    bestEff     = effCost;
+                    bestLat     = latencyCost;
+                    bestDep     = depth;
+                    bestPr      = p;
+                    flippedNode = node;
+                    flipped     = true;
+                }
+            }
+
+            if (flipped) {
+                curIt->second.cost        = bestLat;
+                curIt->second.effCost     = bestEff;
+                curIt->second.bestNode    = flippedNode;
+                curIt->second.depth       = bestDep;
+                curIt->second.regPressure = bestPr;
+            }
+        }
     }
 
     return best;
@@ -12341,6 +12973,46 @@ std::vector<RewriteRule> getAllRules() {
                  std::make_move_iterator(relRules.end()));
 
     auto fpRules = getFloatingPointRules();
+
+    // ── Type guard: fp_* rules must only fire on float-typed operands ──
+    //
+    // The e-graph deliberately uses a single Op for each arithmetic
+    // operation (Op::Add for both `int+int` and `float+float`, etc.)
+    // so that algebraic rewrites apply uniformly.  But the *floating-
+    // point-specific* rules below introduce `ConstF(N.0)` literals on
+    // their RHS — and if such a rule fires on a class that represents
+    // an integer expression, the resulting `Mul(x, ConstF(2.0))` ends
+    // up unified (via congruence closure) with the original
+    // `Mul(x, Const(2))`.  That bridges the two constant classes:
+    // `Const(2) ≡ ConstF(2.0)` becomes a derived equality, and
+    // extraction is then free to pick `ConstF(2.0)` as the right
+    // operand of an integer `Shl`, breaking codegen.
+    //
+    // Fix: wrap every fp_* rule with a guard that requires at least
+    // one bound wildcard's class to be provably float-typed
+    // (`EClass::isFloat`).  Float-typed classes are seeded by
+    // `Op::ConstF` literals and propagated through arithmetic in
+    // `EGraph::add` / `EGraph::merge`.  Pure-integer expressions
+    // therefore never trigger fp_* rules and the cross-type bridge
+    // can no longer form.
+    //
+    // Chains with any pre-existing guard on the rule (some fp_* rules
+    // already had value-based guards like `x != 0`).
+    for (auto& rule : fpRules) {
+        RuleGuard prev = rule.guard;
+        rule.guard = [prev](const EGraph& g, const Subst& s) -> bool {
+            bool anyFloat = false;
+            for (const auto& [name, cls] : s) {
+                ClassId c = const_cast<EGraph&>(g).find(cls);
+                if (c < g.numClasses() && g.getClass(c).isFloat) {
+                    anyFloat = true;
+                    break;
+                }
+            }
+            if (!anyFloat) return false;
+            return prev ? prev(g, s) : true;
+        };
+    }
     rules.insert(rules.end(), std::make_move_iterator(fpRules.begin()),
                  std::make_move_iterator(fpRules.end()));
 

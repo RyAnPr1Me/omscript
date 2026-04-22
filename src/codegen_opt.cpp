@@ -2319,6 +2319,180 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Loop-Invariant Reciprocal Hoisting Pass (LIRH)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Hardware floating-point division is one of the most expensive arithmetic
+// instructions on every modern CPU: typically 10-25 cycles latency with a
+// reciprocal throughput of one instruction per ~5-7 cycles, versus 3-5 cycle
+// latency and 2/cycle throughput for fmul.  When a loop performs multiple
+// divisions by the same loop-invariant divisor — pervasive in physics,
+// graphics, normalization, statistics, and BLAS-style kernels — every
+// iteration pays the full division cost.
+//
+// Pattern (any number of `fdiv` ops with the same loop-invariant divisor `d`):
+//   loop:
+//     ...                                 ...
+//     %a = fdiv %x, %d        →    preheader:
+//     %b = fdiv %y, %d                  %inv = fdiv 1.0, %d   ; (hoisted, runs ONCE)
+//     %c = fdiv %z, %d             loop:
+//     ...                                 ...
+//                                          %a = fmul %x, %inv   ; ~5× cheaper than fdiv
+//                                          %b = fmul %y, %inv
+//                                          %c = fmul %z, %inv
+//                                          ...
+//
+// What LLVM does *not* do:
+//   - InstCombine substitutes reciprocals for *constant* divisors and for
+//     single-use intra-block patterns under the `arcp` flag, but it does not
+//     scan loops to coalesce repeated variable divisors.
+//   - LICM hoists loop-invariant *computations*, but the `fdiv x, d` itself
+//     is NOT loop-invariant (its dividend `x` varies per iteration), so LICM
+//     leaves the division in the loop body.
+//   - The vectorizer pulls reciprocals only for vectorized loops and only in
+//     a narrow set of patterns; it does nothing for un-vectorizable loops.
+//
+// What this pass does: for each loop with a preheader, bucket every `fdiv`
+// inside the loop by its (divisor, type) pair.  For any bucket with ≥2 uses,
+// emit a single `fdiv 1.0, %d` in the preheader and rewrite each in-loop
+// `fdiv %x, %d` as `fmul %x, %inv`.  The result is N divisions becoming
+// 1 division + N multiplications — typically a 3-5× speedup on the dependent
+// arithmetic critical path of the loop body.
+//
+// Safety: enabled only for `fdiv` instructions that already carry the `arcp`
+// (allow reciprocal) or `reassoc` fast-math flag, OR when the function has
+// the `unsafe-fp-math="true"` attribute.  In OPTMAX functions with
+// `fast_math = true` the FP-flag sweep applies full fast-math flags to every
+// FP instruction, so this pass fires on essentially all FP-heavy OPTMAX
+// loops.  Constant divisors are skipped (InstCombine handles them).  Vector
+// divisors are supported (`ConstantFP::get` produces the right splat for
+// vector types).  Per-bucket FMF on the rewritten fmul preserves the
+// original division's flags so any narrower flags the user opted for are
+// retained.
+// ─────────────────────────────────────────────────────────────────────────────
+struct LoopInvariantReciprocalHoistPass
+    : public llvm::PassInfoMixin<LoopInvariantReciprocalHoistPass> {
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& FAM) {
+        auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
+
+        // Function-level fast-math attribute permits reciprocal substitution
+        // even when individual fdiv instructions don't carry the arcp flag.
+        const bool funcUnsafeFPMath =
+            F.getFnAttribute("unsafe-fp-math").getValueAsString() == "true";
+
+        bool changed = false;
+
+        // Process all loops (innermost first via depth_first iteration).
+        // Outer loops can also benefit when the divisor is invariant w.r.t.
+        // an outer loop but not the inner; we process every level.
+        llvm::SmallVector<llvm::Loop*, 8> worklist;
+        for (auto* L : LI)
+            for (auto* SubL : llvm::depth_first(L))
+                worklist.push_back(SubL);
+
+        for (auto* L : worklist) {
+            changed |= processLoop(*L, funcUnsafeFPMath);
+        }
+
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+
+private:
+    static bool fdivAllowsReciprocal(const llvm::BinaryOperator& BO,
+                                     bool funcUnsafeFPMath) {
+        const llvm::FastMathFlags FMF = BO.getFastMathFlags();
+        return FMF.allowReciprocal() || FMF.allowReassoc() || funcUnsafeFPMath;
+    }
+
+    bool processLoop(llvm::Loop& L, bool funcUnsafeFPMath) {
+        // We need a single-entry preheader to safely host the hoisted
+        // reciprocal.  Loops without one (irreducible, multi-entry) are
+        // skipped — LoopSimplify normally guarantees a preheader, and the
+        // OPTMAX pipeline runs `addCanonicalLoopBarrier` (LoopSimplify +
+        // LCSSA) just before this pass.
+        llvm::BasicBlock* preheader = L.getLoopPreheader();
+        if (!preheader) return false;
+
+        // Bucket eligible fdivs by (divisor, type).  Type is part of the key
+        // because we may have both scalar and vector divs by the same scalar
+        // value (uncommon but legal); we hoist a separate reciprocal for each.
+        using Key = std::pair<llvm::Value*, llvm::Type*>;
+        llvm::DenseMap<Key, llvm::SmallVector<llvm::BinaryOperator*, 4>> buckets;
+
+        for (auto* BB : L.blocks()) {
+            for (auto& I : *BB) {
+                auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(&I);
+                if (!binOp) continue;
+                if (binOp->getOpcode() != llvm::Instruction::FDiv) continue;
+                if (!fdivAllowsReciprocal(*binOp, funcUnsafeFPMath)) continue;
+
+                llvm::Value* divisor = binOp->getOperand(1);
+                if (!L.isLoopInvariant(divisor)) continue;
+
+                // Skip constants — InstCombine already substitutes a folded
+                // reciprocal for `fdiv x, C` under arcp.
+                if (llvm::isa<llvm::Constant>(divisor)) continue;
+
+                buckets[{divisor, binOp->getType()}].push_back(binOp);
+            }
+        }
+
+        bool changed = false;
+        for (auto& kv : buckets) {
+            auto& divs = kv.second;
+            // Threshold = 2: with a single fdiv there's no win — we'd just
+            // turn `fdiv x, d` into `fdiv 1, d; fmul x, inv`, paying one
+            // extra fmul for nothing.
+            if (divs.size() < 2) continue;
+
+            llvm::Value* divisor = kv.first.first;
+            llvm::Type* ty       = kv.first.second;
+
+            // Build "1.0" with matching shape.  ConstantFP::get on a vector
+            // type produces the splat <1.0, 1.0, ...> automatically.
+            llvm::Constant* one = llvm::ConstantFP::get(ty, 1.0);
+
+            // Insert the hoisted reciprocal right before the preheader's
+            // terminator so the divisor (defined either above this point in
+            // the preheader or in a dominating block) is in scope.
+            llvm::IRBuilder<> preBuilder(preheader->getTerminator());
+
+            // The hoisted instruction is brand new; give it the union of the
+            // safest flags.  We always need arcp on the rewrite itself; the
+            // hoisted reciprocal is a fresh value whose only consumer is the
+            // pass-generated fmul, so giving it `fast` is safe and lets the
+            // backend use the most efficient sequence (e.g., RCPPS+NR step
+            // on x86 with -mrecip, or the native FDIV otherwise).
+            llvm::FastMathFlags hoistedFMF;
+            hoistedFMF.setFast();
+            preBuilder.setFastMathFlags(hoistedFMF);
+
+            llvm::Value* inv = preBuilder.CreateFDiv(one, divisor, "lirh.recip");
+
+            // Replace each in-loop fdiv with an fmul by the hoisted reciprocal.
+            // Per-instruction FMF is preserved on the new fmul so we don't
+            // strengthen flags for downstream consumers that might have been
+            // relying on, e.g., signed-zero handling.
+            for (auto* div : divs) {
+                llvm::IRBuilder<> b(div);
+                b.setFastMathFlags(div->getFastMathFlags());
+                llvm::Value* mul = b.CreateFMul(div->getOperand(0), inv,
+                                                "lirh.mul");
+                div->replaceAllUsesWith(mul);
+                div->eraseFromParent();
+            }
+
+            changed = true;
+        }
+
+        return changed;
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Dead Argument Propagation Pass
 // ─────────────────────────────────────────────────────────────────────────────
 //
@@ -2534,6 +2708,75 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
     if (optimizationLevel >= OptimizationLevel::O2) {
         opt.AllowFPOpFusion = llvm::FPOpFusion::Fast;
     }
+
+    // ── Section granularity ────────────────────────────────────────────────
+    // At O2+, place every function in its own ELF section (.text.<name>) and
+    // every global in its own data section (.data.<name> / .rodata.<name>),
+    // analogous to clang's `-ffunction-sections -fdata-sections`.
+    //
+    // Why this is a machine-code-quality win:
+    //   • The linker can run `--gc-sections` and physically drop unused
+    //     functions/globals from the final binary, shrinking the .text
+    //     footprint and reducing the working set the CPU touches.
+    //   • Enables the LLVM Machine Function Splitter and downstream linker
+    //     ordering (`--symbol-ordering-file`, BOLT, propeller) to place hot
+    //     code contiguously and isolate cold code in `.text.unlikely`,
+    //     improving i-cache utilization and TLB locality.
+    //   • Required for per-function profile-guided layout once PGO data
+    //     becomes available.
+    //
+    // Off at O0/O1 to keep object files compact for fast iterative builds
+    // (each extra section adds an ELF section header, which inflates `.o`
+    // size noticeably for small modules).
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        opt.FunctionSections = true;
+        opt.DataSections = true;
+    }
+
+    // ── Machine-level interprocedural / outlining optimizations ────────────
+    // EnableMachineOutliner (O2+):
+    //   The MachineOutliner pass (run after register allocation) scans the
+    //   module for repeated machine-instruction sequences across functions
+    //   and replaces them with calls to a shared outlined helper.  This
+    //   shrinks the .text segment, improves i-cache density, and is purely
+    //   semantics-preserving — it operates on already-codegen'd MachineIR
+    //   so it cannot change program behavior.  Mature on x86-64 and AArch64
+    //   in LLVM ≥14; off-by-default upstream only because some embedded
+    //   targets historically lacked support.  Pairs naturally with the
+    //   FunctionSections layout enabled above: the linker can place the
+    //   outlined helper near its hottest caller.
+    //
+    // EnableMachineFunctionSplitter (O2+ with PGO-use):
+    //   At MachineFunction lowering, splits each function into a hot
+    //   `.text.hot.<name>` and a cold `.text.unlikely.<name>` section
+    //   based on profile-derived block frequencies.  Cold blocks (error
+    //   handlers, slow paths) are physically separated so the hot path
+    //   uses contiguous cache lines.  Requires PGO data to be meaningful;
+    //   only enable when `--pgo-use=` was supplied.
+    //
+    // EnableIPRA (O3):
+    //   Interprocedural Register Allocation.  The backend computes the
+    //   actual register-clobber set of each function (rather than the
+    //   conservative ABI clobber list) and propagates it to callers, so
+    //   the register allocator can keep values live in callee-saved
+    //   registers across calls that don't actually touch them.  Eliminates
+    //   caller-save spill/reload pairs around small leaf calls — a real
+    //   IPC win on call-heavy compute code.  Restricted to O3 because the
+    //   bottom-up call-graph traversal during MI lowering adds compile
+    //   time, and because it requires the whole module to be available
+    //   (incompatible with separate-compilation linking semantics if any
+    //   call escapes to an external function — the backend handles that
+    //   correctly by falling back to ABI clobbers for unknown callees).
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        opt.EnableMachineOutliner = true;
+        if (!pgoUsePath_.empty()) {
+            opt.EnableMachineFunctionSplitter = true;
+        }
+    }
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        opt.EnableIPRA = true;
+    }
+
     const std::optional<llvm::Reloc::Model> RM = usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
 
     std::string cpu;
@@ -4227,6 +4470,37 @@ void CodeGenerator::runOptimizationPasses() {
                     std::cout << "    Superoptimizer pass 2: "
                               << total2 << " additional optimizations" << '\n';
                 }
+
+                // Lightweight cleanup after pass 2.  Without this, pass-2
+                // outputs (algebraic folds, idiom replacements, branch
+                // simplifications) reach the HGOE and the final closing
+                // pipeline un-cleaned: the SCCP/CVP/NewGVN/DSE chain that
+                // cleaned up after pass 1 has already finished and won't be
+                // re-entered until the very end of the pipeline (after HGOE).
+                //
+                // Use a *minimal* cleanup — SCCP + InstCombine + ADCE +
+                // SimplifyCFG — rather than the full pass-1 cleanup chain
+                // (NewGVN, DSE, MemCpyOpt are O(NlogN) and pass 2 produces
+                // far fewer changes since synthesis is disabled).  This keeps
+                // compile time bounded while still folding constants exposed
+                // by pass-2 idiom replacement and removing the dead remnants
+                // pass-2 algebraic folds leave behind, so HGOE sees a clean
+                // IR for its hardware-aware transforms.
+                if (total2 > 0) {
+                    std::vector<llvm::Function*> smallFuncs2;
+                    for (auto& func : *module) {
+                        if (!func.isDeclaration() && func.getInstructionCount() <= 2000)
+                            smallFuncs2.push_back(&func);
+                    }
+                    if (!smallFuncs2.empty()) {
+                        llvm::FunctionPassManager PSuperFPM2;
+                        PSuperFPM2.addPass(llvm::SCCPPass());
+                        PSuperFPM2.addPass(llvm::InstCombinePass());
+                        PSuperFPM2.addPass(llvm::ADCEPass());
+                        PSuperFPM2.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                        runPostFPMOnFuncs(std::move(PSuperFPM2), std::move(smallFuncs2));
+                    }
+                }
             }
         }
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSuperopt_) {
@@ -4516,6 +4790,23 @@ void CodeGenerator::runOptimizationPasses() {
             // loop bounds may have been folded to small constants.
             // Re-running LoopUnroll here catches these late opportunities.
             CloseFPM.addPass(llvm::LoopUnrollPass(llvm::LoopUnrollOptions()));
+            // Post-unroll redundancy elimination.  Loop unrolling duplicates
+            // the body N times, creating cross-iteration redundant GEPs,
+            // identical address computations, and repeated IV arithmetic
+            // that InstCombine cannot eliminate (it works locally on a
+            // single instruction's operands; it does not perform congruence
+            // analysis across the unrolled copies).  Without a CSE step
+            // here, the downstream SLPVectorizer sees redundant scalar
+            // chains under different SSA names and either bundles them
+            // inefficiently or fails to bundle at all.  EarlyCSE with
+            // MemorySSA is the right tool: it's near-linear, exploits the
+            // already-computed MemorySSA from the LICM pass above, and
+            // collapses the duplicated trees into single canonical
+            // instructions that the vectorizer can match into bundles.
+            // This mirrors the GCC -O3 second-tree-opt-round pattern and
+            // LLVM's ThinLTO pipeline, both of which re-run CSE after late
+            // unrolling for the same reason.
+            CloseFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
             // Phase 4: strength reduction + final peephole.
             CloseFPM.addPass(llvm::InstCombinePass());
             // RPAR: rebalance linear associative chains into O(log n) depth
@@ -4886,6 +5177,12 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Cross-iteration load reuse in OPTMAX loops: carry stencil/window values
     // across iterations in registers to eliminate redundant loads.
     FPMMax.addPass(CrossIterLoadReusePass());
+    // LIRH: hoist 1.0/d outside loops where the loop-invariant divisor d is
+    // used by ≥2 fdivs, rewriting each in-loop division as a multiplication
+    // by the precomputed reciprocal.  Runs before MACPatternPass so any
+    // newly-created fmul that participates in a fadd reduction is picked up
+    // by MAC for FMA fusion.
+    FPMMax.addPass(LoopInvariantReciprocalHoistPass());
     // MAC pattern detection: convert fadd(fmul(a,b), acc) → fmuladd for FMA.
     FPMMax.addPass(MACPatternPass());
     FPMMax.addPass(llvm::IRCEPass());
@@ -4924,6 +5221,19 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     FPMMax.addPass(llvm::AlignmentFromAssumptionsPass());
     {
         llvm::LoopPassManager LPM;
+        // Re-rotate loops before LICM.  Phase 2.5 (LoopUnroll/UnrollAndJam)
+        // and all of Phase 3 (SimplifyCFG with hyperblock then aggressive
+        // opts, JumpThreading, DFAJumpThreading, SpeculativeExecution,
+        // BranchEntropyReduction's select↔branch conversions, and
+        // ConditionalStoreSink) mutate the CFG aggressively and can leave
+        // loops in non-rotated form (test-at-top / for-style) where the
+        // header guard is not loop-invariant.  Both LoopVersioningLICM and
+        // LICM require rotated do-while form to hoist invariants out of
+        // the header — without rotation they silently no-op on those loops
+        // and Phase 4's load-hoisting work is wasted.  LoopRotate is
+        // idempotent, near-free on already-rotated loops, and is what
+        // LLVM's own PassBuilderPipelines.cpp does before every LICM call.
+        LPM.addPass(llvm::LoopRotatePass());
         LPM.addPass(llvm::IndVarSimplifyPass());
         LPM.addPass(llvm::LoopVersioningLICMPass());
         LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
@@ -4966,7 +5276,19 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     FPMMax.addPass(llvm::DSEPass());
     FPMMax.addPass(llvm::MemCpyOptPass());
     FPMMax.addPass(llvm::NewGVNPass());
-    FPMMax.addPass(llvm::InstSimplifyPass());
+    // After NewGVN merges values from across the unrolled/vectorized body,
+    // many new InstCombine-foldable patterns appear: redundant bitcasts and
+    // truncs around vector operands, equivalent-but-syntactically-different
+    // expressions, and fused-arith opportunities from now-CSE'd subterms.
+    // The previous pipeline ran only InstSimplify here, which is strictly
+    // weaker than InstCombine (it does not rewrite — only constant-folds and
+    // matches a small set of identities), so it left these patterns on the
+    // table.  VectorCombine then cleans up the insertelement/extractelement
+    // chains that the SLP/LoadStoreVectorizer produced in Phase 4 once
+    // NewGVN has de-duplicated their operands, which is exactly when those
+    // chains become foldable.
+    FPMMax.addPass(llvm::InstCombinePass());
+    FPMMax.addPass(llvm::VectorCombinePass());
     FPMMax.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
     FPMMax.addPass(llvm::LoopSinkPass());
     FPMMax.addPass(llvm::ADCEPass());

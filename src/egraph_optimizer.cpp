@@ -181,26 +181,33 @@ static bool isUnaryOp(Op op) {
     }
 }
 
-/// Recursively extract an ENode tree from the e-graph starting at a class.
-/// Uses the cost model to pick the best node at each level.
-static ENode extractRecursive(EGraph& graph, ClassId cls, const CostModel& model,
-                               std::unordered_map<ClassId, ENode>& cache) {
-    cls = graph.find(cls);
-    auto it = cache.find(cls);
-    if (it != cache.end()) return it->second;
-
-    ENode best = graph.extract(cls, model);
-    cache[cls] = best;
-    return best;
-}
-
 /// Convert an extracted e-graph node back into an AST Expression.
-/// Recursively converts children, consulting the e-graph for sub-expressions.
+///
+/// `bestMap` is the result of a SINGLE `EGraph::extractAll(root, model)`
+/// call performed at the top level — every class reachable from the
+/// extraction root is already populated with its optimal e-node, so
+/// child lookups are O(1) hash hits.  The previous implementation
+/// invoked `EGraph::extract(child, model)` per recursion step, which
+/// in turn invoked `extractAll(child, model)` — yielding O(N²) work
+/// in the size of the e-graph.  Reusing one `bestMap` makes AST
+/// conversion strictly linear in the size of the extracted tree.
 static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
-                                               const CostModel& model,
-                                               std::unordered_map<ClassId, ENode>& cache) {
+                                               const std::unordered_map<ClassId,
+                                                   EGraph::ExtractionResult>& bestMap) {
     cls = graph.find(cls);
-    ENode node = extractRecursive(graph, cls, model, cache);
+
+    ENode node;
+    auto it = bestMap.find(cls);
+    if (it != bestMap.end()) {
+        node = it->second.bestNode;
+    } else {
+        // Fallback: pick the first node of the class.  This matches the
+        // legacy `EGraph::extract` behaviour and only triggers for classes
+        // unreachable from the extraction root, which by construction
+        // cannot occur for sub-classes referenced by an extracted node.
+        const auto& nodes = graph.getClass(cls).nodes;
+        node = nodes.empty() ? ENode(Op::Nop) : nodes.front();
+    }
 
     switch (node.op) {
     case Op::Const:
@@ -227,23 +234,23 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
 
     // Binary operations
     if (isBinaryOp(node.op) && node.children.size() == 2) {
-        auto left = eNodeToAST(graph, node.children[0], model, cache);
-        auto right = eNodeToAST(graph, node.children[1], model, cache);
+        auto left = eNodeToAST(graph, node.children[0], bestMap);
+        auto right = eNodeToAST(graph, node.children[1], bestMap);
         return std::make_unique<BinaryExpr>(opToString(node.op),
                                              std::move(left), std::move(right));
     }
 
     // Unary operations
     if (isUnaryOp(node.op) && node.children.size() == 1) {
-        auto operand = eNodeToAST(graph, node.children[0], model, cache);
+        auto operand = eNodeToAST(graph, node.children[0], bestMap);
         return std::make_unique<UnaryExpr>(opToString(node.op), std::move(operand));
     }
 
     // Ternary
     if (node.op == Op::Ternary && node.children.size() == 3) {
-        auto cond = eNodeToAST(graph, node.children[0], model, cache);
-        auto thenE = eNodeToAST(graph, node.children[1], model, cache);
-        auto elseE = eNodeToAST(graph, node.children[2], model, cache);
+        auto cond = eNodeToAST(graph, node.children[0], bestMap);
+        auto thenE = eNodeToAST(graph, node.children[1], bestMap);
+        auto elseE = eNodeToAST(graph, node.children[2], bestMap);
         return std::make_unique<TernaryExpr>(std::move(cond), std::move(thenE),
                                               std::move(elseE));
     }
@@ -253,7 +260,7 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
         std::vector<std::unique_ptr<Expression>> args;
         args.reserve(node.children.size());
         for (auto child : node.children) {
-            args.push_back(eNodeToAST(graph, child, model, cache));
+            args.push_back(eNodeToAST(graph, child, bestMap));
         }
         auto e = std::make_unique<CallExpr>(node.name, std::move(args));
         e->fromStdNamespace = true; // e-graph optimizer generated
@@ -379,8 +386,12 @@ static std::unique_ptr<Expression> optimizeExpressionImpl(const Expression* expr
     graph.saturate(kAllRules);
 
     const CostModel model;
-    std::unordered_map<ClassId, ENode> cache;
-    return eNodeToAST(graph, root, model, cache);
+    // Single bottom-up cost-DAG construction for the entire reachable
+    // sub-graph from `root`.  Reused for every recursive `eNodeToAST`
+    // call below; replaces the old per-class `EGraph::extract` which
+    // re-ran extractAll for each visited class (O(N²)).
+    auto bestMap = graph.extractAll(root, model);
+    return eNodeToAST(graph, root, bestMap);
 }
 
 /// Optimize an expression in-place by replacing with the e-graph result.

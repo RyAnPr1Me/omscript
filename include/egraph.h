@@ -23,6 +23,7 @@
 ///   - Efficient union-find with path compression
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -164,6 +165,14 @@ struct EClass {
     bool isNonNeg = false;              ///< True if all values are >= 0 (by analysis)
     bool isPowerOfTwo = false;          ///< True if value is a power of 2 (1,2,4,8,...)
     bool isBoolean = false;             ///< True if value is 0 or 1 (comparison result)
+    bool isFloat = false;               ///< Provably float-typed (contains ConstF or
+                                        ///< derives from a float-typed operand).  Used
+                                        ///< by `fp_*` rewrite rules to avoid unifying
+                                        ///< integer and float constants via congruence.
+    bool isInt = false;                 ///< Provably integer-typed (contains Const,
+                                        ///< Shl/Shr/BitOp output, or derives from int
+                                        ///< operands).  Used by integer-only rules to
+                                        ///< avoid firing on float-typed operands.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -275,10 +284,42 @@ static constexpr Cost INFINITE_COST = 1e18;
 
 /// Cost model that considers instruction latency, memory access, and
 /// instruction-level parallelism for x86-64 targets.
+///
+/// In addition to per-node latency, the model carries the **register
+/// budget** (number of architectural GPRs available to hold simultaneous
+/// live values) and the **spill penalty** (added cost per excess live
+/// value beyond the budget).  These two parameters drive the
+/// register-pressure-aware extraction pass: when an extracted DAG would
+/// exceed the budget, the extractor pays a spill penalty per excess
+/// register and may flip the selection toward a node that produces an
+/// equivalent value with a shallower (lower-pressure) sub-tree.
+///
+/// Defaults model a generic x86-64 host:
+///   - 13 callee-clobbered + caller-saved GPRs available to a leaf
+///     function (16 architectural - RSP - RBP - 1 frame/scratch reserve).
+///   - 5 cycles per spill (conservative L1 round-trip for a stack slot
+///     reload).
+///
+/// HGOE may construct a `CostModel` with target-specific values from a
+/// resolved `MicroarchProfile` (e.g. AArch64 has 31 GPRs → regBudget=27,
+/// in-order Cortex-A55 has higher spill cost ~8, etc.).
 struct CostModel {
     /// Returns the cost of a single e-node, not counting children.
     /// The extraction algorithm adds children costs to get total cost.
     Cost nodeCost(const ENode& node) const;
+
+    /// Number of architectural registers the extractor may assume are
+    /// available to hold simultaneously-live values.  When the
+    /// pressure of a candidate sub-DAG exceeds this, each excess
+    /// live value costs `spillPenalty` cycles.  Set to 0 to disable
+    /// register-pressure-aware extraction (the extractor then uses
+    /// pure latency cost, matching the historical behaviour).
+    unsigned regBudget = 13;
+
+    /// Cost added per excess simultaneously-live value beyond
+    /// `regBudget`.  Models a stack-slot spill+reload round-trip.
+    /// A value of 0 disables the pressure penalty.
+    Cost spillPenalty = 5.0;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -406,11 +447,77 @@ private:
     /// Total node count across all classes.
     size_t totalNodes_ = 0;
 
+    /// Monotonically-increasing counter of successful merges (i.e. calls to
+    /// `merge(a, b)` where `find(a) != find(b)` so a real union happened).
+    /// Incremented by `merge()` for every union path — including merges
+    /// triggered by `foldConstants()` and pattern rules — so callers can
+    /// detect "no merges since the last checkpoint" without instrumenting
+    /// every path.  `saturate()` uses it to skip the per-iteration rebuild
+    /// when no merges occurred, eliminating O(N) wasted work on the final
+    /// fixpoint iteration and on rule sets that are quickly satisfied.
+    size_t mergeCount_ = 0;
+
+    /// Per-class use-list: `parents_[c]` lists every class id whose nodes
+    /// reference `c` as a child.  Populated by `add()` and updated by
+    /// `merge()` so the dirty-class rebuild can locate every class that
+    /// could be affected by a union without scanning the entire graph.
+    std::vector<std::vector<ClassId>> parents_;
+
+    /// Worklist of classes whose hashcons entries may be stale because
+    /// either they themselves received a merge or one of their children's
+    /// canonical class id changed.  Drained by `rebuild()`.
+    std::vector<ClassId> dirty_;
+    std::vector<bool>    dirtyMark_;
+
+    /// Per-op index of classes whose node-list contains at least one node
+    /// of that op.  Populated by `add()` (one entry per new class+op
+    /// combination) and extended by `merge()` (when class `b` carries an
+    /// op into class `a` that wasn't already present).  Used by `match()`
+    /// to skip the O(N) scan over all classes when the rule's root is an
+    /// `OpMatch` pattern — we walk only the bucket for that op.
+    ///
+    /// Buckets may contain stale (non-canonical) ids that have since been
+    /// merged away; `match()` canonicalises with `find()` and de-duplicates
+    /// per call.  Entries are append-only because removing on every merge
+    /// would make `merge()` linear in bucket size.
+    static constexpr size_t kNumOps = static_cast<size_t>(Op::Nop) + 1;
+    std::array<std::vector<ClassId>, kNumOps> classesByOp_;
+
+    /// Generation-stamped scratch buffer used by `match()` (and any other
+    /// per-call de-dup over canonical class ids) to avoid the per-call
+    /// `std::vector<bool>(classes_.size(), false)` allocate-and-fill.  The
+    /// buffer grows monotonically; each call bumps `matchSeenGen_` and
+    /// considers an entry "seen" iff it equals the current generation.
+    /// On generation overflow we zero the buffer once and reset the
+    /// counter.  Mutable because `match()` is `const`.
+    mutable std::vector<uint32_t> matchSeen_;
+    mutable uint32_t              matchSeenGen_ = 0;
+
+    /// Cheap O(1) test for "does the e-graph contain at least one
+    /// e-class with a node of op `op`?" — used by `applyRules` to skip
+    /// rules whose LHS root op cannot possibly match.  Buckets are
+    /// append-only so a non-empty bucket is sufficient even if some
+    /// entries are stale (the appended id was the canonical class at
+    /// add-time and is still reachable via `find()`).
+    bool hasOp(Op op) const noexcept {
+        const auto idx = static_cast<size_t>(op);
+        return idx < classesByOp_.size() && !classesByOp_[idx].empty();
+    }
+
     /// Canonicalize an ENode's children to use canonical class IDs.
     ENode canonicalize(ENode node) const;
 
     /// Internal: rebuild the hashcons table after merges.
+    /// Restricts re-canonicalization to classes that could have been
+    /// affected by recent merges (those in `dirty_` plus their use-list
+    /// closure).  When `dirty_` is empty, returns immediately — this is
+    /// the common case on the final saturation iteration where the
+    /// previous round produced no merges.
     void rebuild();
+
+    /// Mark a class (and transitively every class that uses it) as dirty
+    /// so that the next `rebuild()` re-canonicalizes their nodes.
+    void markDirty(ClassId id);
 
     /// Internal: match a pattern against a specific e-class.
     bool matchClass(const Pattern& pat, ClassId cls, Subst& subst) const;
@@ -423,13 +530,44 @@ private:
     /// Internal: constant folding pass on an e-class.
     void foldConstants(ClassId cls);
 
-    /// Internal: extract helper returning cost + best node per class.
+public:
+    /// Extract helper returning cost + best node per class.
+    ///
+    /// The extractor selects, for each e-class, the e-node that minimises
+    /// the **effective cost** — a linear combination of latency cost and
+    /// spill penalty derived from estimated register pressure.  When the
+    /// host cost model has `spillPenalty == 0` or `regBudget == 0`, the
+    /// pressure terms drop out and selection is purely latency-driven.
+    ///
+    /// Made public so that the AST bridge in `egraph_optimizer.cpp` can
+    /// call `extractAll(root, model)` exactly once and reuse the
+    /// resulting per-class best-node map for the linear-time recursive
+    /// AST conversion.  The previous flow re-ran extractAll for every
+    /// visited class via `EGraph::extract`, yielding O(N²) behaviour.
     struct ExtractionResult {
-        Cost cost;
+        Cost cost;          ///< Pure latency cost (sum of node + children costs,
+                            ///< with DAG-sharing discount applied).
+        Cost effCost = 0;   ///< Effective cost = cost + spillPenalty *
+                            ///< max(0, regPressure - regBudget).  This is
+                            ///< the metric the selection refinement
+                            ///< minimises after the initial latency-only
+                            ///< extraction has produced an estimate of
+                            ///< parent counts (= sharing structure).
         ENode bestNode;
-        unsigned depth = 0; ///< Critical-path depth (0 = leaf). Used as tie-breaker:
-                             ///< when two options have equal cost, prefer the shallower
-                             ///< one to reduce register pressure and expose more ILP.
+        unsigned depth = 0; ///< Critical-path depth (0 = leaf).  Used as a
+                            ///< secondary tie-breaker after effCost/cost.
+        unsigned regPressure = 1; ///< Sethi-Ullman simultaneous-live-value
+                            ///< estimate for evaluating this sub-DAG.  For
+                            ///< a leaf this is 1; for an internal node
+                            ///< with k unshared children sorted by
+                            ///< descending pressure p_i, it is
+                            ///< sharedCount + max_i (p_i + i - 1), capturing
+                            ///< the registers held for already-evaluated
+                            ///< siblings while later siblings are computed.
+                            ///< Shared children (parentCount > 1 in the
+                            ///< extracted DAG) contribute exactly one
+                            ///< register each because their result is
+                            ///< computed once and reused.
     };
     std::unordered_map<ClassId, ExtractionResult>
     extractAll(ClassId root, const CostModel& model);
