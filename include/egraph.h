@@ -23,6 +23,7 @@
 ///   - Efficient union-find with path compression
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -467,6 +468,20 @@ private:
     /// canonical class id changed.  Drained by `rebuild()`.
     std::vector<ClassId> dirty_;
     std::vector<bool>    dirtyMark_;
+
+    /// Per-op index of classes whose node-list contains at least one node
+    /// of that op.  Populated by `add()` (one entry per new class+op
+    /// combination) and extended by `merge()` (when class `b` carries an
+    /// op into class `a` that wasn't already present).  Used by `match()`
+    /// to skip the O(N) scan over all classes when the rule's root is an
+    /// `OpMatch` pattern — we walk only the bucket for that op.
+    ///
+    /// Buckets may contain stale (non-canonical) ids that have since been
+    /// merged away; `match()` canonicalises with `find()` and de-duplicates
+    /// per call.  Entries are append-only because removing on every merge
+    /// would make `merge()` linear in bucket size.
+    static constexpr size_t kNumOps = static_cast<size_t>(Op::Nop) + 1;
+    std::array<std::vector<ClassId>, kNumOps> classesByOp_;
 
     /// Canonicalize an ENode's children to use canonical class IDs.
     ENode canonicalize(ENode node) const;

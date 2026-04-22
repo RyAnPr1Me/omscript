@@ -269,6 +269,15 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
 
     classes_.push_back(std::move(cls));
 
+    // Per-op class index: O(1) bucket append so `match()` can iterate
+    // only classes that actually contain a node of the rule's root op.
+    {
+        const auto opIdx = static_cast<size_t>(node.op);
+        if (opIdx < classesByOp_.size()) {
+            classesByOp_[opIdx].push_back(id);
+        }
+    }
+
     // Maintain the use-list for incremental rebuild: every distinct child
     // class records this new class as one of its users.  Duplicates are
     // permitted (cheap to add, harmless when iterated; the dirty queue
@@ -342,8 +351,22 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
     // b merges into a
     parent_[b] = a;
 
-    // Move all nodes from b into a
+    // Move all nodes from b into a, and update the per-op class index so
+    // that any op `b` carried (but `a` did not) will surface `a` in the
+    // matcher's bucket walk.  We record the set of ops `a` already had
+    // BEFORE moving — appending `a` for those would create harmless but
+    // wasted bucket entries.
+    std::array<bool, kNumOps> aHadOp{};
+    for (const auto& n : classes_[a].nodes) {
+        const auto idx = static_cast<size_t>(n.op);
+        if (idx < kNumOps) aHadOp[idx] = true;
+    }
     for (auto& node : classes_[b].nodes) {
+        const auto idx = static_cast<size_t>(node.op);
+        if (idx < kNumOps && !aHadOp[idx]) {
+            classesByOp_[idx].push_back(a);
+            aHadOp[idx] = true;  // avoid duplicate append for repeat ops
+        }
         classes_[a].nodes.push_back(std::move(node));
     }
     classes_[b].nodes.clear();
@@ -585,6 +608,38 @@ void EGraph::rebuild() {
 
 std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
     std::vector<std::pair<ClassId, Subst>> results;
+
+    // ── Fast path: rule's root pattern matches a specific op ─────────────
+    // Walk only the bucket of classes that contain at least one node of
+    // that op, instead of the entire e-class array.  This is the hot
+    // path during equality saturation: the e-graph typically has tens of
+    // thousands of classes but most ops have small buckets.
+    //
+    // Buckets may carry stale or duplicate ids (entries are append-only;
+    // see `classesByOp_` declaration).  We canonicalise via `find()` and
+    // de-duplicate per call using a small `seen` bitset sized to the
+    // current class count.
+    if (pat.kind == Pattern::Kind::OpMatch) {
+        const auto opIdx = static_cast<size_t>(pat.op);
+        if (opIdx >= classesByOp_.size()) return results;
+        const auto& bucket = classesByOp_[opIdx];
+
+        std::vector<bool> seen(classes_.size(), false);
+        for (ClassId raw : bucket) {
+            if (raw >= classes_.size()) continue;
+            ClassId canonical = const_cast<EGraph*>(this)->find(raw);
+            if (canonical >= seen.size() || seen[canonical]) continue;
+            seen[canonical] = true;
+
+            Subst subst;
+            if (matchClassCommutative(pat, canonical, subst)) {
+                results.emplace_back(canonical, std::move(subst));
+            }
+        }
+        return results;
+    }
+
+    // ── Slow path: wildcard at root (degenerate; matches every class) ──
     for (ClassId i = 0; i < classes_.size(); ++i) {
         ClassId canonical = const_cast<EGraph*>(this)->find(i);
         if (canonical != i) continue; // Skip non-canonical
