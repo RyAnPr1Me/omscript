@@ -2319,6 +2319,180 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Loop-Invariant Reciprocal Hoisting Pass (LIRH)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Hardware floating-point division is one of the most expensive arithmetic
+// instructions on every modern CPU: typically 10-25 cycles latency with a
+// reciprocal throughput of one instruction per ~5-7 cycles, versus 3-5 cycle
+// latency and 2/cycle throughput for fmul.  When a loop performs multiple
+// divisions by the same loop-invariant divisor — pervasive in physics,
+// graphics, normalization, statistics, and BLAS-style kernels — every
+// iteration pays the full division cost.
+//
+// Pattern (any number of `fdiv` ops with the same loop-invariant divisor `d`):
+//   loop:
+//     ...                                 ...
+//     %a = fdiv %x, %d        →    preheader:
+//     %b = fdiv %y, %d                  %inv = fdiv 1.0, %d   ; (hoisted, runs ONCE)
+//     %c = fdiv %z, %d             loop:
+//     ...                                 ...
+//                                          %a = fmul %x, %inv   ; ~5× cheaper than fdiv
+//                                          %b = fmul %y, %inv
+//                                          %c = fmul %z, %inv
+//                                          ...
+//
+// What LLVM does *not* do:
+//   - InstCombine substitutes reciprocals for *constant* divisors and for
+//     single-use intra-block patterns under the `arcp` flag, but it does not
+//     scan loops to coalesce repeated variable divisors.
+//   - LICM hoists loop-invariant *computations*, but the `fdiv x, d` itself
+//     is NOT loop-invariant (its dividend `x` varies per iteration), so LICM
+//     leaves the division in the loop body.
+//   - The vectorizer pulls reciprocals only for vectorized loops and only in
+//     a narrow set of patterns; it does nothing for un-vectorizable loops.
+//
+// What this pass does: for each loop with a preheader, bucket every `fdiv`
+// inside the loop by its (divisor, type) pair.  For any bucket with ≥2 uses,
+// emit a single `fdiv 1.0, %d` in the preheader and rewrite each in-loop
+// `fdiv %x, %d` as `fmul %x, %inv`.  The result is N divisions becoming
+// 1 division + N multiplications — typically a 3-5× speedup on the dependent
+// arithmetic critical path of the loop body.
+//
+// Safety: enabled only for `fdiv` instructions that already carry the `arcp`
+// (allow reciprocal) or `reassoc` fast-math flag, OR when the function has
+// the `unsafe-fp-math="true"` attribute.  In OPTMAX functions with
+// `fast_math = true` the FP-flag sweep applies full fast-math flags to every
+// FP instruction, so this pass fires on essentially all FP-heavy OPTMAX
+// loops.  Constant divisors are skipped (InstCombine handles them).  Vector
+// divisors are supported (`ConstantFP::get` produces the right splat for
+// vector types).  Per-bucket FMF on the rewritten fmul preserves the
+// original division's flags so any narrower flags the user opted for are
+// retained.
+// ─────────────────────────────────────────────────────────────────────────────
+struct LoopInvariantReciprocalHoistPass
+    : public llvm::PassInfoMixin<LoopInvariantReciprocalHoistPass> {
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& FAM) {
+        auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
+
+        // Function-level fast-math attribute permits reciprocal substitution
+        // even when individual fdiv instructions don't carry the arcp flag.
+        const bool funcUnsafeFPMath =
+            F.getFnAttribute("unsafe-fp-math").getValueAsString() == "true";
+
+        bool changed = false;
+
+        // Process all loops (innermost first via depth_first iteration).
+        // Outer loops can also benefit when the divisor is invariant w.r.t.
+        // an outer loop but not the inner; we process every level.
+        llvm::SmallVector<llvm::Loop*, 8> worklist;
+        for (auto* L : LI)
+            for (auto* SubL : llvm::depth_first(L))
+                worklist.push_back(SubL);
+
+        for (auto* L : worklist) {
+            changed |= processLoop(*L, funcUnsafeFPMath);
+        }
+
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+
+private:
+    static bool fdivAllowsReciprocal(const llvm::BinaryOperator& BO,
+                                     bool funcUnsafeFPMath) {
+        const llvm::FastMathFlags FMF = BO.getFastMathFlags();
+        return FMF.allowReciprocal() || FMF.allowReassoc() || funcUnsafeFPMath;
+    }
+
+    bool processLoop(llvm::Loop& L, bool funcUnsafeFPMath) {
+        // We need a single-entry preheader to safely host the hoisted
+        // reciprocal.  Loops without one (irreducible, multi-entry) are
+        // skipped — LoopSimplify normally guarantees a preheader, and the
+        // OPTMAX pipeline runs `addCanonicalLoopBarrier` (LoopSimplify +
+        // LCSSA) just before this pass.
+        llvm::BasicBlock* preheader = L.getLoopPreheader();
+        if (!preheader) return false;
+
+        // Bucket eligible fdivs by (divisor, type).  Type is part of the key
+        // because we may have both scalar and vector divs by the same scalar
+        // value (uncommon but legal); we hoist a separate reciprocal for each.
+        using Key = std::pair<llvm::Value*, llvm::Type*>;
+        llvm::DenseMap<Key, llvm::SmallVector<llvm::BinaryOperator*, 4>> buckets;
+
+        for (auto* BB : L.blocks()) {
+            for (auto& I : *BB) {
+                auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(&I);
+                if (!binOp) continue;
+                if (binOp->getOpcode() != llvm::Instruction::FDiv) continue;
+                if (!fdivAllowsReciprocal(*binOp, funcUnsafeFPMath)) continue;
+
+                llvm::Value* divisor = binOp->getOperand(1);
+                if (!L.isLoopInvariant(divisor)) continue;
+
+                // Skip constants — InstCombine already substitutes a folded
+                // reciprocal for `fdiv x, C` under arcp.
+                if (llvm::isa<llvm::Constant>(divisor)) continue;
+
+                buckets[{divisor, binOp->getType()}].push_back(binOp);
+            }
+        }
+
+        bool changed = false;
+        for (auto& kv : buckets) {
+            auto& divs = kv.second;
+            // Threshold = 2: with a single fdiv there's no win — we'd just
+            // turn `fdiv x, d` into `fdiv 1, d; fmul x, inv`, paying one
+            // extra fmul for nothing.
+            if (divs.size() < 2) continue;
+
+            llvm::Value* divisor = kv.first.first;
+            llvm::Type* ty       = kv.first.second;
+
+            // Build "1.0" with matching shape.  ConstantFP::get on a vector
+            // type produces the splat <1.0, 1.0, ...> automatically.
+            llvm::Constant* one = llvm::ConstantFP::get(ty, 1.0);
+
+            // Insert the hoisted reciprocal right before the preheader's
+            // terminator so the divisor (defined either above this point in
+            // the preheader or in a dominating block) is in scope.
+            llvm::IRBuilder<> preBuilder(preheader->getTerminator());
+
+            // The hoisted instruction is brand new; give it the union of the
+            // safest flags.  We always need arcp on the rewrite itself; the
+            // hoisted reciprocal is a fresh value whose only consumer is the
+            // pass-generated fmul, so giving it `fast` is safe and lets the
+            // backend use the most efficient sequence (e.g., RCPPS+NR step
+            // on x86 with -mrecip, or the native FDIV otherwise).
+            llvm::FastMathFlags hoistedFMF;
+            hoistedFMF.setFast();
+            preBuilder.setFastMathFlags(hoistedFMF);
+
+            llvm::Value* inv = preBuilder.CreateFDiv(one, divisor, "lirh.recip");
+
+            // Replace each in-loop fdiv with an fmul by the hoisted reciprocal.
+            // Per-instruction FMF is preserved on the new fmul so we don't
+            // strengthen flags for downstream consumers that might have been
+            // relying on, e.g., signed-zero handling.
+            for (auto* div : divs) {
+                llvm::IRBuilder<> b(div);
+                b.setFastMathFlags(div->getFastMathFlags());
+                llvm::Value* mul = b.CreateFMul(div->getOperand(0), inv,
+                                                "lirh.mul");
+                div->replaceAllUsesWith(mul);
+                div->eraseFromParent();
+            }
+
+            changed = true;
+        }
+
+        return changed;
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Dead Argument Propagation Pass
 // ─────────────────────────────────────────────────────────────────────────────
 //
@@ -5003,6 +5177,12 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Cross-iteration load reuse in OPTMAX loops: carry stencil/window values
     // across iterations in registers to eliminate redundant loads.
     FPMMax.addPass(CrossIterLoadReusePass());
+    // LIRH: hoist 1.0/d outside loops where the loop-invariant divisor d is
+    // used by ≥2 fdivs, rewriting each in-loop division as a multiplication
+    // by the precomputed reciprocal.  Runs before MACPatternPass so any
+    // newly-created fmul that participates in a fadd reduction is picked up
+    // by MAC for FMA fusion.
+    FPMMax.addPass(LoopInvariantReciprocalHoistPass());
     // MAC pattern detection: convert fadd(fmul(a,b), acc) → fmuladd for FMA.
     FPMMax.addPass(MACPatternPass());
     FPMMax.addPass(llvm::IRCEPass());
