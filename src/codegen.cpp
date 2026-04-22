@@ -9066,10 +9066,9 @@ void CodeGenerator::generateGlobals(Program* program) {
     if (!program) return;
     for (const auto& gv : program->globals) {
         if (!gv) continue;
-        // Determine the LLVM symbol name: mangled if from another file.
-        const std::string llvmName = gv->globalNamespace.empty()
-            ? gv->name
-            : gv->globalNamespace + "__" + gv->name;
+        // Use the original unqualified name as the LLVM symbol.
+        // Namespace resolution happens at the parser level; no mangling here.
+        const std::string llvmName = gv->name;
 
         // Determine the LLVM type: use the annotation if present, else i64.
         llvm::Type* ty = gv->typeName.empty()
@@ -9092,6 +9091,13 @@ void CodeGenerator::generateGlobals(Program* program) {
                 // String or other: fall back to null (runtime init unsupported for top-level globals)
             }
             // Non-literal initializers at top level: zero-init the global.
+        }
+
+        // If a global with this name already exists (e.g. from a previous import
+        // of the same file), skip re-declaration to avoid a duplicate symbol.
+        if (module->getGlobalVariable(llvmName)) {
+            globalVars_[llvmName] = module->getGlobalVariable(llvmName);
+            continue;
         }
 
         auto* llvmGV = new llvm::GlobalVariable(

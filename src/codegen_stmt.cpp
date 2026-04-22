@@ -30,9 +30,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     // When the variable is declared global (inside a function), create a
     // module-level GlobalVariable instead of a stack alloca.
     if (stmt->isGlobal) {
-        const std::string llvmName = stmt->globalNamespace.empty()
-            ? stmt->name
-            : stmt->globalNamespace + "__" + stmt->name;
+        // Always use the original unqualified name; no mangling.
+        const std::string llvmName = stmt->name;
         // If already created (e.g., by generateGlobals), just record it.
         if (auto* existing = module->getGlobalVariable(llvmName)) {
             namedValues[stmt->name] = existing;

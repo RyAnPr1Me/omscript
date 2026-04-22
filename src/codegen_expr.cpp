@@ -433,12 +433,14 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
     }
 
     // Check if this is a cross-file global variable reference (foo::varname).
+    // The parser already resolves these to IdentifierExpr nodes using the
+    // original unmangled name; this path is a fallback for any
+    // ScopeResolutionExpr nodes that reach codegen directly.
     {
-        const std::string mangledName = scope + "__" + member;
-        auto gvIt = globalVars_.find(mangledName);
+        auto gvIt = globalVars_.find(member);
         if (gvIt != globalVars_.end()) {
             auto* gv = gvIt->second;
-            return builder->CreateLoad(gv->getValueType(), gv, mangledName);
+            return builder->CreateLoad(gv->getValueType(), gv, member);
         }
     }
 

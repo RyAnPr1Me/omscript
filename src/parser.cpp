@@ -561,11 +561,11 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
         advance(); // consume 'as'
         const Token aliasTok = consume(TokenType::IDENTIFIER, "Expected alias name after 'as'");
         alias = aliasTok.lexeme;
-        // Support multi-level alias: as john::int  →  internal prefix "john__int"
+        // Support multi-level alias: as john::int  →  internal key "john::int"
         while (check(TokenType::SCOPE)) {
             advance(); // consume '::'
             const Token seg = consume(TokenType::IDENTIFIER, "Expected identifier in alias path");
-            alias += "__" + seg.lexeme;
+            alias += "::" + seg.lexeme;
         }
     }
 
@@ -666,8 +666,10 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     }
     for (auto& gv : importedProgram->globals) {
         if (!gv) continue;
-        const std::string mangledName = globalAlias + "__" + gv->name;
-        importedGlobalVars_[globalAlias][gv->name] = mangledName;
+        // No mangling: the global keeps its original name as the LLVM symbol.
+        // The namespace registry (importedGlobalVars_) is the only level of
+        // indirection; the actual LLVM global is just named by gv->name.
+        importedGlobalVars_[globalAlias][gv->name] = gv->name;
         gv->globalNamespace = globalAlias;
         pendingGlobals_.push_back(std::move(gv));
     }
@@ -675,13 +677,14 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 
 std::string Parser::resolveNamespacedPath(const std::vector<std::string>& segments) {
     // Try progressively shorter namespace prefixes (longest-match first).
+    // Namespace keys use '::' as separator (matching the source syntax).
     // For segments [a, b, c]:
-    //   1st pass: ns="a__b",  fn="c"
-    //   2nd pass: ns="a",     fn="b__c"
+    //   1st pass: ns="a::b", fn="c"
+    //   2nd pass: ns="a",    fn="b::c"
     for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
         std::string ns;
         for (int i = 0; i < cut; ++i) {
-            if (i > 0) ns += "__";
+            if (i > 0) ns += "::";
             ns += segments[i];
         }
         auto nsIt = importNamespaces_.find(ns);
@@ -690,7 +693,7 @@ std::string Parser::resolveNamespacedPath(const std::vector<std::string>& segmen
         // Namespace found — build function name from remaining segments.
         std::string fn;
         for (int i = cut; i < (int)segments.size(); ++i) {
-            if (i > cut) fn += "__";
+            if (i > cut) fn += "::";
             fn += segments[i];
         }
         auto fnIt = nsIt->second.find(fn);
@@ -830,15 +833,23 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
                 consume(TokenType::IDENTIFIER, "Expected identifier in function path").lexeme);
         }
         consume(TokenType::SEMICOLON, "Expected ';' after function alias");
-        // Resolve via namespace registry, fall back to flat name.
+        // Resolve via namespace registry.
         std::string resolvedTarget;
         if (segs.size() >= 2) {
             resolvedTarget = resolveNamespacedPath(segs);
         }
         if (resolvedTarget.empty()) {
-            resolvedTarget = segs[0];
-            for (size_t i = 1; i < segs.size(); ++i)
-                resolvedTarget += "__" + segs[i];
+            if (segs.size() == 1) {
+                resolvedTarget = segs[0];
+            } else {
+                // Build a helpful error: the user wrote a multi-segment path
+                // that couldn't be resolved through any imported namespace.
+                std::string path = segs[0];
+                for (size_t i = 1; i < segs.size(); ++i) path += "::" + segs[i];
+                error("Cannot resolve function alias target '" + path +
+                      "': no matching namespace found. "
+                      "Import the file with 'import \"file\" as alias' first.");
+            }
         }
         // Build: return resolvedTarget(params...);
         std::vector<std::unique_ptr<Expression>> callArgs;
@@ -3733,14 +3744,34 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 e->column = token.column;
                 return e;
             }
-            // Multi-level value reference without '()': flat identifier.
-            std::string flatName = segments[0];
-            for (size_t i = 1; i < segments.size(); ++i)
-                flatName += "__" + segments[i];
-            auto e = std::make_unique<IdentifierExpr>(flatName);
-            e->line = token.line;
-            e->column = token.column;
-            return e;
+            // Multi-level value reference without '()': attempt global lookup,
+            // then error — name mangling is not performed.
+            {
+                // Try longest-prefix global lookup: e.g. a::b::c
+                // where "a::b" is a namespace and "c" is a global variable.
+                for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
+                    std::string ns = segments[0];
+                    for (int i = 1; i < cut; ++i) ns += "::" + segments[i];
+                    std::string varName = segments[cut];
+                    for (size_t i = (size_t)cut + 1; i < segments.size(); ++i)
+                        varName += "::" + segments[i];
+                    auto gvNsIt = importedGlobalVars_.find(ns);
+                    if (gvNsIt != importedGlobalVars_.end()) {
+                        auto gvIt = gvNsIt->second.find(varName);
+                        if (gvIt != gvNsIt->second.end()) {
+                            auto e = std::make_unique<IdentifierExpr>(gvIt->second);
+                            e->line = token.line;
+                            e->column = token.column;
+                            return e;
+                        }
+                    }
+                }
+                // No namespace resolved — emit a clear error.
+                std::string path = segments[0];
+                for (size_t i = 1; i < segments.size(); ++i) path += "::" + segments[i];
+                error("Cannot resolve '" + path + "': no matching namespace or global found. "
+                      "Import the file with 'import \"file\" as alias' first.");
+            }
         }
         // Check if this is a struct literal: StructName { field: value, ... }
         if (structNames_.count(token.lexeme) && check(TokenType::LBRACE)) {
