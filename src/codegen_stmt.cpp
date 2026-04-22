@@ -3310,6 +3310,26 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     auto* allocaType = llvm::cast<llvm::AllocaInst>(alloca)->getAllocatedType();
     builder->CreateStore(llvm::UndefValue::get(allocaType), alloca);
 
+    // ── Tracking-set cleanup ───────────────────────────────────────────────
+    // Erase the variable from every compile-time tracking map so that any
+    // later reference (after re-declaration) starts with a clean slate and
+    // the optimizer does not use stale constant-fold or range information.
+    constIntFolds_.erase(name);
+    constFloatFolds_.erase(name);
+    constStringFolds_.erase(name);
+    varTypeAnnotations_.erase(name);
+    stringVars_.erase(name);
+    arrayVars_.erase(name);
+    dictVarNames_.erase(name);
+    ptrVarNames_.erase(name);
+    ptrElemTypes_.erase(name);
+    heapPtrVarNames_.erase(name);
+    structVars_.erase(name);
+    simdVars_.erase(name);
+    registerVars_.erase(name);
+    stackAllocatedArrays_.erase(name);
+    frozenVars_.erase(name);
+
     // Mark the variable as dead for use-after-invalidate detection.
     deadVars_.insert(name);
     deadVarReason_[name] = "invalidated";
