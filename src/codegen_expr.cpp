@@ -1777,6 +1777,27 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // strictly less than UINT64_MAX = 2^64−1 (nuw).  The nuw flag additionally
     // enables LLVM's loop unroller to propagate non-negativity to unrolled
     // copies and allows SCEV to use unsigned induction variable ranges.
+
+    // ── Pointer arithmetic ────────────────────────────────────────────────────
+    // When the left operand is a pointer (ptr type), emit byte-level GEP rather
+    // than integer add/sub.  This preserves pointer provenance through LLVM's
+    // alias analysis and produces correct TBAA/AA metadata.
+    if ((expr->op == "+" || expr->op == "-") && left->getType()->isPointerTy()) {
+        llvm::Value* offset = right;
+        if (!offset->getType()->isIntegerTy())
+            offset = builder->CreateFPToSI(offset, getDefaultType(), "ptrarith.ftoi");
+        if (expr->op == "-")
+            offset = builder->CreateNeg(offset, "ptrarith.neg");
+        offset = builder->CreateIntCast(offset, llvm::Type::getInt64Ty(*context), true, "ptrarith.idx");
+        return builder->CreateGEP(llvm::Type::getInt8Ty(*context), left, offset, "ptrarith");
+    }
+    // ptr - ptr: distance in bytes
+    if (expr->op == "-" && right->getType()->isPointerTy() && left->getType()->isPointerTy()) {
+        auto* lInt = builder->CreatePtrToInt(left,  getDefaultType(), "ptrdiff.l");
+        auto* rInt = builder->CreatePtrToInt(right, getDefaultType(), "ptrdiff.r");
+        return builder->CreateSub(lInt, rInt, "ptrdiff");
+    }
+
     if (expr->op == "+") {
         const bool leftNonNeg = nonNegValues_.count(left);
         const bool rightNonNeg = nonNegValues_.count(right);
@@ -4664,11 +4685,52 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         }
         return builder->CreateNot(operand, "bitnottmp");
     } else if (expr->op == "&") {
-        // Address-of operator: in OmScript's value semantics, this is a
-        // pass-through — the operand is already the loaded value (not a
-        // pointer).  The `&` is syntactic sugar for borrow declarations
-        // (e.g., `borrow var j:&i32 = &x;`).
+        // Address-of operator: return the alloca/global pointer itself
+        // (not the loaded value).  This gives a true raw pointer to the
+        // variable's storage — necessary for ptr initializations like
+        //   var p:ptr = &x;
+        if (expr->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* idExpr = static_cast<IdentifierExpr*>(expr->operand.get());
+            auto it = namedValues.find(idExpr->name);
+            if (it != namedValues.end() && it->second) {
+                // namedValues stores AllocaInst* or GlobalVariable* — both are
+                // already pointer-typed values.
+                return it->second;
+            }
+            codegenError("Cannot take address of unknown variable: " + idExpr->name, expr);
+        }
+        // For array index expressions (&arr[i]), generate a GEP to the element.
+        if (expr->operand->type == ASTNodeType::INDEX_EXPR) {
+            auto* idxExpr = static_cast<IndexExpr*>(expr->operand.get());
+            // Retrieve the base pointer for the array.
+            llvm::Value* base = nullptr;
+            if (idxExpr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const std::string& arrName =
+                    static_cast<IdentifierExpr*>(idxExpr->array.get())->name;
+                auto it = namedValues.find(arrName);
+                if (it != namedValues.end() && it->second) {
+                    // Load the array base pointer from the alloca.
+                    auto* alloca = it->second;
+                    base = builder->CreateLoad(
+                        llvm::PointerType::getUnqual(*context), alloca, "arr.base");
+                }
+            }
+            if (!base)
+                base = generateExpression(idxExpr->array.get());
+            llvm::Value* idx = generateExpression(idxExpr->index.get());
+            idx = builder->CreateIntCast(idx, llvm::Type::getInt64Ty(*context), true, "gep.idx");
+            // Byte-level GEP (i8 elements) for generic ptr arithmetic.
+            return builder->CreateGEP(llvm::Type::getInt8Ty(*context), base, idx, "addr.gep");
+        }
+        // Fallback: evaluate operand and return it (handles other lvalue forms).
         return operand;
+    } else if (expr->op == "deref") {
+        // Pointer dereference (*p): load the value pointed to by p.
+        llvm::Value* ptr = operand;
+        if (!ptr->getType()->isPointerTy())
+            ptr = builder->CreateIntToPtr(ptr, llvm::PointerType::getUnqual(*context), "deref.itop");
+        // Load as the default integer type (i64).
+        return builder->CreateLoad(getDefaultType(), ptr, "deref");
     }
 
     codegenError("Unknown unary operator: " + expr->op, expr);

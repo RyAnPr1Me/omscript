@@ -142,7 +142,11 @@ enum class BuiltinId : uint8_t {
     MAT_TRANSP,   ///< mat_transp(m)            → transpose of m (new allocation)
     // ── Region management builtins (RLC pass support) ────────────────────────
     NEW_REGION,   ///< newRegion()        → opaque region handle (malloc arena head)
-    ALLOC         ///< alloc(r, size)     → allocate `size` bytes in region r
+    ALLOC,        ///< alloc(r, size)     → allocate `size` bytes in region r
+    // ── Raw memory builtins ──────────────────────────────────────────────────
+    MALLOC,       ///< malloc(size)       → allocate `size` bytes, return ptr
+    FREE,         ///< free(ptr)          → deallocate ptr (void return)
+    SIZEOF        ///< sizeof(type_name)  → byte size of type as i64 constant
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -371,6 +375,10 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     // Region management
     {"newRegion",  BuiltinId::NEW_REGION},
     {"alloc",      BuiltinId::ALLOC},
+    // Raw memory
+    {"malloc",     BuiltinId::MALLOC},
+    {"free",       BuiltinId::FREE},
+    {"sizeof",     BuiltinId::SIZEOF},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -8958,6 +8966,48 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             {builder->CreateIntCast(sizeVal, llvm::Type::getInt64Ty(*context), false, "alloc.sz64")},
             "region.alloc");
         return builder->CreatePtrToInt(ptr, getDefaultType(), "region.ptr");
+    }
+
+    // ── malloc(size) ── allocate `size` bytes, return raw ptr ────────────────
+    if (bid == BuiltinId::MALLOC) {
+        validateArgCount(expr, "malloc", 1);
+        llvm::Value* sizeVal = generateExpression(expr->arguments[0].get());
+        if (!sizeVal->getType()->isIntegerTy())
+            sizeVal = builder->CreatePtrToInt(sizeVal, getDefaultType(), "malloc.sz");
+        llvm::Function* mallocFn = getOrDeclareMalloc();
+        auto* rawPtr = builder->CreateCall(
+            mallocFn,
+            {builder->CreateIntCast(sizeVal, llvm::Type::getInt64Ty(*context), false, "malloc.sz64")},
+            "malloc.ptr");
+        return rawPtr;
+    }
+
+    // ── free(ptr) ── deallocate a pointer returned by malloc ─────────────────
+    if (bid == BuiltinId::FREE) {
+        validateArgCount(expr, "free", 1);
+        llvm::Value* ptrVal = generateExpression(expr->arguments[0].get());
+        // Accept both pointer-typed values and integer-encoded pointers.
+        if (!ptrVal->getType()->isPointerTy())
+            ptrVal = builder->CreateIntToPtr(ptrVal, llvm::PointerType::getUnqual(*context), "free.itop");
+        builder->CreateCall(getOrDeclareFree(), {ptrVal});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // ── sizeof(typename) ── byte size of a type as a compile-time i64 ────────
+    // The argument is a single identifier naming the type.  Handled at the
+    // parse level (parsePrimary) for the common case; this BuiltinId path is a
+    // fallback for any sizeof() that reaches codegen as a CallExpr.
+    if (bid == BuiltinId::SIZEOF) {
+        validateArgCount(expr, "sizeof", 1);
+        // Try to extract the type name from a single identifier argument.
+        std::string typeName;
+        if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+            typeName = static_cast<IdentifierExpr*>(expr->arguments[0].get())->name;
+        }
+        llvm::Type* ty = typeName.empty() ? getDefaultType() : resolveAnnotatedType(typeName);
+        const llvm::DataLayout& DL = module->getDataLayout();
+        uint64_t sz = DL.getTypeAllocSize(ty);
+        return llvm::ConstantInt::get(getDefaultType(), sz);
     }
 
     if (inOptMaxFunction) {

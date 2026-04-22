@@ -980,6 +980,8 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (!ann.empty() && ann[0] == '&') {
         ann = ann.substr(1);
     }
+    if (ann == "ptr")
+        return llvm::PointerType::getUnqual(*context);
     if (ann == "float" || ann == "double")
         return getFloatType();                                  // f64
     if (ann == "bool")

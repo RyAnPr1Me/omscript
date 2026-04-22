@@ -26,7 +26,7 @@ static bool isIntWidthTypeName(const std::string& name) {
 /// uses of colon in expression context.
 static bool isKnownTypeName(const std::string& name) {
     if (name == "int" || name == "float" || name == "double" || name == "bool" ||
-        name == "string" || name == "dict" || name == "bigint")
+        name == "string" || name == "dict" || name == "bigint" || name == "ptr")
         return true;
     return isIntWidthTypeName(name);
 }
@@ -1436,6 +1436,51 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     std::unique_ptr<Expression> initializer = nullptr;
     if (match(TokenType::ASSIGN)) {
         initializer = parseExpression();
+    }
+
+    // Compile-time validation: `ptr` variables may only be initialized with
+    //   &var / &arr[...]  (UnaryExpr op == "&")
+    //   malloc/realloc/calloc(...) (CallExpr)
+    //   null              (LiteralExpr intValue == 0)
+    //   ptr-arithmetic    (BinaryExpr e.g. p + n, p - n)
+    //   another ptr var   (IdentifierExpr)
+    // Literal non-zero integers, floats, and strings are always rejected.
+    if (typeName == "ptr" && initializer) {
+        bool valid = false;
+        const Expression* init = initializer.get();
+        switch (init->type) {
+            case ASTNodeType::UNARY_EXPR:
+                valid = (static_cast<const UnaryExpr*>(init)->op == "&");
+                break;
+            case ASTNodeType::CALL_EXPR: {
+                const std::string& callee = static_cast<const CallExpr*>(init)->callee;
+                valid = (callee == "malloc" || callee == "realloc" || callee == "calloc");
+                break;
+            }
+            case ASTNodeType::LITERAL_EXPR: {
+                const auto* lit = static_cast<const LiteralExpr*>(init);
+                // Only null (integer 0) is valid; any other literal is rejected.
+                valid = (lit->literalType == LiteralExpr::LiteralType::INTEGER &&
+                         lit->intValue == 0);
+                break;
+            }
+            case ASTNodeType::BINARY_EXPR:
+                // Pointer arithmetic (p + n, p - n) or other ptr-producing ops.
+                valid = true;
+                break;
+            case ASTNodeType::IDENTIFIER_EXPR:
+                // Pointer-to-pointer assignment (var q:ptr = p).
+                valid = true;
+                break;
+            default:
+                valid = false;
+                break;
+        }
+        if (!valid) {
+            error("Pointer variable '" + name.lexeme + "' must be initialized with "
+                  "&var, &arr, malloc(...), realloc(...), calloc(...), null, "
+                  "pointer arithmetic (p+n), or another pointer variable");
+        }
     }
 
     auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
@@ -3111,6 +3156,17 @@ std::unique_ptr<Expression> Parser::parseUnary() {
         return node;
     }
 
+    // `*expr` — pointer dereference (e.g. `*p`, `*(p + 1)`)
+    // Only treated as dereference in unary position; binary `*` is multiplication.
+    if (match(TokenType::STAR)) {
+        const Token opToken = tokens[current - 1];
+        auto operand = parseUnary();
+        auto node = std::make_unique<UnaryExpr>("deref", std::move(operand));
+        node->line = opToken.line;
+        node->column = opToken.column;
+        return node;
+    }
+
     if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
         const Token opToken = tokens[current - 1];
         auto operand = parseUnary();
@@ -3342,6 +3398,47 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         auto expr = std::make_unique<LiteralExpr>(static_cast<long long>(0));
         expr->line = token.line;
         expr->column = token.column;
+        return expr;
+    }
+
+    // sizeof(T) — compile-time byte size of a type.
+    // The argument MUST be a type name (identifier), not an expression.
+    // Produces an integer literal equal to the byte size of T.
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "sizeof" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LPAREN) {
+        const Token kw = advance(); // consume 'sizeof'
+        advance();                  // consume '('
+        // Parse the type annotation inside the parens.
+        const std::string typeName = parseTypeAnnotation();
+        consume(TokenType::RPAREN, "Expected ')' after type name in sizeof(...)");
+        // Compute size at parse time using known bit widths.
+        long long byteSize = 8; // default (pointer/int64)
+        if (typeName == "bool" || typeName == "i8" || typeName == "u8")
+            byteSize = 1;
+        else if (typeName == "i16" || typeName == "u16")
+            byteSize = 2;
+        else if (typeName == "i32" || typeName == "u32")
+            byteSize = 4;
+        else if (typeName == "i64" || typeName == "u64" || typeName == "int" ||
+                 typeName == "uint" || typeName == "float" || typeName == "double" ||
+                 typeName == "ptr" || typeName == "string" || typeName == "bigint")
+            byteSize = 8;
+        else if (typeName == "i128" || typeName == "u128")
+            byteSize = 16;
+        else if (typeName == "i256" || typeName == "u256")
+            byteSize = 32;
+        else {
+            // iN / uN — compute from bit width
+            const char* s = typeName.c_str();
+            if ((s[0] == 'i' || s[0] == 'u') && s[1] != '\0') {
+                int bits = std::atoi(s + 1);
+                if (bits >= 1 && bits <= 256)
+                    byteSize = (bits + 7) / 8;
+            }
+        }
+        auto expr = std::make_unique<LiteralExpr>(byteSize);
+        expr->line = kw.line;
+        expr->column = kw.column;
         return expr;
     }
 
