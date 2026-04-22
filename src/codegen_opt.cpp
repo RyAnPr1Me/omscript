@@ -2534,6 +2534,31 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
     if (optimizationLevel >= OptimizationLevel::O2) {
         opt.AllowFPOpFusion = llvm::FPOpFusion::Fast;
     }
+
+    // ── Section granularity ────────────────────────────────────────────────
+    // At O2+, place every function in its own ELF section (.text.<name>) and
+    // every global in its own data section (.data.<name> / .rodata.<name>),
+    // analogous to clang's `-ffunction-sections -fdata-sections`.
+    //
+    // Why this is a machine-code-quality win:
+    //   • The linker can run `--gc-sections` and physically drop unused
+    //     functions/globals from the final binary, shrinking the .text
+    //     footprint and reducing the working set the CPU touches.
+    //   • Enables the LLVM Machine Function Splitter and downstream linker
+    //     ordering (`--symbol-ordering-file`, BOLT, propeller) to place hot
+    //     code contiguously and isolate cold code in `.text.unlikely`,
+    //     improving i-cache utilization and TLB locality.
+    //   • Required for per-function profile-guided layout once PGO data
+    //     becomes available.
+    //
+    // Off at O0/O1 to keep object files compact for fast iterative builds
+    // (each extra section adds an ELF section header, which inflates `.o`
+    // size noticeably for small modules).
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        opt.FunctionSections = true;
+        opt.DataSections = true;
+    }
+
     const std::optional<llvm::Reloc::Model> RM = usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
 
     std::string cpu;
