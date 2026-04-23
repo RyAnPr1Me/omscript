@@ -6512,6 +6512,84 @@ TEST(CodegenTest, LcmZeroArgs) {
     EXPECT_THROW(generateIR("fn main() { return lcm(); }", codegen), std::runtime_error);
 }
 
+// ── Read-only global array literal optimization ───────────────────────────
+
+// At O2+, an array literal whose every element is a compile-time integer
+// constant and that is provably never written through (no IndexAssign, no
+// alias creation, no escape to a mutating callee) should be bound directly
+// to a private read-only global constant — no malloc, no alloca, no memcpy.
+TEST(CodegenTest, ReadOnlyGlobalArrayLiteral_NoMallocNoMemcpy) {
+    // Disable the LLVM pipeline so we observe what codegen *emits*, not
+    // what later passes happen to fold away.  The optimization we are
+    // verifying happens in CodeGenerator's own pre-pass.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setRunIRPasses(false);
+    // `arr` is read in two index expressions and passed to the pure
+    // built-in `len` — no writes, no aliases.  A runtime input prevents
+    // the deep const-eval pass from folding the whole expression.
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var arr = [10,20,30,40,50,60,70,80]; "
+        "return arr[n & 7] + len(arr); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+
+    // No malloc and no memcpy must be emitted for the array.  (A small
+    // alloca for the i64 pointer slot itself is fine — what we care about
+    // is that the *array storage* is the constant.)
+    bool sawMalloc = false;
+    bool sawMemcpy = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    auto name = callee->getName();
+                    if (name == "malloc") sawMalloc = true;
+                    if (name.starts_with("llvm.memcpy")) sawMemcpy = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(sawMalloc)
+        << "ro-global array literal must not emit malloc";
+    EXPECT_FALSE(sawMemcpy)
+        << "ro-global array literal must not emit memcpy";
+
+    // The module should contain a private constant named arr.ro.const* that
+    // holds the [length, e0, e1, ...] payload.
+    bool sawRoGlobal = false;
+    for (auto& gv : mod->globals()) {
+        if (gv.getName().starts_with("arr.ro.const") && gv.isConstant()) {
+            sawRoGlobal = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(sawRoGlobal)
+        << "expected a private @arr.ro.const* read-only constant";
+}
+
+// Negative case: when the array IS index-assigned, the optimization must
+// NOT fire — writing through an .rodata pointer would segfault at runtime.
+TEST(CodegenTest, ReadOnlyGlobalArrayLiteral_SkippedWhenIndexAssigned) {
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var arr = [10,20,30,40,50,60,70,80]; "
+        "arr[0] = n; return arr[n & 7]; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    bool sawRoGlobal = false;
+    for (auto& gv : mod->globals()) {
+        if (gv.getName().starts_with("arr.ro.const")) {
+            sawRoGlobal = true;
+            break;
+        }
+    }
+    EXPECT_FALSE(sawRoGlobal)
+        << "ro-global must not fire when the array is index-assigned";
+}
+
 // ── NUW on non-negative additions ─────────────────────────────────────────
 
 // At O1+, adding two provably non-negative values should produce an add

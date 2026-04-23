@@ -5485,7 +5485,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constIntFolds_.clear();
     constFloatFolds_.clear();
     stackAllocatedArrays_.clear();
+    readOnlyGlobalArrays_.clear();
     pendingArrayStackAlloc_ = false;
+    pendingArrayReadOnlyGlobal_ = false;
     scopeComptimeInts_.clear();
     catchTable_.clear();
     catchDefaultBB_ = nullptr;
@@ -9215,6 +9217,335 @@ bool CodeGenerator::doesVarEscapeCurrentScope(const std::string& varName) const 
     }
     // Not found: conservative.
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// IndexAssign detection: returns true if a variable is the target of any
+// `varName[i] = expr` write anywhere in a function body.  Used by the
+// read-only-global array literal optimization, which can only fire when the
+// variable is provably never written through.
+// ---------------------------------------------------------------------------
+
+/// Forward decl: scan a statement subtree for an IndexAssign targeting varName.
+static bool exprHasIndexAssignToVar(const Expression* expr, const std::string& varName);
+static bool stmtHasIndexAssignToVar(const Statement* s, const std::string& varName);
+
+static bool exprHasIndexAssignToVar(const Expression* expr, const std::string& varName) {
+    if (!expr) return false;
+    switch (expr->type) {
+    case ASTNodeType::INDEX_ASSIGN_EXPR: {
+        auto* ia = static_cast<const IndexAssignExpr*>(expr);
+        // Direct target: `varName[i] = v` — the array operand is an identifier
+        // referring to varName.
+        if (ia->array && ia->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<const IdentifierExpr*>(ia->array.get());
+            if (id->name == varName) return true;
+        }
+        // Recurse into sub-expressions.
+        return exprHasIndexAssignToVar(ia->array.get(), varName) ||
+               exprHasIndexAssignToVar(ia->index.get(), varName) ||
+               exprHasIndexAssignToVar(ia->value.get(), varName);
+    }
+    case ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<const BinaryExpr*>(expr);
+        return exprHasIndexAssignToVar(bin->left.get(), varName) ||
+               exprHasIndexAssignToVar(bin->right.get(), varName);
+    }
+    case ASTNodeType::UNARY_EXPR:
+        return exprHasIndexAssignToVar(
+            static_cast<const UnaryExpr*>(expr)->operand.get(), varName);
+    case ASTNodeType::PREFIX_EXPR:
+        return exprHasIndexAssignToVar(
+            static_cast<const PrefixExpr*>(expr)->operand.get(), varName);
+    case ASTNodeType::POSTFIX_EXPR:
+        return exprHasIndexAssignToVar(
+            static_cast<const PostfixExpr*>(expr)->operand.get(), varName);
+    case ASTNodeType::TERNARY_EXPR: {
+        auto* t = static_cast<const TernaryExpr*>(expr);
+        return exprHasIndexAssignToVar(t->condition.get(), varName) ||
+               exprHasIndexAssignToVar(t->thenExpr.get(), varName) ||
+               exprHasIndexAssignToVar(t->elseExpr.get(), varName);
+    }
+    case ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<const CallExpr*>(expr);
+        for (const auto& arg : call->arguments) {
+            if (exprHasIndexAssignToVar(arg.get(), varName)) return true;
+        }
+        return false;
+    }
+    case ASTNodeType::INDEX_EXPR: {
+        auto* idx = static_cast<const IndexExpr*>(expr);
+        return exprHasIndexAssignToVar(idx->array.get(), varName) ||
+               exprHasIndexAssignToVar(idx->index.get(), varName);
+    }
+    case ASTNodeType::ASSIGN_EXPR: {
+        auto* asgn = static_cast<const AssignExpr*>(expr);
+        return exprHasIndexAssignToVar(asgn->value.get(), varName);
+    }
+    case ASTNodeType::ARRAY_EXPR: {
+        auto* arr = static_cast<const ArrayExpr*>(expr);
+        for (const auto& e : arr->elements) {
+            if (exprHasIndexAssignToVar(e.get(), varName)) return true;
+        }
+        return false;
+    }
+    default:
+        return false;
+    }
+}
+
+static bool stmtHasIndexAssignToVar(const Statement* s, const std::string& varName) {
+    if (!s) return false;
+    if (auto* es = dynamic_cast<const ExprStmt*>(s))
+        return exprHasIndexAssignToVar(es->expression.get(), varName);
+    if (auto* vd = dynamic_cast<const VarDecl*>(s))
+        return vd->initializer && exprHasIndexAssignToVar(vd->initializer.get(), varName);
+    if (auto* ret = dynamic_cast<const ReturnStmt*>(s))
+        return ret->value && exprHasIndexAssignToVar(ret->value.get(), varName);
+    if (auto* blk = dynamic_cast<const BlockStmt*>(s)) {
+        for (const auto& st : blk->statements)
+            if (stmtHasIndexAssignToVar(st.get(), varName)) return true;
+        return false;
+    }
+    if (auto* ifs = dynamic_cast<const IfStmt*>(s))
+        return exprHasIndexAssignToVar(ifs->condition.get(), varName) ||
+               stmtHasIndexAssignToVar(ifs->thenBranch.get(), varName) ||
+               stmtHasIndexAssignToVar(ifs->elseBranch.get(), varName);
+    if (auto* ws = dynamic_cast<const WhileStmt*>(s))
+        return exprHasIndexAssignToVar(ws->condition.get(), varName) ||
+               stmtHasIndexAssignToVar(ws->body.get(), varName);
+    if (auto* dws = dynamic_cast<const DoWhileStmt*>(s))
+        return exprHasIndexAssignToVar(dws->condition.get(), varName) ||
+               stmtHasIndexAssignToVar(dws->body.get(), varName);
+    if (auto* fs = dynamic_cast<const ForStmt*>(s))
+        return exprHasIndexAssignToVar(fs->start.get(), varName) ||
+               exprHasIndexAssignToVar(fs->end.get(), varName) ||
+               (fs->step && exprHasIndexAssignToVar(fs->step.get(), varName)) ||
+               stmtHasIndexAssignToVar(fs->body.get(), varName);
+    if (auto* fes = dynamic_cast<const ForEachStmt*>(s))
+        return exprHasIndexAssignToVar(fes->collection.get(), varName) ||
+               stmtHasIndexAssignToVar(fes->body.get(), varName);
+    return false;
+}
+
+bool CodeGenerator::doesVarHaveIndexAssign(const std::string& varName) const {
+    if (!currentFuncDecl_ || !currentFuncDecl_->body) return true; // conservative
+    return stmtHasIndexAssignToVar(currentFuncDecl_->body.get(), varName);
+}
+
+// ---------------------------------------------------------------------------
+// Read-only-use analysis for the read-only-global array literal optimization.
+//
+// A variable is "read-only" iff every textual reference to it in the
+// function body is one of:
+//   * `varName[i]`               — IndexExpr read (array operand is the var)
+//   * `len(varName)`, `print(varName)`, etc. — argument to a non-mutating
+//     built-in (BuiltinEffectTable::isMutating == false)
+//   * Argument to a user function known-pure to the CT-engine
+// Anything else (return varName, var x = varName, varName[i] = …, pass to
+// an unknown/mutating callee) makes the variable non-read-only.
+//
+// Only used to gate the ro-global allocation strategy where the data lives
+// in a `.rodata` constant.  Writing through such a pointer would segfault,
+// so we must conservatively rule out every potential write site at compile
+// time.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A reference to varName is "OK if it is the array operand of an IndexExpr
+// read, or it appears strictly inside a call argument whose callee is known
+// non-mutating".  We walk the AST and shortcut to false on the first
+// non-OK use.
+
+struct ReadOnlyUseChecker {
+    const std::string& var;
+    const CTEngine* ctEngine;
+    // True if some reference to `var` was found in a non-read-only position.
+    bool violation = false;
+
+    explicit ReadOnlyUseChecker(const std::string& v, const CTEngine* eng)
+        : var(v), ctEngine(eng) {}
+
+    bool isVarIdent(const Expression* e) const {
+        return e && e->type == ASTNodeType::IDENTIFIER_EXPR &&
+               static_cast<const IdentifierExpr*>(e)->name == var;
+    }
+
+    // Return true iff we can prove the call does not mutate any of its
+    // pointer-typed arguments.
+    bool isCallNonMutating(const std::string& callee) const {
+        // Built-ins: ask the unified effect table.
+        if (BuiltinEffectTable::isPure(callee)) return true;
+        if (BuiltinEffectTable::isReadOnly(callee)) return true;
+        if (BuiltinEffectTable::isMutating(callee)) return false;
+        // I/O builtins (print, etc.) read their args without mutating.
+        // Conservative: only allow when it's flagged as pure or read-only.
+        // User functions: trust the CT-engine purity result.
+        if (ctEngine && ctEngine->isPure(callee)) return true;
+        return false;
+    }
+
+    void visitExpr(const Expression* e) {
+        if (!e || violation) return;
+        switch (e->type) {
+        case ASTNodeType::LITERAL_EXPR:
+            return;
+        case ASTNodeType::IDENTIFIER_EXPR:
+            if (static_cast<const IdentifierExpr*>(e)->name == var) {
+                // Bare identifier reference outside a recognized read-only
+                // context (CallExpr handled elsewhere; IndexExpr handled in
+                // its case).  Conservative: treat as a violation.
+                violation = true;
+            }
+            return;
+        case ASTNodeType::INDEX_EXPR: {
+            auto* idx = static_cast<const IndexExpr*>(e);
+            // `var[i]` read is always OK; only the index sub-expression
+            // needs further inspection (var must not appear inside it as
+            // anything but a read).
+            if (!isVarIdent(idx->array.get())) {
+                visitExpr(idx->array.get());
+            }
+            visitExpr(idx->index.get());
+            return;
+        }
+        case ASTNodeType::INDEX_ASSIGN_EXPR: {
+            auto* ia = static_cast<const IndexAssignExpr*>(e);
+            // `var[i] = …` is a direct write — violation.
+            if (isVarIdent(ia->array.get())) {
+                violation = true;
+                return;
+            }
+            visitExpr(ia->array.get());
+            visitExpr(ia->index.get());
+            visitExpr(ia->value.get());
+            return;
+        }
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<const CallExpr*>(e);
+            const bool nonMut = isCallNonMutating(call->callee);
+            for (const auto& arg : call->arguments) {
+                if (isVarIdent(arg.get())) {
+                    if (!nonMut) {
+                        violation = true;
+                        return;
+                    }
+                    // Pass-by-value to a non-mutating callee is OK; no
+                    // further inspection needed for this arg.
+                    continue;
+                }
+                visitExpr(arg.get());
+            }
+            return;
+        }
+        case ASTNodeType::ASSIGN_EXPR: {
+            auto* a = static_cast<const AssignExpr*>(e);
+            // Right-hand side mentioning var would create an alias —
+            // violation.  Inspect via the bare-identifier rule above.
+            visitExpr(a->value.get());
+            return;
+        }
+        case ASTNodeType::BINARY_EXPR: {
+            auto* b = static_cast<const BinaryExpr*>(e);
+            visitExpr(b->left.get());
+            visitExpr(b->right.get());
+            return;
+        }
+        case ASTNodeType::UNARY_EXPR:
+            visitExpr(static_cast<const UnaryExpr*>(e)->operand.get());
+            return;
+        case ASTNodeType::PREFIX_EXPR:
+            visitExpr(static_cast<const PrefixExpr*>(e)->operand.get());
+            return;
+        case ASTNodeType::POSTFIX_EXPR:
+            visitExpr(static_cast<const PostfixExpr*>(e)->operand.get());
+            return;
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* t = static_cast<const TernaryExpr*>(e);
+            visitExpr(t->condition.get());
+            visitExpr(t->thenExpr.get());
+            visitExpr(t->elseExpr.get());
+            return;
+        }
+        case ASTNodeType::ARRAY_EXPR: {
+            // var appearing inside an array literal would create an alias.
+            // Treat as bare reference (handled in IDENTIFIER_EXPR case).
+            auto* arr = static_cast<const ArrayExpr*>(e);
+            for (const auto& el : arr->elements) visitExpr(el.get());
+            return;
+        }
+        default:
+            // Conservative for unknown expression kinds: if `var` appears
+            // inside, flag as a violation.  We do this by structural walk
+            // through known sub-nodes — but for safety bail out.
+            violation = true;
+            return;
+        }
+    }
+
+    void visitStmt(const Statement* s) {
+        if (!s || violation) return;
+        if (auto* es = dynamic_cast<const ExprStmt*>(s)) {
+            visitExpr(es->expression.get());
+            return;
+        }
+        if (auto* vd = dynamic_cast<const VarDecl*>(s)) {
+            // A declaration `var x = var` would create an alias.  The
+            // bare-IDENTIFIER rule will catch this.
+            if (vd->initializer) visitExpr(vd->initializer.get());
+            return;
+        }
+        if (auto* ret = dynamic_cast<const ReturnStmt*>(s)) {
+            // Returning the variable (or any expression containing it)
+            // creates an unbounded alias — violation.
+            if (ret->value) visitExpr(ret->value.get());
+            return;
+        }
+        if (auto* blk = dynamic_cast<const BlockStmt*>(s)) {
+            for (const auto& st : blk->statements) visitStmt(st.get());
+            return;
+        }
+        if (auto* ifs = dynamic_cast<const IfStmt*>(s)) {
+            visitExpr(ifs->condition.get());
+            visitStmt(ifs->thenBranch.get());
+            visitStmt(ifs->elseBranch.get());
+            return;
+        }
+        if (auto* ws = dynamic_cast<const WhileStmt*>(s)) {
+            visitExpr(ws->condition.get());
+            visitStmt(ws->body.get());
+            return;
+        }
+        if (auto* dws = dynamic_cast<const DoWhileStmt*>(s)) {
+            visitExpr(dws->condition.get());
+            visitStmt(dws->body.get());
+            return;
+        }
+        if (auto* fs = dynamic_cast<const ForStmt*>(s)) {
+            visitExpr(fs->start.get());
+            visitExpr(fs->end.get());
+            if (fs->step) visitExpr(fs->step.get());
+            visitStmt(fs->body.get());
+            return;
+        }
+        if (auto* fes = dynamic_cast<const ForEachStmt*>(s)) {
+            visitExpr(fes->collection.get());
+            visitStmt(fes->body.get());
+            return;
+        }
+        // Unknown statement kind — conservative.
+        violation = true;
+    }
+};
+
+}  // namespace
+
+bool CodeGenerator::doesVarHaveOnlyReadOnlyUses(const std::string& varName) const {
+    if (!currentFuncDecl_ || !currentFuncDecl_->body) return false;  // conservative
+    ReadOnlyUseChecker checker(varName, ctEngine_.get());
+    checker.visitStmt(currentFuncDecl_->body.get());
+    return !checker.violation;
 }
 
 

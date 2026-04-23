@@ -57,6 +57,7 @@ struct OptStats {
     unsigned constFolded      = 0; ///< Expressions folded to compile-time constants
     unsigned callsInlined     = 0; ///< Call sites inlined
     unsigned escapeStackAllocs = 0; ///< Array/struct allocations moved to stack (escape analysis)
+    unsigned roGlobalArrays   = 0; ///< Read-only array literals bound directly to a private global (no alloc, no copy)
     unsigned loopsFused       = 0; ///< Loop pairs fused by the @fuse pre-pass
     unsigned borrowsFrozen    = 0; ///< Variables frozen (freeze + alias propagation)
     unsigned independentLoops = 0; ///< Loops annotated with @independent
@@ -90,6 +91,7 @@ struct OptStats {
                   << "  const-folded expressions : " << constFolded << "\n"
                   << "  calls inlined            : " << callsInlined << "\n"
                   << "  stack allocs (escape)    : " << escapeStackAllocs << "\n"
+                  << "  ro-global arrays         : " << roGlobalArrays << "\n"
                   << "  loops fused              : " << loopsFused << "\n"
                   << "  borrows frozen           : " << borrowsFrozen << "\n"
                   << "  independent loops        : " << independentLoops << "\n"
@@ -981,6 +983,26 @@ class CodeGenerator {
     /// returns false when we can PROVE there is no escape.
     bool doesVarEscapeCurrentScope(const std::string& varName) const;
 
+    /// Returns true if the variable @p varName is the target of any
+    /// `varName[i] = ...` IndexAssign anywhere in the current function body
+    /// (recursing into nested blocks / if / while / for).  Conservative: if
+    /// the function body is unavailable, returns true.
+    bool doesVarHaveIndexAssign(const std::string& varName) const;
+
+    /// Returns true if every use of @p varName in the current function body
+    /// is provably read-only.  Allowed uses are:
+    ///   * `varName[i]` — IndexExpr read
+    ///   * `len(varName)` and other non-mutating built-in calls
+    ///   * Argument to a user function known-pure to the CTEngine
+    /// Disallowed uses (return false):
+    ///   * IndexAssign target on varName
+    ///   * Return varName / use in returned expression
+    ///   * Assignment of varName to another variable (creates alias)
+    ///   * Argument to a callee that may mutate, may unwind into mutating
+    ///     code, or whose effect we cannot prove is read-only
+    /// Used by the read-only-global array literal optimization.
+    bool doesVarHaveOnlyReadOnlyUses(const std::string& varName) const;
+
     /// Maximum number of array elements for stack allocation (prevents
     /// stack overflow from large arrays — 64 elements × 8 bytes = 512 B).
     static constexpr size_t kMaxStackArrayElements = 64;
@@ -989,9 +1011,21 @@ class CodeGenerator {
     /// is not called on them and bounds-check code uses the correct base.
     llvm::StringSet<> stackAllocatedArrays_;
 
+    /// Track which variables hold a pointer into a read-only global constant
+    /// array (no allocation, no copy: PtrToInt of @arr.ro.const).  These must
+    /// also be skipped from free() and any potential write would be UB; the
+    /// pre-pass that sets this guarantees no IndexAssign and no escape.
+    llvm::StringSet<> readOnlyGlobalArrays_;
+
     /// Hint flag set by generateVarDecl to tell generateArray to use alloca
     /// instead of malloc for the next array allocation.
     bool pendingArrayStackAlloc_ = false;
+
+    /// Hint flag set by generateVarDecl to tell generateArray to bind the
+    /// declared variable directly to a private read-only global constant
+    /// (no malloc, no alloca, no memcpy).  Mutually exclusive with
+    /// pendingArrayStackAlloc_; the pre-pass picks at most one.
+    bool pendingArrayReadOnlyGlobal_ = false;
 
     /// Returns true if @p expr statically resolves to a dict/map value.
     /// Used to route dict["key"] through map_get IR rather than array element IR.

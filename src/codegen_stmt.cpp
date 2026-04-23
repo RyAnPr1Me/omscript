@@ -109,7 +109,15 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             //   1. const arrays (existing logic, N ≤ 64)
             //   2. Non-const arrays with all-integer-literal elements, N ≤ 16,
             //      that don't escape the function scope (escape analysis).
+            //
+            // A third, even better case is detected here: an all-int-literal
+            // array that does not escape AND is never index-assigned can be
+            // bound directly to a private read-only global constant — zero
+            // allocation, zero memcpy.  This subsumes the alloca path for
+            // pure-readonly arrays and lets the backend fold subsequent
+            // loads against the constant data section.
             bool useStackAlloc = false;
+            bool useReadOnlyGlobal = false;
             if (stmt->initializer->type == ASTNodeType::ARRAY_EXPR &&
                 optimizationLevel >= OptimizationLevel::O1) {
                 auto* arrExpr = static_cast<ArrayExpr*>(stmt->initializer.get());
@@ -120,27 +128,62 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         hasSpreadElem = true;
                         break;
                     }
-                    if (elem->type != ASTNodeType::LITERAL_EXPR ||
-                        static_cast<LiteralExpr*>(elem.get())->literalType !=
+                    if (elem->type == ASTNodeType::LITERAL_EXPR &&
+                        static_cast<LiteralExpr*>(elem.get())->literalType ==
                             LiteralExpr::LiteralType::INTEGER) {
-                        allIntLiterals = false;
+                        continue;  // OK
                     }
+                    // Negative integer literal: unary `-` on integer.
+                    if (elem->type == ASTNodeType::UNARY_EXPR) {
+                        auto* un = static_cast<UnaryExpr*>(elem.get());
+                        if (un->op == "-" && un->operand &&
+                            un->operand->type == ASTNodeType::LITERAL_EXPR &&
+                            static_cast<LiteralExpr*>(un->operand.get())
+                                    ->literalType ==
+                                LiteralExpr::LiteralType::INTEGER) {
+                            continue;
+                        }
+                    }
+                    allIntLiterals = false;
                 }
                 const size_t n = arrExpr->elements.size();
                 if (!hasSpreadElem) {
-                    if (stmt->isConst && n <= kMaxStackArrayElements) {
+                    // Strongest form: bind the var to a private global
+                    // read-only constant.  Requires every use of the var
+                    // to be provably read-only (IndexExpr reads, calls to
+                    // non-mutating built-ins, calls to known-pure user
+                    // functions).  A single mutating use anywhere in the
+                    // function body disqualifies it.  Available at O2+
+                    // because the analysis is mildly more expensive than
+                    // the existing escape check, and only worthwhile when
+                    // the post-codegen LLVM pipeline will actually run.
+                    if (allIntLiterals && n >= 2 &&
+                        optimizationLevel >= OptimizationLevel::O2 &&
+                        doesVarHaveOnlyReadOnlyUses(stmt->name)) {
+                        useReadOnlyGlobal = true;
+                    } else if (stmt->isConst && n <= kMaxStackArrayElements) {
                         useStackAlloc = true;
                     } else if (!stmt->isConst && allIntLiterals && n <= 16 &&
                                !doesVarEscapeCurrentScope(stmt->name)) {
                         useStackAlloc = true;
                     }
                 }
-                if (useStackAlloc) {
+                if (useReadOnlyGlobal) {
+                    pendingArrayReadOnlyGlobal_ = true;
+                } else if (useStackAlloc) {
                     pendingArrayStackAlloc_ = true;
                 }
             }
             initValue = generateExpression(stmt->initializer.get());
-            if (useStackAlloc) {
+            if (useReadOnlyGlobal) {
+                pendingArrayReadOnlyGlobal_ = false;
+                readOnlyGlobalArrays_.insert(stmt->name);
+                // Treat ro-global arrays the same as stack-allocated arrays
+                // for cleanup purposes (no free() needed; mark base safe for
+                // bounds-check folding).
+                stackAllocatedArrays_.insert(stmt->name);
+                optStats_.roGlobalArrays++;
+            } else if (useStackAlloc) {
                 pendingArrayStackAlloc_ = false;
                 stackAllocatedArrays_.insert(stmt->name);
                 optStats_.escapeStackAllocs++;
@@ -3375,6 +3418,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     simdVars_.erase(name);
     registerVars_.erase(name);
     stackAllocatedArrays_.erase(name);
+    readOnlyGlobalArrays_.erase(name);
     frozenVars_.erase(name);
 
     // Mark the variable as dead for use-after-invalidate detection.
