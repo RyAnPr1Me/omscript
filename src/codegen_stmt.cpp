@@ -27,6 +27,17 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         codegenError("Variable declaration outside of function", stmt);
     }
 
+    // ── Mandatory type annotation enforcement (codegen safety-net) ────────
+    // The parser enforces this for user-written code; this check catches any
+    // VarDecl nodes that bypass the parser (e.g., loaded from a pre-parsed
+    // AST or created by a pass that forgot to set isCompilerGenerated).
+    if (stmt->typeName.empty() && !stmt->isCompilerGenerated) {
+        codegenError("Variable '" + stmt->name + "' has no type annotation. "
+                     "All user-declared variables require an explicit type "
+                     "(e.g., 'var " + stmt->name + ":i64 = ...'). "
+                     "Untyped variables are not allowed.", stmt);
+    }
+
     // When the variable is declared global (inside a function), create a
     // module-level GlobalVariable instead of a stack alloca.
     if (stmt->isGlobal) {

@@ -1168,6 +1168,11 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             init = parseExpression();
         }
         consume(TokenType::SEMICOLON, "Expected ';' after register variable declaration");
+
+        if (typeName.empty()) {
+            error("Variable '" + name.lexeme + "' requires an explicit type annotation "
+                  "(e.g., '" + name.lexeme + ":i64'). Untyped variables are not allowed.");
+        }
         auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
         decl->isRegister = true;
         decl->line = kw.line;
@@ -1192,6 +1197,11 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             init = parseExpression();
         }
         consume(TokenType::SEMICOLON, "Expected ';' after global variable declaration");
+
+        if (typeName.empty()) {
+            error("Variable '" + name.lexeme + "' requires an explicit type annotation "
+                  "(e.g., '" + name.lexeme + ":i64'). Untyped variables are not allowed.");
+        }
         auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
         decl->isGlobal = true;
         decl->line = kw.line;
@@ -1295,7 +1305,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         // or just: move used as expression context (handled elsewhere)
         if (check(TokenType::VAR) || (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
             tokens[current + 1].type == TokenType::IDENTIFIER)) {
-            // `move var x = expr;` or `move int x = expr;`
+            // `move var x = expr;` or `move var x:type = expr;` or `move int x = expr;`
             std::string typeName;
             if (match(TokenType::VAR)) {
                 typeName = "";
@@ -1303,6 +1313,15 @@ std::unique_ptr<Statement> Parser::parseStatement() {
                 typeName = advance().lexeme; // consume type name
             }
             const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in move declaration");
+            // Optional :type annotation (supports `move var x:i64 = expr;`)
+            if (typeName.empty() && match(TokenType::COLON)) {
+                typeName = parseTypeAnnotation();
+            }
+            // Mandatory type annotation enforcement for move declarations.
+            if (typeName.empty()) {
+                error("Move variable '" + name.lexeme + "' requires an explicit type annotation "
+                      "(e.g., 'move var " + name.lexeme + ":i64 = ...').");
+            }
             consume(TokenType::ASSIGN, "Expected '=' in move declaration");
             auto init = parseExpression();
             consume(TokenType::SEMICOLON, "Expected ';' after move declaration");
@@ -1339,6 +1358,9 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         // Support name:type syntax: borrow j:u32 = expr;
         if (typeName.empty() && match(TokenType::COLON)) {
             typeName = parseTypeAnnotation();
+        }
+        if (typeName.empty()) {
+            error("Borrow variable '" + name.lexeme + "' requires an explicit type annotation (e.g., 'borrow " + name.lexeme + ":i64 = ...').");
         }
         consume(TokenType::ASSIGN, "Expected '=' in borrow declaration");
         auto init = parseExpression();
@@ -1381,6 +1403,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         reborrowExpr->line = kw.line;
         reborrowExpr->column = kw.column;
         auto stmt = std::make_unique<VarDecl>(name.lexeme, std::move(reborrowExpr), false, "");
+        stmt->isCompilerGenerated = true; // reborrow: type inferred from source
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
@@ -1444,6 +1467,21 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     std::unique_ptr<Expression> initializer = nullptr;
     if (match(TokenType::ASSIGN)) {
         initializer = parseExpression();
+    }
+
+    // ── Mandatory type annotation enforcement ─────────────────────────────
+    // Every user-declared variable must carry an explicit type annotation.
+    // This is the foundation of OmScript's real type system: the compiler
+    // never silently defaults to a "base type" (previously i64).
+    //
+    // Exception: untyped `ptr` is allowed — the variable has the explicit
+    // type `ptr`, it just omits the optional element-type parameter.
+    // Exception: inferred-type declarations (handled by type inference pass).
+    if (typeName.empty()) {
+        error("Variable '" + name.lexeme + "' requires an explicit type annotation "
+              "(e.g., 'var " + name.lexeme + ":i64 = ...'). "
+              "Untyped variables are not allowed; the compiler no longer "
+              "silently defaults to 'i64'.");
     }
 
     // Compile-time validation: `ptr` variables may only be initialized with
@@ -1617,6 +1655,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
         // var __for_arr_N = collection;
         auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
+        arrDecl->isCompilerGenerated = true;
         arrDecl->line = varName.line;
         arrDecl->column = varName.column;
         outerStmts.push_back(std::move(arrDecl));
@@ -1627,6 +1666,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         auto idxRef = std::make_unique<IdentifierExpr>(varName.lexeme);
         auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
         auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
+        itemDecl->isCompilerGenerated = true;
         itemDecl->line = itemName.line;
         itemDecl->column = itemName.column;
         innerStmts.push_back(std::move(itemDecl));
@@ -2033,6 +2073,7 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
 
         // var __foreach_arr_N = collection;
         auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
+        arrDecl->isCompilerGenerated = true;
         arrDecl->line = firstName.line;
         arrDecl->column = firstName.column;
         outerStmts.push_back(std::move(arrDecl));
@@ -2045,6 +2086,7 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
         auto idxRef = std::make_unique<IdentifierExpr>(firstName.lexeme);
         auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
         auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
+        itemDecl->isCompilerGenerated = true;
         itemDecl->line = itemName.line;
         itemDecl->column = itemName.column;
         innerStmts.push_back(std::move(itemDecl));
@@ -2127,7 +2169,7 @@ std::unique_ptr<Statement> Parser::parseSwapStmt() {
 
     // var __swap_tmp = first;
     auto tmpInit = std::make_unique<IdentifierExpr>(names[0]);
-    stmts.push_back(std::make_unique<VarDecl>(tmpName, std::move(tmpInit)));
+    { auto _cg = std::make_unique<VarDecl>(tmpName, std::move(tmpInit)); _cg->isCompilerGenerated = true; stmts.push_back(std::move(_cg)); }
 
     // Circular rotation: names[0] = names[1]; names[1] = names[2]; ...
     for (size_t i = 0; i + 1 < names.size(); ++i) {
@@ -2286,6 +2328,7 @@ std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isCo
 
     // var __destructure_N = expr;
     auto tmpDecl = std::make_unique<VarDecl>(tmpName, std::move(initializer), false);
+    tmpDecl->isCompilerGenerated = true;
     tmpDecl->line = lbracket.line;
     tmpDecl->column = lbracket.column;
     stmts.push_back(std::move(tmpDecl));
@@ -2299,6 +2342,7 @@ std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isCo
         auto indexExpr = std::make_unique<IndexExpr>(std::move(tmpRef), std::move(idx));
 
         auto varDecl = std::make_unique<VarDecl>(names[i], std::move(indexExpr), isConst);
+        varDecl->isCompilerGenerated = true;
         varDecl->line = lbracket.line;
         varDecl->column = lbracket.column;
         stmts.push_back(std::move(varDecl));
@@ -4055,16 +4099,22 @@ std::unique_ptr<Expression> Parser::parsePipe() {
 std::unique_ptr<Expression> Parser::parseLambda() {
     const Token pipeToken = tokens[current - 1]; // the opening |
     std::vector<std::string> params;
+    std::vector<std::string> paramTypes;
 
     // Parse lambda parameters: |x| or |x, y| or || or |x:int| or |x:int, y:int|
     if (!check(TokenType::PIPE)) {
         do {
             const Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name in lambda");
-            params.push_back(paramName.lexeme);
-            // Skip optional type annotation (e.g. |x:int|)
+            // Lambda parameters default to i64 when no explicit type annotation is
+            // given.  Higher-kinded type inference is not yet available at parse time,
+            // so we bind the most common element type.  Users can always annotate
+            // explicitly: |x:float| x * 2.0
+            std::string paramType = "i64";
             if (match(TokenType::COLON)) {
-                parseTypeAnnotation();
+                paramType = parseTypeAnnotation();
             }
+            params.push_back(paramName.lexeme);
+            paramTypes.push_back(paramType);
         } while (match(TokenType::COMMA));
     }
 
@@ -4081,9 +4131,12 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
 
     // Create the function: fn __lambda_N(params...) { return body; }
+    // Lambda parameters carry their resolved type annotations (default: i64).
     std::vector<Parameter> fnParams;
-    for (const auto& p : node->params) {
-        fnParams.push_back(Parameter(p));
+    for (size_t i = 0; i < node->params.size(); ++i) {
+        Parameter p(node->params[i]);
+        p.typeName = (i < paramTypes.size()) ? paramTypes[i] : "i64";
+        fnParams.push_back(std::move(p));
     }
     auto returnStmt = std::make_unique<ReturnStmt>(std::move(node->body));
     returnStmt->line = pipeToken.line;

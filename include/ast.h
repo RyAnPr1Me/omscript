@@ -268,6 +268,10 @@ class VarDecl : public Statement {
     bool isRegister = false; ///< `register var` — force variable into CPU register via mem2reg
     bool isGlobal = false;          ///< Declared with the `global` keyword
     std::string globalNamespace;    ///< Non-empty when imported: the alias under which this global lives (e.g. "foo")
+    /// True for VarDecl nodes synthesised by the compiler (for-loop desugaring,
+    /// foreach item variables, etc.).  These are exempt from the mandatory-type
+    /// annotation check; only user-written declarations require an explicit type.
+    bool isCompilerGenerated = false;
 
     VarDecl(const std::string& n, std::unique_ptr<Expression> init, bool cnst = false, const std::string& type = "")
         : Statement(ASTNodeType::VAR_DECL), name(n), initializer(std::move(init)), isConst(cnst), typeName(type) {}
