@@ -27,15 +27,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         codegenError("Variable declaration outside of function", stmt);
     }
 
-    // ── Mandatory type annotation enforcement (codegen safety-net) ────────
-    // The parser enforces this for user-written code; this check catches any
-    // VarDecl nodes that bypass the parser (e.g., loaded from a pre-parsed
-    // AST or created by a pass that forgot to set isCompilerGenerated).
-    if (stmt->typeName.empty() && !stmt->isCompilerGenerated) {
-        codegenError("Variable '" + stmt->name + "' has no type annotation. "
+    // Codegen safety-net: a VarDecl that escaped parser checks is allowed
+    // when an initializer is present (codegen infers the type), but a bare
+    // declaration with neither annotation nor initializer is unrecoverable.
+    if (stmt->typeName.empty() && !stmt->initializer && !stmt->isCompilerGenerated) {
+        codegenError("Variable '" + stmt->name + "' has no type annotation and no initializer. "
                      "All user-declared variables require an explicit type "
-                     "(e.g., 'var " + stmt->name + ":i64 = ...'). "
-                     "Untyped variables are not allowed.", stmt);
+                     "(e.g., 'var " + stmt->name + ":i64 = ...') unless an "
+                     "initializer is present from which the type can be inferred.", stmt);
     }
 
     // When the variable is declared global (inside a function), create a
@@ -110,7 +109,15 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             //   1. const arrays (existing logic, N ≤ 64)
             //   2. Non-const arrays with all-integer-literal elements, N ≤ 16,
             //      that don't escape the function scope (escape analysis).
+            //
+            // A third, even better case is detected here: an all-int-literal
+            // array that does not escape AND is never index-assigned can be
+            // bound directly to a private read-only global constant — zero
+            // allocation, zero memcpy.  This subsumes the alloca path for
+            // pure-readonly arrays and lets the backend fold subsequent
+            // loads against the constant data section.
             bool useStackAlloc = false;
+            bool useReadOnlyGlobal = false;
             if (stmt->initializer->type == ASTNodeType::ARRAY_EXPR &&
                 optimizationLevel >= OptimizationLevel::O1) {
                 auto* arrExpr = static_cast<ArrayExpr*>(stmt->initializer.get());
@@ -121,27 +128,108 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         hasSpreadElem = true;
                         break;
                     }
-                    if (elem->type != ASTNodeType::LITERAL_EXPR ||
-                        static_cast<LiteralExpr*>(elem.get())->literalType !=
+                    if (elem->type == ASTNodeType::LITERAL_EXPR &&
+                        static_cast<LiteralExpr*>(elem.get())->literalType ==
                             LiteralExpr::LiteralType::INTEGER) {
-                        allIntLiterals = false;
+                        continue;  // OK
                     }
+                    // Negative integer literal: unary `-` on integer.
+                    if (elem->type == ASTNodeType::UNARY_EXPR) {
+                        auto* un = static_cast<UnaryExpr*>(elem.get());
+                        if (un->op == "-" && un->operand &&
+                            un->operand->type == ASTNodeType::LITERAL_EXPR &&
+                            static_cast<LiteralExpr*>(un->operand.get())
+                                    ->literalType ==
+                                LiteralExpr::LiteralType::INTEGER) {
+                            continue;
+                        }
+                    }
+                    allIntLiterals = false;
                 }
                 const size_t n = arrExpr->elements.size();
                 if (!hasSpreadElem) {
-                    if (stmt->isConst && n <= kMaxStackArrayElements) {
+                    // Strongest form: bind the var to a private global
+                    // read-only constant.  Requires every use of the var
+                    // to be provably read-only (IndexExpr reads, calls to
+                    // non-mutating built-ins, calls to known-pure user
+                    // functions).  A single mutating use anywhere in the
+                    // function body disqualifies it.  Available at O2+
+                    // because the analysis is mildly more expensive than
+                    // the existing escape check, and only worthwhile when
+                    // the post-codegen LLVM pipeline will actually run.
+                    if (allIntLiterals && n >= 2 &&
+                        optimizationLevel >= OptimizationLevel::O2 &&
+                        doesVarHaveOnlyReadOnlyUses(stmt->name)) {
+                        useReadOnlyGlobal = true;
+                    } else if (stmt->isConst && n <= kMaxStackArrayElements) {
                         useStackAlloc = true;
                     } else if (!stmt->isConst && allIntLiterals && n <= 16 &&
                                !doesVarEscapeCurrentScope(stmt->name)) {
                         useStackAlloc = true;
                     }
                 }
-                if (useStackAlloc) {
+                if (useReadOnlyGlobal) {
+                    pendingArrayReadOnlyGlobal_ = true;
+                } else if (useStackAlloc) {
                     pendingArrayStackAlloc_ = true;
                 }
             }
+            // ── array_fill(N, V) → ro-global LUT ────────────────────────────
+            // Common idiom: `var lut = array_fill(256, 0);` materialises a
+            // 256-entry zeroed lookup table.  When N and V are both
+            // compile-time integer constants and the variable is provably
+            // read-only, we can replace the calloc/malloc + fill loop with a
+            // single private global constant.  Cap N at 1024 to avoid
+            // bloating the IR for large fills (the runtime path is fine for
+            // those — the IR itself becomes O(N) constants).
+            else if (stmt->initializer->type == ASTNodeType::CALL_EXPR &&
+                     optimizationLevel >= OptimizationLevel::O2) {
+                auto* call = static_cast<CallExpr*>(stmt->initializer.get());
+                if (call->callee == "array_fill" &&
+                    call->arguments.size() == 2) {
+                    auto getConstInt = [](const Expression* e,
+                                          int64_t& out) -> bool {
+                        if (!e) return false;
+                        if (e->type == ASTNodeType::LITERAL_EXPR) {
+                            auto* lit = static_cast<const LiteralExpr*>(e);
+                            if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                                out = lit->intValue;
+                                return true;
+                            }
+                        }
+                        if (e->type == ASTNodeType::UNARY_EXPR) {
+                            auto* un = static_cast<const UnaryExpr*>(e);
+                            if (un->op == "-" && un->operand &&
+                                un->operand->type == ASTNodeType::LITERAL_EXPR) {
+                                auto* lit = static_cast<const LiteralExpr*>(un->operand.get());
+                                if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                                    out = -lit->intValue;
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    };
+                    int64_t nVal = 0, vVal = 0;
+                    if (getConstInt(call->arguments[0].get(), nVal) &&
+                        getConstInt(call->arguments[1].get(), vVal) &&
+                        nVal >= 2 && nVal <= 1024 &&
+                        doesVarHaveOnlyReadOnlyUses(stmt->name)) {
+                        useReadOnlyGlobal = true;
+                        pendingArrayReadOnlyGlobal_ = true;
+                    }
+                }
+            }
             initValue = generateExpression(stmt->initializer.get());
-            if (useStackAlloc) {
+            if (useReadOnlyGlobal) {
+                pendingArrayReadOnlyGlobal_ = false;
+                readOnlyGlobalArrays_.insert(stmt->name);
+                // Treat ro-global arrays the same as stack-allocated arrays
+                // for cleanup purposes (no free() needed; mark base safe for
+                // bounds-check folding).
+                stackAllocatedArrays_.insert(stmt->name);
+                optStats_.roGlobalArrays++;
+            } else if (useStackAlloc) {
                 pendingArrayStackAlloc_ = false;
                 stackAllocatedArrays_.insert(stmt->name);
                 optStats_.escapeStackAllocs++;
@@ -331,6 +419,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     call->callee == "array_copy" || call->callee == "array_map" ||
                     call->callee == "array_filter" || call->callee == "array_slice" ||
                     call->callee == "push" || call->callee == "pop" ||
+                    call->callee == "shift" || call->callee == "unshift" ||
                     call->callee == "sort" || call->callee == "reverse" ||
                     call->callee == "array_remove" || call->callee == "array_reduce" ||
                     call->callee == "str_split" || call->callee == "str_chars" ||
@@ -2491,6 +2580,177 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         codegenError("For-each loop outside of function", stmt);
     }
 
+    // ── Range / range_step fast path ─────────────────────────────────────
+    // `for (x in range(start, end)) { body }` and
+    // `for (x in range_step(start, end, step)) { body }` allocate an
+    // intermediate array of (end - start [/ step]) elements only to
+    // immediately iterate over it.  Detect both patterns and emit a
+    // direct counting loop, eliminating the malloc + fill loop entirely
+    // and binding the iterator directly to (start + idx * step).  The
+    // surrounding for-each is otherwise unchanged: same break/continue
+    // semantics, same loop metadata, same iterator-var alloca.
+    //
+    // Available at O1+ since the transformation is a strict reduction in
+    // work (no allocation, no element store, no element load) and is
+    // never larger than the array path it replaces.  For range_step the
+    // runtime step!=0 check is preserved with the same abort behaviour.
+    if (stmt->collection->type == ASTNodeType::CALL_EXPR &&
+        optimizationLevel >= OptimizationLevel::O1) {
+        auto* call = static_cast<CallExpr*>(stmt->collection.get());
+        const bool isRange     = (call->callee == "range"      && call->arguments.size() == 2);
+        const bool isRangeStep = (call->callee == "range_step" && call->arguments.size() == 3);
+        if (isRange || isRangeStep) {
+            const ScopeGuard rangeScope(*this);
+
+            // Evaluate start, end (and step) exactly once to preserve
+            // side-effect order with the unfused builtin path.
+            llvm::Value* startV = generateExpression(call->arguments[0].get());
+            llvm::Value* endV   = generateExpression(call->arguments[1].get());
+            startV = toDefaultType(startV);
+            endV   = toDefaultType(endV);
+
+            llvm::Value* zeroC = llvm::ConstantInt::get(getDefaultType(), 0);
+            llvm::Value* oneC  = llvm::ConstantInt::get(getDefaultType(), 1);
+
+            llvm::Value* stepV = nullptr; // nullptr → unit step (no mul needed)
+            llvm::Value* count = nullptr;
+            if (isRange) {
+                // count = max(end - start, 0).  Loop runs `count` times and
+                // binds x to (start + i) for i = 0..count-1.
+                llvm::Value* diff  = builder->CreateSub(endV, startV, "frng.diff");
+                llvm::Value* isPos = builder->CreateICmpSGT(diff, zeroC, "frng.ispos");
+                count = builder->CreateSelect(isPos, diff, zeroC, "frng.count");
+            } else {
+                // range_step: evaluate step once, then preserve the
+                // runtime step==0 abort that the builtin would emit.
+                stepV = generateExpression(call->arguments[2].get());
+                stepV = toDefaultType(stepV);
+
+                llvm::Value* stepIsZero = builder->CreateICmpEQ(stepV, zeroC, "frng.stepzero");
+                llvm::BasicBlock* stepOkBB   = llvm::BasicBlock::Create(*context, "frng.stepok",   function);
+                llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "frng.stepfail", function);
+                builder->CreateCondBr(stepIsZero, stepFailBB, stepOkBB);
+
+                builder->SetInsertPoint(stepFailBB);
+                {
+                    std::string msg = call->line > 0
+                        ? std::string("Runtime error: range step cannot be zero at line ") + std::to_string(call->line) + "\n"
+                        : "Runtime error: range step cannot be zero\n";
+                    builder->CreateCall(getPrintfFunction(),
+                        {builder->CreateGlobalString(msg, "frng_zero_msg")});
+                }
+                builder->CreateCall(getOrDeclareAbort());
+                builder->CreateUnreachable();
+
+                builder->SetInsertPoint(stepOkBB);
+
+                // count = max(0, (end - start + step - sign) / step).  This
+                // matches the existing range_step builtin's formula exactly,
+                // so the loop trip count is identical to the unfused path.
+                llvm::Value* diff    = builder->CreateSub(endV, startV, "frng.diff");
+                llvm::Value* stepM1  = builder->CreateSub(stepV, oneC,  "frng.stepm1");
+                llvm::Value* adjDiff = builder->CreateAdd(diff, stepM1, "frng.adjdiff");
+                llvm::Value* rawCnt  = builder->CreateSDiv(adjDiff, stepV, "frng.rawcount");
+                llvm::Value* isPos   = builder->CreateICmpSGT(rawCnt, zeroC, "frng.ispos");
+                count = builder->CreateSelect(isPos, rawCnt, zeroC, "frng.count");
+            }
+
+            // Hidden index alloca + iterator alloca, mirroring the array path.
+            llvm::AllocaInst* idxAllocaR = createEntryBlockAlloca(function, "_foreach_idx");
+            builder->CreateStore(zeroC, idxAllocaR);
+            nonNegValues_.insert(idxAllocaR);
+
+            llvm::AllocaInst* iterAllocaR = createEntryBlockAlloca(function, stmt->iteratorVar);
+            bindVariable(stmt->iteratorVar, iterAllocaR);
+
+            llvm::BasicBlock* condBBR = llvm::BasicBlock::Create(*context, "frng.cond", function);
+            llvm::BasicBlock* bodyBBR = llvm::BasicBlock::Create(*context, "frng.body", function);
+            llvm::BasicBlock* incBBR  = llvm::BasicBlock::Create(*context, "frng.inc",  function);
+            llvm::BasicBlock* endBBR  = llvm::BasicBlock::Create(*context, "frng.end",  function);
+
+            builder->CreateBr(condBBR);
+
+            // Condition: idx < count (unsigned: idx and count are both ≥ 0).
+            builder->SetInsertPoint(condBBR);
+            llvm::Value* curIdxR = builder->CreateAlignedLoad(
+                getDefaultType(), idxAllocaR, llvm::MaybeAlign(8), "frng.idx");
+            if (optimizationLevel >= OptimizationLevel::O1) {
+                llvm::cast<llvm::LoadInst>(curIdxR)->setMetadata(
+                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            }
+            llvm::Value* condR = builder->CreateICmpULT(curIdxR, count, "frng.cmp");
+            auto* condBrR = builder->CreateCondBr(condR, bodyBBR, endBBR);
+            if (optimizationLevel >= OptimizationLevel::O2) {
+                llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+                condBrR->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+            }
+
+            // Body: bind x = start + idx [* step], then execute user body.
+            builder->SetInsertPoint(bodyBBR);
+            if (optimizationLevel >= OptimizationLevel::O2) {
+                llvm::Value* nn = builder->CreateICmpSGE(
+                    curIdxR, zeroC, "frng.nonneg");
+                llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
+                    module.get(), llvm::Intrinsic::assume, {});
+                builder->CreateCall(assumeFn, {nn});
+            }
+            // For range:      x = start + idx       (nsw safe; both fit in i64)
+            // For range_step: x = start + idx*step  (no nsw — step may be
+            //                                        negative or large; the
+            //                                        builtin path is also
+            //                                        wrapping here)
+            llvm::Value* offset = stepV
+                ? builder->CreateMul(curIdxR, stepV, "frng.off")
+                : curIdxR;
+            llvm::Value* iterVal = builder->CreateAdd(
+                startV, offset, "frng.val",
+                /*HasNUW=*/false, /*HasNSW=*/stepV == nullptr);
+            builder->CreateStore(iterVal, iterAllocaR);
+
+            loopStack.push_back({endBBR, incBBR});
+            auto savedLenCacheR = std::move(loopArrayLenCache_);
+            loopArrayLenCache_.clear();
+            generateStatement(stmt->body.get());
+            loopArrayLenCache_ = std::move(savedLenCacheR);
+            loopStack.pop_back();
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                builder->CreateBr(incBBR);
+            }
+
+            // Increment hidden idx and back-edge.
+            builder->SetInsertPoint(incBBR);
+            llvm::Value* nextIdxR = builder->CreateAdd(
+                curIdxR, oneC, "frng.next", /*HasNUW=*/true, /*HasNSW=*/true);
+            builder->CreateStore(nextIdxR, idxAllocaR);
+            auto* backBrR = builder->CreateBr(condBBR);
+
+            // Loop metadata: same hints as the array foreach path so the
+            // vectorizer/unroller treat both consistently.
+            if (optimizationLevel >= OptimizationLevel::O1) {
+                llvm::MDNode* mustProgress = llvm::MDNode::get(
+                    *context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
+                llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
+                loopMDs.push_back(nullptr);
+                loopMDs.push_back(mustProgress);
+                if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 &&
+                    enableUnrollLoops_) {
+                    loopMDs.push_back(llvm::MDNode::get(
+                        *context,
+                        {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                             llvm::Type::getInt32Ty(*context), 4))}));
+                }
+                llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
+                loopMD->replaceOperandWith(0, loopMD);
+                backBrR->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
+            }
+
+            builder->SetInsertPoint(endBBR);
+            optStats_.foreachRangeFused++;
+            return;
+        }
+    }
+
     const ScopeGuard scope(*this);
 
     // Evaluate the collection (array or string)
@@ -3375,6 +3635,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     simdVars_.erase(name);
     registerVars_.erase(name);
     stackAllocatedArrays_.erase(name);
+    readOnlyGlobalArrays_.erase(name);
     frozenVars_.erase(name);
 
     // Mark the variable as dead for use-after-invalidate detection.
@@ -3421,6 +3682,97 @@ void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
         else
             builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
     }
+}
+
+llvm::Value* CodeGenerator::generateRangeAnnot(RangeAnnotExpr* expr) {
+    // ── Compile-time bounds check ────────────────────────────────────────
+    // If the inner expression folds to a known integer constant outside
+    // [lo, hi], emit a hard error.  This catches obvious mistakes like
+    // `@range[0, 9] 100` at compile time, before any IR is produced.
+    if (auto cv = tryFoldInt(expr->inner.get())) {
+        const int64_t v = *cv;
+        if (v < expr->lo || v > expr->hi) {
+            codegenError(
+                "@range[" + std::to_string(expr->lo) + ", " + std::to_string(expr->hi) +
+                "] violated: inner expression folds to " + std::to_string(v) +
+                " which is outside the declared range", expr);
+        }
+    }
+
+    // ── Generate the inner value ─────────────────────────────────────────
+    llvm::Value* val = generateExpression(expr->inner.get());
+    if (!val) return val;
+
+    // Range hints only apply to integer values.  Non-integer results
+    // (strings, pointers, floats) silently pass through — the annotation
+    // is a hint, not a type cast.
+    if (!val->getType()->isIntegerTy()) return val;
+
+    // i1 booleans don't have a meaningful integer range; skip the hint.
+    if (val->getType()->isIntegerTy(1)) return val;
+
+    llvm::IntegerType* intTy = llvm::cast<llvm::IntegerType>(val->getType());
+    const unsigned bits = intTy->getBitWidth();
+
+    // Sanity-clamp: if the declared range exceeds what the underlying
+    // integer type can represent, clamp the assume to the representable
+    // window so we don't emit nonsense that LLVM would simplify away.
+    int64_t lo = expr->lo;
+    int64_t hi = expr->hi;
+    if (bits < 64) {
+        const int64_t typeMin = -(int64_t{1} << (bits - 1));
+        const int64_t typeMax =  (int64_t{1} << (bits - 1)) - 1;
+        if (lo < typeMin) lo = typeMin;
+        if (hi > typeMax) hi = typeMax;
+        if (lo > hi) return val; // nothing to assert
+    }
+
+    llvm::Constant* loC = llvm::ConstantInt::get(intTy, lo, /*IsSigned=*/true);
+    llvm::Constant* hiC = llvm::ConstantInt::get(intTy, hi, /*IsSigned=*/true);
+
+    // ── !range metadata on load/call results ─────────────────────────────
+    // LLVM's !range metadata uses the half-open interval [lo, hi+1).
+    // Skip when hi+1 would overflow (the range covers the full type) or
+    // when lo == hi+1 (empty range — invalid).  Only valid on instructions
+    // that produce integer values: LoadInst, CallInst (incl. invoke), etc.
+    if (auto* inst = llvm::dyn_cast<llvm::Instruction>(val)) {
+        bool canAttach = llvm::isa<llvm::LoadInst>(inst) ||
+                         llvm::isa<llvm::CallInst>(inst) ||
+                         llvm::isa<llvm::InvokeInst>(inst);
+        if (canAttach && hi < std::numeric_limits<int64_t>::max()) {
+            // Don't overwrite a tighter pre-existing !range; intersect
+            // would be ideal but conservatively replacing is safe because
+            // the user-declared range is, by contract, also valid.
+            if (!inst->getMetadata(llvm::LLVMContext::MD_range)) {
+                llvm::Metadata* mdOps[] = {
+                    llvm::ConstantAsMetadata::get(loC),
+                    llvm::ConstantAsMetadata::get(
+                        llvm::ConstantInt::get(intTy, hi + 1, /*IsSigned=*/true))};
+                inst->setMetadata(llvm::LLVMContext::MD_range,
+                                  llvm::MDNode::get(*context, mdOps));
+            }
+        }
+    }
+
+    // ── llvm.assume(val >= lo && val <= hi) ─────────────────────────────
+    // Two separate assumes (joined by `and` would also work, but two calls
+    // give LLVM's AssumptionCache a slightly cleaner per-bound view).
+    llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
+        module.get(), llvm::Intrinsic::assume, {});
+    llvm::Value* geLo = builder->CreateICmpSGE(val, loC, "rangeannot.gelo");
+    builder->CreateCall(assumeFn, {geLo});
+    llvm::Value* leHi = builder->CreateICmpSLE(val, hiC, "rangeannot.lehi");
+    builder->CreateCall(assumeFn, {leHi});
+
+    // ── Non-negativity bookkeeping ──────────────────────────────────────
+    // When lo >= 0, downstream OmScript passes (foreach-range fusion,
+    // CSE for array length, sign-bit elision) can skip their own
+    // non-negativity guards on this value.
+    if (lo >= 0) {
+        nonNegValues_.insert(val);
+    }
+
+    return val;
 }
 
 llvm::Value* CodeGenerator::generateMoveExpr(MoveExpr* expr) {

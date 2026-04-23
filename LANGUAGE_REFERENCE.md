@@ -754,7 +754,25 @@ import "math_helpers.om" as math
 var result = DOUBLE(5);  // Expands to: 5 + 5
 ```
 
-**Stringification (`#`) and token pasting (`##`)**: Not implemented. Macro expansion performs only textual substitution.
+**Stringification (`#`) and token pasting (`##`)**: Implemented for
+function-like macros.
+
+* `#param` in the macro body is replaced by a string literal whose contents
+  are the textual argument with leading/trailing whitespace trimmed and
+  embedded `"` / `\` escaped:
+
+  ```omscript
+  #define STR(x) #x
+  var s:string = STR(world);   // expands to: var s:string = "world";
+  ```
+
+* `a ## b` collapses two tokens into one by removing the `##` and any
+  surrounding whitespace.  Multiple consecutive pastes are supported:
+
+  ```omscript
+  #define CONCAT(a, b) a ## b
+  var CONCAT(my, Var):i64 = 42;   // expands to: var myVar:i64 = 42;
+  ```
 
 ### 3.3 Predefined Macros
 
@@ -2103,6 +2121,38 @@ unlikely if (error_occurred) {
 
 **Effect**: Emits LLVM branch weight metadata (`!prof`). No semantic difference, only optimization hints.
 
+### 7.8b `@range[lo, hi] expr` — Internal Range-Bound Hint
+
+**Syntax**: `@range[lo, hi] expression`
+
+Asserts to the optimizer that `expression` evaluates to an integer within the inclusive range `[lo, hi]`. Both bounds must be integer literals (an optional unary `-` is allowed) and `lo <= hi` is enforced at parse time. The annotation binds at unary-operator precedence, so `@range[0, 9] x + 1` parses as `(@range[0, 9] x) + 1`.
+
+**Semantics**:
+- **Compile-time check**: if `expression` folds to a known integer constant outside `[lo, hi]`, the compiler emits a hard error and produces no IR.
+- **Runtime hint**: otherwise, codegen emits `@llvm.assume(val >= lo && val <= hi)` and attaches `!range !{lo, hi+1}` metadata to load/call results so LLVM's LVI / CorrelatedValuePropagation / SCEV / InstCombine can propagate the bound.
+- **Non-negativity**: when `lo >= 0` the value is also recorded in the codegen's non-negative set, so OmScript-level passes (foreach-range fusion, array-length CSE, sign-bit elision) can skip their own non-negativity guards.
+- **Pure hint**: never affects observable behaviour — only optimization. Works on any expression that produces an integer (loads, calls, arithmetic, etc.).
+
+**Example**:
+```omscript
+fn lookup(table:[i64], idx:i64) {
+    // We've externally guaranteed idx ∈ [0, 255]; tell the optimizer.
+    var safe = @range[0, 255] idx;
+    return table[safe];               // bounds-check elimination on safe
+}
+
+fn main() {
+    var n = input();
+    var bucket = @range[0, 15] (n & 15);   // mask result is always 0..15
+    return bucket;
+}
+
+// Compile error — caught at compile time, no IR generated:
+//   var bad = @range[0, 9] 100;
+```
+
+**Effect**: Emits `llvm.assume` calls + `!range` metadata on the inner value. No new instructions on hot paths once LLVM has propagated the bound.
+
 ### 7.9 Ternary Operator
 
 **Syntax**: `condition ? true_expr : false_expr`
@@ -3296,17 +3346,39 @@ println(len(a));   // 2
 
 ---
 
-#### `shift(array) → i64` (unimplemented in source — verify if exists)
+#### `shift(array) → i64`
 
-**Expected semantics:** Remove and return the first element; shift all remaining elements left.  
+**Signature:** `shift(array) → i64`
+**Semantics:** Remove and return the first element; shift all remaining
+elements left by one slot. Mutates the array in place: length decreases by 1.
+Aborts with a runtime error when called on an empty array.
 **Time:** O(n)
+
+```omscript
+var a:i64[] = [10, 20, 30];
+var x:i64 = shift(a);
+println(x);        // 10
+println(len(a));   // 2
+println(a[0]);     // 20
+```
 
 ---
 
-#### `unshift(array, value) → i64` (unimplemented in source — verify if exists)
+#### `unshift(array, value) → i64`
 
-**Expected semantics:** Insert `value` at the beginning; shift existing elements right.  
+**Signature:** `unshift(array, i64) → array`
+**Semantics:** Insert `value` at index 0; shift existing elements right by one
+slot. Returns the (possibly reallocated) array pointer — assign it back to a
+variable to track the new buffer when growth occurs. Reuses the same
+power-of-two growth policy as `push`.
 **Time:** O(n)
+
+```omscript
+var a:i64[] = [20, 30];
+a = unshift(a, 10);
+println(a[0]);     // 10
+println(len(a));   // 3
+```
 
 ---
 

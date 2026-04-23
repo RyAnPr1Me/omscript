@@ -107,6 +107,7 @@ void Parser::registerStdNamespace() {
         {"is_space",   "is_space"},   {"is_alnum",   "is_alnum"},
         // ── Array ────────────────────────────────────────────────────────────
         {"push",       "push"},       {"pop",        "pop"},
+        {"shift",      "shift"},      {"unshift",    "unshift"},
         {"len",        "len"},        {"reverse",    "reverse"},
         {"sort",       "sort"},       {"sum",        "sum"},
         {"index_of",   "index_of"},   {"swap",       "swap"},
@@ -1169,9 +1170,9 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         }
         consume(TokenType::SEMICOLON, "Expected ';' after register variable declaration");
 
-        if (typeName.empty()) {
+        if (typeName.empty() && !init) {
             error("Variable '" + name.lexeme + "' requires an explicit type annotation "
-                  "(e.g., '" + name.lexeme + ":i64'). Untyped variables are not allowed.");
+                  "(e.g., '" + name.lexeme + ":i64'). Untyped variables without an initializer are not allowed.");
         }
         auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
         decl->isRegister = true;
@@ -1198,9 +1199,9 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         }
         consume(TokenType::SEMICOLON, "Expected ';' after global variable declaration");
 
-        if (typeName.empty()) {
+        if (typeName.empty() && !init) {
             error("Variable '" + name.lexeme + "' requires an explicit type annotation "
-                  "(e.g., '" + name.lexeme + ":i64'). Untyped variables are not allowed.");
+                  "(e.g., '" + name.lexeme + ":i64'). Untyped variables without an initializer are not allowed.");
         }
         auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
         decl->isGlobal = true;
@@ -1317,11 +1318,9 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             if (typeName.empty() && match(TokenType::COLON)) {
                 typeName = parseTypeAnnotation();
             }
-            // Mandatory type annotation enforcement for move declarations.
-            if (typeName.empty()) {
-                error("Move variable '" + name.lexeme + "' requires an explicit type annotation "
-                      "(e.g., 'move var " + name.lexeme + ":i64 = ...').");
-            }
+            // Move declarations always have an initializer (parsed below);
+            // we infer the type from it when no annotation is given.
+            // No error needed here.
             consume(TokenType::ASSIGN, "Expected '=' in move declaration");
             auto init = parseExpression();
             consume(TokenType::SEMICOLON, "Expected ';' after move declaration");
@@ -1359,12 +1358,11 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         if (typeName.empty() && match(TokenType::COLON)) {
             typeName = parseTypeAnnotation();
         }
-        if (typeName.empty()) {
-            error("Borrow variable '" + name.lexeme + "' requires an explicit type annotation (e.g., 'borrow " + name.lexeme + ":i64 = ...').");
-        }
         consume(TokenType::ASSIGN, "Expected '=' in borrow declaration");
         auto init = parseExpression();
         consume(TokenType::SEMICOLON, "Expected ';' after borrow declaration");
+        // Type annotation is optional when an initializer is present —
+        // codegen infers the borrowed value's representation.
         // Create a VarDecl with a BorrowExpr wrapper
         auto borrowExpr = std::make_unique<BorrowExpr>(std::move(init), isMut);
         borrowExpr->line = kw.line;
@@ -1480,15 +1478,17 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
         initializer = parseExpression();
     }
 
-    // ── Mandatory type annotation enforcement ─────────────────────────────
-    // Every user-declared variable must carry an explicit type annotation.
-    // This is the foundation of OmScript's real type system: the compiler
-    // never silently defaults to a "base type" (previously i64).
-    //
-    // Exception: untyped `ptr` is allowed — the variable has the explicit
-    // type `ptr`, it just omits the optional element-type parameter.
-    // Exception: inferred-type declarations (handled by type inference pass).
-    if (typeName.empty()) {
+    // ── Type annotation enforcement ───────────────────────────────────────
+    // Every variable must be typed, but we accept two forms:
+    //   1. an explicit annotation (`var x:i64 = …`), or
+    //   2. an initializer from which the type can be inferred at codegen
+    //      time (`var x = 42;` → i64, `var s = "hi"` → string, etc.).
+    // The codegen already tracks variable kinds (array/string/struct/dict)
+    // from the initializer's AST shape and falls back to i64 for plain
+    // numeric expressions, so omitting `:T` is safe whenever an initializer
+    // is present.  An uninitialised, untyped declaration however leaves the
+    // compiler with nothing to work from and remains an error.
+    if (typeName.empty() && !initializer) {
         error("Variable '" + name.lexeme + "' requires an explicit type annotation "
               "(e.g., 'var " + name.lexeme + ":i64 = ...'). "
               "Untyped variables are not allowed; the compiler no longer "
@@ -1562,15 +1562,16 @@ std::unique_ptr<Statement> Parser::parseVarDeclWithInheritedType(
         typeName = inheritedType;
     }
 
-    // If still empty (first var was also untyped), emit the normal error.
-    if (typeName.empty()) {
-        error("Variable '" + name.lexeme + "' requires an explicit type annotation "
-              "(e.g., 'var " + name.lexeme + ":i64 = ...'). Untyped variables are not allowed.");
-    }
-
     std::unique_ptr<Expression> initializer = nullptr;
     if (match(TokenType::ASSIGN)) {
         initializer = parseExpression();
+    }
+
+    // Same relaxed rule as parseVarDecl: omit-type-with-init is allowed; a
+    // bare `var x` with neither type nor initializer is the only error case.
+    if (typeName.empty() && !initializer) {
+        error("Variable '" + name.lexeme + "' requires an explicit type annotation "
+              "(e.g., 'var " + name.lexeme + ":i64 = ...'). Untyped variables without an initializer are not allowed.");
     }
 
     auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
@@ -3233,6 +3234,47 @@ std::unique_ptr<Expression> Parser::parsePower() {
 }
 
 std::unique_ptr<Expression> Parser::parseUnary() {
+    // ── @range[lo, hi] expr ───────────────────────────────────────────────
+    // Internal range-bound annotation.  Parses two integer literals (each
+    // with an optional unary minus) and wraps the following unary
+    // expression in a RangeAnnotExpr.  The pair is required to satisfy
+    // lo <= hi at parse time; codegen additionally errors out if `expr`
+    // is a compile-time constant outside [lo, hi].
+    //
+    // The annotation binds tighter than any binary operator (it sits in
+    // unary position), so `@range[0,9] x + 1` parses as `(@range[0,9] x) + 1`.
+    if (check(TokenType::AT) && current + 1 < tokens.size() &&
+        tokens[current + 1].type == TokenType::IDENTIFIER &&
+        tokens[current + 1].lexeme == "range" &&
+        current + 2 < tokens.size() &&
+        tokens[current + 2].type == TokenType::LBRACKET) {
+        const Token atTok = tokens[current];
+        advance(); // '@'
+        advance(); // 'range'
+        advance(); // '['
+        auto parseSignedInt = [this](const char* what) -> int64_t {
+            bool neg = false;
+            if (match(TokenType::MINUS)) neg = true;
+            const Token lit = consume(TokenType::INTEGER,
+                std::string("Expected integer ") + what + " in @range[lo, hi]");
+            int64_t v = static_cast<int64_t>(lit.intValue);
+            return neg ? -v : v;
+        };
+        const int64_t lo = parseSignedInt("lo");
+        consume(TokenType::COMMA, "Expected ',' between lo and hi in @range[lo, hi]");
+        const int64_t hi = parseSignedInt("hi");
+        consume(TokenType::RBRACKET, "Expected ']' to close @range[lo, hi]");
+        if (lo > hi) {
+            error("@range[lo, hi] requires lo <= hi (got lo=" +
+                  std::to_string(lo) + ", hi=" + std::to_string(hi) + ")");
+        }
+        auto inner = parseUnary();
+        auto node = std::make_unique<RangeAnnotExpr>(lo, hi, std::move(inner));
+        node->line = atTok.line;
+        node->column = atTok.column;
+        return node;
+    }
+
     if (match(TokenType::MINUS) || match(TokenType::NOT) || match(TokenType::TILDE)) {
         const Token opToken = tokens[current - 1];
         auto operand = parseUnary();

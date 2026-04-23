@@ -3056,7 +3056,13 @@ TEST(CodegenTest, BytecodeAlgebraicZeroMulPreservesSideEffects) {
 TEST(CodegenTest, OptmaxMulZeroPreservesSideEffects) {
     // In OPTMAX, func() * 0 should NOT be optimized to 0 because the
     // function call may have side effects. The multiplication should remain.
+    // We disable the OPTMAX LLVM pipeline so helper() is not inlined +
+    // constant-folded; the AST-level OPTMAX folder is what we're testing
+    // here, and it correctly preserves the CallExpr (non-pure at the AST
+    // level).  LLVM passes are also disabled (O0 already does this) so the
+    // call is observable in the emitted IR.
     CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setOptMax(false);
     auto* mod = generateIR("OPTMAX=:\n"
                            "fn helper(x: int) { return x; }\n"
                            "fn mul_zero(x: int) { return helper(x) * 0; }\n"
@@ -3081,6 +3087,7 @@ TEST(CodegenTest, OptmaxPowZeroPreservesSideEffects) {
     // In OPTMAX, func() ** 0 should NOT be optimized to 1 because the
     // function call may have side effects.
     CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setOptMax(false);
     auto* mod = generateIR("OPTMAX=:\n"
                            "fn helper(x: int) { return x; }\n"
                            "fn pow_zero(x: int) { return helper(x) ** 0; }\n"
@@ -6505,6 +6512,346 @@ TEST(CodegenTest, LcmZeroArgs) {
     EXPECT_THROW(generateIR("fn main() { return lcm(); }", codegen), std::runtime_error);
 }
 
+// ── Read-only global array literal optimization ───────────────────────────
+
+// At O2+, an array literal whose every element is a compile-time integer
+// constant and that is provably never written through (no IndexAssign, no
+// alias creation, no escape to a mutating callee) should be bound directly
+// to a private read-only global constant — no malloc, no alloca, no memcpy.
+TEST(CodegenTest, ReadOnlyGlobalArrayLiteral_NoMallocNoMemcpy) {
+    // Disable the LLVM pipeline so we observe what codegen *emits*, not
+    // what later passes happen to fold away.  The optimization we are
+    // verifying happens in CodeGenerator's own pre-pass.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setRunIRPasses(false);
+    // `arr` is read in two index expressions and passed to the pure
+    // built-in `len` — no writes, no aliases.  A runtime input prevents
+    // the deep const-eval pass from folding the whole expression.
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var arr = [10,20,30,40,50,60,70,80]; "
+        "return arr[n & 7] + len(arr); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+
+    // No malloc and no memcpy must be emitted for the array.  (A small
+    // alloca for the i64 pointer slot itself is fine — what we care about
+    // is that the *array storage* is the constant.)
+    bool sawMalloc = false;
+    bool sawMemcpy = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    auto name = callee->getName();
+                    if (name == "malloc") sawMalloc = true;
+                    if (name.starts_with("llvm.memcpy")) sawMemcpy = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(sawMalloc)
+        << "ro-global array literal must not emit malloc";
+    EXPECT_FALSE(sawMemcpy)
+        << "ro-global array literal must not emit memcpy";
+
+    // The module should contain a private constant named arr.ro.const* that
+    // holds the [length, e0, e1, ...] payload.
+    bool sawRoGlobal = false;
+    for (auto& gv : mod->globals()) {
+        if (gv.getName().starts_with("arr.ro.const") && gv.isConstant()) {
+            sawRoGlobal = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(sawRoGlobal)
+        << "expected a private @arr.ro.const* read-only constant";
+}
+
+// Negative case: when the array IS index-assigned, the optimization must
+// NOT fire — writing through an .rodata pointer would segfault at runtime.
+TEST(CodegenTest, ReadOnlyGlobalArrayLiteral_SkippedWhenIndexAssigned) {
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var arr = [10,20,30,40,50,60,70,80]; "
+        "arr[0] = n; return arr[n & 7]; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    bool sawRoGlobal = false;
+    for (auto& gv : mod->globals()) {
+        if (gv.getName().starts_with("arr.ro.const")) {
+            sawRoGlobal = true;
+            break;
+        }
+    }
+    EXPECT_FALSE(sawRoGlobal)
+        << "ro-global must not fire when the array is index-assigned";
+}
+
+// `var lut = array_fill(N, V)` with N and V both compile-time integer
+// constants and `lut` provably read-only must materialise as a private
+// global constant — no calloc, no malloc, no fill loop.
+TEST(CodegenTest, ReadOnlyGlobalArrayFill_NoCallocNoMallocForReadOnlyLUT) {
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var lut = array_fill(256, 0); "
+        "var s = 0; for (i in 0...n) { s = s + lut[i & 0xff]; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool sawAlloc = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    auto name = callee->getName();
+                    if (name == "calloc" || name == "malloc")
+                        sawAlloc = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(sawAlloc)
+        << "ro-global array_fill(N,V) must not emit calloc/malloc";
+    bool sawRoGlobal = false;
+    for (auto& gv : mod->globals()) {
+        if (gv.getName().starts_with("fill.ro.const") && gv.isConstant()) {
+            sawRoGlobal = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(sawRoGlobal)
+        << "expected a private @fill.ro.const* read-only constant";
+}
+
+// Negative: array_fill with non-constant size must NOT fire the optimization.
+TEST(CodegenTest, ReadOnlyGlobalArrayFill_SkippedForRuntimeSize) {
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var lut = array_fill(n, 0); "
+        "return lut[0]; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    bool sawRoGlobal = false;
+    for (auto& gv : mod->globals()) {
+        if (gv.getName().starts_with("fill.ro.const")) {
+            sawRoGlobal = true;
+            break;
+        }
+    }
+    EXPECT_FALSE(sawRoGlobal)
+        << "ro-global must not fire when array_fill size is not a constant";
+}
+
+// `for (x in range(start, end)) { body }` must not allocate the
+// intermediate range array — the foreach should be lowered to a direct
+// counting loop with x bound to (start + idx).
+TEST(CodegenTest, ForeachOverRange_NoMallocForDirectRangeCall) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var s = 0; "
+        "for (x in range(0, n)) { s = s + x; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool sawMalloc = false;
+    bool sawRangeBlock = false;
+    for (auto& BB : *fn) {
+        if (BB.getName().starts_with("range."))
+            sawRangeBlock = true;
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getName() == "malloc")
+                        sawMalloc = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(sawMalloc)
+        << "foreach-over-range must not emit malloc for the intermediate array";
+    EXPECT_FALSE(sawRangeBlock)
+        << "the range builtin's loop blocks must not appear; the fused path "
+           "uses frng.* blocks instead";
+}
+
+// Negative: when the collection is a variable bound to range() (not a
+// direct range() call expression), the optimization must not fire.  The
+// alias could otherwise change observable allocation behaviour.
+TEST(CodegenTest, ForeachOverRange_SkippedForBoundVariable) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var r = range(0, n); var s = 0; "
+        "for (x in r) { s = s + x; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool sawMalloc = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getName() == "malloc")
+                        sawMalloc = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(sawMalloc)
+        << "when range() is bound to a var, the array allocation must remain";
+}
+
+// `for (x in range_step(start, end, step)) { body }` must also be lowered
+// to a direct counting loop with x bound to (start + idx*step).  The
+// runtime step!=0 abort path must still be emitted (preserves builtin
+// semantics), but no malloc / no rstep.* blocks should remain.
+TEST(CodegenTest, ForeachOverRange_NoMallocForDirectRangeStepCall) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var s = 0; "
+        "for (x in range_step(0, n, 2)) { s = s + x; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool sawMalloc = false;
+    bool sawRstepBlock = false;
+    bool sawStepFail = false;
+    for (auto& BB : *fn) {
+        if (BB.getName().starts_with("rstep."))
+            sawRstepBlock = true;
+        if (BB.getName().starts_with("frng.stepfail"))
+            sawStepFail = true;
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getName() == "malloc")
+                        sawMalloc = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(sawMalloc)
+        << "foreach-over-range_step must not emit malloc for the intermediate array";
+    EXPECT_FALSE(sawRstepBlock)
+        << "the range_step builtin's loop blocks must not appear; the fused path "
+           "uses frng.* blocks instead";
+    EXPECT_TRUE(sawStepFail)
+        << "the step==0 runtime abort branch must be preserved";
+}
+
+// ── @range[lo, hi] expr — internal range-bound annotation ────────────────
+
+// Positive: `@range[lo, hi] expr` over a non-constant input must emit two
+// `llvm.assume` calls (one per bound) on the inner value.  At O0 the
+// optimizer hasn't deleted them yet, so they should be observable.
+TEST(CodegenTest, RangeAnnot_EmitsAssumesAndRangeMetadata) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var x = @range[0, 100] n; return x; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    int assumeCalls = 0;
+    bool sawGelo = false;
+    bool sawLehi = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getName() == "llvm.assume")
+                        ++assumeCalls;
+                }
+            }
+            if (I.getName().starts_with("rangeannot.gelo")) sawGelo = true;
+            if (I.getName().starts_with("rangeannot.lehi")) sawLehi = true;
+        }
+    }
+    EXPECT_GE(assumeCalls, 2)
+        << "@range[lo, hi] should emit one llvm.assume per bound";
+    EXPECT_TRUE(sawGelo) << "lower-bound icmp must be present";
+    EXPECT_TRUE(sawLehi) << "upper-bound icmp must be present";
+}
+
+// Negative: a compile-time-constant inner expression outside the declared
+// range is a hard compile error — no IR is generated.
+TEST(CodegenTest, RangeAnnot_RejectsConstantOutsideRange) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setRunIRPasses(false);
+    bool threw = false;
+    std::string msg;
+    try {
+        (void)generateIR(
+            "fn main() { var x = @range[0, 9] 100; return x; }", codegen);
+    } catch (const std::exception& e) {
+        threw = true;
+        msg = e.what();
+    }
+    EXPECT_TRUE(threw) << "constant 100 outside @range[0, 9] must be rejected";
+    EXPECT_NE(msg.find("@range"), std::string::npos)
+        << "diagnostic should mention @range; got: " << msg;
+}
+
+// Negative: lo > hi at parse time is a parse error.
+TEST(CodegenTest, RangeAnnot_RejectsLoGreaterThanHi) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setRunIRPasses(false);
+    bool threw = false;
+    std::string msg;
+    try {
+        (void)generateIR(
+            "fn main() { var x = @range[10, 0] 5; return x; }", codegen);
+    } catch (const std::exception& e) {
+        threw = true;
+        msg = e.what();
+    }
+    EXPECT_TRUE(threw) << "lo > hi must be rejected at parse time";
+    EXPECT_NE(msg.find("lo <= hi"), std::string::npos)
+        << "diagnostic should explain the lo <= hi requirement; got: " << msg;
+}
+
+// `@range[lo, hi]` with `lo >= 0` should attach `!range !{lo, hi+1}`
+// metadata to load/call results that produce the value, allowing LLVM's
+// LVI/CVP to propagate the bound without examining assume intrinsics.
+TEST(CodegenTest, RangeAnnot_AttachesRangeMetadataToLoad) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var x = @range[0, 7] n; return x; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool sawTightRange = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            auto* load = llvm::dyn_cast<llvm::LoadInst>(&I);
+            if (!load) continue;
+            auto* md = load->getMetadata(llvm::LLVMContext::MD_range);
+            if (!md || md->getNumOperands() < 2) continue;
+            auto* loC = llvm::mdconst::dyn_extract<llvm::ConstantInt>(md->getOperand(0));
+            auto* hiC = llvm::mdconst::dyn_extract<llvm::ConstantInt>(md->getOperand(1));
+            if (!loC || !hiC) continue;
+            if (loC->getSExtValue() == 0 && hiC->getSExtValue() == 8)
+                sawTightRange = true;
+        }
+    }
+    EXPECT_TRUE(sawTightRange)
+        << "expected !range !{0, 8} (half-open, hi+1) on the loaded inner value";
+}
+
 // ── NUW on non-negative additions ─────────────────────────────────────────
 
 // At O1+, adding two provably non-negative values should produce an add
@@ -6514,7 +6861,14 @@ TEST(CodegenTest, LcmZeroArgs) {
 TEST(CodegenTest, NUWAddOnNonNegOperands) {
     // The for-loop iterator `i` is non-negative (ascending from 0); `len(a)`
     // is also non-negative.  Their sum should get both nuw and nsw.
+    //
+    // We disable runOptimizationPasses() so the LLVM pipeline cannot replace
+    // the loop with a closed-form triangular sum (n*(n-1)/2) via the
+    // superoptimizer — that transformation is correct but eliminates the
+    // very `add nuw nsw` instruction emitted by the OmScript codegen that
+    // this test is verifying.
     CodeGenerator codegen(OptimizationLevel::O1);
+    codegen.setRunIRPasses(false);
     auto* mod = generateIR(
         "fn f(a:i64) { var s:i64 = 0; for (i in 0...len(a)) { s = s + i; } return s; } "
         "fn main() { return f([1, 2, 3]); }",
@@ -6545,6 +6899,11 @@ TEST(CodegenTest, NUWAddOnNonNegOperands) {
 // directly in the IR to every LLVM pass, not just through assume intrinsics.
 TEST(CodegenTest, RangeMetadataOnNonNegLoad) {
     CodeGenerator codegen(OptimizationLevel::O1);
+    // Disable LLVM passes so the `load !range` metadata emitted by the
+    // OmScript codegen survives — LLVM's mem2reg/DCE would promote away
+    // the load of `i` (or delete the dead `var x:i64 = i*2;` store entirely)
+    // before the test could observe the metadata.
+    codegen.setRunIRPasses(false);
     auto* mod = generateIR(
         "fn f(n:i64) { for (i in 0...n) { var x:i64 = i * 2; } } "
         "fn main() { f(10); return 0; }",
@@ -6694,9 +7053,16 @@ TEST(CodegenTest, DeepConstEval_IntConstantReturningFunction) {
 //    be marked as constant-returning.
 TEST(CodegenTest, DeepConstEval_SideEffectFunctionNotFolded) {
     CodeGenerator codegen(OptimizationLevel::O1);
-    // This function has a non-const var — the analysis must reject it.
+    // Disable LLVM passes so the non-folded make_str() call remains
+    // observable.  The OmScript deep-const-eval short-circuit runs during
+    // codegen (and correctly refuses to fold make_str because the call to
+    // the impure builtin input() gives it an observable side effect), but
+    // LLVM's inliner + IPSCCP at O1 would otherwise inline the body.
+    codegen.setRunIRPasses(false);
+    // make_str() reads from input() — a genuine observable side effect —
+    // so the deep-const-eval pass must reject it and leave the call live.
     auto* mod = generateIR(
-        "fn make_str() { var s:i64 = \"a\"; s = s + \"b\"; return s; }"
+        "fn make_str() { var s:i64 = input(); s = s + \"b\"; return s; }"
         "fn main() { return len(make_str()); }",
         codegen);
     ASSERT_NE(mod, nullptr);
@@ -6721,8 +7087,13 @@ TEST(CodegenTest, DeepConstEval_SideEffectFunctionNotFolded) {
 // matching what generateIdentifier emits for regular variable reads.
 TEST(CodegenTest, IncDecLoadHasNoundef) {
     CodeGenerator codegen(OptimizationLevel::O1);
+    // Disable LLVM passes so the load (and its !noundef metadata emitted
+    // by OmScript's generateIncDec) is not promoted away by mem2reg.
+    codegen.setRunIRPasses(false);
+    // Use a parameter-sourced initial value and an external sink so the
+    // codegen-time constant evaluator cannot fold the whole body away.
     auto* mod = generateIR(
-        "fn f() { var x:i64 = 0; x++; return x; } fn main() { return f(); }",
+        "fn f(n:i64) { var x:i64 = n; x++; return x; } fn main() { return f(1); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6745,8 +7116,13 @@ TEST(CodegenTest, IncDecLoadHasNoundef) {
 // inside x++ should carry !range [0, INT64_MAX) metadata.
 TEST(CodegenTest, IncDecLoadHasRangeOnNonNeg) {
     CodeGenerator codegen(OptimizationLevel::O1);
+    // Disable LLVM passes so the !range-annotated load is not promoted
+    // away by mem2reg.
+    codegen.setRunIRPasses(false);
+    // `abs(n)` guarantees non-negative without being a compile-time constant,
+    // so the !range metadata path is exercised on a real load.
     auto* mod = generateIR(
-        "fn f() { var x:i64 = 5; x++; return x; } fn main() { return f(); }",
+        "fn f(n:i64) { var x:i64 = abs(n); x++; return x; } fn main() { return f(5); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6773,7 +7149,7 @@ TEST(CodegenTest, IncDecLoadHasRangeOnNonNeg) {
 TEST(CodegenTest, IncrementNUWOnNonNegVariable) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn f() { var x:i64 = 0; x++; return x; } fn main() { return f(); }",
+        "fn f(n:i64) { var x:i64 = abs(n); x++; return x; } fn main() { return f(0); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6800,7 +7176,7 @@ TEST(CodegenTest, IncrementNUWOnNonNegVariable) {
 TEST(CodegenTest, IncrementPreservesNonNegTracking) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn f() { var x:i64 = 0; x++; var y:i64 = x + 1; return y; } fn main() { return f(); }",
+        "fn f(n:i64) { var x:i64 = abs(n); x++; var y:i64 = x + 1; return y; } fn main() { return f(0); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6876,6 +7252,10 @@ TEST(CodegenTest, PipelineZeroCountNoBody) {
 TEST(CodegenTest, PipelineO1LoopMetadata) {
     // At O1 the back-edge should carry llvm.loop metadata (mustprogress etc.)
     CodeGenerator codegen(OptimizationLevel::O1);
+    // Disable LLVM passes so the empty pipeline loop is not eliminated by
+    // LoopDeletion — we're verifying the metadata is emitted by codegen,
+    // not that it survives all downstream optimizations.
+    codegen.setRunIRPasses(false);
     auto* mod = generateIR(
         "fn main() { pipeline 8 { stage s { } } }", codegen);
     ASSERT_NE(mod, nullptr);

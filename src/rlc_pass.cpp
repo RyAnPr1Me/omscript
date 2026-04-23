@@ -141,6 +141,9 @@ static bool exprUsesVar(const Expression* expr, const std::string& name) {
         case ASTNodeType::COMPTIME_EXPR:
             // Conservative: treat comptime blocks as potentially using any var.
             return true;
+        case ASTNodeType::RANGE_ANNOT_EXPR:
+            return exprUsesVar(
+                static_cast<const RangeAnnotExpr*>(expr)->inner.get(), name);
         default:
             return false;
     }
@@ -342,6 +345,10 @@ static void renameInExpr(Expression* expr,
         case ASTNodeType::PIPE_EXPR:
             renameInExpr(
                 static_cast<PipeExpr*>(expr)->left.get(), rmap);
+            break;
+        case ASTNodeType::RANGE_ANNOT_EXPR:
+            renameInExpr(
+                static_cast<RangeAnnotExpr*>(expr)->inner.get(), rmap);
             break;
         case ASTNodeType::STRUCT_LITERAL_EXPR: {
             auto* sl = static_cast<StructLiteralExpr*>(expr);

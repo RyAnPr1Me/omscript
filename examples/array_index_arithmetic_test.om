@@ -1,0 +1,28 @@
+// Array bounds and indexing: last-element indexing, reverse indexing via
+// (len - 1 - i), and in-place assignment at a computed index.  Result
+// fits inside an 8-bit exit code (< 256).
+fn main() {
+    var arr = [10, 20, 30, 40, 50];
+    var n = len(arr);
+
+    // Classic index-based sum.
+    var sum = 0;
+    for (i in 0...n) {
+        sum = sum + arr[i];
+    }
+    // 10+20+30+40+50 = 150
+
+    // Reverse iteration — last to first.
+    var reverse_first = arr[n - 1];     // 50
+    var reverse_last  = arr[0];          // 10
+
+    // Mid element via integer division.
+    var mid = arr[n / 2];                // arr[2] = 30
+
+    // Assign through a computed index.
+    arr[n - 1] = 99;
+    var new_last = arr[n - 1];           // 99
+
+    // 150 + 50 + 10 + 30 + 99 − 147 = 192
+    return sum + reverse_first + reverse_last + mid + new_last - 147;
+}

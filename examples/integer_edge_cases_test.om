@@ -1,0 +1,35 @@
+// Integer edge cases: signed arithmetic boundaries, shift boundaries,
+// division rounding toward zero, modulo sign semantics.  These exercise
+// codegen paths for poison-free semantics and signed-overflow handling
+// without depending on particular optimiser hints.
+fn main() {
+    var acc = 0;
+
+    // Division rounds toward zero for negatives (truncating, not flooring).
+    //   (-7) / 2 == -3  (not -4)
+    //   (-7) % 2 == -1  (C semantics: sign follows dividend)
+    acc = acc + ((-7) / 2);          // -3
+    acc = acc + ((-7) % 2);          // -1   → acc = -4
+
+    // Positive identities.
+    acc = acc + (7 / 2);             // 3    → acc = -1
+    acc = acc + (7 % 2);             // 1    → acc = 0
+
+    // Shift boundaries: shifting by 0 is identity.
+    acc = acc + (42 << 0);           // 42
+    acc = acc + (42 >> 0);           // 42   → acc = 84
+
+    // Chained shifts — associativity.
+    acc = acc + ((1 << 4) >> 2);     // 16 >> 2 = 4
+    acc = acc - ((64 >> 1) << 1);    // 64 >> 1 << 1 = 64 → acc = 84 + 4 - 64 = 24
+
+    // Mixed unary/binary.
+    acc = acc + (-(-5));             // 5    → acc = 29
+    acc = acc + ~(~1);               // 1    → acc = 30
+
+    // Chained arithmetic with precedence.
+    acc = acc + (2 + 3 * 4);         // 14   → acc = 44
+    acc = acc - ((2 + 3) * 4);       // 20   → acc = 24
+
+    return acc;                      // 24
+}

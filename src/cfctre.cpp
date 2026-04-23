@@ -3733,6 +3733,11 @@ void CTEngine::runPass(const Program* program) {
                 walkE(se->operand.get());
                 return;
             }
+            case ASTNodeType::RANGE_ANNOT_EXPR: {
+                auto* ra = static_cast<const RangeAnnotExpr*>(ex);
+                walkE(ra->inner.get());
+                return;
+            }
             default:
                 return;
             }

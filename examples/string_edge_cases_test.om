@@ -1,0 +1,40 @@
+// String builtins edge cases: empty string length, concatenation with
+// an empty string, indexing via char_at, equality.  Returns the count
+// of passing assertions.
+fn main() {
+    var r = 0;
+
+    // Empty string length.
+    var s = "";
+    if (len(s) == 0) { r = r + 1; }
+
+    // Empty + non-empty concatenation.
+    var s2 = "" + "hello";
+    if (len(s2) == 5) { r = r + 1; }
+
+    // Non-empty + empty concatenation.
+    var s3 = "world" + "";
+    if (len(s3) == 5) { r = r + 1; }
+
+    // Simple equality.
+    if ("abc" == "abc") { r = r + 1; }
+    if ("abc" != "abd") { r = r + 1; }
+
+    // First character via char_at (104 == 'h').
+    var hello = "hello";
+    if (char_at(hello, 0) == 104) { r = r + 1; }
+    // Last character (111 == 'o').
+    if (char_at(hello, 4) == 111) { r = r + 1; }
+
+    // Concatenation of literals.
+    var combined = "foo" + "bar";
+    if (len(combined) == 6) { r = r + 1; }
+    if (char_at(combined, 0) == 102) { r = r + 1; } // 'f'
+    if (char_at(combined, 3) == 98)  { r = r + 1; } // 'b'
+
+    // Length of a numeric-looking string.
+    var num = "12345";
+    if (len(num) == 5) { r = r + 1; }
+
+    return r;  // 11
+}

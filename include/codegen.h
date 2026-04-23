@@ -57,6 +57,8 @@ struct OptStats {
     unsigned constFolded      = 0; ///< Expressions folded to compile-time constants
     unsigned callsInlined     = 0; ///< Call sites inlined
     unsigned escapeStackAllocs = 0; ///< Array/struct allocations moved to stack (escape analysis)
+    unsigned roGlobalArrays   = 0; ///< Read-only array literals bound directly to a private global (no alloc, no copy)
+    unsigned foreachRangeFused = 0; ///< `for x in range(a,b)` lowered to a direct counting loop (no array alloc)
     unsigned loopsFused       = 0; ///< Loop pairs fused by the @fuse pre-pass
     unsigned borrowsFrozen    = 0; ///< Variables frozen (freeze + alias propagation)
     unsigned independentLoops = 0; ///< Loops annotated with @independent
@@ -90,6 +92,8 @@ struct OptStats {
                   << "  const-folded expressions : " << constFolded << "\n"
                   << "  calls inlined            : " << callsInlined << "\n"
                   << "  stack allocs (escape)    : " << escapeStackAllocs << "\n"
+                  << "  ro-global arrays         : " << roGlobalArrays << "\n"
+                  << "  foreach-range fused      : " << foreachRangeFused << "\n"
                   << "  loops fused              : " << loopsFused << "\n"
                   << "  borrows frozen           : " << borrowsFrozen << "\n"
                   << "  independent loops        : " << independentLoops << "\n"
@@ -287,6 +291,16 @@ class CodeGenerator {
     /// allows explicitly disabling it even when those flags are present.
     void setHardwareGraphOpt(bool enable) {
         enableHGOE_ = enable;
+    }
+
+    /// Enable or disable the post-codegen LLVM IR optimization pipeline
+    /// (runOptimizationPasses()).  Default: true.  White-box unit tests that
+    /// inspect the raw IR emitted by the CodeGenerator (metadata, nuw/nsw
+    /// flags, load-bound annotations, loop-back-edge md) set this to false
+    /// so LLVM's own O1+ passes do not eliminate the very patterns the test
+    /// is verifying.
+    void setRunIRPasses(bool enable) {
+        runIRPasses_ = enable;
     }
 
     /// Enable PGO instrumentation generation mode.
@@ -971,6 +985,26 @@ class CodeGenerator {
     /// returns false when we can PROVE there is no escape.
     bool doesVarEscapeCurrentScope(const std::string& varName) const;
 
+    /// Returns true if the variable @p varName is the target of any
+    /// `varName[i] = ...` IndexAssign anywhere in the current function body
+    /// (recursing into nested blocks / if / while / for).  Conservative: if
+    /// the function body is unavailable, returns true.
+    bool doesVarHaveIndexAssign(const std::string& varName) const;
+
+    /// Returns true if every use of @p varName in the current function body
+    /// is provably read-only.  Allowed uses are:
+    ///   * `varName[i]` — IndexExpr read
+    ///   * `len(varName)` and other non-mutating built-in calls
+    ///   * Argument to a user function known-pure to the CTEngine
+    /// Disallowed uses (return false):
+    ///   * IndexAssign target on varName
+    ///   * Return varName / use in returned expression
+    ///   * Assignment of varName to another variable (creates alias)
+    ///   * Argument to a callee that may mutate, may unwind into mutating
+    ///     code, or whose effect we cannot prove is read-only
+    /// Used by the read-only-global array literal optimization.
+    bool doesVarHaveOnlyReadOnlyUses(const std::string& varName) const;
+
     /// Maximum number of array elements for stack allocation (prevents
     /// stack overflow from large arrays — 64 elements × 8 bytes = 512 B).
     static constexpr size_t kMaxStackArrayElements = 64;
@@ -979,9 +1013,21 @@ class CodeGenerator {
     /// is not called on them and bounds-check code uses the correct base.
     llvm::StringSet<> stackAllocatedArrays_;
 
+    /// Track which variables hold a pointer into a read-only global constant
+    /// array (no allocation, no copy: PtrToInt of @arr.ro.const).  These must
+    /// also be skipped from free() and any potential write would be UB; the
+    /// pre-pass that sets this guarantees no IndexAssign and no escape.
+    llvm::StringSet<> readOnlyGlobalArrays_;
+
     /// Hint flag set by generateVarDecl to tell generateArray to use alloca
     /// instead of malloc for the next array allocation.
     bool pendingArrayStackAlloc_ = false;
+
+    /// Hint flag set by generateVarDecl to tell generateArray to bind the
+    /// declared variable directly to a private read-only global constant
+    /// (no malloc, no alloca, no memcpy).  Mutually exclusive with
+    /// pendingArrayStackAlloc_; the pre-pass picks at most one.
+    bool pendingArrayReadOnlyGlobal_ = false;
 
     /// Returns true if @p expr statically resolves to a dict/map value.
     /// Used to route dict["key"] through map_get IR rather than array element IR.
@@ -1030,6 +1076,14 @@ class CodeGenerator {
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
     llvm::Value* generateReborrowExpr(ReborrowExpr* expr);
+
+    /// Lower `@range[lo, hi] expr` (RangeAnnotExpr).  Compile-time fails
+    /// when `expr` folds to an integer outside [lo, hi].  Otherwise emits
+    /// `llvm.assume(val >= lo && val <= hi)`, attaches `!range !{lo, hi+1}`
+    /// metadata to load/call results, and (when `lo >= 0`) records the
+    /// value in `nonNegValues_` so later passes can skip non-negativity
+    /// guards.  Pure hint: never affects correctness, only optimization.
+    llvm::Value* generateRangeAnnot(RangeAnnotExpr* expr);
 
     /// Loop fusion pre-pass: walk a BlockStmt's statement list and merge
     /// adjacent ForStmt pairs where both/either has loopHints.fuse=true,
@@ -1266,6 +1320,13 @@ class CodeGenerator {
     bool enableSuperopt_ = true;      // -fsuperopt / -fno-superopt (superoptimizer)
     unsigned superoptLevel_ = 2;      // -fsuperopt-level=0/1/2/3 (default: 2)
     bool enableHGOE_ = true;          // -fhgoe / -fno-hgoe (hardware graph optimization)
+    bool runIRPasses_ = true;         // Run runOptimizationPasses() after codegen.
+                                       // Unit tests that inspect the raw IR
+                                       // emitted by the CodeGenerator (metadata,
+                                       // nuw/nsw flags, loop-back-edge md, etc.)
+                                       // set this to false so that LLVM's own
+                                       // passes do not eliminate the patterns
+                                       // the tests are verifying.
     unsigned preferredVectorWidth_ = 4; // SIMD vector width for loop hints (target-aware)
     std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file

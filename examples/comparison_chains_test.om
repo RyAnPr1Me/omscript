@@ -1,0 +1,37 @@
+// Comparison chaining + combined comparison operators.  Validates that
+// lexing/parsing of multi-operator chains (a < b < c etc.) behave as
+// documented, and that boolean results from comparisons compose safely
+// through &&/||.
+fn main() {
+    var a = 1;
+    var b = 5;
+    var c = 10;
+
+    var r = 0;
+
+    // Basic ordering.
+    if (a < b)  { r = r + 1; }    // r = 1
+    if (b < c)  { r = r + 1; }    // r = 2
+    if (a < c)  { r = r + 1; }    // r = 3
+
+    // Combined via &&.
+    if (a < b && b < c) { r = r + 10; }  // r = 13
+
+    // Negation.
+    if (!(c < a)) { r = r + 1; }  // r = 14
+
+    // Equality with different types of values.
+    if (a == 1 && b == 5 && c == 10) { r = r + 1; }  // r = 15
+
+    // != inequality.
+    if (a != b) { r = r + 1; }    // r = 16
+
+    // <= and >= boundary.
+    if (a <= a && a >= a) { r = r + 1; }  // r = 17
+    if (c >= b && b >= a) { r = r + 1; }  // r = 18
+
+    // Chained comparisons via parens.
+    if ((a < b) == 1 && (b > a) == 1) { r = r + 10; }  // r = 28
+
+    return r;
+}

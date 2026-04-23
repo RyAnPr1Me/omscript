@@ -4914,6 +4914,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
                 call->callee == "array_copy" || call->callee == "array_map" ||
                 call->callee == "array_filter" || call->callee == "array_slice" ||
                 call->callee == "push" || call->callee == "pop" ||
+                call->callee == "shift" || call->callee == "unshift" ||
                 call->callee == "sort" || call->callee == "reverse" ||
                 call->callee == "array_remove" || call->callee == "array_reduce" ||
                 call->callee == "str_split" || call->callee == "str_chars" ||
@@ -5436,6 +5437,45 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         const size_t numElements = expr->elements.size();
         const size_t totalSlots = 1 + numElements;
         const size_t totalBytes = totalSlots * 8;
+
+        // ── Read-only global fast path ──────────────────────────────────────
+        // Pre-pass (in codegen_stmt.cpp) detected that:
+        //   * every element is a compile-time integer literal,
+        //   * the variable does not escape the current function, and
+        //   * the variable is never the target of an IndexAssign.
+        // Bind the var directly to a private global constant of the form
+        // `[length, e0, e1, ...]` — no malloc, no alloca, no memcpy.  All
+        // subsequent index reads (`gep ptr, i+1`) read directly from the
+        // constant data section, which the LLVM backend can fold into
+        // immediate operands or wide loads.
+        if (pendingArrayReadOnlyGlobal_ && numElements >= 2 &&
+            optimizationLevel >= OptimizationLevel::O2) {
+            std::vector<llvm::Constant*> initVals;
+            initVals.reserve(totalSlots);
+            initVals.push_back(llvm::ConstantInt::get(getDefaultType(),
+                                                     static_cast<int64_t>(numElements)));
+            for (const auto& elem : expr->elements) {
+                int64_t v = 0;
+                if (elem->type == ASTNodeType::LITERAL_EXPR) {
+                    v = static_cast<LiteralExpr*>(elem.get())->intValue;
+                } else if (elem->type == ASTNodeType::UNARY_EXPR) {
+                    auto* un = static_cast<UnaryExpr*>(elem.get());
+                    if (un->op == "-" && un->operand &&
+                        un->operand->type == ASTNodeType::LITERAL_EXPR) {
+                        v = -static_cast<LiteralExpr*>(un->operand.get())->intValue;
+                    }
+                }
+                initVals.push_back(llvm::ConstantInt::get(getDefaultType(), v));
+            }
+            auto* arrTy = llvm::ArrayType::get(getDefaultType(), totalSlots);
+            auto* initArray = llvm::ConstantArray::get(arrTy, initVals);
+            auto* gv = new llvm::GlobalVariable(
+                *module, arrTy, /*isConstant=*/true,
+                llvm::GlobalValue::PrivateLinkage, initArray, "arr.ro.const");
+            gv->setAlignment(llvm::Align(16));
+            gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+            return builder->CreatePtrToInt(gv, getDefaultType(), "arr.ro.int");
+        }
 
         llvm::Value* arrPtr;
         if (pendingArrayStackAlloc_ &&

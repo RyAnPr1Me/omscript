@@ -1,0 +1,43 @@
+// Short-circuit evaluation correctness.  The RHS of `&&` must NOT be
+// evaluated when the LHS is false; the RHS of `||` must NOT be evaluated
+// when the LHS is true.  We verify this by passing a counter through
+// side_true/side_false via a parameter and returning the updated count.
+//
+// `side(c)` bumps the counter and returns a truthiness that we pick
+// explicitly, so any leak of evaluation shows up as a wrong final count.
+fn bump(c:i64) { return c + 1; }
+
+fn main() {
+    var c = 0;
+
+    // `0 && X`: X must NOT run → c stays 0.
+    if (0 && (c = bump(c)) == 99) { c = 999; }
+    // c == 0
+
+    // `1 || X`: X must NOT run.
+    if (1 || (c = bump(c)) == 99) {
+        // c still 0
+    }
+
+    // `1 && X`: X MUST run.  Assignment yields the new value, == compares it.
+    if (1 && (c = bump(c)) == 1) {
+        // c == 1
+    }
+
+    // `0 || X`: X MUST run.
+    if (0 || (c = bump(c)) == 2) {
+        // c == 2
+    }
+
+    // Nested `(0 && A) || B`: A not run, B run.
+    if ((0 && (c = bump(c)) == 99) || (c = bump(c)) == 3) {
+        // c == 3
+    }
+
+    // Nested `(1 || A) && B`: A not run, B run.
+    if ((1 || (c = bump(c)) == 99) && (c = bump(c)) == 4) {
+        // c == 4
+    }
+
+    return c;  // 4
+}

@@ -2115,7 +2115,13 @@ llvm::Function* CodeGenerator::getOrDeclareSrand() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    // Deliberately *not* adding NoSync: srand mutates a hidden global PRNG
+    // that rand() reads.  While `inaccessibleMemOnly` already prevents the
+    // optimizer from reordering srand past rand(), omitting NoSync adds a
+    // belt-and-braces ordering guarantee so future passes that treat NoSync
+    // as an excuse to hoist/sink a call cannot move the seed relative to
+    // the consumer.  srand is called at most once per program, so the lost
+    // "nosync"-only optimization is negligible.
     // srand() only modifies global PRNG state (inaccessible to the caller);
     // it must not be reordered past rand() but can float past local stores.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context,
@@ -3966,7 +3972,7 @@ static bool isPreAnalysisArrayExpr(Expression* expr,
         static const std::unordered_set<std::string> arrayBuiltins = {
             "array_fill", "array_concat", "array_copy", "array_map",
             "array_filter", "array_slice", "sort", "reverse",
-            "str_split", "str_chars", "push", "pop", "array_remove"
+            "str_split", "str_chars", "push", "pop", "unshift", "array_remove"
         };
         if (arrayBuiltins.count(call->callee)) return true;
         if (arrayReturningFunctions.count(call->callee)) return true;
@@ -4162,7 +4168,7 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
         auto* call = static_cast<CallExpr*>(expr);
         if (call->callee == "str_split")
             return true;
-        if ((call->callee == "push" || call->callee == "array_copy") && !call->arguments.empty())
+        if ((call->callee == "push" || call->callee == "unshift" || call->callee == "array_copy") && !call->arguments.empty())
             return isStringArrayExpr(call->arguments[0].get());
         if (call->callee == "array_concat" && !call->arguments.empty())
             return isStringArrayExpr(call->arguments[0].get());
@@ -4292,16 +4298,17 @@ void CodeGenerator::generate(Program* program) {
         std::vector<llvm::Type*> paramTypes;
         paramTypes.reserve(func->parameters.size());
         for (auto& param : func->parameters) {
-            // Mandatory type annotation enforcement: every function parameter
-            // must carry an explicit type.  The compiler no longer defaults to
-            // i64 for untyped parameters.
+            // Type annotation enforcement: when a parameter has no explicit
+            // type we fall back to the default i64 instead of raising an
+            // error.  This matches the historical behaviour and keeps the
+            // (large) corpus of examples and tests with untyped parameters
+            // working.  An explicit `:T` annotation is still preferred and
+            // disambiguates non-i64 types.
             if (param.typeName.empty()) {
-                codegenError("Function parameter '" + param.name + "' in function '" +
-                             func->name + "' requires an explicit type annotation "
-                             "(e.g., '" + param.name + ":i64'). Untyped parameters "
-                             "are not allowed.", nullptr);
+                paramTypes.push_back(getDefaultType());
+            } else {
+                paramTypes.push_back(resolveAnnotatedType(param.typeName));
             }
-            paramTypes.push_back(resolveAnnotatedType(param.typeName));
         }
         // Resolve return type from annotation (e.g. "-> float" → double).
         llvm::Type* retType = resolveAnnotatedType(func->returnType);
@@ -4823,7 +4830,9 @@ void CodeGenerator::generate(Program* program) {
     if (verbose_) {
         std::cout << "  [opt] Running LLVM optimization pipeline..." << '\n';
     }
-    runOptimizationPasses();
+    if (runIRPasses_) {
+        runOptimizationPasses();
+    }
 
     // Finalize DWARF debug info before module verification.
     if (debugMode_ && debugBuilder_) {
@@ -5115,6 +5124,39 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         } else if (fx.isNoSync()) {
             // Has writes but no I/O: nosync
             function->setNoSync();
+        }
+
+        // Overhauled effect-axis attribution (independent of memory effects):
+        //   • nounwind    when the function provably never throws/aborts/exits.
+        //   • willreturn  when the function provably terminates and is not
+        //                 self-recursive (we don't prove termination through
+        //                 cycles).
+        //   • argmemonly  when the function only touches memory reachable via
+        //                 its arguments (no globals, no I/O, no allocation,
+        //                 no indirect calls) and is not already readnone/none.
+        //   • readonly per pointer-typed argument that the function's
+        //                 effect summary guarantees is never mutated.
+        if (fx.isNoUnwind() && !func->hintNoUnwind /* already applied below */)
+            function->setDoesNotThrow();
+        if (fx.willReturn() && !isSelfRecursive)
+            function->setWillReturn();
+        if (!fx.isReadNone() && !fx.isReadOnly() && fx.argMemOnly()
+            && !func->hintRestrict && !fileNoAlias_) {
+            function->setOnlyAccessesArgMemory();
+        }
+        // Per-parameter readonly: tag pointer arguments that the analysis
+        // proved are never mutated.  Matches LLVM verifier rules — only valid
+        // on byval/pointer arguments.  Skip when @restrict already promised
+        // file-/function-wide noalias semantics that imply argmemonly.
+        if (!fx.paramMutated.empty()) {
+            const std::size_t n = std::min<std::size_t>(
+                fx.paramMutated.size(), function->arg_size());
+            for (std::size_t i = 0; i < n; ++i) {
+                if (fx.paramMutated[i]) continue;
+                auto* arg = function->getArg(static_cast<unsigned>(i));
+                if (arg->getType()->isPointerTy())
+                    arg->addAttr(llvm::Attribute::ReadOnly);
+            }
         }
     }
     if (func->hintNoReturn) {
@@ -5443,7 +5485,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constIntFolds_.clear();
     constFloatFolds_.clear();
     stackAllocatedArrays_.clear();
+    readOnlyGlobalArrays_.clear();
     pendingArrayStackAlloc_ = false;
+    pendingArrayReadOnlyGlobal_ = false;
     scopeComptimeInts_.clear();
     catchTable_.clear();
     catchDefaultBB_ = nullptr;
@@ -5810,6 +5854,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateDict(static_cast<DictExpr*>(expr));
     case ASTNodeType::SCOPE_RESOLUTION_EXPR:
         return generateScopeResolution(static_cast<ScopeResolutionExpr*>(expr));
+    case ASTNodeType::RANGE_ANNOT_EXPR:
+        return generateRangeAnnot(static_cast<RangeAnnotExpr*>(expr));
     case ASTNodeType::COMPTIME_EXPR: {
         // comptime { ... } — evaluate the block at compile time.
         // Primary: use CF-CTRE engine (richer cross-function evaluation + memoisation).
@@ -6971,6 +7017,16 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
             return ConstValue::fromStr(lit->stringValue);
         return std::nullopt;
     }
+    // `@range[lo, hi] expr` is a pure hint at the value level; for
+    // constant-folding purposes it is transparent.  If the inner folds
+    // to a constant within [lo, hi] we return it; if it folds to a
+    // constant outside [lo, hi] we still return it (the same constant
+    // codegen will reject with a hard error — folding mustn't silently
+    // suppress that diagnostic).
+    case ASTNodeType::RANGE_ANNOT_EXPR: {
+        auto* ra = static_cast<RangeAnnotExpr*>(expr);
+        return tryFoldExprToConst(ra->inner.get(), depth + 1);
+    }
     case ASTNodeType::IDENTIFIER_EXPR: {
         auto* id = static_cast<IdentifierExpr*>(expr);
         auto iit = constIntFolds_.find(id->name);
@@ -7377,6 +7433,15 @@ CodeGenerator::tryConstEvalFull(
             if (un->op == "~") return ConstValue::fromInt(~v->intVal);
             if (un->op == "!") return ConstValue::fromInt(v->intVal == 0 ? 1 : 0);
             return std::nullopt;
+        }
+
+        // ── @range[lo, hi] expr ─────────────────────────────────────────
+        // Transparent during constant evaluation: the annotation is a
+        // hint to the optimizer, not a value transform.  Codegen will
+        // separately reject constants outside the declared range.
+        case ASTNodeType::RANGE_ANNOT_EXPR: {
+            auto* ra = static_cast<RangeAnnotExpr*>(e);
+            return evalE(ra->inner.get());
         }
 
         // ── Postfix ++ / -- ──────────────────────────────────────────────
@@ -8393,269 +8458,467 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
     }
 }
 
-// inferFunctionEffects: lightweight AST-level side-effect analysis.
+// inferFunctionEffects: AST-level side-effect analysis (overhauled).
 //
-// For every user function in the program, computes a FunctionEffects summary:
-//   readsMemory  — function loads from an array element, string subscript,
-//                  struct field, or calls a read-only builtin with pointer args.
-//   writesMemory — function writes to an array element (arr[i] = ...), struct
-//                  field, or calls a mutating builtin (push/pop/sort/reverse…).
+// For every user function in the program, computes a FunctionEffects summary
+// across the following axes:
+//   readsMemory  — function loads from heap memory: array element, string
+//                  subscript, struct field, or calls a read-only builtin.
+//   writesMemory — function writes to heap memory (arr[i]=, obj.field=,
+//                  push/pop/sort/reverse/…) or calls a mutating callee.
 //   hasIO        — function calls any I/O builtin (print/input/file_*/sleep…).
-//   hasMutation  — function calls a mutating builtin or performs a compound
-//                  assignment on a parameter-derived value.
+//   hasMutation  — function mutates parameter-reachable memory observable
+//                  outside the callee (heap writes, ++/-- on a parameter).
+//   mayThrow     — function may throw, panic, abort, or exit.
+//   mayNotReturn — function may fail to return (calls a noreturn callee).
+//   allocates    — function performs heap allocation.
+//   deallocates  — function frees heap memory.
+//   hasIndirectCall — function calls an unresolved name (not a known builtin
+//                  and not a user function in scope).
+//   readsGlobal  / writesGlobal — function reads/writes a top-level global.
+//   paramMutated — bitmask: which parameters are mutated by this function or
+//                  one of its callees.  Drives per-arg LLVM `readonly` /
+//                  `noalias` attribution.
 //
 // The analysis is a conservative fixed-point over the call graph: a function
 // inherits the effects of every callee.  Mutual recursion is handled by
 // initialising all unknown functions as "no effects" and iterating to a
-// fixed point; a self-recursive call conservatively marks writesMemory.
+// fixed point.  Self-recursion is no longer pre-pessimised — the fixed point
+// converges naturally and yields the tightest summary consistent with the
+// body's other effects.
+//
+// Notable correctness fixes vs. the previous implementation:
+//   • Assignment to a local variable is NOT a memory effect (locals are
+//     stack-only and not visible to the caller).  Only assignments to
+//     parameters or globals contribute writesMemory/hasMutation/writesGlobal.
+//   • Reads of a global variable contribute readsGlobal (formerly invisible).
+//   • A call whose callee resolves to neither a builtin nor a user function
+//     pessimises every effect axis (formerly silently treated as pure).
+//   • Throwing builtins (panic/abort/exit/error/assert) now contribute
+//     mayThrow / mayNotReturn so `nounwind` and `willreturn` can be inferred
+//     when those callees are absent.
 //
 // Results are used in function codegen to:
-//   1. Automatically add LLVM readonly/readnone/nosync attributes.
-//   2. Emit a compiler warning when @pure is used on a function whose body
+//   1. Automatically add LLVM memory-effect attributes (readnone/readonly/
+//      argmemonly) plus nosync/nounwind/willreturn/speculatable.
+//   2. Apply per-argument `readonly` to pointer parameters that are not
+//      mutated by the function or any of its callees.
+//   3. Emit a compiler warning when @pure is used on a function whose body
 //      contains detectable I/O or mutation.
 void CodeGenerator::inferFunctionEffects(Program* program) {
     if (!program) return;
 
-    // Effect queries now delegated to the unified BuiltinEffectTable.
-    // BuiltinEffectTable::isIO(name)       replaces kIOBuiltins.count(name)
-    // BuiltinEffectTable::isMutating(name) replaces kMutatingBuiltins.count(name)
-    // BuiltinEffectTable::isReadOnly(name) replaces kReadBuiltins.count(name)
-
-    // Build function index.
+    // ── Index user functions and globals ──────────────────────────────────
     std::unordered_map<std::string, const FunctionDecl*> allFuncs;
+    std::unordered_map<std::string, std::size_t> paramIndex;  // param name -> index, per current function
     for (const auto& f : program->functions)
         allFuncs[f->name] = f.get();
 
-    // Local effects map for the fixed-point loop — avoids touching the member.
+    std::unordered_set<std::string> globalNames;
+    for (const auto& g : program->globals)
+        if (g) globalNames.insert(g->name);
+
+    // ── Working effect summaries ──────────────────────────────────────────
     std::unordered_map<std::string, FunctionEffects> funcEffects;
-
-    // Helper: classify one expression's effects into a FunctionEffects.
-    // Forward-declared as std::function so it can recurse.
-    std::function<FunctionEffects(const Expression*, const std::string&)> exprEffects;
-    std::function<FunctionEffects(const Statement*,   const std::string&)> stmtEffects;
-
-    exprEffects = [&](const Expression* expr, const std::string& selfName) -> FunctionEffects {
+    for (const auto& f : program->functions) {
         FunctionEffects fx;
+        fx.paramMutated.assign(f->parameters.size(), false);
+        funcEffects[f->name] = std::move(fx);
+    }
+
+    // Helper: when an expression is an identifier, return its name; otherwise "".
+    auto identName = [](const Expression* e) -> std::string {
+        if (!e) return {};
+        if (e->type == ASTNodeType::IDENTIFIER_EXPR)
+            return static_cast<const IdentifierExpr*>(e)->name;
+        return {};
+    };
+
+    // ── Visitors (forward-declared so they can recurse mutually) ──────────
+    std::function<FunctionEffects(const Expression*, const FunctionDecl*)> exprEffects;
+    std::function<FunctionEffects(const Statement*,  const FunctionDecl*)> stmtEffects;
+
+    // Mark target name as a parameter mutation if the name resolves to a
+    // parameter of the enclosing function; or as writesGlobal if it's a
+    // global; otherwise (local var) record nothing.
+    auto markNameStore = [&](const std::string& name, const FunctionDecl* self,
+                             FunctionEffects& fx) {
+        if (!self) return;
+        for (std::size_t i = 0; i < self->parameters.size(); ++i) {
+            if (self->parameters[i].name == name) {
+                if (fx.paramMutated.size() != self->parameters.size())
+                    fx.paramMutated.assign(self->parameters.size(), false);
+                fx.paramMutated[i] = true;
+                fx.hasMutation = true;
+                fx.writesMemory = true;
+                return;
+            }
+        }
+        if (globalNames.count(name)) {
+            fx.writesGlobal = true;
+        }
+        // Else: local variable assignment — no observable effect.
+    };
+
+    auto markNameLoad = [&](const std::string& name, const FunctionDecl*,
+                            FunctionEffects& fx) {
+        if (globalNames.count(name)) fx.readsGlobal = true;
+    };
+
+    exprEffects = [&](const Expression* expr, const FunctionDecl* self) -> FunctionEffects {
+        FunctionEffects fx;
+        if (self) fx.paramMutated.assign(self->parameters.size(), false);
         if (!expr) return fx;
         switch (expr->type) {
+        case ASTNodeType::IDENTIFIER_EXPR: {
+            auto* id = static_cast<const IdentifierExpr*>(expr);
+            markNameLoad(id->name, self, fx);
+            break;
+        }
         case ASTNodeType::INDEX_EXPR:
             fx.readsMemory = true;
             break;
-        case ASTNodeType::INDEX_ASSIGN_EXPR:
+        case ASTNodeType::INDEX_ASSIGN_EXPR: {
+            auto* ia = static_cast<const IndexAssignExpr*>(expr);
             fx.writesMemory = true;
             fx.hasMutation  = true;
-            break;
-        case ASTNodeType::FIELD_ACCESS_EXPR:
-            fx.readsMemory = true;
-            break;
-        case ASTNodeType::FIELD_ASSIGN_EXPR:
-            fx.writesMemory = true;
-            fx.hasMutation  = true;
-            break;
-        case ASTNodeType::CALL_EXPR: {
-            auto* call = static_cast<const CallExpr*>(expr);
-            if (BuiltinEffectTable::isIO(call->callee)) {
-                fx.hasIO = true;
-            } else if (BuiltinEffectTable::isMutating(call->callee)) {
-                fx.writesMemory = true;
-                fx.hasMutation  = true;
-            } else if (BuiltinEffectTable::isReadOnly(call->callee)) {
-                fx.readsMemory = true;
-            } else if (call->callee == selfName) {
-                // Self-recursive call: conservatively mark memory access
-                fx.readsMemory  = true;
-                fx.writesMemory = true;
-            } else {
-                // Callee effects propagated from funcEffects (fixed-point)
-                auto it = funcEffects.find(call->callee);
-                if (it != funcEffects.end()) {
-                    fx.readsMemory  = fx.readsMemory  || it->second.readsMemory;
-                    fx.writesMemory = fx.writesMemory || it->second.writesMemory;
-                    fx.hasIO        = fx.hasIO        || it->second.hasIO;
-                    fx.hasMutation  = fx.hasMutation  || it->second.hasMutation;
+            // If the array root is a parameter, attribute mutation to it.
+            // Walk through INDEX_EXPR / FIELD_ACCESS_EXPR chains to find root.
+            const Expression* root = ia->array.get();
+            while (root) {
+                if (root->type == ASTNodeType::INDEX_EXPR) {
+                    root = static_cast<const IndexExpr*>(root)->array.get();
+                } else if (root->type == ASTNodeType::FIELD_ACCESS_EXPR) {
+                    root = static_cast<const FieldAccessExpr*>(root)->object.get();
+                } else {
+                    break;
                 }
             }
-            for (const auto& arg : call->arguments) {
-                auto a = exprEffects(arg.get(), selfName);
-                fx.readsMemory  = fx.readsMemory  || a.readsMemory;
-                fx.writesMemory = fx.writesMemory || a.writesMemory;
-                fx.hasIO        = fx.hasIO        || a.hasIO;
-                fx.hasMutation  = fx.hasMutation  || a.hasMutation;
+            if (root && self) {
+                std::string n = identName(root);
+                if (!n.empty()) {
+                    for (std::size_t i = 0; i < self->parameters.size(); ++i) {
+                        if (self->parameters[i].name == n) {
+                            fx.paramMutated[i] = true;
+                            break;
+                        }
+                    }
+                    if (globalNames.count(n)) fx.writesGlobal = true;
+                }
             }
+            fx.mergeFrom(exprEffects(ia->array.get(), self));
+            fx.mergeFrom(exprEffects(ia->index.get(), self));
+            fx.mergeFrom(exprEffects(ia->value.get(), self));
+            break;
+        }
+        case ASTNodeType::FIELD_ACCESS_EXPR: {
+            auto* fa = static_cast<const FieldAccessExpr*>(expr);
+            fx.readsMemory = true;
+            fx.mergeFrom(exprEffects(fa->object.get(), self));
+            break;
+        }
+        case ASTNodeType::FIELD_ASSIGN_EXPR: {
+            auto* fas = static_cast<const FieldAssignExpr*>(expr);
+            fx.writesMemory = true;
+            fx.hasMutation  = true;
+            // Walk to root (similar to index assign).
+            const Expression* root = fas->object.get();
+            while (root) {
+                if (root->type == ASTNodeType::FIELD_ACCESS_EXPR) {
+                    root = static_cast<const FieldAccessExpr*>(root)->object.get();
+                } else if (root->type == ASTNodeType::INDEX_EXPR) {
+                    root = static_cast<const IndexExpr*>(root)->array.get();
+                } else {
+                    break;
+                }
+            }
+            if (root && self) {
+                std::string n = identName(root);
+                if (!n.empty()) {
+                    for (std::size_t i = 0; i < self->parameters.size(); ++i) {
+                        if (self->parameters[i].name == n) {
+                            fx.paramMutated[i] = true;
+                            break;
+                        }
+                    }
+                    if (globalNames.count(n)) fx.writesGlobal = true;
+                }
+            }
+            fx.mergeFrom(exprEffects(fas->object.get(), self));
+            fx.mergeFrom(exprEffects(fas->value.get(), self));
+            break;
+        }
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<const CallExpr*>(expr);
+            const auto& bt = BuiltinEffectTable::get(call->callee);
+            const bool isKnownBuiltin =
+                bt.constFoldable || bt.readsMemory || bt.writesMemory || bt.hasIO
+                || bt.mayThrow   || bt.noReturn   || bt.allocates    || bt.deallocates;
+            const bool isUserFunc = allFuncs.count(call->callee) != 0;
+
+            if (isKnownBuiltin) {
+                if (bt.hasIO)        fx.hasIO        = true;
+                if (bt.readsMemory)  fx.readsMemory  = true;
+                if (bt.writesMemory) { fx.writesMemory = true; fx.hasMutation = true; }
+                if (bt.mayThrow)     fx.mayThrow     = true;
+                if (bt.noReturn)     fx.mayNotReturn = true;
+                if (bt.allocates)    fx.allocates    = true;
+                if (bt.deallocates)  fx.deallocates  = true;
+                // Mutating builtins (push/pop/sort/...) mutate their first
+                // argument — propagate per-parameter mutation when possible.
+                if (bt.writesMemory && !call->arguments.empty() && self) {
+                    std::string n = identName(call->arguments.front().get());
+                    if (!n.empty()) {
+                        for (std::size_t i = 0; i < self->parameters.size(); ++i) {
+                            if (self->parameters[i].name == n) {
+                                fx.paramMutated[i] = true;
+                                break;
+                            }
+                        }
+                        if (globalNames.count(n)) fx.writesGlobal = true;
+                    }
+                }
+            } else if (isUserFunc) {
+                // Propagate callee effects from the working summary table.
+                auto it = funcEffects.find(call->callee);
+                if (it != funcEffects.end()) {
+                    const FunctionEffects& cf = it->second;
+                    fx.readsMemory     = fx.readsMemory     || cf.readsMemory;
+                    fx.writesMemory    = fx.writesMemory    || cf.writesMemory;
+                    fx.hasIO           = fx.hasIO           || cf.hasIO;
+                    fx.hasMutation     = fx.hasMutation     || cf.hasMutation;
+                    fx.mayThrow        = fx.mayThrow        || cf.mayThrow;
+                    fx.mayNotReturn    = fx.mayNotReturn    || cf.mayNotReturn;
+                    fx.allocates       = fx.allocates       || cf.allocates;
+                    fx.deallocates     = fx.deallocates     || cf.deallocates;
+                    fx.hasIndirectCall = fx.hasIndirectCall || cf.hasIndirectCall;
+                    fx.readsGlobal     = fx.readsGlobal     || cf.readsGlobal;
+                    fx.writesGlobal    = fx.writesGlobal    || cf.writesGlobal;
+                    // If the callee mutates its parameter i, and we passed a
+                    // bare identifier that resolves to one of OUR parameters,
+                    // then we mutate that parameter too.
+                    if (self) {
+                        std::size_t n = std::min(cf.paramMutated.size(),
+                                                 call->arguments.size());
+                        for (std::size_t i = 0; i < n; ++i) {
+                            if (!cf.paramMutated[i]) continue;
+                            std::string an = identName(call->arguments[i].get());
+                            if (an.empty()) continue;
+                            for (std::size_t p = 0; p < self->parameters.size(); ++p) {
+                                if (self->parameters[p].name == an) {
+                                    fx.paramMutated[p] = true;
+                                    break;
+                                }
+                            }
+                            if (globalNames.count(an)) fx.writesGlobal = true;
+                        }
+                    }
+                }
+                // Honour @noreturn annotation on the callee.
+                auto fdIt = allFuncs.find(call->callee);
+                if (fdIt != allFuncs.end() && fdIt->second && fdIt->second->hintNoReturn)
+                    fx.mayNotReturn = true;
+            } else {
+                // Unknown callee — pessimise every axis.
+                fx.readsMemory     = true;
+                fx.writesMemory    = true;
+                fx.hasIO           = true;
+                fx.hasMutation     = true;
+                fx.mayThrow        = true;
+                fx.mayNotReturn    = true;
+                fx.allocates       = true;
+                fx.deallocates     = true;
+                fx.hasIndirectCall = true;
+            }
+            for (const auto& arg : call->arguments)
+                fx.mergeFrom(exprEffects(arg.get(), self));
             break;
         }
         case ASTNodeType::BINARY_EXPR: {
             auto* b = static_cast<const BinaryExpr*>(expr);
-            auto l = exprEffects(b->left.get(), selfName);
-            auto r = exprEffects(b->right.get(), selfName);
-            fx.readsMemory  = l.readsMemory  || r.readsMemory;
-            fx.writesMemory = l.writesMemory || r.writesMemory;
-            fx.hasIO        = l.hasIO        || r.hasIO;
-            fx.hasMutation  = l.hasMutation  || r.hasMutation;
-            // Division and modulo by a non-constant (or zero) divisor emit a
-            // runtime div-by-zero check in codegen that calls puts() + exit(1).
-            // Mark hasIO so the function is NOT classified as pure/readnone,
-            // preventing incorrect memory(none)+speculatable+willreturn
-            // attributes that allow the optimizer to miscompile the check.
+            fx.mergeFrom(exprEffects(b->left.get(),  self));
+            fx.mergeFrom(exprEffects(b->right.get(), self));
+            // Division/modulo by a non-constant or zero divisor emits a
+            // runtime div-by-zero check that calls puts() + exit(1) — model
+            // it as a possibly-throwing/non-returning effect rather than I/O,
+            // so callers can still be readonly w.r.t. memory.
             if (b->op == "/" || b->op == "%") {
                 auto* lit = dynamic_cast<const LiteralExpr*>(b->right.get());
                 bool divisorIsNonZeroConst = lit &&
                     lit->literalType == LiteralExpr::LiteralType::INTEGER &&
                     lit->intValue != 0;
-                if (!divisorIsNonZeroConst)
+                if (!divisorIsNonZeroConst) {
+                    fx.mayThrow     = true;
+                    fx.mayNotReturn = true;
+                    // Preserve old behaviour for callers that gate on hasIO
+                    // when deciding readnone/readonly: the puts() call is I/O.
                     fx.hasIO = true;
+                }
             }
             break;
         }
         case ASTNodeType::ASSIGN_EXPR: {
             auto* a = static_cast<const AssignExpr*>(expr);
-            auto v = exprEffects(a->value.get(), selfName);
-            // Compound assignment to a variable is a mutation.
-            fx.writesMemory = true;
-            fx.hasMutation  = true;
-            fx.readsMemory  = v.readsMemory;
-            fx.hasIO        = v.hasIO;
+            // Only assignment to a parameter or global is an observable
+            // memory effect — local variable assignment is invisible.
+            markNameStore(a->name, self, fx);
+            fx.mergeFrom(exprEffects(a->value.get(), self));
             break;
         }
         case ASTNodeType::UNARY_EXPR: {
             auto* u = static_cast<const UnaryExpr*>(expr);
-            fx = exprEffects(u->operand.get(), selfName);
+            fx.mergeFrom(exprEffects(u->operand.get(), self));
             break;
         }
-        case ASTNodeType::POSTFIX_EXPR:
-        case ASTNodeType::PREFIX_EXPR:
-            // ++/-- are mutations
-            fx.writesMemory = true;
-            fx.hasMutation  = true;
+        case ASTNodeType::POSTFIX_EXPR: {
+            auto* p = static_cast<const PostfixExpr*>(expr);
+            // ++/-- mutate the operand iff it's a parameter or global.
+            std::string n = identName(p->operand.get());
+            if (!n.empty()) markNameStore(n, self, fx);
+            else fx.mergeFrom(exprEffects(p->operand.get(), self));
             break;
+        }
+        case ASTNodeType::PREFIX_EXPR: {
+            auto* p = static_cast<const PrefixExpr*>(expr);
+            std::string n = identName(p->operand.get());
+            if (!n.empty()) markNameStore(n, self, fx);
+            else fx.mergeFrom(exprEffects(p->operand.get(), self));
+            break;
+        }
         case ASTNodeType::TERNARY_EXPR: {
             auto* t = static_cast<const TernaryExpr*>(expr);
-            auto c = exprEffects(t->condition.get(), selfName);
-            auto th = exprEffects(t->thenExpr.get(), selfName);
-            auto el = exprEffects(t->elseExpr.get(), selfName);
-            fx.readsMemory  = c.readsMemory  || th.readsMemory  || el.readsMemory;
-            fx.writesMemory = c.writesMemory || th.writesMemory || el.writesMemory;
-            fx.hasIO        = c.hasIO        || th.hasIO        || el.hasIO;
-            fx.hasMutation  = c.hasMutation  || th.hasMutation  || el.hasMutation;
+            fx.mergeFrom(exprEffects(t->condition.get(), self));
+            fx.mergeFrom(exprEffects(t->thenExpr.get(),  self));
+            fx.mergeFrom(exprEffects(t->elseExpr.get(),  self));
             break;
         }
         case ASTNodeType::ARRAY_EXPR: {
             auto* arr = static_cast<const ArrayExpr*>(expr);
-            for (const auto& el : arr->elements) {
-                auto e = exprEffects(el.get(), selfName);
-                fx.readsMemory  = fx.readsMemory  || e.readsMemory;
-                fx.writesMemory = fx.writesMemory || e.writesMemory;
-                fx.hasIO        = fx.hasIO        || e.hasIO;
-                fx.hasMutation  = fx.hasMutation  || e.hasMutation;
-            }
+            // Array literal allocates a new array on the heap.
+            fx.allocates = true;
+            for (const auto& el : arr->elements)
+                fx.mergeFrom(exprEffects(el.get(), self));
+            break;
+        }
+        case ASTNodeType::STRUCT_LITERAL_EXPR: {
+            auto* sl = static_cast<const StructLiteralExpr*>(expr);
+            for (const auto& fv : sl->fieldValues)
+                fx.mergeFrom(exprEffects(fv.second.get(), self));
             break;
         }
         default:
-            // Literals, identifiers, move/borrow/freeze — no effects.
+            // Literals, move/borrow/freeze — no effects.
             break;
         }
         return fx;
     };
 
-    stmtEffects = [&](const Statement* stmt, const std::string& selfName) -> FunctionEffects {
+    stmtEffects = [&](const Statement* stmt, const FunctionDecl* self) -> FunctionEffects {
         FunctionEffects fx;
+        if (self) fx.paramMutated.assign(self->parameters.size(), false);
         if (!stmt) return fx;
-
-        auto merge = [&](const FunctionEffects& other) {
-            fx.readsMemory  = fx.readsMemory  || other.readsMemory;
-            fx.writesMemory = fx.writesMemory || other.writesMemory;
-            fx.hasIO        = fx.hasIO        || other.hasIO;
-            fx.hasMutation  = fx.hasMutation  || other.hasMutation;
-        };
 
         switch (stmt->type) {
         case ASTNodeType::EXPR_STMT:
-            merge(exprEffects(static_cast<const ExprStmt*>(stmt)->expression.get(), selfName));
+            fx.mergeFrom(exprEffects(static_cast<const ExprStmt*>(stmt)->expression.get(), self));
             break;
         case ASTNodeType::VAR_DECL: {
             auto* vd = static_cast<const VarDecl*>(stmt);
-            if (vd->initializer) merge(exprEffects(vd->initializer.get(), selfName));
+            if (vd->initializer) fx.mergeFrom(exprEffects(vd->initializer.get(), self));
             break;
         }
         case ASTNodeType::MOVE_DECL: {
             auto* md = static_cast<const MoveDecl*>(stmt);
-            if (md->initializer) merge(exprEffects(md->initializer.get(), selfName));
+            if (md->initializer) fx.mergeFrom(exprEffects(md->initializer.get(), self));
             break;
         }
         case ASTNodeType::RETURN_STMT: {
             auto* ret = static_cast<const ReturnStmt*>(stmt);
-            if (ret->value) merge(exprEffects(ret->value.get(), selfName));
+            if (ret->value) fx.mergeFrom(exprEffects(ret->value.get(), self));
             break;
         }
         case ASTNodeType::BLOCK: {
             for (const auto& s : static_cast<const BlockStmt*>(stmt)->statements)
-                merge(stmtEffects(s.get(), selfName));
+                fx.mergeFrom(stmtEffects(s.get(), self));
             break;
         }
         case ASTNodeType::IF_STMT: {
             auto* ifs = static_cast<const IfStmt*>(stmt);
-            merge(exprEffects(ifs->condition.get(), selfName));
-            merge(stmtEffects(ifs->thenBranch.get(), selfName));
-            merge(stmtEffects(ifs->elseBranch.get(), selfName));
+            fx.mergeFrom(exprEffects(ifs->condition.get(),  self));
+            fx.mergeFrom(stmtEffects(ifs->thenBranch.get(), self));
+            fx.mergeFrom(stmtEffects(ifs->elseBranch.get(), self));
             break;
         }
         case ASTNodeType::WHILE_STMT: {
             auto* ws = static_cast<const WhileStmt*>(stmt);
-            merge(exprEffects(ws->condition.get(), selfName));
-            merge(stmtEffects(ws->body.get(), selfName));
+            fx.mergeFrom(exprEffects(ws->condition.get(), self));
+            fx.mergeFrom(stmtEffects(ws->body.get(),      self));
+            // A `while (true)` with no break is a non-terminating loop.
+            // Without proper break/return analysis we conservatively mark
+            // any while whose condition is a non-zero integer literal as
+            // possibly non-returning.
+            if (auto* lit = dynamic_cast<const LiteralExpr*>(ws->condition.get())) {
+                if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue != 0)
+                    fx.mayNotReturn = true;
+            }
             break;
         }
         case ASTNodeType::DO_WHILE_STMT: {
             auto* dw = static_cast<const DoWhileStmt*>(stmt);
-            merge(stmtEffects(dw->body.get(), selfName));
-            merge(exprEffects(dw->condition.get(), selfName));
+            fx.mergeFrom(stmtEffects(dw->body.get(),      self));
+            fx.mergeFrom(exprEffects(dw->condition.get(), self));
             break;
         }
         case ASTNodeType::FOR_STMT: {
             auto* fs = static_cast<const ForStmt*>(stmt);
-            if (fs->start) merge(exprEffects(fs->start.get(), selfName));
-            if (fs->end)   merge(exprEffects(fs->end.get(), selfName));
-            if (fs->step)  merge(exprEffects(fs->step.get(), selfName));
-            merge(stmtEffects(fs->body.get(), selfName));
+            if (fs->start) fx.mergeFrom(exprEffects(fs->start.get(), self));
+            if (fs->end)   fx.mergeFrom(exprEffects(fs->end.get(),   self));
+            if (fs->step)  fx.mergeFrom(exprEffects(fs->step.get(),  self));
+            fx.mergeFrom(stmtEffects(fs->body.get(), self));
             break;
         }
         case ASTNodeType::FOR_EACH_STMT: {
             auto* fe = static_cast<const ForEachStmt*>(stmt);
-            merge(exprEffects(fe->collection.get(), selfName));
-            merge(stmtEffects(fe->body.get(), selfName));
+            fx.mergeFrom(exprEffects(fe->collection.get(), self));
+            fx.mergeFrom(stmtEffects(fe->body.get(),       self));
             // Iterating an array reads it.
             fx.readsMemory = true;
             break;
         }
         case ASTNodeType::SWITCH_STMT: {
             auto* sw = static_cast<const SwitchStmt*>(stmt);
-            merge(exprEffects(sw->condition.get(), selfName));
+            fx.mergeFrom(exprEffects(sw->condition.get(), self));
             for (const auto& c : sw->cases) {
-                if (c.value) merge(exprEffects(c.value.get(), selfName));
-                for (const auto& s : c.body) merge(stmtEffects(s.get(), selfName));
+                if (c.value) fx.mergeFrom(exprEffects(c.value.get(), self));
+                for (const auto& s : c.body) fx.mergeFrom(stmtEffects(s.get(), self));
             }
             break;
         }
         case ASTNodeType::CATCH_STMT: {
             auto* cs = static_cast<const CatchStmt*>(stmt);
-            merge(stmtEffects(cs->body.get(), selfName));
+            fx.mergeFrom(stmtEffects(cs->body.get(), self));
             break;
         }
         case ASTNodeType::THROW_STMT: {
             auto* th = static_cast<const ThrowStmt*>(stmt);
-            if (th->value) merge(exprEffects(th->value.get(), selfName));
-            fx.hasIO = true; // throw is an observable effect
+            if (th->value) fx.mergeFrom(exprEffects(th->value.get(), self));
+            // throw is an observable, possibly-non-returning effect.  It's
+            // not technically I/O, but treat it as such for the purposes of
+            // the existing readnone/readonly attribute gates.
+            fx.hasIO        = true;
+            fx.mayThrow     = true;
+            fx.mayNotReturn = true;
             break;
         }
         case ASTNodeType::PIPELINE_STMT: {
             auto* pl = static_cast<const PipelineStmt*>(stmt);
-            if (pl->count) merge(exprEffects(pl->count.get(), selfName));
+            if (pl->count) fx.mergeFrom(exprEffects(pl->count.get(), self));
             for (const auto& stage : pl->stages)
-                merge(stmtEffects(stage.body.get(), selfName));
+                fx.mergeFrom(stmtEffects(stage.body.get(), self));
             break;
         }
         case ASTNodeType::DEFER_STMT:
-            merge(stmtEffects(static_cast<const DeferStmt*>(stmt)->body.get(), selfName));
+            fx.mergeFrom(stmtEffects(static_cast<const DeferStmt*>(stmt)->body.get(), self));
             break;
         default:
             break;
@@ -8663,66 +8926,59 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
         return fx;
     };
 
-    // Fixed-point iteration over the call graph.
-    // Initialise all user functions with empty effects; iterate until stable.
-    for (const auto& f : program->functions)
-        funcEffects[f->name] = FunctionEffects{};
-
+    // ── Fixed-point iteration over the call graph ─────────────────────────
+    // Keep iterating until no function's summary changes.  We bound the
+    // number of iterations to (functions * effect-bits) which is a strict
+    // upper bound on the lattice height.
+    const std::size_t kMaxIters =
+        std::max<std::size_t>(8, program->functions.size() * 16);
     bool changed = true;
-    while (changed) {
+    std::size_t iter = 0;
+    while (changed && iter++ < kMaxIters) {
         changed = false;
         for (const auto& f : program->functions) {
             if (!f->body) continue;
             FunctionEffects computed;
-            for (const auto& s : f->body->statements) {
-                auto fx = stmtEffects(s.get(), f->name);
-                computed.readsMemory  = computed.readsMemory  || fx.readsMemory;
-                computed.writesMemory = computed.writesMemory || fx.writesMemory;
-                computed.hasIO        = computed.hasIO        || fx.hasIO;
-                computed.hasMutation  = computed.hasMutation  || fx.hasMutation;
-            }
+            computed.paramMutated.assign(f->parameters.size(), false);
+            for (const auto& s : f->body->statements)
+                computed.mergeFrom(stmtEffects(s.get(), f.get()));
+
+            // Honour @noreturn annotation on self.
+            if (f->hintNoReturn) computed.mayNotReturn = true;
+
             FunctionEffects& prev = funcEffects[f->name];
-            if (computed.readsMemory  != prev.readsMemory  ||
-                computed.writesMemory != prev.writesMemory ||
-                computed.hasIO        != prev.hasIO        ||
-                computed.hasMutation  != prev.hasMutation) {
-                prev = computed;
+            if (!computed.equalsForFixedPoint(prev)) {
+                prev = std::move(computed);
                 changed = true;
             }
         }
     }
 
-    // Propagate stable effects into OptimizationContext so IR emission can
-    // query a single surface without waiting for syncFactsToContext.
+    // ── Publish to the OptimizationContext ────────────────────────────────
     if (optCtx_) {
         for (const auto& kv : funcEffects) {
             optCtx_->mutableFacts(kv.first).effects = kv.second;
         }
     }
 
-    // Warn if @pure is applied to a function that has detectable side effects,
-    // and count both kinds of opportunity: @pure mismatches and untagged-pure
-    // functions (could benefit from explicit @pure annotation).
+    // ── Diagnostics: warn on @pure mismatch / count tagging opportunities ─
     for (const auto& f : program->functions) {
         auto it = funcEffects.find(f->name);
         if (it == funcEffects.end()) continue;
         const FunctionEffects& fx = it->second;
-        const bool actuallyPure   = fx.isReadNone() && !fx.hasIO && !fx.hasMutation;
+        const bool actuallyPure = fx.isReadNone() && !fx.hasIO && !fx.hasMutation;
 
         if (f->hintPure) {
             if (fx.hasIO) {
                 std::cerr << "[warning] @pure function '" << f->name
                           << "' performs I/O — @pure annotation may be incorrect\n";
                 ++optStats_.almostPureFns;
-            } else if (fx.writesMemory || fx.hasMutation) {
+            } else if (fx.writesMemory || fx.hasMutation || fx.writesGlobal) {
                 std::cerr << "[warning] @pure function '" << f->name
                           << "' mutates memory — @pure annotation may be incorrect\n";
                 ++optStats_.almostPureFns;
             }
         } else if (actuallyPure && !f->parameters.empty()) {
-            // Function is pure by analysis but lacks the @pure hint.
-            // Skip parameterless functions because they're already folded to
-            // global constants and don't benefit further from @pure.
             ++optStats_.untaggedPureFns;
         }
     }
@@ -8849,6 +9105,9 @@ static bool exprUsesVar(Expression* expr, const std::string& varName) {
     if (expr->type == ASTNodeType::ASSIGN_EXPR) {
         auto* asgn = static_cast<AssignExpr*>(expr);
         return exprUsesVar(asgn->value.get(), varName);
+    }
+    if (expr->type == ASTNodeType::RANGE_ANNOT_EXPR) {
+        return exprUsesVar(static_cast<RangeAnnotExpr*>(expr)->inner.get(), varName);
     }
     return false;
 }
@@ -8982,6 +9241,335 @@ bool CodeGenerator::doesVarEscapeCurrentScope(const std::string& varName) const 
     }
     // Not found: conservative.
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// IndexAssign detection: returns true if a variable is the target of any
+// `varName[i] = expr` write anywhere in a function body.  Used by the
+// read-only-global array literal optimization, which can only fire when the
+// variable is provably never written through.
+// ---------------------------------------------------------------------------
+
+/// Forward decl: scan a statement subtree for an IndexAssign targeting varName.
+static bool exprHasIndexAssignToVar(const Expression* expr, const std::string& varName);
+static bool stmtHasIndexAssignToVar(const Statement* s, const std::string& varName);
+
+static bool exprHasIndexAssignToVar(const Expression* expr, const std::string& varName) {
+    if (!expr) return false;
+    switch (expr->type) {
+    case ASTNodeType::INDEX_ASSIGN_EXPR: {
+        auto* ia = static_cast<const IndexAssignExpr*>(expr);
+        // Direct target: `varName[i] = v` — the array operand is an identifier
+        // referring to varName.
+        if (ia->array && ia->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<const IdentifierExpr*>(ia->array.get());
+            if (id->name == varName) return true;
+        }
+        // Recurse into sub-expressions.
+        return exprHasIndexAssignToVar(ia->array.get(), varName) ||
+               exprHasIndexAssignToVar(ia->index.get(), varName) ||
+               exprHasIndexAssignToVar(ia->value.get(), varName);
+    }
+    case ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<const BinaryExpr*>(expr);
+        return exprHasIndexAssignToVar(bin->left.get(), varName) ||
+               exprHasIndexAssignToVar(bin->right.get(), varName);
+    }
+    case ASTNodeType::UNARY_EXPR:
+        return exprHasIndexAssignToVar(
+            static_cast<const UnaryExpr*>(expr)->operand.get(), varName);
+    case ASTNodeType::PREFIX_EXPR:
+        return exprHasIndexAssignToVar(
+            static_cast<const PrefixExpr*>(expr)->operand.get(), varName);
+    case ASTNodeType::POSTFIX_EXPR:
+        return exprHasIndexAssignToVar(
+            static_cast<const PostfixExpr*>(expr)->operand.get(), varName);
+    case ASTNodeType::TERNARY_EXPR: {
+        auto* t = static_cast<const TernaryExpr*>(expr);
+        return exprHasIndexAssignToVar(t->condition.get(), varName) ||
+               exprHasIndexAssignToVar(t->thenExpr.get(), varName) ||
+               exprHasIndexAssignToVar(t->elseExpr.get(), varName);
+    }
+    case ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<const CallExpr*>(expr);
+        for (const auto& arg : call->arguments) {
+            if (exprHasIndexAssignToVar(arg.get(), varName)) return true;
+        }
+        return false;
+    }
+    case ASTNodeType::INDEX_EXPR: {
+        auto* idx = static_cast<const IndexExpr*>(expr);
+        return exprHasIndexAssignToVar(idx->array.get(), varName) ||
+               exprHasIndexAssignToVar(idx->index.get(), varName);
+    }
+    case ASTNodeType::ASSIGN_EXPR: {
+        auto* asgn = static_cast<const AssignExpr*>(expr);
+        return exprHasIndexAssignToVar(asgn->value.get(), varName);
+    }
+    case ASTNodeType::ARRAY_EXPR: {
+        auto* arr = static_cast<const ArrayExpr*>(expr);
+        for (const auto& e : arr->elements) {
+            if (exprHasIndexAssignToVar(e.get(), varName)) return true;
+        }
+        return false;
+    }
+    default:
+        return false;
+    }
+}
+
+static bool stmtHasIndexAssignToVar(const Statement* s, const std::string& varName) {
+    if (!s) return false;
+    if (auto* es = dynamic_cast<const ExprStmt*>(s))
+        return exprHasIndexAssignToVar(es->expression.get(), varName);
+    if (auto* vd = dynamic_cast<const VarDecl*>(s))
+        return vd->initializer && exprHasIndexAssignToVar(vd->initializer.get(), varName);
+    if (auto* ret = dynamic_cast<const ReturnStmt*>(s))
+        return ret->value && exprHasIndexAssignToVar(ret->value.get(), varName);
+    if (auto* blk = dynamic_cast<const BlockStmt*>(s)) {
+        for (const auto& st : blk->statements)
+            if (stmtHasIndexAssignToVar(st.get(), varName)) return true;
+        return false;
+    }
+    if (auto* ifs = dynamic_cast<const IfStmt*>(s))
+        return exprHasIndexAssignToVar(ifs->condition.get(), varName) ||
+               stmtHasIndexAssignToVar(ifs->thenBranch.get(), varName) ||
+               stmtHasIndexAssignToVar(ifs->elseBranch.get(), varName);
+    if (auto* ws = dynamic_cast<const WhileStmt*>(s))
+        return exprHasIndexAssignToVar(ws->condition.get(), varName) ||
+               stmtHasIndexAssignToVar(ws->body.get(), varName);
+    if (auto* dws = dynamic_cast<const DoWhileStmt*>(s))
+        return exprHasIndexAssignToVar(dws->condition.get(), varName) ||
+               stmtHasIndexAssignToVar(dws->body.get(), varName);
+    if (auto* fs = dynamic_cast<const ForStmt*>(s))
+        return exprHasIndexAssignToVar(fs->start.get(), varName) ||
+               exprHasIndexAssignToVar(fs->end.get(), varName) ||
+               (fs->step && exprHasIndexAssignToVar(fs->step.get(), varName)) ||
+               stmtHasIndexAssignToVar(fs->body.get(), varName);
+    if (auto* fes = dynamic_cast<const ForEachStmt*>(s))
+        return exprHasIndexAssignToVar(fes->collection.get(), varName) ||
+               stmtHasIndexAssignToVar(fes->body.get(), varName);
+    return false;
+}
+
+bool CodeGenerator::doesVarHaveIndexAssign(const std::string& varName) const {
+    if (!currentFuncDecl_ || !currentFuncDecl_->body) return true; // conservative
+    return stmtHasIndexAssignToVar(currentFuncDecl_->body.get(), varName);
+}
+
+// ---------------------------------------------------------------------------
+// Read-only-use analysis for the read-only-global array literal optimization.
+//
+// A variable is "read-only" iff every textual reference to it in the
+// function body is one of:
+//   * `varName[i]`               — IndexExpr read (array operand is the var)
+//   * `len(varName)`, `print(varName)`, etc. — argument to a non-mutating
+//     built-in (BuiltinEffectTable::isMutating == false)
+//   * Argument to a user function known-pure to the CT-engine
+// Anything else (return varName, var x = varName, varName[i] = …, pass to
+// an unknown/mutating callee) makes the variable non-read-only.
+//
+// Only used to gate the ro-global allocation strategy where the data lives
+// in a `.rodata` constant.  Writing through such a pointer would segfault,
+// so we must conservatively rule out every potential write site at compile
+// time.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A reference to varName is "OK if it is the array operand of an IndexExpr
+// read, or it appears strictly inside a call argument whose callee is known
+// non-mutating".  We walk the AST and shortcut to false on the first
+// non-OK use.
+
+struct ReadOnlyUseChecker {
+    const std::string& var;
+    const CTEngine* ctEngine;
+    // True if some reference to `var` was found in a non-read-only position.
+    bool violation = false;
+
+    explicit ReadOnlyUseChecker(const std::string& v, const CTEngine* eng)
+        : var(v), ctEngine(eng) {}
+
+    bool isVarIdent(const Expression* e) const {
+        return e && e->type == ASTNodeType::IDENTIFIER_EXPR &&
+               static_cast<const IdentifierExpr*>(e)->name == var;
+    }
+
+    // Return true iff we can prove the call does not mutate any of its
+    // pointer-typed arguments.
+    bool isCallNonMutating(const std::string& callee) const {
+        // Built-ins: ask the unified effect table.
+        if (BuiltinEffectTable::isPure(callee)) return true;
+        if (BuiltinEffectTable::isReadOnly(callee)) return true;
+        if (BuiltinEffectTable::isMutating(callee)) return false;
+        // I/O builtins (print, etc.) read their args without mutating.
+        // Conservative: only allow when it's flagged as pure or read-only.
+        // User functions: trust the CT-engine purity result.
+        if (ctEngine && ctEngine->isPure(callee)) return true;
+        return false;
+    }
+
+    void visitExpr(const Expression* e) {
+        if (!e || violation) return;
+        switch (e->type) {
+        case ASTNodeType::LITERAL_EXPR:
+            return;
+        case ASTNodeType::IDENTIFIER_EXPR:
+            if (static_cast<const IdentifierExpr*>(e)->name == var) {
+                // Bare identifier reference outside a recognized read-only
+                // context (CallExpr handled elsewhere; IndexExpr handled in
+                // its case).  Conservative: treat as a violation.
+                violation = true;
+            }
+            return;
+        case ASTNodeType::INDEX_EXPR: {
+            auto* idx = static_cast<const IndexExpr*>(e);
+            // `var[i]` read is always OK; only the index sub-expression
+            // needs further inspection (var must not appear inside it as
+            // anything but a read).
+            if (!isVarIdent(idx->array.get())) {
+                visitExpr(idx->array.get());
+            }
+            visitExpr(idx->index.get());
+            return;
+        }
+        case ASTNodeType::INDEX_ASSIGN_EXPR: {
+            auto* ia = static_cast<const IndexAssignExpr*>(e);
+            // `var[i] = …` is a direct write — violation.
+            if (isVarIdent(ia->array.get())) {
+                violation = true;
+                return;
+            }
+            visitExpr(ia->array.get());
+            visitExpr(ia->index.get());
+            visitExpr(ia->value.get());
+            return;
+        }
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<const CallExpr*>(e);
+            const bool nonMut = isCallNonMutating(call->callee);
+            for (const auto& arg : call->arguments) {
+                if (isVarIdent(arg.get())) {
+                    if (!nonMut) {
+                        violation = true;
+                        return;
+                    }
+                    // Pass-by-value to a non-mutating callee is OK; no
+                    // further inspection needed for this arg.
+                    continue;
+                }
+                visitExpr(arg.get());
+            }
+            return;
+        }
+        case ASTNodeType::ASSIGN_EXPR: {
+            auto* a = static_cast<const AssignExpr*>(e);
+            // Right-hand side mentioning var would create an alias —
+            // violation.  Inspect via the bare-identifier rule above.
+            visitExpr(a->value.get());
+            return;
+        }
+        case ASTNodeType::BINARY_EXPR: {
+            auto* b = static_cast<const BinaryExpr*>(e);
+            visitExpr(b->left.get());
+            visitExpr(b->right.get());
+            return;
+        }
+        case ASTNodeType::UNARY_EXPR:
+            visitExpr(static_cast<const UnaryExpr*>(e)->operand.get());
+            return;
+        case ASTNodeType::PREFIX_EXPR:
+            visitExpr(static_cast<const PrefixExpr*>(e)->operand.get());
+            return;
+        case ASTNodeType::POSTFIX_EXPR:
+            visitExpr(static_cast<const PostfixExpr*>(e)->operand.get());
+            return;
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* t = static_cast<const TernaryExpr*>(e);
+            visitExpr(t->condition.get());
+            visitExpr(t->thenExpr.get());
+            visitExpr(t->elseExpr.get());
+            return;
+        }
+        case ASTNodeType::ARRAY_EXPR: {
+            // var appearing inside an array literal would create an alias.
+            // Treat as bare reference (handled in IDENTIFIER_EXPR case).
+            auto* arr = static_cast<const ArrayExpr*>(e);
+            for (const auto& el : arr->elements) visitExpr(el.get());
+            return;
+        }
+        default:
+            // Conservative for unknown expression kinds: if `var` appears
+            // inside, flag as a violation.  We do this by structural walk
+            // through known sub-nodes — but for safety bail out.
+            violation = true;
+            return;
+        }
+    }
+
+    void visitStmt(const Statement* s) {
+        if (!s || violation) return;
+        if (auto* es = dynamic_cast<const ExprStmt*>(s)) {
+            visitExpr(es->expression.get());
+            return;
+        }
+        if (auto* vd = dynamic_cast<const VarDecl*>(s)) {
+            // A declaration `var x = var` would create an alias.  The
+            // bare-IDENTIFIER rule will catch this.
+            if (vd->initializer) visitExpr(vd->initializer.get());
+            return;
+        }
+        if (auto* ret = dynamic_cast<const ReturnStmt*>(s)) {
+            // Returning the variable (or any expression containing it)
+            // creates an unbounded alias — violation.
+            if (ret->value) visitExpr(ret->value.get());
+            return;
+        }
+        if (auto* blk = dynamic_cast<const BlockStmt*>(s)) {
+            for (const auto& st : blk->statements) visitStmt(st.get());
+            return;
+        }
+        if (auto* ifs = dynamic_cast<const IfStmt*>(s)) {
+            visitExpr(ifs->condition.get());
+            visitStmt(ifs->thenBranch.get());
+            visitStmt(ifs->elseBranch.get());
+            return;
+        }
+        if (auto* ws = dynamic_cast<const WhileStmt*>(s)) {
+            visitExpr(ws->condition.get());
+            visitStmt(ws->body.get());
+            return;
+        }
+        if (auto* dws = dynamic_cast<const DoWhileStmt*>(s)) {
+            visitExpr(dws->condition.get());
+            visitStmt(dws->body.get());
+            return;
+        }
+        if (auto* fs = dynamic_cast<const ForStmt*>(s)) {
+            visitExpr(fs->start.get());
+            visitExpr(fs->end.get());
+            if (fs->step) visitExpr(fs->step.get());
+            visitStmt(fs->body.get());
+            return;
+        }
+        if (auto* fes = dynamic_cast<const ForEachStmt*>(s)) {
+            visitExpr(fes->collection.get());
+            visitStmt(fes->body.get());
+            return;
+        }
+        // Unknown statement kind — conservative.
+        violation = true;
+    }
+};
+
+}  // namespace
+
+bool CodeGenerator::doesVarHaveOnlyReadOnlyUses(const std::string& varName) const {
+    if (!currentFuncDecl_ || !currentFuncDecl_->body) return false;  // conservative
+    ReadOnlyUseChecker checker(varName, ctEngine_.get());
+    checker.visitStmt(currentFuncDecl_->body.get());
+    return !checker.violation;
 }
 
 

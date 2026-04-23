@@ -73,6 +73,10 @@ struct BuiltinEffects {
     bool readsMemory   = false; ///< Accesses heap/array/string memory
     bool writesMemory  = false; ///< Mutates heap/array/string memory
     bool hasIO         = false; ///< Performs observable I/O
+    bool mayThrow      = false; ///< May raise / panic / abort / exit
+    bool noReturn      = false; ///< Provably never returns to the caller
+    bool allocates     = false; ///< Performs heap allocation
+    bool deallocates   = false; ///< Releases heap memory
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,6 +122,26 @@ public:
     static bool isReadOnly(const std::string& name) noexcept {
         const auto& e = get(name);
         return e.readsMemory && !e.writesMemory && !e.hasIO;
+    }
+
+    /// True when @p name may throw, panic, abort, or otherwise unwind/terminate.
+    static bool mayThrow(const std::string& name) noexcept {
+        return get(name).mayThrow;
+    }
+
+    /// True when @p name provably never returns (panic/abort/exit).
+    static bool noReturn(const std::string& name) noexcept {
+        return get(name).noReturn;
+    }
+
+    /// True when @p name allocates heap memory.
+    static bool allocates(const std::string& name) noexcept {
+        return get(name).allocates;
+    }
+
+    /// True when @p name deallocates heap memory.
+    static bool deallocates(const std::string& name) noexcept {
+        return get(name).deallocates;
     }
 
 private:
