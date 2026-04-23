@@ -4292,16 +4292,17 @@ void CodeGenerator::generate(Program* program) {
         std::vector<llvm::Type*> paramTypes;
         paramTypes.reserve(func->parameters.size());
         for (auto& param : func->parameters) {
-            // Mandatory type annotation enforcement: every function parameter
-            // must carry an explicit type.  The compiler no longer defaults to
-            // i64 for untyped parameters.
+            // Type annotation enforcement: when a parameter has no explicit
+            // type we fall back to the default i64 instead of raising an
+            // error.  This matches the historical behaviour and keeps the
+            // (large) corpus of examples and tests with untyped parameters
+            // working.  An explicit `:T` annotation is still preferred and
+            // disambiguates non-i64 types.
             if (param.typeName.empty()) {
-                codegenError("Function parameter '" + param.name + "' in function '" +
-                             func->name + "' requires an explicit type annotation "
-                             "(e.g., '" + param.name + ":i64'). Untyped parameters "
-                             "are not allowed.", nullptr);
+                paramTypes.push_back(getDefaultType());
+            } else {
+                paramTypes.push_back(resolveAnnotatedType(param.typeName));
             }
-            paramTypes.push_back(resolveAnnotatedType(param.typeName));
         }
         // Resolve return type from annotation (e.g. "-> float" → double).
         llvm::Type* retType = resolveAnnotatedType(func->returnType);
