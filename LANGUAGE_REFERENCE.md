@@ -543,6 +543,18 @@ OPTMAX!:
 
 **Backtick identifiers**: Identifiers enclosed in backticks (`` `name` ``) are contextual tokens used for defining custom infix operators. They are scanned as `BACKTICK_IDENT` tokens. See §6 for usage in operator definitions.
 
+**Contextual keywords (not in the lexer's keyword table):** A handful of names act as keywords *only inside specific grammar productions* — outside those contexts they are ordinary identifiers and may be used as variable / function names:
+
+| Word | Where it is contextual | Outside that context |
+|------|------------------------|----------------------|
+| `downto` | Second token of a `for (i in HI downto LO ...)` range loop (§8.5) | Plain identifier |
+| `step` | Optional trailing modifier of a `for (i in A...B step N)` loop (§8.5) | Plain identifier |
+| `deopt` | Optional marker in `assume(c) else deopt { ... }` (§7.10) | Plain identifier |
+| `as` | Import alias (`import "x.om" as foo`) and explicit casts | Plain identifier |
+| `from` | Inside specific destructuring forms | Plain identifier |
+
+These do not appear in the keyword table in §2.4 and you may shadow them, but doing so usually hurts readability. Treat them as reserved in idiomatic code.
+
 ---
 
 ## 3. Preprocessor
@@ -645,17 +657,72 @@ Emits a warning message (compilation continues):
 #warning "This feature is experimental"
 ```
 
-#### 3.1.7 `#line` — Set Line Number
+#### 3.1.7 `#line` — Set Line Number (RESERVED — NOT IMPLEMENTED)
 
-Sets the line number and optionally the filename for subsequent diagnostics:
+**Status:** Reserved syntactically. The current preprocessor (`src/preprocessor.cpp`) does **not** recognize `#line` as a known directive — it falls through to the generic "unknown preprocessor directive" warning. Generated-code line attribution must be done via host-side rewriting until this directive is wired up.
+
+#### 3.1.8 `#info` — Emit Informational Message
+
+Like `#warning` but tagged as `info:` instead of `warning:`. Compilation continues. Use for benign build-time annotations (which optimization tier was selected, which feature flags are on, etc.):
 ```omscript
-#line 100
-#line 200 "generated.om"
+#info "fast-path build enabled"
+```
+Implementation: appended to the preprocessor's accumulated warnings list and surfaced through the same diagnostic channel as `#warning`.
+
+#### 3.1.9 `#assert` — Compile-Time Assertion
+
+**Syntax:**
+```ebnf
+assert_directive ::= '#assert' const_expression [ '"' message '"' ]
 ```
 
-**Use case**: Generated code can attribute errors to original source locations.
+Evaluates `const_expression` using the same `#if` expression evaluator (§3.5). If the result is `0`, the build fails with a diagnostic of the form `#assert failed: <message>` (or `#assert failed: compile-time assertion failed: <expression>` if no message is given).
 
-#### 3.1.8 `import` — File Inclusion
+```omscript
+#assert __VERSION__ >= 2 "OmScript ≥ 2 required"
+#assert defined(TARGET_X86_64) "this module is x86-64-only"
+```
+
+Use for build-time invariants (feature-flag combinations, ABI assumptions) that should fail loudly rather than silently mis-compile.
+
+#### 3.1.10 `#require` — Minimum Compiler Version
+
+**Syntax:**
+```ebnf
+require_directive ::= '#require' '"' version_string '"'
+```
+
+Fails the build if the running compiler's `__VERSION__` is older than `version_string` (string-comparison via the compiler's internal `cmpVersion`). Emits an error of the form `#require: compiler version <current> is older than required <X.Y.Z>`.
+
+```omscript
+#require "1.2.0"
+```
+
+#### 3.1.11 `#counter` — Define an Auto-Incrementing Macro
+
+**Syntax:**
+```ebnf
+counter_directive ::= '#counter' identifier
+```
+
+Creates a macro that yields a fresh, monotonically increasing integer on every textual expansion (starts at `0`). Useful for generating unique IDs in macro-heavy code:
+```omscript
+#counter UNIQ
+const int id1 = UNIQ;   // 0
+const int id2 = UNIQ;   // 1
+const int id3 = UNIQ;   // 2
+```
+Distinct from the predefined `__COUNTER__` macro (§3.3) — `__COUNTER__` is a single global counter shared across the whole translation unit, while `#counter` lets you declare *named* counters with independent state.
+
+#### 3.1.12 `#pragma` — Vendor-Specific Hints (Currently a No-Op)
+
+`#pragma` lines are accepted by the preprocessor and silently consumed. No pragma names are currently recognized — the directive is reserved for forward-compatible insertion of compiler-specific hints without breaking older builds.
+
+```omscript
+#pragma optimize_for_size   // accepted but ignored today
+```
+
+#### 3.1.13 `import` — File Inclusion
 
 Includes another OmScript source file (processed by the parser, not the preprocessor directly, but conceptually similar to `#include`):
 ```omscript
@@ -2054,32 +2121,68 @@ var sign: string = (x >= 0) ? "positive" : "negative";
 
 ### 7.10 `assume` / `unreachable` / `expect` Statements
 
-**Status**: These are **implemented** as built-in functions (not statements), but the parser may recognize special statement forms.
+These three constructs feed information to the optimizer. They emit **no runtime code** in the success path — they are purely advisory.
 
-**Functions**:
-- `assume(condition)` — Tells the optimizer to assume `condition` is true (undefined behavior if false at runtime)
-- `unreachable()` — Marks a code path as unreachable (triggers undefined behavior if reached)
-- `expect(value, expected)` — Hints that `value` is expected to equal `expected` (for branch prediction)
+#### `assume(cond)` and `assume(cond) else deopt { stmt }`
 
-**Example**:
+`assume` is **both a statement and a built-in expression** with two forms:
+
+**Bare form — statement or expression:**
+```omscript
+assume(b != 0);          // statement
+let q = a / assume(b != 0); // expression position also accepted
+```
+Tells the optimizer to treat `cond` as true — implemented by lowering to `llvm.assume(cond)`. **No runtime check is emitted.** If `cond` is actually false at runtime, the program has undefined behaviour (the optimizer may have deleted code, mis-folded values, etc.). Use only for invariants you can prove.
+
+**`else deopt` form — statement only:**
+```omscript
+assume(x > 0) else deopt {
+    // deopt path: runs when the assumed condition does not hold
+    println("slow path");
+    return -1;
+}
+```
+This form **does** emit a runtime check. If the condition is true the body is skipped (just like the bare form); if it's false the deopt block runs. Conceptually a guarded fast-path / slow-path split — the optimizer is told to bias and lay out the deopt block as cold. The `deopt` keyword after `else` is optional in the grammar; both `assume(c) else deopt { ... }` and `assume(c) else { ... }` parse to the same AST (`AssumeStmt` with a non-null deopt body).
+
+#### `unreachable()`
+
+```omscript
+unreachable();
+```
+Marks a code path as never executed. Lowers to LLVM's `unreachable` instruction — reaching it at runtime is **undefined behaviour** (the compiler is free to delete preceding code that would lead here). Use at the bottom of `switch` defaults that should be impossible, or after `exit`/`abort` calls the optimizer doesn't recognize.
+
+#### `expect(value, expected)`
+
+```omscript
+if (expect(x == 0, false)) { /* cold */ }
+```
+A pure branch-prediction hint. Returns `value` unchanged but tags the comparison with metadata steering LLVM's branch-weighting. No runtime cost, no UB on misprediction — this is purely a layout hint.
+
+#### Comparison
+
+| Construct | Runtime check? | UB if violated? | Effect |
+|-----------|---------------|----------------|--------|
+| `assert(cond)` (§16.3) | Yes | No (abort) | Real check, prints + aborts on failure |
+| `assume(cond)` | **No** | **Yes** | Optimizer hint via `llvm.assume` |
+| `assume(cond) else deopt { ... }` | Yes | No (runs deopt body) | Guarded fast-path / cold deopt path |
+| `unreachable()` | No | **Yes** | Optimizer assumes path is dead |
+| `expect(v, e)` | No | No | Branch-prediction hint only |
+
+**Example:**
 ```omscript
 fn divide(a: int, b: int) -> int {
-    assume(b != 0);  // Optimizer assumes b is never 0
+    assume(b != 0);  // optimizer assumes b is never 0; division check elided
     return a / b;
 }
 
 fn handle_case(x: int) {
-    if (x == 1) {
-        return;
-    } elif (x == 2) {
-        return;
-    } else {
-        unreachable();  // All cases handled; this is unreachable
-    }
+    if (x == 1)      { return; }
+    elif (x == 2)    { return; }
+    else             { unreachable(); }  // x is always 1 or 2 by construction
 }
 ```
 
-**Warning**: Incorrect use of `assume` or `unreachable` leads to undefined behavior (crashes, wrong results).
+**Warning:** Misuse of `assume` or `unreachable` produces silent miscompilation, not a crash. Reserve them for invariants you can prove. Prefer `assert` when in doubt.
 
 ---
 
@@ -5275,9 +5378,14 @@ Natural log.
 
 ---
 
-#### `log2(numeric) → f64`
+#### `log2(numeric) → i64 | f64`
 
-Base-2 log (or integer log2 via CTZ for integers).
+Base-2 logarithm. Behaviour depends on the **argument type**:
+
+- **Integer argument** → returns `i64` (the floor of `log2(n)`). Implemented as `63 - clz(n)` via the `llvm.ctlz.i64` intrinsic, so it lowers to a single `BSR`/`LZCNT` on x86. Returns `-1` if `n ≤ 0`.
+- **Float argument** → returns `f64` from `llvm.log2.f64` (only used when the argument is statically a float in a comptime-folding context; the runtime path is integer-only).
+
+For a true floating-point base-2 log on integer inputs, cast the input first: `log2(f64(n))`.
 
 ---
 
@@ -5332,6 +5440,30 @@ Return 1 if odd, 0 if even.
 #### `is_power_of_2(i64) → bool`
 
 Return 1 if x is a power of 2, 0 otherwise.
+
+---
+
+#### `fast_sqrt(numeric) → f64`
+
+Fast-math square root. Lowers to `llvm.sqrt.f64` with the `afn` (approximate-function) fast-math flag set, allowing the backend to substitute a reciprocal-sqrt-and-multiply or a hardware approximation. Less accurate than `sqrt` but typically 2-3× faster on x86-64. Use only when ULP-level accuracy is not required.
+
+---
+
+#### `is_nan(numeric) → bool`
+
+Return 1 if the argument is an IEEE-754 NaN, 0 otherwise. The argument is interpreted as `f64`. Implemented as `x != x` — works on signaling and quiet NaNs alike.
+
+---
+
+#### `is_inf(numeric) → bool`
+
+Return 1 if the argument is `+∞` or `-∞`, 0 otherwise. The argument is interpreted as `f64`. Implemented via `llvm.fabs.f64` followed by an equality test against `0x7FF0000000000000`.
+
+---
+
+#### `min_float(a, b) → f64` / `max_float(a, b) → f64`
+
+Float-specific minimum/maximum. Unlike `min` / `max` (which dispatch on argument type), these always treat both arguments as `f64` and use `llvm.minnum.f64` / `llvm.maxnum.f64` — IEEE-754 minNum/maxNum semantics, which propagate non-NaN over NaN. Use these when you have mixed `int`/`float` arguments and want float-domain comparison without the implicit-promotion ambiguity of generic `min`/`max`.
 
 ---
 
@@ -5538,13 +5670,17 @@ var rc = sudo_command("apt update", "password");
 
 ---
 
-#### `exit(i64) → void`
+#### `exit(i64?) → void` / `exit_program(i64?) → void`
 
-Terminate the program with the given exit code.
+Terminate the program with the given exit code. The argument is **optional** — `exit()` with no argument exits with status `0`. `exit_program` is a synonym for `exit`. The exit code is truncated to `i32` before being passed to the platform `exit(3)` syscall, so the meaningful range is `0..=255` on POSIX.
+
+After the call the compiler emits an LLVM `unreachable` and starts a fresh dead block — code following `exit()` is never executed but is still type-checked.
 
 **Example:**
 ```omscript
-exit(0);
+exit();      // status 0
+exit(0);     // status 0 (explicit)
+exit(2);     // status 2 (POSIX "misuse of shell builtins" — your choice)
 ```
 
 ---
@@ -5817,6 +5953,103 @@ See parser registration in `parser.cpp` lines 52-100. Key entries:
 - String: `std::str_len`, `std::str_upper`, `std::str_split`, etc.
 - Array: `std::len`, `std::push`, `std::pop`, `std::sort`, etc.
 - I/O: `std::print`, `std::println`, `std::input`, etc.
+
+---
+
+### 19.14 Generic collection operations
+
+#### `filter(collection, predicate_fn) → same`
+
+Type-dispatched filter. Examines the static type of `collection`:
+
+- `string` → forwards to `str_filter` (§12.7), returning a new string of characters that pass the predicate.
+- otherwise → forwards to `array_filter` (§11.6), returning a new array of elements that pass the predicate.
+
+The predicate is given as the **name of an existing function** (string literal — same convention as `array_map` / `thread_create`), not as a lambda value. The function must take one argument and return a truthy value.
+
+**Example:**
+```omscript
+fn keep_even(x: int) -> int { return x % 2 == 0 ? 1 : 0; }
+
+var nums  = [1, 2, 3, 4, 5];
+var evens = filter(nums, "keep_even");        // → [2, 4]
+var only_az = filter("Hello, World!", "is_alpha"); // string path
+```
+
+This is the only generic dispatcher in the collection-builtin family — `map`, `reduce`, `find`, etc. do **not** have a generic form and must be called with their explicit `array_*` / `str_*` / `map_*` name.
+
+---
+
+### 19.15 Matrix operations
+
+OmScript ships a minimal row-major dense-matrix API on top of arrays. Matrices are returned as opaque array-typed values (the codegen tracks them via `arrayReturningFunctions_`), and elements are stored as `i64`. There is no separate `Matrix` type — interoperate with the array API where helpful, but treat the layout as opaque.
+
+#### `mat_new(rows: i64, cols: i64) → array`
+
+Allocate a new `rows × cols` matrix, zero-initialised. Returns an opaque array handle.
+
+#### `mat_fill(rows: i64, cols: i64, value: i64) → array`
+
+Allocate a new `rows × cols` matrix with every element set to `value`.
+
+#### `mat_get(m: array, i: i64, j: i64) → i64`
+
+Return the element at row `i`, column `j`. Bounds-checked at runtime in debug builds.
+
+#### `mat_set(m: array, i: i64, j: i64, value: i64) → i64`
+
+Store `value` at row `i`, column `j`. Returns `value`.
+
+#### `mat_rows(m: array) → i64` / `mat_cols(m: array) → i64`
+
+Return the number of rows / columns of `m`.
+
+#### `mat_mul(a: array, b: array) → array`
+
+Standard dense matrix multiply. Returns a new `mat_rows(a) × mat_cols(b)` matrix. Requires `mat_cols(a) == mat_rows(b)` — mismatched dimensions are a runtime error.
+
+#### `mat_transp(m: array) → array`
+
+Return the transpose of `m` as a new matrix.
+
+**Example:**
+```omscript
+var a = mat_fill(2, 3, 1);
+var b = mat_fill(3, 2, 2);
+var c = mat_mul(a, b);          // 2×2, every element = 6
+println(mat_get(c, 0, 0));      // 6
+```
+
+---
+
+### 19.16 Region allocation and raw memory
+
+Low-level escape hatches for hand-managing memory. Use these when the ownership system (§17) and built-in arrays / strings / dicts cannot express a needed allocation pattern. They are unsafe by design — there are no bounds checks on raw pointers and no use-after-free detection across regions.
+
+#### `newRegion() → i64`
+
+Create a fresh memory region (an arena). Returns an opaque region handle. Allocations inside the region (`alloc`) live until the region is freed by leaving its lexical scope (region cleanup is wired into the function epilogue).
+
+#### `alloc(region: i64, size: i64) → ptr`
+
+Allocate `size` bytes inside `region`. Returns a `ptr` to the allocation. The pointer is valid until the region is destroyed.
+
+#### `malloc(size: i64) → ptr`
+
+Heap-allocate `size` bytes via the platform `malloc(3)`. The caller is responsible for freeing the result with `free`.
+
+#### `free(p: ptr) → i64`
+
+Release a pointer previously returned by `malloc`. **Do not** call `free` on pointers obtained via `alloc(region, …)` — those are owned by the region.
+
+**Choosing between region, malloc, and managed types:**
+
+| Need | Recommended API |
+|------|-----------------|
+| String / array / dict / struct | The managed type (no manual free; see §17) |
+| Many short-lived allocations with a clear lifetime | `newRegion` + `alloc` (bulk free at scope exit) |
+| Long-lived, irregular lifetime | `malloc` + `free` |
+| Inter-op with C ABI requiring a raw buffer | `malloc` |
 
 ---
 
