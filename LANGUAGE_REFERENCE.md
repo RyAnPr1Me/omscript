@@ -6687,11 +6687,11 @@ Profile format: LLVM raw profile (`.profraw`), converted via `llvm-profdata merg
 
 **Default**: `O2` unless overridden by profile or explicit flag.
 
-**Per-level pass schedule** (from `optimization_manager.cpp`):
-- **O0**: AST validation, type checking only.
-- **O1**: CF-CTRE (with reduced fuel), basic dead-code removal.
-- **O2**: Full AST pipeline (synthesis → CF-CTRE → e-graph → range analysis), LLVM midend (IPSCCP, GVN, DSE, loop vectorizer), superoptimizer, HGOE.
-- **O3**: All O2 passes with higher limits (e-graph node limit 50,000 → 100,000; superopt budget 200k → 500k; unroll factor 4 → 8).
+**Per-level pass schedule** (full detail in §25.3; this is a one-line summary):
+- **O0**: AST validation, type checking, codegen — no AST optimizations.
+- **O1**: + Purity inference + CF-CTRE + LLVM SimplifyCFG/Mem2Reg/SROA/EarlyCSE.
+- **O2**: + std::synthesize expansion, e-graph saturation (`maxNodes = 50,000`, `maxIterations = 30`), abstract interpretation, polyhedral optimizer, full LLVM midend (IPSCCP, GVN, DSE, vectorizers), superoptimizer (level 2: idiom + algebraic + branch→select + synthesis), HGOE (when a hardware profile is available).
+- **O3**: All O2 passes with the superoptimizer forced to level 3 (deeper synthesis: `maxInstructions = 5`, `costThreshold = 0.9`) and the LLVM `-O3` preset (which raises LLVM's own unroll/inline thresholds). E-graph and CF-CTRE limits are **not** raised at O3 — they are constants.
 
 ### 24.6 Target specification
 
@@ -6899,30 +6899,31 @@ The compiler uses two pass managers:
 2. Parser
 3. Type pre-analysis
 4. Purity inference (lightweight, no cross-function analysis)
-5. CF-CTRE (fuel limit 100,000)
+5. CF-CTRE (same fuel/depth limits as O2 — see below)
 6. Codegen
 7. LLVM: SimplifyCFG, Mem2Reg, SROA, EarlyCSE
 
 #### O2 (standard)
 1–6. (All AST phases)
 7. **Synthesis expansion** (if `std::synthesize` present)
-8. **CF-CTRE** (fuel limit 10,000,000)
+8. **CF-CTRE** (fuel limit `kMaxInstructions = 10,000,000`, depth limit `kMaxDepth = 128` — see `include/cfctre.h:483-484`)
 9. **Abstract interpretation**
-10. **E-graph optimization** (node limit 50,000, 10 iterations)
+10. **E-graph optimization** (`SaturationConfig`: `maxNodes = 50,000`, `maxIterations = 30` — see `include/egraph.h:331-332`)
 11. Codegen
 12. LLVM canonicalization: LoopSimplify, LCSSA, IndVarSimplify
-13. **Polyhedral optimizer** (tiling, interchange, skewing)
+13. **Polyhedral optimizer** (tiling, interchange, skewing — see §26.13)
 14. LLVM midend: Inlining, IPSCCP, GVN, LICM, DSE, Loop Vectorizer, SLP Vectorizer
-15. **Superoptimizer** (idiom recognition, level 2)
-16. **HGOE** (if `-march` specified)
+15. **Superoptimizer** (idiom recognition + algebraic + branch→select + synthesis, level 2 default — see §26.2)
+16. **HGOE** (only when a hardware profile is available — i.e. `-march=` or `-mtune=` resolves to a known microarch — see §26.3)
 17. Post-pipeline cleanup: AggressiveDCE, GlobalDCE
 
+**CF-CTRE fuel/depth limits are constants, not per-O-level knobs.** All O-levels that run CF-CTRE share the same `kMaxInstructions` / `kMaxDepth` budgets. See `include/cfctre.h:483-484` and §28.10.
+
 #### O3 (aggressive)
-All O2 passes with raised limits:
-- E-graph node limit: 100,000
-- Superoptimizer budget: 500,000 candidates
-- Loop unroll factor: 8 (vs. 4 at O2)
-- Inline threshold: 500 (vs. 250 at O2)
+All O2 passes with the following raised knobs (verified in `src/codegen_opt.cpp:4381-4387`):
+- Superoptimizer level forced to ≥ 3 → `synthesis.maxInstructions = 5` (vs. default `3` from `SynthesisConfig`) and `synthesis.costThreshold = 0.9`
+- LLVM loop-unroll and inline thresholds: inherited from the LLVM pipeline preset for `-O3`; OmScript does not currently override these
+- E-graph and CF-CTRE limits are **not** raised at O3 — they are constants (see above)
 
 ### 25.4 Diagnostics flow
 
@@ -7040,8 +7041,8 @@ x != x → false
 #### Termination
 
 The engine terminates when:
-1. **Node limit reached**: Default 50,000 nodes at O2, 100,000 at O3.
-2. **Iteration limit reached**: 10 iterations (one iteration = apply all rules to all nodes once).
+1. **Node limit reached**: `SaturationConfig::maxNodes = 50,000` (`include/egraph.h:331`). This is a fixed default — it is **not** raised at O3.
+2. **Iteration limit reached**: `SaturationConfig::maxIterations = 30` (`include/egraph.h:332`) — one iteration = apply all rules to all nodes once.
 3. **Saturation**: No new e-nodes added in an iteration.
 
 #### Cost Model
@@ -7146,22 +7147,24 @@ clz(x-1) → bit_smear + 1 → 1 << (bw - ctlz(x-1))
 
 #### Levels
 
-Controlled by `-fsuperopt-level=N`:
+Controlled by `-fsuperopt-level=N` (default `2` — see `include/codegen.h:1267`). The superoptimizer runs only at `O2+` and only when `-fno-superopt` was not passed; it is gated on `enableSuperopt_ && optimizationLevel >= O2` in `src/codegen_opt.cpp:4369`.
 
-| Level | Budget (candidates) | Idioms | Synthesis | Branch→Select | Algebraic |
-|-------|---------------------|--------|-----------|---------------|-----------|
-| 0     | 0                   | ✗      | ✗         | ✗             | ✗         |
-| 1     | 50,000              | ✓      | ✗         | ✓             | ✓         |
-| 2     | 200,000             | ✓      | ✓         | ✓             | ✓         |
-| 3     | 500,000             | ✓      | ✓ (depth 4) | ✓           | ✓         |
+| Level | Idioms | Algebraic | Branch→Select | Synthesis | Synthesis tuning |
+|-------|--------|-----------|---------------|-----------|------------------|
+| 0     | ✗      | ✗         | ✗             | ✗         | (superopt disabled entirely) |
+| 1     | ✓      | ✓         | ✗ (`enableBranchOpt = false`) | ✗ (`enableSynthesis = false`) | n/a |
+| 2     | ✓      | ✓         | ✓             | ✓         | `SynthesisConfig` defaults: `maxInstructions = 3`, `costThreshold = 1.0` |
+| 3     | ✓      | ✓         | ✓             | ✓ (deeper) | `maxInstructions = 5`, `costThreshold = 0.9` |
+
+Level 3 is also forced when the global optimization level is `O3`, regardless of `-fsuperopt-level=` (`codegen_opt.cpp:4384`). There is **no fixed per-level "candidate budget" knob**; cost-bounded candidate enumeration is governed by `SynthesisConfig::maxInstructions` (sequence length) and the cost threshold above.
 
 #### Verification
 
-Each candidate is evaluated on 16 test vectors:
+Each candidate is evaluated on `SynthesisConfig::numTestVectors = 16` test vectors (`include/superoptimizer.h:128`) of the form:
 ```c++
 TestVector { inputs: [a, b, ...], expectedOutput: f(a, b, ...) }
 ```
-If all test vectors pass, the candidate is considered equivalent. No formal proof.
+A candidate is accepted iff every test vector matches the original. This is a **probabilistic** equivalence check, not a formal proof — the superoptimizer does not currently invoke an SMT solver.
 
 #### Examples
 
@@ -7421,14 +7424,20 @@ Transformed to:
 
 ### 26.10 OptStats
 
-**Not exposed as a flag**. Internal counters tracked by `OptimizationManager`:
-- `egraphNodesCreated`
-- `egraphRulesApplied`
-- `superoptReplacements`
-- `hgoeInstructionsRescheduled`
-- `polyoptLoopsTiled`
+The optimizer **orchestrator** (not the optimization manager) tracks pass-execution statistics in an internal `RunStats` struct (`include/opt_orchestrator.h:120-127`):
 
-Printed when `--verbose` is set.
+| Field | Meaning |
+|-------|---------|
+| `passesRun` | Number of passes that actually executed |
+| `passesSkipped` | Number of passes whose precondition was already satisfied (analysis cache hit) |
+| `totalElapsedMs` | Wall-clock time across the whole pass pipeline (ms) |
+| `passTimings` | Per-pass `(name, elapsed_ms)` records |
+
+These are **not** exposed as a public flag. When `--verbose` is set the orchestrator prints a summary line of the form:
+```
+Optimizer: <run> ran, <skip> skipped, <ms> ms total
+```
+and (per-pass timings are recorded but printed only when verbose mode is on; see `src/opt_orchestrator.cpp:493-496`). There are currently **no per-component counters** for e-graph nodes created, superoptimizer replacements, HGOE rescheduling, polyopt loop counts, etc. — those would require adding fields to `RunStats` and wiring each subsystem to populate them.
 
 ### 26.11 Compile-Time Array Evaluation
 
@@ -7491,15 +7500,29 @@ fn process() {
 
 ### 26.13 Polyhedral Optimizer
 
-See `polyopt.h`. The polyhedral optimizer:
+Implemented in `src/polyopt.cpp` (~1,800 lines). The polyhedral optimizer:
 1. **Detects SCoPs** (Static Control Parts): loops with affine bounds and subscripts.
 2. **Builds iteration domains**: polyhedra `{[i,j] : 0 ≤ i < N, 0 ≤ j < M}`.
 3. **Computes dependences**: Fourier-Motzkin elimination to test `∃ (i,j) : Write(i,j) before Read(i,j)`.
-4. **Applies transforms**:
-   - **Tiling**: Insert tile loops `for ii in 0..N step 32`.
-   - **Interchange**: Swap loop orders to maximize locality.
-   - **Skewing**: `j' = j + factor * i`.
-5. **Regenerates IR**: Use `SCEVExpander` to emit transformed loops.
+4. **Applies transforms** (each individually toggleable — see `PolyOptConfig`):
+   - **Tiling** (`enableTiling`): Insert tile loops `for ii in 0..N step T` (tile size selected from L1/L2 cache hints).
+   - **Interchange** (`enableInterchange`): Swap loop orders to maximize locality.
+   - **Skewing** (`enableSkewing`): `j' = j + factor * i` (enables wavefront parallelism).
+   - **Reversal** (`enableReversal`): Iterate the loop backwards when legal and profitable.
+   - **Fusion** (`enableFusion`): Merge adjacent loops with compatible iteration spaces.
+   - **Fission** (`enableFission`): Split a loop body into multiple independent loops.
+5. **Regenerates IR**: emits transformed loops back into the AST/IR.
+
+**Configuration knobs** (`include/polyopt.h:108-145`, all defaults shown):
+
+| Knob | Default | Meaning |
+|------|---------|---------|
+| `enableTiling` / `enableInterchange` / `enableSkewing` / `enableFusion` / `enableFission` / `enableReversal` | `true` | Per-transform on/off switches |
+| `l1CacheBytes` | `0` (auto-detect via TTI) | L1 data-cache size used to choose tile sizes |
+| `l2CacheBytes` | `0` (auto-detect) | L2 data-cache size for outer-tile sizing |
+| `cacheLineBytes` | `64` | Cache line size in bytes (x86-64 default) |
+| `maxLoopDepth` | `6` | Maximum loop-nest depth analysed (deeper nests have exponential analysis cost) |
+| `maxScopStatements` | `32` | Maximum statements per SCoP — larger SCoPs are bypassed |
 
 **Legality**: A transform is legal iff the transformed dependence distance vectors are lexicographically non-negative.
 
@@ -8142,14 +8165,23 @@ CF-CTRE produces:
 
 ### 28.10 Performance Characteristics
 
-**Fuel budget**: 10,000,000 instructions at O2 (100,000 at O1).
+**Fuel and depth budgets are constants, not per-O-level knobs** (`include/cfctre.h:483-484`):
 
-**Typical compile-time cost**:
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `kMaxInstructions` | `10,000,000` | Total instructions the abstract interpreter may execute per CF-CTRE invocation |
+| `kMaxDepth` | `128` | Maximum call-frame depth (bounds recursive evaluation) |
+
+The same budgets apply at every optimization level that runs CF-CTRE — there is **no separate "100,000-instruction" O1 mode**. If you need a tighter budget, disable CF-CTRE entirely with the corresponding `-fno-` flag rather than expecting an O-level scaler.
+
+The fuel counter (`fuel_`) is incremented once per evaluated abstract operation. On if-statements with symbolic conditions both branches are evaluated on a saved-and-restored fuel counter, then the post-merge counter is set to `max(fuelAfterThen, fuelAfterElse)` so symbolic branching costs the worst of the two paths (`src/cfctre.cpp:2772-2796`).
+
+**Typical compile-time cost** (illustrative, not guaranteed):
 - Simple function (arithmetic): ~100 instructions.
 - Loop (10 iterations): ~1,000 instructions.
 - Recursive function (depth 10): ~10,000 instructions.
 
-**Worst case**: Pathological recursion or loops exhaust fuel → return `symbolic()`.
+**Worst case**: Pathological recursion or loops exhaust fuel → CF-CTRE returns `CTValue::uninit()` and the caller falls back to runtime evaluation (no error is raised — the program still compiles, just without that fold).
 
 ### 28.11 Programmer-Visible Effects
 
