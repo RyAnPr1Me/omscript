@@ -5830,9 +5830,32 @@ for (i in 0...n) {
 
 ## 21. File I/O
 
-### `file_read(string) → string`
+OmScript exposes a small set of synchronous, **whole-file** I/O built-ins backed by the C runtime (`fopen` / `fread` / `fwrite` / `fclose`) and POSIX `access`. There is no streaming, seeking, or file-handle abstraction at the language level — each call opens, performs its operation, and closes the file in one step.
 
-Read entire file into a string. Returns the file contents or empty string on error.
+**I/O model:**
+- Files are opened in **binary mode** (`"rb"`, `"wb"`, `"a"`).
+- Paths are interpreted by the underlying C library (relative paths resolve against the process's current working directory).
+- Errors do **not** throw or abort — every built-in returns a sentinel value (empty string, or non-zero return code) so callers can branch explicitly.
+- There is no implicit buffering or text-mode newline translation.
+
+### 21.1 Summary
+
+| Built-in | Signature | On success | On failure |
+| --- | --- | --- | --- |
+| `file_read` | `(path: string) → string` | File contents | Empty string `""` |
+| `file_write` | `(path: string, content: string) → i64` | `0` | `1` |
+| `file_append` | `(path: string, content: string) → i64` | `0` | `1` |
+| `file_exists` | `(path: string) → bool` | `1` if exists | `0` |
+
+---
+
+### 21.2 `file_read(path: string) → string`
+
+**Description:** Read the entire contents of `path` into a newly-allocated, null-terminated string. The file is opened in binary mode, so no newline translation occurs.
+
+**Returns:** The file contents as a `string`. Returns the empty string `""` if the file cannot be opened or its size cannot be determined (e.g., non-seekable stream).
+
+**Errors:** Never throws. Failure is reported as an empty string — distinguish from a legitimately empty file using `file_exists` first if needed.
 
 **Example:**
 ```omscript
@@ -5842,20 +5865,27 @@ println(content);
 
 ---
 
-### `file_write(string, string) → i64`
+### 21.3 `file_write(path: string, content: string) → i64`
 
-Write string to file (overwrite). Returns 0 on success.
+**Description:** Write `content` to `path`, **truncating** any existing file. Opens in binary mode (`"wb"`) and writes exactly `strlen(content)` bytes.
+
+**Returns:** `0` on success, `1` if the file could not be opened for writing.
 
 **Example:**
 ```omscript
-file_write("output.txt", "hello world");
+var rc = file_write("output.txt", "hello world");
+if (rc != 0) {
+    println("write failed");
+}
 ```
 
 ---
 
-### `file_append(string, string) → i64`
+### 21.4 `file_append(path: string, content: string) → i64`
 
-Append string to file. Returns 0 on success.
+**Description:** Append `content` to the end of `path`. Opens in append mode (`"a"`); creates the file if it does not exist.
+
+**Returns:** `0` on success, `1` if the file could not be opened.
 
 **Example:**
 ```omscript
@@ -5864,9 +5894,11 @@ file_append("log.txt", "Log entry\n");
 
 ---
 
-### `file_exists(string) → bool`
+### 21.5 `file_exists(path: string) → bool`
 
-Return 1 if file exists, 0 otherwise.
+**Description:** Test whether `path` exists and is accessible to the current process. Implemented via POSIX `access(path, F_OK)`.
+
+**Returns:** `1` (true) if the path exists, `0` (false) otherwise. Note that a `false` result may also indicate a permission error preventing the existence check.
 
 **Example:**
 ```omscript
