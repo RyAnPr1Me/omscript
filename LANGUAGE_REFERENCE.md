@@ -754,7 +754,25 @@ import "math_helpers.om" as math
 var result = DOUBLE(5);  // Expands to: 5 + 5
 ```
 
-**Stringification (`#`) and token pasting (`##`)**: Not implemented. Macro expansion performs only textual substitution.
+**Stringification (`#`) and token pasting (`##`)**: Implemented for
+function-like macros.
+
+* `#param` in the macro body is replaced by a string literal whose contents
+  are the textual argument with leading/trailing whitespace trimmed and
+  embedded `"` / `\` escaped:
+
+  ```omscript
+  #define STR(x) #x
+  var s:string = STR(world);   // expands to: var s:string = "world";
+  ```
+
+* `a ## b` collapses two tokens into one by removing the `##` and any
+  surrounding whitespace.  Multiple consecutive pastes are supported:
+
+  ```omscript
+  #define CONCAT(a, b) a ## b
+  var CONCAT(my, Var):i64 = 42;   // expands to: var myVar:i64 = 42;
+  ```
 
 ### 3.3 Predefined Macros
 
@@ -3296,17 +3314,39 @@ println(len(a));   // 2
 
 ---
 
-#### `shift(array) → i64` (unimplemented in source — verify if exists)
+#### `shift(array) → i64`
 
-**Expected semantics:** Remove and return the first element; shift all remaining elements left.  
+**Signature:** `shift(array) → i64`
+**Semantics:** Remove and return the first element; shift all remaining
+elements left by one slot. Mutates the array in place: length decreases by 1.
+Aborts with a runtime error when called on an empty array.
 **Time:** O(n)
+
+```omscript
+var a:i64[] = [10, 20, 30];
+var x:i64 = shift(a);
+println(x);        // 10
+println(len(a));   // 2
+println(a[0]);     // 20
+```
 
 ---
 
-#### `unshift(array, value) → i64` (unimplemented in source — verify if exists)
+#### `unshift(array, value) → i64`
 
-**Expected semantics:** Insert `value` at the beginning; shift existing elements right.  
+**Signature:** `unshift(array, i64) → array`
+**Semantics:** Insert `value` at index 0; shift existing elements right by one
+slot. Returns the (possibly reallocated) array pointer — assign it back to a
+variable to track the new buffer when growth occurs. Reuses the same
+power-of-two growth policy as `push`.
 **Time:** O(n)
+
+```omscript
+var a:i64[] = [20, 30];
+a = unshift(a, 10);
+println(a[0]);     // 10
+println(len(a));   // 3
+```
 
 ---
 

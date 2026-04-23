@@ -186,6 +186,8 @@ const std::unordered_map<std::string, BuiltinEffects>& BuiltinEffectTable::table
         // ── Mutating builtins (write memory, no I/O) ──────────────────────
         {"push",            {false, true,  true,  false}},
         {"pop",             {false, true,  true,  false}},
+        {"shift",           {false, true,  true,  false}},
+        {"unshift",         {false, true,  true,  false, false, false, true,  false}},
         {"sort",            {false, true,  true,  false}},
         {"reverse",         {false, true,  true,  false}},
         {"swap",            {false, true,  true,  false}},

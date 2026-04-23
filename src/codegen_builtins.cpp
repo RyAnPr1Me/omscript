@@ -59,6 +59,8 @@ enum class BuiltinId : uint8_t {
     STR_REVERSE, PUSH, POP, INDEX_OF, ARRAY_CONTAINS, SORT, ARRAY_FILL,
     ARRAY_CONCAT, ARRAY_SLICE, ARRAY_COPY, ARRAY_REMOVE, ARRAY_MAP,
     ARRAY_FILTER, ARRAY_REDUCE, PRINTLN, WRITE, EXIT_PROGRAM,
+    // Array shift / unshift: head removal and head insertion (O(n) in length).
+    SHIFT, UNSHIFT,
     RANDOM, TIME, SLEEP, STR_TO_INT, STR_TO_FLOAT, STR_SPLIT, STR_CHARS,
     FILE_READ, FILE_WRITE, FILE_APPEND, FILE_EXISTS, MAP_NEW, MAP_SET,
     MAP_GET, MAP_HAS, MAP_REMOVE, MAP_KEYS, MAP_VALUES, MAP_SIZE,
@@ -210,6 +212,8 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"str_reverse", BuiltinId::STR_REVERSE},
     {"push", BuiltinId::PUSH},
     {"pop", BuiltinId::POP},
+    {"shift", BuiltinId::SHIFT},
+    {"unshift", BuiltinId::UNSHIFT},
     {"index_of", BuiltinId::INDEX_OF},
     {"array_contains", BuiltinId::ARRAY_CONTAINS},
     {"sort", BuiltinId::SORT},
@@ -3628,6 +3632,144 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* popLenSt = builder->CreateAlignedStore(newLen, arrPtr, llvm::MaybeAlign(8));
         popLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         return lastVal;
+    }
+
+    // -----------------------------------------------------------------------
+    // shift(arr) — remove and return arr[0], shifting remaining elements left.
+    //   Aborts on empty array.  Mutates the array in place: length decreases
+    //   by 1, all subsequent elements move left by one slot.  O(n) in length.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::SHIFT) {
+        validateArgCount(expr, "shift", 1);
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy()
+                ? arrArg
+                : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "shift.arrptr");
+        llvm::Value* oldLen = emitLoadArrayLen(arrPtr, "shift.oldlen");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* isEmpty = builder->CreateICmpSLE(oldLen, zero, "shift.empty");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "shift.ok",   function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "shift.fail", function);
+        // Shifting an empty array is exceptional.
+        llvm::MDNode* shW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(isEmpty, failBB, okBB, shW);
+
+        builder->SetInsertPoint(failBB);
+        {
+            std::string msg = expr->line > 0
+                ? std::string("Runtime error: shift from empty array at line ") + std::to_string(expr->line) + "\n"
+                : "Runtime error: shift from empty array\n";
+            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "shift_empty_msg")});
+        }
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
+        // Save the first element (arr[1]).
+        llvm::Value* firstPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "shift.firstptr");
+        llvm::Value* firstVal = emitLoadArrayElem(firstPtr, "shift.firstval");
+
+        // Move arr[2..oldLen+1) → arr[1..oldLen).  Source and dest overlap, so use memmove.
+        // Byte count = (oldLen - 1) * 8.
+        llvm::Value* newLen = builder->CreateSub(oldLen, one, "shift.newlen", /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* moveBytes = builder->CreateMul(newLen, eight, "shift.movebytes", /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* dst = firstPtr;  // arr + 1
+        llvm::Value* src = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
+            llvm::ConstantInt::get(getDefaultType(), 2), "shift.src");
+        builder->CreateCall(getOrDeclareMemmove(), {dst, src, moveBytes});
+
+        // Decrease length in-place.
+        auto* lenSt = builder->CreateAlignedStore(newLen, arrPtr, llvm::MaybeAlign(8));
+        lenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        return firstVal;
+    }
+
+    // -----------------------------------------------------------------------
+    // unshift(arr, val) — insert val at index 0, shifting existing elements right.
+    //   Returns the (possibly reallocated) array pointer.  Mutates in place
+    //   when the buffer has spare capacity, otherwise reallocates with the
+    //   same power-of-two growth policy as push.  O(n) in length.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::UNSHIFT) {
+        validateArgCount(expr, "unshift", 2);
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* valArg = generateExpression(expr->arguments[1].get());
+        arrArg = toDefaultType(arrArg);
+        valArg = toDefaultType(valArg);
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy()
+                ? arrArg
+                : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "ush.arrptr");
+        llvm::Value* oldLen = emitLoadArrayLen(arrPtr, "ush.oldlen");
+        llvm::Value* one64  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight  = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* zero64 = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* newLen = builder->CreateAdd(oldLen, one64, "ush.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
+
+        // Same growth policy as push: realloc only at power-of-2 boundary or
+        // first time we cross the minimum capacity (16 slots).
+        llvm::Value* oldSlots = builder->CreateAdd(oldLen, one64, "ush.oldslots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* minSlots = llvm::ConstantInt::get(getDefaultType(), 16);
+        llvm::Value* oldSlotsM1 = builder->CreateSub(oldSlots, one64, "ush.osm1", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* andCheck = builder->CreateAnd(oldSlots, oldSlotsM1, "ush.ispow2");
+        llvm::Value* isPow2 = builder->CreateICmpEQ(andCheck, zero64, "ush.ispow2cmp");
+        llvm::Value* belowMin = builder->CreateICmpSLT(oldSlots, minSlots, "ush.belowmin");
+        llvm::Value* atBoundary = builder->CreateAnd(isPow2,
+            builder->CreateNot(belowMin, "ush.abovemin"), "ush.atbound");
+        llvm::Value* needsGrow = builder->CreateOr(belowMin, atBoundary, "ush.needsgrow");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* growBB   = llvm::BasicBlock::Create(*context, "ush.grow",   function);
+        llvm::BasicBlock* nogrowBB = llvm::BasicBlock::Create(*context, "ush.nogrow", function);
+        llvm::BasicBlock* mergeBB  = llvm::BasicBlock::Create(*context, "ush.merge",  function);
+        llvm::MDNode* growW = llvm::MDBuilder(*context).createBranchWeights(1, 99);
+        builder->CreateCondBr(needsGrow, growBB, nogrowBB, growW);
+
+        // Grow path: nextPow2(newSlots) via ctlz.
+        builder->SetInsertPoint(growBB);
+        llvm::Value* slots = builder->CreateAdd(newLen, one64, "ush.slots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* slotsM1 = builder->CreateSub(slots, one64, "ush.pm1", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(),
+            llvm::Intrinsic::ctlz, {getDefaultType()});
+        llvm::Value* lz = builder->CreateCall(ctlzFn,
+            {slotsM1, llvm::ConstantInt::getTrue(*context)}, "ush.lz");
+        llvm::Value* shiftAmt = builder->CreateSub(
+            llvm::ConstantInt::get(getDefaultType(), 64), lz, "ush.shift");
+        llvm::Value* cap = builder->CreateShl(one64, shiftAmt, "ush.cap", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* useMin = builder->CreateICmpSLT(cap, minSlots, "ush.usemin");
+        cap = builder->CreateSelect(useMin, minSlots, cap, "ush.finalcap");
+        llvm::Value* newSize = builder->CreateMul(cap, eight, "ush.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* grownBuf = builder->CreateCall(getOrDeclareRealloc(), {arrPtr, newSize}, "ush.newbuf");
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(nogrowBB);
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* newBuf = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "ush.buf");
+        newBuf->addIncoming(grownBuf, growBB);
+        newBuf->addIncoming(arrPtr, nogrowBB);
+
+        // memmove arr[1..oldLen+1) → arr[2..newLen+1) — overlapping, dest > src.
+        llvm::Value* moveBytes = builder->CreateMul(oldLen, eight, "ush.movebytes", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* src = builder->CreateInBoundsGEP(getDefaultType(), newBuf, one64, "ush.src");
+        llvm::Value* dst = builder->CreateInBoundsGEP(getDefaultType(), newBuf,
+            llvm::ConstantInt::get(getDefaultType(), 2), "ush.dst");
+        builder->CreateCall(getOrDeclareMemmove(), {dst, src, moveBytes});
+
+        // Store the new value at index 1 (the first slot after the header).
+        llvm::Value* firstPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, one64, "ush.firstptr");
+        emitStoreArrayElem(valArg, firstPtr);
+
+        // Update length header.
+        emitStoreArrayLen(newLen, newBuf);
+        return builder->CreatePtrToInt(newBuf, getDefaultType(), "ush.result");
     }
 
     if (bid == BuiltinId::INDEX_OF) {

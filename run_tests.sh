@@ -380,6 +380,8 @@ ptest_program "examples/trig_math_test.om" 32
 ptest_program "examples/string_builtins_test.om" 12
 ptest_program "examples/char_predicates_test.om" 27
 ptest_program "examples/array_builtins_test.om" 20
+ptest_program "examples/array_shift_unshift_test.om" 19
+ptest_program "examples/macro_stringify_paste_test.om" 4
 ptest_program "examples/array_utility_test.om" 18
 ptest_program "examples/simd_register_test.om" 14
 ptest_program "examples/register_test.om" 25

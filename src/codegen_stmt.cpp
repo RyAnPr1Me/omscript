@@ -331,6 +331,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     call->callee == "array_copy" || call->callee == "array_map" ||
                     call->callee == "array_filter" || call->callee == "array_slice" ||
                     call->callee == "push" || call->callee == "pop" ||
+                    call->callee == "shift" || call->callee == "unshift" ||
                     call->callee == "sort" || call->callee == "reverse" ||
                     call->callee == "array_remove" || call->callee == "array_reduce" ||
                     call->callee == "str_split" || call->callee == "str_chars" ||

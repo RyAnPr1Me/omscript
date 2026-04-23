@@ -254,6 +254,69 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
                     const MacroDef& def = it->second;
                     std::string expanded = def.body;
 
+                    // ── Stringification: replace `#param` with `"arg"`.
+                    //
+                    // Per C99-style preprocessor semantics, `#x` in the macro
+                    // body is replaced by a string literal containing the
+                    // (un-expanded) actual argument text, with leading and
+                    // trailing whitespace trimmed and embedded `"` and `\`
+                    // escaped.  This pass runs BEFORE normal parameter
+                    // substitution so that stringified parameters are not
+                    // also macro-expanded.
+                    auto stringifyArg = [](const std::string& a) {
+                        std::string s = "\"";
+                        // Trim leading/trailing whitespace.
+                        size_t start = 0, end = a.size();
+                        while (start < end && std::isspace(static_cast<unsigned char>(a[start]))) ++start;
+                        while (end > start && std::isspace(static_cast<unsigned char>(a[end - 1]))) --end;
+                        for (size_t k = start; k < end; ++k) {
+                            char ch = a[k];
+                            if (ch == '"' || ch == '\\') s += '\\';
+                            s += ch;
+                        }
+                        s += '"';
+                        return s;
+                    };
+                    {
+                        std::string out;
+                        out.reserve(expanded.size());
+                        size_t k = 0;
+                        while (k < expanded.size()) {
+                            // Recognise `#` followed by an identifier — but
+                            // skip `##` (handled below) so we don't confuse
+                            // stringification with token pasting.
+                            if (expanded[k] == '#'
+                                && k + 1 < expanded.size()
+                                && expanded[k + 1] != '#'
+                                && (k == 0 || expanded[k - 1] != '#')) {
+                                size_t s = k + 1;
+                                // Tolerate whitespace between `#` and the param name.
+                                while (s < expanded.size()
+                                       && std::isspace(static_cast<unsigned char>(expanded[s])))
+                                    ++s;
+                                if (s < expanded.size() && isIdentStart(expanded[s])) {
+                                    size_t e = s;
+                                    while (e < expanded.size() && isIdentChar(expanded[e])) ++e;
+                                    const std::string name = expanded.substr(s, e - s);
+                                    bool replaced = false;
+                                    for (size_t pi = 0; pi < def.params.size(); ++pi) {
+                                        if (def.params[pi] == name) {
+                                            const std::string& a =
+                                                (pi < args.size()) ? args[pi] : std::string();
+                                            out += stringifyArg(a);
+                                            k = e;
+                                            replaced = true;
+                                            break;
+                                        }
+                                    }
+                                    if (replaced) continue;
+                                }
+                            }
+                            out += expanded[k++];
+                        }
+                        expanded = std::move(out);
+                    }
+
                     for (size_t pi = 0; pi < def.params.size(); pi++) {
                         const std::string& param = def.params[pi];
                         const std::string& arg = (pi < args.size()) ? args[pi] : "";
@@ -271,6 +334,28 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
                         }
                         expanded = newExp;
                     }
+
+                    // ── Token pasting: collapse `A ## B` into the single
+                    // token `AB`.  We walk the text, and whenever we see
+                    // `##` (optionally surrounded by whitespace) we splice
+                    // the runs to its left and right together.  Multiple
+                    // consecutive pastes (`A ## B ## C`) are handled by
+                    // re-running the loop until no `##` remains.
+                    auto applyTokenPaste = [](std::string s) {
+                        for (;;) {
+                            const size_t hpos = s.find("##");
+                            if (hpos == std::string::npos) return s;
+                            size_t lo = hpos;
+                            while (lo > 0 && std::isspace(static_cast<unsigned char>(s[lo - 1])))
+                                --lo;
+                            size_t hi = hpos + 2;
+                            while (hi < s.size() && std::isspace(static_cast<unsigned char>(s[hi])))
+                                ++hi;
+                            s = s.substr(0, lo) + s.substr(hi);
+                        }
+                    };
+                    expanded = applyTokenPaste(std::move(expanded));
+
                     result += substituteMacros(expanded, lineNo, depth + 1);
                     continue;
                 }

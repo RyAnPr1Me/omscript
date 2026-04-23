@@ -107,6 +107,7 @@ void Parser::registerStdNamespace() {
         {"is_space",   "is_space"},   {"is_alnum",   "is_alnum"},
         // ── Array ────────────────────────────────────────────────────────────
         {"push",       "push"},       {"pop",        "pop"},
+        {"shift",      "shift"},      {"unshift",    "unshift"},
         {"len",        "len"},        {"reverse",    "reverse"},
         {"sort",       "sort"},       {"sum",        "sum"},
         {"index_of",   "index_of"},   {"swap",       "swap"},

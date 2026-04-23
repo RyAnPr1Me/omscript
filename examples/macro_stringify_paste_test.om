@@ -1,0 +1,26 @@
+// Tests preprocessor stringification (#) and token pasting (##).
+// Expected exit code: 4 (number of passing assertions).
+#define STR(x) #x
+#define CONCAT(a, b) a ## b
+
+fn main() {
+    var total:i64 = 0;
+
+    // ── Stringification: turns the macro arg into a string literal. ─────
+    var s:string = STR(world);
+    total = total + str_eq(s, "world");          // 1
+
+    // ── Stringification with whitespace + escapable chars. ──────────────
+    var t:string = STR(  hi  );
+    total = total + str_eq(t, "hi");             // 1
+
+    // ── Token pasting: `my ## Var` builds the identifier `myVar`. ───────
+    var CONCAT(my, Var):i64 = 42;
+    total = total + (myVar == 42);               // 1
+
+    // ── Pasting a prefix to a numeric suffix builds a new identifier. ───
+    var CONCAT(x, 1):i64 = 7;
+    total = total + (x1 == 7);                   // 1
+
+    return total;
+}

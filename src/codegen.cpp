@@ -3966,7 +3966,7 @@ static bool isPreAnalysisArrayExpr(Expression* expr,
         static const std::unordered_set<std::string> arrayBuiltins = {
             "array_fill", "array_concat", "array_copy", "array_map",
             "array_filter", "array_slice", "sort", "reverse",
-            "str_split", "str_chars", "push", "pop", "array_remove"
+            "str_split", "str_chars", "push", "pop", "unshift", "array_remove"
         };
         if (arrayBuiltins.count(call->callee)) return true;
         if (arrayReturningFunctions.count(call->callee)) return true;
@@ -4162,7 +4162,7 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
         auto* call = static_cast<CallExpr*>(expr);
         if (call->callee == "str_split")
             return true;
-        if ((call->callee == "push" || call->callee == "array_copy") && !call->arguments.empty())
+        if ((call->callee == "push" || call->callee == "unshift" || call->callee == "array_copy") && !call->arguments.empty())
             return isStringArrayExpr(call->arguments[0].get());
         if (call->callee == "array_concat" && !call->arguments.empty())
             return isStringArrayExpr(call->arguments[0].get());

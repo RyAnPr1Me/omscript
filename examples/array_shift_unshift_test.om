@@ -1,0 +1,54 @@
+// Tests shift / unshift array builtins.
+// Expected exit code: 18 (number of passing assertions).
+fn main() {
+    var total:i64 = 0;
+
+    // ── shift: removes first element, shifts the rest left ──────────────
+    var a:i64[] = [10, 20, 30, 40];
+    var first:i64 = shift(a);
+    total = total + (first == 10);    // 1
+    total = total + (len(a) == 3);    // 1
+    total = total + (a[0] == 20);     // 1
+    total = total + (a[1] == 30);     // 1
+    total = total + (a[2] == 40);     // 1
+    // total = 5
+
+    // ── shift down to a single element ──────────────────────────────────
+    var b:i64[] = [1, 2];
+    var x:i64 = shift(b);
+    total = total + (x == 1);         // 1
+    total = total + (len(b) == 1);    // 1
+    total = total + (b[0] == 2);      // 1
+    // total = 8
+
+    // ── unshift: prepends a value, returns the (possibly grown) array ───
+    var c:i64[] = [20, 30];
+    c = unshift(c, 10);
+    total = total + (len(c) == 3);    // 1
+    total = total + (c[0] == 10);     // 1
+    total = total + (c[1] == 20);     // 1
+    total = total + (c[2] == 30);     // 1
+    // total = 12
+
+    // ── unshift triggers buffer growth past the minimum capacity ────────
+    var d:i64[] = [0];
+    d = unshift(d, 1);
+    d = unshift(d, 2);
+    d = unshift(d, 3);
+    total = total + (len(d) == 4);    // 1
+    total = total + (d[0] == 3);      // 1
+    total = total + (d[1] == 2);      // 1
+    total = total + (d[2] == 1);      // 1
+    total = total + (d[3] == 0);      // 1
+    // total = 17
+
+    // ── shift after unshift round-trips correctly ───────────────────────
+    var e:i64[] = [100];
+    e = unshift(e, 50);
+    var y:i64 = shift(e);
+    total = total + (y == 50);        // 1
+    total = total + (e[0] == 100);    // 1
+    // total = 19
+
+    return total;
+}
