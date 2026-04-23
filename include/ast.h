@@ -809,23 +809,111 @@ class ComptimeExpr : public Expression {
 /// Inferred side-effect summary for a user function.
 ///
 /// Populated by CodeGenerator::inferFunctionEffects() before any code is
-/// generated.  Drives automatic LLVM attribute inference (readonly, readnone,
-/// nosync, willreturn) and warns when @pure is annotated on a function whose
-/// body contains detectable effects.
+/// generated.  Drives automatic LLVM attribute inference (readnone, readonly,
+/// nosync, willreturn, nounwind, argmemonly) and warns when @pure is
+/// annotated on a function whose body contains detectable effects.
+///
+/// The flags are conservative: a `true` value means "may have this effect";
+/// a `false` value means "provably does not have this effect under the
+/// program's static call graph".  Unknown callees pessimise every flag.
 struct FunctionEffects {
-    bool readsMemory  = false; ///< Function reads from heap/params (loads)
-    bool writesMemory = false; ///< Function writes to heap/params (stores, push, pop, sort…)
-    bool hasIO        = false; ///< Function performs I/O (print, file_*, input, sleep…)
-    bool hasMutation  = false; ///< Function mutates a parameter observable outside the callee
+    // ── Heap / parameter memory ───────────────────────────────────────────
+    bool readsMemory  = false; ///< Reads from heap/params (loads, index, field)
+    bool writesMemory = false; ///< Writes to heap/params (index/field assign, push, pop, sort…)
+    bool hasIO        = false; ///< Performs I/O (print, file_*, input, sleep…)
+    bool hasMutation  = false; ///< Mutates parameter-reachable memory observable outside the callee
 
-    /// True when the function has no detectable effects at all (pure).
-    bool isReadNone() const { return !readsMemory && !writesMemory && !hasIO && !hasMutation; }
-    /// True when the function only reads memory and has no I/O or mutations.
-    bool isReadOnly() const { return readsMemory && !writesMemory && !hasIO && !hasMutation; }
+    // ── New (overhauled) effect axes ──────────────────────────────────────
+    bool mayThrow         = false; ///< May throw, panic, abort, or exit
+    bool mayNotReturn     = false; ///< May fail to return (calls noreturn callee or unbounded loop)
+    bool allocates        = false; ///< Performs heap allocation (alloc, newRegion, array constructors…)
+    bool deallocates      = false; ///< Frees heap memory (free, invalidate, region destroy)
+    bool hasIndirectCall  = false; ///< Calls through an unresolved name (function pointer / unknown callee)
+    bool readsGlobal      = false; ///< Reads a top-level global variable
+    bool writesGlobal     = false; ///< Writes a top-level global variable
+
+    /// Per-parameter mutation mask.  `paramMutated[i] == true` means
+    /// parameter `i` (or memory reachable through it) is mutated by the
+    /// function or one of its callees.  Empty until effect inference has
+    /// computed it for the function; size matches the function's parameter
+    /// list when populated.
+    std::vector<bool> paramMutated;
+
+    // ── Derived predicates ────────────────────────────────────────────────
+
+    /// True when the function has no detectable memory effects at all.
+    bool isReadNone() const {
+        return !readsMemory && !writesMemory && !hasIO && !hasMutation
+            && !readsGlobal && !writesGlobal && !allocates && !deallocates
+            && !hasIndirectCall;
+    }
+    /// True when the function only reads memory (no writes, no I/O, no mutation).
+    bool isReadOnly() const {
+        return (readsMemory || readsGlobal)
+            && !writesMemory && !writesGlobal && !hasIO && !hasMutation
+            && !allocates && !deallocates && !hasIndirectCall;
+    }
     /// True when the function is safe to mark nosync (no I/O, no concurrency).
-    bool isNoSync()   const { return !hasIO; }
+    bool isNoSync() const { return !hasIO; }
     /// True when the function can be inferred as @pure by the compiler.
     bool inferredPure() const { return isReadNone() || isReadOnly(); }
+    /// True when the function provably never throws / aborts / exits.
+    bool isNoUnwind() const { return !mayThrow; }
+    /// True when the function provably terminates.
+    bool willReturn() const { return !mayNotReturn; }
+    /// True when the function only touches memory reachable through its
+    /// arguments — no globals, no I/O, no allocation, no indirect calls.
+    /// Maps to the LLVM `argmemonly` memory effect.
+    bool argMemOnly() const {
+        return !readsGlobal && !writesGlobal && !hasIO
+            && !allocates && !deallocates && !hasIndirectCall;
+    }
+    /// True when parameter @p i is mutated.  Returns false when the per-param
+    /// mask hasn't been populated for this function (conservative for callers
+    /// that need to know "definitely not mutated").
+    bool paramIsMutated(std::size_t i) const {
+        return i < paramMutated.size() && paramMutated[i];
+    }
+    /// True when at least one parameter is known to be mutated.
+    bool anyParamMutated() const {
+        for (bool b : paramMutated) if (b) return true;
+        return false;
+    }
+    /// Merge another summary into this one (logical OR over every flag,
+    /// element-wise OR over the param-mutation mask up to the shorter length).
+    void mergeFrom(const FunctionEffects& o) {
+        readsMemory      = readsMemory      || o.readsMemory;
+        writesMemory     = writesMemory     || o.writesMemory;
+        hasIO            = hasIO            || o.hasIO;
+        hasMutation      = hasMutation      || o.hasMutation;
+        mayThrow         = mayThrow         || o.mayThrow;
+        mayNotReturn     = mayNotReturn     || o.mayNotReturn;
+        allocates        = allocates        || o.allocates;
+        deallocates      = deallocates      || o.deallocates;
+        hasIndirectCall  = hasIndirectCall  || o.hasIndirectCall;
+        readsGlobal      = readsGlobal      || o.readsGlobal;
+        writesGlobal     = writesGlobal     || o.writesGlobal;
+        // Param-mutation masks merge only when sizes match (same function).
+        if (paramMutated.size() == o.paramMutated.size()) {
+            for (std::size_t i = 0; i < paramMutated.size(); ++i)
+                paramMutated[i] = paramMutated[i] || o.paramMutated[i];
+        }
+    }
+    /// Equality across every effect axis (used by the fixed-point loop).
+    bool equalsForFixedPoint(const FunctionEffects& o) const {
+        return readsMemory     == o.readsMemory
+            && writesMemory    == o.writesMemory
+            && hasIO           == o.hasIO
+            && hasMutation     == o.hasMutation
+            && mayThrow        == o.mayThrow
+            && mayNotReturn    == o.mayNotReturn
+            && allocates       == o.allocates
+            && deallocates     == o.deallocates
+            && hasIndirectCall == o.hasIndirectCall
+            && readsGlobal     == o.readsGlobal
+            && writesGlobal    == o.writesGlobal
+            && paramMutated    == o.paramMutated;
+    }
 };
 
 // ---------------------------------------------------------------------------
