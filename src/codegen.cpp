@@ -4830,7 +4830,9 @@ void CodeGenerator::generate(Program* program) {
     if (verbose_) {
         std::cout << "  [opt] Running LLVM optimization pipeline..." << '\n';
     }
-    runOptimizationPasses();
+    if (runIRPasses_) {
+        runOptimizationPasses();
+    }
 
     // Finalize DWARF debug info before module verification.
     if (debugMode_ && debugBuilder_) {

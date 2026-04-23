@@ -289,6 +289,16 @@ class CodeGenerator {
         enableHGOE_ = enable;
     }
 
+    /// Enable or disable the post-codegen LLVM IR optimization pipeline
+    /// (runOptimizationPasses()).  Default: true.  White-box unit tests that
+    /// inspect the raw IR emitted by the CodeGenerator (metadata, nuw/nsw
+    /// flags, load-bound annotations, loop-back-edge md) set this to false
+    /// so LLVM's own O1+ passes do not eliminate the very patterns the test
+    /// is verifying.
+    void setRunIRPasses(bool enable) {
+        runIRPasses_ = enable;
+    }
+
     /// Enable PGO instrumentation generation mode.
     /// When set, the AOT-compiled binary will write a raw profile (.profraw)
     /// to @p profilePath at program exit, capturing branch and call counts.
@@ -1266,6 +1276,13 @@ class CodeGenerator {
     bool enableSuperopt_ = true;      // -fsuperopt / -fno-superopt (superoptimizer)
     unsigned superoptLevel_ = 2;      // -fsuperopt-level=0/1/2/3 (default: 2)
     bool enableHGOE_ = true;          // -fhgoe / -fno-hgoe (hardware graph optimization)
+    bool runIRPasses_ = true;         // Run runOptimizationPasses() after codegen.
+                                       // Unit tests that inspect the raw IR
+                                       // emitted by the CodeGenerator (metadata,
+                                       // nuw/nsw flags, loop-back-edge md, etc.)
+                                       // set this to false so that LLVM's own
+                                       // passes do not eliminate the patterns
+                                       // the tests are verifying.
     unsigned preferredVectorWidth_ = 4; // SIMD vector width for loop hints (target-aware)
     std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file

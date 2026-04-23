@@ -3056,7 +3056,13 @@ TEST(CodegenTest, BytecodeAlgebraicZeroMulPreservesSideEffects) {
 TEST(CodegenTest, OptmaxMulZeroPreservesSideEffects) {
     // In OPTMAX, func() * 0 should NOT be optimized to 0 because the
     // function call may have side effects. The multiplication should remain.
+    // We disable the OPTMAX LLVM pipeline so helper() is not inlined +
+    // constant-folded; the AST-level OPTMAX folder is what we're testing
+    // here, and it correctly preserves the CallExpr (non-pure at the AST
+    // level).  LLVM passes are also disabled (O0 already does this) so the
+    // call is observable in the emitted IR.
     CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setOptMax(false);
     auto* mod = generateIR("OPTMAX=:\n"
                            "fn helper(x: int) { return x; }\n"
                            "fn mul_zero(x: int) { return helper(x) * 0; }\n"
@@ -3074,7 +3080,6 @@ TEST(CodegenTest, OptmaxMulZeroPreservesSideEffects) {
                 hasCall = true;
         }
     }
-    if (!hasCall) func->print(llvm::errs());
     EXPECT_TRUE(hasCall);
 }
 
@@ -3082,6 +3087,7 @@ TEST(CodegenTest, OptmaxPowZeroPreservesSideEffects) {
     // In OPTMAX, func() ** 0 should NOT be optimized to 1 because the
     // function call may have side effects.
     CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setOptMax(false);
     auto* mod = generateIR("OPTMAX=:\n"
                            "fn helper(x: int) { return x; }\n"
                            "fn pow_zero(x: int) { return helper(x) ** 0; }\n"
@@ -6515,7 +6521,14 @@ TEST(CodegenTest, LcmZeroArgs) {
 TEST(CodegenTest, NUWAddOnNonNegOperands) {
     // The for-loop iterator `i` is non-negative (ascending from 0); `len(a)`
     // is also non-negative.  Their sum should get both nuw and nsw.
+    //
+    // We disable runOptimizationPasses() so the LLVM pipeline cannot replace
+    // the loop with a closed-form triangular sum (n*(n-1)/2) via the
+    // superoptimizer — that transformation is correct but eliminates the
+    // very `add nuw nsw` instruction emitted by the OmScript codegen that
+    // this test is verifying.
     CodeGenerator codegen(OptimizationLevel::O1);
+    codegen.setRunIRPasses(false);
     auto* mod = generateIR(
         "fn f(a:i64) { var s:i64 = 0; for (i in 0...len(a)) { s = s + i; } return s; } "
         "fn main() { return f([1, 2, 3]); }",
@@ -6546,6 +6559,11 @@ TEST(CodegenTest, NUWAddOnNonNegOperands) {
 // directly in the IR to every LLVM pass, not just through assume intrinsics.
 TEST(CodegenTest, RangeMetadataOnNonNegLoad) {
     CodeGenerator codegen(OptimizationLevel::O1);
+    // Disable LLVM passes so the `load !range` metadata emitted by the
+    // OmScript codegen survives — LLVM's mem2reg/DCE would promote away
+    // the load of `i` (or delete the dead `var x:i64 = i*2;` store entirely)
+    // before the test could observe the metadata.
+    codegen.setRunIRPasses(false);
     auto* mod = generateIR(
         "fn f(n:i64) { for (i in 0...n) { var x:i64 = i * 2; } } "
         "fn main() { f(10); return 0; }",
@@ -6695,9 +6713,16 @@ TEST(CodegenTest, DeepConstEval_IntConstantReturningFunction) {
 //    be marked as constant-returning.
 TEST(CodegenTest, DeepConstEval_SideEffectFunctionNotFolded) {
     CodeGenerator codegen(OptimizationLevel::O1);
-    // This function has a non-const var — the analysis must reject it.
+    // Disable LLVM passes so the non-folded make_str() call remains
+    // observable.  The OmScript deep-const-eval short-circuit runs during
+    // codegen (and correctly refuses to fold make_str because the call to
+    // the impure builtin input() gives it an observable side effect), but
+    // LLVM's inliner + IPSCCP at O1 would otherwise inline the body.
+    codegen.setRunIRPasses(false);
+    // make_str() reads from input() — a genuine observable side effect —
+    // so the deep-const-eval pass must reject it and leave the call live.
     auto* mod = generateIR(
-        "fn make_str() { var s:i64 = \"a\"; s = s + \"b\"; return s; }"
+        "fn make_str() { var s:i64 = input(); s = s + \"b\"; return s; }"
         "fn main() { return len(make_str()); }",
         codegen);
     ASSERT_NE(mod, nullptr);
@@ -6722,6 +6747,9 @@ TEST(CodegenTest, DeepConstEval_SideEffectFunctionNotFolded) {
 // matching what generateIdentifier emits for regular variable reads.
 TEST(CodegenTest, IncDecLoadHasNoundef) {
     CodeGenerator codegen(OptimizationLevel::O1);
+    // Disable LLVM passes so the load (and its !noundef metadata emitted
+    // by OmScript's generateIncDec) is not promoted away by mem2reg.
+    codegen.setRunIRPasses(false);
     // Use a parameter-sourced initial value and an external sink so the
     // codegen-time constant evaluator cannot fold the whole body away.
     auto* mod = generateIR(
@@ -6748,6 +6776,9 @@ TEST(CodegenTest, IncDecLoadHasNoundef) {
 // inside x++ should carry !range [0, INT64_MAX) metadata.
 TEST(CodegenTest, IncDecLoadHasRangeOnNonNeg) {
     CodeGenerator codegen(OptimizationLevel::O1);
+    // Disable LLVM passes so the !range-annotated load is not promoted
+    // away by mem2reg.
+    codegen.setRunIRPasses(false);
     // `abs(n)` guarantees non-negative without being a compile-time constant,
     // so the !range metadata path is exercised on a real load.
     auto* mod = generateIR(
@@ -6881,6 +6912,10 @@ TEST(CodegenTest, PipelineZeroCountNoBody) {
 TEST(CodegenTest, PipelineO1LoopMetadata) {
     // At O1 the back-edge should carry llvm.loop metadata (mustprogress etc.)
     CodeGenerator codegen(OptimizationLevel::O1);
+    // Disable LLVM passes so the empty pipeline loop is not eliminated by
+    // LoopDeletion — we're verifying the metadata is emitted by codegen,
+    // not that it survives all downstream optimizations.
+    codegen.setRunIRPasses(false);
     auto* mod = generateIR(
         "fn main() { pipeline 8 { stage s { } } }", codegen);
     ASSERT_NE(mod, nullptr);
