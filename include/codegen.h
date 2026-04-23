@@ -61,6 +61,7 @@ struct OptStats {
     unsigned borrowsFrozen    = 0; ///< Variables frozen (freeze + alias propagation)
     unsigned independentLoops = 0; ///< Loops annotated with @independent
     unsigned allocatorFuncs   = 0; ///< User functions annotated as @allocator
+    unsigned regionsCoalesced = 0; ///< Region pairs coalesced by the RLC pass
 
     // ── CF-CTRE / abstract-interpretation statistics ──────────────────────
     // Populated from CTEngine::stats() at print time when a CT engine is
@@ -92,7 +93,8 @@ struct OptStats {
                   << "  loops fused              : " << loopsFused << "\n"
                   << "  borrows frozen           : " << borrowsFrozen << "\n"
                   << "  independent loops        : " << independentLoops << "\n"
-                  << "  allocator wrappers       : " << allocatorFuncs << "\n";
+                  << "  allocator wrappers       : " << allocatorFuncs << "\n"
+                  << "  regions coalesced (RLC)  : " << regionsCoalesced << "\n";
 
         // Only print the CF-CTRE block when at least one CT-engine counter is
         // non-zero (avoids visual clutter for pipelines that don't run CTRE).
@@ -400,6 +402,11 @@ class CodeGenerator {
     /// Public-facing wrapper for the CF-CTRE pre-pass (was private).
     void runCFCTRE(Program* program);
 
+    /// Run the Region Lifetime Coalescing pass (AST-level transformation).
+    /// Detects invalidate-based region lifetime patterns and coalesces
+    /// temporally disjoint regions to eliminate redundant allocations.
+    void runRLCPass(Program* program, bool verbose);
+
   private:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
@@ -441,6 +448,11 @@ class CodeGenerator {
     /// Enables zero-cost bounds check elision for arr[i] inside such loops:
     /// the loop condition i < len(arr) already proves the index is valid.
     llvm::StringMap<std::string> loopIterEndArray_;
+
+    /// LLVM global variable registry: name → GlobalVariable*.
+    /// Populated by generateGlobals() and used by generateIdentifier() /
+    /// generateScopeResolution() to resolve global variable references.
+    llvm::StringMap<llvm::GlobalVariable*> globalVars_;
 
     /// Maps array variable name → the AllocaInst of the variable passed as
     /// size to array_fill(sizeVar, val).  Enables bounds check elision when
@@ -840,6 +852,30 @@ class CodeGenerator {
     /// dict["key"] index expressions through map_get IR instead of array IR.
     llvm::StringSet<> dictVarNames_;
 
+    /// Variables declared with type `ptr` or `ptr<T>`.  Used to exclude them
+    /// from isStringExpr() — pointer-typed allocas would otherwise be
+    /// misidentified as string variables and routed through strlen/strcat paths.
+    llvm::StringSet<> ptrVarNames_;
+
+    /// Element type string for typed pointer variables (`ptr<T>`).
+    /// Maps variable name → inner type annotation (e.g., "i64", "i32[]").
+    /// Empty for untyped `ptr` variables.
+    llvm::StringMap<std::string> ptrElemTypes_;
+
+    /// Subset of ptrVarNames_ whose stored value is heap-allocated (malloc /
+    /// alloc<T> with large/dynamic count).  `invalidate` on these emits free().
+    llvm::StringSet<> heapPtrVarNames_;
+
+    /// Maps ptr variable name → the backing AllocaInst for stack-allocated
+    /// alloc<T>(N) pointers, so that `invalidate` can emit lifetime.end on the
+    /// actual storage (not just the pointer variable's own alloca slot).
+    llvm::StringMap<llvm::AllocaInst*> stackPtrBackingAlloca_;
+
+    /// Scratch field: set by generateCall for alloc<T> to pass the backing
+    /// AllocaInst to the enclosing VarDecl codegen so it can be registered in
+    /// stackPtrBackingAlloca_.  Reset to nullptr after each use.
+    llvm::AllocaInst* lastStackAllocBacking_ = nullptr;
+
     /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
     bool currentFuncHintUnroll_ = false;
     bool currentFuncHintNoUnroll_ = false;
@@ -967,6 +1003,7 @@ class CodeGenerator {
 
     // Statement generators
     void generateVarDecl(VarDecl* stmt);
+    void generateGlobals(Program* program);
     void generateReturn(ReturnStmt* stmt);
     void generateIf(IfStmt* stmt);
     void generateWhile(WhileStmt* stmt);
@@ -1278,6 +1315,7 @@ class CodeGenerator {
     // multiple built-in handlers.
     llvm::Function* getOrDeclareStrlen();
     llvm::Function* getOrDeclareMalloc();
+    llvm::Function* getOrDeclareAlignedAlloc();
     llvm::Function* getOrDeclareCalloc();
     llvm::Function* getOrDeclareStrcpy();
     llvm::Function* getOrDeclareStrcat();

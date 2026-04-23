@@ -20,7 +20,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **For-Each Loops**: Iterate over arrays with `for (x in array)`
 - **Switch/Case**: Multi-way branching with `switch`/`case`/`default`, multi-value `case 1, 2, 3:`
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
-- **Error Handling**: `try`/`catch`/`throw` for structured error handling
+- **Error Handling**: `throw N;` and per-function `catch(N) { ... }` handler blocks (zero-cost integer-keyed dispatch — no stack unwinding)
 - **Ownership System**: `move`, `invalidate`, `borrow`, `borrow mut`, `freeze`, and `reborrow` keywords for compile-time lifetime tracking and LLVM optimization hints
 - **`comptime {}` Blocks**: Expressions evaluated entirely at compile time — result folded into a constant at the call site
 - **Array-Returning `comptime` Blocks**: `comptime` can call user functions that return arrays; the result is emitted as a `private unnamed_addr constant` global — zero runtime allocation, zero function call
@@ -186,12 +186,18 @@ switch (value) {
     default:      println("large");
 }
 
-// Error handling
-try {
+// Error handling — top-level catch(N) blocks and `throw <int>;`
+// (no `try {}` block, no exception variable; see §16 of the Language Reference)
+fn risky() {
     throw 42;
-} catch (err) {
-    println(err);  // 42
+    return 0;
+
+    catch(42) {
+        println("caught 42");
+        return -1;
+    }
 }
+risky();
 ```
 
 ### Arrays
@@ -256,17 +262,18 @@ write("log.txt", "entry\n");                  // alias for file_write
 
 ### Threading
 ```omscript
-fn worker(arg) {
-    println(arg);
-    return 0;
+fn worker() {
+    println("hello from thread");
 }
 
 fn main() {
-    var t = thread_create(worker, 99);
+    var t = thread_create("worker");   // function name as a string literal
     thread_join(t);
     return 0;
 }
 ```
+`thread_create` takes the **name of a top-level function as a string literal** and runs it on a new pthread with no arguments. Use `global var` + a mutex to communicate with the worker. See §20 of the Language Reference for the full concurrency model.
+
 Mutex primitives: `mutex_new()`, `mutex_lock(m)`, `mutex_unlock(m)`, `mutex_destroy(m)`.
 
 ### Lambda Expressions

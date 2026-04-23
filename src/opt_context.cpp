@@ -230,6 +230,9 @@ const std::unordered_map<std::string, BuiltinEffects>& BuiltinEffectTable::table
         {"panic",           {false, false, false, true}},
         {"error",           {false, false, false, true}},
         {"assert",          {false, false, false, true}},
+        // ── Region management builtins ────────────────────────────────────────
+        {"newRegion",       {false, false, true,  false}},
+        {"alloc",           {false, false, true,  false}},
         {"random",          {false, false, false, true}},
         {"rand",            {false, false, false, true}},
         {"time",            {false, false, false, true}},

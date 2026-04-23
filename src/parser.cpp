@@ -26,7 +26,7 @@ static bool isIntWidthTypeName(const std::string& name) {
 /// uses of colon in expression context.
 static bool isKnownTypeName(const std::string& name) {
     if (name == "int" || name == "float" || name == "double" || name == "bool" ||
-        name == "string" || name == "dict" || name == "bigint")
+        name == "string" || name == "dict" || name == "bigint" || name == "ptr")
         return true;
     return isIntWidthTypeName(name);
 }
@@ -310,13 +310,24 @@ std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
     std::vector<std::unique_ptr<StructDecl>> structs;
+    std::vector<std::unique_ptr<VarDecl>> globals;
     bool optMaxTagActive = false;
     bool fileNoAlias = false;
 
     while (!isAtEnd()) {
         if (match(TokenType::IMPORT)) {
             try {
-                parseImport(functions, enums, structs);
+                parseImport(functions, enums, structs, globals);
+            } catch (const std::exception& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
+        if (check(TokenType::GLOBAL)) {
+            try {
+                auto gv = parseGlobalDecl();
+                globals.push_back(std::move(gv));
             } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -527,12 +538,19 @@ std::unique_ptr<Program> Parser::parse() {
     }
     lambdaFunctions_.clear();
 
-    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias);
+    // Drain pending globals from imports
+    for (auto& pg : pendingGlobals_) {
+        globals.push_back(std::move(pg));
+    }
+    pendingGlobals_.clear();
+
+    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias, std::move(globals));
 }
 
 void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                          std::vector<std::unique_ptr<EnumDecl>>& enums,
-                         std::vector<std::unique_ptr<StructDecl>>& structs) {
+                         std::vector<std::unique_ptr<StructDecl>>& structs,
+                         std::vector<std::unique_ptr<VarDecl>>& /*globals*/) {
     const Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
 
     // Optional alias: import "file" as alias
@@ -543,11 +561,11 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
         advance(); // consume 'as'
         const Token aliasTok = consume(TokenType::IDENTIFIER, "Expected alias name after 'as'");
         alias = aliasTok.lexeme;
-        // Support multi-level alias: as john::int  →  internal prefix "john__int"
+        // Support multi-level alias: as john::int  →  internal key "john::int"
         while (check(TokenType::SCOPE)) {
             advance(); // consume '::'
             const Token seg = consume(TokenType::IDENTIFIER, "Expected identifier in alias path");
-            alias += "__" + seg.lexeme;
+            alias += "::" + seg.lexeme;
         }
     }
 
@@ -638,17 +656,35 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     for (const auto& name : importParser.enumNames_) {
         enumNames_.insert(name);
     }
+
+    // Import global variables: derive the alias stem if none was given.
+    std::string globalAlias = alias;
+    if (globalAlias.empty()) {
+        // Derive stem from the filename (no directory, no extension)
+        // e.g. "math.om" → "math",  "lib/utils.om" → "utils"
+        globalAlias = std::filesystem::path(filename).stem().string();
+    }
+    for (auto& gv : importedProgram->globals) {
+        if (!gv) continue;
+        // No mangling: the global keeps its original name as the LLVM symbol.
+        // The namespace registry (importedGlobalVars_) is the only level of
+        // indirection; the actual LLVM global is just named by gv->name.
+        importedGlobalVars_[globalAlias][gv->name] = gv->name;
+        gv->globalNamespace = globalAlias;
+        pendingGlobals_.push_back(std::move(gv));
+    }
 }
 
 std::string Parser::resolveNamespacedPath(const std::vector<std::string>& segments) {
     // Try progressively shorter namespace prefixes (longest-match first).
+    // Namespace keys use '::' as separator (matching the source syntax).
     // For segments [a, b, c]:
-    //   1st pass: ns="a__b",  fn="c"
-    //   2nd pass: ns="a",     fn="b__c"
+    //   1st pass: ns="a::b", fn="c"
+    //   2nd pass: ns="a",    fn="b::c"
     for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
         std::string ns;
         for (int i = 0; i < cut; ++i) {
-            if (i > 0) ns += "__";
+            if (i > 0) ns += "::";
             ns += segments[i];
         }
         auto nsIt = importNamespaces_.find(ns);
@@ -657,7 +693,7 @@ std::string Parser::resolveNamespacedPath(const std::vector<std::string>& segmen
         // Namespace found — build function name from remaining segments.
         std::string fn;
         for (int i = cut; i < (int)segments.size(); ++i) {
-            if (i > cut) fn += "__";
+            if (i > cut) fn += "::";
             fn += segments[i];
         }
         auto fnIt = nsIt->second.find(fn);
@@ -689,6 +725,14 @@ std::string Parser::parseTypeAnnotation() {
         advance(); // consume '['
         advance(); // consume ']'
         typeName += "[]";
+    }
+    // Support ptr<T> generic pointer annotation: ptr<i64>, ptr<i32[]>, ptr<ptr<i32>>, etc.
+    // Uses <T> angle-bracket syntax (LT / GT tokens).
+    if (typeName == "ptr" && check(TokenType::LT)) {
+        advance(); // consume '<'
+        std::string inner = parseTypeAnnotation(); // recursively parse element type
+        consume(TokenType::GT, "Expected '>' to close ptr<T> type parameter");
+        typeName = "ptr<" + inner + ">";
     }
     // Support dict[KeyType, ValType] generic annotation (e.g., dict[str, int])
     // Only activates when the type name is exactly "dict" followed by '[' with
@@ -797,15 +841,23 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
                 consume(TokenType::IDENTIFIER, "Expected identifier in function path").lexeme);
         }
         consume(TokenType::SEMICOLON, "Expected ';' after function alias");
-        // Resolve via namespace registry, fall back to flat name.
+        // Resolve via namespace registry.
         std::string resolvedTarget;
         if (segs.size() >= 2) {
             resolvedTarget = resolveNamespacedPath(segs);
         }
         if (resolvedTarget.empty()) {
-            resolvedTarget = segs[0];
-            for (size_t i = 1; i < segs.size(); ++i)
-                resolvedTarget += "__" + segs[i];
+            if (segs.size() == 1) {
+                resolvedTarget = segs[0];
+            } else {
+                // Build a helpful error: the user wrote a multi-segment path
+                // that couldn't be resolved through any imported namespace.
+                std::string path = segs[0];
+                for (size_t i = 1; i < segs.size(); ++i) path += "::" + segs[i];
+                error("Cannot resolve function alias target '" + path +
+                      "': no matching namespace found. "
+                      "Import the file with 'import \"file\" as alias' first.");
+            }
         }
         // Build: return resolvedTarget(params...);
         std::vector<std::unique_ptr<Expression>> callArgs;
@@ -1116,8 +1168,42 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             init = parseExpression();
         }
         consume(TokenType::SEMICOLON, "Expected ';' after register variable declaration");
+
+        if (typeName.empty()) {
+            error("Variable '" + name.lexeme + "' requires an explicit type annotation "
+                  "(e.g., '" + name.lexeme + ":i64'). Untyped variables are not allowed.");
+        }
         auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
         decl->isRegister = true;
+        decl->line = kw.line;
+        decl->column = kw.column;
+        return decl;
+    }
+    // global var/const — declare a program-wide variable inside a function body.
+    // Syntax: global var name[:type] [= expr];
+    if (match(TokenType::GLOBAL)) {
+        const Token kw = tokens[current - 1];
+        const bool isConst = check(TokenType::CONST);
+        if (!match(TokenType::VAR) && !match(TokenType::CONST)) {
+            error("Expected 'var' or 'const' after 'global'");
+        }
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'global var'");
+        std::string typeName;
+        if (match(TokenType::COLON)) {
+            typeName = parseTypeAnnotation();
+        }
+        std::unique_ptr<Expression> init = nullptr;
+        if (match(TokenType::ASSIGN)) {
+            init = parseExpression();
+        }
+        consume(TokenType::SEMICOLON, "Expected ';' after global variable declaration");
+
+        if (typeName.empty()) {
+            error("Variable '" + name.lexeme + "' requires an explicit type annotation "
+                  "(e.g., '" + name.lexeme + ":i64'). Untyped variables are not allowed.");
+        }
+        auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
+        decl->isGlobal = true;
         decl->line = kw.line;
         decl->column = kw.column;
         return decl;
@@ -1219,7 +1305,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         // or just: move used as expression context (handled elsewhere)
         if (check(TokenType::VAR) || (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
             tokens[current + 1].type == TokenType::IDENTIFIER)) {
-            // `move var x = expr;` or `move int x = expr;`
+            // `move var x = expr;` or `move var x:type = expr;` or `move int x = expr;`
             std::string typeName;
             if (match(TokenType::VAR)) {
                 typeName = "";
@@ -1227,6 +1313,15 @@ std::unique_ptr<Statement> Parser::parseStatement() {
                 typeName = advance().lexeme; // consume type name
             }
             const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in move declaration");
+            // Optional :type annotation (supports `move var x:i64 = expr;`)
+            if (typeName.empty() && match(TokenType::COLON)) {
+                typeName = parseTypeAnnotation();
+            }
+            // Mandatory type annotation enforcement for move declarations.
+            if (typeName.empty()) {
+                error("Move variable '" + name.lexeme + "' requires an explicit type annotation "
+                      "(e.g., 'move var " + name.lexeme + ":i64 = ...').");
+            }
             consume(TokenType::ASSIGN, "Expected '=' in move declaration");
             auto init = parseExpression();
             consume(TokenType::SEMICOLON, "Expected ';' after move declaration");
@@ -1263,6 +1358,9 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         // Support name:type syntax: borrow j:u32 = expr;
         if (typeName.empty() && match(TokenType::COLON)) {
             typeName = parseTypeAnnotation();
+        }
+        if (typeName.empty()) {
+            error("Borrow variable '" + name.lexeme + "' requires an explicit type annotation (e.g., 'borrow " + name.lexeme + ":i64 = ...').");
         }
         consume(TokenType::ASSIGN, "Expected '=' in borrow declaration");
         auto init = parseExpression();
@@ -1305,6 +1403,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         reborrowExpr->line = kw.line;
         reborrowExpr->column = kw.column;
         auto stmt = std::make_unique<VarDecl>(name.lexeme, std::move(reborrowExpr), false, "");
+        stmt->isCompilerGenerated = true; // reborrow: type inferred from source
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
@@ -1340,9 +1439,20 @@ std::unique_ptr<BlockStmt> Parser::parseBlock() {
                 }
                 consume(TokenType::SEMICOLON, "Expected ';' after destructuring declaration");
             } else {
-                statements.push_back(parseVarDecl(isConst));
+                // Multi-variable declarations: var a:T = 1, b = 2, c = 3;
+                // The type annotation on the first variable is propagated to
+                // subsequent variables that omit a type annotation.
+                auto firstDecl = parseVarDecl(isConst);
+                // Capture the first var's type for propagation.
+                std::string multiVarType;
+                if (auto* vd = dynamic_cast<VarDecl*>(firstDecl.get()))
+                    multiVarType = vd->typeName;
+                statements.push_back(std::move(firstDecl));
                 while (match(TokenType::COMMA)) {
-                    statements.push_back(parseVarDecl(isConst));
+                    // Pass the inherited type so subsequent vars like `b = 2`
+                    // don't fail the mandatory-annotation check when they
+                    // omit the type (they inherit from `a:T`).
+                    statements.push_back(parseVarDeclWithInheritedType(isConst, multiVarType));
                 }
                 consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
             }
@@ -1370,9 +1480,125 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
         initializer = parseExpression();
     }
 
+    // ── Mandatory type annotation enforcement ─────────────────────────────
+    // Every user-declared variable must carry an explicit type annotation.
+    // This is the foundation of OmScript's real type system: the compiler
+    // never silently defaults to a "base type" (previously i64).
+    //
+    // Exception: untyped `ptr` is allowed — the variable has the explicit
+    // type `ptr`, it just omits the optional element-type parameter.
+    // Exception: inferred-type declarations (handled by type inference pass).
+    if (typeName.empty()) {
+        error("Variable '" + name.lexeme + "' requires an explicit type annotation "
+              "(e.g., 'var " + name.lexeme + ":i64 = ...'). "
+              "Untyped variables are not allowed; the compiler no longer "
+              "silently defaults to 'i64'.");
+    }
+
+    // Compile-time validation: `ptr` variables may only be initialized with
+    //   &var / &arr[...]  (UnaryExpr op == "&")
+    //   malloc/realloc/calloc(...) (CallExpr)
+    //   null              (LiteralExpr intValue == 0)
+    //   ptr-arithmetic    (BinaryExpr e.g. p + n, p - n)
+    //   another ptr var   (IdentifierExpr)
+    // Literal non-zero integers, floats, and strings are always rejected.
+    if ((typeName == "ptr" || typeName.rfind("ptr<", 0) == 0) && initializer) {
+        bool valid = false;
+        const Expression* init = initializer.get();
+        switch (init->type) {
+            case ASTNodeType::UNARY_EXPR:
+                valid = (static_cast<const UnaryExpr*>(init)->op == "&");
+                break;
+            case ASTNodeType::CALL_EXPR: {
+                const std::string& callee = static_cast<const CallExpr*>(init)->callee;
+                valid = (callee == "malloc" || callee == "realloc" || callee == "calloc" ||
+                         (callee.rfind("alloc<", 0) == 0 && callee.back() == '>'));
+                break;
+            }
+            case ASTNodeType::LITERAL_EXPR: {
+                const auto* lit = static_cast<const LiteralExpr*>(init);
+                // Only null (integer 0) is valid; any other literal is rejected.
+                valid = (lit->literalType == LiteralExpr::LiteralType::INTEGER &&
+                         lit->intValue == 0);
+                break;
+            }
+            case ASTNodeType::BINARY_EXPR:
+                // Pointer arithmetic (p + n, p - n) or other ptr-producing ops.
+                valid = true;
+                break;
+            case ASTNodeType::IDENTIFIER_EXPR:
+                // Pointer-to-pointer assignment (var q:ptr = p).
+                valid = true;
+                break;
+            default:
+                valid = false;
+                break;
+        }
+        if (!valid) {
+            error("Pointer variable '" + name.lexeme + "' must be initialized with "
+                  "&var, &arr, malloc(...), realloc(...), calloc(...), null, "
+                  "pointer arithmetic (p+n), or another pointer variable");
+        }
+    }
+
     auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
     decl->line = name.line;
     decl->column = name.column;
+    return decl;
+}
+
+/// Variant of parseVarDecl used for subsequent variables in a multi-var
+/// declaration (e.g., the `b = 2` and `c = 3` in `var a:i64 = 1, b = 2, c = 3`).
+/// If the variable has no explicit `:type` annotation, `inheritedType` is used
+/// instead, which is the type of the first variable in the declaration.
+std::unique_ptr<Statement> Parser::parseVarDeclWithInheritedType(
+        bool isConst, const std::string& inheritedType) {
+    const Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
+    std::string typeName;
+    if (match(TokenType::COLON)) {
+        typeName = parseTypeAnnotation();
+    } else {
+        // Inherit from the first variable in the multi-var declaration.
+        typeName = inheritedType;
+    }
+
+    // If still empty (first var was also untyped), emit the normal error.
+    if (typeName.empty()) {
+        error("Variable '" + name.lexeme + "' requires an explicit type annotation "
+              "(e.g., 'var " + name.lexeme + ":i64 = ...'). Untyped variables are not allowed.");
+    }
+
+    std::unique_ptr<Expression> initializer = nullptr;
+    if (match(TokenType::ASSIGN)) {
+        initializer = parseExpression();
+    }
+
+    auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
+    decl->line = name.line;
+    decl->column = name.column;
+    return decl;
+}
+
+std::unique_ptr<VarDecl> Parser::parseGlobalDecl() {
+    const Token kw = advance(); // consume 'global'
+    const bool isConst = check(TokenType::CONST);
+    if (!match(TokenType::VAR) && !match(TokenType::CONST)) {
+        error("Expected 'var' or 'const' after 'global'");
+    }
+    const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'global var'");
+    std::string typeName;
+    if (match(TokenType::COLON)) {
+        typeName = parseTypeAnnotation();
+    }
+    std::unique_ptr<Expression> init = nullptr;
+    if (match(TokenType::ASSIGN)) {
+        init = parseExpression();
+    }
+    consume(TokenType::SEMICOLON, "Expected ';' after global variable declaration");
+    auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
+    decl->isGlobal = true;
+    decl->line = kw.line;
+    decl->column = kw.column;
     return decl;
 }
 
@@ -1472,6 +1698,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
         // var __for_arr_N = collection;
         auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
+        arrDecl->isCompilerGenerated = true;
         arrDecl->line = varName.line;
         arrDecl->column = varName.column;
         outerStmts.push_back(std::move(arrDecl));
@@ -1482,6 +1709,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         auto idxRef = std::make_unique<IdentifierExpr>(varName.lexeme);
         auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
         auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
+        itemDecl->isCompilerGenerated = true;
         itemDecl->line = itemName.line;
         itemDecl->column = itemName.column;
         innerStmts.push_back(std::move(itemDecl));
@@ -1888,6 +2116,7 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
 
         // var __foreach_arr_N = collection;
         auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
+        arrDecl->isCompilerGenerated = true;
         arrDecl->line = firstName.line;
         arrDecl->column = firstName.column;
         outerStmts.push_back(std::move(arrDecl));
@@ -1900,6 +2129,7 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
         auto idxRef = std::make_unique<IdentifierExpr>(firstName.lexeme);
         auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
         auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
+        itemDecl->isCompilerGenerated = true;
         itemDecl->line = itemName.line;
         itemDecl->column = itemName.column;
         innerStmts.push_back(std::move(itemDecl));
@@ -1982,7 +2212,7 @@ std::unique_ptr<Statement> Parser::parseSwapStmt() {
 
     // var __swap_tmp = first;
     auto tmpInit = std::make_unique<IdentifierExpr>(names[0]);
-    stmts.push_back(std::make_unique<VarDecl>(tmpName, std::move(tmpInit)));
+    { auto _cg = std::make_unique<VarDecl>(tmpName, std::move(tmpInit)); _cg->isCompilerGenerated = true; stmts.push_back(std::move(_cg)); }
 
     // Circular rotation: names[0] = names[1]; names[1] = names[2]; ...
     for (size_t i = 0; i + 1 < names.size(); ++i) {
@@ -2141,6 +2371,7 @@ std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isCo
 
     // var __destructure_N = expr;
     auto tmpDecl = std::make_unique<VarDecl>(tmpName, std::move(initializer), false);
+    tmpDecl->isCompilerGenerated = true;
     tmpDecl->line = lbracket.line;
     tmpDecl->column = lbracket.column;
     stmts.push_back(std::move(tmpDecl));
@@ -2154,6 +2385,7 @@ std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isCo
         auto indexExpr = std::make_unique<IndexExpr>(std::move(tmpRef), std::move(idx));
 
         auto varDecl = std::make_unique<VarDecl>(names[i], std::move(indexExpr), isConst);
+        varDecl->isCompilerGenerated = true;
         varDecl->line = lbracket.line;
         varDecl->column = lbracket.column;
         stmts.push_back(std::move(varDecl));
@@ -3020,6 +3252,17 @@ std::unique_ptr<Expression> Parser::parseUnary() {
         return node;
     }
 
+    // `*expr` — pointer dereference (e.g. `*p`, `*(p + 1)`)
+    // Only treated as dereference in unary position; binary `*` is multiplication.
+    if (match(TokenType::STAR)) {
+        const Token opToken = tokens[current - 1];
+        auto operand = parseUnary();
+        auto node = std::make_unique<UnaryExpr>("deref", std::move(operand));
+        node->line = opToken.line;
+        node->column = opToken.column;
+        return node;
+    }
+
     if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
         const Token opToken = tokens[current - 1];
         auto operand = parseUnary();
@@ -3251,6 +3494,71 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         auto expr = std::make_unique<LiteralExpr>(static_cast<long long>(0));
         expr->line = token.line;
         expr->column = token.column;
+        return expr;
+    }
+
+    // alloc<T>(x) — smart typed allocator.
+    // Decides stack vs heap at compile time based on whether x is a
+    // compile-time constant and fits within the stack threshold.
+    // Returns a ptr<T> pointing to x contiguous elements of type T.
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "alloc" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LT) {
+        const Token kw = advance(); // consume 'alloc'
+        advance();                  // consume '<'
+        std::string elemTypeName = parseTypeAnnotation();
+        consume(TokenType::GT, "Expected '>' after type in alloc<T>(...)");
+        consume(TokenType::LPAREN, "Expected '(' after alloc<T>");
+        auto countExpr = parseExpression();
+        consume(TokenType::RPAREN, "Expected ')' after count in alloc<T>(...)");
+        // Encode the element type in the callee name so codegen can recover it
+        // without modifying the CallExpr AST.  Pattern: "alloc<T>" with one arg.
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(std::move(countExpr));
+        auto call = std::make_unique<CallExpr>("alloc<" + elemTypeName + ">", std::move(args));
+        call->line   = kw.line;
+        call->column = kw.column;
+        return call;
+    }
+
+    // sizeof(T) — compile-time byte size of a type.
+    // The argument MUST be a type name (identifier), not an expression.
+    // Produces an integer literal equal to the byte size of T.
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "sizeof" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LPAREN) {
+        const Token kw = advance(); // consume 'sizeof'
+        advance();                  // consume '('
+        // Parse the type annotation inside the parens.
+        const std::string typeName = parseTypeAnnotation();
+        consume(TokenType::RPAREN, "Expected ')' after type name in sizeof(...)");
+        // Compute size at parse time using known bit widths.
+        long long byteSize = 8; // default (pointer/int64)
+        if (typeName == "bool" || typeName == "i8" || typeName == "u8")
+            byteSize = 1;
+        else if (typeName == "i16" || typeName == "u16")
+            byteSize = 2;
+        else if (typeName == "i32" || typeName == "u32")
+            byteSize = 4;
+        else if (typeName == "i64" || typeName == "u64" || typeName == "int" ||
+                 typeName == "uint" || typeName == "float" || typeName == "double" ||
+                 typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 ||
+                 typeName == "string" || typeName == "bigint")
+            byteSize = 8;
+        else if (typeName == "i128" || typeName == "u128")
+            byteSize = 16;
+        else if (typeName == "i256" || typeName == "u256")
+            byteSize = 32;
+        else {
+            // iN / uN — compute from bit width
+            const char* s = typeName.c_str();
+            if ((s[0] == 'i' || s[0] == 'u') && s[1] != '\0') {
+                int bits = std::atoi(s + 1);
+                if (bits >= 1 && bits <= 256)
+                    byteSize = (bits + 7) / 8;
+            }
+        }
+        auto expr = std::make_unique<LiteralExpr>(byteSize);
+        expr->line = kw.line;
+        expr->column = kw.column;
         return expr;
     }
 
@@ -3632,21 +3940,55 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 }
             }
 
-            // Not a call: single-level → classic enum member access.
+            // Not a call: single-level → check for imported global, then classic enum member access.
             if (depth == 1) {
+                // Priority: cross-file global variable access (e.g. math::PI)
+                {
+                    auto gvNsIt = importedGlobalVars_.find(segments[0]);
+                    if (gvNsIt != importedGlobalVars_.end()) {
+                        auto gvIt = gvNsIt->second.find(segments[1]);
+                        if (gvIt != gvNsIt->second.end()) {
+                            auto e = std::make_unique<IdentifierExpr>(gvIt->second);
+                            e->line = token.line;
+                            e->column = token.column;
+                            return e;
+                        }
+                    }
+                }
+                // Fallback: classic enum member access
                 auto e = std::make_unique<ScopeResolutionExpr>(segments[0], segments[1]);
                 e->line = token.line;
                 e->column = token.column;
                 return e;
             }
-            // Multi-level value reference without '()': flat identifier.
-            std::string flatName = segments[0];
-            for (size_t i = 1; i < segments.size(); ++i)
-                flatName += "__" + segments[i];
-            auto e = std::make_unique<IdentifierExpr>(flatName);
-            e->line = token.line;
-            e->column = token.column;
-            return e;
+            // Multi-level value reference without '()': attempt global lookup,
+            // then error — name mangling is not performed.
+            {
+                // Try longest-prefix global lookup: e.g. a::b::c
+                // where "a::b" is a namespace and "c" is a global variable.
+                for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
+                    std::string ns = segments[0];
+                    for (int i = 1; i < cut; ++i) ns += "::" + segments[i];
+                    std::string varName = segments[cut];
+                    for (size_t i = (size_t)cut + 1; i < segments.size(); ++i)
+                        varName += "::" + segments[i];
+                    auto gvNsIt = importedGlobalVars_.find(ns);
+                    if (gvNsIt != importedGlobalVars_.end()) {
+                        auto gvIt = gvNsIt->second.find(varName);
+                        if (gvIt != gvNsIt->second.end()) {
+                            auto e = std::make_unique<IdentifierExpr>(gvIt->second);
+                            e->line = token.line;
+                            e->column = token.column;
+                            return e;
+                        }
+                    }
+                }
+                // No namespace resolved — emit a clear error.
+                std::string path = segments[0];
+                for (size_t i = 1; i < segments.size(); ++i) path += "::" + segments[i];
+                error("Cannot resolve '" + path + "': no matching namespace or global found. "
+                      "Import the file with 'import \"file\" as alias' first.");
+            }
         }
         // Check if this is a struct literal: StructName { field: value, ... }
         if (structNames_.count(token.lexeme) && check(TokenType::LBRACE)) {
@@ -3800,16 +4142,22 @@ std::unique_ptr<Expression> Parser::parsePipe() {
 std::unique_ptr<Expression> Parser::parseLambda() {
     const Token pipeToken = tokens[current - 1]; // the opening |
     std::vector<std::string> params;
+    std::vector<std::string> paramTypes;
 
     // Parse lambda parameters: |x| or |x, y| or || or |x:int| or |x:int, y:int|
     if (!check(TokenType::PIPE)) {
         do {
             const Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name in lambda");
-            params.push_back(paramName.lexeme);
-            // Skip optional type annotation (e.g. |x:int|)
+            // Lambda parameters default to i64 when no explicit type annotation is
+            // given.  Higher-kinded type inference is not yet available at parse time,
+            // so we bind the most common element type.  Users can always annotate
+            // explicitly: |x:float| x * 2.0
+            std::string paramType = "i64";
             if (match(TokenType::COLON)) {
-                parseTypeAnnotation();
+                paramType = parseTypeAnnotation();
             }
+            params.push_back(paramName.lexeme);
+            paramTypes.push_back(paramType);
         } while (match(TokenType::COMMA));
     }
 
@@ -3826,9 +4174,12 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
 
     // Create the function: fn __lambda_N(params...) { return body; }
+    // Lambda parameters carry their resolved type annotations (default: i64).
     std::vector<Parameter> fnParams;
-    for (const auto& p : node->params) {
-        fnParams.push_back(Parameter(p));
+    for (size_t i = 0; i < node->params.size(); ++i) {
+        Parameter p(node->params[i]);
+        p.typeName = (i < paramTypes.size()) ? paramTypes[i] : "i64";
+        fnParams.push_back(std::move(p));
     }
     auto returnStmt = std::make_unique<ReturnStmt>(std::move(node->body));
     returnStmt->line = pipeToken.line;

@@ -3,6 +3,7 @@
 #include "egraph.h"
 #include "opt_context.h"
 #include "opt_orchestrator.h"
+#include "rlc_pass.h"
 #include "synthesize.h"
 #include <climits>
 #include <cmath>
@@ -677,6 +678,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "asin",
                                                                 "assert",
                                                                 "assume",
+                                                                "alloc",
                                                                 "atan",
                                                                 "atan2",
                                                                 "bitreverse",
@@ -742,6 +744,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "min",
                                                                 "min_float",
                                                                 "number_to_string",
+                                                                "newRegion",
                                                                 "pop",
                                                                 "popcount",
                                                                 "pow",
@@ -977,6 +980,8 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (!ann.empty() && ann[0] == '&') {
         ann = ann.substr(1);
     }
+    if (ann == "ptr" || (ann.rfind("ptr<", 0) == 0 && ann.back() == '>'))
+        return llvm::PointerType::getUnqual(*context);
     if (ann == "float" || ann == "double")
         return getFloatType();                                  // f64
     if (ann == "bool")
@@ -1594,6 +1599,33 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     // LLVM about this alignment enables aligned vector loads/stores on every
     // heap-allocated buffer (arrays, strings, maps) without runtime checks.
     fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
+    return fn;
+}
+
+// aligned_alloc(size_t alignment, size_t size) -> void*
+// Used by alloc<T>(n) when the element type's ABI alignment exceeds 16 bytes
+// (e.g., SIMD vector types).  The C11 aligned_alloc function requires that
+// `size` be a multiple of `alignment`; callers must ensure this.
+llvm::Function* CodeGenerator::getOrDeclareAlignedAlloc() {
+    if (auto* fn = module->getFunction("aligned_alloc"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {getDefaultType(), getDefaultType()}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage,
+                                                "aligned_alloc", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoBuiltin);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 1, std::nullopt));
+    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
+                                       static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
+                                                             llvm::AllocFnKind::Uninitialized)));
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }
 
@@ -4069,7 +4101,8 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         // for arrays/structs/dicts, we must exclude those to avoid false
         // positives that would misroute array indexing to strlen-based paths.
         if (arrayVars_.count(id->name) || dictVarNames_.count(id->name)
-            || structVars_.count(id->name) || stringArrayVars_.count(id->name))
+            || structVars_.count(id->name) || stringArrayVars_.count(id->name)
+            || ptrVarNames_.count(id->name))
             return false;
         auto it = namedValues.find(id->name);
         if (it != namedValues.end() && it->second) {
@@ -4259,6 +4292,15 @@ void CodeGenerator::generate(Program* program) {
         std::vector<llvm::Type*> paramTypes;
         paramTypes.reserve(func->parameters.size());
         for (auto& param : func->parameters) {
+            // Mandatory type annotation enforcement: every function parameter
+            // must carry an explicit type.  The compiler no longer defaults to
+            // i64 for untyped parameters.
+            if (param.typeName.empty()) {
+                codegenError("Function parameter '" + param.name + "' in function '" +
+                             func->name + "' requires an explicit type annotation "
+                             "(e.g., '" + param.name + ":i64'). Untyped parameters "
+                             "are not allowed.", nullptr);
+            }
             paramTypes.push_back(resolveAnnotatedType(param.typeName));
         }
         // Resolve return type from annotation (e.g. "-> float" → double).
@@ -4442,6 +4484,9 @@ void CodeGenerator::generate(Program* program) {
         std::cout << "  [codegen] Generating LLVM IR for " << program->functions.size()
                   << " functions..." << '\n';
     }
+
+    // Emit LLVM global variables for all program-level global declarations.
+    generateGlobals(program);
 
     // Generate all function bodies
     for (auto& func : program->functions) {
@@ -5402,6 +5447,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     scopeComptimeInts_.clear();
     catchTable_.clear();
     catchDefaultBB_ = nullptr;
+
+    // Expose all global variables inside this function so that reads,
+    // writes, and assignments resolve through the normal namedValues path.
+    for (auto& entry : globalVars_) {
+        namedValues[entry.getKey().str()] = entry.getValue();
+    }
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -9048,6 +9099,62 @@ void CodeGenerator::fuseLoops(BlockStmt* block) {
         optStats_.loopsFused++;
         // Don't advance i — try to fuse again with the next statement.
     }
+}
+
+void CodeGenerator::generateGlobals(Program* program) {
+    if (!program) return;
+    for (const auto& gv : program->globals) {
+        if (!gv) continue;
+        // Use the original unqualified name as the LLVM symbol.
+        // Namespace resolution happens at the parser level; no mangling here.
+        const std::string llvmName = gv->name;
+
+        // Determine the LLVM type: use the annotation if present, else i64.
+        llvm::Type* ty = gv->typeName.empty()
+            ? getDefaultType()
+            : resolveAnnotatedType(gv->typeName);
+
+        // Build a constant initializer.
+        llvm::Constant* initVal = llvm::Constant::getNullValue(ty);
+        if (gv->initializer) {
+            if (gv->initializer->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<LiteralExpr*>(gv->initializer.get());
+                if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                    initVal = llvm::ConstantInt::get(ty, static_cast<uint64_t>(lit->intValue), true);
+                } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+                    if (ty->isFloatingPointTy())
+                        initVal = llvm::ConstantFP::get(ty, lit->floatValue);
+                    else
+                        initVal = llvm::ConstantInt::get(ty, static_cast<uint64_t>(lit->floatValue), true);
+                }
+                // String or other: fall back to null (runtime init unsupported for top-level globals)
+            }
+            // Non-literal initializers at top level: zero-init the global.
+        }
+
+        // If a global with this name already exists (e.g. from a previous import
+        // of the same file), skip re-declaration to avoid a duplicate symbol.
+        if (module->getGlobalVariable(llvmName)) {
+            globalVars_[llvmName] = module->getGlobalVariable(llvmName);
+            continue;
+        }
+
+        auto* llvmGV = new llvm::GlobalVariable(
+            *module,
+            ty,
+            gv->isConst,                              // isConstant
+            llvm::GlobalValue::ExternalLinkage,
+            initVal,
+            llvmName
+        );
+        llvmGV->setAlignment(llvm::MaybeAlign(8));
+        globalVars_[llvmName] = llvmGV;
+    }
+}
+
+void CodeGenerator::runRLCPass(Program* program, bool verbose) {
+    const RLCStats stats = omscript::runRLCPass(program, verbose);
+    optStats_.regionsCoalesced += stats.regionsCoalesced;
 }
 
 } // namespace omscript

@@ -508,7 +508,7 @@ TEST(LexerTest, NullKeyword) {
 }
 
 TEST(LexerTest, BoolKeywordsInContext) {
-    auto tokens = lex("var x = true; var y = false; var z = null;");
+    auto tokens = lex("var x:i64 = true; var y:i64 = false; var z:i64 = null;");
     int trueCount = 0, falseCount = 0, nullCount = 0;
     for (const auto& t : tokens) {
         if (t.type == TokenType::TRUE)
@@ -687,7 +687,7 @@ TEST(LexerTest, BorrowKeyword) {
 }
 
 TEST(LexerTest, OwnershipKeywordsInContext) {
-    auto tokens = lex("move var x = y; invalidate z; borrow var ref = w;");
+    auto tokens = lex("move var x:i64 = y; invalidate z; borrow var ref:i64 = w;");
     int moveCount = 0, invalidateCount = 0, borrowCount = 0;
     for (const auto& t : tokens) {
         if (t.type == TokenType::MOVE) moveCount++;
@@ -726,7 +726,7 @@ TEST(LexerTest, NullCoalesceAssignToken) {
 }
 
 TEST(LexerTest, RegisterKeyword) {
-    auto tokens = lex("register var x = 0;");
+    auto tokens = lex("register var x:i64 = 0;");
     ASSERT_GE(tokens.size(), 6u);
     EXPECT_EQ(tokens[0].type, TokenType::REGISTER);
     EXPECT_EQ(tokens[0].lexeme, "register");

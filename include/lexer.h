@@ -77,6 +77,7 @@ enum class TokenType {
     REBORROW,  // reborrow — create a new borrow reference from existing borrow
     PIPELINE,  // pipeline — staged execution pipeline construct
     STAGE,     // stage    — named stage inside a pipeline block
+    GLOBAL,    // global   — declare a program-wide variable
 
     // Operators
     PLUS,

@@ -34,6 +34,8 @@ enum class ErrorCode {
     E010_UNKNOWN_FIELD,
     E011_DIVISION_BY_ZERO,
     E012_INDEX_OUT_OF_BOUNDS,
+    E013_REGION_NOT_INVALIDATED, ///< Region variable created with newRegion() not invalidated before function end
+    E014_REGION_USE_AFTER_INVALIDATE, ///< Region variable referenced after it was invalidated
     NONE  ///< No specific error code (legacy/fallback).
 };
 
@@ -52,6 +54,8 @@ inline const char* errorCodeString(ErrorCode code) {
     case ErrorCode::E010_UNKNOWN_FIELD:       return "E010";
     case ErrorCode::E011_DIVISION_BY_ZERO:    return "E011";
     case ErrorCode::E012_INDEX_OUT_OF_BOUNDS: return "E012";
+    case ErrorCode::E013_REGION_NOT_INVALIDATED:     return "E013";
+    case ErrorCode::E014_REGION_USE_AFTER_INVALIDATE: return "E014";
     case ErrorCode::NONE:                     return "";
     }
     return "";

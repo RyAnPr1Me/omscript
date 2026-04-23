@@ -27,6 +27,48 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         codegenError("Variable declaration outside of function", stmt);
     }
 
+    // ── Mandatory type annotation enforcement (codegen safety-net) ────────
+    // The parser enforces this for user-written code; this check catches any
+    // VarDecl nodes that bypass the parser (e.g., loaded from a pre-parsed
+    // AST or created by a pass that forgot to set isCompilerGenerated).
+    if (stmt->typeName.empty() && !stmt->isCompilerGenerated) {
+        codegenError("Variable '" + stmt->name + "' has no type annotation. "
+                     "All user-declared variables require an explicit type "
+                     "(e.g., 'var " + stmt->name + ":i64 = ...'). "
+                     "Untyped variables are not allowed.", stmt);
+    }
+
+    // When the variable is declared global (inside a function), create a
+    // module-level GlobalVariable instead of a stack alloca.
+    if (stmt->isGlobal) {
+        // Always use the original unqualified name; no mangling.
+        const std::string llvmName = stmt->name;
+        // If already created (e.g., by generateGlobals), just record it.
+        if (auto* existing = module->getGlobalVariable(llvmName)) {
+            namedValues[stmt->name] = existing;
+            globalVars_[llvmName] = existing;
+            return;
+        }
+        llvm::Type* ty = stmt->typeName.empty() ? getDefaultType() : resolveAnnotatedType(stmt->typeName);
+        auto* gv = new llvm::GlobalVariable(
+            *module, ty,
+            stmt->isConst,
+            llvm::GlobalValue::ExternalLinkage,
+            llvm::Constant::getNullValue(ty),
+            llvmName);
+        gv->setAlignment(llvm::MaybeAlign(8));
+        globalVars_[llvmName] = gv;
+        namedValues[stmt->name] = gv;
+        // If there is an initializer, generate it and store into the global.
+        if (stmt->initializer) {
+            llvm::Value* initVal = generateExpression(stmt->initializer.get());
+            if (initVal->getType() != ty)
+                initVal = builder->CreateIntCast(initVal, ty, true, "gvinit");
+            builder->CreateStore(initVal, gv);
+        }
+        return;
+    }
+
     // Resolve the alloca type from the type annotation if present.
     llvm::Type* allocaType = stmt->typeName.empty()
                                  ? getDefaultType()
@@ -191,6 +233,84 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         }
         if (isDict)
             dictVarNames_.insert(stmt->name);
+    }
+
+    // Track `ptr` / `ptr<T>` variables so isStringExpr() can exclude them
+    // from the string pointer category (both use pointer-typed allocas).
+    // Also track heap vs stack allocation origin for `invalidate`.
+    {
+        const std::string& tn = stmt->typeName;
+        const bool isPtr = (tn == "ptr" || tn.rfind("ptr<", 0) == 0);
+        if (isPtr) {
+            ptrVarNames_.insert(stmt->name);
+            if (tn.rfind("ptr<", 0) == 0 && tn.back() == '>') {
+                // Extract inner element type: ptr<T> → T
+                ptrElemTypes_[stmt->name] = tn.substr(4, tn.size() - 5);
+            } else {
+                // Untyped `ptr`: record as "ptr" sentinel so callers know this
+                // variable is a pointer even when no element-type annotation
+                // was given.  This also enables &x inference below.
+                ptrElemTypes_[stmt->name] = "ptr";
+            }
+            // ── Element-addressed &x inference ─────────────────────────────
+            // When the initializer is `&x` (UnaryExpr op == "&"), attempt to
+            // infer the element type from the source variable's type annotation.
+            // Example: var x:i32 = 5; var p:ptr = &x; → ptrElemTypes_[p] = "i32"
+            // The explicit annotation always wins (ptr<T> already set above).
+            if (stmt->initializer &&
+                stmt->initializer->type == ASTNodeType::UNARY_EXPR) {
+                const auto* ue = static_cast<const UnaryExpr*>(stmt->initializer.get());
+                if (ue->op == "&" && ue->operand &&
+                    ue->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    const std::string& srcName =
+                        static_cast<const IdentifierExpr*>(ue->operand.get())->name;
+                    // Only override if we don't already have an explicit element type
+                    // (i.e., the annotation was just bare `ptr`, not `ptr<T>`).
+                    const bool hasExplicitElemType =
+                        (tn.rfind("ptr<", 0) == 0 && tn.back() == '>');
+                    if (!hasExplicitElemType) {
+                        auto tit = varTypeAnnotations_.find(srcName);
+                        if (tit != varTypeAnnotations_.end() && !tit->second.empty()) {
+                            ptrElemTypes_[stmt->name] = tit->second;
+                        }
+                    }
+                }
+            }
+            // Determine heap vs stack origin for invalidate:
+            //   • alloc<T> with small constant count → stack (lastStackAllocBacking_ set)
+            //   • alloc<T> with large/dynamic count  → heap (lastStackAllocBacking_ null)
+            //   • malloc / realloc / calloc           → heap
+            //   • &var / null / other                 → neither (no automatic free)
+            if (stmt->initializer) {
+                if (lastStackAllocBacking_) {
+                    // Stack allocation: record the backing alloca for lifetime.end.
+                    stackPtrBackingAlloca_[stmt->name] = lastStackAllocBacking_;
+                    heapPtrVarNames_.erase(stmt->name);
+                    lastStackAllocBacking_ = nullptr;
+                } else if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+                    auto* call = static_cast<CallExpr*>(stmt->initializer.get());
+                    const bool isHeapAlloc =
+                        call->callee == "malloc" || call->callee == "realloc" ||
+                        call->callee == "calloc" ||
+                        (call->callee.rfind("alloc<", 0) == 0 && call->callee.back() == '>');
+                    if (isHeapAlloc) {
+                        heapPtrVarNames_.insert(stmt->name);
+                        stackPtrBackingAlloca_.erase(stmt->name);
+                    } else {
+                        heapPtrVarNames_.erase(stmt->name);
+                        stackPtrBackingAlloca_.erase(stmt->name);
+                    }
+                } else {
+                    heapPtrVarNames_.erase(stmt->name);
+                    stackPtrBackingAlloca_.erase(stmt->name);
+                }
+            }
+        } else {
+            ptrVarNames_.erase(stmt->name);
+            ptrElemTypes_.erase(stmt->name);
+            heapPtrVarNames_.erase(stmt->name);
+            stackPtrBackingAlloca_.erase(stmt->name);
+        }
     }
 
     // Track array variables so isStringExpr() can distinguish array pointers
@@ -3170,8 +3290,19 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     const bool isHeapArray  = arrayVars_.count(name) > 0 &&
                                !stackAllocatedArrays_.count(name);
     const bool isHeapDict   = dictVarNames_.count(name) > 0;
+    // ptr variables whose value was heap-allocated (malloc / heap alloc<T>).
+    const bool isHeapPtr    = heapPtrVarNames_.count(name) > 0;
+    // struct variables are heap-allocated opaque pointers.
+    const bool isHeapStruct = structVars_.count(name) > 0;
+    // bigint variables are heap-allocated arbitrary-precision integers.
+    bool isHeapBigint = false;
+    {
+        auto tit = varTypeAnnotations_.find(name);
+        isHeapBigint = (tit != varTypeAnnotations_.end() && tit->second == "bigint");
+    }
 
-    if (isHeapString || isHeapArray || isHeapDict) {
+    if (isHeapString || isHeapArray || isHeapDict || isHeapPtr ||
+        isHeapStruct || isHeapBigint) {
         // Load the heap pointer from the alloca (i64 stored as int, ptr cast needed).
         auto* allocaInst2 = llvm::dyn_cast<llvm::AllocaInst>(alloca);
         if (allocaInst2) {
@@ -3185,6 +3316,27 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
             // Emit free().  The compiler already knows free() is
             // InaccessibleOrArgMemOnly so this is safe to CSE/hoist.
             builder->CreateCall(getOrDeclareFree(), {heapPtr});
+        }
+    }
+
+    // For stack-allocated alloc<T> pointers: end the lifetime of the backing
+    // alloca so LLVM knows the stack slot is dead and can reuse it.
+    {
+        auto backingIt = stackPtrBackingAlloca_.find(name);
+        if (backingIt != stackPtrBackingAlloca_.end()) {
+            auto* backingAlloca = backingIt->second;
+            if (backingAlloca) {
+                const uint64_t backingSz =
+                    module->getDataLayout().getTypeAllocSize(
+                        backingAlloca->getAllocatedType());
+                auto* backingSzVal = llvm::ConstantInt::get(
+                    llvm::Type::getInt64Ty(*context), backingSz);
+                auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(
+                    module.get(), llvm::Intrinsic::lifetime_end,
+                    {llvm::PointerType::getUnqual(*context)});
+                builder->CreateCall(lifetimeEnd, {backingSzVal, backingAlloca});
+            }
+            stackPtrBackingAlloca_.erase(backingIt);
         }
     }
 
@@ -3204,6 +3356,26 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     // Store an undef/poison value to enable dead-store elimination.
     auto* allocaType = llvm::cast<llvm::AllocaInst>(alloca)->getAllocatedType();
     builder->CreateStore(llvm::UndefValue::get(allocaType), alloca);
+
+    // ── Tracking-set cleanup ───────────────────────────────────────────────
+    // Erase the variable from every compile-time tracking map so that any
+    // later reference (after re-declaration) starts with a clean slate and
+    // the optimizer does not use stale constant-fold or range information.
+    constIntFolds_.erase(name);
+    constFloatFolds_.erase(name);
+    constStringFolds_.erase(name);
+    varTypeAnnotations_.erase(name);
+    stringVars_.erase(name);
+    arrayVars_.erase(name);
+    dictVarNames_.erase(name);
+    ptrVarNames_.erase(name);
+    ptrElemTypes_.erase(name);
+    heapPtrVarNames_.erase(name);
+    structVars_.erase(name);
+    simdVars_.erase(name);
+    registerVars_.erase(name);
+    stackAllocatedArrays_.erase(name);
+    frozenVars_.erase(name);
 
     // Mark the variable as dead for use-after-invalidate detection.
     deadVars_.insert(name);

@@ -139,7 +139,14 @@ enum class BuiltinId : uint8_t {
     MAT_ROWS,     ///< mat_rows(m)              → number of rows
     MAT_COLS,     ///< mat_cols(m)              → number of columns
     MAT_MUL,      ///< mat_mul(a,b)             → C = A × B (column-major result)
-    MAT_TRANSP    ///< mat_transp(m)            → transpose of m (new allocation)
+    MAT_TRANSP,   ///< mat_transp(m)            → transpose of m (new allocation)
+    // ── Region management builtins (RLC pass support) ────────────────────────
+    NEW_REGION,   ///< newRegion()        → opaque region handle (malloc arena head)
+    ALLOC,        ///< alloc(r, size)     → allocate `size` bytes in region r
+    // ── Raw memory builtins ──────────────────────────────────────────────────
+    MALLOC,       ///< malloc(size)       → allocate `size` bytes, return ptr
+    FREE,         ///< free(ptr)          → deallocate ptr (void return)
+    SIZEOF        ///< sizeof(type_name)  → byte size of type as i64 constant
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -365,6 +372,13 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"mat_cols",   BuiltinId::MAT_COLS},
     {"mat_mul",    BuiltinId::MAT_MUL},
     {"mat_transp", BuiltinId::MAT_TRANSP},
+    // Region management
+    {"newRegion",  BuiltinId::NEW_REGION},
+    {"alloc",      BuiltinId::ALLOC},
+    // Raw memory
+    {"malloc",     BuiltinId::MALLOC},
+    {"free",       BuiltinId::FREE},
+    {"sizeof",     BuiltinId::SIZEOF},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -389,6 +403,106 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     const BuiltinId bid = lookupBuiltin(expr->callee);
     // Builtins are accepted whether they were parsed as std::foo() or bare
     // foo() to preserve compatibility with existing programs and tests.
+
+    // ── alloc<T>(x) — compile-time smart allocator ───────────────────────────
+    // Syntax: alloc<T>(count)  where T is a type and count is the element count.
+    // Returns a ptr<T> pointing to `count` contiguous elements of type T.
+    //
+    // Allocation policy (decided entirely at compile time — no runtime branch):
+    //   • count is a compile-time constant AND count*sizeof(T) ≤ 4096 bytes
+    //     → stack allocation via alloca in the function entry block.
+    //       The alloca is aligned to the type's ABI alignment.
+    //   • otherwise (dynamic count or too large) → heap via malloc or
+    //     aligned_alloc when ABI alignment > 16 bytes.
+    //
+    // Because the decision is made during IR emission (before any runtime code
+    // runs), there is zero branch overhead and the allocator choice is visible
+    // to all LLVM optimization passes (LICM, alias analysis, DSE, etc.).
+    if (expr->callee.size() > 6 &&
+        expr->callee.rfind("alloc<", 0) == 0 && expr->callee.back() == '>') {
+        const std::string elemTypeName = expr->callee.substr(6, expr->callee.size() - 7);
+        llvm::Type* elemTy = resolveAnnotatedType(elemTypeName);
+        const llvm::DataLayout& DL = module->getDataLayout();
+        const uint64_t elemSize  = DL.getTypeAllocSize(elemTy);
+        const llvm::Align elemAlign = DL.getABITypeAlign(elemTy);
+
+        if (expr->arguments.size() != 1)
+            codegenError("alloc<T> expects exactly one argument (element count)", expr);
+
+        llvm::Value* countVal = generateExpression(expr->arguments[0].get());
+        countVal = builder->CreateIntCast(countVal, getDefaultType(),
+                                          /*isSigned=*/true, "alloc.cnt");
+
+        // ── Compile-time stack allocation ────────────────────────────────────
+        // Only when count is a compile-time ConstantInt AND total bytes ≤ 4096.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(countVal)) {
+            const uint64_t count = ci->getZExtValue();
+            const uint64_t totalBytes = count * elemSize;
+            constexpr uint64_t kStackThreshold = 4096;
+
+            if (count > 0 && totalBytes <= kStackThreshold) {
+                // Place the alloca in the function entry block so mem2reg /
+                // SROA can reason about it across all basic blocks.
+                llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                llvm::IRBuilder<> entryB(&fn->getEntryBlock(),
+                                         fn->getEntryBlock().begin());
+                auto* arrayTy = llvm::ArrayType::get(elemTy, count);
+                auto* stackAlloc = entryB.CreateAlloca(arrayTy, nullptr,
+                                                       "stkalloc." + elemTypeName);
+                stackAlloc->setAlignment(elemAlign);
+
+                // Emit lifetime.start to scope the allocation tightly and
+                // allow DSE/LICM to treat it as a bounded object.
+                const uint64_t lifeSz = DL.getTypeAllocSize(arrayTy);
+                auto* lifeSzVal = llvm::ConstantInt::get(
+                    llvm::Type::getInt64Ty(*context), lifeSz);
+                auto* lifetimeStart = OMSC_GET_INTRINSIC(
+                    module.get(), llvm::Intrinsic::lifetime_start,
+                    {llvm::PointerType::getUnqual(*context)});
+                builder->CreateCall(lifetimeStart, {lifeSzVal, stackAlloc});
+
+                // Return pointer to first element (GEP through [N x T]* → T*).
+                auto* zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
+                auto* ptr = builder->CreateInBoundsGEP(arrayTy, stackAlloc,
+                                                       {zero, zero}, "stkalloc.ptr");
+                // Record the backing alloca so invalidate can end its lifetime.
+                lastStackAllocBacking_ = stackAlloc;
+                return ptr;
+            }
+        }
+
+        // ── Compile-time heap allocation ─────────────────────────────────────
+        // Total size = count * sizeof(T), rounded up to a multiple of alignment
+        // when using aligned_alloc (required by C11).
+        llvm::Value* totalSize = builder->CreateMul(
+            countVal,
+            llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(elemSize)),
+            "halloc.sz", /*HasNUW=*/true);
+
+        llvm::Value* heapPtr;
+        if (elemAlign.value() > 16) {
+            // Round totalSize up to the next multiple of alignment so that
+            // aligned_alloc's precondition (size % align == 0) is satisfied.
+            const uint64_t alignBytes = elemAlign.value();
+            llvm::Value* alignVal = llvm::ConstantInt::get(getDefaultType(),
+                                                           static_cast<int64_t>(alignBytes));
+            // roundUp(sz, a) = (sz + a - 1) & ~(a - 1)  — valid since a is pow2.
+            llvm::Value* alignMinus1 = llvm::ConstantInt::get(getDefaultType(),
+                                                               static_cast<int64_t>(alignBytes - 1));
+            llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(),
+                                                        static_cast<int64_t>(~(alignBytes - 1)));
+            llvm::Value* roundedSize = builder->CreateAnd(
+                builder->CreateAdd(totalSize, alignMinus1, "halloc.roundup"),
+                mask, "halloc.rounded");
+            heapPtr = builder->CreateCall(getOrDeclareAlignedAlloc(),
+                                          {alignVal, roundedSize}, "halloc.ptr");
+        } else {
+            heapPtr = builder->CreateCall(getOrDeclareMalloc(),
+                                          {totalSize}, "halloc.ptr");
+        }
+        lastStackAllocBacking_ = nullptr; // heap allocation has no backing alloca
+        return heapPtr;
+    }
 
     // ── Width-typed integer intrinsics (__tw_<op>_<N>) ───────────────────────
     // Generated by the parser for iN::op(args) where N < 64. Uses the narrower
@@ -8901,6 +9015,99 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             });
         arrayReturningFunctions_.insert("mat_mul");
         return builder->CreatePtrToInt(cBuf, getDefaultType(), "matm.result");
+    }
+
+    // ── newRegion() ── create a region handle (malloc-backed arena pointer) ──
+    // Returns a pointer-sized integer that serves as the region's identity.
+    // The RLC pass may coalesce two region variables into one, removing this
+    // call entirely after transformation.  At runtime, newRegion() allocates a
+    // small header block via malloc so that the region handle is a valid,
+    // unique pointer (useful for identity checks and future arena growth).
+    if (bid == BuiltinId::NEW_REGION) {
+        validateArgCount(expr, "newRegion", 0);
+        // Emit: call i8* @malloc(i64 8)  (8-byte region header)
+        llvm::Function* mallocFn = llvm::cast<llvm::Function>(
+            module->getOrInsertFunction(
+                "malloc",
+                llvm::FunctionType::get(
+                    llvm::PointerType::getUnqual(*context),
+                    {llvm::Type::getInt64Ty(*context)},
+                    false))
+            .getCallee());
+        auto* hdr = builder->CreateCall(
+            mallocFn,
+            {llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 8)},
+            "region.hdr");
+        // Return as a pointer-sized integer so it fits in the default i64 type.
+        return builder->CreatePtrToInt(hdr, getDefaultType(), "region.handle");
+    }
+
+    // ── alloc(region, size) ── allocate `size` bytes via malloc ──────────────
+    // In the un-coalesced baseline, alloc() simply calls malloc(size).
+    // After the RLC pass coalesces regions, both alloc(r1,...) and alloc(r2,...)
+    // use the same region handle, and their backing memory is already unified;
+    // the semantics remain correct because the handle is just an identity tag.
+    if (bid == BuiltinId::ALLOC) {
+        validateArgCount(expr, "alloc", 2);
+        // Second argument is the size.
+        llvm::Value* sizeVal = generateExpression(expr->arguments[1].get());
+        if (!sizeVal->getType()->isIntegerTy())
+            sizeVal = builder->CreatePtrToInt(sizeVal, getDefaultType(), "alloc.sz");
+        llvm::Function* mallocFn = llvm::cast<llvm::Function>(
+            module->getOrInsertFunction(
+                "malloc",
+                llvm::FunctionType::get(
+                    llvm::PointerType::getUnqual(*context),
+                    {llvm::Type::getInt64Ty(*context)},
+                    false))
+            .getCallee());
+        auto* ptr = builder->CreateCall(
+            mallocFn,
+            {builder->CreateIntCast(sizeVal, llvm::Type::getInt64Ty(*context), false, "alloc.sz64")},
+            "region.alloc");
+        return builder->CreatePtrToInt(ptr, getDefaultType(), "region.ptr");
+    }
+
+    // ── malloc(size) ── allocate `size` bytes, return raw ptr ────────────────
+    if (bid == BuiltinId::MALLOC) {
+        validateArgCount(expr, "malloc", 1);
+        llvm::Value* sizeVal = generateExpression(expr->arguments[0].get());
+        if (!sizeVal->getType()->isIntegerTy())
+            sizeVal = builder->CreatePtrToInt(sizeVal, getDefaultType(), "malloc.sz");
+        llvm::Function* mallocFn = getOrDeclareMalloc();
+        auto* rawPtr = builder->CreateCall(
+            mallocFn,
+            {builder->CreateIntCast(sizeVal, llvm::Type::getInt64Ty(*context), false, "malloc.sz64")},
+            "malloc.ptr");
+        return rawPtr;
+    }
+
+    // ── free(ptr) ── deallocate a pointer returned by malloc ─────────────────
+    if (bid == BuiltinId::FREE) {
+        validateArgCount(expr, "free", 1);
+        llvm::Value* ptrVal = generateExpression(expr->arguments[0].get());
+        // Accept both pointer-typed values and integer-encoded pointers.
+        if (!ptrVal->getType()->isPointerTy())
+            ptrVal = builder->CreateIntToPtr(ptrVal, llvm::PointerType::getUnqual(*context), "free.itop");
+        builder->CreateCall(getOrDeclareFree(), {ptrVal});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // ── sizeof(typename) ── byte size of a type as a compile-time i64 ────────
+    // The argument is a single identifier naming the type.  Handled at the
+    // parse level (parsePrimary) for the common case; this BuiltinId path is a
+    // fallback for any sizeof() that reaches codegen as a CallExpr.
+    if (bid == BuiltinId::SIZEOF) {
+        validateArgCount(expr, "sizeof", 1);
+        // Try to extract the type name from a single identifier argument.
+        std::string typeName;
+        if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+            typeName = static_cast<IdentifierExpr*>(expr->arguments[0].get())->name;
+        }
+        llvm::Type* ty = typeName.empty() ? getDefaultType() : resolveAnnotatedType(typeName);
+        const llvm::DataLayout& DL = module->getDataLayout();
+        uint64_t sz = DL.getTypeAllocSize(ty);
+        return llvm::ConstantInt::get(getDefaultType(), sz);
     }
 
     if (inOptMaxFunction) {

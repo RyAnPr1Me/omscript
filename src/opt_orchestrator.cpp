@@ -165,6 +165,7 @@ namespace PassId {
     uint32_t kCFCTRE          = 0;
     uint32_t kEGraph          = 0;
     uint32_t kRangeAnalysis   = 0;
+    uint32_t kRLC             = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -282,6 +283,17 @@ static void registerAllPasses() {
         {AnalysisFact::kRangeAnalysis},
         {},
     });
+
+    PassId::kRLC = reg.registerPass({
+        0,
+        "rlc",
+        "Region Lifetime Coalescing: merge temporally disjoint newRegion() pairs to reduce allocation overhead",
+        PassPhase::ASTTransform,
+        PassKind::SemanticTransform,
+        {AnalysisFact::kEffects},           // requires effects analysis
+        {AnalysisFact::kRLC},               // provides rlc fact
+        {AnalysisFact::kPurity, AnalysisFact::kEffects, AnalysisFact::kCFCTRE}, // invalidates after AST mutation
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -334,6 +346,7 @@ bool OptimizationOrchestrator::runToProvide(const std::string& factKey,
         {PassId::kCFCTRE,          [this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); }},
         {PassId::kEGraph,          [this](Program* p, OptimizationContext& c){ runEGraph(p, c); }},
         {PassId::kRangeAnalysis,   [this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); }},
+        {PassId::kRLC,             [this](Program* p, OptimizationContext& c){ runRLC(p, c); }},
     };
 
     // Attach the dependency graph (same as runPassPipeline does for static runs).
@@ -386,6 +399,7 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         {PassId::kCFCTRE,          [this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); }},
         {PassId::kEGraph,          [this](Program* p, OptimizationContext& c){ runEGraph(p, c); }},
         {PassId::kRangeAnalysis,   [this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); }},
+        {PassId::kRLC,             [this](Program* p, OptimizationContext& c){ runRLC(p, c); }},
     };
 
     const auto& reg   = PassRegistry::instance();
@@ -734,6 +748,11 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
             ff.returnRange = *joined;
     }
     ctx.validity().rangeAnalysis = true;
+}
+
+void OptimizationOrchestrator::runRLC(Program* program, OptimizationContext& ctx) {
+    codegen_->runRLCPass(program, verbose_);
+    ctx.validity().rlc = true;
 }
 
 // ── syncFactsToContext ────────────────────────────────────────────────────────

@@ -88,7 +88,7 @@ TEST(CodegenTest, EmptyMainFunction) {
 
 TEST(CodegenTest, FunctionWithParameters) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn add(a, b) { return a; } fn main() { return add(1, 2); }", codegen);
+    auto* mod = generateIR("fn add(a:i64, b:i64) { return a; } fn main() { return add(1, 2); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* addFunc = mod->getFunction("add");
     ASSERT_NE(addFunc, nullptr);
@@ -150,25 +150,25 @@ TEST(CodegenTest, IfElseStatement) {
 
 TEST(CodegenTest, WhileLoop) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 0; while (x < 10) { x = x + 1; } return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 0; while (x < 10) { x = x + 1; } return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, DoWhileLoop) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 0; do { x = x + 1; } while (x < 10); return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 0; do { x = x + 1; } while (x < 10); return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ForLoop) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ForLoopWithStep) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...10...2) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...10...2) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -196,19 +196,19 @@ TEST(CodegenTest, TernaryExpression) {
 
 TEST(CodegenTest, FloatExpression) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 3.14; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 3.14; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StringExpression) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var s = \"hello\"; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = \"hello\"; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ArrayExpression) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [1, 2, 3]; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2, 3]; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -218,19 +218,19 @@ TEST(CodegenTest, ArrayExpression) {
 
 TEST(CodegenTest, VariableDecl) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 42; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 42; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ConstDecl) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { const c = 42; return c; }", codegen);
+    auto* mod = generateIR("fn main() { const c:i64 = 42; return c; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, CompoundAssignment) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 10; x += 5; x -= 2; x *= 3; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 10; x += 5; x -= 2; x *= 3; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -240,13 +240,13 @@ TEST(CodegenTest, CompoundAssignment) {
 
 TEST(CodegenTest, PostfixIncrement) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 5; x++; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 5; x++; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, PrefixDecrement) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 5; --x; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 5; --x; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -272,7 +272,7 @@ TEST(CodegenTest, AbsCall) {
 
 TEST(CodegenTest, BlockScope) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 1; { var x = 2; } return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 1; { var x:i64 = 2; } return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -283,14 +283,14 @@ TEST(CodegenTest, BlockScope) {
 TEST(CodegenTest, BreakInLoop) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod =
-        generateIR("fn main() { var x = 0; while (1) { x = x + 1; if (x == 5) { break; } } return x; }", codegen);
+        generateIR("fn main() { var x:i64 = 0; while (1) { x = x + 1; if (x == 5) { break; } } return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ContinueInLoop) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "fn main() { var s = 0; for (i in 0...10) { if (i == 5) { continue; } s = s + i; } return s; }", codegen);
+        "fn main() { var s:i64 = 0; for (i in 0...10) { if (i == 5) { continue; } s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -331,8 +331,8 @@ TEST(CodegenTest, BitwiseOperators) {
 
 TEST(CodegenTest, ComparisonOperators) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 1 < 2; var b = 1 <= 2; var c = 2 > 1; var d = 2 >= 1; var e = 1 == 1; "
-                           "var f = 1 != 2; return 0; }",
+    auto* mod = generateIR("fn main() { var a:i64 = 1 < 2; var b:i64 = 1 <= 2; var c:i64 = 2 > 1; var d:i64 = 2 >= 1; var e:i64 = 1 == 1; "
+                           "var f:i64 = 1 != 2; return 0; }",
                            codegen);
     ASSERT_NE(mod, nullptr);
 }
@@ -488,27 +488,27 @@ TEST(CodegenTest, OptmaxAssignmentOptimization) {
 
 TEST(CodegenTest, FloatArithmetic) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 1.5 + 2.5; var y = 3.0 - 1.0; var z = 2.0 * 3.0; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 1.5 + 2.5; var y:i64 = 3.0 - 1.0; var z:i64 = 2.0 * 3.0; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, FloatDivision) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 10.0 / 3.0; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 10.0 / 3.0; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, FloatComparison) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 1.0 < 2.0; var b = 1.0 <= 2.0; var c = 2.0 > 1.0; var d = 2.0 >= 1.0; "
-                           "var e = 1.0 == 1.0; var f = 1.0 != 2.0; return 0; }",
+    auto* mod = generateIR("fn main() { var a:i64 = 1.0 < 2.0; var b:i64 = 1.0 <= 2.0; var c:i64 = 2.0 > 1.0; var d:i64 = 2.0 >= 1.0; "
+                           "var e:i64 = 1.0 == 1.0; var f:i64 = 1.0 != 2.0; return 0; }",
                            codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, MixedIntFloatArithmetic) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 1 + 2.5; var y = 3.0 - 1; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 1 + 2.5; var y:i64 = 3.0 - 1; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -590,19 +590,19 @@ TEST(CodegenTest, LenCall) {
 
 TEST(CodegenTest, SumCall) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var arr = [1, 2, 3]; return sum(arr); }", codegen);
+    auto* mod = generateIR("fn main() { var arr:i64[] = [1, 2, 3]; return sum(arr); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, SwapCall) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var arr = [1, 2, 3]; swap(arr, 0, 1); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var arr:i64[] = [1, 2, 3]; swap(arr, 0, 1); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ReverseCall) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var arr = [1, 2, 3]; reverse(arr); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var arr:i64[] = [1, 2, 3]; reverse(arr); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -618,7 +618,7 @@ TEST(CodegenTest, PrintCharCall) {
 
 TEST(CodegenTest, StringLiteralReturn) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var s = \"hello world\"; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = \"hello world\"; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -650,13 +650,13 @@ TEST(CodegenTest, IntegerModulo) {
 
 TEST(CodegenTest, LogicalAndShortCircuit) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 0 && 1; var y = 1 && 1; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 0 && 1; var y:i64 = 1 && 1; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, LogicalOrShortCircuit) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 0 || 1; var y = 1 || 0; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 0 || 1; var y:i64 = 1 || 0; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -666,13 +666,13 @@ TEST(CodegenTest, LogicalOrShortCircuit) {
 
 TEST(CodegenTest, PostfixDecrement) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 5; x--; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 5; x--; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, PrefixIncrement) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 5; ++x; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 5; ++x; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -692,7 +692,7 @@ TEST(CodegenTest, TernaryFalseCondition) {
 
 TEST(CodegenTest, ForLoopDescending) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 10...0...-1) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 10...0...-1) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -702,7 +702,7 @@ TEST(CodegenTest, ForLoopDescending) {
 
 TEST(CodegenTest, ConstModificationError) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_THROW(generateIR("fn main() { const c = 5; c = 10; return c; }", codegen), std::runtime_error);
+    EXPECT_THROW(generateIR("fn main() { const c:i64 = 5; c = 10; return c; }", codegen), std::runtime_error);
 }
 
 // ===========================================================================
@@ -720,7 +720,7 @@ TEST(CodegenTest, UndefinedVariableError) {
 
 TEST(CodegenTest, ArrayExpressionError) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [1, 2, 3]; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2, 3]; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -734,13 +734,13 @@ TEST(CodegenTest, ArrayExpressionError) {
 
 TEST(CodegenTest, FloatAbsCall) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 3.14; return abs(-5); }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 3.14; return abs(-5); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, FloatSqrtCall) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = sqrt(16); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = sqrt(16); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -790,7 +790,7 @@ TEST(CodegenTest, PrefixOnNonIdentifier) {
 
 TEST(CodegenTest, VarDeclNoInit) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -800,7 +800,7 @@ TEST(CodegenTest, VarDeclNoInit) {
 
 TEST(CodegenTest, NestedScoping) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 1; { var x = 2; { var x = 3; } } return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 1; { var x:i64 = 2; { var x:i64 = 3; } } return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -810,17 +810,17 @@ TEST(CodegenTest, NestedScoping) {
 
 TEST(CodegenTest, ConstPostfixError) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_THROW(generateIR("fn main() { const c = 5; c++; return c; }", codegen), std::runtime_error);
+    EXPECT_THROW(generateIR("fn main() { const c:i64 = 5; c++; return c; }", codegen), std::runtime_error);
 }
 
 TEST(CodegenTest, ConstPrefixError) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_THROW(generateIR("fn main() { const c = 5; ++c; return c; }", codegen), std::runtime_error);
+    EXPECT_THROW(generateIR("fn main() { const c:i64 = 5; ++c; return c; }", codegen), std::runtime_error);
 }
 
 TEST(CodegenTest, ConstCompoundAssignError) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_THROW(generateIR("fn main() { const c = 5; c += 1; return c; }", codegen), std::runtime_error);
+    EXPECT_THROW(generateIR("fn main() { const c:i64 = 5; c += 1; return c; }", codegen), std::runtime_error);
 }
 
 // ===========================================================================
@@ -860,17 +860,17 @@ TEST(CodegenTest, MinWrongArgs) {
 
 TEST(CodegenTest, FloatDivisionIR) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 10.0; var b = 3.0; var c = a / b; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:float = 10.0; var b:float = 3.0; var c:i64 = a / b; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, FloatComparisonAllOps) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var a = 1.0; var b = 2.0;"
-                           "  var lt = a < b; var le = a <= b;"
-                           "  var gt = b > a; var ge = b >= a;"
-                           "  var eq = a == a; var ne = a != b;"
+                           "  var a:float = 1.0; var b:float = 2.0;"
+                           "  var lt:bool = a < b; var le:bool = a <= b;"
+                           "  var gt:bool = b > a; var ge:bool = b >= a;"
+                           "  var eq:bool = a == a; var ne:bool = a != b;"
                            "  return 0;"
                            "}",
                            codegen);
@@ -879,7 +879,7 @@ TEST(CodegenTest, FloatComparisonAllOps) {
 
 TEST(CodegenTest, FloatUnaryNeg) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 3.14; var y = -x; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 3.14; var y:i64 = -x; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1066,7 +1066,7 @@ TEST(CodegenTest, WriteObjectFile) {
 
 TEST(CodegenTest, OptimizationPassesO2) {
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn main() { var x = 10; var y = x + 5; return y; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 10; var y:i64 = x + 5; return y; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1076,14 +1076,14 @@ TEST(CodegenTest, OptimizationPassesO2) {
 
 TEST(CodegenTest, StringConcatenation) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = \"hello \"; var b = \"world\"; var c = a + b; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64 = \"hello \"; var b:i64 = \"world\"; var c:i64 = a + b; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StringComparison) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "fn main() { var a = \"abc\"; var b = \"def\"; var eq = a == b; var ne = a != b; return 0; }", codegen);
+        "fn main() { var a:i64 = \"abc\"; var b:i64 = \"def\"; var eq:bool = a == b; var ne:bool = a != b; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1093,7 +1093,7 @@ TEST(CodegenTest, StringComparison) {
 
 TEST(CodegenTest, IndexExpressionCodegen) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [1, 2, 3]; var x = a[0]; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2, 3]; var x:i64 = a[0]; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1103,7 +1103,7 @@ TEST(CodegenTest, IndexExpressionCodegen) {
 
 TEST(CodegenTest, TernaryWithVariable) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var c = 1; return c ? 10 : 20; }", codegen);
+    auto* mod = generateIR("fn main() { var c:i64 = 1; return c ? 10 : 20; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1119,7 +1119,7 @@ TEST(CodegenTest, ModuloExpression) {
 
 TEST(CodegenTest, ShiftExpressions) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 1 << 4; var b = 16 >> 2; return a + b; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64 = 1 << 4; var b:i64 = 16 >> 2; return a + b; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1131,7 +1131,7 @@ TEST(CodegenTest, InputCall) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() { return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
-    auto* inputMod = generateIR("fn foo() { var x = input(); return x; } fn main() { return 0; }", codegen);
+    auto* inputMod = generateIR("fn foo() { var x:string = input(); return x; } fn main() { return 0; }", codegen);
     ASSERT_NE(inputMod, nullptr);
 }
 
@@ -1142,14 +1142,14 @@ TEST(CodegenTest, InputCall) {
 TEST(CodegenTest, ForLoopWithBreak) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "fn main() { var s = 0; for (i in 0...100) { if (i == 50) { break; } s = s + i; } return s; }", codegen);
+        "fn main() { var s:i64 = 0; for (i in 0...100) { if (i == 50) { break; } s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ForLoopWithContinue) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "fn main() { var s = 0; for (i in 0...10) { if (i == 5) { continue; } s = s + i; } return s; }", codegen);
+        "fn main() { var s:i64 = 0; for (i in 0...10) { if (i == 5) { continue; } s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1160,7 +1160,7 @@ TEST(CodegenTest, ForLoopWithContinue) {
 TEST(CodegenTest, DoWhileBreak) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "fn main() { var x = 0; do { x = x + 1; if (x == 3) { break; } } while (x < 10); return x; }", codegen);
+        "fn main() { var x:i64 = 0; do { x = x + 1; if (x == 3) { break; } } while (x < 10); return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1170,8 +1170,8 @@ TEST(CodegenTest, DoWhileBreak) {
 
 TEST(CodegenTest, NestedFunctionCalls) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn add(a, b) { return a + b; }"
-                           "fn mul(a, b) { return a * b; }"
+    auto* mod = generateIR("fn add(a:i64, b:i64) { return a + b; }"
+                           "fn mul(a:i64, b:i64) { return a * b; }"
                            "fn main() { return add(mul(2, 3), mul(4, 5)); }",
                            codegen);
     ASSERT_NE(mod, nullptr);
@@ -1187,7 +1187,7 @@ TEST(CodegenTest, NestedFunctionCalls) {
 
 TEST(CodegenTest, AllCompoundAssignments) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 100; x += 10; x -= 5; x *= 2; x /= 3; x %= 7; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 100; x += 10; x -= 5; x *= 2; x /= 3; x %= 7; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1201,43 +1201,43 @@ TEST(CodegenTest, AllCompoundAssignments) {
 
 TEST(CodegenTest, PrintFloatArg) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 3.14; print(x); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 3.14; print(x); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, AbsFloatArg) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = -3.14; var y = abs(x); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = -3.14; var y:i64 = abs(x); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, MinFloatArgs) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 1.5; var b = 2.5; var c = min(a, b); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:float = 1.5; var b:float = 2.5; var c:i64 = min(a, b); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, MaxFloatArgs) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 1.5; var b = 2.5; var c = max(a, b); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:float = 1.5; var b:float = 2.5; var c:i64 = max(a, b); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, SignFloatArg) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = -3.14; var y = sign(x); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = -3.14; var y:i64 = sign(x); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ClampFloatArgs) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 15.0; var y = clamp(x, 0.0, 10.0); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 15.0; var y:i64 = clamp(x, 0.0, 10.0); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, PrintCharFloatArg) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 65.0; print_char(x); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 65.0; print_char(x); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1247,7 +1247,7 @@ TEST(CodegenTest, PrintCharFloatArg) {
 
 TEST(CodegenTest, InputWrongArgs) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_THROW(generateIR("fn main() { var x = input(1); return 0; }", codegen), std::runtime_error);
+    EXPECT_THROW(generateIR("fn main() { var x:string = input(1); return 0; }", codegen), std::runtime_error);
 }
 
 // ===========================================================================
@@ -1269,7 +1269,7 @@ TEST(CodegenTest, OptmaxCallNonStdlibError) {
 
 TEST(CodegenTest, WrongArgCountUserFunction) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_THROW(generateIR("fn add(a, b) { return a + b; } fn main() { return add(1); }", codegen),
+    EXPECT_THROW(generateIR("fn add(a:i64, b:i64) { return a + b; } fn main() { return add(1); }", codegen),
                  std::runtime_error);
 }
 
@@ -1279,13 +1279,13 @@ TEST(CodegenTest, WrongArgCountUserFunction) {
 
 TEST(CodegenTest, TernaryFloatBranches) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 1 ? 1.5 : 2.5; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 1 ? 1.5 : 2.5; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, TernaryMixedTypes) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 1 ? 1.5 : 2; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 1 ? 1.5 : 2; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1295,7 +1295,7 @@ TEST(CodegenTest, TernaryMixedTypes) {
 
 TEST(CodegenTest, UnaryNotOnVar) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 0; return !x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 0; return !x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1305,7 +1305,7 @@ TEST(CodegenTest, UnaryNotOnVar) {
 
 TEST(CodegenTest, UnaryTildeOnVar) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 5; return ~x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 5; return ~x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1315,31 +1315,31 @@ TEST(CodegenTest, UnaryTildeOnVar) {
 
 TEST(CodegenTest, BitwiseAndOnVars) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 5; var b = 3; return a & b; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64 = 5; var b:i64 = 3; return a & b; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, BitwiseOrOnVars) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 5; var b = 3; return a | b; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64 = 5; var b:i64 = 3; return a | b; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, BitwiseXorOnVars) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 5; var b = 3; return a ^ b; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64 = 5; var b:i64 = 3; return a ^ b; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ShiftOnVars) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 1; var b = 4; return a << b; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64 = 1; var b:i64 = 4; return a << b; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ArithShiftRight) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = 16; var b = 2; return a >> b; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64 = 16; var b:i64 = 2; return a >> b; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1385,7 +1385,7 @@ TEST(CodegenTest, ReturnVoid) {
 
 TEST(CodegenTest, IfElseMerging) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 0; if (1) { x = 1; } else { x = 2; } return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 0; if (1) { x = 1; } else { x = 2; } return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1395,13 +1395,13 @@ TEST(CodegenTest, IfElseMerging) {
 
 TEST(CodegenTest, FloatPostfixIncrement) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 1.5; x++; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 1.5; x++; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, FloatPrefixDecrement) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 3.14; --x; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 3.14; --x; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1447,7 +1447,7 @@ TEST(CodegenTest, FloatPrefixDecrement) {
 
 TEST(CodegenTest, OptimizationO1FunctionPasses) {
     CodeGenerator codegen(OptimizationLevel::O1);
-    auto* mod = generateIR("fn add(a, b) { return a + b; } fn main() { return add(1, 2); }", codegen);
+    auto* mod = generateIR("fn add(a:i64, b:i64) { return a + b; } fn main() { return add(1, 2); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1457,7 +1457,7 @@ TEST(CodegenTest, OptimizationO1FunctionPasses) {
 
 TEST(CodegenTest, TildeOnFloatVar) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 3.14; return ~x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 3.14; return ~x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1468,9 +1468,9 @@ TEST(CodegenTest, TildeOnFloatVar) {
 TEST(CodegenTest, StringConcatLazyInit) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var a = \"hello\";"
-                           "  var b = \" world\";"
-                           "  var c = a + b;"
+                           "  var a:i64 = \"hello\";"
+                           "  var b:i64 = \" world\";"
+                           "  var c:i64 = a + b;"
                            "  print(c);"
                            "  return 0;"
                            "}",
@@ -1484,7 +1484,7 @@ TEST(CodegenTest, StringConcatLazyInit) {
 
 TEST(CodegenTest, InputFunctionCodegen) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn foo() { var x = input(); return x; }"
+    auto* mod = generateIR("fn foo() { var x:string = input(); return x; }"
                            "fn main() { return 0; }",
                            codegen);
     ASSERT_NE(mod, nullptr);
@@ -1518,7 +1518,7 @@ TEST(CodegenTest, OptmaxIndexExpr) {
 
 TEST(CodegenTest, OptimizeFunctionPerFunction) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn add(a, b) { return a + b; } fn main() { return add(1, 2); }", codegen);
+    auto* mod = generateIR("fn add(a:i64, b:i64) { return a + b; } fn main() { return add(1, 2); }", codegen);
     ASSERT_NE(mod, nullptr);
     // Find the 'add' function and run per-function optimization on it
     llvm::Function* addFn = mod->getFunction("add");
@@ -1534,7 +1534,7 @@ TEST(CodegenTest, OptimizeFunctionPerFunction) {
 
 TEST(CodegenTest, OptimizationPassesO0) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 10; var y = x + 5; return y; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 10; var y:i64 = x + 5; return y; }", codegen);
     ASSERT_NE(mod, nullptr);
     // Module should be valid even with O0 (no optimizations)
     llvm::Function* mainFn = mod->getFunction("main");
@@ -1548,7 +1548,7 @@ TEST(CodegenTest, OptimizationPassesO0) {
 
 TEST(CodegenTest, SwitchBasic) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn classify(x) {"
+    auto* mod = generateIR("fn classify(x:i64) {"
                            "  switch (x) {"
                            "    case 1: return 10;"
                            "    case 2: return 20;"
@@ -1566,7 +1566,7 @@ TEST(CodegenTest, SwitchBasic) {
 TEST(CodegenTest, SwitchNoDefault) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var x = 5;"
+                           "  var x:i64 = 5;"
                            "  switch (x) {"
                            "    case 1: return 10;"
                            "    case 2: return 20;"
@@ -1583,7 +1583,7 @@ TEST(CodegenTest, SwitchNoDefault) {
 
 TEST(CodegenTest, TypeofCodegen) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var t = typeof(42); return t; }", codegen);
+    auto* mod = generateIR("fn main() { var t:i64 = typeof(42); return t; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -1610,7 +1610,7 @@ TEST(CodegenTest, TypeofWrongArgCount) {
 TEST(CodegenTest, BreakInsideSwitch) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var r = 0;"
+                           "  var r:i64 = 0;"
                            "  switch (1) {"
                            "    case 1: r = 10; break;"
                            "    case 2: r = 20; break;"
@@ -1648,7 +1648,7 @@ TEST(CodegenTest, SwitchInOptmax) {
 TEST(CodegenTest, SwitchDuplicateCaseError) {
     CodeGenerator codegen(OptimizationLevel::O0);
     EXPECT_THROW(generateIR("fn main() {"
-                            "  var x = 1;"
+                            "  var x:i64 = 1;"
                             "  switch (x) {"
                             "    case 1: return 10;"
                             "    case 1: return 20;"
@@ -1662,7 +1662,7 @@ TEST(CodegenTest, SwitchDuplicateCaseError) {
 TEST(CodegenTest, SwitchMultiValueCase) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var x = 2;"
+                           "  var x:i64 = 2;"
                            "  switch (x) {"
                            "    case 1, 2, 3: return 10;"
                            "    case 4, 5: return 20;"
@@ -1679,7 +1679,7 @@ TEST(CodegenTest, SwitchMultiValueCase) {
 TEST(CodegenTest, SwitchMultiValueDuplicateError) {
     CodeGenerator codegen(OptimizationLevel::O0);
     EXPECT_THROW(generateIR("fn main() {"
-                            "  var x = 1;"
+                            "  var x:i64 = 1;"
                             "  switch (x) {"
                             "    case 1, 2: return 10;"
                             "    case 2, 3: return 20;"
@@ -1720,7 +1720,7 @@ TEST(CodegenTest, SwitchConstantConditionElimination) {
 TEST(CodegenTest, ArrayIndexAssignment) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var arr = [10, 20, 30];"
+                           "  var arr:i64[] = [10, 20, 30];"
                            "  arr[0] = 99;"
                            "  return arr[0];"
                            "}",
@@ -1734,7 +1734,7 @@ TEST(CodegenTest, ArrayIndexAssignment) {
 TEST(CodegenTest, ArrayIndexAssignmentMultiple) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var arr = [1, 2, 3];"
+                           "  var arr:i64[] = [1, 2, 3];"
                            "  arr[0] = 10;"
                            "  arr[1] = 20;"
                            "  arr[2] = 30;"
@@ -1751,8 +1751,8 @@ TEST(CodegenTest, ArrayIndexAssignmentMultiple) {
 TEST(CodegenTest, ForEachBasic) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var arr = [10, 20, 30];"
-                           "  var total = 0;"
+                           "  var arr:i64[] = [10, 20, 30];"
+                           "  var total:i64 = 0;"
                            "  for (x in arr) {"
                            "    total = total + x;"
                            "  }"
@@ -1768,8 +1768,8 @@ TEST(CodegenTest, ForEachBasic) {
 TEST(CodegenTest, ForEachWithBreak) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var arr = [1, 2, 3, 4, 5];"
-                           "  var total = 0;"
+                           "  var arr:i64[] = [1, 2, 3, 4, 5];"
+                           "  var total:i64 = 0;"
                            "  for (x in arr) {"
                            "    if (x == 4) { break; }"
                            "    total = total + x;"
@@ -1783,8 +1783,8 @@ TEST(CodegenTest, ForEachWithBreak) {
 TEST(CodegenTest, ForEachWithContinue) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var arr = [1, 2, 3, 4, 5];"
-                           "  var total = 0;"
+                           "  var arr:i64[] = [1, 2, 3, 4, 5];"
+                           "  var total:i64 = 0;"
                            "  for (x in arr) {"
                            "    if (x % 2 == 0) { continue; }"
                            "    total = total + x;"
@@ -1802,7 +1802,7 @@ TEST(CodegenTest, ForEachWithContinue) {
 TEST(CodegenTest, StrLen) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var s = \"Hello\";"
+                           "  var s:i64 = \"Hello\";"
                            "  return str_len(s);"
                            "}",
                            codegen);
@@ -1815,7 +1815,7 @@ TEST(CodegenTest, StrLen) {
 TEST(CodegenTest, CharAt) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var s = \"ABC\";"
+                           "  var s:i64 = \"ABC\";"
                            "  return char_at(s, 0);"
                            "}",
                            codegen);
@@ -1839,7 +1839,7 @@ TEST(CodegenTest, CharAtWrongArity) {
 TEST(CodegenTest, MultiVarDeclaration) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var a = 10, b = 20, c = 30;"
+                           "  var a:i64 = 10, b:i64 = 20, c:i64 = 30;"
                            "  return a + b + c;"
                            "}",
                            codegen);
@@ -1852,7 +1852,7 @@ TEST(CodegenTest, MultiVarDeclaration) {
 TEST(CodegenTest, MultiConstDeclaration) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  const x = 5, y = 10;"
+                           "  const x:i64 = 5, y:i64 = 10;"
                            "  return x * y;"
                            "}",
                            codegen);
@@ -1866,8 +1866,8 @@ TEST(CodegenTest, MultiConstDeclaration) {
 TEST(CodegenTest, StrEqFunction) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {"
-                           "  var a = \"hello\";"
-                           "  var b = \"hello\";"
+                           "  var a:i64 = \"hello\";"
+                           "  var b:i64 = \"hello\";"
                            "  return str_eq(a, b);"
                            "}",
                            codegen);
@@ -1898,7 +1898,7 @@ TEST(CodegenTest, InliningAtO2) {
     // At O2, the new pass manager should inline small functions.
     // After inlining square(5) + square(3), IPSCCP should fold to 34.
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn square(x) { return x * x; }"
+    auto* mod = generateIR("fn square(x:i64) { return x * x; }"
                            "fn main() { return square(5) + square(3); }",
                            codegen);
     llvm::Function* mainFn = mod->getFunction("main");
@@ -1919,7 +1919,7 @@ TEST(CodegenTest, InliningAtO2) {
 
 TEST(CodegenTest, InliningAtO3) {
     CodeGenerator codegen(OptimizationLevel::O3);
-    auto* mod = generateIR("fn double_it(n) { return n + n; }"
+    auto* mod = generateIR("fn double_it(n:i64) { return n + n; }"
                            "fn main() { return double_it(21); }",
                            codegen);
     llvm::Function* mainFn = mod->getFunction("main");
@@ -1940,7 +1940,7 @@ TEST(CodegenTest, InliningAtO3) {
 TEST(CodegenTest, InliningAtO1) {
     // O1 uses the new pass manager's standard pipeline which includes inlining.
     CodeGenerator codegen(OptimizationLevel::O1);
-    auto* mod = generateIR("fn helper(x) { return x * 2; }"
+    auto* mod = generateIR("fn helper(x:i64) { return x * 2; }"
                            "fn main() { return helper(10); }",
                            codegen);
     llvm::Function* mainFn = mod->getFunction("main");
@@ -1961,8 +1961,8 @@ TEST(CodegenTest, InliningAtO1) {
 TEST(CodegenTest, ConstantPropagationThroughInline) {
     // After inlining + IPSCCP, the entire program should fold to a constant
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn add(a, b) { return a + b; }"
-                           "fn mul(a, b) { return a * b; }"
+    auto* mod = generateIR("fn add(a:i64, b:i64) { return a + b; }"
+                           "fn mul(a:i64, b:i64) { return a * b; }"
                            "fn main() { return add(mul(3, 4), mul(5, 6)); }",
                            codegen);
     llvm::Function* mainFn = mod->getFunction("main");
@@ -2040,7 +2040,7 @@ TEST(CodegenTest, FalseLiteral) {
 
 TEST(CodegenTest, NullLiteral) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = null; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = null; return x; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
     EXPECT_FALSE(mainFn->empty());
@@ -2059,35 +2059,35 @@ TEST(CodegenTest, TrueInCondition) {
 
 TEST(CodegenTest, BitwiseAndAssign) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 15; x &= 6; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 15; x &= 6; return x; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 }
 
 TEST(CodegenTest, BitwiseOrAssign) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 3; x |= 12; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 3; x |= 12; return x; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 }
 
 TEST(CodegenTest, BitwiseXorAssign) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 15; x ^= 9; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 15; x ^= 9; return x; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 }
 
 TEST(CodegenTest, ShiftLeftAssign) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 1; x <<= 3; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 1; x <<= 3; return x; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 }
 
 TEST(CodegenTest, ShiftRightAssign) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 32; x >>= 2; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 32; x >>= 2; return x; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 }
@@ -2098,21 +2098,21 @@ TEST(CodegenTest, ShiftRightAssign) {
 
 TEST(CodegenTest, ArrayCompoundAssignPlus) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var arr = [10, 20]; arr[0] += 5; return arr[0]; }", codegen);
+    auto* mod = generateIR("fn main() { var arr:i64[] = [10, 20]; arr[0] += 5; return arr[0]; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 }
 
 TEST(CodegenTest, ArrayCompoundAssignMinus) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var arr = [10, 20]; arr[1] -= 3; return arr[1]; }", codegen);
+    auto* mod = generateIR("fn main() { var arr:i64[] = [10, 20]; arr[1] -= 3; return arr[1]; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 }
 
 TEST(CodegenTest, ArrayCompoundAssignMul) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var arr = [10]; arr[0] *= 3; return arr[0]; }", codegen);
+    auto* mod = generateIR("fn main() { var arr:i64[] = [10]; arr[0] *= 3; return arr[0]; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 }
@@ -2140,8 +2140,8 @@ TEST(CodegenTest, DuplicateFunction) {
     CodeGenerator codegen(OptimizationLevel::O0);
     EXPECT_THROW(
         {
-            generateIR("fn add(a, b) { return a + b; }\n"
-                       "fn add(x, y) { return x + y; }\n"
+            generateIR("fn add(a:i64, b:i64) { return a + b; }\n"
+                       "fn add(x:i64, y:i64) { return x + y; }\n"
                        "fn main() { return add(1, 2); }",
                        codegen);
         },
@@ -2151,8 +2151,8 @@ TEST(CodegenTest, DuplicateFunction) {
 TEST(CodegenTest, DuplicateFunctionMessage) {
     CodeGenerator codegen(OptimizationLevel::O0);
     try {
-        generateIR("fn add(a, b) { return a + b; }\n"
-                   "fn add(x, y) { return x + y; }\n"
+        generateIR("fn add(a:i64, b:i64) { return a + b; }\n"
+                   "fn add(x:i64, y:i64) { return x + y; }\n"
                    "fn main() { return add(1, 2); }",
                    codegen);
         FAIL() << "Expected exception";
@@ -2165,7 +2165,7 @@ TEST(CodegenTest, DuplicateParameter) {
     CodeGenerator codegen(OptimizationLevel::O0);
     EXPECT_THROW(
         {
-            generateIR("fn add(a, a) { return a + a; }\n"
+            generateIR("fn add(a:i64, a:i64) { return a + a; }\n"
                        "fn main() { return add(1, 2); }",
                        codegen);
         },
@@ -2175,7 +2175,7 @@ TEST(CodegenTest, DuplicateParameter) {
 TEST(CodegenTest, DuplicateParameterMessage) {
     CodeGenerator codegen(OptimizationLevel::O0);
     try {
-        generateIR("fn add(a, a) { return a + a; }\n"
+        generateIR("fn add(a:i64, a:i64) { return a + a; }\n"
                    "fn main() { return add(1, 2); }",
                    codegen);
         FAIL() << "Expected exception";
@@ -2186,7 +2186,7 @@ TEST(CodegenTest, DuplicateParameterMessage) {
 
 TEST(CodegenTest, ValidProgramAccepted) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn add(a, b) { return a + b; }\n"
+    auto* mod = generateIR("fn add(a:i64, b:i64) { return a + b; }\n"
                            "fn main() { return add(1, 2); }",
                            codegen);
     auto* mainFn = mod->getFunction("main");
@@ -2225,7 +2225,7 @@ TEST(CodegenTest, DivisionStrengthReduction) {
     // egraph) because signed division truncates toward zero while arithmetic
     // shift right rounds toward negative infinity.
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn divide_by_four(n) { return n / 4; }\n"
+    auto* mod = generateIR("fn divide_by_four(n:i64) { return n / 4; }\n"
                            "fn main() { return divide_by_four(16); }",
                            codegen);
     auto* func = mod->getFunction("divide_by_four");
@@ -2250,7 +2250,7 @@ TEST(CodegenTest, ModuloStrengthReduction) {
     // n % 8 where the divisor is a known power-of-2 constant should be
     // strength-reduced by the LLVM backend at O2+.
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn mod_by_eight(n) { return n % 8; }\n"
+    auto* mod = generateIR("fn mod_by_eight(n:i64) { return n % 8; }\n"
                            "fn main() { return mod_by_eight(17); }",
                            codegen);
     auto* func = mod->getFunction("mod_by_eight");
@@ -2274,7 +2274,7 @@ TEST(CodegenTest, MultiplyStrengthReduction) {
     // n * 8 should be converted to n << 3 (left shift) when the multiplier
     // is a power of 2.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul_by_eight(n) { return n * 8; }\n"
+    auto* mod = generateIR("fn mul_by_eight(n:i64) { return n * 8; }\n"
                            "fn main() { return mul_by_eight(3); }",
                            codegen);
     auto* func = mod->getFunction("mul_by_eight");
@@ -2298,7 +2298,7 @@ TEST(CodegenTest, MultiplyStrengthReduction) {
 TEST(CodegenTest, AlgebraicIdentityMultiplyByZero) {
     // x * 0 should fold to 0 (no multiply instruction emitted)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul_zero(n) { return n * 0; }\n"
+    auto* mod = generateIR("fn mul_zero(n:i64) { return n * 0; }\n"
                            "fn main() { return mul_zero(42); }",
                            codegen);
     auto* func = mod->getFunction("mul_zero");
@@ -2316,7 +2316,7 @@ TEST(CodegenTest, AlgebraicIdentityMultiplyByZero) {
 TEST(CodegenTest, AlgebraicIdentityAddZero) {
     // x + 0 should fold to x (no add instruction emitted)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn add_zero(n) { return n + 0; }\n"
+    auto* mod = generateIR("fn add_zero(n:i64) { return n + 0; }\n"
                            "fn main() { return add_zero(42); }",
                            codegen);
     auto* func = mod->getFunction("add_zero");
@@ -2334,7 +2334,7 @@ TEST(CodegenTest, AlgebraicIdentityAddZero) {
 TEST(CodegenTest, AlgebraicIdentityZeroPlusX) {
     // 0 + x should fold to x
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn zero_plus(n) { return 0 + n; }\n"
+    auto* mod = generateIR("fn zero_plus(n:i64) { return 0 + n; }\n"
                            "fn main() { return zero_plus(42); }",
                            codegen);
     auto* func = mod->getFunction("zero_plus");
@@ -2352,7 +2352,7 @@ TEST(CodegenTest, AlgebraicIdentityZeroPlusX) {
 TEST(CodegenTest, AlgebraicIdentityBitwiseAndZero) {
     // x & 0 should fold to 0
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn and_zero(n) { return n & 0; }\n"
+    auto* mod = generateIR("fn and_zero(n:i64) { return n & 0; }\n"
                            "fn main() { return and_zero(42); }",
                            codegen);
     auto* func = mod->getFunction("and_zero");
@@ -2370,7 +2370,7 @@ TEST(CodegenTest, AlgebraicIdentityBitwiseAndZero) {
 TEST(CodegenTest, AlgebraicIdentityBitwiseOrZero) {
     // x | 0 should fold to x
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn or_zero(n) { return n | 0; }\n"
+    auto* mod = generateIR("fn or_zero(n:i64) { return n | 0; }\n"
                            "fn main() { return or_zero(42); }",
                            codegen);
     auto* func = mod->getFunction("or_zero");
@@ -2388,7 +2388,7 @@ TEST(CodegenTest, AlgebraicIdentityBitwiseOrZero) {
 TEST(CodegenTest, AlgebraicIdentityXorZero) {
     // x ^ 0 should fold to x
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn xor_zero(n) { return n ^ 0; }\n"
+    auto* mod = generateIR("fn xor_zero(n:i64) { return n ^ 0; }\n"
                            "fn main() { return xor_zero(42); }",
                            codegen);
     auto* func = mod->getFunction("xor_zero");
@@ -2406,7 +2406,7 @@ TEST(CodegenTest, AlgebraicIdentityXorZero) {
 TEST(CodegenTest, AlgebraicIdentityShlZero) {
     // x << 0 should fold to x
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn shl_zero(n) { return n << 0; }\n"
+    auto* mod = generateIR("fn shl_zero(n:i64) { return n << 0; }\n"
                            "fn main() { return shl_zero(42); }",
                            codegen);
     auto* func = mod->getFunction("shl_zero");
@@ -2424,7 +2424,7 @@ TEST(CodegenTest, AlgebraicIdentityShlZero) {
 TEST(CodegenTest, AlgebraicIdentityShrZero) {
     // x >> 0 should fold to x
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn shr_zero(n) { return n >> 0; }\n"
+    auto* mod = generateIR("fn shr_zero(n:i64) { return n >> 0; }\n"
                            "fn main() { return shr_zero(42); }",
                            codegen);
     auto* func = mod->getFunction("shr_zero");
@@ -2442,7 +2442,7 @@ TEST(CodegenTest, AlgebraicIdentityShrZero) {
 TEST(CodegenTest, AlgebraicIdentityPowZero) {
     // x ** 0 should fold to 1 (no loop)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn pow_zero(n) { return n ** 0; }\n"
+    auto* mod = generateIR("fn pow_zero(n:i64) { return n ** 0; }\n"
                            "fn main() { return pow_zero(42); }",
                            codegen);
     auto* func = mod->getFunction("pow_zero");
@@ -2459,7 +2459,7 @@ TEST(CodegenTest, AlgebraicIdentityPowZero) {
 TEST(CodegenTest, AlgebraicIdentityPowOne) {
     // x ** 1 should fold to x (no loop)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn pow_one(n) { return n ** 1; }\n"
+    auto* mod = generateIR("fn pow_one(n:i64) { return n ** 1; }\n"
                            "fn main() { return pow_one(42); }",
                            codegen);
     auto* func = mod->getFunction("pow_one");
@@ -2475,7 +2475,7 @@ TEST(CodegenTest, AlgebraicIdentityPowOne) {
 TEST(CodegenTest, AlgebraicIdentityOnePowX) {
     // 1 ** x should fold to 1
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn one_pow(n) { return 1 ** n; }\n"
+    auto* mod = generateIR("fn one_pow(n:i64) { return 1 ** n; }\n"
                            "fn main() { return one_pow(42); }",
                            codegen);
     auto* func = mod->getFunction("one_pow");
@@ -2625,7 +2625,7 @@ TEST(CodegenTest, OptmaxDoubleBitwiseNot) {
 TEST(CodegenTest, AlgebraicIdentityModOne) {
     // x % 1 should fold to 0 (no modulo instruction emitted)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mod_one(n) { return n % 1; }\n"
+    auto* mod = generateIR("fn mod_one(n:i64) { return n % 1; }\n"
                            "fn main() { return mod_one(42); }",
                            codegen);
     auto* func = mod->getFunction("mod_one");
@@ -2644,7 +2644,7 @@ TEST(CodegenTest, AlgebraicIdentityModOne) {
 TEST(CodegenTest, AlgebraicIdentityMulNegOne) {
     // x * (-1) should emit a negation, not a multiply
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul_neg(n) { return n * (-1); }\n"
+    auto* mod = generateIR("fn mul_neg(n:i64) { return n * (-1); }\n"
                            "fn main() { return mul_neg(42); }",
                            codegen);
     auto* func = mod->getFunction("mul_neg");
@@ -2662,7 +2662,7 @@ TEST(CodegenTest, AlgebraicIdentityMulNegOne) {
 TEST(CodegenTest, AlgebraicIdentityAndAllOnes) {
     // x & (-1) should fold to x (no AND instruction emitted)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn and_allones(n) { return n & (-1); }\n"
+    auto* mod = generateIR("fn and_allones(n:i64) { return n & (-1); }\n"
                            "fn main() { return and_allones(42); }",
                            codegen);
     auto* func = mod->getFunction("and_allones");
@@ -2680,7 +2680,7 @@ TEST(CodegenTest, AlgebraicIdentityAndAllOnes) {
 TEST(CodegenTest, AlgebraicIdentityOrAllOnes) {
     // x | (-1) should fold to -1 (all ones)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn or_allones(n) { return n | (-1); }\n"
+    auto* mod = generateIR("fn or_allones(n:i64) { return n | (-1); }\n"
                            "fn main() { return or_allones(42); }",
                            codegen);
     auto* func = mod->getFunction("or_allones");
@@ -2702,7 +2702,7 @@ TEST(CodegenTest, AlgebraicIdentityOrAllOnes) {
 TEST(CodegenTest, StrengthReductionMultiplyBy10) {
     // n * 10 should use shift+add: (n<<3) + (n<<1)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul10(n) { return n * 10; }\n"
+    auto* mod = generateIR("fn mul10(n:i64) { return n * 10; }\n"
                            "fn main() { return mul10(5); }",
                            codegen);
     auto* func = mod->getFunction("mul10");
@@ -2724,7 +2724,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy10) {
 TEST(CodegenTest, StrengthReductionMultiplyBy15) {
     // n * 15 should use (n<<4) - n
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul15(n) { return n * 15; }\n"
+    auto* mod = generateIR("fn mul15(n:i64) { return n * 15; }\n"
                            "fn main() { return mul15(5); }",
                            codegen);
     auto* func = mod->getFunction("mul15");
@@ -2746,7 +2746,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy15) {
 TEST(CodegenTest, StrengthReductionMultiplyBy17) {
     // n * 17 should use (n<<4) + n
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul17(n) { return n * 17; }\n"
+    auto* mod = generateIR("fn mul17(n:i64) { return n * 17; }\n"
                            "fn main() { return mul17(5); }",
                            codegen);
     auto* func = mod->getFunction("mul17");
@@ -2773,7 +2773,7 @@ TEST(CodegenTest, O2DeadStoreElimination) {
     // At O2, dead stores (values written but never read) should be eliminated
     CodeGenerator codegen(OptimizationLevel::O2);
     auto* mod = generateIR("fn dead_store() {\n"
-                           "  var x = 42;\n"
+                           "  var x:i64 = 42;\n"
                            "  x = 100;\n"
                            "  return x;\n"
                            "}\n"
@@ -2816,7 +2816,7 @@ TEST(CodegenTest, O2GlobalOptimization) {
 TEST(CodegenTest, SmallExponentPow2) {
     // x**2 should inline as x*x — no loop needed
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn sq(n) { return n ** 2; }\n"
+    auto* mod = generateIR("fn sq(n:i64) { return n ** 2; }\n"
                            "fn main() { return sq(5); }",
                            codegen);
     auto* func = mod->getFunction("sq");
@@ -2833,7 +2833,7 @@ TEST(CodegenTest, SmallExponentPow2) {
 TEST(CodegenTest, SmallExponentPow3) {
     // x**3 should inline as x*x*x — no loop needed
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn cube(n) { return n ** 3; }\n"
+    auto* mod = generateIR("fn cube(n:i64) { return n ** 3; }\n"
                            "fn main() { return cube(5); }",
                            codegen);
     auto* func = mod->getFunction("cube");
@@ -2849,7 +2849,7 @@ TEST(CodegenTest, SmallExponentPow3) {
 TEST(CodegenTest, SmallExponentPow4) {
     // x**4 should inline as t=x*x; t*t — no loop needed
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn pow4(n) { return n ** 4; }\n"
+    auto* mod = generateIR("fn pow4(n:i64) { return n ** 4; }\n"
                            "fn main() { return pow4(5); }",
                            codegen);
     auto* func = mod->getFunction("pow4");
@@ -2865,7 +2865,7 @@ TEST(CodegenTest, SmallExponentPow4) {
 TEST(CodegenTest, SmallExponentPow8) {
     // x**8 should inline as t=x*x; u=t*t; u*u — no loop needed
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn pow8(n) { return n ** 8; }\n"
+    auto* mod = generateIR("fn pow8(n:i64) { return n ** 8; }\n"
                            "fn main() { return pow8(2); }",
                            codegen);
     auto* func = mod->getFunction("pow8");
@@ -2884,7 +2884,7 @@ TEST(CodegenTest, SmallExponentPow8) {
 
 TEST(CodegenTest, StrengthReductionMultiplyBy6) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul6(n) { return n * 6; }\n"
+    auto* mod = generateIR("fn mul6(n:i64) { return n * 6; }\n"
                            "fn main() { return mul6(5); }",
                            codegen);
     auto* func = mod->getFunction("mul6");
@@ -2905,7 +2905,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy6) {
 
 TEST(CodegenTest, StrengthReductionMultiplyBy24) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul24(n) { return n * 24; }\n"
+    auto* mod = generateIR("fn mul24(n:i64) { return n * 24; }\n"
                            "fn main() { return mul24(5); }",
                            codegen);
     auto* func = mod->getFunction("mul24");
@@ -2926,7 +2926,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy24) {
 
 TEST(CodegenTest, StrengthReductionMultiplyBy31) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul31(n) { return n * 31; }\n"
+    auto* mod = generateIR("fn mul31(n:i64) { return n * 31; }\n"
                            "fn main() { return mul31(5); }",
                            codegen);
     auto* func = mod->getFunction("mul31");
@@ -2953,7 +2953,7 @@ TEST(CodegenTest, MallocHasNonNullReturn) {
     // malloc should have nonnull on its return value
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {\n"
-                           "  var arr = [1, 2, 3];\n"
+                           "  var arr:i64[] = [1, 2, 3];\n"
                            "  return arr[0];\n"
                            "}",
                            codegen);
@@ -2971,7 +2971,7 @@ TEST(CodegenTest, PureFunctionsHaveMemoryNone) {
     // Pure math functions should have memory(none)
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() {\n"
-                           "  var x = floor(3.7);\n"
+                           "  var x:i64 = floor(3.7);\n"
                            "  return to_int(x);\n"
                            "}",
                            codegen);
@@ -2991,7 +2991,7 @@ TEST(CodegenTest, PureFunctionsHaveMemoryNone) {
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityAddZero) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto program = parseSource("fn add_zero(x) { return x + 0; }\n"
+    auto program = parseSource("fn add_zero(x:i64) { return x + 0; }\n"
                                "fn main() { return 0; }");
     codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("add_zero"), nullptr);
@@ -2999,7 +2999,7 @@ TEST(CodegenTest, BytecodeAlgebraicIdentityAddZero) {
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityMulZero) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
+    auto program = parseSource("fn mul_zero(x:i64) { return x * 0; }\n"
                                "fn main() { return 0; }");
     codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("mul_zero"), nullptr);
@@ -3007,7 +3007,7 @@ TEST(CodegenTest, BytecodeAlgebraicIdentityMulZero) {
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityMulOne) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto program = parseSource("fn mul_one(x) { return x * 1; }\n"
+    auto program = parseSource("fn mul_one(x:i64) { return x * 1; }\n"
                                "fn main() { return 0; }");
     codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("mul_one"), nullptr);
@@ -3015,7 +3015,7 @@ TEST(CodegenTest, BytecodeAlgebraicIdentityMulOne) {
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityPowZero) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
+    auto program = parseSource("fn pow_zero(x:i64) { return x ** 0; }\n"
                                "fn main() { return 0; }");
     codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("pow_zero"), nullptr);
@@ -3027,7 +3027,7 @@ TEST(CodegenTest, BytecodeAlgebraicIdentityPowZero) {
 
 TEST(CodegenTest, BytecodeAlgebraicMulZeroPreservesSideEffects) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
+    auto program = parseSource("fn mul_zero(x:i64) { return x * 0; }\n"
                                "fn main() { return 0; }");
     codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("mul_zero"), nullptr);
@@ -3035,7 +3035,7 @@ TEST(CodegenTest, BytecodeAlgebraicMulZeroPreservesSideEffects) {
 
 TEST(CodegenTest, BytecodeAlgebraicPowZeroPreservesSideEffects) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
+    auto program = parseSource("fn pow_zero(x:i64) { return x ** 0; }\n"
                                "fn main() { return 0; }");
     codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("pow_zero"), nullptr);
@@ -3043,7 +3043,7 @@ TEST(CodegenTest, BytecodeAlgebraicPowZeroPreservesSideEffects) {
 
 TEST(CodegenTest, BytecodeAlgebraicZeroMulPreservesSideEffects) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto program = parseSource("fn zero_mul(x) { return 0 * x; }\n"
+    auto program = parseSource("fn zero_mul(x:i64) { return 0 * x; }\n"
                                "fn main() { return 0; }");
     codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("zero_mul"), nullptr);
@@ -3138,24 +3138,24 @@ TEST(CodegenTest, IsStdlibFunctionArrayReduce) {
 
 TEST(CodegenTest, ArrayMapGeneration) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn double(x) { return x * 2; }\n"
-                           "fn main() { var a = [1, 2, 3]; var b = array_map(a, \"double\"); return 0; }",
+    auto* mod = generateIR("fn double(x:i64) { return x * 2; }\n"
+                           "fn main() { var a:i64[] = [1, 2, 3]; var b:i64 = array_map(a, \"double\"); return 0; }",
                            codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ArrayFilterGeneration) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn is_pos(x) { return x > 0; }\n"
-                           "fn main() { var a = [1, -2, 3]; var b = array_filter(a, \"is_pos\"); return 0; }",
+    auto* mod = generateIR("fn is_pos(x:i64) { return x > 0; }\n"
+                           "fn main() { var a:i64[] = [1, -2, 3]; var b:i64 = array_filter(a, \"is_pos\"); return 0; }",
                            codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ArrayReduceGeneration) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn add(acc, x) { return acc + x; }\n"
-                           "fn main() { var a = [1, 2, 3]; var s = array_reduce(a, \"add\", 0); return 0; }",
+    auto* mod = generateIR("fn add(acc:i64, x:i64) { return acc + x; }\n"
+                           "fn main() { var a:i64[] = [1, 2, 3]; var s:i64 = array_reduce(a, \"add\", 0); return 0; }",
                            codegen);
     ASSERT_NE(mod, nullptr);
 }
@@ -3166,7 +3166,7 @@ TEST(CodegenTest, ArrayReduceGeneration) {
 
 TEST(CodegenTest, LambdaWithArrayMap) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [1, 2, 3]; var b = array_map(a, |x| x * 2); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2, 3]; var b:i64 = array_map(a, |x| x * 2); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
     // The lambda should be desugared into a __lambda_ function
     bool foundLambda = false;
@@ -3182,40 +3182,40 @@ TEST(CodegenTest, LambdaWithArrayMap) {
 TEST(CodegenTest, LambdaWithArrayFilter) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod =
-        generateIR("fn main() { var a = [1, 2, 3, 4]; var b = array_filter(a, |x| x % 2 == 0); return 0; }", codegen);
+        generateIR("fn main() { var a:i64[] = [1, 2, 3, 4]; var b:bool = array_filter(a, |x| x % 2 == 0); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, LambdaWithArrayReduce) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod =
-        generateIR("fn main() { var a = [1, 2, 3]; var s = array_reduce(a, |acc, x| acc + x, 0); return 0; }", codegen);
+        generateIR("fn main() { var a:i64[] = [1, 2, 3]; var s:i64 = array_reduce(a, |acc, x| acc + x, 0); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, PipeOperator) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn double(x) { return x * 2; }\n"
-                           "fn main() { var x = 5 |> double; return 0; }",
+    auto* mod = generateIR("fn double(x:i64) { return x * 2; }\n"
+                           "fn main() { var x:i64 = 5 |> double; return 0; }",
                            codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, PipeOperatorWithStdlib) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [1, 2, 3]; var n = a |> len; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2, 3]; var n:bool = a |> len; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, SpreadOperatorInArray) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [1, 2]; var b = [3, 4]; var c = [...a, ...b]; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2]; var b:i64[] = [3, 4]; var c:i64[] = [...a, ...b]; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, SpreadWithPlainElements) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [1, 2]; var b = [0, ...a, 99]; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2]; var b:i64[] = [0, ...a, 99]; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3233,7 +3233,7 @@ TEST(CodegenTest, VectorizeFlagDefaultOn) {
     // Vectorize is on by default — generating a for-loop at O2 should succeed.
     CodeGenerator codegen(OptimizationLevel::O2);
     codegen.setVectorize(true);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3241,21 +3241,21 @@ TEST(CodegenTest, VectorizeFlagOff) {
     // Disabling vectorize should still compile successfully.
     CodeGenerator codegen(OptimizationLevel::O2);
     codegen.setVectorize(false);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, UnrollLoopsFlagOff) {
     CodeGenerator codegen(OptimizationLevel::O2);
     codegen.setUnrollLoops(false);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, LoopOptimizeFlagOff) {
     CodeGenerator codegen(OptimizationLevel::O3);
     codegen.setLoopOptimize(false);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3263,7 +3263,7 @@ TEST(CodegenTest, LoopOptimizeFlagOnO3) {
     // At O3 with loop-optimize on, the polyhedral LoopDistribute pass runs.
     CodeGenerator codegen(OptimizationLevel::O3);
     codegen.setLoopOptimize(true);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...10) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3271,7 +3271,7 @@ TEST(CodegenTest, PollyLoopOptO2) {
     // At O2 with loop-optimize on, the Polly polyhedral plugin is loaded.
     CodeGenerator codegen(OptimizationLevel::O2);
     codegen.setLoopOptimize(true);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3279,7 +3279,7 @@ TEST(CodegenTest, PollyDisabledWhenLoopOptOff) {
     // When loop-optimize is off, Polly should not be loaded; compilation still works.
     CodeGenerator codegen(OptimizationLevel::O2);
     codegen.setLoopOptimize(false);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3287,14 +3287,14 @@ TEST(CodegenTest, LoopIdiomAndIndVarO2) {
     // At O2+, LoopIdiomRecognize and IndVarSimplify run via the loop optimizer
     // end EP.  Verify the pipeline doesn't crash on a typical loop.
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...1000) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...1000) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, LoopDeletionO2) {
     // LoopDeletion should handle dead loops (result unused) without crashing.
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + 1; } return 42; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...100) { s = s + 1; } return 42; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3302,35 +3302,35 @@ TEST(CodegenTest, LoopInterchangeO3) {
     // At O3 with loop-optimize, LoopInterchange runs for nested loop patterns.
     CodeGenerator codegen(OptimizationLevel::O3);
     codegen.setLoopOptimize(true);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...10) { for (j in 0...10) { s = s + i * j; } } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...10) { for (j in 0...10) { s = s + i * j; } } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ADCEAndFloat2IntO2) {
     // ADCE and Float2Int run at the scalar optimizer late EP for O2+.
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn main() { var x = 3.0; var y = x + 1.0; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 3.0; var y:i64 = x + 1.0; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, VectorCombineAndLoopSinkO2) {
     // VectorCombine and LoopSink run at the optimizer last EP for O2+.
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, InferFunctionAttrsO1) {
     // InferFunctionAttrs runs at pipeline start for O1+.
     CodeGenerator codegen(OptimizationLevel::O1);
-    auto* mod = generateIR("fn add(a, b) { return a + b; } fn main() { return add(1, 2); }", codegen);
+    auto* mod = generateIR("fn add(a:i64, b:i64) { return a + b; } fn main() { return add(1, 2); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, PartiallyInlineLibCallsOptmax) {
     // PartiallyInlineLibCalls is in the OPTMAX pipeline for math functions.
     CodeGenerator codegen(OptimizationLevel::O3);
-    auto* mod = generateIR("fn main() { var x = 2.0; var y = x ** 0.5; return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var x:float = 2.0; var y:i64 = x ** 0.5; return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3341,70 +3341,70 @@ TEST(CodegenTest, PartiallyInlineLibCallsOptmax) {
 TEST(CodegenTest, StrengthReductionMul14) {
     // n*14 → (n<<4) - (n<<1) — two shifts + one sub instead of hardware multiply.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 7; return x * 14; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 7; return x * 14; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StrengthReductionMul28) {
     // n*28 → (n<<5) - (n<<2).
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 3; return x * 28; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 3; return x * 28; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StrengthReductionMul40) {
     // n*40 → (n<<5) + (n<<3).
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 5; return x * 40; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 5; return x * 40; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StrengthReductionMul48) {
     // n*48 → (n<<5) + (n<<4).
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 2; return x * 48; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 2; return x * 48; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StrengthReductionMul60) {
     // n*60 → (n<<6) - (n<<2).
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 4; return x * 60; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 4; return x * 60; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StrengthReductionMul96) {
     // n*96 → (n<<7) - (n<<5).
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 3; return x * 96; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 3; return x * 96; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StrengthReductionMul120) {
     // n*120 → (n<<7) - (n<<3).
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 2; return x * 120; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 2; return x * 120; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StrengthReductionMul256) {
     // n*256 → (n<<8).
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 5; return x * 256; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 5; return x * 256; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StrengthReductionMul512) {
     // n*512 → (n<<9).
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 3; return x * 512; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 3; return x * 512; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StrengthReductionMul1024) {
     // n*1024 → (n<<10).
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 7; return x * 1024; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 7; return x * 1024; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3415,35 +3415,35 @@ TEST(CodegenTest, StrengthReductionMul1024) {
 TEST(CodegenTest, ExponentSpecializationPow17) {
     // x**17 → inline 5 multiplications instead of binary exponentiation loop.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 2; return x ** 17; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 2; return x ** 17; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ExponentSpecializationPow18) {
     // x**18 → inline 5 multiplications.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 2; return x ** 18; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 2; return x ** 18; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ExponentSpecializationPow20) {
     // x**20 → inline 5 multiplications.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 2; return x ** 20; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 2; return x ** 20; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ExponentSpecializationPow24) {
     // x**24 → inline 5 multiplications.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 2; return x ** 24; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 2; return x ** 24; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ExponentSpecializationPow25) {
     // x**25 → inline 6 multiplications.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 2; return x ** 25; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 2; return x ** 25; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3454,28 +3454,28 @@ TEST(CodegenTest, ExponentSpecializationPow25) {
 TEST(CodegenTest, MergeICmpsO2) {
     // MergeICmps runs at O2+ to merge comparison chains into memcmp.
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn main() { var a = 1; var b = 2; if (a == 1 && b == 2) { return 1; } return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64 = 1; var b:i64 = 2; if (a == 1 && b == 2) { return 1; } return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, HotColdSplittingO3) {
     // HotColdSplitting at O3 outlines cold code for better I-cache density.
     CodeGenerator codegen(OptimizationLevel::O3);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...1000) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...1000) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, StraightLineStrengthReduceO2) {
     // StraightLineStrengthReduce reuses address computations in straight-line code.
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn main() { var a = 5; var b = a * 3 + 1; var c = a * 3 + 2; return b + c; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64 = 5; var b:i64 = a * 3 + 1; var c:i64 = a * 3 + 2; return b + c; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, NaryReassociateO2) {
     // NaryReassociate reuses sub-expressions in add/mul chains.
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn f(a, b) { var t = a + b; return (a + b) + 2; } fn main() { return f(3, 4); }", codegen);
+    auto* mod = generateIR("fn f(a:i64, b:i64) { var t:i64 = a + b; return (a + b) + 2; } fn main() { return f(3, 4); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3484,7 +3484,7 @@ TEST(CodegenTest, TargetAwareVectorWidth) {
     // On the build machine this is at least 4 (SSE), 8 (AVX2), or 16 (AVX-512).
     CodeGenerator codegen(OptimizationLevel::O3);
     codegen.setVectorize(true);
-    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...1000) { s = s + i; } return s; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = 0; for (i in 0...1000) { s = s + i; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3493,7 +3493,7 @@ TEST(CodegenTest, WhileLoopWithVectorizeHints) {
     CodeGenerator codegen(OptimizationLevel::O2);
     codegen.setVectorize(true);
     auto* mod =
-        generateIR("fn main() { var i = 0; var s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }", codegen);
+        generateIR("fn main() { var i:i64 = 0; var s:i64 = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -3505,7 +3505,7 @@ TEST(CodegenTest, ArithmeticUsesWrapping) {
     // Verify that the generated IR uses wrapping add/sub/mul (not NSW variants)
     // to ensure defined two's-complement behavior on integer overflow.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn add(a, b) { return a + b; } fn main() { return add(1, 2); }", codegen);
+    auto* mod = generateIR("fn add(a:i64, b:i64) { return a + b; } fn main() { return add(1, 2); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* addFn = mod->getFunction("add");
     ASSERT_NE(addFn, nullptr);
@@ -3525,7 +3525,7 @@ TEST(CodegenTest, ArithmeticUsesWrapping) {
 
 TEST(CodegenTest, SubtractionWrapping) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn sub(a, b) { return a - b; } fn main() { return sub(3, 1); }", codegen);
+    auto* mod = generateIR("fn sub(a:i64, b:i64) { return a - b; } fn main() { return sub(3, 1); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* subFn = mod->getFunction("sub");
     ASSERT_NE(subFn, nullptr);
@@ -3543,7 +3543,7 @@ TEST(CodegenTest, SubtractionWrapping) {
 TEST(CodegenTest, MultiplicationWrapping) {
     CodeGenerator codegen(OptimizationLevel::O0);
     // Use a non-power-of-2 constant to avoid strength-reduction to shl
-    auto* mod = generateIR("fn mul(a, b) { return a * b; } fn main() { return mul(3, 5); }", codegen);
+    auto* mod = generateIR("fn mul(a:i64, b:i64) { return a * b; } fn main() { return mul(3, 5); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* mulFn = mod->getFunction("mul");
     ASSERT_NE(mulFn, nullptr);
@@ -3565,7 +3565,7 @@ TEST(CodegenTest, MultiplicationWrapping) {
 TEST(CodegenTest, DivisionByZeroGuard) {
     // Verify that division generates a zero-check guard.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn div(a, b) { return a / b; } fn main() { return div(10, 2); }", codegen);
+    auto* mod = generateIR("fn div(a:i64, b:i64) { return a / b; } fn main() { return div(10, 2); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* divFn = mod->getFunction("div");
     ASSERT_NE(divFn, nullptr);
@@ -3576,7 +3576,7 @@ TEST(CodegenTest, DivisionByZeroGuard) {
 
 TEST(CodegenTest, ModuloByZeroGuard) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mod_fn(a, b) { return a % b; } fn main() { return mod_fn(10, 3); }", codegen);
+    auto* mod = generateIR("fn mod_fn(a:i64, b:i64) { return a % b; } fn main() { return mod_fn(10, 3); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* modFn = mod->getFunction("mod_fn");
     ASSERT_NE(modFn, nullptr);
@@ -3592,7 +3592,7 @@ TEST(CodegenTest, ArrayIndexBoundsCheck) {
     // Verify that array indexing generates bounds-check guard blocks.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod =
-        generateIR("fn get(a, i) { return a[i]; } fn main() { var arr = [1,2,3]; return get(arr, 0); }", codegen);
+        generateIR("fn get(a:i64, i:i64) { return a[i]; } fn main() { var arr:i64[] = [1,2,3]; return get(arr, 0); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* getFn = mod->getFunction("get");
     ASSERT_NE(getFn, nullptr);
@@ -3604,7 +3604,7 @@ TEST(CodegenTest, ArrayIndexBoundsCheck) {
 TEST(CodegenTest, ArrayIndexAssignBoundsCheck) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "fn set(a, i, v) { a[i] = v; return 0; } fn main() { var arr = [1,2,3]; return set(arr, 0, 42); }", codegen);
+        "fn set(a:i64, i:i64, v:i64) { a[i] = v; return 0; } fn main() { var arr:i64[] = [1,2,3]; return set(arr, 0, 42); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* setFn = mod->getFunction("set");
     ASSERT_NE(setFn, nullptr);
@@ -3681,7 +3681,7 @@ TEST(CodegenTest, SameValueOrIdentity) {
 
 TEST(CodegenTest, MultiplyBy3StrengthReduction) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul3(x) { return x * 3; } fn main() { return mul3(10); }", codegen);
+    auto* mod = generateIR("fn mul3(x:i64) { return x * 3; } fn main() { return mul3(10); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("mul3");
     ASSERT_NE(fn, nullptr);
@@ -3702,7 +3702,7 @@ TEST(CodegenTest, MultiplyBy3StrengthReduction) {
 
 TEST(CodegenTest, MultiplyBy5StrengthReduction) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul5(x) { return x * 5; } fn main() { return mul5(10); }", codegen);
+    auto* mod = generateIR("fn mul5(x:i64) { return x * 5; } fn main() { return mul5(10); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("mul5");
     ASSERT_NE(fn, nullptr);
@@ -3722,7 +3722,7 @@ TEST(CodegenTest, MultiplyBy5StrengthReduction) {
 
 TEST(CodegenTest, MultiplyBy7StrengthReduction) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul7(x) { return x * 7; } fn main() { return mul7(10); }", codegen);
+    auto* mod = generateIR("fn mul7(x:i64) { return x * 7; } fn main() { return mul7(10); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("mul7");
     ASSERT_NE(fn, nullptr);
@@ -3743,7 +3743,7 @@ TEST(CodegenTest, MultiplyBy7StrengthReduction) {
 
 TEST(CodegenTest, MultiplyBy9StrengthReduction) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul9(x) { return x * 9; } fn main() { return mul9(10); }", codegen);
+    auto* mod = generateIR("fn mul9(x:i64) { return x * 9; } fn main() { return mul9(10); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("mul9");
     ASSERT_NE(fn, nullptr);
@@ -3764,7 +3764,7 @@ TEST(CodegenTest, MultiplyBy9StrengthReduction) {
 TEST(CodegenTest, MultiplyBy3Commutative) {
     // 3 * x should also be strength-reduced (commutative)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul3c(x) { return 3 * x; } fn main() { return mul3c(10); }", codegen);
+    auto* mod = generateIR("fn mul3c(x:i64) { return 3 * x; } fn main() { return mul3c(10); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("mul3c");
     ASSERT_NE(fn, nullptr);
@@ -3969,7 +3969,7 @@ TEST(CodegenTest, NullCoalesceConstFoldZero) {
 TEST(CodegenTest, FloatNegOneMultFold) {
     // x * (-1.0) should fold to -x (FNeg) instead of FMul
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x * (-1.0); }\n"
+    auto* mod = generateIR("fn f(x:i64) { return x * (-1.0); }\n"
                            "fn main() { return 0; }",
                            codegen);
     auto* fn = mod->getFunction("f");
@@ -4060,7 +4060,7 @@ TEST(CodegenTest, SameValueLessThanFoldsToZero) {
 TEST(CodegenTest, WhileConstantFalseEliminated) {
     // while (0) { ... } should not generate any loop structure
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 1; while (0) { x = x + 1; } return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 1; while (0) { x = x + 1; } return x; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
     // Should not have any whilecond/whilebody blocks
@@ -4095,7 +4095,7 @@ TEST(CodegenTest, WhileConstantTrueNoCondCheck) {
 TEST(CodegenTest, DoWhileConstantFalseSingleExec) {
     // do { ... } while (0) should execute body once and not loop back
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 0; do { x = x + 1; } while (0); return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 0; do { x = x + 1; } while (0); return x; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
     // The condition block should not have a conditional branch back to the body
@@ -4135,7 +4135,7 @@ TEST(CodegenTest, O3PipelineAggressiveInstCombine) {
     // At O3, the pipeline should include AggressiveInstCombine and
     // ConstraintElimination passes via the new PM extension points.
     CodeGenerator codegen(OptimizationLevel::O3);
-    auto* mod = generateIR("fn main() { var x = 42; return x * 2 + x * 2; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 42; return x * 2 + x * 2; }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
@@ -4148,7 +4148,7 @@ TEST(CodegenTest, O3PipelineAggressiveInstCombine) {
 TEST(CodegenTest, DivisionByPow2EmitsShiftNotSDiv) {
     // n / 16 should emit AShr-based sequence at O2+ (LLVM backend transform)
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn f(n) { return n / 16; } fn main() { return f(32); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n / 16; } fn main() { return f(32); }", codegen);
     auto* func = mod->getFunction("f");
     if (!func) { SUCCEED(); return; } // inlined at O2
     bool hasAShr = false;
@@ -4164,7 +4164,7 @@ TEST(CodegenTest, DivisionByPow2EmitsShiftNotSDiv) {
 TEST(CodegenTest, DivisionByNonPow2UsesMagicNumber) {
     // n / 3 should use magic-number multiplication at O2+ (LLVM backend)
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn f(n) { return n / 3; } fn main() { return f(9); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n / 3; } fn main() { return f(9); }", codegen);
     auto* func = mod->getFunction("f");
     if (!func) { SUCCEED(); return; } // inlined at O2
     bool hasSDiv = false;
@@ -4181,7 +4181,7 @@ TEST(CodegenTest, DivisionByOneIsIdentity) {
     // n / 1 should be simplified by the algebraic identity (x/1 → x)
     // and not generate any division or shift instructions at all.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(n) { return n / 1; } fn main() { return f(42); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n / 1; } fn main() { return f(42); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasSDiv = false;
@@ -4205,7 +4205,7 @@ TEST(CodegenTest, DivisionByOneIsIdentity) {
 TEST(CodegenTest, ModuloByPow2EmitsShiftNotSRem) {
     // n % 16 should emit shift-based sequence at O2+ (LLVM backend)
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn f(n) { return n % 16; } fn main() { return f(33); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n % 16; } fn main() { return f(33); }", codegen);
     auto* func = mod->getFunction("f");
     if (!func) { SUCCEED(); return; } // inlined at O2
     bool hasSRem = false;
@@ -4269,7 +4269,7 @@ TEST(CodegenTest, TernaryConstantFalse) {
 TEST(CodegenTest, DoubleNegationInt) {
     // -(-x) should simplify to x (no Neg instructions)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return -(-x); } fn main() { return f(5); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return -(-x); } fn main() { return f(5); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     int negCount = 0;
@@ -4286,7 +4286,7 @@ TEST(CodegenTest, DoubleNegationInt) {
 TEST(CodegenTest, DoubleBitwiseNotElim) {
     // ~(~x) should simplify to x (no Xor instructions)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return ~(~x); } fn main() { return f(5); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return ~(~x); } fn main() { return f(5); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     int xorCount = 0;
@@ -4302,7 +4302,7 @@ TEST(CodegenTest, DoubleBitwiseNotElim) {
 TEST(CodegenTest, DoubleLogicalNotElim) {
     // !(!x) should simplify to x (no ICmp/Xor)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return !(!x); } fn main() { return f(5); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return !(!x); } fn main() { return f(5); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     int icmpCount = 0;
@@ -4322,7 +4322,7 @@ TEST(CodegenTest, DoubleLogicalNotElim) {
 TEST(CodegenTest, ForLoopEmptyRangeEliminated) {
     // for (i in 10...10) {} should be entirely eliminated since start == end
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 1; for (i in 10...10) { x = x + 1; } return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 1; for (i in 10...10) { x = x + 1; } return x; }", codegen);
     auto* func = mod->getFunction("main");
     ASSERT_NE(func, nullptr);
     // Should not have any for-loop blocks
@@ -4342,7 +4342,7 @@ TEST(CodegenTest, ForLoopEmptyRangeEliminated) {
 TEST(CodegenTest, MemcpyHasWillReturn) {
     // memcpy should have WillReturn attribute
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [1, 2, 3]; var b = a; return b[0]; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2, 3]; var b:i64 = a; return b[0]; }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("memcpy");
     if (fn) {
@@ -4353,7 +4353,7 @@ TEST(CodegenTest, MemcpyHasWillReturn) {
 TEST(CodegenTest, MemmoveHasFullAttributes) {
     // memmove should have WillReturn, NoFree, NoSync attributes
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [1, 2, 3]; return a[0]; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2, 3]; return a[0]; }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("memmove");
     if (fn) {
@@ -4375,7 +4375,7 @@ TEST(CodegenTest, MallocHasAllocatorAttributes) {
     CodeGenerator codegen(OptimizationLevel::O0);
     // String concatenation triggers a malloc call.
     auto* mod =
-        generateIR("fn main() { var a = \"hello\"; var b = \"world\"; print(a + b); return 0; }", codegen);
+        generateIR("fn main() { var a:i64 = \"hello\"; var b:i64 = \"world\"; print(a + b); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("malloc");
     ASSERT_NE(fn, nullptr) << "malloc should be declared";
@@ -4391,7 +4391,7 @@ TEST(CodegenTest, FreeHasAllocatorAttributes) {
     CodeGenerator codegen(OptimizationLevel::O0);
     // push uses realloc (not free), so free may not be declared by this snippet.
     // We still test that IF free appears, its attributes are correct.
-    auto* mod = generateIR("fn main() { var a = [1, 2]; push(a, 3); return a[0]; }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2]; push(a, 3); return a[0]; }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("free");
     if (fn) {
@@ -4416,7 +4416,7 @@ TEST(CodegenTest, ReallocHasAllocatorAttributes) {
     // realloc should have allocsize, allockind, nocapture, and memory effect attrs.
     CodeGenerator codegen(OptimizationLevel::O0);
     // Use array operations that may trigger realloc
-    auto* mod = generateIR("fn main() { var a = [1, 2]; return len(a); }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [1, 2]; return len(a); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("realloc");
     if (fn) {
@@ -4448,7 +4448,7 @@ TEST(CodegenTest, StrndupHasAllocatorAttributes) {
     CodeGenerator codegen(OptimizationLevel::O0);
     // str_split triggers strndup for extracting substrings.
     auto* mod =
-        generateIR("fn main() { var s = \"hello world\"; var parts = str_split(s, \" \"); return len(parts); }", codegen);
+        generateIR("fn main() { var s:i64 = \"hello world\"; var parts:i64 = str_split(s, \" \"); return len(parts); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("strndup");
     if (fn) {
@@ -4476,7 +4476,7 @@ TEST(CodegenTest, StrndupHasAllocatorAttributes) {
 TEST(CodegenTest, MagicDivisionBy7) {
     // n / 7 should use magic-number multiplication at O2+ (LLVM backend)
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn f(n) { return n / 7; } fn main() { return f(49); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n / 7; } fn main() { return f(49); }", codegen);
     auto* func = mod->getFunction("f");
     if (!func) { SUCCEED(); return; } // inlined at O2
     bool hasSDiv = false;
@@ -4492,7 +4492,7 @@ TEST(CodegenTest, MagicDivisionBy7) {
 TEST(CodegenTest, MagicModuloBy7) {
     // n % 7 should use magic-number multiplication at O2+ (LLVM backend)
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn f(n) { return n % 7; } fn main() { return f(50); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n % 7; } fn main() { return f(50); }", codegen);
     auto* func = mod->getFunction("f");
     if (!func) { SUCCEED(); return; } // inlined at O2
     bool hasSRem = false;
@@ -4512,7 +4512,7 @@ TEST(CodegenTest, MagicModuloBy7) {
 TEST(CodegenTest, NegativeMultiplyStrengthReduction) {
     // n * (-3) should use shift+add+neg, not generic multiply
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(n) { return n * (-3); } fn main() { return f(5); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n * (-3); } fn main() { return f(5); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasMul = false;
@@ -4536,7 +4536,7 @@ TEST(CodegenTest, NegativeMultiplyStrengthReduction) {
 TEST(CodegenTest, StrengthReductionMultiplyBy127) {
     // n * 127 → (n<<7) - n
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(n) { return n * 127; } fn main() { return f(5); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n * 127; } fn main() { return f(5); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasMul = false;
@@ -4556,7 +4556,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy127) {
 TEST(CodegenTest, StrengthReductionMultiplyBy255) {
     // n * 255 → (n<<8) - n
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(n) { return n * 255; } fn main() { return f(5); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n * 255; } fn main() { return f(5); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasMul = false;
@@ -4576,7 +4576,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy255) {
 TEST(CodegenTest, StrengthReductionMultiplyBy1000) {
     // n * 1000 → shift+sub sequence
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(n) { return n * 1000; } fn main() { return f(5); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n * 1000; } fn main() { return f(5); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasMul = false;
@@ -4600,7 +4600,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy1000) {
 TEST(CodegenTest, FloatDivByPow2UsesReciprocal) {
     // x / 2.0 should become x * 0.5 (FMul not FDiv)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return to_float(x) / 2.0; } fn main() { return f(10); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return to_float(x) / 2.0; } fn main() { return f(10); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasFDiv = false;
@@ -4625,7 +4625,7 @@ TEST(CodegenTest, PureFunctionGetsReadnone) {
     // A pure arithmetic function (no memory access) should get
     // memory(none) at O1+.
     CodeGenerator codegen(OptimizationLevel::O1);
-    auto* mod = generateIR("fn square(x) { return x * x; }\n"
+    auto* mod = generateIR("fn square(x:i64) { return x * x; }\n"
                            "fn main() { return square(5); }",
                            codegen);
     auto* func = mod->getFunction("square");
@@ -4642,7 +4642,7 @@ TEST(CodegenTest, PureFunctionGetsReadnone) {
 TEST(CodegenTest, ExponentSpecializationPow7) {
     // x**7 should produce inline multiplications, no loop
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x ** 7; } fn main() { return f(2); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x ** 7; } fn main() { return f(2); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasLoop = false;
@@ -4665,7 +4665,7 @@ TEST(CodegenTest, ExponentSpecializationPow7) {
 TEST(CodegenTest, ExponentSpecializationPow9) {
     // x**9 should produce inline multiplications, no loop
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x ** 9; } fn main() { return f(2); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x ** 9; } fn main() { return f(2); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasLoop = false;
@@ -4687,7 +4687,7 @@ TEST(CodegenTest, ExponentSpecializationPow9) {
 TEST(CodegenTest, ExponentSpecializationPow10) {
     // x**10 should produce inline multiplications, no loop
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x ** 10; } fn main() { return f(2); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x ** 10; } fn main() { return f(2); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasLoop = false;
@@ -4709,7 +4709,7 @@ TEST(CodegenTest, ExponentSpecializationPow10) {
 TEST(CodegenTest, ExponentSpecializationPow16) {
     // x**16 should produce inline multiplications, no loop
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x ** 16; } fn main() { return f(2); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x ** 16; } fn main() { return f(2); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasLoop = false;
@@ -4735,7 +4735,7 @@ TEST(CodegenTest, ExponentSpecializationPow16) {
 TEST(CodegenTest, MagicDivisionBy1337) {
     // n / 1337 should use magic-number multiplication at O2+ (LLVM backend)
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn f(n) { return n / 1337; } fn main() { return f(2674); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n / 1337; } fn main() { return f(2674); }", codegen);
     auto* func = mod->getFunction("f");
     if (!func) { SUCCEED(); return; } // inlined at O2
     bool hasSDiv = false;
@@ -4751,7 +4751,7 @@ TEST(CodegenTest, MagicDivisionBy1337) {
 TEST(CodegenTest, MagicDivisionByLargeConstant) {
     // n / 12345 should use magic-number multiplication at O2+ (LLVM backend)
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn f(n) { return n / 12345; } fn main() { return f(24690); }", codegen);
+    auto* mod = generateIR("fn f(n:i64) { return n / 12345; } fn main() { return f(24690); }", codegen);
     auto* func = mod->getFunction("f");
     if (!func) { SUCCEED(); return; } // inlined at O2
     bool hasSDiv = false;
@@ -4774,7 +4774,7 @@ TEST(CodegenTest, SameValueDivisionIdentity) {
     // verifies the identity fires after LLVM's mem2reg (at O1+).
     CodeGenerator codegen(OptimizationLevel::O0);
     // Use a literal-level identity where the expression value is reused:
-    // `var x = a + 1; return x / x;`  — 'x' is loaded once, both references
+    // `var x:i64 = a + 1; return x / x;`  — 'x' is loaded once, both references
     // are the same SSA value after the load.  However, at O0 two separate
     // loads will occur. The identity correctly fires post-mem2reg (O1+).
     // For now, verify the identity exists by checking that the pattern is
@@ -4817,7 +4817,7 @@ TEST(CodegenTest, SameValueModuloIdentity) {
 TEST(CodegenTest, MulCompareZeroFolding) {
     // x * 5 == 0  →  x == 0 (eliminates the multiply)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x * 5 == 0; } fn main() { return f(0); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x * 5 == 0; } fn main() { return f(0); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasMul = false;
@@ -4837,7 +4837,7 @@ TEST(CodegenTest, MulCompareZeroFolding) {
 TEST(CodegenTest, UserFunctionParamsHaveSignExt) {
     // User function parameters should have signext attribute.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn add(a, b) { return a + b; }\n"
+    auto* mod = generateIR("fn add(a:i64, b:i64) { return a + b; }\n"
                            "fn main() { return add(1, 2); }",
                            codegen);
     auto* func = mod->getFunction("add");
@@ -4858,7 +4858,7 @@ TEST(CodegenTest, UserFunctionParamsHaveSignExt) {
 TEST(CodegenTest, NonRecursiveFunctionGetsNorecurse) {
     // A non-recursive function should get norecurse at O1+.
     CodeGenerator codegen(OptimizationLevel::O1);
-    auto* mod = generateIR("fn add(a, b) { return a + b; }\n"
+    auto* mod = generateIR("fn add(a:i64, b:i64) { return a + b; }\n"
                            "fn main() { return add(1, 2); }",
                            codegen);
     auto* func = mod->getFunction("add");
@@ -4871,7 +4871,7 @@ TEST(CodegenTest, NonRecursiveFunctionGetsNorecurse) {
 TEST(CodegenTest, RecursiveFunctionDoesNotGetNorecurse) {
     // A recursive function should NOT get norecurse.
     CodeGenerator codegen(OptimizationLevel::O1);
-    auto* mod = generateIR("fn fib(n) { if (n <= 1) { return n; } return fib(n - 1) + fib(n - 2); }\n"
+    auto* mod = generateIR("fn fib(n:i64) { if (n <= 1) { return n; } return fib(n - 1) + fib(n - 2); }\n"
                            "fn main() { return fib(10); }",
                            codegen);
     auto* func = mod->getFunction("fib");
@@ -4889,7 +4889,7 @@ TEST(CodegenTest, ExitHasColdAttribute) {
     // exit() should be marked cold since it's an error/termination path.
     CodeGenerator codegen(OptimizationLevel::O0);
     // Division-by-zero path calls exit, which forces the declaration.
-    auto* mod = generateIR("fn f(a, b) { return a / b; }\nfn main() { return f(10, 2); }", codegen);
+    auto* mod = generateIR("fn f(a:i64, b:i64) { return a / b; }\nfn main() { return f(10, 2); }", codegen);
     auto* exitFn = mod->getFunction("exit");
     if (exitFn) {
         EXPECT_TRUE(exitFn->hasFnAttribute(llvm::Attribute::Cold))
@@ -4903,7 +4903,7 @@ TEST(CodegenTest, ExitHasColdAttribute) {
 
 TEST(CodegenTest, StrcpyHasReturnedAttribute) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var s = \"hello\"; return len(s); }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = \"hello\"; return len(s); }", codegen);
     auto* fn = mod->getFunction("strcpy");
     if (fn) {
         EXPECT_TRUE(fn->hasParamAttribute(0, llvm::Attribute::Returned))
@@ -4913,7 +4913,7 @@ TEST(CodegenTest, StrcpyHasReturnedAttribute) {
 
 TEST(CodegenTest, MemcpyHasReturnedAttribute) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var arr = [1, 2, 3]; return arr[0]; }", codegen);
+    auto* mod = generateIR("fn main() { var arr:i64[] = [1, 2, 3]; return arr[0]; }", codegen);
     auto* fn = mod->getFunction("memcpy");
     if (fn) {
         EXPECT_TRUE(fn->hasParamAttribute(0, llvm::Attribute::Returned))
@@ -4924,7 +4924,7 @@ TEST(CodegenTest, MemcpyHasReturnedAttribute) {
 TEST(CodegenTest, MemcpyHasArgMemOnly) {
     // memcpy should have memory(argmem: readwrite)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var arr = [1, 2, 3]; return arr[0]; }", codegen);
+    auto* mod = generateIR("fn main() { var arr:i64[] = [1, 2, 3]; return arr[0]; }", codegen);
     auto* fn = mod->getFunction("memcpy");
     if (fn) {
         EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoSync))
@@ -4994,7 +4994,7 @@ TEST(CodegenTest, AtofHasArgMemRead) {
 TEST(CodegenTest, FopenHasNoUnwind) {
     CodeGenerator codegen(OptimizationLevel::O0);
     // file_read() builtin calls fopen internally
-    auto* mod = generateIR("fn main() { var s = file_read(\"test.txt\"); return 0; }", codegen);
+    auto* mod = generateIR("fn main() { var s:i64 = file_read(\"test.txt\"); return 0; }", codegen);
     auto* fn = mod->getFunction("fopen");
     if (fn) {
         EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind))
@@ -5014,7 +5014,7 @@ TEST(CodegenTest, SubEqZeroFoldsToEq) {
     // (x - y) == 0 should fold to x == y, comparing operands directly
     // instead of using the sub result in the comparison.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(a, b) { return (a - b) == 0; }\n"
+    auto* mod = generateIR("fn f(a:i64, b:i64) { return (a - b) == 0; }\n"
                            "fn main() { return f(5, 5); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5041,7 +5041,7 @@ TEST(CodegenTest, SubEqZeroFoldsToEq) {
 TEST(CodegenTest, SubNeqZeroFoldsToNeq) {
     // (x - y) != 0 should fold to x != y, comparing operands directly
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(a, b) { return (a - b) != 0; }\n"
+    auto* mod = generateIR("fn f(a:i64, b:i64) { return (a - b) != 0; }\n"
                            "fn main() { return f(5, 3); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5069,7 +5069,7 @@ TEST(CodegenTest, SubNeqZeroFoldsToNeq) {
 TEST(CodegenTest, StrengthReductionMultiplyBy11) {
     // n * 11 should use shift+add: (n<<3) + (n<<1) + n
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul11(n) { return n * 11; }\n"
+    auto* mod = generateIR("fn mul11(n:i64) { return n * 11; }\n"
                            "fn main() { return mul11(5); }",
                            codegen);
     auto* func = mod->getFunction("mul11");
@@ -5091,7 +5091,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy11) {
 TEST(CodegenTest, StrengthReductionMultiplyBy13) {
     // n * 13 should use shift+sub: (n<<4) - (n<<1) - n
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul13(n) { return n * 13; }\n"
+    auto* mod = generateIR("fn mul13(n:i64) { return n * 13; }\n"
                            "fn main() { return mul13(5); }",
                            codegen);
     auto* func = mod->getFunction("mul13");
@@ -5113,7 +5113,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy13) {
 TEST(CodegenTest, StrengthReductionMultiplyBy20) {
     // n * 20 should use shift+add: (n<<4) + (n<<2)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul20(n) { return n * 20; }\n"
+    auto* mod = generateIR("fn mul20(n:i64) { return n * 20; }\n"
                            "fn main() { return mul20(5); }",
                            codegen);
     auto* func = mod->getFunction("mul20");
@@ -5135,7 +5135,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy20) {
 TEST(CodegenTest, StrengthReductionMultiplyBy21) {
     // n * 21 should use shift+add: (n<<4) + (n<<2) + n
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul21(n) { return n * 21; }\n"
+    auto* mod = generateIR("fn mul21(n:i64) { return n * 21; }\n"
                            "fn main() { return mul21(5); }",
                            codegen);
     auto* func = mod->getFunction("mul21");
@@ -5157,7 +5157,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy21) {
 TEST(CodegenTest, StrengthReductionMultiplyBy11Commutative) {
     // 11 * n (left operand constant) should also use shift+add
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn mul11c(n) { return 11 * n; }\n"
+    auto* mod = generateIR("fn mul11c(n:i64) { return 11 * n; }\n"
                            "fn main() { return mul11c(5); }",
                            codegen);
     auto* func = mod->getFunction("mul11c");
@@ -5179,7 +5179,7 @@ TEST(CodegenTest, StrengthReductionMultiplyBy11Commutative) {
 TEST(CodegenTest, NegativeMultiplyBy11StrengthReduction) {
     // n * (-11) should use shift+add + neg
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn muln11(n) { return n * (-11); }\n"
+    auto* mod = generateIR("fn muln11(n:i64) { return n * (-11); }\n"
                            "fn main() { return muln11(5); }",
                            codegen);
     auto* func = mod->getFunction("muln11");
@@ -5205,7 +5205,7 @@ TEST(CodegenTest, NegativeMultiplyBy11StrengthReduction) {
 TEST(CodegenTest, ExponentSpecializationPow11) {
     // x**11 should produce inline multiplications, no loop
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x ** 11; } fn main() { return f(2); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x ** 11; } fn main() { return f(2); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasLoop = false;
@@ -5227,7 +5227,7 @@ TEST(CodegenTest, ExponentSpecializationPow11) {
 TEST(CodegenTest, ExponentSpecializationPow12) {
     // x**12 should produce inline multiplications, no loop
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x ** 12; } fn main() { return f(2); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x ** 12; } fn main() { return f(2); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasLoop = false;
@@ -5253,7 +5253,7 @@ TEST(CodegenTest, ExponentSpecializationPow12) {
 TEST(CodegenTest, ConstantDivisorSkipsZeroCheck) {
     // Division by a constant nonzero value should not generate a zero-check branch
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(n) { return n / 7; }\n"
+    auto* mod = generateIR("fn f(n:i64) { return n / 7; }\n"
                            "fn main() { return f(42); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5273,7 +5273,7 @@ TEST(CodegenTest, ConstantDivisorSkipsZeroCheck) {
 TEST(CodegenTest, ConstantModuloSkipsZeroCheck) {
     // Modulo by a constant nonzero value should not generate a zero-check branch
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(n) { return n % 5; }\n"
+    auto* mod = generateIR("fn f(n:i64) { return n % 5; }\n"
                            "fn main() { return f(42); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5293,7 +5293,7 @@ TEST(CodegenTest, ConstantModuloSkipsZeroCheck) {
 TEST(CodegenTest, VariableDivisorHasZeroCheck) {
     // Division by a variable should still generate a zero-check branch
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(a, b) { return a / b; }\n"
+    auto* mod = generateIR("fn f(a:i64, b:i64) { return a / b; }\n"
                            "fn main() { return f(42, 7); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5317,7 +5317,7 @@ TEST(CodegenTest, VariableDivisorHasZeroCheck) {
 TEST(CodegenTest, NegativeDivisorUsesMagicNumber) {
     // x / (-7) should use magic-number multiplication at O2+ (LLVM backend)
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn f(n) { return n / (-7); }\n"
+    auto* mod = generateIR("fn f(n:i64) { return n / (-7); }\n"
                            "fn main() { return f(42); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5335,7 +5335,7 @@ TEST(CodegenTest, NegativeDivisorUsesMagicNumber) {
 TEST(CodegenTest, NegativeModuloUsesMagicNumber) {
     // x % (-5) should use magic-number multiplication at O2+ (LLVM backend)
     CodeGenerator codegen(OptimizationLevel::O2);
-    auto* mod = generateIR("fn f(n) { return n % (-5); }\n"
+    auto* mod = generateIR("fn f(n:i64) { return n % (-5); }\n"
                            "fn main() { return f(42); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5357,7 +5357,7 @@ TEST(CodegenTest, NegativeModuloUsesMagicNumber) {
 TEST(CodegenTest, FloatPowHalfUsesSqrt) {
     // x ** 0.5 should use sqrt intrinsic, not llvm.pow
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return to_float(x) ** 0.5; }\n"
+    auto* mod = generateIR("fn f(x:i64) { return to_float(x) ** 0.5; }\n"
                            "fn main() { return f(4); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5383,7 +5383,7 @@ TEST(CodegenTest, FloatPowHalfUsesSqrt) {
 TEST(CodegenTest, FloatPow3UsesInlineMul) {
     // x ** 3.0 should use inline multiplies, not llvm.pow
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return to_float(x) ** 3.0; }\n"
+    auto* mod = generateIR("fn f(x:i64) { return to_float(x) ** 3.0; }\n"
                            "fn main() { return f(2); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5412,7 +5412,7 @@ TEST(CodegenTest, FloatPow3UsesInlineMul) {
 
 TEST(CodegenTest, ExponentSpecializationPow13) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x ** 13; } fn main() { return f(2); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x ** 13; } fn main() { return f(2); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasLoop = false;
@@ -5433,7 +5433,7 @@ TEST(CodegenTest, ExponentSpecializationPow13) {
 
 TEST(CodegenTest, ExponentSpecializationPow15) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x ** 15; } fn main() { return f(2); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x ** 15; } fn main() { return f(2); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasLoop = false;
@@ -5454,7 +5454,7 @@ TEST(CodegenTest, ExponentSpecializationPow15) {
 
 TEST(CodegenTest, ExponentSpecializationPow32) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x ** 32; } fn main() { return f(2); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x ** 32; } fn main() { return f(2); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasLoop = false;
@@ -5475,7 +5475,7 @@ TEST(CodegenTest, ExponentSpecializationPow32) {
 
 TEST(CodegenTest, ExponentSpecializationPow64) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return x ** 64; } fn main() { return f(2); }", codegen);
+    auto* mod = generateIR("fn f(x:i64) { return x ** 64; } fn main() { return f(2); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasLoop = false;
@@ -5501,7 +5501,7 @@ TEST(CodegenTest, ExponentSpecializationPow64) {
 TEST(CodegenTest, ZeroShiftLeftIsZero) {
     // 0 << x should produce constant 0 (no shift instruction)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return 0 << x; }\n"
+    auto* mod = generateIR("fn f(x:i64) { return 0 << x; }\n"
                            "fn main() { return f(5); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5519,7 +5519,7 @@ TEST(CodegenTest, ZeroShiftLeftIsZero) {
 TEST(CodegenTest, ZeroShiftRightIsZero) {
     // 0 >> x should produce constant 0 (no shift instruction)
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return 0 >> x; }\n"
+    auto* mod = generateIR("fn f(x:i64) { return 0 >> x; }\n"
                            "fn main() { return f(5); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5537,7 +5537,7 @@ TEST(CodegenTest, ZeroShiftRightIsZero) {
 TEST(CodegenTest, ZeroMinusXIsNeg) {
     // 0 - x should produce neg(x), not a sub instruction with 0 LHS
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return 0 - x; }\n"
+    auto* mod = generateIR("fn f(x:i64) { return 0 - x; }\n"
                            "fn main() { return f(5); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5556,7 +5556,7 @@ TEST(CodegenTest, FloatMulByZeroNotFolded) {
     // x*0.0 must NOT be folded to 0.0: NaN*0=NaN, Inf*0=NaN, (-x)*0=-0.
     // Verify that FMul instruction is preserved (not folded to constant).
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return to_float(x) * 0.0; }\n"
+    auto* mod = generateIR("fn f(x:i64) { return to_float(x) * 0.0; }\n"
                            "fn main() { return f(1); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5575,7 +5575,7 @@ TEST(CodegenTest, FloatMulByZeroNotFolded) {
 TEST(CodegenTest, ZeroMulByFloatNotFolded) {
     // 0.0*x must NOT be folded to 0.0: same IEEE-754 concerns as x*0.0.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return 0.0 * to_float(x); }\n"
+    auto* mod = generateIR("fn f(x:i64) { return 0.0 * to_float(x); }\n"
                            "fn main() { return f(1); }",
                            codegen);
     auto* func = mod->getFunction("f");
@@ -5653,7 +5653,7 @@ TEST(CodegenTest, StructCreationAndFieldAccess) {
     const char* src =
         "struct Point { x, y }"
         "fn main() {"
-        "    var p = Point { x: 42, y: 7 };"
+        "    var p:i64 = Point { x: 42, y: 7 };"
         "    return p.x;"
         "}";
     auto* mod = generateIR(src, codegen);
@@ -5666,7 +5666,7 @@ TEST(CodegenTest, StructFieldAssignment) {
     const char* src =
         "struct Point { x, y }"
         "fn main() {"
-        "    var p = Point { x: 1, y: 2 };"
+        "    var p:i64 = Point { x: 1, y: 2 };"
         "    p.x = 99;"
         "    return p.x;"
         "}";
@@ -5679,12 +5679,12 @@ TEST(CodegenTest, StructAsReturnValue) {
     CodeGenerator codegen(OptimizationLevel::O0);
     const char* src =
         "struct Pair { a, b }"
-        "fn make_pair(x, y) {"
-        "    var p = Pair { a: x, b: y };"
+        "fn make_pair(x:i64, y:i64) {"
+        "    var p:i64 = Pair { a: x, b: y };"
         "    return p;"
         "}"
         "fn main() {"
-        "    var q = make_pair(10, 20);"
+        "    var q:i64 = make_pair(10, 20);"
         "    return q.a;"
         "}";
     auto* mod = generateIR(src, codegen);
@@ -5723,7 +5723,7 @@ TEST(CodegenTest, ZeroDividedByZeroNotFolded) {
     // runtime division instruction.
     CodeGenerator codegen(OptimizationLevel::O2);
     const char* src =
-        "fn divide(x) { return 0 / x; }"
+        "fn divide(x:i64) { return 0 / x; }"
         "fn main() { return divide(1); }";
     auto* mod = generateIR(src, codegen);
     ASSERT_NE(mod, nullptr);
@@ -5762,7 +5762,7 @@ TEST(CodegenTest, PrefetchVarDeclRegistersNoAllocaPrefetch) {
     const char* src =
         "fn main() {"
         "    prefetch var x:i32 = 5;"
-        "    var y = x + 1;"
+        "    var y:i64 = x + 1;"
         "    invalidate x;"
         "    return y;"
         "}";
@@ -5794,7 +5794,7 @@ TEST(CodegenTest, PrefetchI64EmitsValuePrefetch) {
     const char* src =
         "fn main() {"
         "    prefetch var v:i64 = 10;"
-        "    var a = v;"
+        "    var a:i64 = v;"
         "    invalidate v;"
         "    return a;"
         "}";
@@ -5861,9 +5861,9 @@ TEST(CodegenTest, PrefetchStructEmitsMemoryPrefetch) {
     const char* src =
         "struct Point { x, y }\n"
         "fn main() {\n"
-        "    var p = Point { x: 1, y: 2 };\n"
+        "    var p:i64 = Point { x: 1, y: 2 };\n"
         "    prefetch p;\n"
-        "    var r = p.x + p.y;\n"
+        "    var r:i64 = p.x + p.y;\n"
         "    invalidate p;\n"
         "    return r;\n"
         "}\n";
@@ -5995,7 +5995,7 @@ TEST(CodegenTest, NegativeExponentLargeBase) {
 TEST(CodegenTest, NegativeExponentRuntimePath) {
     // Runtime negative exponent: base 1 should still yield 1.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn neg_pow(b, e) { return b ** e; }\n"
+    auto* mod = generateIR("fn neg_pow(b:i64, e:i64) { return b ** e; }\n"
                            "fn main() { return neg_pow(1, -5); }",
                            codegen);
     ASSERT_NE(mod, nullptr);
@@ -6018,7 +6018,7 @@ TEST(CodegenTest, NegativeExponentRuntimePath) {
 TEST(CodegenTest, ShiftConstantNoMask) {
     // Shift by a constant in [0, 63] should NOT generate an AND mask.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn shl5(x) { return x << 5; }\n"
+    auto* mod = generateIR("fn shl5(x:i64) { return x << 5; }\n"
                            "fn main() { return shl5(1); }",
                            codegen);
     ASSERT_NE(mod, nullptr);
@@ -6038,7 +6038,7 @@ TEST(CodegenTest, ShiftConstantNoMask) {
 TEST(CodegenTest, ShiftVariableHasMask) {
     // Shift by a variable should still generate an AND mask.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn shlv(x, n) { return x << n; }\n"
+    auto* mod = generateIR("fn shlv(x:i64, n:i64) { return x << n; }\n"
                            "fn main() { return shlv(1, 5); }",
                            codegen);
     ASSERT_NE(mod, nullptr);
@@ -6062,7 +6062,7 @@ TEST(CodegenTest, ShiftVariableHasMask) {
 TEST(CodegenTest, ShortCircuitAndFalse) {
     // 0 && x should fold to 0 without evaluating x.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return 0 && x; }\n"
+    auto* mod = generateIR("fn f(x:i64) { return 0 && x; }\n"
                            "fn main() { return f(42); }",
                            codegen);
     ASSERT_NE(mod, nullptr);
@@ -6076,7 +6076,7 @@ TEST(CodegenTest, ShortCircuitAndFalse) {
 TEST(CodegenTest, ShortCircuitOrTrue) {
     // 1 || x should fold to 1 without evaluating x.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(x) { return 1 || x; }\n"
+    auto* mod = generateIR("fn f(x:i64) { return 1 || x; }\n"
                            "fn main() { return f(42); }",
                            codegen);
     ASSERT_NE(mod, nullptr);
@@ -6093,7 +6093,7 @@ TEST(CodegenTest, ShortCircuitOrTrue) {
 TEST(CodegenTest, StringRepeatOverflowGuard) {
     // String repetition should have an overflow guard.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn f(n) { return \"abc\" * n; }\n"
+    auto* mod = generateIR("fn f(n:i64) { return \"abc\" * n; }\n"
                            "fn main() { return 0; }",
                            codegen);
     ASSERT_NE(mod, nullptr);
@@ -6297,37 +6297,37 @@ TEST(CodegenTest, IsStdlibFunctionArrayUtilities) {
 
 TEST(CodegenTest, ArrayMinGeneration) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [5, 3, 8]; return array_min(a); }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [5, 3, 8]; return array_min(a); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ArrayMaxGeneration) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [5, 3, 8]; return array_max(a); }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [5, 3, 8]; return array_max(a); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ArrayFindGeneration) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var a = [5, 3, 8]; return array_find(a, 3); }", codegen);
+    auto* mod = generateIR("fn main() { var a:i64[] = [5, 3, 8]; return array_find(a, 3); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ArrayAnyGeneration) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn is_pos(x) { return x > 0; }\nfn main() { var a = [1, -2, 3]; return array_any(a, \"is_pos\"); }", codegen);
+    auto* mod = generateIR("fn is_pos(x:i64) { return x > 0; }\nfn main() { var a:i64[] = [1, -2, 3]; return array_any(a, \"is_pos\"); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ArrayEveryGeneration) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn is_pos(x) { return x > 0; }\nfn main() { var a = [1, 2, 3]; return array_every(a, \"is_pos\"); }", codegen);
+    auto* mod = generateIR("fn is_pos(x:i64) { return x > 0; }\nfn main() { var a:i64[] = [1, 2, 3]; return array_every(a, \"is_pos\"); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, ArrayCountGeneration) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn is_even(x) { return x % 2 == 0; }\nfn main() { var a = [1, 2, 3, 4]; return array_count(a, \"is_even\"); }", codegen);
+    auto* mod = generateIR("fn is_even(x:i64) { return x % 2 == 0; }\nfn main() { var a:i64[] = [1, 2, 3, 4]; return array_count(a, \"is_even\"); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -6367,13 +6367,13 @@ TEST(CodegenTest, SimdF64x2Vector) {
 
 TEST(CodegenTest, RegisterVarDecl) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { register var x = 42; return x; }", codegen);
+    auto* mod = generateIR("fn main() { register var x:i64 = 42; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, RegisterVarReassign) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { register var x = 0; x = 42; return x; }", codegen);
+    auto* mod = generateIR("fn main() { register var x:i64 = 0; x = 42; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -6381,7 +6381,7 @@ TEST(CodegenTest, RegisterVarForcesPromotion) {
     // At O0, register var should still produce zero allocas because
     // mem2reg is forced after codegen for functions with register vars.
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { register var x = 0; x = x + 1; return x; }", codegen);
+    auto* mod = generateIR("fn main() { register var x:i64 = 0; x = x + 1; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("main");
     ASSERT_NE(fn, nullptr);
@@ -6399,13 +6399,13 @@ TEST(CodegenTest, RegisterVarForcesPromotion) {
 
 TEST(CodegenTest, PowerAssign) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 2; x **= 3; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 2; x **= 3; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
 TEST(CodegenTest, NullCoalesceAssign) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("fn main() { var x = 0; x ?\?= 42; return x; }", codegen);
+    auto* mod = generateIR("fn main() { var x:i64 = 0; x ?\?= 42; return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -6415,7 +6415,7 @@ TEST(CodegenTest, NullCoalesceAssign) {
 
 TEST(CodegenTest, StructFieldCompoundAssign) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("struct P { x, y }\nfn main() { var p = P { x: 10, y: 20 }; p.x += 5; return p.x; }", codegen);
+    auto* mod = generateIR("struct P { x, y }\nfn main() { var p:i64 = P { x: 10, y: 20 }; p.x += 5; return p.x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -6516,7 +6516,7 @@ TEST(CodegenTest, NUWAddOnNonNegOperands) {
     // is also non-negative.  Their sum should get both nuw and nsw.
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn f(a) { var s = 0; for (i in 0...len(a)) { s = s + i; } return s; } "
+        "fn f(a:i64) { var s:i64 = 0; for (i in 0...len(a)) { s = s + i; } return s; } "
         "fn main() { return f([1, 2, 3]); }",
         codegen);
     ASSERT_NE(mod, nullptr);
@@ -6546,7 +6546,7 @@ TEST(CodegenTest, NUWAddOnNonNegOperands) {
 TEST(CodegenTest, RangeMetadataOnNonNegLoad) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn f(n) { for (i in 0...n) { var x = i * 2; } } "
+        "fn f(n:i64) { for (i in 0...n) { var x:i64 = i * 2; } } "
         "fn main() { f(10); return 0; }",
         codegen);
     ASSERT_NE(mod, nullptr);
@@ -6615,13 +6615,13 @@ TEST(CodegenTest, DeepConstEval_LenOfConstantReturningFunction) {
         << "make_str() should be short-circuited — no call site expected";
 }
 
-// 2. const s = make_str(); len(s) should also fold — the const var inherits
+// 2. const s:i64 = make_str(); len(s) should also fold — the const var inherits
 //    the compile-time string value from the function's return analysis.
 TEST(CodegenTest, DeepConstEval_ConstVarFromConstantReturningFunction) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
         "fn make_str() { return \"hi\"; }"
-        "fn main() { const s = make_str(); return len(s); }",
+        "fn main() { const s:i64 = make_str(); return len(s); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* mainFn = mod->getFunction("main");
@@ -6643,11 +6643,11 @@ TEST(CodegenTest, DeepConstEval_LenOfStringConcatLiterals) {
         << "len(\"a\" + \"b\" + \"c\") should fold to 3 at compile time";
 }
 
-// 4. const s = "hello"; len(s + " world") should fold.
+// 4. const s:i64 = "hello"; len(s + " world") should fold.
 TEST(CodegenTest, DeepConstEval_LenOfConstVarConcat) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn main() { const s = \"hello\"; return len(s + \" world\"); }",
+        "fn main() { const s:i64 = \"hello\"; return len(s + \" world\"); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* mainFn = mod->getFunction("main");
@@ -6675,7 +6675,7 @@ TEST(CodegenTest, DeepConstEval_TwoHopChainFolding) {
 }
 
 // 6. Integer constant-returning function: fn get_n() { return 42; }
-//    const n = get_n() should record n as a compile-time constant so that
+//    const n:i64 = get_n() should record n as a compile-time constant so that
 //    subsequent uses don't emit a call.
 TEST(CodegenTest, DeepConstEval_IntConstantReturningFunction) {
     CodeGenerator codegen(OptimizationLevel::O1);
@@ -6696,7 +6696,7 @@ TEST(CodegenTest, DeepConstEval_SideEffectFunctionNotFolded) {
     CodeGenerator codegen(OptimizationLevel::O1);
     // This function has a non-const var — the analysis must reject it.
     auto* mod = generateIR(
-        "fn make_str() { var s = \"a\"; s = s + \"b\"; return s; }"
+        "fn make_str() { var s:i64 = \"a\"; s = s + \"b\"; return s; }"
         "fn main() { return len(make_str()); }",
         codegen);
     ASSERT_NE(mod, nullptr);
@@ -6722,7 +6722,7 @@ TEST(CodegenTest, DeepConstEval_SideEffectFunctionNotFolded) {
 TEST(CodegenTest, IncDecLoadHasNoundef) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn f() { var x = 0; x++; return x; } fn main() { return f(); }",
+        "fn f() { var x:i64 = 0; x++; return x; } fn main() { return f(); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6746,7 +6746,7 @@ TEST(CodegenTest, IncDecLoadHasNoundef) {
 TEST(CodegenTest, IncDecLoadHasRangeOnNonNeg) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn f() { var x = 5; x++; return x; } fn main() { return f(); }",
+        "fn f() { var x:i64 = 5; x++; return x; } fn main() { return f(); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6773,7 +6773,7 @@ TEST(CodegenTest, IncDecLoadHasRangeOnNonNeg) {
 TEST(CodegenTest, IncrementNUWOnNonNegVariable) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn f() { var x = 0; x++; return x; } fn main() { return f(); }",
+        "fn f() { var x:i64 = 0; x++; return x; } fn main() { return f(); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6800,7 +6800,7 @@ TEST(CodegenTest, IncrementNUWOnNonNegVariable) {
 TEST(CodegenTest, IncrementPreservesNonNegTracking) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn f() { var x = 0; x++; var y = x + 1; return y; } fn main() { return f(); }",
+        "fn f() { var x:i64 = 0; x++; var y:i64 = x + 1; return y; } fn main() { return f(); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6839,7 +6839,7 @@ TEST(CodegenTest, PipelineOneShot) {
     // One-shot form (no count) compiles as straight-line block
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "fn main() { var x = 0; pipeline { stage s { x = x + 1; } } return x; }", codegen);
+        "fn main() { var x:i64 = 0; pipeline { stage s { x = x + 1; } } return x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 
@@ -6847,7 +6847,7 @@ TEST(CodegenTest, PipelineMultipleStages) {
     // Three-stage pipeline; stages execute in declaration order
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "fn main() { var s = 0; pipeline 4 {"
+        "fn main() { var s:i64 = 0; pipeline 4 {"
         "  stage load    { s = s + 1; }"
         "  stage compute { s = s * 2; }"
         "  stage store   { s = s - 1; }"
@@ -6859,7 +6859,7 @@ TEST(CodegenTest, PipelineIteratorAccessible) {
     // __pipeline_i is accessible inside stage bodies
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "fn main() { var s = 0; pipeline 10 {"
+        "fn main() { var s:i64 = 0; pipeline 10 {"
         "  stage body { s = s + __pipeline_i; }"
         "} return s; }", codegen);
     ASSERT_NE(mod, nullptr);
@@ -6897,6 +6897,6 @@ TEST(CodegenTest, PipelineExprCount) {
     // Count can be a runtime value
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "fn main(n) { pipeline n { stage s { } } }", codegen);
+        "fn main(n:i64) { pipeline n { stage s { } } }", codegen);
     ASSERT_NE(mod, nullptr);
 }

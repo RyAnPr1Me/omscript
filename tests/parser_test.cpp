@@ -44,7 +44,7 @@ TEST(ParserTest, FunctionWithParamsAndReturnType) {
 }
 
 TEST(ParserTest, FunctionWithParameters) {
-    auto program = parse("fn add(a, b) { return a; }");
+    auto program = parse("fn add(a:i64, b:i64) { return a; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->parameters.size(), 2u);
     EXPECT_EQ(program->functions[0]->parameters[0].name, "a");
@@ -95,7 +95,7 @@ TEST(ParserTest, ReturnVoid) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, VarDecl) {
-    auto program = parse("fn main() { var x = 10; }");
+    auto program = parse("fn main() { var x:i64 = 10; }");
     auto* var = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(var, nullptr);
     EXPECT_EQ(var->name, "x");
@@ -104,14 +104,14 @@ TEST(ParserTest, VarDecl) {
 }
 
 TEST(ParserTest, ConstDecl) {
-    auto program = parse("fn main() { const y = 5; }");
+    auto program = parse("fn main() { const y:i64 = 5; }");
     auto* var = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(var, nullptr);
     EXPECT_TRUE(var->isConst);
 }
 
 TEST(ParserTest, VarDeclNoInit) {
-    auto program = parse("fn main() { var x; }");
+    auto program = parse("fn main() { var x:i64; }");
     auto* var = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(var, nullptr);
     EXPECT_EQ(var->initializer, nullptr);
@@ -196,7 +196,7 @@ TEST(ParserTest, FunctionCall) {
 }
 
 TEST(ParserTest, Assignment) {
-    auto program = parse("fn main() { var x = 0; x = 5; }");
+    auto program = parse("fn main() { var x:i64 = 0; x = 5; }");
     auto* stmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(stmt, nullptr);
     auto* assign = dynamic_cast<AssignExpr*>(stmt->expression.get());
@@ -205,7 +205,7 @@ TEST(ParserTest, Assignment) {
 }
 
 TEST(ParserTest, CompoundAssignment) {
-    auto program = parse("fn main() { var x = 0; x += 5; }");
+    auto program = parse("fn main() { var x:i64 = 0; x += 5; }");
     auto* stmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(stmt, nullptr);
     // Compound assignment desugars to: x = x + 5
@@ -218,7 +218,7 @@ TEST(ParserTest, CompoundAssignment) {
 }
 
 TEST(ParserTest, PostfixIncrement) {
-    auto program = parse("fn main() { var x = 0; x++; }");
+    auto program = parse("fn main() { var x:i64 = 0; x++; }");
     auto* stmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(stmt, nullptr);
     auto* post = dynamic_cast<PostfixExpr*>(stmt->expression.get());
@@ -227,7 +227,7 @@ TEST(ParserTest, PostfixIncrement) {
 }
 
 TEST(ParserTest, PrefixDecrement) {
-    auto program = parse("fn main() { var x = 0; --x; }");
+    auto program = parse("fn main() { var x:i64 = 0; --x; }");
     auto* stmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(stmt, nullptr);
     auto* pre = dynamic_cast<PrefixExpr*>(stmt->expression.get());
@@ -252,7 +252,7 @@ TEST(ParserTest, EmptyArray) {
 }
 
 TEST(ParserTest, IndexExpr) {
-    auto program = parse("fn main() { var a = [1]; return a[0]; }");
+    auto program = parse("fn main() { var a:i64[] = [1]; return a[0]; }");
     auto* ret = dynamic_cast<ReturnStmt*>(program->functions[0]->body->statements[1].get());
     auto* idx = dynamic_cast<IndexExpr*>(ret->value.get());
     ASSERT_NE(idx, nullptr);
@@ -324,7 +324,7 @@ TEST(ParserTest, ContinueStmt) {
 }
 
 TEST(ParserTest, BlockStmt) {
-    auto program = parse("fn main() { { var x = 1; } }");
+    auto program = parse("fn main() { { var x:i64 = 1; } }");
     auto* block = dynamic_cast<BlockStmt*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(block, nullptr);
     EXPECT_EQ(block->statements.size(), 1u);
@@ -391,7 +391,7 @@ TEST(ParserTest, MissingFunction) {
 }
 
 TEST(ParserTest, MissingClosingParen) {
-    EXPECT_THROW(parse("fn main( { }"), std::runtime_error);
+    EXPECT_THROW(parse("fn main({ }"), std::runtime_error);
 }
 
 TEST(ParserTest, MissingClosingBrace) {
@@ -517,7 +517,7 @@ TEST(ParserTest, OptmaxErrorDoesNotLeakUnterminatedBlock) {
         FAIL() << "Expected std::runtime_error";
     } catch (const std::runtime_error& e) {
         std::string msg = e.what();
-        EXPECT_NE(msg.find("OPTMAX variables must include type annotations"), std::string::npos);
+        EXPECT_NE(msg.find("type annotation"), std::string::npos);
         EXPECT_EQ(msg.find("Unterminated OPTMAX block"), std::string::npos)
             << "synchronize() must not skip OPTMAX!: and leave block unterminated";
     }
@@ -534,7 +534,7 @@ TEST(ParserTest, OptmaxErrorNoCascadingFnErrors) {
     } catch (const std::runtime_error& e) {
         std::string msg = e.what();
         // The message must contain the true error but must NOT contain cascaded fn errors.
-        EXPECT_NE(msg.find("OPTMAX variables must include type annotations"), std::string::npos);
+        EXPECT_NE(msg.find("type annotation"), std::string::npos);
         EXPECT_EQ(msg.find("Expected 'fn'"), std::string::npos)
             << "synchronize() must not stop at statement keywords and cause cascading errors";
     }
@@ -553,7 +553,7 @@ TEST(ParserTest, InvalidAssignmentTarget) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, SlashAssign) {
-    auto program = parse("fn main() { var x = 10; x /= 2; }");
+    auto program = parse("fn main() { var x:i64 = 10; x /= 2; }");
     auto* stmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(stmt, nullptr);
     auto* assign = dynamic_cast<AssignExpr*>(stmt->expression.get());
@@ -565,7 +565,7 @@ TEST(ParserTest, SlashAssign) {
 }
 
 TEST(ParserTest, PercentAssign) {
-    auto program = parse("fn main() { var x = 10; x %= 3; }");
+    auto program = parse("fn main() { var x:i64 = 10; x %= 3; }");
     auto* stmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(stmt, nullptr);
     auto* assign = dynamic_cast<AssignExpr*>(stmt->expression.get());
@@ -597,7 +597,7 @@ TEST(ParserTest, InvalidFunctionCall) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, ExpectedExpressionError) {
-    EXPECT_THROW(parse("fn main() { var x = ; }"), std::runtime_error);
+    EXPECT_THROW(parse("fn main() { var x:i64 =  ; }"), std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +635,7 @@ TEST(ParserTest, SwitchMultiValueCase) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, ArrayIndexAssignment) {
-    auto program = parse("fn main() { var arr = [1, 2, 3]; arr[0] = 42; }");
+    auto program = parse("fn main() { var arr:i64[] = [1, 2, 3]; arr[0] = 42; }");
     EXPECT_EQ(program->functions.size(), 1u);
     auto& stmts = program->functions[0]->body->statements;
     ASSERT_GE(stmts.size(), 2u);
@@ -655,7 +655,7 @@ TEST(ParserTest, ArrayIndexAssignmentInvalid) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, ForEachLoop) {
-    auto program = parse("fn main() { var arr = [1, 2, 3]; for (x in arr) { return x; } }");
+    auto program = parse("fn main() { var arr:i64[] = [1, 2, 3]; for (x in arr) { return x; } }");
     EXPECT_EQ(program->functions.size(), 1u);
     auto& stmts = program->functions[0]->body->statements;
     ASSERT_GE(stmts.size(), 2u);
@@ -676,7 +676,7 @@ TEST(ParserTest, ForEachVsRangeFor) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, MultiVarDeclaration) {
-    auto program = parse("fn main() { var a = 1, b = 2, c = 3; }");
+    auto program = parse("fn main() { var a:i64 = 1, b:i64 = 2, c:i64 = 3; }");
     EXPECT_EQ(program->functions.size(), 1u);
     auto& stmts = program->functions[0]->body->statements;
     ASSERT_EQ(stmts.size(), 3u);
@@ -693,7 +693,7 @@ TEST(ParserTest, MultiVarDeclaration) {
 }
 
 TEST(ParserTest, MultiConstDeclaration) {
-    auto program = parse("fn main() { const x = 10, y = 20; }");
+    auto program = parse("fn main() { const x:i64 = 10, y:i64 = 20; }");
     auto& stmts = program->functions[0]->body->statements;
     ASSERT_EQ(stmts.size(), 2u);
     auto* x = dynamic_cast<omscript::VarDecl*>(stmts[0].get());
@@ -705,7 +705,7 @@ TEST(ParserTest, MultiConstDeclaration) {
 }
 
 TEST(ParserTest, SingleVarStillWorks) {
-    auto program = parse("fn main() { var x = 42; }");
+    auto program = parse("fn main() { var x:i64 = 42; }");
     auto& stmts = program->functions[0]->body->statements;
     ASSERT_EQ(stmts.size(), 1u);
     EXPECT_EQ(stmts[0]->type, omscript::ASTNodeType::VAR_DECL);
@@ -753,24 +753,24 @@ TEST(ParserTest, PrefixDecrementOnLiteral) {
 }
 
 TEST(ParserTest, PostfixOnIdentifierSucceeds) {
-    auto program = parse("fn main() { var x = 0; x++; return x; }");
+    auto program = parse("fn main() { var x:i64 = 0; x++; return x; }");
     ASSERT_EQ(program->functions.size(), 1u);
 }
 
 TEST(ParserTest, PrefixOnIdentifierSucceeds) {
-    auto program = parse("fn main() { var x = 0; ++x; return x; }");
+    auto program = parse("fn main() { var x:i64 = 0; ++x; return x; }");
     ASSERT_EQ(program->functions.size(), 1u);
 }
 
 TEST(ParserTest, PostfixOnParenExprSucceeds) {
     // (a)++ is valid because parenthesized (a) resolves to identifier a
-    auto program = parse("fn main() { var a = 1; (a)++; return 0; }");
+    auto program = parse("fn main() { var a:i64 = 1; (a)++; return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
 }
 
 TEST(ParserTest, PrefixOnParenExprSucceeds) {
     // ++(a) is valid because parenthesized (a) resolves to identifier a
-    auto program = parse("fn main() { var a = 1; ++(a); return 0; }");
+    auto program = parse("fn main() { var a:i64 = 1; ++(a); return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
 }
 
@@ -815,7 +815,7 @@ TEST(ParserTest, BoolInCondition) {
 }
 
 TEST(ParserTest, BoolInVarDecl) {
-    auto program = parse("fn main() { var x = true; var y = false; var z = null; return 0; }");
+    auto program = parse("fn main() { var x:i64 = true; var y:i64 = false; var z:i64 = null; return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto& body = program->functions[0]->body->statements;
     ASSERT_GE(body.size(), 4u);
@@ -826,7 +826,7 @@ TEST(ParserTest, BoolInVarDecl) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, BitwiseAndAssign) {
-    auto program = parse("fn main() { var x = 15; x &= 6; return x; }");
+    auto program = parse("fn main() { var x:i64 = 15; x &= 6; return x; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto& body = program->functions[0]->body->statements;
     ASSERT_GE(body.size(), 2u);
@@ -842,7 +842,7 @@ TEST(ParserTest, BitwiseAndAssign) {
 }
 
 TEST(ParserTest, ShiftAssignLeft) {
-    auto program = parse("fn main() { var x = 1; x <<= 3; return x; }");
+    auto program = parse("fn main() { var x:i64 = 1; x <<= 3; return x; }");
     auto& body = program->functions[0]->body->statements;
     auto* exprStmt = dynamic_cast<ExprStmt*>(body[1].get());
     auto* assign = dynamic_cast<AssignExpr*>(exprStmt->expression.get());
@@ -857,7 +857,7 @@ TEST(ParserTest, ShiftAssignLeft) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, ArrayCompoundAssign) {
-    auto program = parse("fn main() { var arr = [10, 20]; arr[0] += 5; return arr[0]; }");
+    auto program = parse("fn main() { var arr:i64[] = [10, 20]; arr[0] += 5; return arr[0]; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto& body = program->functions[0]->body->statements;
     ASSERT_GE(body.size(), 2u);
@@ -873,7 +873,7 @@ TEST(ParserTest, ArrayCompoundAssign) {
 }
 
 TEST(ParserTest, ArrayCompoundAssignWithVarIndex) {
-    auto program = parse("fn main() { var arr = [10]; var i = 0; arr[i] += 5; return 0; }");
+    auto program = parse("fn main() { var arr:i64[] = [10]; var i:i64 = 0; arr[i] += 5; return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
 }
 
@@ -983,7 +983,7 @@ TEST(ParserTest, MissingRightBracket) {
 }
 
 TEST(ParserTest, MissingRightBrace) {
-    EXPECT_THROW(parse("fn main() { var x = 1;"), std::runtime_error);
+    EXPECT_THROW(parse("fn main() { var x:i64 = 1;"), std::runtime_error);
 }
 
 TEST(ParserTest, EmptyFunctionBody) {
@@ -1001,14 +1001,14 @@ TEST(ParserTest, NestedBlocks) {
 }
 
 TEST(ParserTest, MultipleStatementsInBlock) {
-    auto program = parse("fn main() { var a = 1; var b = 2; return a + b; }");
+    auto program = parse("fn main() { var a:i64 = 1; var b:i64 = 2; return a + b; }");
     auto* block = dynamic_cast<BlockStmt*>(program->functions[0]->body.get());
     ASSERT_NE(block, nullptr);
     EXPECT_EQ(block->statements.size(), 3u);
 }
 
 TEST(ParserTest, TernaryWithComplexCondition) {
-    auto program = parse("fn main() { var x = 1; return x > 0 ? x : -x; }");
+    auto program = parse("fn main() { var x:i64 = 1; return x > 0 ? x : -x; }");
     ASSERT_EQ(program->functions.size(), 1u);
 }
 
@@ -1018,12 +1018,12 @@ TEST(ParserTest, TernaryNested) {
 }
 
 TEST(ParserTest, ArrayInCondition) {
-    auto program = parse("fn main() { var arr = [1, 2, 3]; if (arr[0]) { return 1; } return 0; }");
+    auto program = parse("fn main() { var arr:i64[] = [1, 2, 3]; if (arr[0]) { return 1; } return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
 }
 
 TEST(ParserTest, FunctionCallAsArrayIndex) {
-    auto program = parse("fn getIdx() { return 0; } fn main() { var arr = [10]; return arr[getIdx()]; }");
+    auto program = parse("fn getIdx() { return 0; } fn main() { var arr:i64[] = [10]; return arr[getIdx()]; }");
     ASSERT_EQ(program->functions.size(), 2u);
 }
 
@@ -1032,7 +1032,7 @@ TEST(ParserTest, FunctionCallAsArrayIndex) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, DefaultParameterInteger) {
-    auto program = parse("fn foo(a, b = 10) { return a + b; }");
+    auto program = parse("fn foo(a:i64, b:i64 = 10) { return a + b; }");
     ASSERT_EQ(program->functions.size(), 1u);
     ASSERT_EQ(program->functions[0]->parameters.size(), 2u);
     EXPECT_EQ(program->functions[0]->parameters[0].name, "a");
@@ -1046,7 +1046,7 @@ TEST(ParserTest, DefaultParameterInteger) {
 }
 
 TEST(ParserTest, DefaultParameterString) {
-    auto program = parse("fn greet(name, msg = \"Hello\") { return 0; }");
+    auto program = parse("fn greet(name:string, msg:string = \"Hello\") { return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     ASSERT_EQ(program->functions[0]->parameters.size(), 2u);
     ASSERT_TRUE(program->functions[0]->parameters[1].defaultValue != nullptr);
@@ -1057,7 +1057,7 @@ TEST(ParserTest, DefaultParameterString) {
 }
 
 TEST(ParserTest, MultipleDefaultParameters) {
-    auto program = parse("fn foo(a, b = 5, c = 100) { return a; }");
+    auto program = parse("fn foo(a:i64, b:i64 = 5, c:i64 = 100) { return a; }");
     ASSERT_EQ(program->functions.size(), 1u);
     ASSERT_EQ(program->functions[0]->parameters.size(), 3u);
     EXPECT_FALSE(program->functions[0]->parameters[0].defaultValue);
@@ -1067,7 +1067,7 @@ TEST(ParserTest, MultipleDefaultParameters) {
 }
 
 TEST(ParserTest, AllDefaultParameters) {
-    auto program = parse("fn foo(a = 1, b = 2) { return a + b; }");
+    auto program = parse("fn foo(a:i64 = 1, b:i64 = 2) { return a + b; }");
     ASSERT_EQ(program->functions.size(), 1u);
     ASSERT_EQ(program->functions[0]->parameters.size(), 2u);
     EXPECT_TRUE(program->functions[0]->parameters[0].defaultValue != nullptr);
@@ -1084,7 +1084,7 @@ TEST(ParserTest, DefaultParameterWithType) {
 }
 
 TEST(ParserTest, DefaultParameterNonDefaultAfterDefaultError) {
-    Lexer lexer("fn foo(a = 10, b) { return 0; }");
+    Lexer lexer("fn foo(a:i64 = 10, b:i64) { return 0; }");
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
     EXPECT_THROW(parser.parse(), std::runtime_error);
@@ -1096,7 +1096,7 @@ TEST(ParserTest, DefaultParameterNonDefaultAfterDefaultError) {
 
 TEST(ParserTest, LambdaDesugaredToFunction) {
     // Lambda |x| x * 2 should be desugared into a generated function
-    auto program = parse("fn main() { var f = |x| x * 2; return 0; }");
+    auto program = parse("fn main() { var f:i64 = |x| x * 2; return 0; }");
     // The program should have main + 1 generated lambda function
     ASSERT_GE(program->functions.size(), 2u);
     // The last function should be the lambda
@@ -1112,7 +1112,7 @@ TEST(ParserTest, LambdaDesugaredToFunction) {
 }
 
 TEST(ParserTest, LambdaTwoParams) {
-    auto program = parse("fn main() { var f = |a, b| a + b; return 0; }");
+    auto program = parse("fn main() { var f:i64 = |a, b| a + b; return 0; }");
     ASSERT_GE(program->functions.size(), 2u);
     bool foundLambda = false;
     for (const auto& func : program->functions) {
@@ -1128,7 +1128,7 @@ TEST(ParserTest, LambdaTwoParams) {
 
 TEST(ParserTest, LambdaResultIsStringLiteral) {
     // Lambda should be desugared into a string literal (the function name)
-    auto program = parse("fn main() { var f = |x| x; return 0; }");
+    auto program = parse("fn main() { var f:i64 = |x| x; return 0; }");
     auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(varDecl, nullptr);
     auto* lit = dynamic_cast<LiteralExpr*>(varDecl->initializer.get());
@@ -1142,7 +1142,7 @@ TEST(ParserTest, LambdaResultIsStringLiteral) {
 // ===========================================================================
 
 TEST(ParserTest, PipeOperator) {
-    auto program = parse("fn main() { var x = 5 |> double; return 0; }");
+    auto program = parse("fn main() { var x:i64 = 5 |> double; return 0; }");
     auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(varDecl, nullptr);
     auto* pipe = dynamic_cast<PipeExpr*>(varDecl->initializer.get());
@@ -1151,7 +1151,7 @@ TEST(ParserTest, PipeOperator) {
 }
 
 TEST(ParserTest, PipeOperatorChain) {
-    auto program = parse("fn main() { var x = 5 |> f |> g; return 0; }");
+    auto program = parse("fn main() { var x:i64 = 5 |> f |> g; return 0; }");
     auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(varDecl, nullptr);
     auto* pipe = dynamic_cast<PipeExpr*>(varDecl->initializer.get());
@@ -1168,7 +1168,7 @@ TEST(ParserTest, PipeOperatorChain) {
 // ===========================================================================
 
 TEST(ParserTest, SpreadInArrayLiteral) {
-    auto program = parse("fn main() { var a = [1, 2]; var b = [...a, 3]; return 0; }");
+    auto program = parse("fn main() { var a:i64[] = [1, 2]; var b:i64[] = [...a, 3]; return 0; }");
     auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(varDecl, nullptr);
     auto* arr = dynamic_cast<ArrayExpr*>(varDecl->initializer.get());
@@ -1187,7 +1187,7 @@ TEST(ParserTest, SpreadInArrayLiteral) {
 }
 
 TEST(ParserTest, MultipleSpreadInArray) {
-    auto program = parse("fn main() { var a = [1]; var b = [2]; var c = [...a, ...b]; return 0; }");
+    auto program = parse("fn main() { var a:i64[] = [1]; var b:i64[] = [2]; var c:i64[] = [...a, ...b]; return 0; }");
     auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[2].get());
     ASSERT_NE(varDecl, nullptr);
     auto* arr = dynamic_cast<ArrayExpr*>(varDecl->initializer.get());
@@ -1231,7 +1231,7 @@ TEST(ParserTest, MultipleStructDeclarations) {
 TEST(ParserTest, StructLiteralExpr) {
     auto program = parse(
         "struct Point { x, y }"
-        "fn main() { var p = Point { x: 10, y: 20 }; return 0; }");
+        "fn main() { var p:i64 = Point { x: 10, y: 20 }; return 0; }");
     ASSERT_EQ(program->structs.size(), 1u);
     auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(varDecl, nullptr);
@@ -1246,7 +1246,7 @@ TEST(ParserTest, StructLiteralExpr) {
 TEST(ParserTest, StructFieldAccess) {
     auto program = parse(
         "struct Point { x, y }"
-        "fn main() { var p = Point { x: 1, y: 2 }; return p.x; }");
+        "fn main() { var p:i64 = Point { x: 1, y: 2 }; return p.x; }");
     auto* retStmt = dynamic_cast<ReturnStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(retStmt, nullptr);
     auto* fieldAccess = dynamic_cast<FieldAccessExpr*>(retStmt->value.get());
@@ -1259,7 +1259,7 @@ TEST(ParserTest, StructFieldAccess) {
 // ===========================================================================
 
 TEST(ParserTest, GenericFunctionNoTypeParams) {
-    auto program = parse("fn id(x) { return x; } fn main() { return 0; }");
+    auto program = parse("fn id(x:i64) { return x; } fn main() { return 0; }");
     ASSERT_EQ(program->functions[0]->name, "id");
     EXPECT_TRUE(program->functions[0]->typeParams.empty());
 }
@@ -1462,7 +1462,7 @@ TEST(ParserTest, ForLoopIteratorArrayType) {
 // ===========================================================================
 
 TEST(ParserTest, InvalidateStatement) {
-    auto program = parse("fn main() { var x = 1; invalidate x; return 0; }");
+    auto program = parse("fn main() { var x:i64 = 1; invalidate x; return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* inv = dynamic_cast<InvalidateStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(inv, nullptr);
@@ -1470,7 +1470,7 @@ TEST(ParserTest, InvalidateStatement) {
 }
 
 TEST(ParserTest, MoveDeclaration) {
-    auto program = parse("fn main() { var a = 1; move var b = a; return 0; }");
+    auto program = parse("fn main() { var a:i64 = 1; move var b:i64 = a; return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* md = dynamic_cast<MoveDecl*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(md, nullptr);
@@ -1479,7 +1479,7 @@ TEST(ParserTest, MoveDeclaration) {
 }
 
 TEST(ParserTest, MoveExprInAssignment) {
-    auto program = parse("fn main() { var x = 1; var y = move x; return 0; }");
+    auto program = parse("fn main() { var x:i64 = 1; var y:i64 = move x; return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* vd = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(vd, nullptr);
@@ -1489,7 +1489,7 @@ TEST(ParserTest, MoveExprInAssignment) {
 }
 
 TEST(ParserTest, MoveExprInReturn) {
-    auto program = parse("fn main() { var x = 1; return move x; }");
+    auto program = parse("fn main() { var x:i64 = 1; return move x; }");
     auto* ret = dynamic_cast<ReturnStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(ret, nullptr);
     auto* mv = dynamic_cast<MoveExpr*>(ret->value.get());
@@ -1497,7 +1497,7 @@ TEST(ParserTest, MoveExprInReturn) {
 }
 
 TEST(ParserTest, BorrowDeclaration) {
-    auto program = parse("fn main() { var x = 1; borrow var ref = x; return 0; }");
+    auto program = parse("fn main() { var x:i64 = 1; borrow var ref:i64 = x; return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* vd = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(vd, nullptr);
@@ -1575,7 +1575,7 @@ TEST(ParserTest, BorrowWithRefTypeAndAddressOf) {
 
 TEST(ParserTest, AddressOfUnaryOperator) {
     // `&x` parsed as a unary expression
-    auto program = parse("fn main() { var x = 1; var y = &x; return 0; }");
+    auto program = parse("fn main() { var x:i64 = 1; var y:i64 = &x; return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* vd = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(vd, nullptr);
@@ -1587,7 +1587,7 @@ TEST(ParserTest, AddressOfUnaryOperator) {
 
 TEST(ParserTest, RefTypeAnnotation) {
     // `&i64` reference type annotation in borrow declaration
-    auto program = parse("fn main() { var x = 10; borrow var k:&i64 = &x; return 0; }");
+    auto program = parse("fn main() { var x:i64 = 10; borrow var k:&i64 = &x; return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* vd = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(vd, nullptr);
@@ -1628,7 +1628,7 @@ TEST(ParserTest, PrefetchImmutAttr) {
 }
 
 TEST(ParserTest, PrefetchStandaloneExistingVar) {
-    auto program = parse("fn main() { var x = 1; prefetch x; invalidate x; return 0; }");
+    auto program = parse("fn main() { var x:i64 = 1; prefetch x; invalidate x; return 0; }");
     auto* pf = dynamic_cast<PrefetchStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(pf, nullptr);
     EXPECT_EQ(pf->varDecl, nullptr);
@@ -1640,7 +1640,7 @@ TEST(ParserTest, PrefetchStandaloneExistingVar) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, PowerAssignOperator) {
-    auto program = parse("fn main() { var x = 2; x **= 3; }");
+    auto program = parse("fn main() { var x:i64 = 2; x **= 3; }");
     ASSERT_EQ(program->functions.size(), 1u);
     // Statement 1 should be an expression statement with an AssignExpr
     auto* exprStmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
@@ -1655,7 +1655,7 @@ TEST(ParserTest, PowerAssignOperator) {
 }
 
 TEST(ParserTest, NullCoalesceAssignOperator) {
-    auto program = parse("fn main() { var x = 0; x ?\?= 42; }");
+    auto program = parse("fn main() { var x:i64 = 0; x ?\?= 42; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* exprStmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(exprStmt, nullptr);
@@ -1672,7 +1672,7 @@ TEST(ParserTest, NullCoalesceAssignOperator) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, StructFieldCompoundAssignment) {
-    auto program = parse("struct S { x, y }\nfn main() { var s = S { x: 1, y: 2 }; s.x += 5; }");
+    auto program = parse("struct S { x, y }\nfn main() { var s:i64 = S { x: 1, y: 2 }; s.x += 5; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* exprStmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(exprStmt, nullptr);
@@ -1687,7 +1687,7 @@ TEST(ParserTest, StructFieldCompoundAssignment) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, RegisterVarDecl) {
-    auto program = parse("fn main() { register var x = 42; }");
+    auto program = parse("fn main() { register var x:i64 = 42; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(varDecl, nullptr);
@@ -1747,7 +1747,7 @@ TEST(ParserTest, PipelineStmtMultipleStages) {
 
 TEST(ParserTest, PipelineStmtExprCount) {
     // Count can be any expression, including a variable reference.
-    auto program = parse("fn main() { var n = 8; pipeline n { stage s { } } }");
+    auto program = parse("fn main() { var n:i64 = 8; pipeline n { stage s { } } }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* pl = dynamic_cast<PipelineStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(pl, nullptr);

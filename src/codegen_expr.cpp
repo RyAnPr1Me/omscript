@@ -432,6 +432,18 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
                      "Use field access with '.' instead", expr);
     }
 
+    // Check if this is a cross-file global variable reference (foo::varname).
+    // The parser already resolves these to IdentifierExpr nodes using the
+    // original unmangled name; this path is a fallback for any
+    // ScopeResolutionExpr nodes that reach codegen directly.
+    {
+        auto gvIt = globalVars_.find(member);
+        if (gvIt != globalVars_.end()) {
+            auto* gv = gvIt->second;
+            return builder->CreateLoad(gv->getValueType(), gv, member);
+        }
+    }
+
     // Unknown scope: provide a helpful error message
     std::string msg = "'" + scope + "' is not a valid scope for '::' operator. "
                       "Expected an enum name";
@@ -457,6 +469,14 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         auto enumIt = enumConstants_.find(expr->name);
         if (enumIt != enumConstants_.end()) {
             return llvm::ConstantInt::get(getDefaultType(), enumIt->second);
+        }
+        // Fallback: check module-level global variables.
+        {
+            auto gvIt = globalVars_.find(expr->name);
+            if (gvIt != globalVars_.end()) {
+                auto* gv = gvIt->second;
+                return builder->CreateLoad(gv->getValueType(), gv, expr->name);
+            }
         }
         // Build "did you mean?" suggestion from known variables.
         std::string msg = "Unknown variable: " + expr->name;
@@ -1757,6 +1777,73 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // strictly less than UINT64_MAX = 2^64−1 (nuw).  The nuw flag additionally
     // enables LLVM's loop unroller to propagate non-negativity to unrolled
     // copies and allows SCEV to use unsigned induction variable ranges.
+
+    // ── Pointer arithmetic ────────────────────────────────────────────────────
+    // OmScript's `ptr` type is intentionally untyped (analogous to void* in C).
+    // Pointer arithmetic is therefore byte-based: `p + n` advances by n bytes,
+    // `p - n` retreats by n bytes, and `p - q` yields the signed byte distance.
+    //
+    // Design rationale:
+    //   • OmScript has no pointer type parameters (no T*), so there is no
+    //     element size to divide or multiply by at the language level.
+    //   • Users who need element-count semantics write `p + n * sizeof(T)`.
+    //   • Byte-granularity matches the semantics of `malloc`/`free` and is
+    //     consistent with every other pointer operation in the language.
+    //
+    // Implementation notes:
+    //   • We use getIndexType() / getIntPtrType() (target pointer-sized integer)
+    //     instead of hardcoding i64 so the code is correct on non-64-bit targets.
+    //   • CreateInBoundsGEP is NOT used: we cannot statically prove that
+    //     user-supplied offsets stay within the allocated object, so the
+    //     conservative (no inbounds) form avoids UB.
+    //   • Float offsets are silently truncated via FPToSI; the language does
+    //     not define float-typed pointer offsets as meaningful.
+    //
+    // IMPORTANT: check ptr - ptr BEFORE ptr - int, because if both operands are
+    // pointers the first branch would otherwise treat the right pointer as an
+    // integer offset (wrong).
+
+    // ptr - ptr: signed byte distance between two pointers (ptrdiff_t semantics).
+    if (expr->op == "-" && left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
+        const llvm::DataLayout& DL = module->getDataLayout();
+        llvm::Type* intptrTy = DL.getIntPtrType(*context);
+        auto* lInt = builder->CreatePtrToInt(left,  intptrTy, "ptrdiff.l");
+        auto* rInt = builder->CreatePtrToInt(right, intptrTy, "ptrdiff.r");
+        auto* diff = builder->CreateSub(lInt, rInt, "ptrdiff");
+        // Widen to default i64 if the target uses a narrower pointer type.
+        if (diff->getType() != getDefaultType())
+            diff = builder->CreateSExt(diff, getDefaultType(), "ptrdiff.ext");
+        return diff;
+    }
+
+    // ptr ± int: advance/retreat by n bytes (untyped) or n elements (typed ptr<T>).
+    if ((expr->op == "+" || expr->op == "-") && left->getType()->isPointerTy()) {
+        const llvm::DataLayout& DL = module->getDataLayout();
+        llvm::Type* idxTy = DL.getIndexType(left->getType());
+
+        llvm::Value* offset = right;
+        // Float offset → integer truncation (float offsets are not meaningful).
+        if (offset->getType()->isDoubleTy() || offset->getType()->isFloatTy())
+            offset = builder->CreateFPToSI(offset, idxTy, "ptrarith.ftoi");
+        // Negate before casting to avoid sign-extension artefacts.
+        if (expr->op == "-")
+            offset = builder->CreateNeg(offset, "ptrarith.neg");
+        // Sign-extend / truncate to the target pointer index type.
+        offset = builder->CreateIntCast(offset, idxTy, /*isSigned=*/true, "ptrarith.idx");
+
+        // Determine the GEP element type:
+        //   ptr<T>  → use T (advance sizeof(T) bytes per index unit — C-style)
+        //   ptr     → use i8 (advance 1 byte per index unit — byte semantics)
+        llvm::Type* gepElemTy = llvm::Type::getInt8Ty(*context);
+        if (expr->left->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<const IdentifierExpr*>(expr->left.get());
+            auto it = ptrElemTypes_.find(id->name);
+            if (it != ptrElemTypes_.end())
+                gepElemTy = resolveAnnotatedType(it->second);
+        }
+        return builder->CreateGEP(gepElemTy, left, offset, "ptrarith");
+    }
+
     if (expr->op == "+") {
         const bool leftNonNeg = nonNegValues_.count(left);
         const bool rightNonNeg = nonNegValues_.count(right);
@@ -4644,11 +4731,66 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         }
         return builder->CreateNot(operand, "bitnottmp");
     } else if (expr->op == "&") {
-        // Address-of operator: in OmScript's value semantics, this is a
-        // pass-through — the operand is already the loaded value (not a
-        // pointer).  The `&` is syntactic sugar for borrow declarations
-        // (e.g., `borrow var j:&i32 = &x;`).
+        // Address-of operator: return the alloca/global pointer itself
+        // (not the loaded value).  This gives a true raw pointer to the
+        // variable's storage — necessary for ptr initializations like
+        //   var p:ptr = &x;
+        if (expr->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* idExpr = static_cast<IdentifierExpr*>(expr->operand.get());
+            auto it = namedValues.find(idExpr->name);
+            if (it != namedValues.end() && it->second) {
+                // namedValues stores AllocaInst* or GlobalVariable* — both are
+                // already pointer-typed values.
+                return it->second;
+            }
+            codegenError("Cannot take address of unknown variable: " + idExpr->name, expr);
+        }
+        // For array index expressions (&arr[i]), generate a GEP to the element.
+        if (expr->operand->type == ASTNodeType::INDEX_EXPR) {
+            auto* idxExpr = static_cast<IndexExpr*>(expr->operand.get());
+            // Retrieve the base pointer for the array.
+            llvm::Value* base = nullptr;
+            if (idxExpr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const std::string& arrName =
+                    static_cast<IdentifierExpr*>(idxExpr->array.get())->name;
+                auto it = namedValues.find(arrName);
+                if (it != namedValues.end() && it->second) {
+                    // Load the array base pointer from the alloca.
+                    auto* alloca = it->second;
+                    base = builder->CreateLoad(
+                        llvm::PointerType::getUnqual(*context), alloca, "arr.base");
+                }
+            }
+            if (!base)
+                base = generateExpression(idxExpr->array.get());
+            llvm::Value* idx = generateExpression(idxExpr->index.get());
+            idx = builder->CreateIntCast(idx, llvm::Type::getInt64Ty(*context), true, "gep.idx");
+            // Byte-level GEP (i8 elements) for generic ptr arithmetic.
+            return builder->CreateGEP(llvm::Type::getInt8Ty(*context), base, idx, "addr.gep");
+        }
+        // Fallback: evaluate operand and return it (handles other lvalue forms).
         return operand;
+    } else if (expr->op == "deref") {
+        // Pointer dereference (*p): load the value pointed to by p.
+        llvm::Value* ptr = operand;
+        if (!ptr->getType()->isPointerTy())
+            ptr = builder->CreateIntToPtr(ptr, llvm::PointerType::getUnqual(*context), "deref.itop");
+        // For typed pointers (ptr<T>), load with the correct element type so
+        // the load instruction has the right width and signedness.
+        // For untyped `ptr`, fall back to the default integer type (i64).
+        llvm::Type* loadTy = getDefaultType();
+        if (expr->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<IdentifierExpr*>(expr->operand.get());
+            auto it = ptrElemTypes_.find(id->name);
+            if (it != ptrElemTypes_.end()) {
+                loadTy = resolveAnnotatedType(it->second);
+            }
+        }
+        auto* loaded = builder->CreateLoad(loadTy, ptr, "deref");
+        // Widen narrower integers to i64 so downstream arithmetic stays uniform.
+        if (loadTy->isIntegerTy() && loadTy != getDefaultType())
+            return builder->CreateSExt(loaded, getDefaultType(), "deref.widen");
+        return loaded;
     }
 
     codegenError("Unknown unary operator: " + expr->op, expr);
@@ -4666,21 +4808,27 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     deadVars_.erase(expr->name);
     deadVarReason_.erase(expr->name);
 
-    // Type conversion if the alloca type and value type differ
-    auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
-    if (alloca) {
-        llvm::Type* allocaType = alloca->getAllocatedType();
-        if (allocaType->isDoubleTy() && value->getType()->isIntegerTy()) {
+    // Type conversion if the alloca type and value type differ.
+    // Also handle GlobalVariable targets (same conversion logic, different cast).
+    llvm::AllocaInst* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    llvm::Type* targetType = nullptr;
+    if (allocaInst) {
+        targetType = allocaInst->getAllocatedType();
+    } else if (auto* gv = llvm::dyn_cast<llvm::GlobalVariable>(it->second)) {
+        targetType = gv->getValueType();
+    }
+    if (targetType) {
+        if (targetType->isDoubleTy() && value->getType()->isIntegerTy()) {
             value = builder->CreateSIToFP(value, getFloatType(), "itof");
-        } else if (allocaType->isIntegerTy() && value->getType()->isDoubleTy()) {
-            value = builder->CreateFPToSI(value, allocaType, "ftoi");
-        } else if (allocaType->isIntegerTy() && value->getType()->isPointerTy()) {
-            value = builder->CreatePtrToInt(value, allocaType, "ptoi");
-        } else if (allocaType->isPointerTy() && value->getType()->isIntegerTy()) {
+        } else if (targetType->isIntegerTy() && value->getType()->isDoubleTy()) {
+            value = builder->CreateFPToSI(value, targetType, "ftoi");
+        } else if (targetType->isIntegerTy() && value->getType()->isPointerTy()) {
+            value = builder->CreatePtrToInt(value, targetType, "ptoi");
+        } else if (targetType->isPointerTy() && value->getType()->isIntegerTy()) {
             value = builder->CreateIntToPtr(value, llvm::PointerType::getUnqual(*context), "itop");
-        } else if (allocaType->isIntegerTy() && value->getType()->isIntegerTy() &&
-                   allocaType != value->getType()) {
-            value = convertTo(value, allocaType);
+        } else if (targetType->isIntegerTy() && value->getType()->isIntegerTy() &&
+                   targetType != value->getType()) {
+            value = convertTo(value, targetType);
         }
     }
 
@@ -4703,7 +4851,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     // subsequent loads can benefit from unsigned operations and NSW flags.
     // When the value might be negative, remove the alloca from nonNegValues_
     // to prevent unsound optimizations.
-    if (alloca && alloca->getAllocatedType()->isIntegerTy()) {
+    if (allocaInst && allocaInst->getAllocatedType()->isIntegerTy()) {
         bool valNonNeg = nonNegValues_.count(value) > 0;
         if (!valNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(value))
@@ -4724,7 +4872,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
                 if (ri->getOpcode() == llvm::Instruction::URem) {
                     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ri->getOperand(1))) {
                         if (ci->getSExtValue() > 1) {
-                            allocaUpperBound_[alloca] = ci->getSExtValue();
+                            allocaUpperBound_[allocaInst] = ci->getSExtValue();
                             return;
                         }
                     }
@@ -4734,12 +4882,12 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
                         ri->getOperand(0));
                     auto it2 = allocaUpperBound_.find(srcAlloca);
                     if (srcAlloca && it2 != allocaUpperBound_.end()) {
-                        allocaUpperBound_[alloca] = it2->second;
+                        allocaUpperBound_[allocaInst] = it2->second;
                         return;
                     }
                 }
             }
-            allocaUpperBound_.erase(alloca);
+            allocaUpperBound_.erase(allocaInst);
         };
         updateBound(value);
     }
