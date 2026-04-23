@@ -6876,15 +6876,112 @@ The OmScript compiler processes source code through eleven phases:
 
 The compiler uses two pass managers:
 
-#### AST-level pass manager (`OptimizationOrchestrator` + `PassScheduler`)
+#### AST-level pass manager (`OptimizationOrchestrator`)
 - Phases 3–10 (pre-codegen).
-- Demand-driven: if a pass requires fact `F`, the scheduler runs prerequisite passes to compute `F`.
-- Invalidation tracking: transformations invalidate dependent analyses (e.g., e-graph invalidates purity).
+- Two run modes (`include/opt_orchestrator.h:96-110`):
+  - **Pipeline mode** (`runPrepasses()`): runs the full per-O-level pass pipeline in dependency order.
+  - **Demand mode** (`runToProvide(fact)`): runs only the minimal set of passes whose `provides_` declarations cover the requested analysis fact.
+- Invalidation tracking: transformations invalidate dependent analyses (e.g., e-graph invalidates `purity`) — the cascade is computed by `AnalysisDependencyGraph` (see §25.2.3).
 
 #### LLVM IR pass manager (`llvm::ModulePassManager`)
 - Phases 11+ (post-codegen).
 - Fixed pipeline (no demand-driven scheduling).
 - Stages: canonicalization → loop transforms → midend (IPSCCP, GVN, DSE) → vectorizer → superoptimizer → HGOE.
+
+### 25.2.1 Pass framework (PassMetadata / PassRegistry / IPass)
+
+Every AST-level pass is described by a `PassMetadata` struct (`include/opt_pass.h:80-95`) and registered in the global `PassRegistry`. The orchestrator never hard-codes pass classes; it discovers them through the registry and orders them by their declared dependencies.
+
+**`PassMetadata` fields** (`opt_pass.h:80-95`):
+
+| Field | Meaning |
+|-------|---------|
+| `id` | Stable numeric ID assigned at registration time |
+| `name` | Short identifier (e.g. `"purity"`) used in diagnostics and tests |
+| `description` | One-line description for `--verbose` output |
+| `phase` | `PassPhase` (see below) |
+| `kind` | `PassKind`: `Analysis` / `SemanticTransform` / `CostTransform` |
+| `requires_` | Analysis facts that must be valid before the pass runs |
+| `provides_` | Analysis facts the pass produces or refreshes |
+| `invalidates_` | Analysis facts the pass invalidates (when it modifies the program) |
+
+**`PassPhase`** (`opt_pass.h:37-43`) — coarse pipeline stage assignment:
+
+| Value | Used for |
+|-------|----------|
+| `Preprocessing` | Source-level analysis before semantic checks |
+| `EvaluationAnalysis` | Purity detection, effect inference, CF-CTRE |
+| `ASTTransform` | AST rewrites (e-graph, OPTMAX folder, loop fusion) |
+| `IRPipeline` | *Reserved* — LLVM pass-manager pipeline |
+| `BackendTuning` | *Reserved* — superoptimizer, HGOE, post-pipeline cleanup |
+
+**`PassKind`** (`opt_pass.h:48-52`) controls O-level gating:
+- `Analysis` — runs at every level that needs the fact
+- `SemanticTransform` — must always be correct; safe at any level
+- `CostTransform` — optional, cost-driven; skipped at O0
+
+**`AnalysisFact`** (`opt_pass.h:61-72`) defines the canonical fact identifiers passes refer to: `string_types`, `array_types`, `constant_returns`, `purity`, `effects`, `synthesis`, `cfctre`, `egraph`, `range_analysis`, `rlc`. The `PassId::k*` extern variables in the same namespace expose stable numeric IDs after registration so tests can refer to passes without hard-coding numbers.
+
+**`IPass`** (`opt_pass.h:146-157`) is the polymorphic interface AST-level passes implement (`metadata()` + `run(Program*, OptimizationContext&)`). IR-level passes that live inside LLVM's `PassManager` are described only by their metadata and do not implement `IPass`.
+
+The registry's `topologicalOrder(subset)` (`opt_pass.h:121-122`) computes a valid run order honouring `requires → provides` edges and throws `std::logic_error` if the dependency graph contains a cycle.
+
+### 25.2.2 PassContract & IRInvariant
+
+`PassContract` (`opt_pass.h:226-252`) is a richer companion to `PassMetadata` that adds **structural IR invariants** on top of the analysis-fact model. It exists so the scheduler can reason about whether the LLVM IR is in the shape a pass needs (e.g. the loop vectorizer needs `LoopSimplify` form), not only about whether semantic facts have been computed.
+
+A `PassContract` declares six lists:
+- `requires_facts` / `provides_facts` / `invalidates_facts` — same model as `PassMetadata`
+- `requires_inv` — `IRInvariant`s that must hold before the pass runs
+- `establishes_inv` — `IRInvariant`s the pass guarantees on exit
+- `invalidates_inv` — `IRInvariant`s the pass breaks (the scheduler must re-establish them before any subsequent consumer)
+- `preserves_inv` — `IRInvariant`s the pass provably does not break
+
+The four currently defined `IRInvariant` values (`opt_pass.h:203-208`):
+
+| Invariant | Meaning |
+|-----------|---------|
+| `LoopSimplify` | Loops have dedicated preheaders and a single backedge |
+| `LCSSA` | Loop-Closed SSA form — uses of loop-defined values exit through PHIs |
+| `CanonicalIV` | Induction variables are in canonical form (IndVarSimplify completed) |
+| `SimplifiedCFG` | Control-flow graph has been simplified (SimplifyCFGPass completed) |
+
+`PassContract` is currently an adjunct to `PassMetadata`; the source comment at `opt_pass.h:223-225` notes that future work will migrate to `PassContract` as the sole pass descriptor.
+
+### 25.2.3 AnalysisDependencyGraph (cascading invalidation)
+
+`AnalysisDependencyGraph` (`opt_pass.h:283-343`) records "fact A depends on fact B" edges. When a transform invalidates fact B, every fact that transitively depends on B is also invalidated. Callers therefore only need to invalidate the *directly* affected fact; the cascade is computed automatically.
+
+The standard OmScript dependency graph is built by `AnalysisDependencyGraph::createDefault()` (`opt_pass.h:336`):
+
+```
+constant_returns → (no dependencies)
+purity           → constant_returns
+effects          → purity
+synthesis        → purity, effects
+cfctre           → purity, effects, synthesis
+egraph           → cfctre
+range_analysis   → purity, effects, cfctre
+```
+
+Read this as "the named fact depends on the listed facts": invalidating `purity` therefore cascades to `effects`, `synthesis`, `cfctre`, `egraph`, and `range_analysis`. Lookup is via `getAllDependents(key)`, which performs a BFS over the dependency edges and returns the fact itself plus every transitive dependent.
+
+**Thread safety** (`opt_pass.h:279-282`): construction (`addDependency`) is **not** thread-safe and must happen during single-threaded static initialisation; subsequent reads from multiple compilation threads are safe.
+
+### 25.2.4 PipelineStage (six-stage compilation pipeline)
+
+`PipelineStage` (`include/optimization_manager.h:83-109`) provides the stable vocabulary the `OptimizationManager` uses to label passes, schedule requests, and emit progress diagnostics. The six stages and their fixed ordering are:
+
+| Stage | Mandate |
+|-------|---------|
+| `AST_ANALYSIS` (0) | Read-only AST analyses: string/array type pre-analysis, constant-return detection, purity inference, effect inference |
+| `AST_TRANSFORM` (1) | Semantics-preserving AST transforms: synthesis expansion, CF-CTRE, e-graph saturation, range analysis |
+| `IR_CANONICALIZE` (2) | LLVM IR normalization that establishes invariants for later loop transforms: LoopSimplify, LCSSA, IndVarSimplify, SimplifyCFG |
+| `LOOP_TRANSFORM` (3) | Polyhedral and structural loop transforms (interchange, tiling, skewing, reversal, fusion, fission) — all routed through `UnifiedLoopTransformer` (see §26.14) |
+| `IR_MIDEND` (4) | LLVM midend scalar + vectorization: inlining, IPSCCP, GVN, DSE, loop vectorizer, SLP, post-vec cleanup |
+| `LATE_SUPEROPT_HGOE` (5) | Late peephole + synthesis: superoptimizer (§26.2), HGOE hardware-guided emission (§26.3), post-pipeline simplification |
+
+Stages run in numerical order and `PassMetadata::phase` (a `PassPhase` value) maps to the corresponding `PipelineStage`.
 
 ### 25.3 Per-O-level pass list
 
@@ -6956,9 +7053,11 @@ Diagnostic(level, code, message, location) → DiagnosticManager → stderr
 
 An **e-graph** (equivalence graph) is a compact representation of many equivalent program expressions. It consists of:
 
-- **E-node** (`ENode`): A single operation (e.g., `Add`, `Mul`, `Const(42)`) with child pointers.
-- **E-class** (`EClass`): An equivalence class of e-nodes representing the same value.
-- **Union-find structure**: Efficiently merges e-classes when a rewrite proves two terms equivalent.
+- **E-node** (`ENode`, `include/egraph.h:101-132`): A single operation with child class IDs, an optional integer `value` (for `Const`), `fvalue` (for `ConstF`), and `name` (for `Var` / `Call`). E-node equality uses bit-pattern comparison for floats so that NaN constants with the same payload deduplicate correctly.
+- **E-class** (`EClass`, `egraph.h:157-176`): An equivalence class of e-nodes representing the same value, plus cached analysis flags (`constVal`, `isZero`, `isOne`, `isNonNeg`, `isPowerOfTwo`, `isBoolean`, `isFloat`, `isInt`) used by relational rules.
+- **Union-find structure**: Efficiently merges e-classes when a rewrite proves two terms equivalent. Hash-consing on `ENode` (via `ENodeHash`, `egraph.h:135-150`) deduplicates structurally identical nodes on insertion.
+
+The supported operation set is fixed by the `Op` enum (`egraph.h:55-98`): constants and variables (`Const`, `ConstF`, `Var`); arithmetic (`Add`, `Sub`, `Mul`, `Div`, `Mod`, `Neg`); bitwise (`BitAnd`, `BitOr`, `BitXor`, `BitNot`, `Shl`, `Shr`); comparisons (`Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge`); logical (`LogAnd`, `LogOr`, `LogNot`); math (`Pow`, `Sqrt`); and special (`Ternary`, `Call`, `Nop`). Anything outside this set is opaque to the e-graph and is not subject to equality saturation.
 
 **Example**:
 ```omscript
@@ -7044,6 +7143,44 @@ The engine terminates when:
 1. **Node limit reached**: `SaturationConfig::maxNodes = 50,000` (`include/egraph.h:331`). This is a fixed default — it is **not** raised at O3.
 2. **Iteration limit reached**: `SaturationConfig::maxIterations = 30` (`include/egraph.h:332`) — one iteration = apply all rules to all nodes once.
 3. **Saturation**: No new e-nodes added in an iteration.
+
+A third `SaturationConfig` knob — `enableConstantFolding` (default `true`, `egraph.h:333`) — controls whether the engine folds `Op(Const, Const)` patterns during saturation in addition to applying rewrite rules.
+
+#### Patterns and Rewrite Rules
+
+Rewrite rules use the `Pattern` type (`egraph.h:182-241`) which has two kinds:
+
+- **`Wildcard`** (`Pattern::Wild("?a")`) — matches any e-class and binds it to the named variable.
+- **`OpMatch`** — requires a specific `Op` and (recursively) matching child patterns. Specialised constructors include:
+  - `OpPat(op, children)` — match an operation and its children
+  - `ConstPat(val)` / `ConstFPat(val)` — match a specific integer or float constant (set `matchConst` / `matchConstF`)
+  - `AnyConst()` — match any integer constant without value constraint
+
+A successful match produces a `Subst` (`egraph.h:244`) — a map from wildcard names to the bound class IDs.
+
+A `RewriteRule` (`egraph.h:263-275`) bundles four things:
+
+| Field | Meaning |
+|-------|---------|
+| `name` | Human-readable rule name (used in diagnostics) |
+| `lhs` | Left-hand side `Pattern` to match |
+| `rhs` | `RhsBuilder` callback `ClassId(EGraph&, const Subst&)` that constructs the replacement |
+| `guard` | Optional `RuleGuard` predicate `bool(const EGraph&, const Subst&)` |
+
+The optional **guard** turns the engine from a purely syntactic rewriter into a *relational* one: a guard can inspect bound `EClass` analysis flags (e.g. `isPowerOfTwo`, `isNonNeg`) before allowing the RHS to be built. This is how rules like "rewrite `x * c` to `x << log2(c)` only when `c` is a power of two" stay sound.
+
+#### Cost Model and Extraction
+
+Once saturation completes, the engine **extracts** a single representative e-node per class to produce the final program. The cost is computed by `CostModel` (`egraph.h:306-323`) with two notable parameters beyond per-node latency:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `regBudget` | `13` | Architectural GPRs the extractor may assume are simultaneously available (16 x86-64 GPRs minus RSP, RBP, and one frame/scratch reserve). Set to 0 to disable register-pressure-aware extraction. |
+| `spillPenalty` | `5.0` | Cycles charged per excess simultaneously-live value beyond `regBudget`. Models a stack-slot spill+reload round-trip. |
+
+When the extractor would exceed `regBudget`, each excess live value adds `spillPenalty` to the candidate's cost, biasing the selection toward shallower (lower-pressure) sub-trees even when their per-node latency is higher. HGOE may install target-specific `regBudget` / `spillPenalty` values from a resolved `MicroarchProfile` (e.g. AArch64's 31 GPRs → `regBudget = 27`).
+
+The `INFINITE_COST` sentinel (`egraph.h:283`, `1e18`) is used to mark unextractable nodes so they never win cost comparisons.
 
 #### Cost Model
 
@@ -7216,6 +7353,42 @@ From `hardware_graph.cpp`, built-in profiles:
 | **Ice Lake**     | `icelake-server`     | 48       | 512     | 5                 | 2                | 2         |
 | **Sapphire Rapids** | `sapphirerapids`  | 48       | 2048    | 5                 | 2                | 2         |
 | **Neoverse V1**  | `neoverse-v1`        | 64       | 1024    | 4                 | 2                | 2         |
+
+The cache cells in this table are illustrative; the authoritative numbers live in the per-microarch profile builders in `src/hardware_graph.cpp` (e.g. `zen3Profile`, `zen4Profile`, `alderlakeProfile`, `neoverseV2Profile`, `graviton3Profile` / `graviton4Profile`, `lunarLakeProfile`, `zen5Profile`). When in doubt, consult the profile function for the CPU you care about.
+
+#### Floating-Point Precision Levels
+
+Independent of `-march`, HGOE supports per-variable / per-operation floating-point precision control via the `FPPrecision` enum (`include/hardware_graph.h:48-53`):
+
+| Level | Meaning |
+|-------|---------|
+| `Strict` | Full IEEE-754 compliance. No reassociation, no NaN/Inf assumptions. |
+| `Medium` | Allow limited reassociation and some vectorization; preserve NaN/Inf. |
+| `Fast` | Equivalent to `-ffast-math`: reassociation, reciprocal transforms, ignoring NaN/Inf, fused operations all permitted. |
+
+`FPPrecision` is an alternative to the global `-ffast-math` flag for cases where only some computations are safe to relax. When two operands carry different precisions they are merged via a *conservative meet* (`hardware_graph.h:68-71`): the **stricter** level wins, so combining a `Strict` operand with a `Fast` operand yields `Strict` semantics. The string names `"strict" / "medium" / "fast"` are exposed by `fpPrecisionName()` (`hardware_graph.h:56-63`).
+
+#### Cache-Aware Optimization
+
+HGOE includes a cache model used to choose tile sizes and software-prefetch distances. The `CacheModel` struct (`hardware_graph.h:80-90`, defaults shown) is built from the resolved `MicroarchProfile` via `buildCacheModel()`:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `l1Size` / `l1Latency` / `l1LineSize` | 32 KB / 4 cyc / 64 B | L1D parameters |
+| `l2Size` / `l2Latency` | 256 KB / 12 cyc | L2 parameters |
+| `l3Size` / `l3Latency` | 8192 KB / 40 cyc | L3 parameters |
+| `memLatency` / `memBandwidth` | 200 cyc / 40.0 GB/s | Main memory parameters |
+
+Memory accesses inside loops are classified by an `AccessPattern` (`hardware_graph.h:98-104`): `Unknown`, `Sequential` (best locality), `Strided` (predictable, may miss cache), `Random` (poor locality), `Streaming` (write-once / read-once, bypass-friendly). The classification feeds prefetch-insertion and AoS→SoA layout decisions.
+
+The cache-aware pass reports its work through `CacheOptStats` (`hardware_graph.h:107-112`):
+
+| Counter | Meaning |
+|---------|---------|
+| `loopsTiled` | Loops with tiling metadata added |
+| `loopsInterchanged` | Loops reordered for locality |
+| `prefetchesInserted` | Software prefetch hints added |
+| `layoutHints` | AoS→SoA suggestions emitted |
 
 #### Operation Classes
 
