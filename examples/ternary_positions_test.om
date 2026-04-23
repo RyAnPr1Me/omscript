@@ -1,0 +1,25 @@
+// Ternary expression in varied positions: basic selection, nesting,
+// use inside arithmetic.  Result is a single total stays within an
+// 8-bit exit-code window.
+fn main() {
+    // Basic selection.
+    var a = (1 == 1) ? 10 : 20;       // a = 10
+    var b = (1 == 2) ? 10 : 20;       // b = 20
+
+    // Nested — compute 2D classification.
+    var x = 5;
+    var grade = (x < 3) ? 0
+              : (x < 7) ? 1
+              :          2;            // x=5 → grade = 1
+
+    // Ternary inside arithmetic.
+    var sum = 100 + ((x > 0) ? 5 : -5); // sum = 105
+
+    // Ternary returning different values based on a variable.
+    var y = 7;
+    var doubled = (y > 0) ? y * 2 : 0;  // doubled = 14
+
+    // Final: a + b + grade + sum + doubled
+    //     = 10 + 20 + 1 + 105 + 14 = 150
+    return a + b + grade + sum + doubled;
+}

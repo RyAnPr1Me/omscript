@@ -1,0 +1,49 @@
+// Loop correctness: break inside nested loops, break with condition,
+// continue skipping only inner iterations.  Verifies control-flow
+// generation for multi-level break/continue without using labels.
+fn main() {
+    var sum = 0;
+
+    // Simple break.
+    for (i in 0...100) {
+        if (i == 5) { break; }
+        sum = sum + i;
+    }
+    // sum = 0+1+2+3+4 = 10
+
+    // Continue in odd iterations.
+    var evens = 0;
+    for (i in 0...10) {
+        if (i % 2 == 1) { continue; }
+        evens = evens + i;
+    }
+    // evens = 0+2+4+6+8 = 20
+
+    // Nested loops with inner break.
+    var nested = 0;
+    for (i in 0...3) {
+        for (j in 0...5) {
+            if (j == 2) { break; }
+            nested = nested + 1;
+        }
+    }
+    // nested = 3 * 2 = 6
+
+    // While loop with conditional break.
+    var x = 0;
+    while (x < 100) {
+        x = x + 1;
+        if (x == 7) { break; }
+    }
+    // x = 7
+
+    // do...while runs body at least once.
+    var y = 10;
+    do {
+        y = y + 1;
+    } while (y < 5);
+    // y = 11
+
+    return sum + evens + nested + x + y;
+    // 10 + 20 + 6 + 7 + 11 = 54
+}

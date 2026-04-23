@@ -6721,8 +6721,10 @@ TEST(CodegenTest, DeepConstEval_SideEffectFunctionNotFolded) {
 // matching what generateIdentifier emits for regular variable reads.
 TEST(CodegenTest, IncDecLoadHasNoundef) {
     CodeGenerator codegen(OptimizationLevel::O1);
+    // Use a parameter-sourced initial value and an external sink so the
+    // codegen-time constant evaluator cannot fold the whole body away.
     auto* mod = generateIR(
-        "fn f() { var x:i64 = 0; x++; return x; } fn main() { return f(); }",
+        "fn f(n:i64) { var x:i64 = n; x++; return x; } fn main() { return f(1); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6745,8 +6747,10 @@ TEST(CodegenTest, IncDecLoadHasNoundef) {
 // inside x++ should carry !range [0, INT64_MAX) metadata.
 TEST(CodegenTest, IncDecLoadHasRangeOnNonNeg) {
     CodeGenerator codegen(OptimizationLevel::O1);
+    // `abs(n)` guarantees non-negative without being a compile-time constant,
+    // so the !range metadata path is exercised on a real load.
     auto* mod = generateIR(
-        "fn f() { var x:i64 = 5; x++; return x; } fn main() { return f(); }",
+        "fn f(n:i64) { var x:i64 = abs(n); x++; return x; } fn main() { return f(5); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6773,7 +6777,7 @@ TEST(CodegenTest, IncDecLoadHasRangeOnNonNeg) {
 TEST(CodegenTest, IncrementNUWOnNonNegVariable) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn f() { var x:i64 = 0; x++; return x; } fn main() { return f(); }",
+        "fn f(n:i64) { var x:i64 = abs(n); x++; return x; } fn main() { return f(0); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");
@@ -6800,7 +6804,7 @@ TEST(CodegenTest, IncrementNUWOnNonNegVariable) {
 TEST(CodegenTest, IncrementPreservesNonNegTracking) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn f() { var x:i64 = 0; x++; var y:i64 = x + 1; return y; } fn main() { return f(); }",
+        "fn f(n:i64) { var x:i64 = abs(n); x++; var y:i64 = x + 1; return y; } fn main() { return f(0); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("f");

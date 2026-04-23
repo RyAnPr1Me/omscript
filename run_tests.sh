@@ -836,6 +836,18 @@ ptest_program "examples/comptime_obfuscated_test.om" 0
 ptest_program "examples/loop_annotation_unroll_test.om" 120
 ptest_program "examples/loop_annotation_vectorize_test.om" 36
 ptest_program "examples/str_format_test.om" 0
+
+# ── Expanded coverage: edge cases and behavioural invariants ─────────────
+ptest_program "examples/integer_edge_cases_test.om" 24
+ptest_program "examples/short_circuit_sideeffects_test.om" 4
+ptest_program "examples/array_index_arithmetic_test.om" 192
+ptest_program "examples/comparison_chains_test.om" 28
+ptest_program "examples/control_flow_nested_test.om" 54
+ptest_program "examples/recursion_patterns_test.om" 12
+ptest_program "examples/string_edge_cases_test.om" 11
+ptest_program "examples/float_identity_test.om" 12
+ptest_program "examples/ternary_positions_test.om" 150
+ptest_program "examples/function_call_patterns_test.om" 10
 flush_ptests
 
 echo ""

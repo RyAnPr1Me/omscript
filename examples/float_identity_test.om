@@ -1,0 +1,39 @@
+// Floating-point semantics: correct rounding for small magnitudes,
+// identity operations, comparison at zero, integer conversion behaviour.
+// Returns an integer count of successful assertions so the test can be
+// validated by exit status.
+fn main() {
+    var r = 0;
+
+    // Basic equality at literal zero.
+    var zero = 0.0;
+    if (zero == 0.0) { r = r + 1; }
+
+    // Identity: 1.0 * x == x for simple values.
+    var f = 3.14;
+    if (1.0 * f == f) { r = r + 1; }
+
+    // Addition identity.
+    if (f + 0.0 == f) { r = r + 1; }
+
+    // Subtraction identity.
+    if (f - 0.0 == f) { r = r + 1; }
+
+    // Multiplication by 2 == addition.
+    if (2.0 * f == f + f) { r = r + 1; }
+
+    // Float → integer truncation via to_int.
+    if (to_int(3.7)  == 3)  { r = r + 1; }   // truncates toward zero
+    if (to_int(-3.7) == -3) { r = r + 1; }   // truncates toward zero
+
+    // Integer → float round-trip on exactly-representable values.
+    if (to_float(42) == 42.0) { r = r + 1; }
+
+    // Comparison operators on floats.
+    if (1.5 < 2.5)  { r = r + 1; }
+    if (2.5 > 1.5)  { r = r + 1; }
+    if (1.5 <= 1.5) { r = r + 1; }
+    if (1.5 >= 1.5) { r = r + 1; }
+
+    return r;  // 12
+}

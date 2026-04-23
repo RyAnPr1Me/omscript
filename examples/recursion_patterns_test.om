@@ -1,0 +1,53 @@
+// Recursion exercises: direct recursion, tail recursion (which may be
+// optimised into a loop by codegen), and mutual recursion expressed as
+// is_even via an intermediate.  Exits with the count of assertions.
+fn fact_recursive(n:i64) {
+    if (n <= 1) { return 1; }
+    return n * fact_recursive(n - 1);
+}
+
+// Tail-recursive helper — last operation is the recursive call.
+fn fact_tail(n:i64, acc:i64) {
+    if (n <= 1) { return acc; }
+    return fact_tail(n - 1, acc * n);
+}
+
+// Integer exponentiation via recursion.
+fn ipow(base:i64, exp:i64) {
+    if (exp == 0) { return 1; }
+    return base * ipow(base, exp - 1);
+}
+
+// Direct parity test (defeats compile-time folding through a loop).
+fn parity_even(n:i64) {
+    if (n < 0) { return parity_even(0 - n); }
+    var x = n;
+    while (x >= 2) { x = x - 2; }
+    return (x == 0) ? 1 : 0;
+}
+
+fn main() {
+    var r = 0;
+
+    // 5! = 120.
+    if (fact_recursive(5) == 120) { r = r + 1; }
+    if (fact_tail(5, 1) == 120)   { r = r + 1; }
+
+    // 10! = 3628800.
+    if (fact_recursive(10) == 3628800) { r = r + 1; }
+    if (fact_tail(10, 1) == 3628800)   { r = r + 1; }
+
+    // ipow.
+    if (ipow(2, 0)  == 1)    { r = r + 1; }
+    if (ipow(2, 10) == 1024) { r = r + 1; }
+    if (ipow(3, 4)  == 81)   { r = r + 1; }
+
+    // Parity.
+    if (parity_even(0)  == 1) { r = r + 1; }
+    if (parity_even(1)  == 0) { r = r + 1; }
+    if (parity_even(10) == 1) { r = r + 1; }
+    if (parity_even(7)  == 0) { r = r + 1; }
+    if (parity_even(-4) == 1) { r = r + 1; }
+
+    return r;  // 12
+}
