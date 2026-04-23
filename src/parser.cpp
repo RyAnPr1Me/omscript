@@ -1439,9 +1439,20 @@ std::unique_ptr<BlockStmt> Parser::parseBlock() {
                 }
                 consume(TokenType::SEMICOLON, "Expected ';' after destructuring declaration");
             } else {
-                statements.push_back(parseVarDecl(isConst));
+                // Multi-variable declarations: var a:T = 1, b = 2, c = 3;
+                // The type annotation on the first variable is propagated to
+                // subsequent variables that omit a type annotation.
+                auto firstDecl = parseVarDecl(isConst);
+                // Capture the first var's type for propagation.
+                std::string multiVarType;
+                if (auto* vd = dynamic_cast<VarDecl*>(firstDecl.get()))
+                    multiVarType = vd->typeName;
+                statements.push_back(std::move(firstDecl));
                 while (match(TokenType::COMMA)) {
-                    statements.push_back(parseVarDecl(isConst));
+                    // Pass the inherited type so subsequent vars like `b = 2`
+                    // don't fail the mandatory-annotation check when they
+                    // omit the type (they inherit from `a:T`).
+                    statements.push_back(parseVarDeclWithInheritedType(isConst, multiVarType));
                 }
                 consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
             }
@@ -1528,6 +1539,38 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
                   "&var, &arr, malloc(...), realloc(...), calloc(...), null, "
                   "pointer arithmetic (p+n), or another pointer variable");
         }
+    }
+
+    auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
+    decl->line = name.line;
+    decl->column = name.column;
+    return decl;
+}
+
+/// Variant of parseVarDecl used for subsequent variables in a multi-var
+/// declaration (e.g., the `b = 2` and `c = 3` in `var a:i64 = 1, b = 2, c = 3`).
+/// If the variable has no explicit `:type` annotation, `inheritedType` is used
+/// instead, which is the type of the first variable in the declaration.
+std::unique_ptr<Statement> Parser::parseVarDeclWithInheritedType(
+        bool isConst, const std::string& inheritedType) {
+    const Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
+    std::string typeName;
+    if (match(TokenType::COLON)) {
+        typeName = parseTypeAnnotation();
+    } else {
+        // Inherit from the first variable in the multi-var declaration.
+        typeName = inheritedType;
+    }
+
+    // If still empty (first var was also untyped), emit the normal error.
+    if (typeName.empty()) {
+        error("Variable '" + name.lexeme + "' requires an explicit type annotation "
+              "(e.g., 'var " + name.lexeme + ":i64 = ...'). Untyped variables are not allowed.");
+    }
+
+    std::unique_ptr<Expression> initializer = nullptr;
+    if (match(TokenType::ASSIGN)) {
+        initializer = parseExpression();
     }
 
     auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);

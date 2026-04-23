@@ -482,7 +482,7 @@ TEST(ParserTest, OptmaxParamMissingType) {
 }
 
 TEST(ParserTest, OptmaxVarMissingType) {
-    EXPECT_THROW(parse("OPTMAX=: fn foo(x: int) { var y:i64 = 5; } OPTMAX!:"), std::runtime_error);
+    EXPECT_THROW(parse("OPTMAX=: fn foo(x: int) { var y = 5; } OPTMAX!:"), std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------
@@ -513,7 +513,7 @@ TEST(ParserTest, OptmaxErrorDoesNotLeakUnterminatedBlock) {
     // The error message should be exactly the annotation error, NOT also
     // "Unterminated OPTMAX block".
     try {
-        parse("OPTMAX=: fn foo(x: int) { var y:i64 = 5; } OPTMAX!: fn main() { return 0; }");
+        parse("OPTMAX=: fn foo(x: int) { var y = 5; } OPTMAX!: fn main() { return 0; }");
         FAIL() << "Expected std::runtime_error";
     } catch (const std::runtime_error& e) {
         std::string msg = e.what();
@@ -676,7 +676,7 @@ TEST(ParserTest, ForEachVsRangeFor) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, MultiVarDeclaration) {
-    auto program = parse("fn main() { var a:i64 = 1, b = 2, c = 3; }");
+    auto program = parse("fn main() { var a:i64 = 1, b:i64 = 2, c:i64 = 3; }");
     EXPECT_EQ(program->functions.size(), 1u);
     auto& stmts = program->functions[0]->body->statements;
     ASSERT_EQ(stmts.size(), 3u);
@@ -693,7 +693,7 @@ TEST(ParserTest, MultiVarDeclaration) {
 }
 
 TEST(ParserTest, MultiConstDeclaration) {
-    auto program = parse("fn main() { const x:i64 = 10, y = 20; }");
+    auto program = parse("fn main() { const x:i64 = 10, y:i64 = 20; }");
     auto& stmts = program->functions[0]->body->statements;
     ASSERT_EQ(stmts.size(), 2u);
     auto* x = dynamic_cast<omscript::VarDecl*>(stmts[0].get());

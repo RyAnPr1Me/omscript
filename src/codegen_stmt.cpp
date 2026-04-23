@@ -247,7 +247,34 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 // Extract inner element type: ptr<T> → T
                 ptrElemTypes_[stmt->name] = tn.substr(4, tn.size() - 5);
             } else {
-                ptrElemTypes_.erase(stmt->name); // untyped ptr has no element type
+                // Untyped `ptr`: record as "ptr" sentinel so callers know this
+                // variable is a pointer even when no element-type annotation
+                // was given.  This also enables &x inference below.
+                ptrElemTypes_[stmt->name] = "ptr";
+            }
+            // ── Element-addressed &x inference ─────────────────────────────
+            // When the initializer is `&x` (UnaryExpr op == "&"), attempt to
+            // infer the element type from the source variable's type annotation.
+            // Example: var x:i32 = 5; var p:ptr = &x; → ptrElemTypes_[p] = "i32"
+            // The explicit annotation always wins (ptr<T> already set above).
+            if (stmt->initializer &&
+                stmt->initializer->type == ASTNodeType::UNARY_EXPR) {
+                const auto* ue = static_cast<const UnaryExpr*>(stmt->initializer.get());
+                if (ue->op == "&" && ue->operand &&
+                    ue->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    const std::string& srcName =
+                        static_cast<const IdentifierExpr*>(ue->operand.get())->name;
+                    // Only override if we don't already have an explicit element type
+                    // (i.e., the annotation was just bare `ptr`, not `ptr<T>`).
+                    const bool hasExplicitElemType =
+                        (tn.rfind("ptr<", 0) == 0 && tn.back() == '>');
+                    if (!hasExplicitElemType) {
+                        auto tit = varTypeAnnotations_.find(srcName);
+                        if (tit != varTypeAnnotations_.end() && !tit->second.empty()) {
+                            ptrElemTypes_[stmt->name] = tit->second;
+                        }
+                    }
+                }
             }
             // Determine heap vs stack origin for invalidate:
             //   • alloc<T> with small constant count → stack (lastStackAllocBacking_ set)
@@ -3265,8 +3292,17 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     const bool isHeapDict   = dictVarNames_.count(name) > 0;
     // ptr variables whose value was heap-allocated (malloc / heap alloc<T>).
     const bool isHeapPtr    = heapPtrVarNames_.count(name) > 0;
+    // struct variables are heap-allocated opaque pointers.
+    const bool isHeapStruct = structVars_.count(name) > 0;
+    // bigint variables are heap-allocated arbitrary-precision integers.
+    bool isHeapBigint = false;
+    {
+        auto tit = varTypeAnnotations_.find(name);
+        isHeapBigint = (tit != varTypeAnnotations_.end() && tit->second == "bigint");
+    }
 
-    if (isHeapString || isHeapArray || isHeapDict || isHeapPtr) {
+    if (isHeapString || isHeapArray || isHeapDict || isHeapPtr ||
+        isHeapStruct || isHeapBigint) {
         // Load the heap pointer from the alloca (i64 stored as int, ptr cast needed).
         auto* allocaInst2 = llvm::dyn_cast<llvm::AllocaInst>(alloca);
         if (allocaInst2) {

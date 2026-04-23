@@ -108,6 +108,7 @@ class Parser {
     std::unique_ptr<Statement> parseStatement();
     std::unique_ptr<BlockStmt> parseBlock();
     std::unique_ptr<Statement> parseVarDecl(bool isConst);
+    std::unique_ptr<Statement> parseVarDeclWithInheritedType(bool isConst, const std::string& inheritedType);
     std::unique_ptr<Statement> parseIfStmt();
     std::unique_ptr<Statement> parseWhileStmt();
     std::unique_ptr<Statement> parseDoWhileStmt();
