@@ -6648,6 +6648,68 @@ TEST(CodegenTest, ReadOnlyGlobalArrayFill_SkippedForRuntimeSize) {
         << "ro-global must not fire when array_fill size is not a constant";
 }
 
+// `for (x in range(start, end)) { body }` must not allocate the
+// intermediate range array — the foreach should be lowered to a direct
+// counting loop with x bound to (start + idx).
+TEST(CodegenTest, ForeachOverRange_NoMallocForDirectRangeCall) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var s = 0; "
+        "for (x in range(0, n)) { s = s + x; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool sawMalloc = false;
+    bool sawRangeBlock = false;
+    for (auto& BB : *fn) {
+        if (BB.getName().starts_with("range."))
+            sawRangeBlock = true;
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getName() == "malloc")
+                        sawMalloc = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(sawMalloc)
+        << "foreach-over-range must not emit malloc for the intermediate array";
+    EXPECT_FALSE(sawRangeBlock)
+        << "the range builtin's loop blocks must not appear; the fused path "
+           "uses frng.* blocks instead";
+}
+
+// Negative: when the collection is a variable bound to range() (not a
+// direct range() call expression), the optimization must not fire.  The
+// alias could otherwise change observable allocation behaviour.
+TEST(CodegenTest, ForeachOverRange_SkippedForBoundVariable) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var r = range(0, n); var s = 0; "
+        "for (x in r) { s = s + x; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool sawMalloc = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getName() == "malloc")
+                        sawMalloc = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(sawMalloc)
+        << "when range() is bound to a var, the array allocation must remain";
+}
+
 // ── NUW on non-negative additions ─────────────────────────────────────────
 
 // At O1+, adding two provably non-negative values should produce an add

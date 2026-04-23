@@ -58,6 +58,7 @@ struct OptStats {
     unsigned callsInlined     = 0; ///< Call sites inlined
     unsigned escapeStackAllocs = 0; ///< Array/struct allocations moved to stack (escape analysis)
     unsigned roGlobalArrays   = 0; ///< Read-only array literals bound directly to a private global (no alloc, no copy)
+    unsigned foreachRangeFused = 0; ///< `for x in range(a,b)` lowered to a direct counting loop (no array alloc)
     unsigned loopsFused       = 0; ///< Loop pairs fused by the @fuse pre-pass
     unsigned borrowsFrozen    = 0; ///< Variables frozen (freeze + alias propagation)
     unsigned independentLoops = 0; ///< Loops annotated with @independent
@@ -92,6 +93,7 @@ struct OptStats {
                   << "  calls inlined            : " << callsInlined << "\n"
                   << "  stack allocs (escape)    : " << escapeStackAllocs << "\n"
                   << "  ro-global arrays         : " << roGlobalArrays << "\n"
+                  << "  foreach-range fused      : " << foreachRangeFused << "\n"
                   << "  loops fused              : " << loopsFused << "\n"
                   << "  borrows frozen           : " << borrowsFrozen << "\n"
                   << "  independent loops        : " << independentLoops << "\n"
