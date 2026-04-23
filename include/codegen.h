@@ -1077,6 +1077,14 @@ class CodeGenerator {
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
     llvm::Value* generateReborrowExpr(ReborrowExpr* expr);
 
+    /// Lower `@range[lo, hi] expr` (RangeAnnotExpr).  Compile-time fails
+    /// when `expr` folds to an integer outside [lo, hi].  Otherwise emits
+    /// `llvm.assume(val >= lo && val <= hi)`, attaches `!range !{lo, hi+1}`
+    /// metadata to load/call results, and (when `lo >= 0`) records the
+    /// value in `nonNegValues_` so later passes can skip non-negativity
+    /// guards.  Pure hint: never affects correctness, only optimization.
+    llvm::Value* generateRangeAnnot(RangeAnnotExpr* expr);
+
     /// Loop fusion pre-pass: walk a BlockStmt's statement list and merge
     /// adjacent ForStmt pairs where both/either has loopHints.fuse=true,
     /// and they share the same start/end bounds.

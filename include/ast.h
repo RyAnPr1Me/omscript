@@ -66,7 +66,8 @@ enum class ASTNodeType {
     ASSUME_STMT,
     COMPTIME_EXPR,  // comptime { ... } — compile-time evaluated block expression
     REBORROW_EXPR,  // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
-    PIPELINE_STMT   // pipeline (i in start...end) { stage name { ... } ... }
+    PIPELINE_STMT,  // pipeline (i in start...end) { stage name { ... } ... }
+    RANGE_ANNOT_EXPR // @range[lo, hi] expr — compiler-level integer range hint
 };
 
 class ASTNode {
@@ -671,6 +672,32 @@ class MoveExpr : public Expression {
 
     explicit MoveExpr(std::unique_ptr<Expression> src)
         : Expression(ASTNodeType::MOVE_EXPR), source(std::move(src)) {}
+};
+
+/// `@range[lo, hi] expr` — internal range-bound annotation.
+///
+/// Asserts to the optimizer that `expr` evaluates to an integer in the
+/// inclusive range [lo, hi].  The annotation is purely a hint:
+///
+///   * If `expr` is a compile-time integer constant outside [lo, hi],
+///     the compiler emits a hard error (no IR is generated).
+///   * Otherwise codegen emits `@llvm.assume(val >= lo && val <= hi)` and,
+///     where applicable, attaches `!range` metadata to the value so LLVM's
+///     LVI / CorrelatedValuePropagation / SCEV / InstCombine can see the
+///     bound.  When `lo >= 0` the value is also added to `nonNegValues_`
+///     so other OmScript passes (loop fusion, index-of-array elision)
+///     skip their own non-negativity guards.
+///
+/// Parsed at parse time; bounds must both be integer literals (with an
+/// optional unary minus) and `lo <= hi` is enforced.
+class RangeAnnotExpr : public Expression {
+  public:
+    int64_t lo = 0;
+    int64_t hi = 0;
+    std::unique_ptr<Expression> inner;
+
+    RangeAnnotExpr(int64_t l, int64_t h, std::unique_ptr<Expression> e)
+        : Expression(ASTNodeType::RANGE_ANNOT_EXPR), lo(l), hi(h), inner(std::move(e)) {}
 };
 
 /// `borrow ref = &x` — non-owning reference hint for alias analysis.

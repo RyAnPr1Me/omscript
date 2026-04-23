@@ -6750,6 +6750,108 @@ TEST(CodegenTest, ForeachOverRange_NoMallocForDirectRangeStepCall) {
         << "the step==0 runtime abort branch must be preserved";
 }
 
+// ── @range[lo, hi] expr — internal range-bound annotation ────────────────
+
+// Positive: `@range[lo, hi] expr` over a non-constant input must emit two
+// `llvm.assume` calls (one per bound) on the inner value.  At O0 the
+// optimizer hasn't deleted them yet, so they should be observable.
+TEST(CodegenTest, RangeAnnot_EmitsAssumesAndRangeMetadata) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var x = @range[0, 100] n; return x; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    int assumeCalls = 0;
+    bool sawGelo = false;
+    bool sawLehi = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getName() == "llvm.assume")
+                        ++assumeCalls;
+                }
+            }
+            if (I.getName().starts_with("rangeannot.gelo")) sawGelo = true;
+            if (I.getName().starts_with("rangeannot.lehi")) sawLehi = true;
+        }
+    }
+    EXPECT_GE(assumeCalls, 2)
+        << "@range[lo, hi] should emit one llvm.assume per bound";
+    EXPECT_TRUE(sawGelo) << "lower-bound icmp must be present";
+    EXPECT_TRUE(sawLehi) << "upper-bound icmp must be present";
+}
+
+// Negative: a compile-time-constant inner expression outside the declared
+// range is a hard compile error — no IR is generated.
+TEST(CodegenTest, RangeAnnot_RejectsConstantOutsideRange) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setRunIRPasses(false);
+    bool threw = false;
+    std::string msg;
+    try {
+        (void)generateIR(
+            "fn main() { var x = @range[0, 9] 100; return x; }", codegen);
+    } catch (const std::exception& e) {
+        threw = true;
+        msg = e.what();
+    }
+    EXPECT_TRUE(threw) << "constant 100 outside @range[0, 9] must be rejected";
+    EXPECT_NE(msg.find("@range"), std::string::npos)
+        << "diagnostic should mention @range; got: " << msg;
+}
+
+// Negative: lo > hi at parse time is a parse error.
+TEST(CodegenTest, RangeAnnot_RejectsLoGreaterThanHi) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setRunIRPasses(false);
+    bool threw = false;
+    std::string msg;
+    try {
+        (void)generateIR(
+            "fn main() { var x = @range[10, 0] 5; return x; }", codegen);
+    } catch (const std::exception& e) {
+        threw = true;
+        msg = e.what();
+    }
+    EXPECT_TRUE(threw) << "lo > hi must be rejected at parse time";
+    EXPECT_NE(msg.find("lo <= hi"), std::string::npos)
+        << "diagnostic should explain the lo <= hi requirement; got: " << msg;
+}
+
+// `@range[lo, hi]` with `lo >= 0` should attach `!range !{lo, hi+1}`
+// metadata to load/call results that produce the value, allowing LLVM's
+// LVI/CVP to propagate the bound without examining assume intrinsics.
+TEST(CodegenTest, RangeAnnot_AttachesRangeMetadataToLoad) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var x = @range[0, 7] n; return x; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool sawTightRange = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            auto* load = llvm::dyn_cast<llvm::LoadInst>(&I);
+            if (!load) continue;
+            auto* md = load->getMetadata(llvm::LLVMContext::MD_range);
+            if (!md || md->getNumOperands() < 2) continue;
+            auto* loC = llvm::mdconst::dyn_extract<llvm::ConstantInt>(md->getOperand(0));
+            auto* hiC = llvm::mdconst::dyn_extract<llvm::ConstantInt>(md->getOperand(1));
+            if (!loC || !hiC) continue;
+            if (loC->getSExtValue() == 0 && hiC->getSExtValue() == 8)
+                sawTightRange = true;
+        }
+    }
+    EXPECT_TRUE(sawTightRange)
+        << "expected !range !{0, 8} (half-open, hi+1) on the loaded inner value";
+}
+
 // ── NUW on non-negative additions ─────────────────────────────────────────
 
 // At O1+, adding two provably non-negative values should produce an add

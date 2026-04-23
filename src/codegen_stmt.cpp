@@ -3684,6 +3684,97 @@ void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
     }
 }
 
+llvm::Value* CodeGenerator::generateRangeAnnot(RangeAnnotExpr* expr) {
+    // ── Compile-time bounds check ────────────────────────────────────────
+    // If the inner expression folds to a known integer constant outside
+    // [lo, hi], emit a hard error.  This catches obvious mistakes like
+    // `@range[0, 9] 100` at compile time, before any IR is produced.
+    if (auto cv = tryFoldInt(expr->inner.get())) {
+        const int64_t v = *cv;
+        if (v < expr->lo || v > expr->hi) {
+            codegenError(
+                "@range[" + std::to_string(expr->lo) + ", " + std::to_string(expr->hi) +
+                "] violated: inner expression folds to " + std::to_string(v) +
+                " which is outside the declared range", expr);
+        }
+    }
+
+    // ── Generate the inner value ─────────────────────────────────────────
+    llvm::Value* val = generateExpression(expr->inner.get());
+    if (!val) return val;
+
+    // Range hints only apply to integer values.  Non-integer results
+    // (strings, pointers, floats) silently pass through — the annotation
+    // is a hint, not a type cast.
+    if (!val->getType()->isIntegerTy()) return val;
+
+    // i1 booleans don't have a meaningful integer range; skip the hint.
+    if (val->getType()->isIntegerTy(1)) return val;
+
+    llvm::IntegerType* intTy = llvm::cast<llvm::IntegerType>(val->getType());
+    const unsigned bits = intTy->getBitWidth();
+
+    // Sanity-clamp: if the declared range exceeds what the underlying
+    // integer type can represent, clamp the assume to the representable
+    // window so we don't emit nonsense that LLVM would simplify away.
+    int64_t lo = expr->lo;
+    int64_t hi = expr->hi;
+    if (bits < 64) {
+        const int64_t typeMin = -(int64_t{1} << (bits - 1));
+        const int64_t typeMax =  (int64_t{1} << (bits - 1)) - 1;
+        if (lo < typeMin) lo = typeMin;
+        if (hi > typeMax) hi = typeMax;
+        if (lo > hi) return val; // nothing to assert
+    }
+
+    llvm::Constant* loC = llvm::ConstantInt::get(intTy, lo, /*IsSigned=*/true);
+    llvm::Constant* hiC = llvm::ConstantInt::get(intTy, hi, /*IsSigned=*/true);
+
+    // ── !range metadata on load/call results ─────────────────────────────
+    // LLVM's !range metadata uses the half-open interval [lo, hi+1).
+    // Skip when hi+1 would overflow (the range covers the full type) or
+    // when lo == hi+1 (empty range — invalid).  Only valid on instructions
+    // that produce integer values: LoadInst, CallInst (incl. invoke), etc.
+    if (auto* inst = llvm::dyn_cast<llvm::Instruction>(val)) {
+        bool canAttach = llvm::isa<llvm::LoadInst>(inst) ||
+                         llvm::isa<llvm::CallInst>(inst) ||
+                         llvm::isa<llvm::InvokeInst>(inst);
+        if (canAttach && hi < std::numeric_limits<int64_t>::max()) {
+            // Don't overwrite a tighter pre-existing !range; intersect
+            // would be ideal but conservatively replacing is safe because
+            // the user-declared range is, by contract, also valid.
+            if (!inst->getMetadata(llvm::LLVMContext::MD_range)) {
+                llvm::Metadata* mdOps[] = {
+                    llvm::ConstantAsMetadata::get(loC),
+                    llvm::ConstantAsMetadata::get(
+                        llvm::ConstantInt::get(intTy, hi + 1, /*IsSigned=*/true))};
+                inst->setMetadata(llvm::LLVMContext::MD_range,
+                                  llvm::MDNode::get(*context, mdOps));
+            }
+        }
+    }
+
+    // ── llvm.assume(val >= lo && val <= hi) ─────────────────────────────
+    // Two separate assumes (joined by `and` would also work, but two calls
+    // give LLVM's AssumptionCache a slightly cleaner per-bound view).
+    llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
+        module.get(), llvm::Intrinsic::assume, {});
+    llvm::Value* geLo = builder->CreateICmpSGE(val, loC, "rangeannot.gelo");
+    builder->CreateCall(assumeFn, {geLo});
+    llvm::Value* leHi = builder->CreateICmpSLE(val, hiC, "rangeannot.lehi");
+    builder->CreateCall(assumeFn, {leHi});
+
+    // ── Non-negativity bookkeeping ──────────────────────────────────────
+    // When lo >= 0, downstream OmScript passes (foreach-range fusion,
+    // CSE for array length, sign-bit elision) can skip their own
+    // non-negativity guards on this value.
+    if (lo >= 0) {
+        nonNegValues_.insert(val);
+    }
+
+    return val;
+}
+
 llvm::Value* CodeGenerator::generateMoveExpr(MoveExpr* expr) {
     // Generate the source value.
     llvm::Value* val = generateExpression(expr->source.get());

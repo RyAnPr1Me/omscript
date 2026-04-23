@@ -5854,6 +5854,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateDict(static_cast<DictExpr*>(expr));
     case ASTNodeType::SCOPE_RESOLUTION_EXPR:
         return generateScopeResolution(static_cast<ScopeResolutionExpr*>(expr));
+    case ASTNodeType::RANGE_ANNOT_EXPR:
+        return generateRangeAnnot(static_cast<RangeAnnotExpr*>(expr));
     case ASTNodeType::COMPTIME_EXPR: {
         // comptime { ... } — evaluate the block at compile time.
         // Primary: use CF-CTRE engine (richer cross-function evaluation + memoisation).
@@ -7015,6 +7017,16 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
             return ConstValue::fromStr(lit->stringValue);
         return std::nullopt;
     }
+    // `@range[lo, hi] expr` is a pure hint at the value level; for
+    // constant-folding purposes it is transparent.  If the inner folds
+    // to a constant within [lo, hi] we return it; if it folds to a
+    // constant outside [lo, hi] we still return it (the same constant
+    // codegen will reject with a hard error — folding mustn't silently
+    // suppress that diagnostic).
+    case ASTNodeType::RANGE_ANNOT_EXPR: {
+        auto* ra = static_cast<RangeAnnotExpr*>(expr);
+        return tryFoldExprToConst(ra->inner.get(), depth + 1);
+    }
     case ASTNodeType::IDENTIFIER_EXPR: {
         auto* id = static_cast<IdentifierExpr*>(expr);
         auto iit = constIntFolds_.find(id->name);
@@ -7421,6 +7433,15 @@ CodeGenerator::tryConstEvalFull(
             if (un->op == "~") return ConstValue::fromInt(~v->intVal);
             if (un->op == "!") return ConstValue::fromInt(v->intVal == 0 ? 1 : 0);
             return std::nullopt;
+        }
+
+        // ── @range[lo, hi] expr ─────────────────────────────────────────
+        // Transparent during constant evaluation: the annotation is a
+        // hint to the optimizer, not a value transform.  Codegen will
+        // separately reject constants outside the declared range.
+        case ASTNodeType::RANGE_ANNOT_EXPR: {
+            auto* ra = static_cast<RangeAnnotExpr*>(e);
+            return evalE(ra->inner.get());
         }
 
         // ── Postfix ++ / -- ──────────────────────────────────────────────
@@ -9084,6 +9105,9 @@ static bool exprUsesVar(Expression* expr, const std::string& varName) {
     if (expr->type == ASTNodeType::ASSIGN_EXPR) {
         auto* asgn = static_cast<AssignExpr*>(expr);
         return exprUsesVar(asgn->value.get(), varName);
+    }
+    if (expr->type == ASTNodeType::RANGE_ANNOT_EXPR) {
+        return exprUsesVar(static_cast<RangeAnnotExpr*>(expr)->inner.get(), varName);
     }
     return false;
 }

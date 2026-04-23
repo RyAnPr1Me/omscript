@@ -3234,6 +3234,47 @@ std::unique_ptr<Expression> Parser::parsePower() {
 }
 
 std::unique_ptr<Expression> Parser::parseUnary() {
+    // ── @range[lo, hi] expr ───────────────────────────────────────────────
+    // Internal range-bound annotation.  Parses two integer literals (each
+    // with an optional unary minus) and wraps the following unary
+    // expression in a RangeAnnotExpr.  The pair is required to satisfy
+    // lo <= hi at parse time; codegen additionally errors out if `expr`
+    // is a compile-time constant outside [lo, hi].
+    //
+    // The annotation binds tighter than any binary operator (it sits in
+    // unary position), so `@range[0,9] x + 1` parses as `(@range[0,9] x) + 1`.
+    if (check(TokenType::AT) && current + 1 < tokens.size() &&
+        tokens[current + 1].type == TokenType::IDENTIFIER &&
+        tokens[current + 1].lexeme == "range" &&
+        current + 2 < tokens.size() &&
+        tokens[current + 2].type == TokenType::LBRACKET) {
+        const Token atTok = tokens[current];
+        advance(); // '@'
+        advance(); // 'range'
+        advance(); // '['
+        auto parseSignedInt = [this](const char* what) -> int64_t {
+            bool neg = false;
+            if (match(TokenType::MINUS)) neg = true;
+            const Token lit = consume(TokenType::INTEGER,
+                std::string("Expected integer ") + what + " in @range[lo, hi]");
+            int64_t v = static_cast<int64_t>(lit.intValue);
+            return neg ? -v : v;
+        };
+        const int64_t lo = parseSignedInt("lo");
+        consume(TokenType::COMMA, "Expected ',' between lo and hi in @range[lo, hi]");
+        const int64_t hi = parseSignedInt("hi");
+        consume(TokenType::RBRACKET, "Expected ']' to close @range[lo, hi]");
+        if (lo > hi) {
+            error("@range[lo, hi] requires lo <= hi (got lo=" +
+                  std::to_string(lo) + ", hi=" + std::to_string(hi) + ")");
+        }
+        auto inner = parseUnary();
+        auto node = std::make_unique<RangeAnnotExpr>(lo, hi, std::move(inner));
+        node->line = atTok.line;
+        node->column = atTok.column;
+        return node;
+    }
+
     if (match(TokenType::MINUS) || match(TokenType::NOT) || match(TokenType::TILDE)) {
         const Token opToken = tokens[current - 1];
         auto operand = parseUnary();
