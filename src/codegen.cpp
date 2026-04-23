@@ -2115,7 +2115,13 @@ llvm::Function* CodeGenerator::getOrDeclareSrand() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    // Deliberately *not* adding NoSync: srand mutates a hidden global PRNG
+    // that rand() reads.  While `inaccessibleMemOnly` already prevents the
+    // optimizer from reordering srand past rand(), omitting NoSync adds a
+    // belt-and-braces ordering guarantee so future passes that treat NoSync
+    // as an excuse to hoist/sink a call cannot move the seed relative to
+    // the consumer.  srand is called at most once per program, so the lost
+    // "nosync"-only optimization is negligible.
     // srand() only modifies global PRNG state (inaccessible to the caller);
     // it must not be reordered past rand() but can float past local stores.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context,

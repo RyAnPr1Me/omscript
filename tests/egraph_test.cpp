@@ -580,7 +580,7 @@ TEST(EGraphTest, ExtractPrefersCheaper) {
     auto rules = getAlgebraicRules();
     g.saturate(rules);
 
-    CostModel model;
+    egraph::CostModel model;
     ENode best = g.extract(g.find(expr), model);
 
     // The cost model should prefer x+x (cost: 1) over x*2 (cost: 3)
@@ -598,7 +598,7 @@ TEST(EGraphTest, ExtractConstantFolded) {
     auto rules = getAllRules();
     g.saturate(rules);
 
-    CostModel model;
+    egraph::CostModel model;
     ENode best = g.extract(g.find(expr), model);
 
     // Should extract the constant 30 (cheapest representation)
@@ -784,7 +784,7 @@ TEST(EGraphTest, SubZeroRight) {
 }
 
 TEST(EGraphTest, CostModelPreferences) {
-    CostModel model;
+    egraph::CostModel model;
 
     // Constants are cheapest
     ENode constNode(Op::Const, 42LL);
@@ -2623,7 +2623,7 @@ TEST(EGraphTest, ExtractDAGSharing) {
     // Use sum twice: sum + sum
     ClassId doubled = g.addBinOp(Op::Add, sum, sum);
 
-    CostModel model;
+    egraph::CostModel model;
     ENode extracted = g.extract(doubled, model);
     EXPECT_EQ(extracted.op, Op::Add);
 }

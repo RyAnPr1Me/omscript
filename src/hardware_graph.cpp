@@ -9263,11 +9263,15 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         unsigned bottomUpCycles = buMax;
 
         // If bottom-up produces fewer cycles, use its instruction order.
+        // `buOrder` is bottom-up (sinks first, deeper defs last); for IR
+        // emission we need topological order (defs before uses), so reverse.
+        // Without this reversal the emitted IR places consumers before their
+        // producers and fails module verification.
         if (bottomUpCycles < topDownCycles) {
             scheduled.clear();
             scheduled.reserve(n);
-            for (unsigned id : buOrder)
-                scheduled.push_back(moveable[id]);
+            for (auto it = buOrder.rbegin(); it != buOrder.rend(); ++it)
+                scheduled.push_back(moveable[*it]);
             maxCycle = bottomUpCycles;
         }
     }
