@@ -180,9 +180,9 @@ The following identifiers are reserved as keywords. They are grouped by category
 **Exception handling:**
 | Keyword | Purpose |
 |---------|---------|
-| `try` | Exception-handling block |
-| `catch` | Exception handler |
-| `throw` | Raise exception |
+| `catch` | Top-level handler block: `catch(N) { ... }` (see §16) |
+| `throw` | Raise an integer error code: `throw 42;` (see §16) |
+| `try` | **Reserved** for future use — not currently a parser keyword (no `try { }` block exists in the language) |
 
 **Ownership and memory:**
 | Keyword | Purpose |
@@ -4538,90 +4538,175 @@ when (c) {
 
 ## 16. Error Handling
 
+OmScript's error-handling model is **deliberately minimal** and very different from C++/Java/Python exceptions:
+
+- There is **no `try { ... }` block.** The `try` keyword is reserved by the lexer but unused by the parser.
+- A `catch(N) { ... }` block is a **top-level statement inside a function body**, not a clause attached to a `try`.
+- `throw expr;` evaluates `expr` to an `i64` "error code" and dispatches via a compile-time **switch table** to the matching `catch(N)` block in the same function. There is no exception variable, no message payload, no stack object, and no inheritance hierarchy.
+- There is **no stack unwinding.** Destructors / `defer` blocks (§7.6) registered in stack frames between the throw and the matching catch are **not run**. Heap allocations made between the two are leaked.
+- Compilation lowers `throw` directly to an LLVM `switch` instruction — there is no `setjmp`/`longjmp`, no DWARF unwind tables, and no runtime exception object.
+
+This design makes errors essentially zero-cost when not raised (a tracked basic block per `catch` and one `switch` per `throw`) and gives the optimizer full visibility into the control flow.
+
 ### 16.1 `throw expr;`
 
-**Status:** Parsed but NOT implemented in code generation. Future feature for exception-like behavior.
-
----
-
-### 16.2 `try { ... } catch (e) { ... }`
-
 **Syntax:**
-```omscript
-try {
-    // code that may throw
-} catch (e) {
-    // handle error
-}
+```ebnf
+throw_stmt ::= 'throw' expression ';'
 ```
 
-**Implementation:**
-- Uses C `setjmp`/`longjmp` for control flow.
-- `try` block sets up a jump buffer.
-- `throw` calls `longjmp` to transfer control to the `catch` block.
-- Exception value is passed via a thread-local global variable.
+**Semantics:**
+1. `expression` is evaluated and coerced to `i64`. (Any non-integer value is implicitly normalized.)
+2. The compiler emits an LLVM `switch` against the value, with a case arm for every `catch(N)` block in the **enclosing function only**.
+3. If a case key matches, control jumps directly to that handler block — execution does not return.
+4. If no key matches (or the function has no `catch` blocks at all), the program prints `Runtime error: unmatched throw` (or `unhandled throw at line N` when there are no handlers at all) and calls `abort()`.
+
+**Important constraints:**
+- `throw` only dispatches to handlers in the **current function**. Throws **do not propagate up the call stack** — there is no unwinding. A `throw` in a callee with no matching local `catch` aborts the program even if the caller has a matching `catch`.
+- Because dispatch is a `switch` over the integer value, only **integer literals** (or values equal to one) can match. The catch key must be an integer or string literal — see §16.2.
+- String catch keys are mapped to internal integer IDs at compile time. This means **string throws practically only match if you `throw <same-string-literal>;` from the same translation unit** and the codegen routes that literal through the same id-assigning path. For runtime-computed strings this will not match — prefer integer codes.
 
 **Example:**
 ```omscript
-fn may_fail(x) {
+fn check(x) {
     if (x < 0) {
-        throw -1;
+        throw 1;        // "negative" error
     }
-    return x * 2;
+    if (x == 0) {
+        throw 2;        // "zero" error
+    }
+    return 100 / x;
 }
 
 fn main() {
-    try {
-        var y = may_fail(-5);
-        println(y);
-    } catch (e) {
-        println("Error:");
-        println(e);  // -1
-    }
+    var y = check(-5);  // throws 1
+    println(y);         // never reached
     return 0;
+
+    catch(1) {
+        println("negative input");
+        return 1;
+    }
+    catch(2) {
+        println("zero input");
+        return 2;
+    }
 }
 ```
 
 ---
 
-### 16.3 `assert cond, "msg";` / `assert(cond)`
+### 16.2 `catch(N) { ... }`
 
-**Semantics:** If `cond` is false, print `msg` (if provided) and terminate the program via `abort()`.
+**Syntax:**
+```ebnf
+catch_stmt ::= 'catch' '(' (integer_literal | string_literal) ')' block
+```
 
-**Implementation:**
-- Evaluate `cond`.
-- If false: print error message and call `abort()`.
-- If true: continue execution.
+**Placement:** A `catch` block is a **top-level statement of a function body** — it sits alongside other statements, *not* immediately after a `try`. Conceptually a function declares a fixed table of (key → handler) pairs and any `throw` in that function dispatches into the table.
+
+**Restrictions:**
+- The catch key **must be a literal** — an integer (`catch(42)`) or a string (`catch("io_error")`). Variables, expressions, and constants are not allowed.
+- **Duplicate keys in the same function are a compile error** (`Duplicate catch(N) block in the same function`).
+- Catch blocks **cannot be nested inside other blocks** — only top-level statements of the function body are scanned. A `catch` placed inside an `if` or `while` body is effectively dead code.
+- There is **no exception variable** — the `catch (e) { ... }` form does *not* exist. The thrown value is consumed by the `switch` dispatch and is not exposed inside the handler.
+
+**Control flow:**
+- Normal (non-throwing) execution falls through `catch` blocks as if they were not there — the compiler emits a branch around each handler's basic block.
+- After a handler runs, control flows through to whatever statement follows the `catch` in the source (a "merge" block). To stop processing, end the handler with `return` (as in §16.1's example).
+
+**Example — multi-handler function:**
+```omscript
+fn parse_and_use(s: string) {
+    if (str_len(s) == 0) { throw 10; }
+    var n = str_to_int(s);
+    if (n < 0) { throw 20; }
+    return n * 2;
+
+    catch(10) {
+        println("empty input");
+        return -1;
+    }
+    catch(20) {
+        println("negative number");
+        return -2;
+    }
+}
+```
+
+---
+
+### 16.3 `assert(cond)`
+
+**Syntax:** Built-in function, **single argument only**:
+```ebnf
+assert_call ::= 'assert' '(' expression ')'
+```
+
+> **Note:** OmScript's `assert` does **not** accept a custom message argument. `assert(cond, "msg")` is a compile error. The runtime always prints `Runtime error: assertion failed at line N`.
+
+**Semantics:**
+1. Evaluates `cond` and coerces to a 1-bit boolean.
+2. If true: returns `1` (the call evaluates as an expression to `1`).
+3. If false: prints `Runtime error: assertion failed at line N` to stdout and calls `abort()`.
+
+**Optimizer hint:** The compiler tags the success branch with a 1000:1 branch-weight, telling LLVM to lay out the failure path cold.
+
+**`assert(cond)` vs `assume(cond)`:**
+
+| Built-in | Failure behaviour | Compiler treatment |
+| --- | --- | --- |
+| `assert(cond)` | Aborts the program at runtime | Emits a real check |
+| `assume(cond)` | **Undefined behaviour** if violated | Lowers to `llvm.assume` — no runtime check, used as an optimization hint (§7.10) |
+
+Use `assert` for safety-critical invariants you want enforced. Use `assume` only when you can prove the predicate holds and want the optimizer to exploit it.
 
 **Example:**
 ```omscript
-assert(x > 0, "x must be positive");
-assert(y != 0);  // no message
+fn divide(a: int, b: int) {
+    assert(b != 0);   // aborts on b == 0 with line number
+    return a / b;
+}
 ```
 
 ---
 
 ### 16.4 Runtime error model
 
-**Mechanism:** Runtime errors (bounds checks, divide-by-zero, assertion failures) print an error message to stderr and call `abort()` or `llvm.trap`, terminating the program immediately.
+Runtime errors in OmScript fall into three categories, all of which **terminate the program immediately** via `abort()` (or LLVM's `llvm.trap` for some classes). There is **no stack unwinding, no destructor invocation, and no opportunity to handle the error** — they are program-fatal.
 
-**No stack unwinding:** OmScript does NOT unwind the stack or run destructors on error (no RAII-style cleanup).
+| Error class | Trigger | Message form |
+| --- | --- | --- |
+| Bounds check | Out-of-range array / string index | `Runtime error: index out of bounds` |
+| Division by zero | Integer `/` or `%` with zero divisor | `Runtime error: division by zero` |
+| Zero-step loop | `for (i in 0...10...0)` | `Runtime error: for loop step is zero` |
+| Assertion failure | `assert(false)` | `Runtime error: assertion failed at line N` |
+| Unmatched throw | `throw N;` with no `catch(N)` in the function | `Runtime error: unmatched throw` |
+| Unhandled throw | `throw N;` in a function with **no** catch blocks at all | `Runtime error: unhandled throw at line N` |
+
+Heap allocations live until program exit (or until the OS reclaims them on `abort`). User-visible side effects (file I/O, stdout buffers) occur in whatever state they were in when the trap fired — buffered output may be lost.
 
 ---
 
 ### 16.5 Compile-time vs runtime errors
 
-**Compile-time errors:**
-- Syntax errors
-- Type mismatches (when detected)
-- Undefined variables
-- OPTMAX restrictions violations
+Errors are reported in two tiers:
 
-**Runtime errors:**
-- Out-of-bounds array/string access
-- Division by zero
-- Assertion failures
-- Try-catch throws
+**Compile-time errors** — produced by the lexer, parser, or code generator before any code is emitted. The compiler exits with a non-zero status and prints a diagnostic with file, line, and (where available) column.
+
+| Class | Examples |
+| --- | --- |
+| Lexical | Unterminated string, invalid character, malformed numeric literal |
+| Syntactic | Missing `;`, mismatched braces, unexpected token |
+| Semantic | Undefined variable / function, duplicate `catch` key, `thread_create` non-literal arg, OPTMAX violation (§18.2) |
+| Type | OPTMAX type-annotation requirement, integer-cast on incompatible type |
+| Resource | Source file > 100 MB, parser nesting depth > 256, IR > 1,000,000 instructions |
+
+**Runtime errors** — produced by checks inserted into the generated code. All of them are program-fatal (see §16.4).
+
+**Recoverable vs non-recoverable:**
+- **Recoverable (within a function):** `throw N;` matched by a local `catch(N)` block.
+- **Non-recoverable:** every other runtime error class. Bounds, divide-by-zero, asserts, and unmatched throws all abort the process.
 
 ---
 
