@@ -104,14 +104,14 @@ TEST(ParserTest, VarDecl) {
 }
 
 TEST(ParserTest, ConstDecl) {
-    auto program = parse("fn main() { const y = 5; }");
+    auto program = parse("fn main() { const y:i64 = 5; }");
     auto* var = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(var, nullptr);
     EXPECT_TRUE(var->isConst);
 }
 
 TEST(ParserTest, VarDeclNoInit) {
-    auto program = parse("fn main() { var x; }");
+    auto program = parse("fn main() { var x:i64; }");
     auto* var = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
     ASSERT_NE(var, nullptr);
     EXPECT_EQ(var->initializer, nullptr);
@@ -482,7 +482,7 @@ TEST(ParserTest, OptmaxParamMissingType) {
 }
 
 TEST(ParserTest, OptmaxVarMissingType) {
-    EXPECT_THROW(parse("OPTMAX=: fn foo(x: int) { var y = 5; } OPTMAX!:"), std::runtime_error);
+    EXPECT_THROW(parse("OPTMAX=: fn foo(x: int) { var y:i64 = 5; } OPTMAX!:"), std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------
@@ -513,7 +513,7 @@ TEST(ParserTest, OptmaxErrorDoesNotLeakUnterminatedBlock) {
     // The error message should be exactly the annotation error, NOT also
     // "Unterminated OPTMAX block".
     try {
-        parse("OPTMAX=: fn foo(x: int) { var y = 5; } OPTMAX!: fn main() { return 0; }");
+        parse("OPTMAX=: fn foo(x: int) { var y:i64 = 5; } OPTMAX!: fn main() { return 0; }");
         FAIL() << "Expected std::runtime_error";
     } catch (const std::runtime_error& e) {
         std::string msg = e.what();
@@ -528,7 +528,7 @@ TEST(ParserTest, OptmaxErrorNoCascadingFnErrors) {
     // "Expected 'fn'" errors for every keyword token in the remainder of the
     // function body.
     try {
-        parse("OPTMAX=: fn foo(x: int) { var y:i64 = 5; for (i: int in 0...10) { return i; } } OPTMAX!: fn main() { return "
+        parse("OPTMAX=: fn foo(x: int) { var y = 5; for (i: int in 0...10) { return i; } } OPTMAX!: fn main() { return "
               "0; }");
         FAIL() << "Expected std::runtime_error";
     } catch (const std::runtime_error& e) {
@@ -693,7 +693,7 @@ TEST(ParserTest, MultiVarDeclaration) {
 }
 
 TEST(ParserTest, MultiConstDeclaration) {
-    auto program = parse("fn main() { const x = 10, y = 20; }");
+    auto program = parse("fn main() { const x:i64 = 10, y = 20; }");
     auto& stmts = program->functions[0]->body->statements;
     ASSERT_EQ(stmts.size(), 2u);
     auto* x = dynamic_cast<omscript::VarDecl*>(stmts[0].get());

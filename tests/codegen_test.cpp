@@ -702,7 +702,7 @@ TEST(CodegenTest, ForLoopDescending) {
 
 TEST(CodegenTest, ConstModificationError) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_THROW(generateIR("fn main() { const c = 5; c = 10; return c; }", codegen), std::runtime_error);
+    EXPECT_THROW(generateIR("fn main() { const c:i64 = 5; c = 10; return c; }", codegen), std::runtime_error);
 }
 
 // ===========================================================================
@@ -810,17 +810,17 @@ TEST(CodegenTest, NestedScoping) {
 
 TEST(CodegenTest, ConstPostfixError) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_THROW(generateIR("fn main() { const c = 5; c++; return c; }", codegen), std::runtime_error);
+    EXPECT_THROW(generateIR("fn main() { const c:i64 = 5; c++; return c; }", codegen), std::runtime_error);
 }
 
 TEST(CodegenTest, ConstPrefixError) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_THROW(generateIR("fn main() { const c = 5; ++c; return c; }", codegen), std::runtime_error);
+    EXPECT_THROW(generateIR("fn main() { const c:i64 = 5; ++c; return c; }", codegen), std::runtime_error);
 }
 
 TEST(CodegenTest, ConstCompoundAssignError) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_THROW(generateIR("fn main() { const c = 5; c += 1; return c; }", codegen), std::runtime_error);
+    EXPECT_THROW(generateIR("fn main() { const c:i64 = 5; c += 1; return c; }", codegen), std::runtime_error);
 }
 
 // ===========================================================================
@@ -6615,13 +6615,13 @@ TEST(CodegenTest, DeepConstEval_LenOfConstantReturningFunction) {
         << "make_str() should be short-circuited — no call site expected";
 }
 
-// 2. const s = make_str(); len(s) should also fold — the const var inherits
+// 2. const s:i64 = make_str(); len(s) should also fold — the const var inherits
 //    the compile-time string value from the function's return analysis.
 TEST(CodegenTest, DeepConstEval_ConstVarFromConstantReturningFunction) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
         "fn make_str() { return \"hi\"; }"
-        "fn main() { const s = make_str(); return len(s); }",
+        "fn main() { const s:i64 = make_str(); return len(s); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* mainFn = mod->getFunction("main");
@@ -6643,11 +6643,11 @@ TEST(CodegenTest, DeepConstEval_LenOfStringConcatLiterals) {
         << "len(\"a\" + \"b\" + \"c\") should fold to 3 at compile time";
 }
 
-// 4. const s = "hello"; len(s + " world") should fold.
+// 4. const s:i64 = "hello"; len(s + " world") should fold.
 TEST(CodegenTest, DeepConstEval_LenOfConstVarConcat) {
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR(
-        "fn main() { const s = \"hello\"; return len(s + \" world\"); }",
+        "fn main() { const s:i64 = \"hello\"; return len(s + \" world\"); }",
         codegen);
     ASSERT_NE(mod, nullptr);
     auto* mainFn = mod->getFunction("main");
@@ -6675,7 +6675,7 @@ TEST(CodegenTest, DeepConstEval_TwoHopChainFolding) {
 }
 
 // 6. Integer constant-returning function: fn get_n() { return 42; }
-//    const n = get_n() should record n as a compile-time constant so that
+//    const n:i64 = get_n() should record n as a compile-time constant so that
 //    subsequent uses don't emit a call.
 TEST(CodegenTest, DeepConstEval_IntConstantReturningFunction) {
     CodeGenerator codegen(OptimizationLevel::O1);
