@@ -5737,82 +5737,147 @@ See parser registration in `parser.cpp` lines 52-100. Key entries:
 
 ## 20. Concurrency
 
+OmScript's concurrency model is a thin layer over the host's POSIX threading primitives (`pthread_*`). All thread and mutex handles are passed around as plain `i64` values that wrap the underlying `pthread_t` / `pthread_mutex_t*`. There is no managed thread pool, no async runtime, no green threads, and no garbage-collection-aware safe-point machinery — threads run to completion, and the user is responsible for joining them and freeing mutexes.
+
+**Model summary:**
+
+| Concept | Backing primitive | Handle type |
+| --- | --- | --- |
+| Thread | `pthread_create` / `pthread_join` | `i64` (pthread_t) |
+| Mutex | `pthread_mutex_*` | `i64` (`pthread_mutex_t*` cast to int) |
+| Parallel loop | `@parallel for` → loop-parallelism metadata | n/a |
+| Atomics | — | not yet implemented |
+
 ### 20.1 Threads
 
-#### `thread_create(fn, arg) → i64`
+#### 20.1.1 `thread_create(fn_name: string) → i64`
 
-Spawn a new thread executing `fn(arg)`. Returns thread handle (pthread_t as i64).
+**Description:** Spawn a new OS thread that calls the OmScript function named by `fn_name`. The argument **must be a string literal** containing the name of an existing top-level function — it is resolved at compile time, not at runtime, and a non-literal or unknown name is a compile-time error.
+
+The spawned thread executes `fn_name()` with **no arguments**; the target function's return value is discarded. To pass data into the thread, use module-level (`global var`) state guarded by a mutex.
+
+**Returns:** A thread handle (`pthread_t` reinterpreted as `i64`). Pass this value to `thread_join`.
+
+**Errors:**
+- *Compile-time:* `thread_create requires a string literal function name` if the argument is not a string literal.
+- *Compile-time:* `thread_create: unknown function 'foo'` if the named function does not exist in the current translation unit.
 
 **Example:**
 ```omscript
-fn worker(arg) {
-    println(arg);
-    return 0;
+global var counter: int = 0;
+global var lock: int = 0;  // initialized in main()
+
+fn worker() {
+    mutex_lock(lock);
+    counter = counter + 1;
+    mutex_unlock(lock);
 }
 
-var t = thread_create(worker, 42);
+fn main() {
+    lock = mutex_new();
+    var t1 = thread_create("worker");
+    var t2 = thread_create("worker");
+    thread_join(t1);
+    thread_join(t2);
+    mutex_destroy(lock);
+    println(counter);   // 2
+    return 0;
+}
 ```
 
 ---
 
-#### `thread_join(i64) → i64`
+#### 20.1.2 `thread_join(tid: i64) → i64`
 
-Wait for thread to complete. Returns the thread's return value.
+**Description:** Block the calling thread until the thread identified by `tid` has terminated. Internally calls `pthread_join(tid, NULL)` — the joined thread's return value is **discarded**, not returned to OmScript.
+
+**Returns:** Always `0`. (The return value exists only so the call can be used as an expression.)
+
+**Errors:** Passing an invalid or already-joined `tid` invokes platform-defined behaviour from `pthread_join` (typically returns `EINVAL` or `ESRCH`); OmScript does not surface this.
 
 **Example:**
 ```omscript
-var result = thread_join(t);
+var t = thread_create("worker");
+thread_join(t);
 ```
 
 ---
 
 ### 20.2 Mutexes
 
-#### `mutex_new() → i64`
+Mutexes are heap-allocated `pthread_mutex_t` structures, returned as opaque `i64` handles. The allocation is sized at **64 bytes** — enough to cover `pthread_mutex_t` on every supported platform (40 bytes on Linux x86_64, 64 bytes on macOS) — and initialized via `pthread_mutex_init` with default attributes. Default-attribute mutexes are **non-recursive**: a thread that locks the same mutex twice without unlocking deadlocks.
 
-Allocate and initialize a new mutex. Returns mutex handle (pthread_mutex_t* as i64).
+> **Note:** OmScript currently exposes only the four operations below. There is **no `mutex_try_lock`**, no read/write lock, and no condition variables.
 
----
+#### 20.2.1 `mutex_new() → i64`
 
-#### `mutex_lock(i64) → i64`
+**Description:** Allocate a new `pthread_mutex_t`, initialize it with default attributes (`pthread_mutex_init(m, NULL)`), and return its address as an `i64`.
 
-Acquire the mutex (blocks if already held). Returns 0.
+**Returns:** A mutex handle. Always non-zero on success; allocation failure is not surfaced (the call may abort if `malloc` fails).
 
----
+**Lifetime:** The caller owns the mutex and must call `mutex_destroy` to release the underlying memory.
 
-#### `mutex_unlock(i64) → i64`
-
-Release the mutex. Returns 0.
-
----
-
-#### `mutex_try_lock(i64) → i64`
-
-Attempt to acquire the mutex without blocking. Returns 0 on success, non-zero on failure.
+**Example:**
+```omscript
+var m = mutex_new();
+```
 
 ---
 
-#### `mutex_destroy(i64) → i64`
+#### 20.2.2 `mutex_lock(m: i64) → i64`
 
-Destroy the mutex and free resources. Returns 0.
+**Description:** Acquire the mutex `m`, blocking the calling thread until it becomes available. Wraps `pthread_mutex_lock`.
+
+**Returns:** Always `0`.
+
+**Errors:** Locking a mutex that the current thread already holds (with default, non-recursive attributes) deadlocks.
+
+**Example:**
+```omscript
+mutex_lock(m);
+// critical section
+mutex_unlock(m);
+```
+
+---
+
+#### 20.2.3 `mutex_unlock(m: i64) → i64`
+
+**Description:** Release the mutex `m`. Wraps `pthread_mutex_unlock`. The current thread must own the mutex; unlocking a mutex held by another thread is undefined behaviour at the pthread level.
+
+**Returns:** Always `0`.
+
+---
+
+#### 20.2.4 `mutex_destroy(m: i64) → i64`
+
+**Description:** Destroy the mutex via `pthread_mutex_destroy` and free its backing allocation. After this call the handle `m` is invalid and **must not be used**.
+
+**Returns:** Always `0`.
+
+**Errors:** Destroying a locked mutex is undefined behaviour at the pthread level.
 
 ---
 
 ### 20.3 Atomics
 
-**Not implemented** in the current code generation. Future feature.
+**Status:** Not implemented in the current code generator. There are no atomic load / store / RMW built-ins or atomic types. Use `mutex_lock` / `mutex_unlock` to protect shared state.
 
 ---
 
-### 20.4 Memory model guarantees
+### 20.4 Memory model
 
-**Sequential consistency:** OmScript does NOT provide explicit memory ordering controls. All memory operations use the default LLVM memory model (unordered loads/stores + acquire/release semantics for pthread primitives).
+OmScript does **not** expose explicit memory ordering controls (no equivalent of C++ `memory_order_*`). The effective guarantees come from the LLVM defaults plus the pthread primitives:
+
+- Plain loads and stores compile to LLVM unordered memory operations — they are **not** sequentially consistent across threads, and the compiler is permitted to reorder them.
+- `mutex_lock` and `mutex_unlock` provide acquire / release semantics respectively (inherited from `pthread_mutex_*`), which is sufficient to publish writes made inside a critical section to the next thread that locks the same mutex.
+- All shared mutable state must be protected by a mutex; relying on plain reads/writes from multiple threads is a data race and is undefined behaviour.
 
 ---
 
 ### 20.5 `parallel for`
 
-**Syntax:** (from Part 1 section 8.12)
+**Syntax:** (full grammar in §8.12)
 ```omscript
 @parallel
 for (i in 0...n) {
@@ -5820,11 +5885,12 @@ for (i in 0...n) {
 }
 ```
 
-**Semantics:** The loop body is executed concurrently across multiple threads. The runtime partitions the iteration space and spawns worker threads.
+**Semantics:** Annotates the loop with LLVM loop-parallelism metadata (`llvm.loop.parallel_accesses` and friends), enabling auto-vectorization and parallel-execution back-ends. The loop body is **not** automatically dispatched to worker threads by the OmScript runtime; parallel execution depends on the LLVM optimizer recognizing the form and on target-specific lowering.
 
 **Restrictions:**
-- Loop body must be thread-safe (no shared mutable state without synchronization).
-- Loop iterations must be independent.
+- Iterations must be independent — no loop-carried data dependencies.
+- Body must not rely on a particular execution order or have observable side effects between iterations (I/O, mutex operations, etc.).
+- Inside `OPTMAX` blocks the body must additionally satisfy OPTMAX restrictions (§18).
 
 ---
 
@@ -5911,64 +5977,120 @@ if (file_exists("config.txt")) {
 
 ## 22. Lambda Expressions
 
+OmScript lambdas are anonymous functions with a lightweight `|params| body` syntax, designed primarily for use with the higher-order array built-ins (`array_map`, `array_filter`, `array_reduce`, `array_any`, `array_every`, `array_count`, `array_find`).
+
+**Implementation model — important:** Lambdas are *not* runtime closures. The parser desugars every lambda into a top-level named function (`__lambda_N`) and replaces the lambda expression with a string literal containing that name. The higher-order built-ins receive that string and resolve it to the generated function at code-gen time. The consequences are:
+
+- Lambdas **cannot capture** variables from the enclosing scope. Reference any non-parameter identifier and you reference a top-level / `global` symbol of the same name, not a local.
+- A lambda's runtime *value* is a `string` (the generated function's name), not a callable. You can store it in a variable, but you cannot directly invoke it as `f(x)` from OmScript code — it can only flow into a built-in that knows how to call it by name.
+- All lambdas with the same body produce distinct generated functions; there is no deduplication.
+
 ### 22.1 Syntax
 
-**Anonymous function:**
-```omscript
-fn (x: i64) -> i64 { return x * 2; }
+```ebnf
+lambda      ::= '|' [params] '|' expression
+params      ::= param { ',' param }
+param       ::= identifier [ ':' type ]
 ```
 
-**Lambda in variable:**
+- The body is **a single expression** (no statement block, no `return` keyword). Whatever the expression evaluates to becomes the function's return value.
+- Parameters with no type annotation default to `i64` (this is the only inferred type — there is no full inference at parse time).
+- Annotate explicitly when the element type is anything else: `|x:float| x * 2.0`, `|s:string| str_len(s)`.
+- Empty parameter list is written as `||`: `var make_zero = || 0;`.
+
+**Examples:**
+
 ```omscript
-var double = fn (x) { return x * 2; };
-var y = double(10);  // 20
+|x| x * 2                    // i64 → i64
+|x:float| x * 2.0            // float → float
+|x, y| x + y                 // (i64, i64) → i64
+|acc, x| acc + x             // for array_reduce
+|s:string| str_len(s)        // string → i64
+|| 42                        // () → i64
 ```
 
 ---
 
-### 22.2 Captures
+### 22.2 Captures (not supported)
 
-**Not fully implemented.** Current parser supports lambda syntax but capture semantics (by-value, by-reference) are not yet complete.
+Lambdas cannot capture local variables. The following does **not** do what it appears to:
 
-**Expected behavior:**
-- Closures should capture local variables from enclosing scope.
-- Captured variables are stored in a heap-allocated closure environment.
+```omscript
+fn scale(arr, factor) {
+    return array_map(arr, |x| x * factor);   // ❌ `factor` is not captured
+}
+```
+
+Inside the generated `__lambda_N` function, `factor` is an unbound name — it resolves to a top-level / `global var` named `factor` if one exists, or fails at codegen otherwise. Workarounds:
+
+1. **Promote to global state** (and serialize access if multiple threads are involved).
+2. **Bake the value into a literal lambda:**
+   ```omscript
+   fn scale_by_2(arr) {
+       return array_map(arr, |x| x * 2);    // ✅ literal 2
+   }
+   ```
+3. **Write a named helper function** and reference it by name (which is what the higher-order built-ins want anyway):
+   ```omscript
+   fn double(x) { return x * 2; }
+   var doubled = array_map(arr, "double");  // pass the name as a string
+   ```
 
 ---
 
 ### 22.3 First-class function values
 
-**Supported:** Functions can be stored in variables and passed as arguments.
+The built-ins that accept a lambda also accept a **string literal containing a function name**, because that's what a lambda compiles to. Both forms are interchangeable:
 
-**Example:**
 ```omscript
-fn apply(f, x) {
-    return f(x);
-}
-
 fn square(n) { return n * n; }
 
-var result = apply(square, 5);  // 25
+var a = array_map([1, 2, 3], |x| x * x);  // lambda form
+var b = array_map([1, 2, 3], "square");   // named-function form (identical effect)
 ```
+
+Functions cannot be passed as bare identifiers in this position — only string literals or lambdas. This is what allows the parser to resolve the target at compile time and emit a direct call.
 
 ---
 
 ### 22.4 Higher-order built-in interaction
 
-See section 11.7 for array higher-order functions (`map`, `filter`, `reduce`, etc.).
+The following built-ins accept a lambda or a function-name string. See §11.7 for full signatures.
+
+| Built-in | Lambda shape |
+| --- | --- |
+| `array_map(arr, fn)` | `|x| → T` |
+| `array_filter(arr, fn)` | `|x| → bool` |
+| `array_reduce(arr, fn, init)` | `|acc, x| → acc` |
+| `array_any(arr, fn)` | `|x| → bool` |
+| `array_every(arr, fn)` | `|x| → bool` |
+| `array_count(arr, fn)` | `|x| → bool` |
+| `array_find(arr, fn)` | `|x| → bool`, returns first matching index or `-1` |
 
 ---
 
 ### 22.5 Pipe-forward and spread interaction
 
-**Pipe-forward:** `x |> f |> g` desugars to `g(f(x))`.
+Because a lambda evaluates to a function-name string and **cannot be invoked as a normal call**, it cannot appear directly on the right side of `|>`. This is illegal:
 
-**Spread:** `...array` expands array elements as function arguments.
+```omscript
+5 |> |x| x * 2     // ❌ pipe target must be a callable named function
+```
 
-**Example:**
+Use a named function, or pipe into a higher-order built-in:
+
+```omscript
+fn double(x) { return x * 2; }
+var y = 5 |> double;                          // ✅ 10
+
+var doubled = [1, 2, 3] |> array_map(|x| x * 2);  // ✅ — array_map is the pipe target
+```
+
+The spread operator `...arr` expands an array as positional arguments to a *function call*, independently of any lambdas:
+
 ```omscript
 var a = [1, 2, 3];
-var sum = sum(...a);  // sum(1, 2, 3)
+var s = sum(...a);   // sum(1, 2, 3) — `sum` is a built-in, not a lambda
 ```
 
 ---

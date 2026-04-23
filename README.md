@@ -256,17 +256,18 @@ write("log.txt", "entry\n");                  // alias for file_write
 
 ### Threading
 ```omscript
-fn worker(arg) {
-    println(arg);
-    return 0;
+fn worker() {
+    println("hello from thread");
 }
 
 fn main() {
-    var t = thread_create(worker, 99);
+    var t = thread_create("worker");   // function name as a string literal
     thread_join(t);
     return 0;
 }
 ```
+`thread_create` takes the **name of a top-level function as a string literal** and runs it on a new pthread with no arguments. Use `global var` + a mutex to communicate with the worker. See §20 of the Language Reference for the full concurrency model.
+
 Mutex primitives: `mutex_new()`, `mutex_lock(m)`, `mutex_unlock(m)`, `mutex_destroy(m)`.
 
 ### Lambda Expressions
