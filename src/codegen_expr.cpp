@@ -6090,22 +6090,46 @@ std::string CodeGenerator::resolveStructType(Expression* objExpr) const {
 
 size_t CodeGenerator::resolveFieldIndex(const std::string& structType, const std::string& fieldName,
                                         const ASTNode* errorNode) {
+    return resolveField(structType, fieldName, errorNode).index;
+}
+
+CodeGenerator::ResolvedField
+CodeGenerator::resolveField(const std::string& structHint, const std::string& fieldName,
+                            const ASTNode* errorNode) {
+    ResolvedField rf{0, "", nullptr, nullptr, ""};
+
+    auto fillFrom = [&](const std::string& sname, size_t idx) {
+        rf.index = idx;
+        rf.structName = sname;
+        rf.structType = getOrCreateStructLLVMType(sname);
+        auto declIt = structFieldDecls_.find(sname);
+        if (declIt != structFieldDecls_.end() && idx < declIt->second.size()) {
+            rf.fieldTypeAnnot = declIt->second[idx].typeName;
+        }
+        if (rf.structType && idx < rf.structType->getNumElements())
+            rf.fieldType = rf.structType->getElementType(static_cast<unsigned>(idx));
+        else
+            rf.fieldType = getDefaultType();
+    };
+
     // If we know the exact struct type, use it directly.
-    if (!structType.empty()) {
-        auto it = structDefs_.find(structType);
+    if (!structHint.empty()) {
+        auto it = structDefs_.find(structHint);
         if (it != structDefs_.end()) {
             for (size_t i = 0; i < it->second.size(); i++) {
                 if (it->second[i] == fieldName) {
-                    return i;
+                    fillFrom(structHint, i);
+                    return rf;
                 }
             }
-            codegenError("Struct '" + structType + "' has no field '" + fieldName + "'", errorNode);
+            codegenError("Struct '" + structHint + "' has no field '" + fieldName + "'", errorNode);
         }
     }
 
     // Fallback: search all struct definitions.  Error if the field is
     // ambiguous (same name at different indices in multiple structs).
     size_t foundIdx = 0;
+    std::string foundStruct;
     bool found = false;
     bool ambiguous = false;
     for (auto& [sname, sfields] : structDefs_) {
@@ -6115,6 +6139,7 @@ size_t CodeGenerator::resolveFieldIndex(const std::string& structType, const std
                     ambiguous = true;
                 }
                 foundIdx = i;
+                foundStruct = sname;
                 found = true;
                 break;
             }
@@ -6126,7 +6151,8 @@ size_t CodeGenerator::resolveFieldIndex(const std::string& structType, const std
     if (!found) {
         codegenError("Unknown field '" + fieldName + "'", errorNode);
     }
-    return foundIdx;
+    fillFrom(foundStruct, foundIdx);
+    return rf;
 }
 
 llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
@@ -6137,123 +6163,158 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     const auto& fields = it->second;
     const size_t numFields = fields.size();
 
-    // Use stack allocation (alloca) for structs.  This avoids malloc overhead
-    // and allows LLVM's mem2reg / SROA passes to promote small structs to
-    // SSA registers, matching C's plain-variable performance.
+    llvm::StructType* sty = getOrCreateStructLLVMType(expr->structName);
+    if (!sty) {
+        codegenError("Failed to build LLVM type for struct '" + expr->structName + "'", expr);
+    }
+
+    // Stack-allocate the real LLVM struct.  Using a StructType (instead of
+    // [N x i64]) lets DataLayout drive field offsets and total size, and
+    // makes the alloca eligible for SROA / mem2reg promotion to SSA registers.
     llvm::Function* curFn = builder->GetInsertBlock()->getParent();
     llvm::IRBuilder<> tmpBuilder(&curFn->getEntryBlock(), curFn->getEntryBlock().begin());
-    llvm::Type* slotTy = getDefaultType();
-    llvm::Value* ptr = tmpBuilder.CreateAlloca(
-        llvm::ArrayType::get(slotTy, numFields), nullptr, "struct.alloca");
-    // Cast to pointer for GEP
-    ptr = builder->CreateBitOrPointerCast(ptr, llvm::PointerType::getUnqual(*context), "struct.ptr");
+    llvm::AllocaInst* structAlloca =
+        tmpBuilder.CreateAlloca(sty, nullptr, "struct.alloca");
+    // Use the DataLayout's preferred alignment for this struct so subsequent
+    // field accesses get the right alignment metadata for free.
+    structAlloca->setAlignment(
+        module->getDataLayout().getPrefTypeAlign(sty));
 
-    // Build field name → index map
+    // Build field-name → index map for the named-field initializer loop below.
     std::unordered_map<std::string, size_t> fieldIndex;
-    for (size_t i = 0; i < fields.size(); i++) {
+    fieldIndex.reserve(numFields);
+    for (size_t i = 0; i < numFields; i++) {
         fieldIndex[fields[i]] = i;
     }
 
-    // Initialize all fields to 0
+    // Zero-initialize every field with a single typed store.  Using a memset
+    // would be equivalent but a per-field store keeps the IR explicit and
+    // lets later assignments be SROA'd individually.
     for (size_t i = 0; i < numFields; i++) {
-        // inbounds: alloca is [numFields x i64], index i ∈ [0, numFields-1].
-        llvm::Value* elemPtr =
-            builder->CreateInBoundsGEP(getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), i), "struct.field.ptr");
-        builder->CreateAlignedStore(llvm::ConstantInt::get(getDefaultType(), 0), elemPtr, llvm::MaybeAlign(8));
+        llvm::Type* elemTy = sty->getElementType(static_cast<unsigned>(i));
+        llvm::Value* fieldPtr = builder->CreateStructGEP(
+            sty, structAlloca, static_cast<unsigned>(i), "struct.field.init.ptr");
+        builder->CreateStore(llvm::Constant::getNullValue(elemTy), fieldPtr);
     }
 
-    // Set provided field values
+    // Fetch the field annotation list (if any) so we know each field's
+    // declared type for value conversion.
+    auto declIt = structFieldDecls_.find(expr->structName);
+
+    // Apply each provided field initializer.
     for (auto& [fieldName, valueExpr] : expr->fieldValues) {
         auto fit = fieldIndex.find(fieldName);
         if (fit == fieldIndex.end()) {
             codegenError("Unknown field '" + fieldName + "' in struct '" + expr->structName + "'", expr);
         }
+        const size_t idx = fit->second;
+        llvm::Type* elemTy = sty->getElementType(static_cast<unsigned>(idx));
+
         llvm::Value* val = generateExpression(valueExpr.get());
-        val = toDefaultType(val);
-        // inbounds: fit->second is a validated index ∈ [0, numFields-1].
-        llvm::Value* elemPtr = builder->CreateInBoundsGEP(
-            getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), fit->second), "struct.field.ptr");
-        builder->CreateAlignedStore(val, elemPtr, llvm::MaybeAlign(8));
-    }
+        // Convert from the expression's natural type to the field's declared
+        // type.  convertTo handles int↔int (sign-extend / truncate),
+        // int↔float, ptr↔int, and is a no-op when types already match.
+        val = convertTo(val, elemTy);
 
-    return builder->CreatePtrToInt(ptr, getDefaultType(), "struct.int");
-}
-
-llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
-    const std::string structType = resolveStructType(expr->object.get());
-    const size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
-
-    llvm::Value* objVal = generateExpression(expr->object.get());
-    objVal = toDefaultType(objVal);
-
-    auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr =
-        objVal->getType()->isPointerTy() ? objVal : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
-    // inbounds: fieldIdx is validated against the declared struct size by
-    // resolveFieldIndex, so it is always within [0, numFields-1].
-    llvm::Value* elemPtr = builder->CreateInBoundsGEP(
-        getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), fieldIdx), "struct.field.load.ptr");
-
-    // Determine alignment from struct field attributes.
-    unsigned fieldAlign = 0;
-    auto declIt = structFieldDecls_.find(structType);
-    const FieldAttrs* attrs = nullptr;
-    if (declIt != structFieldDecls_.end() && fieldIdx < declIt->second.size()) {
-        attrs = &declIt->second[fieldIdx].attrs;
-        if (attrs->align > 0) {
-            fieldAlign = static_cast<unsigned>(attrs->align);
+        llvm::Value* fieldPtr = builder->CreateStructGEP(
+            sty, structAlloca, static_cast<unsigned>(idx), "struct.field.init.ptr");
+        llvm::StoreInst* st = builder->CreateStore(val, fieldPtr);
+        // Per-field TBAA so writes to one field don't appear to alias loads
+        // from sibling fields.  Mirrors the access path in generateFieldAccess.
+        st->setMetadata(llvm::LLVMContext::MD_tbaa,
+                        getOrCreateFieldTBAA(expr->structName, idx));
+        // If the field is marked `cold`, hint the store as non-temporal so
+        // it bypasses the cache, matching generateFieldAssign's behaviour.
+        if (declIt != structFieldDecls_.end() && idx < declIt->second.size() &&
+            declIt->second[idx].attrs.cold) {
+            llvm::Metadata* one[] = {
+                llvm::ConstantAsMetadata::get(
+                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))
+            };
+            st->setMetadata(llvm::LLVMContext::MD_nontemporal,
+                            llvm::MDNode::get(*context, one));
         }
     }
 
-    llvm::LoadInst* load;
-    if (fieldAlign > 0) {
-        load = builder->CreateAlignedLoad(getDefaultType(), elemPtr,
-                                          llvm::MaybeAlign(fieldAlign), "struct.field.val");
+    // The struct value travels through the rest of codegen as a pointer.
+    // Return it as i64 (ptrtoint) so it round-trips cleanly through the
+    // existing convertTo(<i64>, ptr) path used by VarDecl init.
+    return builder->CreatePtrToInt(structAlloca, getDefaultType(), "struct.int");
+}
+
+llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
+    const std::string structHint = resolveStructType(expr->object.get());
+    const ResolvedField rf = resolveField(structHint, expr->fieldName, expr);
+
+    llvm::Value* objVal = generateExpression(expr->object.get());
+
+    // The struct value travels as a pointer.  If we received an integer
+    // (legacy ptrtoint round-trip path), convert it back to a pointer.
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* basePtr = objVal->getType()->isPointerTy()
+                               ? objVal
+                               : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
+
+    // Use a real StructGEP so DataLayout drives the field offset.  When the
+    // struct type is unknown (rare cross-function case) we cannot do this —
+    // fall back to the legacy uniform-i64 GEP so existing programs keep
+    // working.  Note resolveField nearly always provides a struct type.
+    llvm::Type* elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
+    llvm::Value* elemPtr;
+    if (rf.structType) {
+        elemPtr = builder->CreateStructGEP(rf.structType, basePtr,
+                                           static_cast<unsigned>(rf.index),
+                                           "struct.field.load.ptr");
     } else {
-        // All struct fields are i64 and structs are malloc'd (≥ 8-byte aligned),
-        // so the field pointer is always 8-byte aligned.  Using CreateAlignedLoad
-        // communicates this to LLVM's backend for better instruction selection
-        // and enables the same scalar-evolution analysis as other aligned loads.
-        load = builder->CreateAlignedLoad(getDefaultType(), elemPtr,
-                                          llvm::MaybeAlign(8), "struct.field.val");
+        elemPtr = builder->CreateInBoundsGEP(
+            getDefaultType(), basePtr,
+            llvm::ConstantInt::get(getDefaultType(), rf.index), "struct.field.load.ptr");
     }
+
+    // Determine alignment.  Prefer an explicit `align(...)` attribute; else
+    // ask DataLayout for the natural alignment of the field's element type.
+    auto declIt = structFieldDecls_.find(rf.structName);
+    const FieldAttrs* attrs = nullptr;
+    if (declIt != structFieldDecls_.end() && rf.index < declIt->second.size()) {
+        attrs = &declIt->second[rf.index].attrs;
+    }
+    llvm::Align fieldAlign;
+    if (attrs && attrs->align > 0) {
+        fieldAlign = llvm::Align(static_cast<unsigned>(attrs->align));
+    } else {
+        fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
+    }
+
+    llvm::LoadInst* load = builder->CreateAlignedLoad(elemTy, elemPtr,
+                                                      fieldAlign, "struct.field.val");
 
     // OmScript structs are always initialized from struct literals (and
     // subsequent field assignments are always explicit), so every field load
     // is guaranteed to produce a defined value.  !noundef lets LLVM speculate,
-    // hoist, and CSE the load — matching the same annotation on variable
-    // loads (generateIdentifier) and array element loads (generateIndex).
+    // hoist, and CSE the load.
     if (optimizationLevel >= OptimizationLevel::O1) {
         load->setMetadata(llvm::LLVMContext::MD_noundef,
                           llvm::MDNode::get(*context, {}));
     }
 
-    // TBAA: use a per-field type node so different fields of the same struct
-    // do not alias each other.  Each (structType, fieldIdx) pair gets a unique
-    // child of tbaaStructTypeNode_, allowing LLVM to prove that, e.g.,
-    // p.x and p.y are independent loads even when their base pointer is shared.
+    // TBAA: per-field type node so different fields of the same struct do not
+    // alias each other.
     load->setMetadata(llvm::LLVMContext::MD_tbaa,
-                      getOrCreateFieldTBAA(structType, fieldIdx));
+                      getOrCreateFieldTBAA(rf.structName, rf.index));
 
     // Apply LLVM metadata from struct field attributes.
     if (attrs) {
-        // immut → !invariant.load metadata: tells LLVM the value never changes
         if (attrs->immut) {
             load->setMetadata(llvm::LLVMContext::MD_invariant_load,
                               llvm::MDNode::get(*context, {}));
         }
-        // noalias → !alias.scope + !noalias metadata pair.
-        // The scope includes a reference to the domain so LLVM's
-        // ScopedNoAliasAA can reason about aliasing across struct fields.
-        // The scope name includes the struct type and field name to
-        // distinguish different field accesses for better alias analysis.
         if (attrs->noalias) {
             llvm::MDNode* domain = llvm::MDNode::getDistinct(*context,
                 {llvm::MDString::get(*context, "struct.noalias.domain")});
             domain->replaceOperandWith(0, domain);
             llvm::SmallString<64> scopeBuf;
             llvm::StringRef scopeName =
-                (llvm::Twine("struct.noalias.") + structType + "." + expr->fieldName)
+                (llvm::Twine("struct.noalias.") + rf.structName + "." + expr->fieldName)
                     .toStringRef(scopeBuf);
             llvm::MDNode* scope = llvm::MDNode::getDistinct(*context,
                 {nullptr, domain, llvm::MDString::get(*context, scopeName)});
@@ -6262,14 +6323,14 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
             load->setMetadata(llvm::LLVMContext::MD_alias_scope, scopeList);
             load->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
         }
-        // range(min,max) → !range metadata for integer range propagation
-        if (attrs->hasRange) {
-            auto* i64Ty = llvm::Type::getInt64Ty(*context);
+        // range(min,max) → !range metadata for integer range propagation.
+        // The range constants must be the same integer type as the load value.
+        if (attrs->hasRange && elemTy->isIntegerTy()) {
             llvm::Metadata* rangeMD[] = {
                 llvm::ConstantAsMetadata::get(
-                    llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(attrs->rangeMin))),
+                    llvm::ConstantInt::get(elemTy, static_cast<uint64_t>(attrs->rangeMin))),
                 llvm::ConstantAsMetadata::get(
-                    llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(attrs->rangeMax) + 1))
+                    llvm::ConstantInt::get(elemTy, static_cast<uint64_t>(attrs->rangeMax) + 1))
             };
             load->setMetadata(llvm::LLVMContext::MD_range,
                               llvm::MDNode::get(*context, rangeMD));
@@ -6284,48 +6345,57 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
                               llvm::MDNode::get(*context, one));
         }
     }
-    return load;
+    // Lift narrow integer / float field values to the default expression
+    // width so existing arithmetic / comparison / call paths keep working
+    // unchanged.  Wider-than-default ints, doubles, pointers, and vectors
+    // pass through untouched.
+    return liftFieldLoad(load, rf.fieldTypeAnnot);
 }
 
 llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
-    const std::string structType = resolveStructType(expr->object.get());
-    const size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
+    const std::string structHint = resolveStructType(expr->object.get());
+    const ResolvedField rf = resolveField(structHint, expr->fieldName, expr);
 
     llvm::Value* objVal = generateExpression(expr->object.get());
-    objVal = toDefaultType(objVal);
-    llvm::Value* newVal = generateExpression(expr->value.get());
-    newVal = toDefaultType(newVal);
-
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr =
-        objVal->getType()->isPointerTy() ? objVal : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
-    // inbounds: fieldIdx is validated against the declared struct size by
-    // resolveFieldIndex, so it is always within [0, numFields-1].
-    llvm::Value* elemPtr = builder->CreateInBoundsGEP(
-        getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), fieldIdx), "struct.field.store.ptr");
+    llvm::Value* basePtr = objVal->getType()->isPointerTy()
+                               ? objVal
+                               : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
 
-    // Apply alignment from struct field attributes.
-    auto declIt = structFieldDecls_.find(structType);
-    const FieldAttrs* attrs = nullptr;
-    if (declIt != structFieldDecls_.end() && fieldIdx < declIt->second.size()) {
-        attrs = &declIt->second[fieldIdx].attrs;
-    }
+    llvm::Value* newVal = generateExpression(expr->value.get());
+    llvm::Type* elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
+    // Convert from the expression's natural type to the field's declared
+    // type before storing.  convertTo is a no-op when types match.
+    newVal = convertTo(newVal, elemTy);
 
-    llvm::StoreInst* store;
-    if (attrs && attrs->align > 0) {
-        store = builder->CreateAlignedStore(newVal, elemPtr,
-                                            llvm::MaybeAlign(static_cast<unsigned>(attrs->align)));
+    llvm::Value* elemPtr;
+    if (rf.structType) {
+        elemPtr = builder->CreateStructGEP(rf.structType, basePtr,
+                                           static_cast<unsigned>(rf.index),
+                                           "struct.field.store.ptr");
     } else {
-        // All struct fields are i64 and structs are malloc'd (≥ 8-byte aligned),
-        // so the field pointer is always 8-byte aligned.  Communicating this to
-        // LLVM enables better store merging and vectorization of struct initialization.
-        store = builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
+        elemPtr = builder->CreateInBoundsGEP(
+            getDefaultType(), basePtr,
+            llvm::ConstantInt::get(getDefaultType(), rf.index), "struct.field.store.ptr");
     }
 
-    // TBAA: per-field type node so writes to different fields don't alias reads
-    // from other fields.  Matches the per-field TBAA used in generateFieldAccess.
+    auto declIt = structFieldDecls_.find(rf.structName);
+    const FieldAttrs* attrs = nullptr;
+    if (declIt != structFieldDecls_.end() && rf.index < declIt->second.size()) {
+        attrs = &declIt->second[rf.index].attrs;
+    }
+
+    llvm::Align fieldAlign;
+    if (attrs && attrs->align > 0) {
+        fieldAlign = llvm::Align(static_cast<unsigned>(attrs->align));
+    } else {
+        fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
+    }
+    llvm::StoreInst* store = builder->CreateAlignedStore(newVal, elemPtr, fieldAlign);
+
+    // TBAA: per-field type node (matches generateFieldAccess).
     store->setMetadata(llvm::LLVMContext::MD_tbaa,
-                       getOrCreateFieldTBAA(structType, fieldIdx));
+                       getOrCreateFieldTBAA(rf.structName, rf.index));
 
     // !nontemporal hint for cold fields — bypass cache on write
     if (attrs && attrs->cold) {
@@ -6337,7 +6407,9 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
                            llvm::MDNode::get(*context, one));
     }
 
-    return newVal;
+    // Field-assign expressions evaluate to the assigned value; lift it back
+    // to expression width to match the convention used by generateFieldAccess.
+    return liftFieldLoad(newVal, rf.fieldTypeAnnot);
 }
 
 bool CodeGenerator::isDictExpr(Expression* expr) const {

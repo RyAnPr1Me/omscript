@@ -982,8 +982,10 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     }
     if (ann == "ptr" || (ann.rfind("ptr<", 0) == 0 && ann.back() == '>'))
         return llvm::PointerType::getUnqual(*context);
-    if (ann == "float" || ann == "double")
-        return getFloatType();                                  // f64
+    if (ann == "float" || ann == "double" || ann == "f64" || ann == "float64")
+        return getFloatType();                                  // f64 (double)
+    if (ann == "f32" || ann == "float32")
+        return llvm::Type::getFloatTy(*context);                // f32 (single)
     if (ann == "bool")
         return llvm::Type::getInt1Ty(*context);                 // i1
     if (ann == "i8" || ann == "u8")
@@ -1055,6 +1057,69 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
 
     // "int", "uint", generics, and empty annotations map to i64.
     return getDefaultType();
+}
+
+llvm::StructType* CodeGenerator::getOrCreateStructLLVMType(const std::string& name) {
+    auto cached = structLLVMTypes_.find(name);
+    if (cached != structLLVMTypes_.end())
+        return cached->second;
+
+    // Look up declared field metadata.  Prefer the rich StructField list
+    // (which carries per-field type annotations); fall back to the bare name
+    // list for legacy untyped structs (every field becomes i64).
+    auto declIt = structFieldDecls_.find(name);
+    auto namesIt = structDefs_.find(name);
+
+    std::vector<llvm::Type*> elemTypes;
+    if (declIt != structFieldDecls_.end() && !declIt->second.empty()) {
+        elemTypes.reserve(declIt->second.size());
+        for (const auto& fd : declIt->second) {
+            llvm::Type* t = fd.typeName.empty() ? getDefaultType()
+                                                : resolveAnnotatedType(fd.typeName);
+            // bool fields would otherwise become i1, which has weird ABI
+            // properties (1 bit -> still allocated as a byte but storage size
+            // can confuse callers); promote to i8 so loads/stores match the
+            // declared boolean width.
+            if (t->isIntegerTy(1))
+                t = llvm::Type::getInt8Ty(*context);
+            elemTypes.push_back(t);
+        }
+    } else if (namesIt != structDefs_.end()) {
+        elemTypes.assign(namesIt->second.size(), getDefaultType());
+    } else {
+        return nullptr; // Unknown struct
+    }
+
+    // Use a non-packed, named struct so LLVM applies the target DataLayout's
+    // natural alignment / padding (matches the C ABI for the same field
+    // sequence).  A named struct also makes IR dumps readable.
+    llvm::StructType* sty =
+        llvm::StructType::create(*context, elemTypes, "omsc.struct." + name, /*isPacked=*/false);
+    structLLVMTypes_[name] = sty;
+    return sty;
+}
+
+llvm::Value* CodeGenerator::liftFieldLoad(llvm::Value* v, const std::string& annot) {
+    llvm::Type* ty = v->getType();
+    // Integers narrower than the default expression width get extended so the
+    // rest of the expression machinery (which assumes i64-ish operands) keeps
+    // working transparently.  Signedness is taken from the annotation: types
+    // starting with 'u' (e.g. u8, u32, uint) are zero-extended; everything
+    // else is sign-extended.  i1 was already promoted to i8 in the StructType,
+    // but handle it here too for robustness.
+    if (ty->isIntegerTy()) {
+        const unsigned bits = ty->getIntegerBitWidth();
+        if (bits < 64) {
+            const bool isUnsigned = isUnsignedAnnot(annot);
+            return isUnsigned
+                       ? builder->CreateZExt(v, getDefaultType(), "field.zext")
+                       : builder->CreateSExt(v, getDefaultType(), "field.sext");
+        }
+        return v;
+    }
+    if (ty->isFloatTy())
+        return builder->CreateFPExt(v, getFloatType(), "field.fpext");
+    return v;
 }
 
 llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
@@ -4459,6 +4524,10 @@ void CodeGenerator::generate(Program* program) {
         } else {
             structDefs_[structDecl->name] = structDecl->fields;
         }
+        // Eagerly build the LLVM StructType so that the field offsets/sizes
+        // computed by DataLayout become available everywhere the struct is
+        // used (literal codegen, field access/assignment, reborrow, etc.).
+        getOrCreateStructLLVMType(structDecl->name);
     }
 
     // ── Optimization pre-pass sequence ────────────────────────────────────

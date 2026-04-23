@@ -530,6 +530,13 @@ class CodeGenerator {
     std::unordered_map<std::string, std::vector<StructField>> structFieldDecls_;
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
+    // Per-struct LLVM StructType — built lazily from structFieldDecls_/structDefs_,
+    // with each field's LLVM type derived from its annotated typeName via
+    // resolveAnnotatedType (empty annotation → i64).  Using a real StructType
+    // (instead of an [N x i64] array) lets LLVM compute DataLayout-correct
+    // field offsets, alignment, and total size, and enables SROA/mem2reg to
+    // promote small structs to SSA registers.
+    std::unordered_map<std::string, llvm::StructType*> structLLVMTypes_;
 
     // Operator overload registry: maps "StructName::op" → generated LLVM function name.
     // e.g. "Vec2::+" → "__op_Vec2_add"
@@ -1046,6 +1053,31 @@ class CodeGenerator {
     std::string resolveStructType(Expression* objExpr) const;
     size_t resolveFieldIndex(const std::string& structType, const std::string& fieldName,
                              const ASTNode* errorNode);
+    /// Resolve `fieldName` to its index, the owning struct's name, and the
+    /// LLVM element type of that field.  When `structHint` is empty and the
+    /// field is uniquely owned by one struct, the owner is auto-discovered
+    /// (matching the behaviour of resolveFieldIndex).
+    struct ResolvedField {
+        size_t index;
+        std::string structName;
+        llvm::StructType* structType;
+        llvm::Type* fieldType;
+        std::string fieldTypeAnnot; ///< Original annotation text (for signedness)
+    };
+    ResolvedField resolveField(const std::string& structHint, const std::string& fieldName,
+                               const ASTNode* errorNode);
+    /// Build (and cache) the LLVM StructType for a declared OmScript struct.
+    /// Field LLVM types come from each StructField::typeName via
+    /// resolveAnnotatedType (empty annotation → i64, preserving the legacy
+    /// uniform-i64 layout for untyped fields).  Uses a non-packed struct so
+    /// LLVM applies natural alignment per the target DataLayout.  Returns
+    /// nullptr if the struct name is unknown.
+    llvm::StructType* getOrCreateStructLLVMType(const std::string& name);
+    /// Lift a freshly-loaded struct field value (or any narrow scalar) to a
+    /// type that the rest of the expression engine expects to consume:
+    /// integers narrower than the default width are sign- (or zero-) extended,
+    /// `float` is widened to `double`.  All other types pass through unchanged.
+    llvm::Value* liftFieldLoad(llvm::Value* v, const std::string& annot);
 
     // Statement generators
     void generateVarDecl(VarDecl* stmt);
