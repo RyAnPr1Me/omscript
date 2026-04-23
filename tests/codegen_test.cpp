@@ -3074,6 +3074,7 @@ TEST(CodegenTest, OptmaxMulZeroPreservesSideEffects) {
                 hasCall = true;
         }
     }
+    if (!hasCall) func->print(llvm::errs());
     EXPECT_TRUE(hasCall);
 }
 
