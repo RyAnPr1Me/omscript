@@ -1,5 +1,5 @@
 // Tests shift / unshift array builtins.
-// Expected exit code: 18 (number of passing assertions).
+// Expected exit code: 19 (number of passing assertions).
 fn main() {
     var total:i64 = 0;
 
