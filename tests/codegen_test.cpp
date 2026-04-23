@@ -6710,6 +6710,46 @@ TEST(CodegenTest, ForeachOverRange_SkippedForBoundVariable) {
         << "when range() is bound to a var, the array allocation must remain";
 }
 
+// `for (x in range_step(start, end, step)) { body }` must also be lowered
+// to a direct counting loop with x bound to (start + idx*step).  The
+// runtime step!=0 abort path must still be emitted (preserves builtin
+// semantics), but no malloc / no rstep.* blocks should remain.
+TEST(CodegenTest, ForeachOverRange_NoMallocForDirectRangeStepCall) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var s = 0; "
+        "for (x in range_step(0, n, 2)) { s = s + x; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool sawMalloc = false;
+    bool sawRstepBlock = false;
+    bool sawStepFail = false;
+    for (auto& BB : *fn) {
+        if (BB.getName().starts_with("rstep."))
+            sawRstepBlock = true;
+        if (BB.getName().starts_with("frng.stepfail"))
+            sawStepFail = true;
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getName() == "malloc")
+                        sawMalloc = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(sawMalloc)
+        << "foreach-over-range_step must not emit malloc for the intermediate array";
+    EXPECT_FALSE(sawRstepBlock)
+        << "the range_step builtin's loop blocks must not appear; the fused path "
+           "uses frng.* blocks instead";
+    EXPECT_TRUE(sawStepFail)
+        << "the step==0 runtime abort branch must be preserved";
+}
+
 // ── NUW on non-negative additions ─────────────────────────────────────────
 
 // At O1+, adding two provably non-negative values should produce an add

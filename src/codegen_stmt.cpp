@@ -2580,39 +2580,80 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         codegenError("For-each loop outside of function", stmt);
     }
 
-    // ── Range fast path ──────────────────────────────────────────────────
-    // `for (x in range(start, end)) { body }` allocates an intermediate
-    // array of (end - start) elements with values [start, start+1, ...,
-    // end-1] only to immediately iterate over it.  Detect this pattern
-    // and emit a direct counting loop, eliminating the malloc + fill loop
-    // entirely and binding the iterator directly to (start + idx).  The
+    // ── Range / range_step fast path ─────────────────────────────────────
+    // `for (x in range(start, end)) { body }` and
+    // `for (x in range_step(start, end, step)) { body }` allocate an
+    // intermediate array of (end - start [/ step]) elements only to
+    // immediately iterate over it.  Detect both patterns and emit a
+    // direct counting loop, eliminating the malloc + fill loop entirely
+    // and binding the iterator directly to (start + idx * step).  The
     // surrounding for-each is otherwise unchanged: same break/continue
     // semantics, same loop metadata, same iterator-var alloca.
     //
     // Available at O1+ since the transformation is a strict reduction in
     // work (no allocation, no element store, no element load) and is
-    // never larger than the array path it replaces.
+    // never larger than the array path it replaces.  For range_step the
+    // runtime step!=0 check is preserved with the same abort behaviour.
     if (stmt->collection->type == ASTNodeType::CALL_EXPR &&
         optimizationLevel >= OptimizationLevel::O1) {
         auto* call = static_cast<CallExpr*>(stmt->collection.get());
-        if (call->callee == "range" && call->arguments.size() == 2) {
+        const bool isRange     = (call->callee == "range"      && call->arguments.size() == 2);
+        const bool isRangeStep = (call->callee == "range_step" && call->arguments.size() == 3);
+        if (isRange || isRangeStep) {
             const ScopeGuard rangeScope(*this);
 
-            // Evaluate start and end exactly once (preserves side effects).
+            // Evaluate start, end (and step) exactly once to preserve
+            // side-effect order with the unfused builtin path.
             llvm::Value* startV = generateExpression(call->arguments[0].get());
             llvm::Value* endV   = generateExpression(call->arguments[1].get());
             startV = toDefaultType(startV);
             endV   = toDefaultType(endV);
 
-            // count = max(end - start, 0).  Loop runs `count` times and
-            // binds x to (start + i) for i = 0..count-1.  When count <= 0,
-            // the loop simply does not execute (count is unsigned-clamped
-            // via SLT below).
             llvm::Value* zeroC = llvm::ConstantInt::get(getDefaultType(), 0);
             llvm::Value* oneC  = llvm::ConstantInt::get(getDefaultType(), 1);
-            llvm::Value* diff = builder->CreateSub(endV, startV, "frng.diff");
-            llvm::Value* isPos = builder->CreateICmpSGT(diff, zeroC, "frng.ispos");
-            llvm::Value* count = builder->CreateSelect(isPos, diff, zeroC, "frng.count");
+
+            llvm::Value* stepV = nullptr; // nullptr → unit step (no mul needed)
+            llvm::Value* count = nullptr;
+            if (isRange) {
+                // count = max(end - start, 0).  Loop runs `count` times and
+                // binds x to (start + i) for i = 0..count-1.
+                llvm::Value* diff  = builder->CreateSub(endV, startV, "frng.diff");
+                llvm::Value* isPos = builder->CreateICmpSGT(diff, zeroC, "frng.ispos");
+                count = builder->CreateSelect(isPos, diff, zeroC, "frng.count");
+            } else {
+                // range_step: evaluate step once, then preserve the
+                // runtime step==0 abort that the builtin would emit.
+                stepV = generateExpression(call->arguments[2].get());
+                stepV = toDefaultType(stepV);
+
+                llvm::Value* stepIsZero = builder->CreateICmpEQ(stepV, zeroC, "frng.stepzero");
+                llvm::BasicBlock* stepOkBB   = llvm::BasicBlock::Create(*context, "frng.stepok",   function);
+                llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "frng.stepfail", function);
+                builder->CreateCondBr(stepIsZero, stepFailBB, stepOkBB);
+
+                builder->SetInsertPoint(stepFailBB);
+                {
+                    std::string msg = call->line > 0
+                        ? std::string("Runtime error: range step cannot be zero at line ") + std::to_string(call->line) + "\n"
+                        : "Runtime error: range step cannot be zero\n";
+                    builder->CreateCall(getPrintfFunction(),
+                        {builder->CreateGlobalString(msg, "frng_zero_msg")});
+                }
+                builder->CreateCall(getOrDeclareAbort());
+                builder->CreateUnreachable();
+
+                builder->SetInsertPoint(stepOkBB);
+
+                // count = max(0, (end - start + step - sign) / step).  This
+                // matches the existing range_step builtin's formula exactly,
+                // so the loop trip count is identical to the unfused path.
+                llvm::Value* diff    = builder->CreateSub(endV, startV, "frng.diff");
+                llvm::Value* stepM1  = builder->CreateSub(stepV, oneC,  "frng.stepm1");
+                llvm::Value* adjDiff = builder->CreateAdd(diff, stepM1, "frng.adjdiff");
+                llvm::Value* rawCnt  = builder->CreateSDiv(adjDiff, stepV, "frng.rawcount");
+                llvm::Value* isPos   = builder->CreateICmpSGT(rawCnt, zeroC, "frng.ispos");
+                count = builder->CreateSelect(isPos, rawCnt, zeroC, "frng.count");
+            }
 
             // Hidden index alloca + iterator alloca, mirroring the array path.
             llvm::AllocaInst* idxAllocaR = createEntryBlockAlloca(function, "_foreach_idx");
@@ -2644,7 +2685,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                 condBrR->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
             }
 
-            // Body: bind x = start + idx, then execute user body.
+            // Body: bind x = start + idx [* step], then execute user body.
             builder->SetInsertPoint(bodyBBR);
             if (optimizationLevel >= OptimizationLevel::O2) {
                 llvm::Value* nn = builder->CreateICmpSGE(
@@ -2653,10 +2694,17 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                     module.get(), llvm::Intrinsic::assume, {});
                 builder->CreateCall(assumeFn, {nn});
             }
-            // x = start + idx (nsw because idx ∈ [0, count), count ≤ end-start
-            // so start + idx ≤ end, which fits in i64 whenever start/end did).
+            // For range:      x = start + idx       (nsw safe; both fit in i64)
+            // For range_step: x = start + idx*step  (no nsw — step may be
+            //                                        negative or large; the
+            //                                        builtin path is also
+            //                                        wrapping here)
+            llvm::Value* offset = stepV
+                ? builder->CreateMul(curIdxR, stepV, "frng.off")
+                : curIdxR;
             llvm::Value* iterVal = builder->CreateAdd(
-                startV, curIdxR, "frng.val", /*HasNUW=*/false, /*HasNSW=*/true);
+                startV, offset, "frng.val",
+                /*HasNUW=*/false, /*HasNSW=*/stepV == nullptr);
             builder->CreateStore(iterVal, iterAllocaR);
 
             loopStack.push_back({endBBR, incBBR});
