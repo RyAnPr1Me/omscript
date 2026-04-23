@@ -1,5 +1,48 @@
 # OmScript Language Reference
 
+## Table of Contents
+
+**Part 1 — Language Core**
+1. [Overview](#1-overview)
+2. [Lexical Structure](#2-lexical-structure)
+3. [Preprocessor](#3-preprocessor)
+4. [Type System Overview](#4-type-system-overview)
+5. [Variables, Constants, and Comptime](#5-variables-constants-and-comptime)
+6. [Functions](#6-functions)
+7. [Control Flow](#7-control-flow)
+8. [Loops](#8-loops)
+9. [Operators and Expressions](#9-operators-and-expressions)
+10. [Collection Literals and Indexing](#10-collection-literals-and-indexing)
+
+**Part 2 — Standard Library and Semantics**
+11. [Arrays — Complete API](#11-arrays--complete-api)
+12. [Strings — Complete API](#12-strings--complete-api)
+13. [Dictionaries / Maps — Complete API](#13-dictionaries--maps--complete-api)
+14. [Structs](#14-structs)
+15. [Enums](#15-enums)
+16. [Error Handling](#16-error-handling)
+17. [Memory and Ownership System](#17-memory-and-ownership-system)
+18. [OPTMAX](#18-optmax)
+19. [Built-in Functions](#19-built-in-functions)
+20. [Concurrency](#20-concurrency)
+21. [File I/O](#21-file-io)
+22. [Lambda Expressions](#22-lambda-expressions)
+23. [Import / Module System](#23-import--module-system)
+
+**Part 3 — Toolchain and Internals**
+24. [Compiler CLI Reference](#24-compiler-cli-reference)
+25. [Compilation Pipeline (Internal)](#25-compilation-pipeline-internal)
+26. [Advanced Optimization Features](#26-advanced-optimization-features)
+27. [Integer Type-Cast Reference](#27-integer-type-cast-reference)
+28. [CF-CTRE — Cross-Function Compile-Time Reasoning Engine](#28-cf-ctre--cross-function-compile-time-reasoning-engine)
+29. [std::synthesize — Compile-Time Program Synthesis](#29-stdsynthesize--compile-time-program-synthesis)
+30. [Build System and Project Layout](#30-build-system-and-project-layout)
+31. [Quick-Start Cheat Sheet](#31-quick-start-cheat-sheet)
+32. [Glossary](#32-glossary)
+33. [Version & Compatibility](#33-version--compatibility)
+
+---
+
 ## 1. Overview
 
 OmScript is a statically-typed, compiled programming language designed for high-performance computing with an emphasis on optimization, control, and clarity. It compiles to native code via LLVM, offering manual control over optimization strategies while maintaining modern language ergonomics.
@@ -2763,7 +2806,7 @@ var n: int = int(s);  // Parse string to int (may fail at runtime)
 
 ---
 
-## 10. Arrays, Strings, Dicts (Literal Forms + Indexing)
+## 10. Collection Literals and Indexing
 
 This section covers the **literal syntax** and **basic indexing/slicing** for built-in composite types. Built-in functions for manipulating these types (e.g., `len`, `push`, `pop`) are deferred to Part 2.
 
@@ -4284,7 +4327,7 @@ map_set(map_set(m, 10, 100), 20, 200);
 
 ---
 
-## 14. Structs — Complete
+## 14. Structs
 
 ### 14.1 Definition syntax
 
@@ -4418,7 +4461,7 @@ invalidate p;
 
 ---
 
-## 15. Enums — Complete
+## 15. Enums
 
 ### 15.1 Definition syntax
 
@@ -4984,7 +5027,7 @@ OPTMAX!:
 
 ---
 
-## 19. Built-in Functions (the rest — non-collection built-ins)
+## 19. Built-in Functions
 
 ### 19.1 I/O
 
@@ -7020,7 +7063,7 @@ if (res.applied()) { /* update analyses */ }
 
 ---
 
-## 27. Integer Type-Cast Reference (DEEP DIVE)
+## 27. Integer Type-Cast Reference
 
 OmScript provides explicit integer type casts as built-in functions. These are **not** part of the type system (OmScript is dynamically typed at runtime) but are codegen-time operations that emit truncation or sign-extension instructions.
 
