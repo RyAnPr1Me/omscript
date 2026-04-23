@@ -883,6 +883,15 @@ class CodeGenerator {
     /// Empty for untyped `ptr` variables.
     llvm::StringMap<std::string> ptrElemTypes_;
 
+    /// Reference-borrow element type for variables declared as
+    /// `borrow [mut] var r:&T = &x;`.  The alloca for `r` holds a `ptr`
+    /// (the address of `x`); reads auto-deref through it to load `T`,
+    /// writes (mutable refs only) write-through to `*ptr`.  Maps variable
+    /// name → stripped element annotation (e.g., "i64", "u32", "f64").
+    /// Plain value-form `borrow var r = x;` is NOT in this map and keeps
+    /// its existing value-copy + alias-metadata semantics.
+    llvm::StringMap<std::string> refVarElemTypes_;
+
     /// Subset of ptrVarNames_ whose stored value is heap-allocated (malloc /
     /// alloc<T> with large/dynamic count).  `invalidate` on these emits free().
     llvm::StringSet<> heapPtrVarNames_;

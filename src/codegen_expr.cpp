@@ -521,6 +521,27 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         }
     }
 
+    // Reference-borrow auto-deref.  For variables declared
+    // `borrow [mut] var r:&T = &x;`, the alloca holds a `ptr` to `x`.
+    // A read of `r` returns *r at type T (lifted to the default expression
+    // width via liftFieldLoad — handles narrow-int sext/zext and f32→f64).
+    {
+        auto rit = refVarElemTypes_.find(expr->name);
+        if (rit != refVarElemTypes_.end()) {
+            llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* ptrLoad = builder->CreateAlignedLoad(
+                ptrTy, it->second, llvm::MaybeAlign(8),
+                (expr->name + ".ref.ptr").c_str());
+            llvm::Type* elemTy = resolveAnnotatedType(rit->second);
+            const llvm::Align elemAlign =
+                module->getDataLayout().getABITypeAlign(elemTy);
+            auto* valLoad = builder->CreateAlignedLoad(
+                elemTy, ptrLoad, llvm::MaybeAlign(elemAlign.value()),
+                (expr->name + ".ref.val").c_str());
+            return liftFieldLoad(valLoad, rit->second);
+        }
+    }
+
     // Register-promotion strategy: prefetched variables go straight to
     // registers (promoted by SROA/mem2reg) and stay there until invalidated.
     // No use-site llvm.prefetch is emitted on the alloca — that would anchor
@@ -4803,6 +4824,55 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         codegenError("Unknown variable: " + expr->name, expr);
     }
     checkConstModification(expr->name, "modify");
+
+    // Reference-borrow write-through.  For `borrow mut var r:&T = &x;`,
+    // assigning to `r` writes the new value through the held pointer to *r.
+    // Immutable reference borrows (`borrow var r:&T = &x;`) reject writes.
+    {
+        auto rit = refVarElemTypes_.find(expr->name);
+        if (rit != refVarElemTypes_.end()) {
+            auto bm = borrowMap_.find(expr->name);
+            if (bm == borrowMap_.end() || !bm->second.isMut) {
+                codegenError("Cannot assign through immutable reference '" +
+                             expr->name +
+                             "' — declare with `borrow mut` for write-through",
+                             expr);
+            }
+            // A live (active) ref var was just written to; revive any
+            // accidental dead-flag (mirrors the standard assign path).
+            deadVars_.erase(expr->name);
+            deadVarReason_.erase(expr->name);
+            llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* ptrLoad = builder->CreateAlignedLoad(
+                ptrTy, it->second, llvm::MaybeAlign(8),
+                (expr->name + ".ref.ptr").c_str());
+            llvm::Type* elemTy = resolveAnnotatedType(rit->second);
+            llvm::Value* coerced = value;
+            if (coerced->getType() != elemTy) {
+                if (elemTy->isDoubleTy() && coerced->getType()->isIntegerTy())
+                    coerced = builder->CreateSIToFP(coerced, elemTy, "itof");
+                else if (elemTy->isFloatTy() && coerced->getType()->isIntegerTy())
+                    coerced = builder->CreateSIToFP(coerced, elemTy, "itof");
+                else if (elemTy->isIntegerTy() && coerced->getType()->isDoubleTy())
+                    coerced = builder->CreateFPToSI(coerced, elemTy, "ftoi");
+                else if (elemTy->isIntegerTy() && coerced->getType()->isFloatTy())
+                    coerced = builder->CreateFPToSI(coerced, elemTy, "ftoi");
+                else if (elemTy->isDoubleTy() && coerced->getType()->isFloatTy())
+                    coerced = builder->CreateFPExt(coerced, elemTy, "fpext");
+                else if (elemTy->isFloatTy() && coerced->getType()->isDoubleTy())
+                    coerced = builder->CreateFPTrunc(coerced, elemTy, "fptrunc");
+                else if (elemTy->isIntegerTy() && coerced->getType()->isIntegerTy())
+                    coerced = convertTo(coerced, elemTy);
+            }
+            const llvm::Align elemAlign =
+                module->getDataLayout().getABITypeAlign(elemTy);
+            builder->CreateAlignedStore(coerced, ptrLoad,
+                                        llvm::MaybeAlign(elemAlign.value()));
+            // The expression value of an assignment is the (original) RHS
+            // value, matching what the standard path returns below.
+            return value;
+        }
+    }
 
     // Re-assigning to a dead (moved/invalidated) variable revives it.
     deadVars_.erase(expr->name);

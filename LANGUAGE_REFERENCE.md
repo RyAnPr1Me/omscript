@@ -1087,11 +1087,29 @@ var p: ptr<int> = &x;  // Pointer to x
 
 #### 4.4.5 Reference Type: `ref` / `&T`
 
-**Status**: Reference types are **mentioned in comments** (e.g., `reborrow ref = &src`) but **not fully formalized** in the type system. This is a future feature or internal representation.
+**Status**: Reference types are partially supported as **borrow-variable annotations**. A variable declared `borrow [mut] var r:&T = &x;` is a true pointer-backed alias for `x`: reads of `r` auto-deref to `T`, and writes through a `borrow mut` reference write back to `*ptr` (so the source variable observes the update). Reference types as struct fields, function parameters, return types, or in expression position are not yet formalized.
 
-**Syntax**: `&T` may denote a borrowed reference to `T`.
+**Syntax**: `&T` denotes a borrowed reference to `T`. The initializer must be an `&<lvalue>` expression (e.g. `&x`, not just `x`).
 
-**Semantics**: References are similar to pointers but enforce borrow-checking rules (see §5 for `borrow` and `move` keywords).
+**Semantics**:
+- The alloca for `r` holds a pointer (`ptr` in LLVM IR), not a `T`.
+- Reading `r` emits `load ptr` then `load T` (auto-deref); narrow integer types are sign- or zero-extended to the default expression width based on the `i*`/`u*` annotation.
+- Writing `r = v` (only legal when declared `borrow mut`) coerces `v` to `T` and stores through the held pointer. Writing through an immutable `&T` is a compile-time error.
+- Borrow-checker rules are unchanged: while `r` is alive, the source `x` cannot be moved, mut-borrowed (via another mut alias), or — for a `borrow mut` — read.
+
+**Example**:
+```omscript
+fn main() -> int {
+    var x:i64 = 4;
+    {
+        borrow mut r:&i64 = &x;
+        r = 40;          // write-through: x is now 40
+    }
+    return x + 2;        // 42
+}
+```
+
+**Out of scope (future work)**: `&T` to struct fields or array elements (use `reborrow` today), `&T` parameters / return types, comparisons of references, multi-level `&&T`.
 
 #### 4.4.6 Struct Type
 

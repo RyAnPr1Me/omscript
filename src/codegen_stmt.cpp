@@ -68,6 +68,64 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         return;
     }
 
+    // ───────────────────────────────────────────────────────────────────────
+    // Real reference borrow: `borrow [mut] var r:&T = &x;`
+    // When the annotation begins with '&' AND the initializer is a BorrowExpr
+    // whose source is `&<lvalue>`, allocate `ptr` storage for `r` and store
+    // the address of `x`.  Reads of `r` auto-deref to `T`; writes (mutable
+    // borrows only) write-through to `*ptr`.  The plain value form
+    // `borrow var r = x;` (no `&T` annotation) skips this branch and keeps
+    // its existing value-copy + alias-metadata semantics — fully backward
+    // compatible.
+    // ───────────────────────────────────────────────────────────────────────
+    if (!stmt->typeName.empty() && stmt->typeName[0] == '&' &&
+        stmt->initializer &&
+        stmt->initializer->type == ASTNodeType::BORROW_EXPR) {
+        auto* bw = static_cast<BorrowExpr*>(stmt->initializer.get());
+        // Require explicit `&` on the initializer for the reference form.
+        // This keeps the syntax distinct from the value form and surfaces a
+        // helpful error before silent value-vs-pointer confusion can happen.
+        if (!bw->source ||
+            bw->source->type != ASTNodeType::UNARY_EXPR ||
+            static_cast<UnaryExpr*>(bw->source.get())->op != "&") {
+            codegenError("Reference borrow '" + stmt->name +
+                         "' requires '&' on the initializer (e.g. `borrow var " +
+                         stmt->name + ":" + stmt->typeName + " = &x;`)", stmt);
+        }
+        // generateBorrowExpr validates borrow state for the source variable
+        // (looks through the leading '&') and returns the source's address —
+        // for `&x`, that's the alloca/global pointer for x.
+        llvm::Value* ptrVal = generateBorrowExpr(bw);
+        if (!ptrVal->getType()->isPointerTy()) {
+            codegenError("Reference borrow source for '" + stmt->name +
+                         "' did not produce a pointer", stmt);
+        }
+        // Allocate a pointer slot for the reference variable itself.
+        llvm::Type* refStorageTy = llvm::PointerType::getUnqual(*context);
+        llvm::AllocaInst* refAlloca =
+            createEntryBlockAlloca(function, stmt->name, refStorageTy);
+        builder->CreateAlignedStore(ptrVal, refAlloca, llvm::MaybeAlign(8));
+        // Strip the leading '&' to get the element annotation (e.g. "i64").
+        const std::string elemAnnot = stmt->typeName.substr(1);
+        refVarElemTypes_[stmt->name] = elemAnnot;
+        // Bind the variable so subsequent identifier lookups find it.  The
+        // full annotation (with the '&') is preserved in varTypeAnnotations_;
+        // isUnsignedAnnot rejects "&…" so the unsignedness inference is
+        // unaffected.
+        bindVariableAnnotated(stmt->name, refAlloca, stmt->typeName, stmt->isConst);
+        // Register the borrow alias (releases the source's borrow count when
+        // the scope ends).  pendingSrcVar was set by generateBorrowExpr.
+        if (!bw->pendingSrcVar.empty()) {
+            if (bw->isMut) {
+                markVariableMutBorrowed(stmt->name, bw->pendingSrcVar);
+            } else {
+                markVariableBorrowed(stmt->name, bw->pendingSrcVar);
+            }
+            bw->pendingSrcVar.clear();
+        }
+        return;
+    }
+
     // Resolve the alloca type from the type annotation if present.
     llvm::Type* allocaType = stmt->typeName.empty()
                                  ? getDefaultType()
@@ -3797,7 +3855,15 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
     // generateVarDecl after the variable name is bound.  For now we use an
     // empty string; the real name is injected by the VarDecl path.
     // We do all validation and state mutations here.
-    if (auto* srcIdent = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
+    //
+    // The source expression is either an identifier (value-form
+    // `borrow r = x;`) or `&<identifier>` (reference-form
+    // `borrow r:&T = &x;`).  Look through one level of `&` UnaryExpr so
+    // the identifier-keyed validation below applies to both forms.
+    Expression* srcForIdent = expr->source.get();
+    if (auto* ue = dynamic_cast<UnaryExpr*>(srcForIdent); ue && ue->op == "&" && ue->operand)
+        srcForIdent = ue->operand.get();
+    if (auto* srcIdent = dynamic_cast<IdentifierExpr*>(srcForIdent)) {
         const std::string& srcName = srcIdent->name;
 
         if (expr->isMut) {

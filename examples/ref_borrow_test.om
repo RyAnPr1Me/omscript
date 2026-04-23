@@ -1,0 +1,44 @@
+// Real `&T` reference borrow — auto-deref on read, write-through on assign.
+//
+// `borrow [mut] var r:&T = &x;` makes `r` a true pointer-backed alias for
+// `x`: reading `r` loads through the pointer, and (for `borrow mut`) writing
+// `r = v` stores back to `*ptr` so the source variable observes the update.
+//
+// Expected exit code: 42
+
+fn main() -> int {
+    // Immutable reference borrow: read-through.
+    var a:i64 = 4;
+    var sumA:i64 = 0;
+    {
+        borrow var ra:&i64 = &a;
+        sumA = ra + 3;            // 4 + 3 == 7
+    }
+
+    // Mutable reference borrow: write-through.
+    var b:i64 = 10;
+    {
+        borrow mut rb:&i64 = &b;
+        rb = 32;                  // *ptr = 32 → b becomes 32
+    }
+    // After the borrow scope ends, `b` is fully owned again and observable.
+    var sumB:i64 = b + 3;          // 32 + 3 == 35
+
+    // Narrow-int element type: u32, with sign-correct widening on read.
+    var c:u32 = 4294967290;       // > INT32_MAX — proves zero-extension
+    var deltaC:i64 = 0;
+    {
+        borrow var rc:&u32 = &c;
+        deltaC = rc - 4294967290; // 0 if zero-extended, large negative if sign-extended
+    }
+
+    // Float element type, write-through then read source.
+    var d:f64 = 1.5;
+    {
+        borrow mut rd:&f64 = &d;
+        rd = rd + 1.5;            // d becomes 3.0
+    }
+
+    // 7 + 35 + 0 + 0 == 42
+    return sumA + sumB + deltaC + i64(d * 0.0);
+}

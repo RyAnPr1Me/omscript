@@ -4173,7 +4173,8 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         // positives that would misroute array indexing to strlen-based paths.
         if (arrayVars_.count(id->name) || dictVarNames_.count(id->name)
             || structVars_.count(id->name) || stringArrayVars_.count(id->name)
-            || ptrVarNames_.count(id->name))
+            || ptrVarNames_.count(id->name)
+            || refVarElemTypes_.count(id->name))
             return false;
         auto it = namedValues.find(id->name);
         if (it != namedValues.end() && it->second) {
