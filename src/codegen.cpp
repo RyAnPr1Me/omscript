@@ -995,24 +995,70 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (ann == "i32" || ann == "u32")
         return llvm::Type::getInt32Ty(*context);                // i32/u32
     // -----------------------------------------------------------------------
-    // SIMD vector types — map to LLVM fixed-vector types for handwritten SIMD
+    // SIMD vector types — table-driven.  Maps a type annotation like "i32x8"
+    // to an LLVM <8 x i32>.  Centralising the registry keeps the supported
+    // surface obvious (one source of truth) and lets us add new lane-counts
+    // by adding a single row.
+    //
+    // Coverage:
+    //   • 8-bit lanes  : i8x16, u8x16, i8x32, u8x32                (SSE2 / AVX2)
+    //   • 16-bit lanes : i16x8, u16x8, i16x16, u16x16              (SSE2 / AVX2)
+    //   • 32-bit lanes : i32x4/u32x4, i32x8/u32x8, i32x16/u32x16   (SSE2 / AVX2 / AVX-512)
+    //   • 64-bit lanes : i64x2/u64x2, i64x4/u64x4, i64x8/u64x8     (SSE2 / AVX2 / AVX-512)
+    //   • f32 lanes    : f32x4, f32x8, f32x16                      (SSE  / AVX  / AVX-512)
+    //   • f64 lanes    : f64x2, f64x4, f64x8                       (SSE2 / AVX  / AVX-512)
+    //
+    // Signed and unsigned integer types share the same LLVM vector
+    // representation; signedness is carried separately via type annotations
+    // and per-instruction opcodes (CreateSDiv vs CreateUDiv, etc.).
     // -----------------------------------------------------------------------
-    if (ann == "f32x4")
-        return llvm::FixedVectorType::get(llvm::Type::getFloatTy(*context), 4);
-    if (ann == "f32x8")
-        return llvm::FixedVectorType::get(llvm::Type::getFloatTy(*context), 8);
-    if (ann == "f64x2")
-        return llvm::FixedVectorType::get(llvm::Type::getDoubleTy(*context), 2);
-    if (ann == "f64x4")
-        return llvm::FixedVectorType::get(llvm::Type::getDoubleTy(*context), 4);
-    if (ann == "i32x4")
-        return llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*context), 4);
-    if (ann == "i32x8")
-        return llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*context), 8);
-    if (ann == "i64x2")
-        return llvm::FixedVectorType::get(llvm::Type::getInt64Ty(*context), 2);
-    if (ann == "i64x4")
-        return llvm::FixedVectorType::get(llvm::Type::getInt64Ty(*context), 4);
+    {
+        struct SimdRow { const char* name; unsigned bits; bool isFloat; unsigned lanes; };
+        static constexpr SimdRow kSimdRows[] = {
+            // f32
+            {"f32x4",  32, true,  4 },
+            {"f32x8",  32, true,  8 },
+            {"f32x16", 32, true,  16},
+            // f64
+            {"f64x2",  64, true,  2 },
+            {"f64x4",  64, true,  4 },
+            {"f64x8",  64, true,  8 },
+            // i8 / u8
+            {"i8x16",   8, false, 16},
+            {"u8x16",   8, false, 16},
+            {"i8x32",   8, false, 32},
+            {"u8x32",   8, false, 32},
+            // i16 / u16
+            {"i16x8",  16, false, 8 },
+            {"u16x8",  16, false, 8 },
+            {"i16x16", 16, false, 16},
+            {"u16x16", 16, false, 16},
+            // i32 / u32
+            {"i32x4",  32, false, 4 },
+            {"u32x4",  32, false, 4 },
+            {"i32x8",  32, false, 8 },
+            {"u32x8",  32, false, 8 },
+            {"i32x16", 32, false, 16},
+            {"u32x16", 32, false, 16},
+            // i64 / u64
+            {"i64x2",  64, false, 2 },
+            {"u64x2",  64, false, 2 },
+            {"i64x4",  64, false, 4 },
+            {"u64x4",  64, false, 4 },
+            {"i64x8",  64, false, 8 },
+            {"u64x8",  64, false, 8 },
+        };
+        for (const SimdRow& r : kSimdRows) {
+            if (ann == r.name) {
+                llvm::Type* elemTy =
+                    r.isFloat
+                        ? (r.bits == 32 ? llvm::Type::getFloatTy(*context)
+                                        : llvm::Type::getDoubleTy(*context))
+                        : llvm::Type::getIntNTy(*context, r.bits);
+                return llvm::FixedVectorType::get(elemTy, r.lanes);
+            }
+        }
+    }
     // -----------------------------------------------------------------------
     // Pointer-holding types — use LLVM pointer type instead of i64.
     // This preserves pointer provenance through LLVM's alias analysis.

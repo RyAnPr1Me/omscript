@@ -3,7 +3,10 @@
 #include "version.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <ctime>
 #include <sstream>
+#include <unordered_set>
 
 // Detect OS and architecture at compile time for __OS__ / __ARCH__
 #if defined(_WIN32) || defined(_WIN64)
@@ -35,6 +38,92 @@ Preprocessor::Preprocessor(std::string filename)
     macros_["__VERSION__"] = {false, false, {}, "\"" OMSC_VERSION "\""};
     macros_["__OS__"]      = {false, false, {}, "\"" OMSC_PP_OS "\""};
     macros_["__ARCH__"]    = {false, false, {}, "\"" OMSC_PP_ARCH "\""};
+    // Original file as the user passed it on the command line — preserved
+    // across `#line` directives that rewrite __FILE__ / line numbers (a la
+    // C99 __BASE_FILE__).
+    macros_["__BASE_FILE__"] = {false, false, {}, "\"" + filename_ + "\""};
+
+    // Build-time date / time of the *compilation of this source file*.
+    // Computed once per Preprocessor instance to keep all uses within a
+    // single source consistent (mirrors C semantics: a single pp-token
+    // value per translation unit).
+    {
+        std::time_t now = std::time(nullptr);
+        std::tm tm_buf{};
+#if defined(_WIN32)
+        localtime_s(&tm_buf, &now);
+#else
+        localtime_r(&now, &tm_buf);
+#endif
+        // C-style "Mmm dd yyyy" — matches C's __DATE__.
+        static const char* const kMonths[12] = {
+            "Jan","Feb","Mar","Apr","May","Jun",
+            "Jul","Aug","Sep","Oct","Nov","Dec"};
+        char dateBuf[32];
+        std::snprintf(dateBuf, sizeof(dateBuf), "\"%s %2d %4d\"",
+                      kMonths[tm_buf.tm_mon], tm_buf.tm_mday,
+                      tm_buf.tm_year + 1900);
+        char timeBuf[16];
+        std::snprintf(timeBuf, sizeof(timeBuf), "\"%02d:%02d:%02d\"",
+                      tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+        macros_["__DATE__"] = {false, false, {}, dateBuf};
+        macros_["__TIME__"] = {false, false, {}, timeBuf};
+    }
+
+    // Target-feature predefined macros — reflect the SIMD / ISA feature set
+    // the compiler binary itself was built for.  This lets user code
+    // conditionally select vector widths and intrinsics, e.g.
+    //   #if defined(__SIMD_AVX2__)
+    //       var v: i32x8 = ...;
+    //   #else
+    //       var v: i32x4 = ...;
+    //   #endif
+    // Only macros for features actually present are defined (mirrors GCC /
+    // clang behavior for __AVX2__, __SSE4_2__, etc.).
+    auto define1 = [&](const char* name) {
+        macros_[name] = {false, false, {}, "1"};
+    };
+#if defined(__SSE2__)
+    define1("__SIMD_SSE2__");
+#endif
+#if defined(__SSE3__)
+    define1("__SIMD_SSE3__");
+#endif
+#if defined(__SSSE3__)
+    define1("__SIMD_SSSE3__");
+#endif
+#if defined(__SSE4_1__)
+    define1("__SIMD_SSE41__");
+#endif
+#if defined(__SSE4_2__)
+    define1("__SIMD_SSE42__");
+#endif
+#if defined(__AVX__)
+    define1("__SIMD_AVX__");
+#endif
+#if defined(__AVX2__)
+    define1("__SIMD_AVX2__");
+#endif
+#if defined(__AVX512F__)
+    define1("__SIMD_AVX512F__");
+#endif
+#if defined(__AVX512BW__)
+    define1("__SIMD_AVX512BW__");
+#endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    define1("__SIMD_NEON__");
+#endif
+
+    // The natural SIMD vector width (lane count for i32) — matches the
+    // value codegen reports via preferredVectorWidth_.  Lets user code
+    // size hand-tuned SIMD chunks without hardcoding `4` or `8`.
+#if defined(__AVX512F__)
+    macros_["__VECTOR_WIDTH__"] = {false, false, {}, "16"};
+#elif defined(__AVX2__) || defined(__AVX__)
+    macros_["__VECTOR_WIDTH__"] = {false, false, {}, "8"};
+#else
+    macros_["__VECTOR_WIDTH__"] = {false, false, {}, "4"};
+#endif
 }
 
 // ============================================================
@@ -400,10 +489,16 @@ struct ExprEval {
     long long parseUnary();
     long long parseMul();
     long long parseAdd();
+    long long parseShift();
     long long parseCmp();
+    long long parseEq();
+    long long parseBitAnd();
+    long long parseBitXor();
+    long long parseBitOr();
     long long parseAnd();
     long long parseOr();
-    long long parse() { return parseOr(); }
+    long long parseTernary();
+    long long parse() { return parseTernary(); }
 };
 
 long long ExprEval::parsePrimary() {
@@ -412,7 +507,7 @@ long long ExprEval::parsePrimary() {
 
     if (src[pos] == '(') {
         pos++;
-        long long v = parseOr();
+        long long v = parseTernary();
         skip();
         if (pos < src.size() && src[pos] == ')') pos++;
         return v;
@@ -420,6 +515,16 @@ long long ExprEval::parsePrimary() {
 
     if (std::isdigit(static_cast<unsigned char>(src[pos]))) {
         const size_t start = pos;
+        // Hex literal: 0x… / 0X…
+        if (src[pos] == '0' && pos + 1 < src.size() &&
+            (src[pos + 1] == 'x' || src[pos + 1] == 'X')) {
+            pos += 2;
+            const size_t hstart = pos;
+            while (pos < src.size() &&
+                   std::isxdigit(static_cast<unsigned char>(src[pos]))) pos++;
+            if (pos == hstart) return 0;
+            return std::stoll(src.substr(hstart, pos - hstart), nullptr, 16);
+        }
         while (pos < src.size() && std::isdigit(static_cast<unsigned char>(src[pos]))) pos++;
         return std::stoll(src.substr(start, pos - start));
     }
@@ -457,6 +562,7 @@ long long ExprEval::parseUnary() {
     if (pos < src.size() && src[pos] == '!') { pos++; return !parseUnary(); }
     if (pos < src.size() && src[pos] == '-') { pos++; return -parseUnary(); }
     if (pos < src.size() && src[pos] == '+') { pos++; return parseUnary(); }
+    if (pos < src.size() && src[pos] == '~') { pos++; return ~parseUnary(); }
     return parsePrimary();
 }
 long long ExprEval::parseMul() {
@@ -482,28 +588,92 @@ long long ExprEval::parseAdd() {
     }
     return v;
 }
-long long ExprEval::parseCmp() {
+long long ExprEval::parseShift() {
     long long v = parseAdd();
     while (true) {
         skip();
+        if (pos + 1 < src.size() && src[pos] == '<' && src[pos+1] == '<') {
+            pos += 2; v = v << parseAdd();
+        } else if (pos + 1 < src.size() && src[pos] == '>' && src[pos+1] == '>') {
+            pos += 2; v = v >> parseAdd();
+        } else break;
+    }
+    return v;
+}
+long long ExprEval::parseCmp() {
+    long long v = parseShift();
+    while (true) {
+        skip();
+        // Two-char relational operators must be tested before the
+        // single-char `<` / `>` to avoid eating `<=` as `<` then `=`.
+        // `==` and `!=` have lower precedence in C — handled in parseEq.
         if (pos + 1 < src.size()) {
-            if (src[pos]=='=' && src[pos+1]=='=') { pos+=2; v=(v==parseAdd()); continue; }
-            if (src[pos]=='!' && src[pos+1]=='=') { pos+=2; v=(v!=parseAdd()); continue; }
-            if (src[pos]=='<' && src[pos+1]=='=') { pos+=2; v=(v<=parseAdd()); continue; }
-            if (src[pos]=='>' && src[pos+1]=='=') { pos+=2; v=(v>=parseAdd()); continue; }
+            if (src[pos]=='<' && src[pos+1]=='=') { pos+=2; v=(v<=parseShift()); continue; }
+            if (src[pos]=='>' && src[pos+1]=='=') { pos+=2; v=(v>=parseShift()); continue; }
         }
-        if (pos < src.size() && src[pos] == '<') { pos++; v=(v< parseAdd()); continue; }
-        if (pos < src.size() && src[pos] == '>') { pos++; v=(v> parseAdd()); continue; }
+        if (pos < src.size() && src[pos] == '<' &&
+            (pos + 1 >= src.size() || src[pos+1] != '<')) {
+            pos++; v=(v< parseShift()); continue;
+        }
+        if (pos < src.size() && src[pos] == '>' &&
+            (pos + 1 >= src.size() || src[pos+1] != '>')) {
+            pos++; v=(v> parseShift()); continue;
+        }
         break;
     }
     return v;
 }
-long long ExprEval::parseAnd() {
+long long ExprEval::parseEq() {
     long long v = parseCmp();
     while (true) {
         skip();
+        if (pos + 1 < src.size() && src[pos]=='=' && src[pos+1]=='=') {
+            pos += 2; v = (v == parseCmp());
+        } else if (pos + 1 < src.size() && src[pos]=='!' && src[pos+1]=='=') {
+            pos += 2; v = (v != parseCmp());
+        } else break;
+    }
+    return v;
+}
+long long ExprEval::parseBitAnd() {
+    long long v = parseEq();
+    while (true) {
+        skip();
+        // Single `&`, NOT `&&` (handled in parseAnd).
+        if (pos < src.size() && src[pos] == '&' &&
+            (pos + 1 >= src.size() || src[pos+1] != '&')) {
+            pos++; v &= parseEq();
+        } else break;
+    }
+    return v;
+}
+long long ExprEval::parseBitXor() {
+    long long v = parseBitAnd();
+    while (true) {
+        skip();
+        if (pos < src.size() && src[pos] == '^') { pos++; v ^= parseBitAnd(); }
+        else break;
+    }
+    return v;
+}
+long long ExprEval::parseBitOr() {
+    long long v = parseBitXor();
+    while (true) {
+        skip();
+        // Single `|`, NOT `||` (handled in parseOr).
+        if (pos < src.size() && src[pos] == '|' &&
+            (pos + 1 >= src.size() || src[pos+1] != '|')) {
+            pos++; v |= parseBitXor();
+        } else break;
+    }
+    return v;
+}
+long long ExprEval::parseAnd() {
+    long long v = parseBitOr();
+    while (true) {
+        skip();
         if (pos + 1 < src.size() && src[pos]=='&' && src[pos+1]=='&') {
-            pos += 2; const long long r = parseCmp(); v = (v && r);
+            pos += 2; const long long r = parseBitOr(); v = (v && r);
         } else break;
     }
     return v;
@@ -517,6 +687,25 @@ long long ExprEval::parseOr() {
         } else break;
     }
     return v;
+}
+long long ExprEval::parseTernary() {
+    long long c = parseOr();
+    skip();
+    if (pos < src.size() && src[pos] == '?') {
+        pos++;
+        // Both branches are evaluated unconditionally to keep the parser
+        // straight-line; this is acceptable for `#if`-style integer
+        // expressions which have no side effects.
+        long long t = parseTernary();
+        skip();
+        if (pos < src.size() && src[pos] == ':') {
+            pos++;
+            long long f = parseTernary();
+            return c ? t : f;
+        }
+        return c ? t : 0;
+    }
+    return c;
 }
 
 } // anonymous namespace
@@ -532,16 +721,30 @@ long long Preprocessor::evalExpr(const std::string& expr, int lineNo) const {
 // ============================================================
 
 std::string Preprocessor::process(const std::string& source) {
-    // Step 1: Join backslash-continuation lines
+    // Step 1: Join backslash-continuation lines AND normalise CRLF / lone CR
+    // to LF.  Without this, a source file authored on Windows would carry
+    // embedded `\r` characters into directive keywords (`#define\r`),
+    // macro names (`FOO\r`), and `#if` expression text — silently breaking
+    // every directive on the line.
     std::string joined;
     joined.reserve(source.size());
     for (size_t i = 0; i < source.size(); i++) {
-        if (source[i] == '\\' && i + 1 < source.size() && source[i + 1] == '\n') {
+        const char c = source[i];
+        if (c == '\\' && i + 1 < source.size() && source[i + 1] == '\n') {
             joined += ' ';
             i++;
             continue;
         }
-        joined += source[i];
+        // CRLF → LF (drop the \r)
+        if (c == '\r' && i + 1 < source.size() && source[i + 1] == '\n') {
+            continue; // skip the \r; the \n is emitted on the next iteration
+        }
+        // Lone CR → LF (very old Mac line endings)
+        if (c == '\r') {
+            joined += '\n';
+            continue;
+        }
+        joined += c;
     }
 
     // Step 2: Split into lines
@@ -601,20 +804,27 @@ std::string Preprocessor::process(const std::string& source) {
             condStack.push_back({cond, cond, false});
             output += '\n'; continue;
         }
-        if (kw == "elif") {
+        if (kw == "elif" || kw == "elifdef" || kw == "elifndef") {
             if (condStack.size() <= 1)
                 throw omscript::DiagnosticError(omscript::Diagnostic{
                     omscript::DiagnosticSeverity::Error,
                     {filename_, lineNo, 0},
-                    "#elif without #if"});
+                    "#" + kw + " without #if"});
             CondEntry& top = condStack.back();
             if (top.done)
                 throw omscript::DiagnosticError(omscript::Diagnostic{
                     omscript::DiagnosticSeverity::Error,
                     {filename_, lineNo, 0},
-                    "#elif after #else"});
+                    "#" + kw + " after #else"});
             if (!top.seenTrue && condStack[condStack.size()-2].active) {
-                const bool cond = (evalExpr(arg, lineNo) != 0);
+                bool cond;
+                if (kw == "elifdef") {
+                    cond = macros_.count(trim(arg)) > 0;
+                } else if (kw == "elifndef") {
+                    cond = macros_.count(trim(arg)) == 0;
+                } else {
+                    cond = (evalExpr(arg, lineNo) != 0);
+                }
                 top.active = cond;
                 top.seenTrue = cond;
             } else {
@@ -724,6 +934,16 @@ std::string Preprocessor::process(const std::string& source) {
             output += '\n'; continue;
         }
         if (kw == "pragma") {
+            // `#pragma once` is recognised silently so user code can adopt
+            // the GCC/Clang-style header-guard idiom.  Real `#include`
+            // de-duplication isn't part of this preprocessor (OmScript uses
+            // the `import` statement at the parser level for that), but we
+            // still accept the directive so polyglot headers don't trip a
+            // warning on every line.
+            //
+            // Other `#pragma <key>` forms are passed through silently for
+            // now to preserve behaviour with existing code that may use
+            // pragmas as toolchain hints.
             output += '\n'; continue;
         }
 

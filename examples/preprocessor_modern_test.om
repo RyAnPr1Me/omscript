@@ -1,0 +1,76 @@
+// Modernized preprocessor: bitwise ops, shifts, ternary, hex literals,
+// `#elifdef` / `#elifndef`, `__DATE__`, `__TIME__`, `__BASE_FILE__`,
+// `__VECTOR_WIDTH__`.  Each conditional contributes 1 to `total` when the
+// behaviour is correct.  Expected total = 13.
+
+#define ANSWER 42
+#define MASK   0x0F
+#define SHFT   3
+
+fn main() -> int {
+    var total = 0;
+
+    // --- Bitwise AND in #if ----------------------------------------------
+#if (ANSWER & MASK) == 10
+    total = total + 1;
+#endif
+
+    // --- Bitwise OR ------------------------------------------------------
+#if (0xF0 | MASK) == 255
+    total = total + 1;
+#endif
+
+    // --- Bitwise XOR -----------------------------------------------------
+#if (0xFF ^ MASK) == 0xF0
+    total = total + 1;
+#endif
+
+    // --- Bitwise NOT (twos-complement on long long) ----------------------
+#if (~0) == -1
+    total = total + 1;
+#endif
+
+    // --- Left shift ------------------------------------------------------
+#if (1 << SHFT) == 8
+    total = total + 1;
+#endif
+
+    // --- Right shift -----------------------------------------------------
+#if (32 >> 2) == 8
+    total = total + 1;
+#endif
+
+    // --- Ternary ---------------------------------------------------------
+#if (ANSWER > 10 ? 1 : 0) == 1
+    total = total + 1;
+#endif
+#if (ANSWER < 10 ? 99 : 7) == 7
+    total = total + 1;
+#endif
+
+    // --- C23 #elifdef ----------------------------------------------------
+#ifdef NEVER_DEFINED
+    total = total + 100;
+#elifdef ANSWER
+    total = total + 1;
+#else
+    total = total + 50;
+#endif
+
+    // --- C23 #elifndef ---------------------------------------------------
+#ifdef NEVER_DEFINED
+    total = total + 100;
+#elifndef NEVER_DEFINED
+    total = total + 1;
+#endif
+
+    // --- New predefined macros are non-empty / numeric -------------------
+    var d = __DATE__;
+    var t = __TIME__;
+    var bf = __BASE_FILE__;
+    if (len(d) > 0) { total = total + 1; }
+    if (len(t) > 0) { total = total + 1; }
+    if (len(bf) > 0) { total = total + 1; }
+
+    return total;   // 13
+}

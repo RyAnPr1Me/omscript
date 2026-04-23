@@ -1,0 +1,34 @@
+// New SIMD vector types from the modernised registry.
+// Exercises i16x8 (16-bit lanes — new) and f32x8 (was already present),
+// plus u32x4 (new unsigned alias) and i64x8 (new AVX-512-class wide).
+// Expected exit code: 42.
+
+fn main() -> int {
+    // -- i16x8 add: [1..8] + [1..8] = [2,4,6,8,10,12,14,16].  Sum of all
+    //    lanes = 72.  We only return one lane to stay within int range.
+    var a: i16x8 = [1, 2, 3, 4, 5, 6, 7, 8];
+    var b: i16x8 = [1, 2, 3, 4, 5, 6, 7, 8];
+    var c: i16x8 = a + b;
+    var s1: int = c[3];          // 8
+
+    // -- u32x4 multiply ----------------------------------------------------
+    var u: u32x4 = [1, 2, 3, 4];
+    var v: u32x4 = [10, 20, 30, 40];
+    var w: u32x4 = u * v;
+    var s2: int = w[2];          // 90
+
+    // -- i64x8 sub (new AVX-512-class wide) -------------------------------
+    var p: i64x8 = [10, 20, 30, 40, 50, 60, 70, 80];
+    var q: i64x8 = [ 1,  2,  3,  4,  5,  6,  7,  8];
+    var r: i64x8 = p - q;
+    var s3: int = r[5];          // 54
+
+    // -- f32x8: existing path, must still work ----------------------------
+    var fa: f32x8 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    var fb: f32x8 = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+    var fc: f32x8 = fa - fb;
+    var s4: int = to_int(fc[6]); // 6
+
+    // 8 + 90 + 54 + 6 - 116 == 42
+    return s1 + s2 + s3 + s4 - 116;
+}

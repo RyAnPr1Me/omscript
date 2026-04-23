@@ -613,8 +613,9 @@ Conditionally include source text based on compile-time expressions:
 **Evaluation**:
 - `#if` and `#elif` conditions are integer expressions evaluated at preprocessing time
 - Macros in conditions are expanded before evaluation
-- Supported operators: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, `(`, `)`
-- `defined(NAME)` checks if macro `NAME` is defined (returns 1 or 0)
+- Supported operators (in C-style precedence): unary `! - + ~`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `|`, `&&`, `||`, ternary `? :`, parentheses
+- Hex integer literals (`0xFF`, `0X1A`) are supported alongside decimal
+- `defined(NAME)` (or `defined NAME`) checks if macro `NAME` is defined (returns 1 or 0)
 - Undefined identifiers evaluate to 0
 
 **Example with `defined`**:
@@ -624,7 +625,18 @@ Conditionally include source text based on compile-time expressions:
 #endif
 ```
 
-#### 3.1.4 `#ifdef` / `#ifndef` — Test Macro Definition
+**Example using bitwise / shift / ternary**:
+```omscript
+#define FLAGS 0x0F
+#if (FLAGS & 0x08) != 0
+    #define HAS_BIT3 1
+#endif
+#if (1 << 4) == 16 ? 1 : 0
+    #define POW2_OK 1
+#endif
+```
+
+#### 3.1.4 `#ifdef` / `#ifndef` / `#elifdef` / `#elifndef` — Test Macro Definition
 
 Shorthand for testing macro presence:
 ```omscript
@@ -640,6 +652,20 @@ Shorthand for testing macro presence:
 Equivalent to:
 - `#ifdef X` → `#if defined(X)`
 - `#ifndef X` → `#if !defined(X)`
+
+The C23-style shorthands `#elifdef X` and `#elifndef X` chain the same test in an `#if` ladder:
+
+```omscript
+#ifdef USE_NEON
+    // ...
+#elifdef USE_AVX2
+    // ...
+#elifndef USE_SCALAR
+    // ...
+#else
+    // ...
+#endif
+```
 
 #### 3.1.5 `#error` — Emit Compilation Error
 
@@ -782,10 +808,28 @@ The preprocessor defines the following macros automatically:
 |-------|-------|-------------|
 | `__FILE__` | `"filename"` | Current source file name (string) |
 | `__LINE__` | `123` | Current line number (integer) |
+| `__BASE_FILE__` | `"main.om"` | Top-level source as passed on the command line — preserved across `#line` (string) |
+| `__DATE__` | `"Jan 23 2026"` | Compilation date in C-style `Mmm dd yyyy` form (string) |
+| `__TIME__` | `"14:05:09"` | Compilation time in `HH:MM:SS` form (string) |
 | `__VERSION__` | `"0.1.0"` | OmScript compiler version (string) |
 | `__OS__` | `"linux"` / `"windows"` / `"macos"` | Target operating system (string) |
 | `__ARCH__` | `"x86_64"` / `"aarch64"` / `"arm"` | Target architecture (string) |
 | `__COUNTER__` | `0`, `1`, ... | Global counter, increments on each use (integer) |
+| `__VECTOR_WIDTH__` | `4` / `8` / `16` | Natural i32-lane SIMD width on the host the compiler was built for (integer) |
+| `__SIMD_SSE2__` … `__SIMD_AVX512F__` | `1` (defined only if available) | Defined when the corresponding x86 SIMD feature is present in the compiler build |
+| `__SIMD_NEON__` | `1` (defined only on ARM) | Defined when ARM NEON is available in the compiler build |
+
+The SIMD-feature macros let portable user code conditionally pick a vector width:
+
+```omscript
+#if defined(__SIMD_AVX512F__)
+    var v: i32x16 = ...;
+#elifdef __SIMD_AVX2__
+    var v: i32x8  = ...;
+#else
+    var v: i32x4  = ...;
+#endif
+```
 
 **Example**:
 ```omscript
@@ -1056,11 +1100,48 @@ ages = map_set(ages, "Charlie", 35);
 var has_bob: int = map_has(ages, "Bob");         // 1
 ```
 
-#### 4.4.3 SIMD Vector Types: `vec4<f32>`, `vec8<i32>`, etc.
+#### 4.4.3 SIMD Vector Types: `f32x4`, `i32x8`, `i16x8`, …
 
-**Status**: SIMD vector types are **mentioned in comments** but **not currently implemented** in the parser or type system. This is a future feature.
+OmScript supports first-class fixed-width SIMD vector types as variable
+annotations. The compiler lowers them to LLVM `<N x T>` vectors so the
+backend's vectorizer and the host's native SIMD instructions are used
+directly.
 
-**Anticipated syntax**: `vecN<T>` where `N` is 2, 4, 8, 16, etc., and `T` is a scalar type (e.g., `vec4<f32>` for 4-element float vector).
+**Naming**: `<elemType>x<lanes>`, where `elemType` is `i8`, `u8`, `i16`,
+`u16`, `i32`, `u32`, `i64`, `u64`, `f32`, or `f64` and `lanes` matches a
+natural SSE / AVX / AVX-512 width:
+
+| Lane width | SSE2 (128-bit) | AVX2 (256-bit) | AVX-512 (512-bit) |
+|------------|----------------|----------------|-------------------|
+| 8-bit  | `i8x16`, `u8x16`     | `i8x32`, `u8x32`        | — |
+| 16-bit | `i16x8`, `u16x8`     | `i16x16`, `u16x16`      | — |
+| 32-bit | `i32x4`, `u32x4`, `f32x4` | `i32x8`, `u32x8`, `f32x8` | `i32x16`, `u32x16`, `f32x16` |
+| 64-bit | `i64x2`, `u64x2`, `f64x2` | `i64x4`, `u64x4`, `f64x4` | `i64x8`, `u64x8`, `f64x8` |
+
+Signed and unsigned integer types share the same LLVM vector
+representation; signedness is carried via the annotation and per-instruction
+opcodes (`SDiv` vs `UDiv`, etc.).
+
+**Operations**:
+- Construction from an array literal of the matching length:
+  `var v: f32x4 = [1.0, 2.0, 3.0, 4.0];`
+- Element-wise arithmetic: `+`, `-`, `*`, `/`, `%`
+- Element-wise bitwise (integer vectors only): `&`, `|`, `^`, `<<`, `>>`
+- Lane read: `v[i]` (lifts narrow elements to the default expression width)
+- Lane write: `v[i] = x`
+
+**Pick a width portably** with the `__VECTOR_WIDTH__` predefined macro and
+the `__SIMD_*__` feature macros — see §3.3.
+
+**Example**:
+```omscript
+fn main() -> int {
+    var a: i32x8 = [1, 2, 3, 4, 5, 6, 7, 8];
+    var b: i32x8 = [1, 1, 1, 1, 1, 1, 1, 1];
+    var c: i32x8 = a + b;       // element-wise add
+    return c[2] + c[7];         // 4 + 9 = 13
+}
+```
 
 #### 4.4.4 Pointer Type: `ptr` / `ptr<T>`
 
