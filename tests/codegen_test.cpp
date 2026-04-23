@@ -6590,6 +6590,64 @@ TEST(CodegenTest, ReadOnlyGlobalArrayLiteral_SkippedWhenIndexAssigned) {
         << "ro-global must not fire when the array is index-assigned";
 }
 
+// `var lut = array_fill(N, V)` with N and V both compile-time integer
+// constants and `lut` provably read-only must materialise as a private
+// global constant — no calloc, no malloc, no fill loop.
+TEST(CodegenTest, ReadOnlyGlobalArrayFill_NoCallocNoMallocForReadOnlyLUT) {
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var lut = array_fill(256, 0); "
+        "var s = 0; for (i in 0...n) { s = s + lut[i & 0xff]; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool sawAlloc = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    auto name = callee->getName();
+                    if (name == "calloc" || name == "malloc")
+                        sawAlloc = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(sawAlloc)
+        << "ro-global array_fill(N,V) must not emit calloc/malloc";
+    bool sawRoGlobal = false;
+    for (auto& gv : mod->globals()) {
+        if (gv.getName().starts_with("fill.ro.const") && gv.isConstant()) {
+            sawRoGlobal = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(sawRoGlobal)
+        << "expected a private @fill.ro.const* read-only constant";
+}
+
+// Negative: array_fill with non-constant size must NOT fire the optimization.
+TEST(CodegenTest, ReadOnlyGlobalArrayFill_SkippedForRuntimeSize) {
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setRunIRPasses(false);
+    auto* mod = generateIR(
+        "fn main() { var n = input(); var lut = array_fill(n, 0); "
+        "return lut[0]; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    bool sawRoGlobal = false;
+    for (auto& gv : mod->globals()) {
+        if (gv.getName().starts_with("fill.ro.const")) {
+            sawRoGlobal = true;
+            break;
+        }
+    }
+    EXPECT_FALSE(sawRoGlobal)
+        << "ro-global must not fire when array_fill size is not a constant";
+}
+
 // ── NUW on non-negative additions ─────────────────────────────────────────
 
 // At O1+, adding two provably non-negative values should produce an add

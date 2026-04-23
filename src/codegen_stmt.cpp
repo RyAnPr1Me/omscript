@@ -174,6 +174,52 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     pendingArrayStackAlloc_ = true;
                 }
             }
+            // ── array_fill(N, V) → ro-global LUT ────────────────────────────
+            // Common idiom: `var lut = array_fill(256, 0);` materialises a
+            // 256-entry zeroed lookup table.  When N and V are both
+            // compile-time integer constants and the variable is provably
+            // read-only, we can replace the calloc/malloc + fill loop with a
+            // single private global constant.  Cap N at 1024 to avoid
+            // bloating the IR for large fills (the runtime path is fine for
+            // those — the IR itself becomes O(N) constants).
+            else if (stmt->initializer->type == ASTNodeType::CALL_EXPR &&
+                     optimizationLevel >= OptimizationLevel::O2) {
+                auto* call = static_cast<CallExpr*>(stmt->initializer.get());
+                if (call->callee == "array_fill" &&
+                    call->arguments.size() == 2) {
+                    auto getConstInt = [](const Expression* e,
+                                          int64_t& out) -> bool {
+                        if (!e) return false;
+                        if (e->type == ASTNodeType::LITERAL_EXPR) {
+                            auto* lit = static_cast<const LiteralExpr*>(e);
+                            if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                                out = lit->intValue;
+                                return true;
+                            }
+                        }
+                        if (e->type == ASTNodeType::UNARY_EXPR) {
+                            auto* un = static_cast<const UnaryExpr*>(e);
+                            if (un->op == "-" && un->operand &&
+                                un->operand->type == ASTNodeType::LITERAL_EXPR) {
+                                auto* lit = static_cast<const LiteralExpr*>(un->operand.get());
+                                if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                                    out = -lit->intValue;
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    };
+                    int64_t nVal = 0, vVal = 0;
+                    if (getConstInt(call->arguments[0].get(), nVal) &&
+                        getConstInt(call->arguments[1].get(), vVal) &&
+                        nVal >= 2 && nVal <= 1024 &&
+                        doesVarHaveOnlyReadOnlyUses(stmt->name)) {
+                        useReadOnlyGlobal = true;
+                        pendingArrayReadOnlyGlobal_ = true;
+                    }
+                }
+            }
             initValue = generateExpression(stmt->initializer.get());
             if (useReadOnlyGlobal) {
                 pendingArrayReadOnlyGlobal_ = false;

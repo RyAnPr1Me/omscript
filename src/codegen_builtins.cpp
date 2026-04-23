@@ -4005,6 +4005,66 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::ARRAY_FILL) {
         validateArgCount(expr, "array_fill", 2);
+        // ── ro-global fast path ─────────────────────────────────────────────
+        // Pre-pass (codegen_stmt.cpp) detected `var x = array_fill(N, V)`
+        // with N and V both compile-time constants and x provably read-only.
+        // Materialise a single private global `[N, V, V, ..., V]` and skip
+        // the calloc/malloc + fill loop entirely.
+        if (pendingArrayReadOnlyGlobal_ &&
+            optimizationLevel >= OptimizationLevel::O2) {
+            auto getConstInt = [](const Expression* e, int64_t& out) -> bool {
+                if (!e) return false;
+                if (e->type == ASTNodeType::LITERAL_EXPR) {
+                    auto* lit = static_cast<const LiteralExpr*>(e);
+                    if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                        out = lit->intValue;
+                        return true;
+                    }
+                }
+                if (e->type == ASTNodeType::UNARY_EXPR) {
+                    auto* un = static_cast<const UnaryExpr*>(e);
+                    if (un->op == "-" && un->operand &&
+                        un->operand->type == ASTNodeType::LITERAL_EXPR) {
+                        auto* lit = static_cast<const LiteralExpr*>(un->operand.get());
+                        if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                            out = -lit->intValue;
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+            int64_t nVal = 0, vVal = 0;
+            if (getConstInt(expr->arguments[0].get(), nVal) &&
+                getConstInt(expr->arguments[1].get(), vVal) &&
+                nVal >= 2 && nVal <= 1024) {
+                const size_t totalSlots = 1 + static_cast<size_t>(nVal);
+                auto* arrTy = llvm::ArrayType::get(getDefaultType(), totalSlots);
+                llvm::Constant* initArray = nullptr;
+                if (vVal == 0) {
+                    // Zero fill: build [N, 0, 0, ...] by hand because
+                    // zeroinitializer would also zero the length slot.
+                    std::vector<llvm::Constant*> initVals(totalSlots,
+                        llvm::ConstantInt::get(getDefaultType(), 0));
+                    initVals[0] = llvm::ConstantInt::get(getDefaultType(), nVal);
+                    initArray = llvm::ConstantArray::get(arrTy, initVals);
+                } else {
+                    std::vector<llvm::Constant*> initVals;
+                    initVals.reserve(totalSlots);
+                    initVals.push_back(llvm::ConstantInt::get(getDefaultType(), nVal));
+                    auto* fillC = llvm::ConstantInt::get(getDefaultType(), vVal);
+                    for (size_t i = 0; i < static_cast<size_t>(nVal); ++i)
+                        initVals.push_back(fillC);
+                    initArray = llvm::ConstantArray::get(arrTy, initVals);
+                }
+                auto* gv = new llvm::GlobalVariable(
+                    *module, arrTy, /*isConstant=*/true,
+                    llvm::GlobalValue::PrivateLinkage, initArray, "fill.ro.const");
+                gv->setAlignment(llvm::Align(16));
+                gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+                return builder->CreatePtrToInt(gv, getDefaultType(), "fill.ro.int");
+            }
+        }
         llvm::Value* sizeArg = generateExpression(expr->arguments[0].get());
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         sizeArg = toDefaultType(sizeArg);
