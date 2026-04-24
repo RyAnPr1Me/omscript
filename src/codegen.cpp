@@ -636,6 +636,54 @@ void optimizeOptMaxStatement(Statement* stmt) {
 
 namespace omscript {
 
+// File-scope SIMD type registry — single source of truth for the
+// `<elem>x<lanes>` annotations OmScript exposes as first-class vector types.
+// Add a row here to expose a new vector type; resolveAnnotatedType() walks
+// this table.  Signed and unsigned integer rows share the same LLVM
+// representation; signedness is carried per-instruction via the annotation
+// (CreateSDiv vs CreateUDiv, ZExt vs SExt on lane reads, etc.).
+struct SimdTypeRow {
+    const char* name;   // OmScript annotation, e.g. "i32x8"
+    unsigned bits;      // element bit width (8, 16, 32, 64)
+    bool isFloat;       // true → IEEE float of `bits`; false → integer
+    unsigned lanes;     // lane count
+};
+
+static constexpr SimdTypeRow kSimdTypeRegistry[] = {
+    // f32 lanes — SSE / AVX / AVX-512
+    {"f32x4",  32, true,  4 },
+    {"f32x8",  32, true,  8 },
+    {"f32x16", 32, true,  16},
+    // f64 lanes — SSE2 / AVX / AVX-512
+    {"f64x2",  64, true,  2 },
+    {"f64x4",  64, true,  4 },
+    {"f64x8",  64, true,  8 },
+    // 8-bit integer lanes — SSE2 / AVX2
+    {"i8x16",   8, false, 16},
+    {"u8x16",   8, false, 16},
+    {"i8x32",   8, false, 32},
+    {"u8x32",   8, false, 32},
+    // 16-bit integer lanes — SSE2 / AVX2
+    {"i16x8",  16, false, 8 },
+    {"u16x8",  16, false, 8 },
+    {"i16x16", 16, false, 16},
+    {"u16x16", 16, false, 16},
+    // 32-bit integer lanes — SSE2 / AVX2 / AVX-512
+    {"i32x4",  32, false, 4 },
+    {"u32x4",  32, false, 4 },
+    {"i32x8",  32, false, 8 },
+    {"u32x8",  32, false, 8 },
+    {"i32x16", 32, false, 16},
+    {"u32x16", 32, false, 16},
+    // 64-bit integer lanes — SSE2 / AVX2 / AVX-512
+    {"i64x2",  64, false, 2 },
+    {"u64x2",  64, false, 2 },
+    {"i64x4",  64, false, 4 },
+    {"u64x4",  64, false, 4 },
+    {"i64x8",  64, false, 8 },
+    {"u64x8",  64, false, 8 },
+};
+
 /// Returns true if a type-annotation string represents an unsigned integer
 /// (uint, or any uN for N in [1..256]).
 static bool isUnsignedAnnotation(const std::string& tn) {
@@ -995,68 +1043,19 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (ann == "i32" || ann == "u32")
         return llvm::Type::getInt32Ty(*context);                // i32/u32
     // -----------------------------------------------------------------------
-    // SIMD vector types — table-driven.  Maps a type annotation like "i32x8"
-    // to an LLVM <8 x i32>.  Centralising the registry keeps the supported
-    // surface obvious (one source of truth) and lets us add new lane-counts
-    // by adding a single row.
-    //
-    // Coverage:
-    //   • 8-bit lanes  : i8x16, u8x16, i8x32, u8x32                (SSE2 / AVX2)
-    //   • 16-bit lanes : i16x8, u16x8, i16x16, u16x16              (SSE2 / AVX2)
-    //   • 32-bit lanes : i32x4/u32x4, i32x8/u32x8, i32x16/u32x16   (SSE2 / AVX2 / AVX-512)
-    //   • 64-bit lanes : i64x2/u64x2, i64x4/u64x4, i64x8/u64x8     (SSE2 / AVX2 / AVX-512)
-    //   • f32 lanes    : f32x4, f32x8, f32x16                      (SSE  / AVX  / AVX-512)
-    //   • f64 lanes    : f64x2, f64x4, f64x8                       (SSE2 / AVX  / AVX-512)
-    //
-    // Signed and unsigned integer types share the same LLVM vector
-    // representation; signedness is carried separately via type annotations
-    // and per-instruction opcodes (CreateSDiv vs CreateUDiv, etc.).
+    // SIMD vector types — table-driven against the file-scope
+    // `kSimdTypeRegistry`.  See the comment on that table for naming
+    // conventions and the supported width matrix.  To add a new vector
+    // type, append a row to the registry; no code change here is needed.
     // -----------------------------------------------------------------------
-    {
-        struct SimdRow { const char* name; unsigned bits; bool isFloat; unsigned lanes; };
-        static constexpr SimdRow kSimdRows[] = {
-            // f32
-            {"f32x4",  32, true,  4 },
-            {"f32x8",  32, true,  8 },
-            {"f32x16", 32, true,  16},
-            // f64
-            {"f64x2",  64, true,  2 },
-            {"f64x4",  64, true,  4 },
-            {"f64x8",  64, true,  8 },
-            // i8 / u8
-            {"i8x16",   8, false, 16},
-            {"u8x16",   8, false, 16},
-            {"i8x32",   8, false, 32},
-            {"u8x32",   8, false, 32},
-            // i16 / u16
-            {"i16x8",  16, false, 8 },
-            {"u16x8",  16, false, 8 },
-            {"i16x16", 16, false, 16},
-            {"u16x16", 16, false, 16},
-            // i32 / u32
-            {"i32x4",  32, false, 4 },
-            {"u32x4",  32, false, 4 },
-            {"i32x8",  32, false, 8 },
-            {"u32x8",  32, false, 8 },
-            {"i32x16", 32, false, 16},
-            {"u32x16", 32, false, 16},
-            // i64 / u64
-            {"i64x2",  64, false, 2 },
-            {"u64x2",  64, false, 2 },
-            {"i64x4",  64, false, 4 },
-            {"u64x4",  64, false, 4 },
-            {"i64x8",  64, false, 8 },
-            {"u64x8",  64, false, 8 },
-        };
-        for (const SimdRow& r : kSimdRows) {
-            if (ann == r.name) {
-                llvm::Type* elemTy =
-                    r.isFloat
-                        ? (r.bits == 32 ? llvm::Type::getFloatTy(*context)
-                                        : llvm::Type::getDoubleTy(*context))
-                        : llvm::Type::getIntNTy(*context, r.bits);
-                return llvm::FixedVectorType::get(elemTy, r.lanes);
-            }
+    for (const SimdTypeRow& r : kSimdTypeRegistry) {
+        if (ann == r.name) {
+            llvm::Type* elemTy =
+                r.isFloat
+                    ? (r.bits == 32 ? llvm::Type::getFloatTy(*context)
+                                    : llvm::Type::getDoubleTy(*context))
+                    : llvm::Type::getIntNTy(*context, r.bits);
+            return llvm::FixedVectorType::get(elemTy, r.lanes);
         }
     }
     // -----------------------------------------------------------------------
