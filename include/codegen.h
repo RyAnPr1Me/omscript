@@ -302,6 +302,26 @@ class CodeGenerator {
         enableSDR_ = enable;
     }
 
+    /// Enable or disable the Implicit Phase Ordering Fixer (IPOF).
+    /// IPOF runs after SDR at O2+.  It scans the IR for missed optimization
+    /// opportunities caused by fixed-order phase sequencing (unfold constants,
+    /// common subexpressions, dead code, redundant loads, all-const call sites)
+    /// and locally re-runs a minimal reordered sub-pass sequence to recover them.
+    /// Default: true at O2+.
+    void setIPOF(bool enable) {
+        enableIPOF_ = enable;
+    }
+
+    /// Set IPOF aggression level (0–3):
+    ///   0 = disabled
+    ///   1 = fast: ConstantFolding + DeadCode + CSE only (default at O2)
+    ///   2 = balanced: all types, ≤2 iterations (default at O3)
+    ///   3 = aggressive: all types, ≤3 iterations, NearVectorizable (@optmax)
+    void setIPOFLevel(unsigned level) {
+        ipofLevel_   = std::min(level, 3u);
+        enableIPOF_  = (level > 0);
+    }
+
     /// Enable or disable the post-codegen LLVM IR optimization pipeline
     /// (runOptimizationPasses()).  Default: true.  White-box unit tests that
     /// inspect the raw IR emitted by the CodeGenerator (metadata, nuw/nsw
@@ -1370,6 +1390,9 @@ class CodeGenerator {
     bool enableSuperopt_ = true;      // -fsuperopt / -fno-superopt (superoptimizer)
     unsigned superoptLevel_ = 2;      // -fsuperopt-level=0/1/2/3 (default: 2)
     bool enableHGOE_ = true;          // -fhgoe / -fno-hgoe (hardware graph optimization)
+    bool enableSDR_  = true;          // -fsdr / -fno-sdr (speculative devectorization & revectorization)
+    bool enableIPOF_ = true;          // -fipof / -fno-ipof (implicit phase ordering fixer)
+    unsigned ipofLevel_ = 0;          // 0 = auto (set from optimization level at call time)
     bool runIRPasses_ = true;         // Run runOptimizationPasses() after codegen.
                                        // Unit tests that inspect the raw IR
                                        // emitted by the CodeGenerator (metadata,

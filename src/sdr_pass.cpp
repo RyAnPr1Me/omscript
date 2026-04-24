@@ -70,14 +70,10 @@ static bool isVectorArith(const llvm::Instruction* inst) noexcept {
 static double vecArithCost(llvm::TargetTransformInfo& TTI,
                             unsigned opcode,
                             llvm::VectorType* vt) {
-    using CK = llvm::TargetTransformInfo::TCK_RecipThroughput;
-    llvm::Type* elemTy = vt->getElementType();
-    llvm::TargetTransformInfo::OperandValueInfo ovi;
     auto cost = TTI.getArithmeticInstrCost(
-        opcode, elemTy,
-        llvm::TargetTransformInfo::TCK_RecipThroughput,
-        ovi, ovi, vt);
-    return static_cast<double>(cost.getValue().getFixedValue());
+        opcode, vt->getElementType(),
+        llvm::TargetTransformInfo::TCK_RecipThroughput);
+    return static_cast<double>(cost.getValue().value_or(1));
 }
 
 /// True when @p inst is an extractelement with a constant index.
@@ -405,12 +401,10 @@ static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
                 reduceIntrinsicFor(reg.root->getOpcode(), elemTy->isFloatingPointTy());
             if (iid != llvm::Intrinsic::not_intrinsic) {
                 // Cost of reduction intrinsic vs. extract+arith chain.
-                using CK = llvm::TargetTransformInfo::TCK_RecipThroughput;
                 auto redCost = TTI.getArithmeticReductionCost(
-                    reg.root->getOpcode(), fvt, std::nullopt,
-                    llvm::TargetTransformInfo::TCK_RecipThroughput);
+                    reg.root->getOpcode(), fvt, /*FMF=*/std::nullopt);
                 const double newCost = static_cast<double>(
-                    redCost.getValue().getFixedValue());
+                    redCost.getValue().value_or(1));
                 const double saving = reg.origCost - newCost;
                 if (saving >= cfg.minAbsoluteSaving &&
                     newCost <= reg.origCost * cfg.costThreshold) {

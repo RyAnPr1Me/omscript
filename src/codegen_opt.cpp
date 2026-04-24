@@ -1,7 +1,9 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
+#include "ipof_pass.h"
 #include "optimization_manager.h" // OptimizationManager, CostModel
+#include "sdr_pass.h"
 #include "superoptimizer.h"
 #include "polyopt.h"
 #include <iostream>
@@ -4581,6 +4583,81 @@ void CodeGenerator::runOptimizationPasses() {
             std::cout << "    Post-HGOE signed→unsigned: "
                       << postHGOECount << " conversions" << '\n';
         }
+    }
+
+    // ── Speculative Devectorization & Revectorization (SDR) ────────────────
+    // Runs after HGOE so it can benefit from the hardware-aware transforms,
+    // but before the prefetch cleanup so TTI-guided narrowing/widening sees
+    // a fully optimized IR.  Enabled at O2+ only.
+    if (enableSDR_ && optimizationLevel >= OptimizationLevel::O2) {
+        if (verbose_) std::cout << "    Running SDR pass..." << '\n';
+        sdr::SdrConfig sdrCfg;
+        // At O3 / optmax, allow more aggressive widening.
+        if (optimizationLevel >= OptimizationLevel::O3) {
+            sdrCfg.maxWidenLanes    = 16;
+            sdrCfg.costThreshold    = 0.85;
+            sdrCfg.partialUseFraction = 0.75;
+        }
+        auto sdrStats = sdr::runSDR(*module,
+            [&](llvm::Function& F) -> llvm::TargetTransformInfo {
+                return targetMachine ? targetMachine->getTargetTransformInfo(F)
+                                     : llvm::TargetTransformInfo(F.getParent()->getDataLayout());
+            },
+            sdrCfg);
+        if (verbose_) {
+            std::cout << "    SDR complete: "
+                      << sdrStats.regionsDetected << " regions detected, "
+                      << sdrStats.narrowed        << " narrowed, "
+                      << sdrStats.widened         << " widened, "
+                      << sdrStats.reductionsReplaced << " reductions replaced"
+                      << " (" << sdrStats.totalTransformed() << " total)"
+                      << '\n';
+        }
+    } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSDR_) {
+        std::cout << "    SDR disabled (-fno-sdr)" << '\n';
+    }
+
+    // ── Implicit Phase Ordering Fixer (IPOF) ────────────────────────────────
+    // Scans the IR for residual missed-optimization patterns left behind by
+    // the fixed-order standard pipeline (constant expressions, common
+    // subexpressions, dead code, redundant loads, all-const call sites) and
+    // locally re-runs a minimal, dependency-ordered sub-pass sequence to
+    // recover each one.  Enabled at O2+.
+    if (enableIPOF_ && optimizationLevel >= OptimizationLevel::O2) {
+        // Derive aggression level from optimization level unless explicitly set.
+        const unsigned level = (ipofLevel_ > 0) ? ipofLevel_
+            : (optimizationLevel >= OptimizationLevel::O3 ? 2u : 1u);
+
+        if (verbose_) {
+            std::cout << "    Running IPOF (level " << level << ")..." << '\n';
+        }
+        ipof::IpofConfig ipofCfg;
+        ipofCfg.aggressionLevel = level;
+        ipofCfg.maxIterations   = (level >= 3) ? 3u : (level == 2 ? 2u : 1u);
+        ipofCfg.enableNearVectorizable = (level >= 3);
+        ipofCfg.enableCallWithConst    = (level >= 2);
+
+        auto ipofStats = ipof::runIPOF(*module,
+            [&](llvm::Function& F) -> llvm::TargetTransformInfo {
+                return targetMachine ? targetMachine->getTargetTransformInfo(F)
+                                     : llvm::TargetTransformInfo(F.getParent()->getDataLayout());
+            },
+            ipofCfg);
+
+        if (verbose_) {
+            std::cout << "    IPOF complete: "
+                      << ipofStats.opportunitiesFound << " opportunities found, "
+                      << ipofStats.acceptedImprovements << " accepted"
+                      << " (constants=" << ipofStats.foldedConstants
+                      << " cse="        << ipofStats.eliminatedCSE
+                      << " dead="       << ipofStats.eliminatedDead
+                      << " loads="      << ipofStats.eliminatedLoads
+                      << " inline="     << ipofStats.inlinedAndFolded
+                      << ") net -"      << ipofStats.netInstrReduction
+                      << " instrs" << '\n';
+        }
+    } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableIPOF_) {
+        std::cout << "    IPOF disabled (-fno-ipof)" << '\n';
     }
 
     // -----------------------------------------------------------------------

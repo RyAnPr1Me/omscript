@@ -92,6 +92,8 @@ set(SRC
     src/rlc_pass.cpp
     src/optimization_manager.cpp
     src/loop_transform_framework.cpp
+    src/sdr_pass.cpp
+    src/ipof_pass.cpp
 
     # Driver
     src/preprocessor.cpp
