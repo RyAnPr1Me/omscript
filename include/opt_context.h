@@ -34,7 +34,7 @@
 #include "ast.h"      // FunctionEffects, OptMaxConfig, etc.
 #include "cfctre.h"   // CTValue, CTEngine
 #include "egraph.h"   // EGraph, SaturationConfig, egraph::optimizeProgram, etc.
-#include "opt_pass.h" // AnalysisKey, PassContract, IRInvariant
+#include "opt_pass.h" // AnalysisKey, PassMetadata, IRInvariant
 #include <any>
 #include <limits>
 #include <optional>
@@ -417,11 +417,11 @@ public:
         }
     }
 
-    /// Remove all cached values whose keys appear in @p contract.invalidates_facts.
+    /// Remove all cached values whose keys appear in @p meta.invalidates_.
     /// Cascades through the dependency graph (if attached) for each key.
-    void invalidateByContract(const PassContract& contract) noexcept {
-        for (const auto& key : contract.invalidates_facts)
-            invalidate(key); // uses graph-aware invalidate
+    void invalidateByContract(const PassMetadata& meta) noexcept {
+        for (const char* key : meta.invalidates_)
+            invalidate(key);
     }
 
     /// Attach a dependency graph so that invalidating a fact also invalidates

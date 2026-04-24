@@ -78,7 +78,6 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <cstdint>
-#include <functional>
 
 namespace omscript::ipof {
 
@@ -158,9 +157,7 @@ struct IpofStats {
 //
 // @p getTTI  Callback supplying TargetTransformInfo per function.
 // @p config  Tuning config.  Default: aggressionLevel=1.
-IpofStats runIPOF(llvm::Module& module,
-                  const std::function<llvm::TargetTransformInfo(llvm::Function&)>& getTTI,
-                  const IpofConfig& config = {});
+IpofStats runIPOF(llvm::Module& module, const IpofConfig& config = {});
 
 } // namespace omscript::ipof
 

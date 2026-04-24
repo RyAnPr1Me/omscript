@@ -4637,12 +4637,7 @@ void CodeGenerator::runOptimizationPasses() {
         ipofCfg.enableNearVectorizable = (level >= 3);
         ipofCfg.enableCallWithConst    = (level >= 2);
 
-        auto ipofStats = ipof::runIPOF(*module,
-            [&](llvm::Function& F) -> llvm::TargetTransformInfo {
-                return targetMachine ? targetMachine->getTargetTransformInfo(F)
-                                     : llvm::TargetTransformInfo(F.getParent()->getDataLayout());
-            },
-            ipofCfg);
+        auto ipofStats = ipof::runIPOF(*module, ipofCfg);
 
         if (verbose_) {
             std::cout << "    IPOF complete: "

@@ -122,18 +122,13 @@ LegalityVerdict LegalityService::canTransformFunction(
 bool PassScheduler::checkPreconditions(const PassMetadata& meta) const noexcept {
     for (const char* req : meta.requires_) {
         if (!ctx_.validity().isValid(req)) {
-            const bool shouldAssert = strict_;
             std::cerr << "[omscript][opt] "
-                      << (shouldAssert ? "FATAL: " : "WARNING: ")
-                      << "pass '" << meta.name
-                      << "' requires fact '" << req
-                      << "' which is not yet valid — "
-                      << (shouldAssert ? "pass ordering is incorrect"
-                                       : "skipping pass")
+                      << (strict_ ? "FATAL: " : "WARNING: ")
+                      << "pass '" << meta.name << "' requires fact '" << req
+                      << "' which is not valid -- "
+                      << (strict_ ? "pass ordering is incorrect" : "skipping pass")
                       << "\n";
-            // In debug mode with strict checking, a precondition failure is a
-            // programmer error that must be surfaced immediately.
-            assert(!shouldAssert && "Pass precondition violated — see error above");
+            assert(!strict_ && "Pass precondition violated -- see error above");
             return false;
         }
     }
@@ -142,19 +137,10 @@ bool PassScheduler::checkPreconditions(const PassMetadata& meta) const noexcept 
 
 void PassScheduler::applyInvalidation(const PassMetadata& meta) noexcept {
     for (const char* fact : meta.invalidates_) {
-        // Invalidate the flag-based validity record so downstream passes know
-        // they need to re-run before consuming this fact.
         ctx_.validity().invalidate(fact);
-        // Also evict any typed cached result to prevent stale data from being
-        // returned by ctx.cache().get<T>(fact) after the transformation.
         ctx_.cache().invalidate(fact);
     }
-    // The dependency-graph cascade can transitively invalidate facts that the
-    // pass JUST PROVIDED (because the pass itself depends on the inputs it
-    // declared as invalidated — e.g. synthesis depends on purity, and also
-    // invalidates purity, so cascading from purity reaches synthesis).  Re-mark
-    // provides_ facts valid: they were freshly computed by this pass run and
-    // remain valid until a subsequent transformation invalidates them.
+    // Re-mark provides_ valid: they were freshly computed by this pass run.
     for (const char* fact : meta.provides_) {
         ctx_.validity().markValid(fact);
     }

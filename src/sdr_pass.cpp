@@ -235,8 +235,6 @@ static ScalarLanes devectorize(SdrRegion& region, llvm::IRBuilder<>& builder) {
     llvm::Instruction* root = region.root;
     auto* fvt = llvm::cast<llvm::FixedVectorType>(root->getType());
     const unsigned N = fvt->getNumElements();
-    llvm::Type* elemTy = fvt->getElementType();
-    (void)elemTy; // used below via ExtractElement
 
     builder.SetInsertPoint(root->getNextNode());
 

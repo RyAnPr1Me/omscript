@@ -159,34 +159,7 @@ namespace PassId {
 // ─────────────────────────────────────────────────────────────────────────────
 // AnalysisKey — type alias for analysis fact identifier strings
 // ─────────────────────────────────────────────────────────────────────────────
-///
-/// An AnalysisKey is the string name of a piece of analysis state.  It matches
-/// the string constants in AnalysisFact (e.g. "purity") and the keys used by
-/// AnalysisValidity.  Using a typedef makes intent explicit and allows future
-/// migration to a stronger handle type.
 using AnalysisKey = std::string;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PassContract — pass fact declarations (invalidates_facts used by AnalysisCache)
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// A PassContract lists the analysis facts a pass requires, provides, and
-/// invalidates.  The invalidates_facts field is used by AnalysisCache::
-/// invalidateByContract().
-///
-/// NOTE: IRInvariant tracking (requires_inv / establishes_inv / invalidates_inv)
-/// is reserved for a future IR-level invariant scheduler.  Only the fact-level
-/// fields are populated and consumed today.
-struct PassContract {
-    /// Analysis facts required before this pass runs.
-    std::vector<AnalysisKey> requires_facts;
-
-    /// Analysis facts produced (or updated) after this pass runs.
-    std::vector<AnalysisKey> provides_facts;
-
-    /// Analysis facts invalidated (made stale) when this pass transforms the IR.
-    std::vector<AnalysisKey> invalidates_facts;
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AnalysisDependencyGraph — tracks which analyses depend on which

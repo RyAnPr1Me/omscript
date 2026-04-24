@@ -497,18 +497,7 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
     }
 }
 
-// ── Per-pass wrappers ─────────────────────────────────────────────────────────
-//
-// Each wrapper:
-//   1. Delegates to the corresponding CodeGenerator method.
-//   2. Marks the produced fact valid in ctx.validity().
-//   3. Increments the pass counter (done by runPassPipeline, not here).
-//
-// Phase B: runPassPipeline checks that all required facts are valid before
-// calling each wrapper, and records wall-clock timing around the call.
-// runPrepasses / runInvalidated are now driven by PassRegistry::topologicalOrder()
-// rather than a hardcoded sequence, so adding or reordering passes only
-// requires a metadata change in registerAllPasses().
+// ── Per-pass wrappers — delegate to CodeGenerator, mark fact valid ────────────
 
 void OptimizationOrchestrator::runStringTypes(Program* program, OptimizationContext& ctx) {
     codegen_->preAnalyzeStringTypes(program);
@@ -546,31 +535,18 @@ void OptimizationOrchestrator::runCFCTRE(Program* program, OptimizationContext& 
 }
 
 void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& ctx) {
-    // Before running the e-graph, populate the pure-user-functions set so
-    // the optimizer can include expressions containing calls to those functions.
-    // A pure function always returns the same value for the same arguments, so
-    // algebraic rules (distributivity, commutativity, etc.) can fire across
-    // call boundaries — e.g. 2*f(x) + 3*f(x) → 5*f(x).
+    // Populate pure-user-functions so algebraic rules can fire across call boundaries.
     std::unordered_set<std::string> pureUserFuncs;
     for (const auto& [name, ff] : ctx.allFacts()) {
         if (ff.isPure) pureUserFuncs.insert(name);
     }
     ctx.egraph().setPureUserFuncs(std::move(pureUserFuncs));
-
-    // Delegate the level/flag guard to CodeGenerator (it knows enableEGraph_).
-    // If the guard passes, CodeGenerator configures the subsystem from its own
-    // settings and then calls ctx.egraph().optimizeProgram().
     codegen_->runEGraphPass(program, ctx);
     ctx.validity().egraph = true;
 }
 
 void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationContext& ctx) {
-    // Synthesize ValueRange facts from CFCTRE results AND simple AST patterns.
-    // Phase 1: constant returns (from CFCTRE).
-    // Phase 2: structural patterns — collect ALL return expressions recursively,
-    //          compute a conservative ValueRange for each, and join them.
-    //          This handles multi-return functions (if-else, early returns, etc.)
-    //          which previously received no range information at all.
+    // Synthesize ValueRange facts from CFCTRE results and AST return-expression analysis.
     if (!program) {
         ctx.validity().rangeAnalysis = true;
         return;
@@ -753,20 +729,7 @@ void OptimizationOrchestrator::runRLC(Program* program, OptimizationContext& ctx
 }
 
 // ── syncFactsToContext ────────────────────────────────────────────────────────
-//
-// Completes the FunctionFacts stored in OptimizationContext by filling in
-// derived facts and CF-CTRE results that are not written directly by the
-// individual analysis passes.
-//
-// Note: raw analysis facts (isConstFoldable, constIntReturn, constStringReturn,
-// effects) are now written directly into OptimizationContext by the analysis
-// passes themselves (Phase F), so this function only needs to:
-//   1. Re-assert raw facts from CodeGenerator as a safety net (ensures facts
-//      set before optCtx_ was wired up — e.g. @const_eval in generateFunction —
-//      are still visible).
-//   2. Compute derived facts (isPure) that depend on the raw facts.
-//   3. Populate CF-CTRE results (isDead, foldedByCFCTRE, uniformCTReturn) that
-//      are only available after runCFCTRE() completes.
+// Fill derived facts and CF-CTRE results into OptimizationContext after passes run.
 
 void OptimizationOrchestrator::syncFactsToContext(Program* program,
                                                    OptimizationContext& ctx) const {
@@ -776,10 +739,8 @@ void OptimizationOrchestrator::syncFactsToContext(Program* program,
         const std::string& name = func->name;
         FunctionFacts& ff = ctx.mutableFacts(name);
 
-        // ── Safety-net: assert raw facts from CodeGenerator accessors ─────
-        // Analysis passes now write these directly, but functions declared
-        // with @const_eval before optCtx_ was live (e.g. during early IR
-        // emission) may not have been written yet.
+        // Safety-net: assert raw facts — @const_eval functions declared before
+        // optCtx_ was live may not have been written by analysis passes.
         if (!ff.isConstFoldable)
             ff.isConstFoldable = codegen_->isConstEvalFunction(name);
         if (!ff.constIntReturn)
@@ -795,20 +756,16 @@ void OptimizationOrchestrator::syncFactsToContext(Program* program,
             }
         }
 
-        // ── Derived: purity ───────────────────────────────────────────────
+        // Derived purity.
         ff.isPure = ff.effects.isReadNone() || ff.isConstFoldable;
 
-        // ── CF-CTRE: dead-function detection ─────────────────────────────
+        // CF-CTRE results.
         if (ctx.ctEngine()) {
-            ff.isDead          = ctx.ctEngine()->deadFunctions().count(name) > 0;
-            ff.foldedByCFCTRE  = ctx.ctEngine()->foldableCallees().count(name) > 0;
-
-            // Uniform return value (same constant on every call path).
+            ff.isDead         = ctx.ctEngine()->deadFunctions().count(name) > 0;
+            ff.foldedByCFCTRE = ctx.ctEngine()->foldableCallees().count(name) > 0;
             const auto& uniform = ctx.ctEngine()->uniformReturnValues();
             auto it = uniform.find(name);
-            if (it != uniform.end()) {
-                ff.uniformCTReturn = it->second;
-            }
+            if (it != uniform.end()) ff.uniformCTReturn = it->second;
         }
     }
 }

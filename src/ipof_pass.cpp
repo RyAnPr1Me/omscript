@@ -223,20 +223,15 @@ static PassSeq selectPassSeq(const std::vector<MissedOp>& ops) {
 
 /// Apply @p seq to @p F (function-level) or to the whole @p M (module-level
 /// when seq == InlineFoldDCE).  Returns true if any transformation fired.
-static bool applyPassSeq(PassSeq seq,
-                          llvm::Function& F,
-                          llvm::Module& M,
-                          llvm::TargetTransformInfo& /*TTI*/) {
+/// The sub-passes used (InstSimplify, ADCE, EarlyCSE, MemCpyOpt, SimplifyCFG,
+/// AlwaysInliner) do not require a hardware-accurate TTI.
+static bool applyPassSeq(PassSeq seq, llvm::Function& F, llvm::Module& M) {
     llvm::PassBuilder PB;
     llvm::LoopAnalysisManager LAM;
     llvm::FunctionAnalysisManager FAM;
     llvm::CGSCCAnalysisManager CGAM;
     llvm::ModuleAnalysisManager MAM;
 
-    // The sub-passes used here (InstSimplify, ADCE, EarlyCSE, MemCpyOpt,
-    // SimplifyCFG, AlwaysInliner) do not require a hardware-accurate TTI;
-    // a default TargetIRAnalysis is sufficient and avoids the move-only
-    // TTI copy problem.
     PB.registerModuleAnalyses(MAM);
     PB.registerCGSCCAnalyses(CGAM);
     PB.registerFunctionAnalyses(FAM);
@@ -285,7 +280,6 @@ static bool applyPassSeq(PassSeq seq,
 
 static IpofStats runOnFunction(llvm::Function& F,
                                 llvm::Module& M,
-                                llvm::TargetTransformInfo& TTI,
                                 const IpofConfig& cfg) {
     IpofStats stats;
     if (F.isDeclaration()) return stats;
@@ -314,7 +308,7 @@ static IpofStats runOnFunction(llvm::Function& F,
         seenHashes.insert(hashBefore);
 
         // Apply.
-        applyPassSeq(seq, F, M, TTI);
+        applyPassSeq(seq, F, M);
         ++stats.rerunsApplied;
 
         const unsigned after = instrCount(F);
@@ -361,9 +355,7 @@ static IpofStats runOnFunction(llvm::Function& F,
 // runIPOF — public entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-IpofStats runIPOF(llvm::Module& module,
-                  const std::function<llvm::TargetTransformInfo(llvm::Function&)>& getTTI,
-                  const IpofConfig& cfg) {
+IpofStats runIPOF(llvm::Module& module, const IpofConfig& cfg) {
     // Apply aggression-level overrides to the effective config.
     IpofConfig eff = cfg;
     eff.aggressionLevel     = std::min(cfg.aggressionLevel, 3u);
@@ -379,8 +371,7 @@ IpofStats runIPOF(llvm::Module& module,
 
     for (llvm::Function& F : module) {
         if (F.isDeclaration()) continue;
-        llvm::TargetTransformInfo TTI = getTTI(F);
-        IpofStats fs = runOnFunction(F, module, TTI, eff);
+        IpofStats fs = runOnFunction(F, module, eff);
         total.opportunitiesFound   += fs.opportunitiesFound;
         total.opportunitiesActed   += fs.opportunitiesActed;
         total.rerunsApplied        += fs.rerunsApplied;

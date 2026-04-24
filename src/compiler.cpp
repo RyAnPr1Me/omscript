@@ -161,6 +161,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     codegen.setSuperoptimize(superopt_);
     codegen.setSuperoptLevel(superoptLevel_);
     codegen.setHardwareGraphOpt(hgoe_);
+    codegen.setSDR(sdr_);
+    codegen.setIPOF(ipof_);
     codegen.setSourceFilename(sourceFile);
     if (!pgoGenPath_.empty()) {
         codegen.setPGOGen(pgoGenPath_);
