@@ -611,10 +611,6 @@ class CodeGenerator {
     std::optional<int64_t>     tryFoldInt(Expression* e) const;
     std::optional<std::string> tryFoldStr(Expression* e) const;
 
-    /// Evaluate a pure built-in at compile time (~80 supported; nullopt if unknown/impure/wrong args).
-    static std::optional<ConstValue> evalConstBuiltin(
-        const std::string& name, const std::vector<ConstValue>& args);
-
     /// Emit a compile-time constant array as a private global (OmScript array layout).
     llvm::Value* emitComptimeArray(const std::vector<ConstValue>& elems);
 

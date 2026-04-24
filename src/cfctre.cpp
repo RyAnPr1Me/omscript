@@ -441,6 +441,24 @@ std::optional<CTValue> CTEngine::evalComptimeBlock(
     return std::nullopt;
 }
 
+// ── evalSingleExpr ─────────────────────────────────────────────────────────
+// Evaluate a single expression in the given environment.
+// Side effects (array writes, local mutations) stay inside the temporary frame
+// and are never propagated back to the caller.
+
+CTValue CTEngine::evalSingleExpr(
+    const std::unordered_map<std::string, CTValue>& env,
+    const Expression* e)
+{
+    if (!e) return CTValue::uninit();
+    CTFrame frame;
+    frame.fn   = nullptr;
+    frame.heap = &heap_;
+    for (auto& [k, v] : env) frame.locals[k] = v;
+    fuel_ = 0;
+    return evalExpr(frame, e);
+}
+
 // ── executeBody ────────────────────────────────────────────────────────────
 
 bool CTEngine::executeBody(CTFrame& frame, const BlockStmt* body) {
@@ -551,12 +569,26 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     // ── Postfix ++ / -- ──────────────────────────────────────────────────
     case ASTNodeType::POSTFIX_EXPR: {
         auto* pfx = static_cast<const PostfixExpr*>(e);
+        const int64_t delta = (pfx->op == "++") ? 1 : -1;
+        // arr[i]++ / arr[i]-- — array element postfix
+        if (pfx->operand->type == ASTNodeType::INDEX_EXPR) {
+            auto* idx    = static_cast<const IndexExpr*>(pfx->operand.get());
+            const CTValue arrVal = evalExpr(frame, idx->array.get());
+            const CTValue idxVal = evalExpr(frame, idx->index.get());
+            if (!arrVal.isKnown() || !idxVal.isKnown() ||
+                !arrVal.isArray() || !idxVal.isInt()) return CTValue::uninit();
+            const int64_t i = idxVal.asI64();
+            CTValue current = heap_.load(arrVal.asArr(), i);
+            if (!current.isKnown() || !current.isInt()) return CTValue::uninit();
+            heap_.store(arrVal.asArr(), i, CTValue::fromI64(current.asI64() + delta));
+            return current;  // postfix: return old value
+        }
+        // x++ / x-- — simple variable postfix
         if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR) return CTValue::uninit();
-        auto* id  = static_cast<const IdentifierExpr*>(pfx->operand.get());
-        auto  it  = frame.locals.find(id->name);
+        auto* id = static_cast<const IdentifierExpr*>(pfx->operand.get());
+        auto  it = frame.locals.find(id->name);
         if (it == frame.locals.end() || !it->second.isInt()) return CTValue::uninit();
         CTValue old = it->second;
-        const int64_t delta = (pfx->op == "++") ? 1 : -1;
         it->second = CTValue::fromI64(it->second.asI64() + delta);
         return old;  // postfix returns old value
     }
@@ -565,11 +597,26 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     case ASTNodeType::PREFIX_EXPR: {
         auto* pfx = static_cast<const PrefixExpr*>(e);
         if (pfx->op != "++" && pfx->op != "--") return CTValue::uninit();
-        if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR) return CTValue::uninit();
-        auto* id  = static_cast<const IdentifierExpr*>(pfx->operand.get());
-        auto  it  = frame.locals.find(id->name);
-        if (it == frame.locals.end() || !it->second.isInt()) return CTValue::uninit();
         const int64_t delta = (pfx->op == "++") ? 1 : -1;
+        // ++arr[i] / --arr[i] — array element prefix
+        if (pfx->operand->type == ASTNodeType::INDEX_EXPR) {
+            auto* idx    = static_cast<const IndexExpr*>(pfx->operand.get());
+            const CTValue arrVal = evalExpr(frame, idx->array.get());
+            const CTValue idxVal = evalExpr(frame, idx->index.get());
+            if (!arrVal.isKnown() || !idxVal.isKnown() ||
+                !arrVal.isArray() || !idxVal.isInt()) return CTValue::uninit();
+            const int64_t i = idxVal.asI64();
+            CTValue current = heap_.load(arrVal.asArr(), i);
+            if (!current.isKnown() || !current.isInt()) return CTValue::uninit();
+            CTValue updated = CTValue::fromI64(current.asI64() + delta);
+            heap_.store(arrVal.asArr(), i, updated);
+            return updated;  // prefix: return new value
+        }
+        // ++x / --x — simple variable prefix
+        if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR) return CTValue::uninit();
+        auto* id = static_cast<const IdentifierExpr*>(pfx->operand.get());
+        auto  it = frame.locals.find(id->name);
+        if (it == frame.locals.end() || !it->second.isInt()) return CTValue::uninit();
         it->second = CTValue::fromI64(it->second.asI64() + delta);
         return it->second;  // prefix returns new value
     }
@@ -684,6 +731,10 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         if (!lv.isKnown()) return CTValue::uninit();
         return evalCall(frame, pipe->functionName, {lv});
     }
+
+    // ── Range annotation (strip hint, evaluate inner) ─────────────────────
+    case ASTNodeType::RANGE_ANNOT_EXPR:
+        return evalExpr(frame, static_cast<const RangeAnnotExpr*>(e)->inner.get());
 
     default:
         return CTValue::uninit();
