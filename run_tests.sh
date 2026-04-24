@@ -776,6 +776,7 @@ ptest_program "examples/loop_ucmp_test.om" 5
 ptest_program "examples/dict_literal_test.om" 18
 ptest_program "examples/preprocessor_test.om" 12
 ptest_program "examples/preprocessor_modern_test.om" 13
+ptest_program "examples/preprocessor_typed_test.om" 6
 ptest_program "examples/dict_chaining_test.om" 16
 ptest_program "examples/ifelse_select_test.om" 37
 ptest_program "examples/const_float_fold_test.om" 7

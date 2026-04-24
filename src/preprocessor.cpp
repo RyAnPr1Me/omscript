@@ -35,13 +35,22 @@ namespace omscript {
 
 Preprocessor::Preprocessor(std::string filename)
     : filename_(std::move(filename)) {
-    macros_["__VERSION__"] = {false, false, {}, "\"" OMSC_VERSION "\""};
-    macros_["__OS__"]      = {false, false, {}, "\"" OMSC_PP_OS "\""};
-    macros_["__ARCH__"]    = {false, false, {}, "\"" OMSC_PP_ARCH "\""};
+    // Helper that installs a reserved (predefined, non-redefinable) macro.
+    // All compiler-installed macros go through this so the reserved-name
+    // check in handleDefine / #undef handling catches every one.
+    auto reserve = [&](const std::string& name, const std::string& body) {
+        MacroDef def;
+        def.body = body;
+        def.isReserved = true;
+        macros_[name] = std::move(def);
+    };
+    reserve("__VERSION__",   "\"" OMSC_VERSION "\"");
+    reserve("__OS__",        "\"" OMSC_PP_OS "\"");
+    reserve("__ARCH__",      "\"" OMSC_PP_ARCH "\"");
     // Original file as the user passed it on the command line — preserved
     // across `#line` directives that rewrite __FILE__ / line numbers (a la
     // C99 __BASE_FILE__).
-    macros_["__BASE_FILE__"] = {false, false, {}, "\"" + filename_ + "\""};
+    reserve("__BASE_FILE__", "\"" + filename_ + "\"");
 
     // Build-time date / time of the *compilation of this source file*.
     // Computed once per Preprocessor instance to keep all uses within a
@@ -66,8 +75,8 @@ Preprocessor::Preprocessor(std::string filename)
         char timeBuf[16];
         std::snprintf(timeBuf, sizeof(timeBuf), "\"%02d:%02d:%02d\"",
                       tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
-        macros_["__DATE__"] = {false, false, {}, dateBuf};
-        macros_["__TIME__"] = {false, false, {}, timeBuf};
+        reserve("__DATE__", dateBuf);
+        reserve("__TIME__", timeBuf);
     }
 
     // Target-feature predefined macros — reflect the SIMD / ISA feature set
@@ -80,9 +89,7 @@ Preprocessor::Preprocessor(std::string filename)
     //   #endif
     // Only macros for features actually present are defined (mirrors GCC /
     // clang behavior for __AVX2__, __SSE4_2__, etc.).
-    auto define1 = [&](const char* name) {
-        macros_[name] = {false, false, {}, "1"};
-    };
+    auto define1 = [&](const char* name) { reserve(name, "1"); };
 #if defined(__SSE2__)
     define1("__SIMD_SSE2__");
 #endif
@@ -118,11 +125,11 @@ Preprocessor::Preprocessor(std::string filename)
     // value codegen reports via preferredVectorWidth_.  Lets user code
     // size hand-tuned SIMD chunks without hardcoding `4` or `8`.
 #if defined(__AVX512F__)
-    macros_["__VECTOR_WIDTH__"] = {false, false, {}, "16"};
+    reserve("__VECTOR_WIDTH__", "16");
 #elif defined(__AVX2__) || defined(__AVX__)
-    macros_["__VECTOR_WIDTH__"] = {false, false, {}, "8"};
+    reserve("__VECTOR_WIDTH__", "8");
 #else
-    macros_["__VECTOR_WIDTH__"] = {false, false, {}, "4"};
+    reserve("__VECTOR_WIDTH__", "4");
 #endif
 }
 
@@ -178,6 +185,15 @@ int Preprocessor::cmpVersion(const std::string& a, const std::string& b) {
 // #define parsing
 // ============================================================
 
+namespace {
+// Special-cased predefined macro names that aren't stored in macros_
+// (handled directly by expandSimple).  Combined with the isReserved flag
+// these form the complete reserved-name set.
+bool isSpecialReservedName(const std::string& n) {
+    return n == "__FILE__" || n == "__LINE__" || n == "__COUNTER__";
+}
+} // namespace
+
 void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
     const std::string r = trimLeft(rest);
     size_t i = 0;
@@ -190,25 +206,91 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
     while (i < r.size() && isIdentChar(r[i])) i++;
     const std::string name = r.substr(0, i);
 
+    // ── Reserved-name protection ────────────────────────────────────────
+    // Predefined macros (__FILE__, __VERSION__, __SIMD_AVX2__, …) are
+    // owned by the compiler; user code must not be able to redefine them
+    // because doing so would let a single source corrupt diagnostic
+    // output, conditional-compilation decisions, or downstream tools
+    // that read the same predefs.  Catch the attempt at #define time.
+    {
+        auto existing = macros_.find(name);
+        if (isSpecialReservedName(name) ||
+            (existing != macros_.end() && existing->second.isReserved)) {
+            throw omscript::DiagnosticError(omscript::Diagnostic{
+                omscript::DiagnosticSeverity::Error,
+                {filename_, lineNo, 0},
+                "#define: '" + name + "' is a reserved predefined macro and cannot be redefined"});
+        }
+    }
+
     MacroDef def;
 
     if (i < r.size() && r[i] == '(') {
         def.isFunctionLike = true;
         i++;
+        // Parse comma-separated parameter list, each optionally followed
+        // by `: <type>`.  E.g. `(x: int, y: int)` records params=[x,y]
+        // and paramTypes=["int","int"].  Untyped params get "" in
+        // paramTypes (treated as "any" by validateMacroCall).
         while (i < r.size() && r[i] != ')') {
             while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
-            if (r[i] == ')') break;
+            if (i >= r.size() || r[i] == ')') break;
             const size_t pstart = i;
             while (i < r.size() && isIdentChar(r[i])) i++;
-            if (i > pstart) def.params.push_back(r.substr(pstart, i - pstart));
+            if (i > pstart) {
+                def.params.push_back(r.substr(pstart, i - pstart));
+                std::string ptype;
+                while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
+                if (i < r.size() && r[i] == ':') {
+                    i++;
+                    while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
+                    const size_t ts = i;
+                    while (i < r.size() && (isIdentChar(r[i]) || r[i] == '*' || r[i] == '[' || r[i] == ']'))
+                        i++;
+                    ptype = r.substr(ts, i - ts);
+                }
+                def.paramTypes.push_back(std::move(ptype));
+            }
             while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
             if (i < r.size() && r[i] == ',') i++;
         }
-        if (i < r.size()) i++;
+        if (i < r.size()) i++;  // skip ')'
+
+        // Optional return-type annotation: `) -> <type>`.  Recorded for
+        // documentation only; not currently checked at expansion sites.
+        while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
+        if (i + 1 < r.size() && r[i] == '-' && r[i + 1] == '>') {
+            i += 2;
+            while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
+            const size_t ts = i;
+            while (i < r.size() && (isIdentChar(r[i]) || r[i] == '*' || r[i] == '[' || r[i] == ']'))
+                i++;
+            def.returnType = r.substr(ts, i - ts);
+        }
     }
 
     if (i < r.size()) {
         def.body = trim(r.substr(i));
+    }
+
+    // ── Redefinition warning ────────────────────────────────────────────
+    // C/C++ require a diagnostic when a macro is redefined unless the new
+    // definition is a token-for-token match of the old one.  We follow
+    // the same convention: identical-body redefines are silent, mismatched
+    // ones get a warning so the user notices.
+    {
+        auto existing = macros_.find(name);
+        if (existing != macros_.end() && !existing->second.isReserved) {
+            const MacroDef& old = existing->second;
+            const bool same = (old.isFunctionLike == def.isFunctionLike &&
+                               old.params == def.params &&
+                               old.paramTypes == def.paramTypes &&
+                               old.body == def.body);
+            if (!same) {
+                warnings_.push_back(filename_ + ":" + std::to_string(lineNo) +
+                    ": warning: macro '" + name + "' redefined with a different body");
+            }
+        }
     }
 
     macros_[name] = std::move(def);
@@ -244,6 +326,182 @@ std::vector<std::string> Preprocessor::collectArgs(const std::string& text,
 }
 
 // ============================================================
+// Argument shape classification + macro-call validation
+// ============================================================
+
+std::string Preprocessor::classifyArg(const std::string& a) {
+    // Trim, then bucket the argument's *syntactic shape* (no execution,
+    // no full parsing) into one of a small set of categories.  Used by
+    // typed function-like macros: declared param type "int" should not
+    // accept a string-literal argument, etc.
+    //
+    // Returns:
+    //   "string" — looks like "..." or '...'
+    //   "float"  — purely numeric and contains a '.' or scientific 'e'/'E'
+    //   "int"    — purely numeric (decimal, 0x.., 0b..) with optional sign
+    //   "bool"   — exactly `true` or `false`
+    //   "ident"  — bare identifier (could be a variable, another macro, …)
+    //   "expr"   — anything else (operators, parens, calls — caller-defined)
+    //   ""       — empty
+    size_t l = 0, r = a.size();
+    while (l < r && std::isspace(static_cast<unsigned char>(a[l]))) ++l;
+    while (r > l && std::isspace(static_cast<unsigned char>(a[r - 1]))) --r;
+    if (l == r) return "";
+    const std::string s = a.substr(l, r - l);
+
+    if (s == "true" || s == "false") return "bool";
+    if (s.front() == '"'  && s.back() == '"' ) return "string";
+    if (s.front() == '\'' && s.back() == '\'') return "string";
+
+    // Numeric classification — accept optional leading sign, then check
+    // every remaining char is a digit / '.' / 'e' / 'E' / hex prefix etc.
+    {
+        size_t k = 0;
+        if (s[k] == '+' || s[k] == '-') ++k;
+        if (k < s.size() && s[k] == '0' && k + 1 < s.size() &&
+            (s[k + 1] == 'x' || s[k + 1] == 'X')) {
+            // 0x… hex literal
+            k += 2;
+            if (k >= s.size()) return "expr";
+            for (; k < s.size(); ++k)
+                if (!std::isxdigit(static_cast<unsigned char>(s[k]))) return "expr";
+            return "int";
+        }
+        if (k < s.size() && s[k] == '0' && k + 1 < s.size() &&
+            (s[k + 1] == 'b' || s[k + 1] == 'B')) {
+            k += 2;
+            if (k >= s.size()) return "expr";
+            for (; k < s.size(); ++k)
+                if (s[k] != '0' && s[k] != '1') return "expr";
+            return "int";
+        }
+        bool hasDigit = false, hasDot = false, hasExp = false, allOk = true;
+        for (; k < s.size(); ++k) {
+            const char c = s[k];
+            if (std::isdigit(static_cast<unsigned char>(c))) { hasDigit = true; }
+            else if (c == '.') { if (hasDot || hasExp) { allOk = false; break; } hasDot = true; }
+            else if (c == 'e' || c == 'E') {
+                if (hasExp || !hasDigit) { allOk = false; break; }
+                hasExp = true;
+                if (k + 1 < s.size() && (s[k + 1] == '+' || s[k + 1] == '-')) ++k;
+            }
+            else if (c == 'f' || c == 'F') { if (k + 1 != s.size()) { allOk = false; break; } hasDot = true; }
+            else { allOk = false; break; }
+        }
+        if (allOk && hasDigit) return (hasDot || hasExp) ? "float" : "int";
+    }
+
+    // Bare identifier
+    {
+        bool ok = !s.empty() && (std::isalpha(static_cast<unsigned char>(s[0])) || s[0] == '_');
+        for (size_t k = 1; ok && k < s.size(); ++k)
+            if (!isIdentChar(s[k])) { ok = false; break; }
+        if (ok) return "ident";
+    }
+
+    return "expr";
+}
+
+namespace {
+// Returns true if `arg` looks like a function call — heuristic: an
+// identifier or qualified path immediately followed by `(...)`.  Used to
+// flag the classic multi-evaluation footgun MAX(f(), g()).
+bool argLooksLikeCall(const std::string& arg) {
+    size_t i = 0;
+    while (i < arg.size() && std::isspace(static_cast<unsigned char>(arg[i]))) ++i;
+    const size_t start = i;
+    while (i < arg.size() &&
+           (std::isalnum(static_cast<unsigned char>(arg[i])) ||
+            arg[i] == '_' || arg[i] == '.' || arg[i] == ':'))
+        ++i;
+    if (i == start) return false;
+    while (i < arg.size() && std::isspace(static_cast<unsigned char>(arg[i]))) ++i;
+    return i < arg.size() && arg[i] == '(';
+}
+} // namespace
+
+void Preprocessor::validateMacroCall(const std::string& name,
+                                     const MacroDef& def,
+                                     const std::vector<std::string>& args,
+                                     int lineNo) const {
+    // Arity check.  Empty-arg edge case: a call written `FOO()` returns
+    // one zero-length arg from collectArgs; treat that as zero args when
+    // the macro itself is declared to take zero parameters so `EMPTY()`
+    // still works.
+    const size_t expected = def.params.size();
+    size_t actual = args.size();
+    if (actual == 1 && args[0].empty() && expected == 0) actual = 0;
+    if (actual != expected) {
+        throw omscript::DiagnosticError(omscript::Diagnostic{
+            omscript::DiagnosticSeverity::Error,
+            {filename_, lineNo, 0},
+            "macro '" + name + "' expects " + std::to_string(expected) +
+            " argument" + (expected == 1 ? "" : "s") +
+            ", got " + std::to_string(actual)});
+    }
+
+    // Per-argument type classification (only when the macro declared a
+    // type for that parameter).  We're deliberately permissive: an
+    // identifier or general expression is accepted for *any* declared
+    // type, because it might further expand or evaluate to the right
+    // shape — we only reject *obvious* mismatches.
+    auto compatible = [](const std::string& declared, const std::string& shape) {
+        if (declared.empty() || declared == "any") return true;
+        if (shape.empty() || shape == "ident" || shape == "expr") return true;
+        if (declared == "int"   || declared == "uint")  return shape == "int";
+        if (declared == "float" || declared == "double") return shape == "int" || shape == "float";
+        if (declared == "string") return shape == "string";
+        if (declared == "bool")   return shape == "bool" || shape == "int";
+        // Unknown declared type — don't second-guess the user
+        return true;
+    };
+    for (size_t i = 0; i < expected; ++i) {
+        const std::string& declared = (i < def.paramTypes.size()) ? def.paramTypes[i] : "";
+        if (declared.empty() || declared == "any") continue;
+        const std::string shape = classifyArg(args[i]);
+        if (!compatible(declared, shape)) {
+            throw omscript::DiagnosticError(omscript::Diagnostic{
+                omscript::DiagnosticSeverity::Error,
+                {filename_, lineNo, 0},
+                "macro '" + name + "': argument " + std::to_string(i + 1) +
+                " ('" + def.params[i] + "') is declared " + declared +
+                " but got a " + shape + "-shaped value: " + args[i]});
+        }
+    }
+
+    // Multi-evaluation warning.  Walk the body looking for whole-token
+    // matches of each parameter; if any parameter occurs more than once
+    // AND the matching argument looks like a function call, warn — this
+    // is the canonical MAX(f(), g()) bug that bites every C user.
+    auto countParamUses = [&](const std::string& param) {
+        int n = 0;
+        const std::string& b = def.body;
+        size_t k = 0;
+        while (k < b.size()) {
+            if (isIdentStart(b[k])) {
+                size_t s = k;
+                while (k < b.size() && isIdentChar(b[k])) ++k;
+                if (b.substr(s, k - s) == param) ++n;
+            } else {
+                ++k;
+            }
+        }
+        return n;
+    };
+    for (size_t i = 0; i < expected; ++i) {
+        if (!argLooksLikeCall(args[i])) continue;
+        if (countParamUses(def.params[i]) > 1) {
+            const_cast<Preprocessor*>(this)->warnings_.push_back(
+                filename_ + ":" + std::to_string(lineNo) +
+                ": warning: macro '" + name + "' uses parameter '" +
+                def.params[i] + "' more than once and argument '" +
+                args[i] + "' looks like a function call — it will be "
+                "evaluated multiple times");
+        }
+    }
+}
+
+// ============================================================
 // expandSimple
 // ============================================================
 
@@ -268,7 +526,28 @@ std::string Preprocessor::expandSimple(const std::string& name, int lineNo,
 
     if (def.isFunctionLike) return name;
 
-    return substituteMacros(def.body, lineNo, depth + 1);
+    // ── Cycle detection ────────────────────────────────────────────────
+    // Object-like macro expansion: if we're already in the middle of
+    // expanding `name`, stop here and return the literal name to break
+    // the cycle.  Without this, `#define A B` / `#define B A` would
+    // recurse until the depth-256 guard fires; with this we surface the
+    // cycle as a deterministic, readable error pointing at the macro.
+    if (expanding_.count(name)) {
+        throw omscript::DiagnosticError(omscript::Diagnostic{
+            omscript::DiagnosticSeverity::Error,
+            {filename_, lineNo, 0},
+            "cyclic macro expansion detected involving '" + name + "'"});
+    }
+    expanding_.insert(name);
+    std::string out;
+    try {
+        out = substituteMacros(def.body, lineNo, depth + 1);
+    } catch (...) {
+        expanding_.erase(name);
+        throw;
+    }
+    expanding_.erase(name);
+    return out;
 }
 
 // ============================================================
@@ -277,7 +556,17 @@ std::string Preprocessor::expandSimple(const std::string& name, int lineNo,
 
 std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
                                              int depth) const {
-    if (depth > 64) return text;
+    // Defence-in-depth recursion limit.  In practice the per-macro cycle
+    // check (expanding_) catches most pathological cases; this guard
+    // catches deep-but-acyclic chains (e.g. 200 nested function-like
+    // expansions) and turns them into a real diagnostic instead of
+    // silently truncating output.
+    if (depth > 256) {
+        throw omscript::DiagnosticError(omscript::Diagnostic{
+            omscript::DiagnosticSeverity::Error,
+            {filename_, lineNo, 0},
+            "macro expansion exceeded 256 levels of nesting (possible runaway expansion)"});
+    }
 
     std::string result;
     result.reserve(text.size());
@@ -341,6 +630,21 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
                     i = j;
 
                     const MacroDef& def = it->second;
+
+                    // ── Type-aware safety check: arity, declared param
+                    //    types, multi-evaluation footgun.  Throws on
+                    //    error; populates warnings_ for soft issues.
+                    validateMacroCall(ident, def, args, lineNo);
+
+                    // ── Cycle detection for function-like expansions.
+                    if (expanding_.count(ident)) {
+                        throw omscript::DiagnosticError(omscript::Diagnostic{
+                            omscript::DiagnosticSeverity::Error,
+                            {filename_, lineNo, 0},
+                            "cyclic macro expansion detected involving '" + ident + "'"});
+                    }
+                    expanding_.insert(ident);
+
                     std::string expanded = def.body;
 
                     // ── Stringification: replace `#param` with `"arg"`.
@@ -445,7 +749,15 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
                     };
                     expanded = applyTokenPaste(std::move(expanded));
 
-                    result += substituteMacros(expanded, lineNo, depth + 1);
+                    std::string sub;
+                    try {
+                        sub = substituteMacros(expanded, lineNo, depth + 1);
+                    } catch (...) {
+                        expanding_.erase(ident);
+                        throw;
+                    }
+                    expanding_.erase(ident);
+                    result += sub;
                     continue;
                 }
             }
@@ -872,7 +1184,22 @@ std::string Preprocessor::process(const std::string& source) {
             output += '\n'; continue;
         }
         if (kw == "undef") {
-            macros_.erase(trim(arg));
+            const std::string un = trim(arg);
+            // Reserved-name protection mirrors the #define path.
+            auto it = macros_.find(un);
+            if (isSpecialReservedName(un) ||
+                (it != macros_.end() && it->second.isReserved)) {
+                throw omscript::DiagnosticError(omscript::Diagnostic{
+                    omscript::DiagnosticSeverity::Error,
+                    {filename_, lineNo, 0},
+                    "#undef: '" + un + "' is a reserved predefined macro and cannot be undefined"});
+            }
+            if (it == macros_.end()) {
+                warnings_.push_back(filename_ + ":" + std::to_string(lineNo) +
+                    ": warning: #undef of macro '" + un + "' that was never defined");
+            } else {
+                macros_.erase(it);
+            }
             output += '\n'; continue;
         }
         if (kw == "error") {
@@ -926,11 +1253,19 @@ std::string Preprocessor::process(const std::string& source) {
             output += '\n'; continue;
         }
         if (kw == "counter") {
-            const std::string name = trim(arg);
+            const std::string cname = trim(arg);
+            auto it = macros_.find(cname);
+            if (isSpecialReservedName(cname) ||
+                (it != macros_.end() && it->second.isReserved)) {
+                throw omscript::DiagnosticError(omscript::Diagnostic{
+                    omscript::DiagnosticSeverity::Error,
+                    {filename_, lineNo, 0},
+                    "#counter: '" + cname + "' is a reserved predefined macro and cannot be redefined"});
+            }
             MacroDef def;
             def.isCounter = true;
             def.counterValue = 0;
-            macros_[name] = std::move(def);
+            macros_[cname] = std::move(def);
             output += '\n'; continue;
         }
         if (kw == "pragma") {

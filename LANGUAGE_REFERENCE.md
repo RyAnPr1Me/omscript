@@ -577,15 +577,51 @@ The **preprocessor** runs before lexical analysis, transforming source text by e
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 ```
 
+**Typed function-like macro** (optional `: <type>` per parameter, optional
+`-> <returnType>` after the parameter list):
+```omscript
+#define SQUARE(x: int) -> int          ((x) * (x))
+#define SCALE(x: float, k: int) -> float ((x) * (k))
+#define GREET(s: string) -> string     (s)
+```
+
+Recognised parameter types: `int`, `uint`, `float`, `double`, `string`,
+`bool`, `any`. Untyped parameters (and the catch-all `any`) accept any
+argument shape. The return-type annotation is informational only.
+
+When the preprocessor expands a typed macro it classifies the *syntactic
+shape* of each argument (a string literal, a numeric literal, a bare
+identifier, a parenthesised expression, …) and rejects an obvious
+mismatch — for example calling `SQUARE("hi")` is reported at preprocess
+time instead of producing a downstream parse error. Identifiers and
+general expressions are accepted for any declared type, since they may
+expand or evaluate to the right shape.
+
 **Syntax**:
 - Object-like: `#define NAME body`
 - Function-like: `#define NAME(param1, param2, ...) body`
+- Typed function-like: `#define NAME(p1: T1, p2: T2, ...) -> R body`
 - No space allowed between `NAME` and `(` in function-like macros
 - Macro body extends to end of line (or use `\` for continuation)
 - Macros are substituted in subsequent source text
-- Recursive expansion is supported (depth limit: 64)
+- Recursive expansion is supported up to a hard limit of 256 nested
+  expansions; true *cyclic* macro definitions (e.g. `#define A B` and
+  `#define B A`) are detected and reported as a deterministic error
+  instead of silently truncating
 
-**Stringification and token pasting**: Not currently implemented. Macros perform textual substitution only.
+**Stringification (`#param`)** and **token pasting (`a ## b`)** are
+supported in function-like macro bodies — see §3.2.
+
+**Diagnostics emitted by `#define` and friends**:
+| Condition | Severity |
+|---|---|
+| `#define` / `#undef` of a reserved predefined macro (`__FILE__`, `__LINE__`, `__VERSION__`, `__DATE__`, `__TIME__`, `__BASE_FILE__`, `__OS__`, `__ARCH__`, `__COUNTER__`, `__VECTOR_WIDTH__`, the `__SIMD_*__` family) | **error** |
+| Function-like macro called with the wrong number of arguments | **error** |
+| Typed function-like macro argument shape clearly incompatible with declared type | **error** |
+| Cyclic macro expansion or > 256 levels of nesting | **error** |
+| Macro redefined with a body that differs from the previous definition | warning |
+| `#undef` of a macro that was never defined | warning |
+| Function-like macro uses a parameter more than once and the matching argument looks like a function call (multi-evaluation footgun) | warning |
 
 #### 3.1.2 `#undef` — Undefine Macro
 
@@ -595,6 +631,9 @@ Removes a macro definition:
 #undef TEMP
 // TEMP is no longer defined
 ```
+
+`#undef` of a name that was never defined emits a warning, and `#undef`
+of a reserved predefined macro is a hard error.
 
 #### 3.1.3 `#if` / `#elif` / `#else` / `#endif` — Conditional Compilation
 

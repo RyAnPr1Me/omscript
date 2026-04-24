@@ -1,0 +1,38 @@
+// Type-aware preprocessor: typed function-like macro parameters with
+// optional `: <type>` annotation and optional `-> <returnType>`.
+// Each correct expansion contributes 1 to `total`; expected total = 6.
+
+// Plain (untyped) macro — backwards compatibility.
+#define ADD_RAW(x, y) ((x) + (y))
+
+// Typed macros — int / float / string / bool / any.
+#define SQUARE(x: int) -> int          ((x) * (x))
+#define SCALE(x: float, k: int) -> float ((x) * (k))
+#define GREET(s: string) -> string     (s)
+#define NEG(b: bool) -> bool           (!b)
+#define IDENTITY(x: any) -> any        (x)
+
+fn main() -> int {
+    var total = 0;
+
+    // Untyped — still works.
+    if (ADD_RAW(2, 3) == 5) { total = total + 1; }
+
+    // Typed int param accepts int literal.
+    if (SQUARE(7) == 49) { total = total + 1; }
+
+    // Typed float param accepts a float literal; int param accepts an int.
+    if (to_int(SCALE(1.5, 4)) == 6) { total = total + 1; }
+
+    // Typed string param accepts a string literal.
+    if (len(GREET("hi")) == 2) { total = total + 1; }
+
+    // Typed bool param accepts a bool literal.
+    if (NEG(false) == true) { total = total + 1; }
+
+    // `any` accepts anything — here a string.
+    var s: string = IDENTITY("ok");
+    if (len(s) == 2) { total = total + 1; }
+
+    return total;   // 6
+}
