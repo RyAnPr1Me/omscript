@@ -293,6 +293,15 @@ class CodeGenerator {
         enableHGOE_ = enable;
     }
 
+    /// Enable or disable Speculative Devectorization & Revectorization (SDR).
+    /// SDR runs after the superoptimizer at O2+.  It detects suboptimal SIMD
+    /// regions (partial lane use, extract chains, wide reductions) and rebuilds
+    /// them with narrower, wider, or intrinsic-based equivalents based on TTI cost.
+    /// Default: true at O2+.
+    void setSDR(bool enable) {
+        enableSDR_ = enable;
+    }
+
     /// Enable or disable the post-codegen LLVM IR optimization pipeline
     /// (runOptimizationPasses()).  Default: true.  White-box unit tests that
     /// inspect the raw IR emitted by the CodeGenerator (metadata, nuw/nsw
