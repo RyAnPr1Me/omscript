@@ -5,8 +5,6 @@
 #include <cstdint>
 
 // Apply maximum compiler optimizations to this hot path.
-// Expression codegen (strength reduction, NSW/NUW flag inference, ternary
-// selection) is on the inner loop for every expression in every function.
 #ifdef __GNUC__
 #  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
 #endif
@@ -30,9 +28,6 @@
 namespace {
 
 /// Returns the log2 of a positive power-of-two value, or -1 if the value is
-/// not a power of two (or is non-positive).  Used by strength-reduction passes
-/// to convert multiply/divide/modulo by a constant power of 2 into cheaper
-/// shift or bitwise-AND operations.
 inline int log2IfPowerOf2(int64_t val) {
     if (val <= 0 || (val & (val - 1)) != 0)
         return -1;
@@ -48,8 +43,6 @@ inline int log2IfPowerOf2(int64_t val) {
 
 namespace omscript {
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Shared bounds check elision and runtime check emission
 // ═══════════════════════════════════════════════════════════════════════════
 
 bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
@@ -76,9 +69,6 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
         return false;
 
     // ── Known-array-size optimization ────────────────────────────────
-    // When the array was created via array_fill(N, val) with constant N,
-    // and the loop iterator is bounded by a constant <= N, prove safety
-    // without loading the length header.
     if (arrayExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
         auto* arrIdent = static_cast<IdentifierExpr*>(arrayExpr);
         auto sizeIt = knownArraySizes_.find(arrIdent->name);
@@ -305,14 +295,6 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
         lenVal = strlenCall;
     } else {
         // Loop-scope array length cache: when we're inside a loop and have
-        // already loaded the length of this array, reuse the SSA value
-        // instead of emitting a redundant load.  LLVM's GVN can sometimes
-        // merge these loads, but when bounds checks create separate control-
-        // flow paths (ok/fail branches), the loads end up in different
-        // dominance subtrees and GVN cannot always merge them.  By caching
-        // at the codegen level, we guarantee a single load per array per
-        // loop iteration, which is critical for tight inner loops with
-        // multiple array accesses (e.g., arr[i] + arr[i+1]).
         auto cacheIt = loopArrayLenCache_.find(basePtr);
         if (cacheIt != loopArrayLenCache_.end()) {
             lenVal = cacheIt->second;
@@ -328,8 +310,6 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
             }
             lenVal = lenLoad;
             // Cache for subsequent bounds checks within the same loop body.
-            // Only cache when inside a loop (loopStack non-empty) to avoid
-            // stale values across unrelated code.
             if (!loopStack.empty()) {
                 loopArrayLenCache_[basePtr] = lenVal;
             }
@@ -373,9 +353,6 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
         return llvm::ConstantFP::get(getFloatType(), expr->floatValue);
     } else {
         // String literal — use the interning pool to deduplicate identical
-        // string constants across the module.  This returns a GEP to the
-        // interned global's first byte, equivalent to CreateGlobalString but
-        // sharing the underlying global for identical content.
         llvm::GlobalVariable* gv = internString(expr->stringValue);
         return llvm::ConstantExpr::getInBoundsGetElementPtr(
             gv->getValueType(),
@@ -433,9 +410,6 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
     }
 
     // Check if this is a cross-file global variable reference (foo::varname).
-    // The parser already resolves these to IdentifierExpr nodes using the
-    // original unmangled name; this path is a fallback for any
-    // ScopeResolutionExpr nodes that reach codegen directly.
     {
         auto gvIt = globalVars_.find(member);
         if (gvIt != globalVars_.end()) {
@@ -494,10 +468,6 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     }
 
     // Constant folding for `const` integer variables: return the constant
-    // directly instead of emitting a load.  This allows downstream div/mod,
-    // multiply, and comparison operations to see a ConstantInt and use the
-    // fast urem/udiv path, NSWMul, and other constant-specific optimizations
-    // that would otherwise only fire after LLVM's mem2reg pass.
     {
         auto foldIt = constIntFolds_.find(expr->name);
         if (foldIt != constIntFolds_.end()) {
@@ -510,10 +480,6 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     }
 
     // Constant folding for `const` float variables: return the ConstantFP
-    // directly.  Enables compile-time evaluation of float arithmetic chains
-    // (e.g. `const PI = 3.14159; var r = PI * 2.0;` → 6.28318 at compile
-    // time) by making the constant visible to the float constant-folding
-    // path in generateBinary.
     {
         auto foldIt = constFloatFolds_.find(expr->name);
         if (foldIt != constFloatFolds_.end()) {
@@ -521,10 +487,25 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         }
     }
 
+    // Reference-borrow auto-deref.  For variables declared
+    {
+        auto rit = refVarElemTypes_.find(expr->name);
+        if (rit != refVarElemTypes_.end()) {
+            llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* ptrLoad = builder->CreateAlignedLoad(
+                ptrTy, it->second, llvm::MaybeAlign(8),
+                (expr->name + ".ref.ptr").c_str());
+            llvm::Type* elemTy = resolveAnnotatedType(rit->second);
+            const llvm::Align elemAlign =
+                module->getDataLayout().getABITypeAlign(elemTy);
+            auto* valLoad = builder->CreateAlignedLoad(
+                elemTy, ptrLoad, llvm::MaybeAlign(elemAlign.value()),
+                (expr->name + ".ref.val").c_str());
+            return liftFieldLoad(valLoad, rit->second);
+        }
+    }
+
     // Register-promotion strategy: prefetched variables go straight to
-    // registers (promoted by SROA/mem2reg) and stay there until invalidated.
-    // No use-site llvm.prefetch is emitted on the alloca — that would anchor
-    // the variable to memory and defeat register promotion.
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
 
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
@@ -532,8 +513,6 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         llvm::MaybeAlign(8), expr->name.c_str());
 
     // If this is a const variable, a prefetch-immut variable, or a frozen
-    // variable, mark the load as invariant so LLVM knows the value never
-    // changes and can hoist/CSE it aggressively.
     bool isInvariant = false;
     auto constIt = constValues.find(expr->name);
     if (constIt != constValues.end() && constIt->second) {
@@ -553,21 +532,11 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         }
     }
     // OmScript variables are always initialized before use (the ownership
-    // system prevents use of uninitialized variables).  The !noundef metadata
-    // tells LLVM that the loaded value is never poison or undef, enabling
-    // more aggressive speculation, freeze elimination, and branch folding.
     if (optimizationLevel >= OptimizationLevel::O1) {
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             loadInst->setMetadata(llvm::LLVMContext::MD_noundef,
                                   llvm::MDNode::get(*context, {}));
             // !nonnull on pointer-typed loads: when the loaded value is a
-            // string or array pointer, OmScript guarantees non-null (runtime
-            // aborts on allocation failure).  This lets LLVM eliminate any
-            // null checks on the loaded pointer, speculate subsequent loads,
-            // and hoist accesses out of loops that test for null.
-            // Only applies to loads that return ptr type (annotated params);
-            // unannotated local array variables are stored as i64 and use
-            // the !range [0, INT64_MAX) path below for non-negativity instead.
             if (loadInst->getType()->isPointerTy()) {
                 if (stringVars_.count(expr->name) || arrayVars_.count(expr->name)) {
                     loadInst->setMetadata(llvm::LLVMContext::MD_nonnull,
@@ -581,20 +550,10 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     if (nonNegValues_.count(it->second)) {
         nonNegValues_.insert(load);
         // Add !range [0, INT64_MAX) metadata so LLVM IR-level passes (LVI,
-        // CVP, InstCombine, loop unroller) see the non-negativity directly
-        // in the IR without relying solely on llvm.assume intrinsics.  The
-        // two approaches are complementary: the assume fires at the point in
-        // the function body where it is emitted; the !range metadata travels
-        // with every individual load and is visible to every pass that
-        // processes the load instruction — including interprocedural passes
-        // that inline the function and lose the assume context.
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             if (loadInst->getType()->isIntegerTy(64)
                     && optimizationLevel >= OptimizationLevel::O1) {
                 // If we have a tighter upper bound from modular arithmetic,
-                // emit !range [0, bound) directly on the load — this IS valid
-                // on load instructions and propagates more precisely through
-                // LLVM's value range analysis (CVP/LVI) than the assume alone.
                 auto bit = allocaUpperBound_.find(it->second);
                 if (bit != allocaUpperBound_.end()) {
                     llvm::MDBuilder mdB(*context);
@@ -611,15 +570,6 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
 }
 
 // ---------------------------------------------------------------------------
-// Recursive string literal constant folding
-// ---------------------------------------------------------------------------
-// Walk a tree of BinaryExpr(+) nodes.  If every leaf is a compile-time
-// constant string (literal, const variable, or zero-parameter pure function
-// call), append all of them (left-to-right) into `out` and return true.
-// This turns  "a" + "b" + "c"  into a single compile-time constant "abc",
-// eliminating all runtime malloc + strlen + memcpy work.
-// Also handles: `const s = "hi"; "prefix" + s + "suffix"` → "prefixhisuffix"
-// and: `fn greet() { return "hello"; }; greet() + " world"` → "hello world"
 bool CodeGenerator::tryFoldStringConcat(Expression* expr, std::string& out) const {
     if (expr->type == ASTNodeType::LITERAL_EXPR) {
         auto* lit = static_cast<LiteralExpr*>(expr);
@@ -658,12 +608,6 @@ bool CodeGenerator::tryFoldStringConcat(Expression* expr, std::string& out) cons
 
 llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // --- Compile-time string constant folding (recursive) ---
-    // Fold arbitrarily chained string literal concatenations at compile time:
-    //   "a" + "b" + "c"  →  single global "abc"
-    // This eliminates runtime malloc+strlen+memcpy chains entirely.  The
-    // recursive helper walks through nested BinaryExpr(+) trees, collecting
-    // all leaf string literals.  If every leaf is a string literal the whole
-    // expression is folded into a single compile-time constant.
     if (expr->op == "+") {
         std::string folded;
         if (tryFoldStringConcat(expr, folded)) {
@@ -681,10 +625,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // --- End string constant folding ---
 
     // For comparison operators, set inComparisonContext_ so that any non-pow2
-    // modulo operations in the operands are classified as "for branch" (not
-    // "for value"). This prevents the vectorization suppression from firing
-    // when urem results feed into scalar comparisons whose vectorized form
-    // is a branch — the dominant pattern in cond_arithmetic-style loops.
     const bool isComparisonOp = (expr->op == "==" || expr->op == "!=" ||
                                  expr->op == "<"  || expr->op == ">"  ||
                                  expr->op == "<=" || expr->op == ">=");
@@ -694,8 +634,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     llvm::Value* left = generateExpression(expr->left.get());
     if (expr->op == "&&" || expr->op == "||") {
         // Constant folding: when the left side is a known constant, we can
-        // skip branch generation entirely and either short-circuit or
-        // evaluate just the right side.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             const bool leftTrue = !ci->isZero();
             if (expr->op == "&&") {
@@ -722,19 +660,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
 
         // Branchless optimization: when the right-hand side is a simple
-        // side-effect-free expression (literal, identifier, or comparison),
-        // emit a bitwise AND/OR instead of branch+PHI.  This eliminates a
-        // branch misprediction penalty and enables LLVM's vectorizer to
-        // handle boolean conditions without control-flow diamond patterns.
         auto isSideEffectFree = [](Expression* e) -> bool {
             if (e->type == ASTNodeType::LITERAL_EXPR) return true;
             if (e->type == ASTNodeType::IDENTIFIER_EXPR) return true;
             if (e->type == ASTNodeType::UNARY_EXPR) {
                 auto* un = static_cast<UnaryExpr*>(e);
                 // Arithmetic/logical unary on a simple operand is side-effect-free
-                // in OmScript's semantics: integer arithmetic wraps by definition
-                // (OmScript does not have UB for integer overflow), there is no
-                // memory access, and no function calls are emitted.
                 if (un->op == "-" || un->op == "!" || un->op == "~") {
                     return un->operand->type == ASTNodeType::IDENTIFIER_EXPR ||
                            un->operand->type == ASTNodeType::LITERAL_EXPR;
@@ -753,10 +684,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (op == "==" || op == "!=" || op == "<" || op == "<=" ||
                     op == ">" || op == ">=") return true;
                 // Bitwise and shift ops: integer-only, no memory, no traps.
-                // + / - / * are intentionally excluded: on string operands they
-                // call str_concat / str_repeat which allocate memory.
-                // / and % are excluded for an additional reason: they trap on
-                // a zero divisor, making them unsafe to evaluate eagerly.
                 if (op == "&" || op == "|" || op == "^" ||
                     op == "<<" || op == ">>") return true;
             }
@@ -847,13 +774,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     inComparisonContext_ = savedInComparison;
 
     // ── CF-CTRE range-conditioned cheaper rewrites (Q4) ───────────────────
-    // Query the abstract interpreter's proven-valid rewrites for this exact
-    // binary expression node.  The rewrite was proven safe from the mathematical
-    // semantic identity (e.g., ∀ x ≥ 0: x / 2^k ≡ x >> k), NOT from syntactic
-    // pattern matching — the abstract interpreter derived x ≥ 0 from the
-    // program's control flow and assignments.
-    if (ctEngine_) {
-        const std::string& altOp = ctEngine_->cheaperRewrite(expr);
+    if (optCtx_) {
+        const std::string& altOp = optCtx_->cheaperRewrite(expr);
         if (!altOp.empty() && !left->getType()->isVectorTy() &&
             !right->getType()->isVectorTy()) {
             llvm::Value* lI = toDefaultType(left);
@@ -893,8 +815,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // SIMD vector operations — when either operand is a vector type,
-    // dispatch to LLVM vector arithmetic instructions.
-    // -----------------------------------------------------------------------
     const bool leftIsVec = left->getType()->isVectorTy();
     const bool rightIsVec = right->getType()->isVectorTy();
     if (leftIsVec || rightIsVec) {
@@ -936,9 +856,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // -----------------------------------------------------------------------
-    // Operator overloading — dispatch to user-defined operator functions
-    // when both operands are known struct types with a matching overload.
-    // -----------------------------------------------------------------------
     {
         std::string leftStructType;
         if (expr->left->type == ASTNodeType::IDENTIFIER_EXPR) {
@@ -965,17 +882,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     const bool rightIsFloat = right->getType()->isDoubleTy();
 
     // Pre-compute string flags once, used by both the float-skip guard below
-    // and the string concatenation block that follows.
-    // Use isStringExpr() as the sole discriminator — pointer type alone is
-    // ambiguous since arrays/structs/dicts also use pointer-typed allocas.
     const bool leftIsStr = isStringExpr(expr->left.get());
     const bool rightIsStr = isStringExpr(expr->right.get());
 
     // Float operations path — but only when neither operand is a string.
-    // When the '+' operator has one string and one float (e.g. "pi=" + 3.14),
-    // the string-concatenation block below must handle it; otherwise
-    // ensureFloat() would reinterpret the string pointer as an integer and
-    // silently produce garbage.
     if ((leftIsFloat || rightIsFloat) && !(expr->op == "+" && (leftIsStr || rightIsStr))) {
         if (!leftIsFloat)
             left = ensureFloat(left);
@@ -1021,8 +931,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
 
         // Float algebraic identity optimizations — eliminate no-op float
-        // operations when one operand is a known constant.  These supplement
-        // LLVM's InstCombine by catching patterns at the IR emission level.
         if (auto* rc = llvm::dyn_cast<llvm::ConstantFP>(right)) {
             const double rv = rc->getValueAPF().convertToDouble();
             if (rv == 0.0 && (expr->op == "+" || expr->op == "-"))
@@ -1034,8 +942,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (rv == -1.0 && expr->op == "/")
                 return builder->CreateFNeg(left, "fnegtmp"); // x/(-1.0) → -x
             // Note: x*0.0 → 0.0 is NOT valid under IEEE-754: NaN*0=NaN,
-            // Inf*0=NaN, and (-x)*0 = -0.0 (not +0.0).  We leave this to
-            // LLVM InstCombine with fast-math flags if the user opts in.
             if (rv == 2.0 && expr->op == "*")
                 return builder->CreateFAdd(left, left, "fmul2"); // x*2.0 → x+x
             if (rv == 2.0 && expr->op == "**")
@@ -1045,10 +951,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (rv == 1.0 && expr->op == "**")
                 return left;  // x**1.0 → x
             // Float division by power-of-2 constant → multiply by reciprocal.
-            // x / 2.0 → x * 0.5, x / 4.0 → x * 0.25, etc.
-            // Multiplication is faster than division on all modern CPUs (3-5 cyc
-            // vs 15-25 cyc).  Only applies to exact powers of 2 where the
-            // reciprocal is exactly representable in IEEE-754 (no rounding error).
             if (expr->op == "/" && rv != 0.0) {
                 const double abs_rv = rv < 0 ? -rv : rv;
                 bool isPow2 = false;
@@ -1232,8 +1134,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {left}, "len1");
             llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {right}, "len2");
             // !range [0, INT64_MAX): strlen always returns non-negative.
-            // This helps SCEV prove the nsw+nuw add below is safe and enables
-            // the optimizer to skip sign-extension/zero-extension checks.
             if (optimizationLevel >= OptimizationLevel::O1) {
                 llvm::cast<llvm::Instruction>(len1)->setMetadata(
                     llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -1241,16 +1141,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             }
             // strlen results are always non-negative and bounded by addressable
-            // memory, so their sum cannot overflow a 64-bit signed integer.
-            // nsw+nuw enable SCEV to compute tight bounds through strlen-based
-            // expressions and help downstream passes (vectorizer, LICM).
             llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* allocSize =
                 builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strbuf");
             // Use memcpy instead of strcpy+strcat: strcat must scan for the
-            // null terminator in buf (O(len1)), so replacing with two memcpy
-            // calls at known offsets saves ~20-30% on string concatenation.
             builder->CreateCall(getOrDeclareMemcpy(), {buf, left, len1});
             llvm::Value* dest2 = builder->CreateInBoundsGEP(
                 llvm::Type::getInt8Ty(*context), buf, len1, "concat.dst2");
@@ -1263,10 +1158,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // String repetition: str * n  (or  n * str) → repeat str n times.
-    // This is the binary-operator equivalent of str_repeat(str, n).
-    //
-    // Uses the same strcat-loop strategy as the str_repeat() builtin,
-    // which is robust under LLVM O2+ optimizations.
     if (expr->op == "*" && (leftIsStr || rightIsStr)) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strVal = leftIsStr ? left : right;
@@ -1286,9 +1177,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
 
         // Guard against multiplication overflow: strLen * countVal could wrap
-        // around the 64-bit range, causing a tiny allocation followed by a
-        // heap-buffer-overflow in the strcat loop.  Use umul.with.overflow to
-        // detect this and abort with a clear error message.
         llvm::Function* overflowIntrinsic = OMSC_GET_INTRINSIC(
             module.get(), llvm::Intrinsic::umul_with_overflow, {getDefaultType()});
         llvm::Value* mulResult = builder->CreateCall(overflowIntrinsic, {strLen, countVal}, "strmul.ovf");
@@ -1319,10 +1207,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
         // Use memcpy loop with a tracked write pointer — O(totalLen) instead of
-        // the previous strcat loop which was O(totalLen²/2) because strcat must
-        // scan the growing destination buffer on every iteration.
-        // writePtr starts at buf and advances by strLen on each copy.
-        // After the loop we null-terminate manually.
         llvm::BasicBlock* preHdr = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "strmul.body", curFn);
@@ -1338,9 +1222,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->CreateCondBr(builder->CreateICmpSLT(idx, countVal, "strmul.cond"), bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         // memcpy(writePtr, strPtr, strLen)  — no null terminator yet.
-        // Guard: skip memcpy for zero-length strings (strLen==0 produces an empty
-        // result regardless of count; the null-terminator in doneBB handles it).
-        // For non-zero lengths ≤ ~8, the C runtime typically inlines the copy.
         if (auto* strLenCI = llvm::dyn_cast<llvm::ConstantInt>(strLen)) {
             if (strLenCI->getZExtValue() > 0) {
                 builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strPtr, strLen});
@@ -1378,8 +1259,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
 
     // for all relational and equality operators.  Without this, the ptr→int
-    // fallback below would compare raw memory addresses instead of lexicographic
-    // order, giving results that depend on allocation order rather than content.
     if (leftIsStr || rightIsStr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         auto toStrPtr = [&](llvm::Value* v) -> llvm::Value* {
@@ -1389,9 +1268,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* rPtr = toStrPtr(right);
 
         // Fast path for == and !=: if pointers are identical, strings are
-        // trivially equal (skip the O(n) strcmp).  This fires when the same
-        // string variable appears on both sides, or when two references
-        // point to the same interned literal.
         if (expr->op == "==" || expr->op == "!=") {
             llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
             auto* ptrEqBB = llvm::BasicBlock::Create(*context, "streq.ptreq", parentFn);
@@ -1460,10 +1336,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // Normalize integer widths: when operands have different integer bit widths
-    // (e.g. i8 from u8, i32 from u32, i64 from default), extend both to the
-    // wider of the two types so that LLVM binary instructions see matching types.
-    // Use ZExt for unsigned-annotated values and SExt for signed-annotated values
-    // so that e.g. u8(200) + u8(100) → 300, not -156 (which SExt would give).
     if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() &&
         left->getType() != right->getType()) {
         const unsigned leftBits = left->getType()->getIntegerBitWidth();
@@ -1488,8 +1360,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         const int64_t lval = leftConst->getSExtValue();
         const int64_t rval = rightConst->getSExtValue();
         // Use unsigned arithmetic for +, -, * to avoid signed overflow UB.
-        // The unsigned result, when reinterpreted as signed, gives the correct
-        // two's-complement wrapping behavior that matches LLVM's add/sub/mul.
         auto ulval = static_cast<uint64_t>(lval);
         auto urval = static_cast<uint64_t>(rval);
 
@@ -1536,9 +1406,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         } else if (expr->op == ">>") {
             if (rval >= 0 && rval < 64)
                 // Arithmetic (signed) right shift: sign-extending, matching
-                // LLVM's AShr semantics.  C++ guarantees arithmetic shift for
-                // signed types since C++20; pre-C++20 it is implementation-
-                // defined but every supported compiler uses arithmetic shift.
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
         } else if (expr->op == "**") {
             if (rval >= 0) {
@@ -1649,11 +1516,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // Same-value identity optimizations — when both operands are the exact
-    // same SSA value, several operations can be simplified without emitting
-    // any instruction.  This fires after mem2reg promotes allocas to SSA
-    // values and catches patterns like f(x) ^ f(x) where the call result
-    // is reused, or when both sides of an operator reference the same
-    // already-loaded variable value.
     if (left == right) {
         if (expr->op == "-" || expr->op == "^")
             return llvm::ConstantInt::get(getDefaultType(), 0); // x-x→0, x^x→0
@@ -1672,9 +1534,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // Comparison-against-zero strength reduction: when one side of an
-    // equality/inequality comparison is the constant 0, exploit the fact
-    // that x86-64 (and most architectures) can test for zero with a single
-    // TEST/CMP instruction.  We canonicalize to place 0 on the right.
     if (expr->op == "==" || expr->op == "!=") {
         llvm::Value* testVal = nullptr;
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
@@ -1714,9 +1573,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // Subtraction-comparison strength reduction: when one side of an
-    // equality/inequality comparison is a subtraction and the other is 0,
-    // replace (x - y) == 0 with x == y and (x - y) != 0 with x != y.
-    // This eliminates a sub instruction since the comparison subsumes it.
     if (expr->op == "==" || expr->op == "!=") {
         auto tryFoldSub = [&](llvm::Value* lhs, llvm::Value* rhs) -> llvm::Value* {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(rhs)) {
@@ -1740,11 +1596,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // Chained inverse operation elimination: (x + C) - C → x, (x - C) + C → x
-    // These patterns arise frequently in index arithmetic (e.g., computing an
-    // offset and then undoing it) and are not always caught by LLVM's InstCombine
-    // when the operations span different basic blocks or when NSW/NUW flags are
-    // absent.  By detecting them at IR generation time we produce shorter IR
-    // and avoid the round-trip through the optimizer.
     if (expr->op == "+" || expr->op == "-") {
         if (auto* ciRight = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             if (auto* binLeft = llvm::dyn_cast<llvm::BinaryOperator>(left)) {
@@ -1765,43 +1616,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // Regular code generation for non-constant expressions.
-    // Integer arithmetic generally uses wrapping (no NSW/NUW flags) because
-    // NSW/NUW tell LLVM that overflow is undefined behavior, which can cause
-    // miscompilation when overflow actually occurs.
-    //
-    // Exception: when BOTH operands are provably non-negative (tracked via
-    // nonNegValues_), we set both nsw and nuw on addition.  For two non-negative
-    // i64 values, signed overflow cannot occur unless the result exceeds
-    // INT64_MAX (nsw), and unsigned overflow cannot occur either: the sum of
-    // two values in [0, INT64_MAX] is at most 2·INT64_MAX = 2^64−2, which is
-    // strictly less than UINT64_MAX = 2^64−1 (nuw).  The nuw flag additionally
-    // enables LLVM's loop unroller to propagate non-negativity to unrolled
-    // copies and allows SCEV to use unsigned induction variable ranges.
 
     // ── Pointer arithmetic ────────────────────────────────────────────────────
-    // OmScript's `ptr` type is intentionally untyped (analogous to void* in C).
-    // Pointer arithmetic is therefore byte-based: `p + n` advances by n bytes,
-    // `p - n` retreats by n bytes, and `p - q` yields the signed byte distance.
-    //
-    // Design rationale:
-    //   • OmScript has no pointer type parameters (no T*), so there is no
-    //     element size to divide or multiply by at the language level.
-    //   • Users who need element-count semantics write `p + n * sizeof(T)`.
-    //   • Byte-granularity matches the semantics of `malloc`/`free` and is
-    //     consistent with every other pointer operation in the language.
-    //
-    // Implementation notes:
-    //   • We use getIndexType() / getIntPtrType() (target pointer-sized integer)
-    //     instead of hardcoding i64 so the code is correct on non-64-bit targets.
-    //   • CreateInBoundsGEP is NOT used: we cannot statically prove that
-    //     user-supplied offsets stay within the allocated object, so the
-    //     conservative (no inbounds) form avoids UB.
-    //   • Float offsets are silently truncated via FPToSI; the language does
-    //     not define float-typed pointer offsets as meaningful.
-    //
-    // IMPORTANT: check ptr - ptr BEFORE ptr - int, because if both operands are
-    // pointers the first branch would otherwise treat the right pointer as an
-    // integer offset (wrong).
 
     // ptr - ptr: signed byte distance between two pointers (ptrdiff_t semantics).
     if (expr->op == "-" && left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
@@ -1832,8 +1648,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         offset = builder->CreateIntCast(offset, idxTy, /*isSigned=*/true, "ptrarith.idx");
 
         // Determine the GEP element type:
-        //   ptr<T>  → use T (advance sizeof(T) bytes per index unit — C-style)
-        //   ptr     → use i8 (advance 1 byte per index unit — byte semantics)
         llvm::Type* gepElemTy = llvm::Type::getInt8Ty(*context);
         if (expr->left->type == ASTNodeType::IDENTIFIER_EXPR) {
             const auto* id = static_cast<const IdentifierExpr*>(expr->left.get());
@@ -1857,27 +1671,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 constNonNeg = rightNonNeg && !ci->isNegative();
         }
         // Both nsw and nuw are safe: for non-negative operands, signed
-        // overflow cannot occur (each value fits in [0, INT64_MAX]), and
-        // their sum is at most 2·INT64_MAX = 2^64−2 < UINT64_MAX so unsigned
-        // overflow cannot occur either.
-        // @optmax: the user's guarantee of well-behaved arithmetic means
-        // signed overflow cannot occur, enabling nsw even when we can't
-        // statically prove non-negativity.  nsw enables SCEV to compute
-        // tighter loop trip counts and proves induction variable monotonicity.
-        //
-        // Two-tier flag assignment:
-        //   canNSWNUW (both non-neg proven) → nsw + nuw (strongest, enables
-        //     unsigned SCEV ranges and non-negative tracking)
-        //   canNSW (@optmax or partial proof) → nsw only (no nuw because
-        //     negative operands can still wrap unsigned)
-        //   neither → no flags (conservative, no UB assumptions)
         const bool canNSWNUW = bothOperandsNonNeg || constNonNeg;
         const bool canNSW = canNSWNUW || inOptMaxFunction;
         // KnownBits fallback: when nonNegValues_ doesn't track both operands
-        // (e.g., values flowing through PHI nodes from loop back-edges),
-        // use LLVM's KnownBits analysis to detect non-negativity.  This
-        // catches patterns like `phi_val + 1` where phi_val is non-negative
-        // via range metadata or nuw flags but not in our tracking set.
         bool kbNSWNUW = false;
         if (!canNSWNUW && !canNSW) {
             const llvm::KnownBits lhsKB = llvm::computeKnownBits(
@@ -1893,26 +1689,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 ? builder->CreateNSWAdd(left, right, "addtmp")
                 : builder->CreateAdd(left, right, "addtmp");
         // Track non-negativity: if both operands are known non-negative
-        // (including constant operands), the result is non-negative
-        // (assuming no overflow, which is true for typical loop counter
-        // arithmetic).  canNSW-only (@optmax) does NOT prove non-negativity
-        // of the result — the operands might be negative.
         if (canNSWNUW || kbNSWNUW)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "-") {
         // When both operands are non-negative, the subtraction of two
-        // non-negative values cannot produce signed overflow: the result
-        // is in the range [-(2^63-1), 2^63-1], which is representable
-        // in i64 without wrapping.  The nsw flag enables SCEV to compute
-        // tighter trip counts for countdown loops and proves induction
-        // variable monotonicity.
         const bool leftNonNeg = nonNegValues_.count(left);
         const bool rightNonNeg = nonNegValues_.count(right);
         const bool bothNonNeg = leftNonNeg && rightNonNeg;
         // Also detect constant non-negative operands — mirrors the
-        // addition logic.  Subtracting a non-negative constant from a
-        // non-negative value (or vice versa) cannot overflow i64.
         bool constNSW = false;
         if (!bothNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
@@ -1939,8 +1724,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (s >= 0) {
                 const bool leftNonNeg = nonNegValues_.count(left);
                 // For non-negative base × positive power-of-2: emit NSWMul so
-                // LLVM's SCEV can track the result range (shift loses flags).
-                // @optmax: always use NSWMul since the user guarantees no overflow.
                 if (leftNonNeg || inOptMaxFunction) {
                     auto* result = builder->CreateNSWMul(left, right, "multmp");
                     if (leftNonNeg)
@@ -1964,12 +1747,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
         }
         // Strength reduction: multiply by small non-power-of-2 constants
-        // to shift+add/sub sequences (faster on many microarchitectures).
-        // n*3 → (n<<1)+n, n*5 → (n<<2)+n, n*7 → (n<<3)-n, n*9 → (n<<3)+n
-        // n*10 → (n<<3)+(n<<1), n*15 → (n<<4)-n, n*17 → (n<<4)+n
-        // When baseNonNeg is true, the base operand is provably non-negative
-        // so intermediate add/sub operations set nsw — this enables SCEV
-        // to compute tighter ranges for induction variable analysis.
         auto emitShiftAdd = [&](llvm::Value* base, int64_t multiplier, bool baseNonNeg = false) -> llvm::Value* {
             const bool nf = false;  // nuw: never set on these (could wrap unsigned)
             const bool ns = baseNonNeg || inOptMaxFunction;  // nsw: safe when base >= 0 or @optmax
@@ -2446,19 +2223,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
             case 43: {
                 // n*43 → (n<<6) - (n<<5) + (n<<3) + n  is 4-instr; use:
-                // n*43 → (n<<4) + (n<<3) + (n<<1) + n  = (n*16 + n*8 + n*2 + n)
-                // Better: n*43 → (n<<6) - (n<<4) - (n<<2) - n  = 64n-16n-4n-n = 43n (4-instr)
-                // Optimal 3-instr: n*43 → (n<<5) + (n<<3) + (n<<1) + n needs 4 ops
-                // Use: (n*44) - n  = (n<<4)*11/4 ... actually:
-                // n*43 = n*32 + n*8 + n*2 + n = 4 shifts but 3 adds → 4 instr total
-                // Best 3-instr: n*43 = (n<<6) - (n<<4) - (n<<1) - n? = 64-16-2-1=45 no
-                // n*43: 43 = 32+8+2+1 → 3 adds, 4 shifts → skip (not 2-instr reducible)
-                // Actually optimal: n*43 = (n<<3+1)*5 + ... nope
-                // Just use: n*44 - n = (n<<2)*11 - n → still recurses
-                // Simple: n*43 = (n<<6) - (n<<5) + (n<<3) + n + n? = 64-32+8+2*1+?
-                // Safest 3-op: (n<<3 + n)<<2 + (n<<3+n) + n*2 nope
-                // n*43 = ((n<<2)+n)*8 + (n<<1)+n = 5*8*n + 3n = 40n+3n → 2 adds
-                // (n<<2+n) = 5n, 5n<<3 = 40n, 40n + (n<<1) + n = 40n+3n ✓ (3-instr)
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul43.shl2");
                 auto* n5   = builder->CreateAdd(shl2, base, "mul43.n5", nf, ns);  // 5n
                 auto* n40  = builder->CreateShl(n5, mkShift(3), "mul43.n40");     // 40n
@@ -2476,12 +2240,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
             case 53: {
                 // n*53 = (n*54) - n = ((n*27)<<1) - n
-                // n*27 = (n*32) - (n*4) - n = (n<<5) - (n<<2) - n  [3-instr]
-                // So n*53 = ((n<<5)-(n<<2)-n)<<1 - n [4-instr total]
-                // Better: n*53 = (n<<6) - (n<<3) - (n<<2) + (n<<1) - ... too long
-                // Optimal: n*53 = (n<<4)*(3+...) ... try:
-                // n*53 = (n<<5 + n)<<1 - n = (n*33<<1) - n?  = 66n-n=65n nope
-                // n*53 = (n<<6) - (n<<3) - (n<<1) - n = 64-8-2-1=53 ✓ (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul53.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul53.shl3");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul53.shl1");
@@ -2556,10 +2314,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
             case 75: {
                 // n*75 = (n*25)*3 = ((n<<5)-(n<<3)+n)*3  but also:
-                // n*75 = (n<<6) + (n<<3) + (n<<1) + n  = 64+8+2+1=75 (3 adds, 3 shifts, too many)
-                // Better: n*75 = (n<<7) - (n<<5) - (n<<2) - n? = 128-32-4-1=91 nope
-                // n*75 = (n<<2+n)*15 = 5n*15 = 5n*(n<<4-n) → too recursive
-                // n*75 = (n<<6) + (n<<4) - (n<<2) - n? = 64+16-4-1=75 ✓ (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul75.shl6");
                 auto* shl4 = builder->CreateShl(base, mkShift(4), "mul75.shl4");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul75.shl2");
@@ -2577,14 +2331,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
             case 77: {
                 // n*77 = (n<<6) + (n<<4) - (n<<2) + n = 64+16-4+1=77 (4-instr)
-                // Better: n*77 = (n<<7) - (n<<5) - (n<<4) - (n<<2) - n?
-                // = 128-32-16-4-1=75 nope
-                // n*77 = (n<<7) - (n<<5) - (n<<4) + (n<<2) - n?
-                // = 128-32-16+4-1=83 nope
-                // n*77 = 7*11*n = (n*7)*11  but 7=8-1, 11=8+2+1:
-                // n7 = (n<<3)-n; n7*11: n7*(8+2+1) = n7<<3 + n7<<1 + n7 (3 more)
-                // total: 5 ops — not better.
-                // Best: n*77 = (n<<6) + (n<<3) + (n<<2) + n = 64+8+4+1=77 (3-instr adds)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul77.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul77.shl3");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul77.shl2");
@@ -3592,30 +3338,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const bool leftNonNeg = nonNegValues_.count(left);
             const int64_t rv = ci->getSExtValue();
             // For non-negative base × positive constant: emit mul nsw directly.
-            // emitShiftAdd produces (x<<a)+x patterns, but LLVM's InstCombine
-            // converts these back to mul and DROPS the nsw flag, preventing
-            // SCEV from proving non-negativity in subsequent analysis passes
-            // (e.g. loop phi variables in Collatz-like while-loops lose the
-            // mul nsw that enables accumulation interleaving and other opts).
-            // Emitting mul nsw directly preserves the flag through all passes
-            // since it is placed on the multiply itself, not on an intermediate
-            // add.  The backend produces the same lea/shift instructions anyway.
             if (leftNonNeg && rv > 0) {
                 auto* result = builder->CreateNSWMul(left, right, "multmp");
                 nonNegValues_.insert(result);
                 return result;
             }
             // Pass leftNonNeg so that shift+add decompositions set NSW on
-            // intermediate additions when the base is non-negative — this
-            // enables SCEV to compute tighter trip counts when the multiply
-            // result feeds a loop bound or induction variable.
             if (auto* result = emitShiftAdd(left, rv, leftNonNeg)) {
                 return result;
             }
             // Negative constant strength reduction: n * (-K) → neg(n * K).
-            // This leverages the existing shift+add patterns for the absolute
-            // value, then negates the result.  A single neg (sub 0, x) is far
-            // cheaper than a hardware multiply.
             if (rv < -1) {
                 if (auto* posResult = emitShiftAdd(left, -rv, leftNonNeg)) {
                     return builder->CreateNeg(posResult, "mulneg");
@@ -3642,10 +3374,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
         }
         // When both operands are known non-negative, set nsw to enable
-        // SCEV range analysis and strength reduction of derived expressions.
-        // Also set nsw when one operand is a positive constant and the other
-        // is non-negative — the product of two non-negative values cannot
-        // overflow into the negative range for typical program values.
         if (nonNegValues_.count(left) && nonNegValues_.count(right)) {
             auto* result = builder->CreateNSWMul(left, right, "multmp");
             nonNegValues_.insert(result);
@@ -3670,24 +3398,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
         }
         // Squaring detection: x*x is always non-negative regardless of
-        // the sign of x.  This is crucial for loops like `(i*i) % 101`
-        // where the non-negativity of the product enables urem instead
-        // of the more expensive srem.
-        // Detect squaring at the AST level: both children are the same
-        // identifier expression.
         {
             if (expr->left->type == ASTNodeType::IDENTIFIER_EXPR && expr->right->type == ASTNodeType::IDENTIFIER_EXPR) {
                 auto* leftIdent = static_cast<IdentifierExpr*>(expr->left.get());
                 auto* rightIdent = static_cast<IdentifierExpr*>(expr->right.get());
                 if (leftIdent->name == rightIdent->name) {
                     // x*x: result is always non-negative.
-                    // nsw: x*x <= x^2 which can be at most INT64_MAX only when
-                    //   |x| <= 3037000499 (floor(sqrt(INT64_MAX))). For general x
-                    //   emit nsw only when x is non-negative (nuw+nsw: result < 2^63).
-                    //   For general signed x*x: x=-2^31 → x*x=2^62 which still fits;
-                    //   x = -(2^31+1) → x*x > 2^62 but still < 2^63, fine.
-                    //   The only problematic case is x = INT64_MIN (-2^63), which
-                    //   produces 0 via 2's complement. Use KnownBits to guard.
                     bool xNonNeg = nonNegValues_.count(left) > 0;
                     if (!xNonNeg) {
                         const llvm::KnownBits KB = llvm::computeKnownBits(
@@ -3697,8 +3413,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     llvm::Value* result;
                     if (xNonNeg) {
                         // x >= 0: x*x cannot signed-overflow (max = (2^63-1)^2 > 2^63
-                        // only if x >= 2^31.5, but for typical values it's fine;
-                        // let KnownBits' leading-zero proof handle overflow).
                         const llvm::KnownBits KB = llvm::computeKnownBits(
                             left, module->getDataLayout());
                         const unsigned lz = KB.countMinLeadingZeros();
@@ -3747,12 +3461,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return builder->CreateNSWMul(left, right, "multmp");
 
         // KnownBits analysis: use leading-zero counts to prove the product
-        // cannot overflow signed i64.  If a has L_a leading zeros and b has
-        // L_b leading zeros, then a < 2^(64-L_a) and b < 2^(64-L_b), so
-        // a*b < 2^(128-L_a-L_b).  The product fits in 64 bits (no unsigned
-        // overflow) when L_a + L_b >= 64, and in 63 bits (no signed overflow)
-        // when L_a + L_b >= 65.  This is the common case for loop-counter ×
-        // small-stride patterns like arr[i*4], arr[i*8], etc.
         {
             const llvm::KnownBits lhsKB = llvm::computeKnownBits(
                 left, module->getDataLayout());
@@ -3770,9 +3478,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
             if (totalLZ >= 64) {
                 // Product provably < 2^64 → fits in unsigned i64 → nuw safe.
-                // nsw requires the result < 2^63 (totalLZ >= 65), so we
-                // conservatively omit it here: e.g. (2^32)*(2^32) = 2^64
-                // fits unsigned but NOT signed i64.
                 auto* result = builder->CreateMul(left, right, "multmp",
                                                    /*HasNUW=*/true, /*HasNSW=*/false);
                 if (lhsKB.isNonNegative() && rhsKB.isNonNegative())
@@ -3788,8 +3493,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // If either operand is explicitly declared unsigned (u8, u32, etc.), use unsigned ops.
         if (isUnsignedValue(left) || isUnsignedValue(right)) {
             // For unsigned division by a power-of-2 constant, strength-reduce to
-            // lshr (exact when divisor is pow2 and dividend is exactly divisible —
-            // omit exact since we can't prove that; LLVM will add it when safe).
             if (isDivision) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
                     const int64_t rv = ci->getSExtValue();
@@ -3823,14 +3526,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
 
         // Strength reduction: unsigned-compatible division/modulo by power of 2.
-        // For signed division by a positive power of 2, we can use an
-        // arithmetic right shift with sign-correction for correct rounding
-        // toward zero (C/OmScript semantics).  For modulo, we use
-        // AND with (divisor - 1) after similar sign correction.
-        //
-        // When the dividend is provably non-negative, skip the sign correction
-        // entirely: a simple logical right shift (div) or AND mask (mod) suffices,
-        // saving 3 instructions per operation.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const int64_t rv = ci->getSExtValue();
             if (rv > 0) {
@@ -3844,8 +3539,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     }
                     if (leftNonNeg) {
                         // Non-negative dividend: no sign correction needed.
-                        // div: x >> s (logical shift — high bits are 0)
-                        // mod: x & (2^s - 1)
                         if (isDivision) {
                             auto* result = builder->CreateLShr(left,
                                 llvm::ConstantInt::get(left->getType(), s), "div.lshr");
@@ -3859,15 +3552,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                         }
                     }
                     // Dividend sign unknown: emit sdiv/srem instead of the
-                    // multi-instruction signed shift expansion.  LLVM's
-                    // CorrelatedValuePropagation (CVP) pass can often prove
-                    // non-negativity through value-range analysis on PHI nodes
-                    // (e.g. Collatz-sequence variables that are always > 0) and
-                    // convert sdiv/srem → udiv/urem, which InstCombine then
-                    // lowers to lshr/and — a single instruction instead of four.
-                    // The inline shift expansion we used previously baked in the
-                    // sign-correction at IR-generation time, before LLVM's
-                    // analyses could run, preventing this optimisation.
                     return isDivision
                         ? builder->CreateSDiv(left, right, "divtmp")
                         : builder->CreateSRem(left, right, "modtmp");
@@ -3876,16 +3560,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
 
         // Division/modulo by a non-zero constant: emit unsigned operations
-        // when the dividend is provably non-negative.  The unsigned path
-        // avoids the sign-correction fixup in the magic-number multiply
-        // sequence, saving ~2 instructions per operation.  This is critical
-        // for vectorization: when LLVM's loop vectorizer creates vector
-        // copies, it preserves urem/udiv directly, whereas srem/sdiv would
-        // require sign-correction in each vector lane.
-        //
-        // For signed (negative-possible) dividends, emit srem/sdiv and
-        // let LLVM's CorrelatedValuePropagation convert them when it can
-        // prove non-negativity through its own analysis.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             if (!ci->isZero()) {
                 if (ci->getSExtValue() > 0) {
@@ -3902,11 +3576,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             ? builder->CreateUDiv(left, right, "udivtmp")
                             : builder->CreateURem(left, right, "uremtmp");
                         // urem/udiv result is always non-negative.
-                        // For non-power-of-2 urem in a loop: emit llvm.assume(result ult divisor)
-                        // so LLVM's LazyValueInfo can propagate the tight range [0, divisor)
-                        // through loop PHI nodes.  This is the critical enabler for the
-                        // conditional-subtract optimization (select(s<C, s, s-C), ~2 cycles)
-                        // instead of a full division (~25 cycles) in modular loops.
                         nonNegValues_.insert(result);
                         if (!isDivision && loopNestDepth_ > 0
                                 && optimizationLevel >= OptimizationLevel::O2) {
@@ -3916,23 +3585,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                                 result, right, "urem.ult");
                             builder->CreateCall(assumeFn, {cmp});
                             // Flag non-pow2 modulo.  Also classify whether the
-                            // urem result is used as a VALUE (not just a branch
-                            // condition).  Vectorization suppression only fires
-                            // when the modulo is ONLY used for comparisons —
-                            // loops like i%3==0 — because vectorizing those
-                            // generates catastrophically slow vector division.
-                            // But loops like i%100 feeding into max(a,b) should
-                            // still be vectorized for profitable SIMD abs/min/max.
                             bodyHasNonPow2Modulo_ = true;
                             if (!inComparisonContext_) {
                                 bodyHasNonPow2ModuloValue_ = true;
                                 // Detect the pattern arr[i] = expr % K: modulo result
-                                // stored directly to an array element.  For this case
-                                // x86-64 has no native 64-bit vector division, so
-                                // urem <N x i64> is scalarized — the extra extract/
-                                // insert round-trip costs more than scalar ILP from
-                                // an unrolled loop.  Set the flag so generateFor can
-                                // disable forced vectorization for this loop.
                                 if (inIndexAssignValueContext_)
                                     bodyHasNonPow2ModuloArrayStore_ = true;
                             }
@@ -3949,9 +3605,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (!isDivision && loopNestDepth_ > 0) {
             bodyHasNonPow2Modulo_ = true;
             // Track whether the modulo result is used as a value (not just in a
-            // comparison context) so the unroll heuristic can distinguish between
-            // `if (i%k==0)` (comparison-only, benefits from 8x unroll) and
-            // `result = val % modulus` (value-producing, keep at 4x unroll).
             if (!inComparisonContext_)
                 bodyHasNonPow2ModuloValue_ = true;
         }
@@ -3964,8 +3617,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::BasicBlock* zeroBB = llvm::BasicBlock::Create(*context, zeroName, function);
         llvm::BasicBlock* opBB = llvm::BasicBlock::Create(*context, opName, function);
         // Branch weights: division by zero is extremely unlikely; mark the
-        // error path cold so the branch predictor favours the fast path and
-        // the code layout keeps the error stub out of the hot I-cache region.
         llvm::MDBuilder mdBuilder(*context);
         auto* brWeights = mdBuilder.createBranchWeights(1, 1000); // 1:1000 zero:nonzero
         builder->CreateCondBr(isZero, zeroBB, opBB, brWeights);
@@ -3986,8 +3637,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         builder->SetInsertPoint(opBB);
         // For non-constant divisors: check if both operands are non-negative
-        // to use faster unsigned operations.  Signed div/rem requires extra
-        // sign-correction instructions in the lowered code.
         {
             bool leftNonNeg = nonNegValues_.count(left) > 0;
             if (!leftNonNeg) {
@@ -4023,8 +3672,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == "<") {
         // Fast path: when the left operand is known non-negative and the right
-        // operand is a negative constant, the comparison is always false.
-        // Symmetrically, a negative constant is always less than a non-negative.
         if (nonNegValues_.count(left)) {
             if (auto* rci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
                 if (rci->isNegative())
@@ -4036,9 +3683,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return llvm::ConstantInt::get(getDefaultType(), 1); // neg < x >= 0 → true
         }
         // When both operands are provably non-negative, use unsigned comparison.
-        // Unsigned comparisons have simpler codegen (no sign-extension) and
-        // enable better vectorization — LLVM's loop vectorizer can widen
-        // unsigned comparisons without sign-correction in each lane.
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
         // Explicit unsigned type annotation always selects unsigned comparison.
         if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
@@ -4160,8 +3804,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "&") {
         auto* result = builder->CreateAnd(left, right, "andtmp");
         // AND with a non-negative value always produces a non-negative result.
-        // Additionally, AND with a non-negative constant mask forces the sign
-        // bit to 0, so the result is always non-negative regardless of left.
         bool resultNonNeg = nonNegValues_.count(left) || nonNegValues_.count(right);
         if (!resultNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
@@ -4175,9 +3817,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "|") {
         auto* result = builder->CreateOr(left, right, "ortmp");
         // OR of two non-negative values is non-negative (sign bit stays 0).
-        // Also: OR with a non-negative constant preserves non-negativity
-        // of the other operand (ORing in low bits cannot set the sign bit
-        // when the constant's sign bit is 0).
         bool resultNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
         if (!resultNonNeg) {
             // One tracked non-neg + constant with sign bit 0 → result non-neg
@@ -4203,9 +3842,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "^") {
         auto* result = builder->CreateXor(left, right, "xortmp");
         // XOR of two non-negative values is non-negative (sign bit stays 0).
-        // Also: XOR with a non-negative constant preserves the sign bit of
-        // the other operand when that operand is non-negative (both have
-        // sign bit 0, XOR(0,0)=0).
         bool resultNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
         if (!resultNonNeg) {
             if (nonNegValues_.count(left)) {
@@ -4226,9 +3862,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const int64_t sv = ci->getSExtValue();
             if (sv >= 0 && sv < 64) {
                 // KnownBits analysis: when the base has enough leading zeros
-                // to absorb the shift without overflow, set nuw (and nsw if
-                // also non-negative).  E.g., loop counter i with 33 leading
-                // zeros shifted left by 3 → 30 leading zeros, still fits.
                 const llvm::KnownBits lhsKB = llvm::computeKnownBits(
                     left, module->getDataLayout());
                 unsigned lz = lhsKB.countMinLeadingZeros();
@@ -4272,14 +3905,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == "**") {
         // Small constant exponent specialization — emit inline multiplications
-        // instead of the general binary-exponentiation loop.  This eliminates
-        // loop overhead and branches for the most common exponents,
-        // producing straight-line code that the backend can schedule optimally.
-        //
-        // When the base is provably non-negative and the exponent is positive,
-        // we set nsw on all intermediate multiplications.  This enables SCEV
-        // to compute tighter value ranges for the result, improving downstream
-        // loop optimization and vectorization.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const int64_t exp = ci->getSExtValue();
             const bool baseNonNeg = nonNegValues_.count(left);
@@ -4601,8 +4226,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
 
         // Integer exponentiation via binary exponentiation (exponentiation by
-        // squaring).  This is O(log n) in the exponent vs. the naive O(n) loop.
-        // baseNonNeg is needed by the loop-body multiplications for NSW flags.
         const bool baseNonNeg = nonNegValues_.count(left) > 0;
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* negExpBB = llvm::BasicBlock::Create(*context, "pow.negexp", function);
@@ -4624,8 +4247,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* isBaseOne = builder->CreateICmpEQ(left, one, "pow.isone");
         llvm::Value* isBaseNegOne = builder->CreateICmpEQ(left, negOne, "pow.isnegone");
         // For base=-1: result is -1 if exponent is odd, 1 if even.
-        // exponent is negative here, but parity of -n equals parity of n:
-        // negate, then check the low bit.
         llvm::Value* absExp = builder->CreateNeg(right, "pow.absexp");
         llvm::Value* expLowBit = builder->CreateAnd(absExp, one, "pow.lowbit");
         llvm::Value* isExpOdd = builder->CreateICmpNE(expLowBit, zero, "pow.expodd");
@@ -4732,9 +4353,6 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         return builder->CreateNot(operand, "bitnottmp");
     } else if (expr->op == "&") {
         // Address-of operator: return the alloca/global pointer itself
-        // (not the loaded value).  This gives a true raw pointer to the
-        // variable's storage — necessary for ptr initializations like
-        //   var p:ptr = &x;
         if (expr->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto* idExpr = static_cast<IdentifierExpr*>(expr->operand.get());
             auto it = namedValues.find(idExpr->name);
@@ -4776,8 +4394,6 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         if (!ptr->getType()->isPointerTy())
             ptr = builder->CreateIntToPtr(ptr, llvm::PointerType::getUnqual(*context), "deref.itop");
         // For typed pointers (ptr<T>), load with the correct element type so
-        // the load instruction has the right width and signedness.
-        // For untyped `ptr`, fall back to the default integer type (i64).
         llvm::Type* loadTy = getDefaultType();
         if (expr->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
             const auto* id = static_cast<IdentifierExpr*>(expr->operand.get());
@@ -4803,6 +4419,53 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         codegenError("Unknown variable: " + expr->name, expr);
     }
     checkConstModification(expr->name, "modify");
+
+    // Reference-borrow write-through.  For `borrow mut var r:&T = &x;`,
+    {
+        auto rit = refVarElemTypes_.find(expr->name);
+        if (rit != refVarElemTypes_.end()) {
+            auto bm = borrowMap_.find(expr->name);
+            if (bm == borrowMap_.end() || !bm->second.isMut) {
+                codegenError("Cannot assign through immutable reference '" +
+                             expr->name +
+                             "' — declare with `borrow mut` for write-through",
+                             expr);
+            }
+            // A live (active) ref var was just written to; revive any
+            // accidental dead-flag (mirrors the standard assign path).
+            deadVars_.erase(expr->name);
+            deadVarReason_.erase(expr->name);
+            llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* ptrLoad = builder->CreateAlignedLoad(
+                ptrTy, it->second, llvm::MaybeAlign(8),
+                (expr->name + ".ref.ptr").c_str());
+            llvm::Type* elemTy = resolveAnnotatedType(rit->second);
+            llvm::Value* coerced = value;
+            if (coerced->getType() != elemTy) {
+                if (elemTy->isDoubleTy() && coerced->getType()->isIntegerTy())
+                    coerced = builder->CreateSIToFP(coerced, elemTy, "itof");
+                else if (elemTy->isFloatTy() && coerced->getType()->isIntegerTy())
+                    coerced = builder->CreateSIToFP(coerced, elemTy, "itof");
+                else if (elemTy->isIntegerTy() && coerced->getType()->isDoubleTy())
+                    coerced = builder->CreateFPToSI(coerced, elemTy, "ftoi");
+                else if (elemTy->isIntegerTy() && coerced->getType()->isFloatTy())
+                    coerced = builder->CreateFPToSI(coerced, elemTy, "ftoi");
+                else if (elemTy->isDoubleTy() && coerced->getType()->isFloatTy())
+                    coerced = builder->CreateFPExt(coerced, elemTy, "fpext");
+                else if (elemTy->isFloatTy() && coerced->getType()->isDoubleTy())
+                    coerced = builder->CreateFPTrunc(coerced, elemTy, "fptrunc");
+                else if (elemTy->isIntegerTy() && coerced->getType()->isIntegerTy())
+                    coerced = convertTo(coerced, elemTy);
+            }
+            const llvm::Align elemAlign =
+                module->getDataLayout().getABITypeAlign(elemTy);
+            builder->CreateAlignedStore(coerced, ptrLoad,
+                                        llvm::MaybeAlign(elemAlign.value()));
+            // The expression value of an assignment is the (original) RHS
+            // value, matching what the standard path returns below.
+            return value;
+        }
+    }
 
     // Re-assigning to a dead (moved/invalidated) variable revives it.
     deadVars_.erase(expr->name);
@@ -4834,23 +4497,14 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
 
     builder->CreateAlignedStore(value, it->second, llvm::MaybeAlign(8));
     // Any assignment to a mutable variable invalidates its compile-time scope
-    // entry (scopeComptimeInts_), which records the initial CT-folded value
-    // for the comptime-block env.  Must be cleared here so that a later
-    // comptime{} block sees the up-to-date value, not the initial constant.
     scopeComptimeInts_.erase(expr->name);
     // Also clear any stale constIntFolds_ entry — this can be set for
-    // comptime-init variables (var x = comptime{...}) which are technically
-    // mutable; without this, reassigning them would leave a stale fold.
     constIntFolds_.erase(expr->name);
     // Track dict variables on reassignment so dict["key"] continues to work
     // after patterns like: m = map_set(m, "k", v) or m = {"a": 1}.
     if (isDictExpr(expr->value.get()))
         dictVarNames_.insert(expr->name);
     // Update non-negativity tracking on assignment.
-    // When the assigned value is provably non-negative, mark the alloca so
-    // subsequent loads can benefit from unsigned operations and NSW flags.
-    // When the value might be negative, remove the alloca from nonNegValues_
-    // to prevent unsound optimizations.
     if (allocaInst && allocaInst->getAllocatedType()->isIntegerTy()) {
         bool valNonNeg = nonNegValues_.count(value) > 0;
         if (!valNonNeg) {
@@ -4862,11 +4516,6 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         else
             nonNegValues_.erase(it->second);
         // Track tight upper bound for modular arithmetic.
-        // If the assigned value is a urem(x, C), record C so subsequent loads
-        // emit llvm.assume(value ult C), letting LLVM's LVI propagate the range
-        // [0, C) through loop PHI nodes and enabling the conditional-subtract
-        // optimization for all unrolled iterations.
-        // Also propagate through variable copies (a = b where b has a bound).
         auto updateBound = [&](llvm::Value* v) {
             if (auto* ri = llvm::dyn_cast<llvm::Instruction>(v)) {
                 if (ri->getOpcode() == llvm::Instruction::URem) {
@@ -4892,8 +4541,6 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         updateBound(value);
     }
     // Update string variable tracking after assignment.
-    // Use isStringExpr() — pointer type alone is ambiguous since
-    // arrays/structs/dicts also use pointer-typed allocas.
     if (isStringExpr(expr->value.get()))
         stringVars_.insert(expr->name);
     else
@@ -4929,11 +4576,6 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     knownArraySizes_.erase(expr->name);
     knownArraySizeAllocas_.erase(expr->name);
     // When a string variable is reassigned to something other than a
-    // str_concat result (which updates the cache itself), invalidate the
-    // stringLenCache_ entry by writing the -1 sentinel.  Without this,
-    // a subsequent str_concat(s, ...) would use a stale cached strlen.
-    // Similarly reset the capacity cache since the new value may point to
-    // a buffer with a different capacity.
     {
         bool isConcat = false;
         if (expr->value->type == ASTNodeType::CALL_EXPR) {
@@ -4960,11 +4602,6 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
 }
 
 // ---------------------------------------------------------------------------
-// Shared prefix/postfix increment/decrement helper
-// ---------------------------------------------------------------------------
-// Factored out of generatePostfix() and generatePrefix() which were ~90%
-// identical.  The only semantic difference is the return value: postfix
-// returns the value *before* the update, prefix returns the value *after*.
 
 llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::string& op, bool isPostfix,
                                            const ASTNode* errorNode) {
@@ -4982,8 +4619,6 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* arrVal = generateExpression(indexExpr->array.get());
         llvm::Value* idxVal = generateExpression(indexExpr->index.get());
         // Normalize index to i64 — generateIndex() does this (line 1003) but
-        // generateIncDec() was missing it, causing type mismatches in the
-        // ICmpSLT bounds check below when the index is a float or i1.
         idxVal = toDefaultType(idxVal);
 
         // Convert i64 → pointer; check if already a pointer first to avoid
@@ -5006,8 +4641,6 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
         auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
         // TBAA: array element slots (index 1+) never alias the length header
-        // (index 0), so tagging the load enables LICM to hoist length loads
-        // past element increments/decrements.
         elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         if (optimizationLevel >= OptimizationLevel::O1)
             elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
@@ -5045,9 +4678,6 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
                               llvm::MDNode::get(*context, {}));
     }
     // Propagate non-negativity: if the alloca is known non-negative, the
-    // loaded value inherits the property.  Emit !range [0, INT64_MAX) so
-    // LLVM IR-level passes (LVI, CVP, InstCombine) see it directly on the
-    // load instruction, matching what generateIdentifier does.
     const bool allocaNonNeg = allocaInst && nonNegValues_.count(allocaInst);
     if (allocaNonNeg && loadType->isIntegerTy(64)
             && optimizationLevel >= OptimizationLevel::O1) {
@@ -5072,10 +4702,6 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
         if (op == "++") {
             // When the variable is provably non-negative, x + 1 with nsw is
-            // also nuw: result ∈ [1, INT64_MAX] ⊂ [0, UINT64_MAX), so
-            // unsigned wrap cannot occur.  The nuw flag enables LLVM's SCEV
-            // to compute tighter ranges and prove non-negativity of derived
-            // expressions, matching the add codegen in generateBinary.
             const bool canNUW = allocaNonNeg;
             updated = builder->CreateAdd(current, delta, "inc", /*HasNUW=*/canNUW, /*HasNSW=*/true);
         } else {
@@ -5086,8 +4712,6 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     builder->CreateStore(updated, it->second);
 
     // Update non-negativity state for the alloca after the mutation.
-    // x++ on a non-negative x: result ∈ [1, INT64_MAX] → still non-negative.
-    // x-- on a non-negative x: result may be -1 (if x was 0) → erase conservatively.
     if (allocaInst) {
         if (op == "++" && allocaNonNeg) {
             nonNegValues_.insert(allocaInst);
@@ -5112,8 +4736,6 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     llvm::Value* condition = generateExpression(expr->condition.get());
 
     // Constant condition elimination — when the condition is known at compile
-    // time we can evaluate only the selected branch, avoiding the branch/PHI
-    // overhead entirely (matches generateIf's dead-branch pruning).
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(condition)) {
         if (ci->isZero()) {
             return generateExpression(expr->elseExpr.get());
@@ -5124,10 +4746,6 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     llvm::Value* condBool = toBool(condition);
 
     // --- Intrinsic idiom recognition for ternary expressions ---
-    // Detect min/max/abs patterns and emit LLVM intrinsics directly, which
-    // map to single hardware instructions on most targets (e.g. cmov, smin,
-    // or pabs).  This avoids the select+cmp overhead and gives LLVM's cost
-    // model perfect information for vectorization decisions.
     if (auto* binCond = dynamic_cast<BinaryExpr*>(expr->condition.get())) {
         auto* thenE = expr->thenExpr.get();
         auto* elseE = expr->elseExpr.get();
@@ -5265,29 +4883,16 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     }
 
     // Branchless select optimization: when both arms are simple expressions
-    // (literals, identifiers, or a binary op between an identifier and a
-    // literal with no side effects), emit a single `select` instruction instead
-    // of a branch+PHI diamond.  This eliminates branch misprediction entirely
-    // and enables the backend to use conditional-move (cmov) instructions.
-    // Arithmetic ops on identifiers/literals are side-effect-free, so evaluating
-    // both arms eagerly is safe.
     auto isSimpleExpr = [](Expression* e) -> bool {
         if (e->type == ASTNodeType::LITERAL_EXPR || e->type == ASTNodeType::IDENTIFIER_EXPR)
             return true;
         // Allow binary ops like `ident OP const` or `const OP ident` — these
-        // are side-effect-free and produce a single arithmetic instruction,
-        // so generating them unconditionally in the select path is correct.
         if (auto* bin = dynamic_cast<BinaryExpr*>(e)) {
             const bool leftSimple  = bin->left->type  == ASTNodeType::IDENTIFIER_EXPR ||
                                      bin->left->type  == ASTNodeType::LITERAL_EXPR;
             const bool rightSimple = bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
                                      bin->right->type == ASTNodeType::LITERAL_EXPR;
             // Allow arithmetic/bitwise ops AND comparisons — all are
-            // side-effect-free single instructions.  Including comparisons
-            // here avoids generating a branch+PHI diamond when the ternary
-            // arms are simple compare expressions, producing a branchless
-            // select instead (e.g. `flag ? a + 1 : a - 1` or
-            // `flag ? x == 0 : y == 0`).
             const std::string& op = bin->op;
             const bool isSafeOp = (op == "+" || op == "-" || op == "*" || op == "/" ||
                                    op == "%" || op == "&" || op == "|" || op == "^" ||
@@ -5298,10 +4903,6 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
                 return true;
         }
         // Allow unary negation/bitwise-NOT on a simple operand — these are
-        // single side-effect-free instructions.  Enables `cond ? -x : x`
-        // (abs pattern), `cond ? ~mask : mask` (toggle pattern), etc.
-        // The superoptimizer's abs/neg idiom detectors can then fold the
-        // resulting select into llvm.abs or a branchless sequence.
         if (auto* un = dynamic_cast<UnaryExpr*>(e)) {
             const bool operandSimple = un->operand->type == ASTNodeType::IDENTIFIER_EXPR ||
                                        un->operand->type == ASTNodeType::LITERAL_EXPR;
@@ -5335,9 +4936,6 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
         if (tNonNeg && eNonNeg) {
             nonNegValues_.insert(sel);
             // Inject @llvm.assume(sel >= 0) at O2+: !range is not valid on
-            // SelectInst, but an assume gives CVP/LVI the same information.
-            // Only emit when the select is integral and non-trivially derived
-            // (constant propagation would already have eliminated the select).
             if (optimizationLevel >= OptimizationLevel::O2 &&
                 sel->getType()->isIntegerTy(64) &&
                 !llvm::isa<llvm::ConstantInt>(sel)) {
@@ -5396,9 +4994,6 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     phi->addIncoming(elseVal, elseBB);
 
     // Propagate non-negativity through the PHI: if both arms are provably
-    // non-negative the merged result is also non-negative.  Without this,
-    // patterns like x = (x%2==0) ? (x/2) : (3*x+1) lose non-neg tracking
-    // after the first iteration, causing srem/sdiv instead of urem/lshr.
     bool thenNonNeg = nonNegValues_.count(thenVal) > 0;
     if (!thenNonNeg)
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(thenVal))
@@ -5410,9 +5005,6 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     if (thenNonNeg && elseNonNeg) {
         nonNegValues_.insert(phi);
         // Note: !range metadata is NOT valid on PHINode in LLVM — it is only
-        // valid on load, call, and invoke.  Non-negativity is propagated via
-        // nonNegValues_ instead; LLVM's value-tracking (KnownBits analysis)
-        // will pick it up through the PHI if both incoming values carry it.
     }
 
     return phi;
@@ -5439,15 +5031,6 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         const size_t totalBytes = totalSlots * 8;
 
         // ── Read-only global fast path ──────────────────────────────────────
-        // Pre-pass (in codegen_stmt.cpp) detected that:
-        //   * every element is a compile-time integer literal,
-        //   * the variable does not escape the current function, and
-        //   * the variable is never the target of an IndexAssign.
-        // Bind the var directly to a private global constant of the form
-        // `[length, e0, e1, ...]` — no malloc, no alloca, no memcpy.  All
-        // subsequent index reads (`gep ptr, i+1`) read directly from the
-        // constant data section, which the LLVM backend can fold into
-        // immediate operands or wide loads.
         if (pendingArrayReadOnlyGlobal_ && numElements >= 2 &&
             optimizationLevel >= OptimizationLevel::O2) {
             std::vector<llvm::Constant*> initVals;
@@ -5498,9 +5081,6 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         }
 
         // Fast path: if ALL elements are compile-time integer constants, build
-        // a global constant array and initialize with a single memcpy.  This
-        // replaces N individual store instructions with one memcpy intrinsic,
-        // which the backend can lower to efficient wide stores or rep movsq.
         bool allConst = true;
         std::vector<int64_t> constVals;
         constVals.reserve(numElements);
@@ -5545,17 +5125,10 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
             // memcpy(arrPtr, @arr.const, totalBytes)
-            // malloc typically returns 16-byte aligned on most 64-bit
-            // platforms (glibc, musl, macOS), but the C standard only
-            // guarantees alignment for max_align_t (usually 8 or 16 bytes).
-            // Use 8-byte alignment for safety on all targets — this still
-            // enables i64-width stores and matches the element size.
             builder->CreateMemCpy(arrPtr, llvm::MaybeAlign(8),
                                   gv, llvm::MaybeAlign(16), totalBytes);
         } else {
             // Mixed constant/dynamic elements: store individually
-            // AlignedStore(8) + tbaaArrayLen_: length header at slot 0 is 8-byte
-            // aligned; TBAA separates it from element stores in slots 1+.
             auto* lenHdrSt = builder->CreateAlignedStore(
                 llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr, llvm::MaybeAlign(8));
             lenHdrSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
@@ -5685,11 +5258,6 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // --- Compile-time dict literal constant propagation ---
-    // When the base is a dict literal and the key is a literal, resolve the
-    // lookup at compile time.  This eliminates hash table allocation,
-    // insertion, and lookup entirely — the matched value expression is
-    // generated directly.  Must run BEFORE generateExpression(array) to
-    // avoid emitting the dead dict construction IR.
     if (expr->array->type == ASTNodeType::DICT_EXPR &&
         expr->index->type == ASTNodeType::LITERAL_EXPR) {
         auto* dict = static_cast<DictExpr*>(expr->array.get());
@@ -5731,8 +5299,6 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
         if (canFold) {
             // Also need to check that all VALUE expressions in the dict are
-            // side-effect-free literals, or we'd lose their side effects.
-            // For now, only fold when every value is a literal (int/float/string).
             bool allValuesAreLiterals = true;
             for (auto& [k, v] : dict->pairs) {
                 if (v->type != ASTNodeType::LITERAL_EXPR) {
@@ -5774,12 +5340,6 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     }
 
     // Chained dict access: dict["k1"]["k2"].
-    // The base is an IndexExpr whose own base is a known dict.  The value
-    // stored under "k1" could be another dict OR an array.  We use the type
-    // of the *current* key as a static discriminator:
-    //   • string key  → treat retrieved value as a dict and do map_get
-    //   • integer key → treat retrieved value as an array (falls through below)
-    // This is zero-cost: the decision is made at compile time; no runtime tag.
     if (expr->array->type == ASTNodeType::INDEX_EXPR) {
         auto* innerIdx = static_cast<IndexExpr*>(expr->array.get());
         if (isDictExpr(innerIdx->array.get()) && isStringExpr(expr->index.get())) {
@@ -5790,18 +5350,6 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     idxVal = toDefaultType(idxVal);
 
     // ── Fast path: range-to-pointer-arithmetic mode ──────────────────────────
-    // When we're inside a for-loop where a pointer-mode preamble was emitted
-    // for this array (data pointer pre-computed, single pre-loop bounds-check
-    // assume already emitted), use the cached data pointer directly.
-    //
-    // Conditions:
-    //   - Not a string (strings don't use the [len, e0, e1, ...] layout)
-    //   - Array is a simple identifier (named local variable)
-    //   - Index is exactly the active pointer-mode iterator (not an expression)
-    //   - We have a cached data pointer for this array name
-    //
-    // This short-circuits the full `basePtr` + `canElideBoundsCheck` path
-    // and produces: `gep inbounds i64, dataPtr, idxVal` without any branch.
     if (!isStringExpr(expr->array.get())
             && !loopPtrModeDataPtrs_.empty()
             && expr->array->type == ASTNodeType::IDENTIFIER_EXPR
@@ -5828,10 +5376,6 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     }
 
     // Detect whether the base expression is a string.  Strings are raw char
-    // pointers without a length header; arrays have the layout [length, e0,
-    // e1, ...] and each element is 8 bytes (i64).
-    // Use isStringExpr() as the sole discriminator — pointer type alone is
-    // ambiguous since arrays/structs/dicts also use pointer-typed allocas.
     const bool isStr = isStringExpr(expr->array.get());
 
     // Convert i64 → pointer (strings may arrive as i64 via ptrtoint)
@@ -5840,27 +5384,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "idx.baseptr");
 
     // Bounds check — elided in OPTMAX functions where compile-time
-    // ownership analysis guarantees safety (zero-cost abstraction).
-    //
-    // Also elided when static analysis can prove the index is within bounds:
-    // for ascending for-loops starting from a non-negative constant, the
-    // iterator is always in [start, endVal).  If the index is a known-safe
-    // loop iterator AND we can verify endVal <= array length, the bounds
-    // check is provably unnecessary (zero-cost abstraction).
-    //
-    // @hot functions at O2+ also skip bounds checks: the user asserts the
-    // function is performance-critical with safe array access patterns.
 
     // ── Backward array reference detection (must run BEFORE boundsCheckElided) ──
-    // Detect arr[i - K] where i is a safe loop iterator and K > 0.
-    // Record the array name in loopBackwardReadArrays_; after the loop body
-    // is generated, bodyHasBackwardArrayRef_ is set only if the same array
-    // is also written to (a true loop-carried write→read dependency).
-    // Read-only backward references (e.g., result[i] = data[i] + data[i-1])
-    // do NOT suppress LICM versioning or parallel_accesses, since LICM and
-    // vectorization are safe when the read array isn't modified.
-    // Must be checked BEFORE boundsCheckElided is set, because OPTMAX and @hot
-    // functions start with boundsCheckElided=true, which would skip this check.
     if (!isStr && loopNestDepth_ > 0
             && expr->index->type == ASTNodeType::BINARY_EXPR) {
         auto* idxBin = static_cast<BinaryExpr*>(expr->index.get());
@@ -5892,8 +5417,6 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         expr->array.get(), expr->index.get(), basePtr, isStr, "idx");
 
     // Ownership-aware optimization: borrowed arrays and const arrays cannot be
-    // resized, so their length is invariant.  Mark the length load with
-    // !invariant.load so LLVM can hoist/CSE it across the loop.
     bool arrayIsBorrowed = false;
     if (!isStr) {
         if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
@@ -5909,33 +5432,17 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     if (isStr) {
         // Load single byte at offset index, zero-extend to i64
-        // inbounds GEP: the bounds check above guarantees the index is within
-        // the allocated string buffer, so the pointer is always valid.
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
         auto* charLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
         charLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         return builder->CreateZExt(charLoad, getDefaultType(), "idx.charext");
     }
     // Array: element is at slot (index + 1) in the i64 buffer.
-    // Compute data pointer (base + 1 slot) then GEP by just the index.
-    // This allows LLVM to hoist the data-pointer computation out of loops.
-    //
-    // OmScript arrays are guaranteed contiguous in memory: the layout is
-    // [length, e0, e1, ..., e(n-1)] as a single malloc/calloc allocation.
-    // We communicate this to LLVM via:
-    //   - 8-byte aligned loads (elements are i64)
-    //   - !nontemporal on large sequential scans (when @prefetch is active)
-    //   - inbounds GEP (the index is within the allocated region)
-    // This enables LLVM to apply vectorization, prefetching, and stride
-    // analysis optimizations that require contiguous memory guarantees.
     llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
         llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
         auto* elemLoad = emitLoadArrayElem(elemPtr, "idx.elem");
     // OmScript arrays are always initialized: array literals set every element,
-    // array_fill zero-initializes via calloc.  The !noundef metadata tells LLVM
-    // the loaded value is never poison/undef, enabling more aggressive
-    // speculation and freeze elimination in downstream loop transforms.
     if (optimizationLevel >= OptimizationLevel::O1)
         elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
     // When inside a parallel loop, attach the access group metadata so
@@ -5947,9 +5454,6 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
 llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     // SIMD vector element insertion: v[i] = x → insertelement.
-    // We must handle this before generating the array expression because
-    // SIMD vectors are values (not pointers) — we load the vector from its
-    // alloca, insert the new element, and store the updated vector back.
     if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
         auto* idExpr = static_cast<IdentifierExpr*>(expr->array.get());
         auto it = namedValues.find(idExpr->name);
@@ -5974,9 +5478,6 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     }
 
     // Track array writes for backward array reference dependency analysis.
-    // When arr[i] = val is inside a loop, record 'arr' in loopWrittenArrays_.
-    // If loopBackwardReadArrays_ already has 'arr', this is a true write→read
-    // dependency and bodyHasBackwardArrayRef_ is set.
     if (loopNestDepth_ > 0 && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
         auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
         loopWrittenArrays_.insert(arrId->name);
@@ -5987,11 +5488,6 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
     // Track whether the value expression contains a non-pow2 modulo being
-    // stored to an array element.  This is the "urem <N x i64> scalarizes"
-    // pattern: arr[i] = (i * K + C) % M where M is a non-power-of-two.
-    // Set the context flag before generating the value so the modulo
-    // detection code in generateBinary can check it.  Only set for array
-    // stores (not string stores); isStringExpr is cheap (AST-only check).
     const bool savedInIndexAssignValue = inIndexAssignValueContext_;
     inIndexAssignValueContext_ = !isStringExpr(expr->array.get());
     llvm::Value* newVal = generateExpression(expr->value.get());
@@ -6000,8 +5496,6 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     idxVal = toDefaultType(idxVal);
 
     // ── Fast path: range-to-pointer-arithmetic mode (store) ─────────────────
-    // Mirror of the fast path in generateIndex: when the pointer preamble has
-    // been emitted for this array, use the cached data pointer directly.
     if (!isStringExpr(expr->array.get())
             && !loopPtrModeDataPtrs_.empty()
             && expr->array->type == ASTNodeType::IDENTIFIER_EXPR
@@ -6024,8 +5518,6 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     }
 
     // Detect whether the base is a string (raw char* without a length header).
-    // Use isStringExpr() as the sole discriminator — pointer type alone is
-    // ambiguous since arrays/structs/dicts also use pointer-typed allocas.
     const bool isStr = isStringExpr(expr->array.get());
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -6049,17 +5541,12 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
     if (isStr) {
         // Truncate to i8 and store at byte offset index
-        // inbounds GEP: the bounds check above guarantees the index is within
-        // the allocated string buffer, so the pointer is always valid.
         llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idxa.charptr");
         auto* charStore = builder->CreateStore(byteVal, charPtr);
         charStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
     } else {
         // Array: store i64 element at slot (index + 1)
-        // Use two-step GEP so LLVM can hoist the data-pointer out of loops.
-        // inbounds GEP: OmScript arrays are contiguous heap allocations,
-        // so the element pointer is always within the allocated region.
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
@@ -6090,22 +5577,46 @@ std::string CodeGenerator::resolveStructType(Expression* objExpr) const {
 
 size_t CodeGenerator::resolveFieldIndex(const std::string& structType, const std::string& fieldName,
                                         const ASTNode* errorNode) {
+    return resolveField(structType, fieldName, errorNode).index;
+}
+
+CodeGenerator::ResolvedField
+CodeGenerator::resolveField(const std::string& structHint, const std::string& fieldName,
+                            const ASTNode* errorNode) {
+    ResolvedField rf{0, "", nullptr, nullptr, ""};
+
+    auto fillFrom = [&](const std::string& sname, size_t idx) {
+        rf.index = idx;
+        rf.structName = sname;
+        rf.structType = getOrCreateStructLLVMType(sname);
+        auto declIt = structFieldDecls_.find(sname);
+        if (declIt != structFieldDecls_.end() && idx < declIt->second.size()) {
+            rf.fieldTypeAnnot = declIt->second[idx].typeName;
+        }
+        if (rf.structType && idx < rf.structType->getNumElements())
+            rf.fieldType = rf.structType->getElementType(static_cast<unsigned>(idx));
+        else
+            rf.fieldType = getDefaultType();
+    };
+
     // If we know the exact struct type, use it directly.
-    if (!structType.empty()) {
-        auto it = structDefs_.find(structType);
+    if (!structHint.empty()) {
+        auto it = structDefs_.find(structHint);
         if (it != structDefs_.end()) {
             for (size_t i = 0; i < it->second.size(); i++) {
                 if (it->second[i] == fieldName) {
-                    return i;
+                    fillFrom(structHint, i);
+                    return rf;
                 }
             }
-            codegenError("Struct '" + structType + "' has no field '" + fieldName + "'", errorNode);
+            codegenError("Struct '" + structHint + "' has no field '" + fieldName + "'", errorNode);
         }
     }
 
     // Fallback: search all struct definitions.  Error if the field is
     // ambiguous (same name at different indices in multiple structs).
     size_t foundIdx = 0;
+    std::string foundStruct;
     bool found = false;
     bool ambiguous = false;
     for (auto& [sname, sfields] : structDefs_) {
@@ -6115,6 +5626,7 @@ size_t CodeGenerator::resolveFieldIndex(const std::string& structType, const std
                     ambiguous = true;
                 }
                 foundIdx = i;
+                foundStruct = sname;
                 found = true;
                 break;
             }
@@ -6126,7 +5638,8 @@ size_t CodeGenerator::resolveFieldIndex(const std::string& structType, const std
     if (!found) {
         codegenError("Unknown field '" + fieldName + "'", errorNode);
     }
-    return foundIdx;
+    fillFrom(foundStruct, foundIdx);
+    return rf;
 }
 
 llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
@@ -6137,123 +5650,144 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     const auto& fields = it->second;
     const size_t numFields = fields.size();
 
-    // Use stack allocation (alloca) for structs.  This avoids malloc overhead
-    // and allows LLVM's mem2reg / SROA passes to promote small structs to
-    // SSA registers, matching C's plain-variable performance.
+    llvm::StructType* sty = getOrCreateStructLLVMType(expr->structName);
+    if (!sty) {
+        codegenError("Failed to build LLVM type for struct '" + expr->structName + "'", expr);
+    }
+
+    // Stack-allocate the real LLVM struct.  Using a StructType (instead of
     llvm::Function* curFn = builder->GetInsertBlock()->getParent();
     llvm::IRBuilder<> tmpBuilder(&curFn->getEntryBlock(), curFn->getEntryBlock().begin());
-    llvm::Type* slotTy = getDefaultType();
-    llvm::Value* ptr = tmpBuilder.CreateAlloca(
-        llvm::ArrayType::get(slotTy, numFields), nullptr, "struct.alloca");
-    // Cast to pointer for GEP
-    ptr = builder->CreateBitOrPointerCast(ptr, llvm::PointerType::getUnqual(*context), "struct.ptr");
+    llvm::AllocaInst* structAlloca =
+        tmpBuilder.CreateAlloca(sty, nullptr, "struct.alloca");
+    // Use the DataLayout's preferred alignment for this struct so subsequent
+    // field accesses get the right alignment metadata for free.
+    structAlloca->setAlignment(
+        module->getDataLayout().getPrefTypeAlign(sty));
 
-    // Build field name → index map
+    // Build field-name → index map for the named-field initializer loop below.
     std::unordered_map<std::string, size_t> fieldIndex;
-    for (size_t i = 0; i < fields.size(); i++) {
+    fieldIndex.reserve(numFields);
+    for (size_t i = 0; i < numFields; i++) {
         fieldIndex[fields[i]] = i;
     }
 
-    // Initialize all fields to 0
+    // Zero-initialize every field with a single typed store.  Using a memset
     for (size_t i = 0; i < numFields; i++) {
-        // inbounds: alloca is [numFields x i64], index i ∈ [0, numFields-1].
-        llvm::Value* elemPtr =
-            builder->CreateInBoundsGEP(getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), i), "struct.field.ptr");
-        builder->CreateAlignedStore(llvm::ConstantInt::get(getDefaultType(), 0), elemPtr, llvm::MaybeAlign(8));
+        llvm::Type* elemTy = sty->getElementType(static_cast<unsigned>(i));
+        llvm::Value* fieldPtr = builder->CreateStructGEP(
+            sty, structAlloca, static_cast<unsigned>(i), "struct.field.init.ptr");
+        builder->CreateStore(llvm::Constant::getNullValue(elemTy), fieldPtr);
     }
 
-    // Set provided field values
+    // Fetch the field annotation list (if any) so we know each field's
+    // declared type for value conversion.
+    auto declIt = structFieldDecls_.find(expr->structName);
+
+    // Apply each provided field initializer.
     for (auto& [fieldName, valueExpr] : expr->fieldValues) {
         auto fit = fieldIndex.find(fieldName);
         if (fit == fieldIndex.end()) {
             codegenError("Unknown field '" + fieldName + "' in struct '" + expr->structName + "'", expr);
         }
+        const size_t idx = fit->second;
+        llvm::Type* elemTy = sty->getElementType(static_cast<unsigned>(idx));
+
         llvm::Value* val = generateExpression(valueExpr.get());
-        val = toDefaultType(val);
-        // inbounds: fit->second is a validated index ∈ [0, numFields-1].
-        llvm::Value* elemPtr = builder->CreateInBoundsGEP(
-            getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), fit->second), "struct.field.ptr");
-        builder->CreateAlignedStore(val, elemPtr, llvm::MaybeAlign(8));
-    }
+        // Convert from the expression's natural type to the field's declared
+        val = convertTo(val, elemTy);
 
-    return builder->CreatePtrToInt(ptr, getDefaultType(), "struct.int");
-}
-
-llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
-    const std::string structType = resolveStructType(expr->object.get());
-    const size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
-
-    llvm::Value* objVal = generateExpression(expr->object.get());
-    objVal = toDefaultType(objVal);
-
-    auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr =
-        objVal->getType()->isPointerTy() ? objVal : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
-    // inbounds: fieldIdx is validated against the declared struct size by
-    // resolveFieldIndex, so it is always within [0, numFields-1].
-    llvm::Value* elemPtr = builder->CreateInBoundsGEP(
-        getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), fieldIdx), "struct.field.load.ptr");
-
-    // Determine alignment from struct field attributes.
-    unsigned fieldAlign = 0;
-    auto declIt = structFieldDecls_.find(structType);
-    const FieldAttrs* attrs = nullptr;
-    if (declIt != structFieldDecls_.end() && fieldIdx < declIt->second.size()) {
-        attrs = &declIt->second[fieldIdx].attrs;
-        if (attrs->align > 0) {
-            fieldAlign = static_cast<unsigned>(attrs->align);
+        llvm::Value* fieldPtr = builder->CreateStructGEP(
+            sty, structAlloca, static_cast<unsigned>(idx), "struct.field.init.ptr");
+        llvm::StoreInst* st = builder->CreateStore(val, fieldPtr);
+        // Per-field TBAA so writes to one field don't appear to alias loads
+        // from sibling fields.  Mirrors the access path in generateFieldAccess.
+        st->setMetadata(llvm::LLVMContext::MD_tbaa,
+                        getOrCreateFieldTBAA(expr->structName, idx));
+        // If the field is marked `cold`, hint the store as non-temporal so
+        // it bypasses the cache, matching generateFieldAssign's behaviour.
+        if (declIt != structFieldDecls_.end() && idx < declIt->second.size() &&
+            declIt->second[idx].attrs.cold) {
+            llvm::Metadata* one[] = {
+                llvm::ConstantAsMetadata::get(
+                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))
+            };
+            st->setMetadata(llvm::LLVMContext::MD_nontemporal,
+                            llvm::MDNode::get(*context, one));
         }
     }
 
-    llvm::LoadInst* load;
-    if (fieldAlign > 0) {
-        load = builder->CreateAlignedLoad(getDefaultType(), elemPtr,
-                                          llvm::MaybeAlign(fieldAlign), "struct.field.val");
+    // The struct value travels through the rest of codegen as a pointer.
+    return builder->CreatePtrToInt(structAlloca, getDefaultType(), "struct.int");
+}
+
+llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
+    const std::string structHint = resolveStructType(expr->object.get());
+    const ResolvedField rf = resolveField(structHint, expr->fieldName, expr);
+
+    llvm::Value* objVal = generateExpression(expr->object.get());
+
+    // The struct value travels as a pointer.  If we received an integer
+    // (legacy ptrtoint round-trip path), convert it back to a pointer.
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* basePtr = objVal->getType()->isPointerTy()
+                               ? objVal
+                               : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
+
+    // Use a real StructGEP so DataLayout drives the field offset.  When the
+    llvm::Type* elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
+    llvm::Value* elemPtr;
+    if (rf.structType) {
+        elemPtr = builder->CreateStructGEP(rf.structType, basePtr,
+                                           static_cast<unsigned>(rf.index),
+                                           "struct.field.load.ptr");
     } else {
-        // All struct fields are i64 and structs are malloc'd (≥ 8-byte aligned),
-        // so the field pointer is always 8-byte aligned.  Using CreateAlignedLoad
-        // communicates this to LLVM's backend for better instruction selection
-        // and enables the same scalar-evolution analysis as other aligned loads.
-        load = builder->CreateAlignedLoad(getDefaultType(), elemPtr,
-                                          llvm::MaybeAlign(8), "struct.field.val");
+        elemPtr = builder->CreateInBoundsGEP(
+            getDefaultType(), basePtr,
+            llvm::ConstantInt::get(getDefaultType(), rf.index), "struct.field.load.ptr");
     }
 
+    // Determine alignment.  Prefer an explicit `align(...)` attribute; else
+    // ask DataLayout for the natural alignment of the field's element type.
+    auto declIt = structFieldDecls_.find(rf.structName);
+    const FieldAttrs* attrs = nullptr;
+    if (declIt != structFieldDecls_.end() && rf.index < declIt->second.size()) {
+        attrs = &declIt->second[rf.index].attrs;
+    }
+    llvm::Align fieldAlign;
+    if (attrs && attrs->align > 0) {
+        fieldAlign = llvm::Align(static_cast<unsigned>(attrs->align));
+    } else {
+        fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
+    }
+
+    llvm::LoadInst* load = builder->CreateAlignedLoad(elemTy, elemPtr,
+                                                      fieldAlign, "struct.field.val");
+
     // OmScript structs are always initialized from struct literals (and
-    // subsequent field assignments are always explicit), so every field load
-    // is guaranteed to produce a defined value.  !noundef lets LLVM speculate,
-    // hoist, and CSE the load — matching the same annotation on variable
-    // loads (generateIdentifier) and array element loads (generateIndex).
     if (optimizationLevel >= OptimizationLevel::O1) {
         load->setMetadata(llvm::LLVMContext::MD_noundef,
                           llvm::MDNode::get(*context, {}));
     }
 
-    // TBAA: use a per-field type node so different fields of the same struct
-    // do not alias each other.  Each (structType, fieldIdx) pair gets a unique
-    // child of tbaaStructTypeNode_, allowing LLVM to prove that, e.g.,
-    // p.x and p.y are independent loads even when their base pointer is shared.
+    // TBAA: per-field type node so different fields of the same struct do not
+    // alias each other.
     load->setMetadata(llvm::LLVMContext::MD_tbaa,
-                      getOrCreateFieldTBAA(structType, fieldIdx));
+                      getOrCreateFieldTBAA(rf.structName, rf.index));
 
     // Apply LLVM metadata from struct field attributes.
     if (attrs) {
-        // immut → !invariant.load metadata: tells LLVM the value never changes
         if (attrs->immut) {
             load->setMetadata(llvm::LLVMContext::MD_invariant_load,
                               llvm::MDNode::get(*context, {}));
         }
-        // noalias → !alias.scope + !noalias metadata pair.
-        // The scope includes a reference to the domain so LLVM's
-        // ScopedNoAliasAA can reason about aliasing across struct fields.
-        // The scope name includes the struct type and field name to
-        // distinguish different field accesses for better alias analysis.
         if (attrs->noalias) {
             llvm::MDNode* domain = llvm::MDNode::getDistinct(*context,
                 {llvm::MDString::get(*context, "struct.noalias.domain")});
             domain->replaceOperandWith(0, domain);
             llvm::SmallString<64> scopeBuf;
             llvm::StringRef scopeName =
-                (llvm::Twine("struct.noalias.") + structType + "." + expr->fieldName)
+                (llvm::Twine("struct.noalias.") + rf.structName + "." + expr->fieldName)
                     .toStringRef(scopeBuf);
             llvm::MDNode* scope = llvm::MDNode::getDistinct(*context,
                 {nullptr, domain, llvm::MDString::get(*context, scopeName)});
@@ -6262,14 +5796,14 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
             load->setMetadata(llvm::LLVMContext::MD_alias_scope, scopeList);
             load->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
         }
-        // range(min,max) → !range metadata for integer range propagation
-        if (attrs->hasRange) {
-            auto* i64Ty = llvm::Type::getInt64Ty(*context);
+        // range(min,max) → !range metadata for integer range propagation.
+        // The range constants must be the same integer type as the load value.
+        if (attrs->hasRange && elemTy->isIntegerTy()) {
             llvm::Metadata* rangeMD[] = {
                 llvm::ConstantAsMetadata::get(
-                    llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(attrs->rangeMin))),
+                    llvm::ConstantInt::get(elemTy, static_cast<uint64_t>(attrs->rangeMin))),
                 llvm::ConstantAsMetadata::get(
-                    llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(attrs->rangeMax) + 1))
+                    llvm::ConstantInt::get(elemTy, static_cast<uint64_t>(attrs->rangeMax) + 1))
             };
             load->setMetadata(llvm::LLVMContext::MD_range,
                               llvm::MDNode::get(*context, rangeMD));
@@ -6284,48 +5818,54 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
                               llvm::MDNode::get(*context, one));
         }
     }
-    return load;
+    // Lift narrow integer / float field values to the default expression
+    return liftFieldLoad(load, rf.fieldTypeAnnot);
 }
 
 llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
-    const std::string structType = resolveStructType(expr->object.get());
-    const size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
+    const std::string structHint = resolveStructType(expr->object.get());
+    const ResolvedField rf = resolveField(structHint, expr->fieldName, expr);
 
     llvm::Value* objVal = generateExpression(expr->object.get());
-    objVal = toDefaultType(objVal);
-    llvm::Value* newVal = generateExpression(expr->value.get());
-    newVal = toDefaultType(newVal);
-
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr =
-        objVal->getType()->isPointerTy() ? objVal : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
-    // inbounds: fieldIdx is validated against the declared struct size by
-    // resolveFieldIndex, so it is always within [0, numFields-1].
-    llvm::Value* elemPtr = builder->CreateInBoundsGEP(
-        getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), fieldIdx), "struct.field.store.ptr");
+    llvm::Value* basePtr = objVal->getType()->isPointerTy()
+                               ? objVal
+                               : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
 
-    // Apply alignment from struct field attributes.
-    auto declIt = structFieldDecls_.find(structType);
-    const FieldAttrs* attrs = nullptr;
-    if (declIt != structFieldDecls_.end() && fieldIdx < declIt->second.size()) {
-        attrs = &declIt->second[fieldIdx].attrs;
-    }
+    llvm::Value* newVal = generateExpression(expr->value.get());
+    llvm::Type* elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
+    // Convert from the expression's natural type to the field's declared
+    // type before storing.  convertTo is a no-op when types match.
+    newVal = convertTo(newVal, elemTy);
 
-    llvm::StoreInst* store;
-    if (attrs && attrs->align > 0) {
-        store = builder->CreateAlignedStore(newVal, elemPtr,
-                                            llvm::MaybeAlign(static_cast<unsigned>(attrs->align)));
+    llvm::Value* elemPtr;
+    if (rf.structType) {
+        elemPtr = builder->CreateStructGEP(rf.structType, basePtr,
+                                           static_cast<unsigned>(rf.index),
+                                           "struct.field.store.ptr");
     } else {
-        // All struct fields are i64 and structs are malloc'd (≥ 8-byte aligned),
-        // so the field pointer is always 8-byte aligned.  Communicating this to
-        // LLVM enables better store merging and vectorization of struct initialization.
-        store = builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
+        elemPtr = builder->CreateInBoundsGEP(
+            getDefaultType(), basePtr,
+            llvm::ConstantInt::get(getDefaultType(), rf.index), "struct.field.store.ptr");
     }
 
-    // TBAA: per-field type node so writes to different fields don't alias reads
-    // from other fields.  Matches the per-field TBAA used in generateFieldAccess.
+    auto declIt = structFieldDecls_.find(rf.structName);
+    const FieldAttrs* attrs = nullptr;
+    if (declIt != structFieldDecls_.end() && rf.index < declIt->second.size()) {
+        attrs = &declIt->second[rf.index].attrs;
+    }
+
+    llvm::Align fieldAlign;
+    if (attrs && attrs->align > 0) {
+        fieldAlign = llvm::Align(static_cast<unsigned>(attrs->align));
+    } else {
+        fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
+    }
+    llvm::StoreInst* store = builder->CreateAlignedStore(newVal, elemPtr, fieldAlign);
+
+    // TBAA: per-field type node (matches generateFieldAccess).
     store->setMetadata(llvm::LLVMContext::MD_tbaa,
-                       getOrCreateFieldTBAA(structType, fieldIdx));
+                       getOrCreateFieldTBAA(rf.structName, rf.index));
 
     // !nontemporal hint for cold fields — bypass cache on write
     if (attrs && attrs->cold) {
@@ -6337,7 +5877,9 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
                            llvm::MDNode::get(*context, one));
     }
 
-    return newVal;
+    // Field-assign expressions evaluate to the assigned value; lift it back
+    // to expression width to match the convention used by generateFieldAccess.
+    return liftFieldLoad(newVal, rf.fieldTypeAnnot);
 }
 
 bool CodeGenerator::isDictExpr(Expression* expr) const {
@@ -6356,9 +5898,6 @@ bool CodeGenerator::isDictExpr(Expression* expr) const {
                call->callee == "map_remove";
     }
     // NOTE: INDEX_EXPR is intentionally NOT included here.  The value returned
-    // by dict["key"] may be another dict OR an array — we cannot know statically
-    // without type inference.  Chained string-key access (dict["k1"]["k2"]) is
-    // handled explicitly in generateIndex using the key type as a discriminator.
     return false;
 }
 

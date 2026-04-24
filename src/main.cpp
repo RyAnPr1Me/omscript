@@ -2196,6 +2196,8 @@ int main(int argc, char* argv[]) {
     bool flagSuperopt = true;
     unsigned flagSuperoptLevel = 2;
     bool flagHGOE = true;
+    bool flagSDR  = true;
+    bool flagIPOF = true;
     bool flagDebug = false;
 
     // Profile selection for project-mode commands.
@@ -2222,6 +2224,8 @@ int main(int argc, char* argv[]) {
         bool superopt      = false;
         bool superoptLevel = false;
         bool hgoe          = false;
+        bool sdr           = false;
+        bool ipof          = false;
         bool debug         = false;
         bool strip         = false;
         bool staticLink    = false;
@@ -2253,117 +2257,47 @@ int main(int argc, char* argv[]) {
             explicitFlags.mtuneCpu = true;
             return true;
         }
-        if (arg == "-flto") {
-            flagLTO = true;
-            explicitFlags.lto = true;
-            return true;
-        }
-        if (arg == "-fno-lto") {
-            flagLTO = false;
-            explicitFlags.lto = true;
-            return true;
-        }
-        if (arg == "-fpic") {
-            flagPIC = true;
-            explicitFlags.pic = true;
-            return true;
-        }
-        if (arg == "-fno-pic") {
-            flagPIC = false;
-            explicitFlags.pic = true;
-            return true;
-        }
-        if (arg == "-ffast-math") {
-            flagFastMath = true;
-            explicitFlags.fastMath = true;
-            return true;
-        }
-        if (arg == "-fno-fast-math") {
-            flagFastMath = false;
-            explicitFlags.fastMath = true;
-            return true;
-        }
-        if (arg == "-foptmax") {
-            flagOptMax = true;
-            explicitFlags.optMax = true;
-            return true;
-        }
-        if (arg == "-fno-optmax") {
-            flagOptMax = false;
-            explicitFlags.optMax = true;
-            return true;
-        }
-        if (arg == "-fstack-protector") {
-            flagStackProtector = true;
-            explicitFlags.stackProtector = true;
-            return true;
-        }
-        if (arg == "-fno-stack-protector") {
-            flagStackProtector = false;
-            explicitFlags.stackProtector = true;
-            return true;
-        }
-        if (arg == "-fvectorize") {
-            flagVectorize = true;
-            explicitFlags.vectorize = true;
-            return true;
-        }
-        if (arg == "-fno-vectorize") {
-            flagVectorize = false;
-            explicitFlags.vectorize = true;
-            return true;
-        }
-        if (arg == "-funroll-loops") {
-            flagUnrollLoops = true;
-            explicitFlags.unrollLoops = true;
-            return true;
-        }
-        if (arg == "-fno-unroll-loops") {
-            flagUnrollLoops = false;
-            explicitFlags.unrollLoops = true;
-            return true;
-        }
-        if (arg == "-floop-optimize") {
-            flagLoopOptimize = true;
-            explicitFlags.loopOptimize = true;
-            return true;
-        }
-        if (arg == "-fno-loop-optimize") {
-            flagLoopOptimize = false;
-            explicitFlags.loopOptimize = true;
-            return true;
-        }
-        if (arg == "-fparallelize") {
-            flagParallelize = true;
-            explicitFlags.parallelize = true;
-            return true;
-        }
-        if (arg == "-fno-parallelize") {
-            flagParallelize = false;
-            explicitFlags.parallelize = true;
-            return true;
-        }
-        if (arg == "-fegraph") {
-            flagEGraph = true;
-            explicitFlags.egraph = true;
-            return true;
-        }
-        if (arg == "-fno-egraph") {
-            flagEGraph = false;
-            explicitFlags.egraph = true;
-            return true;
-        }
-        if (arg == "-fsuperopt") {
-            flagSuperopt = true;
-            explicitFlags.superopt = true;
-            return true;
-        }
-        if (arg == "-fno-superopt") {
-            flagSuperopt = false;
-            flagSuperoptLevel = 0;
-            explicitFlags.superopt = true;
-            explicitFlags.superoptLevel = true;
-            return true;
+        // Table-driven boolean flag parser.
+        // Each entry: { enable-flag, disable-flag, value-ptr, explicit-flag-ptr }
+        struct BoolFlagEntry {
+            const char* onFlag;
+            const char* offFlag;
+            bool*       value;
+            bool*       explicit_;
+        };
+        static const BoolFlagEntry kBoolFlags[] = {
+            {"-flto",              "-fno-lto",              &flagLTO,           &explicitFlags.lto},
+            {"-fpic",              "-fno-pic",              &flagPIC,           &explicitFlags.pic},
+            {"-ffast-math",        "-fno-fast-math",        &flagFastMath,      &explicitFlags.fastMath},
+            {"-foptmax",           "-fno-optmax",           &flagOptMax,        &explicitFlags.optMax},
+            {"-fstack-protector",  "-fno-stack-protector",  &flagStackProtector,&explicitFlags.stackProtector},
+            {"-fvectorize",        "-fno-vectorize",        &flagVectorize,     &explicitFlags.vectorize},
+            {"-funroll-loops",     "-fno-unroll-loops",     &flagUnrollLoops,   &explicitFlags.unrollLoops},
+            {"-floop-optimize",    "-fno-loop-optimize",    &flagLoopOptimize,  &explicitFlags.loopOptimize},
+            {"-fparallelize",      "-fno-parallelize",      &flagParallelize,   &explicitFlags.parallelize},
+            {"-fegraph",           "-fno-egraph",           &flagEGraph,        &explicitFlags.egraph},
+            {"-fsuperopt",         "-fno-superopt",         &flagSuperopt,      &explicitFlags.superopt},
+            {"-fhgoe",             "-fno-hgoe",             &flagHGOE,          &explicitFlags.hgoe},
+            {"-fsdr",              "-fno-sdr",              &flagSDR,           &explicitFlags.sdr},
+            {"-fipof",             "-fno-ipof",             &flagIPOF,          &explicitFlags.ipof},
+            {"-static",            nullptr,                 &flagStatic,        &explicitFlags.staticLink}, // no -fno-static: static linking is always explicitly opted into
+        };
+        for (const auto& e : kBoolFlags) {
+            if (e.onFlag && arg == e.onFlag) {
+                *e.value     = true;
+                *e.explicit_ = true;
+                return true;
+            }
+            if (e.offFlag && arg == e.offFlag) {
+                *e.value     = false;
+                *e.explicit_ = true;
+                // -fno-superopt also resets the level to 0.
+                if (e.value == &flagSuperopt) {
+                    flagSuperoptLevel = 0;
+                    explicitFlags.superoptLevel = true;
+                }
+                return true;
+            }
         }
         if (arg.substr(0, 17) == "-fsuperopt-level=") {
             const auto levelStr = arg.substr(17);
@@ -2378,21 +2312,6 @@ int main(int argc, char* argv[]) {
             }
             explicitFlags.superopt = true;
             explicitFlags.superoptLevel = true;
-            return true;
-        }
-        if (arg == "-fhgoe") {
-            flagHGOE = true;
-            explicitFlags.hgoe = true;
-            return true;
-        }
-        if (arg == "-fno-hgoe") {
-            flagHGOE = false;
-            explicitFlags.hgoe = true;
-            return true;
-        }
-        if (arg == "-static") {
-            flagStatic = true;
-            explicitFlags.staticLink = true;
             return true;
         }
         if (arg == "-s" || arg == "--strip") {
@@ -2844,6 +2763,24 @@ int main(int argc, char* argv[]) {
     try {
         auto totalStart = std::chrono::steady_clock::now();
 
+        // Shared lambda: apply all -f flags to a CodeGenerator instance.
+        const auto applyCodegenFlags = [&](omscript::CodeGenerator& cg) {
+            cg.setPIC(flagPIC);
+            cg.setFastMath(flagFastMath);
+            cg.setOptMax(flagOptMax);
+            cg.setVectorize(flagVectorize);
+            cg.setUnrollLoops(flagUnrollLoops);
+            cg.setLoopOptimize(flagLoopOptimize);
+            cg.setParallelize(flagParallelize);
+            cg.setEGraphOptimize(flagEGraph);
+            cg.setSuperoptimize(flagSuperopt);
+            cg.setSuperoptLevel(flagSuperoptLevel);
+            cg.setHardwareGraphOpt(flagHGOE);
+            cg.setSDR(flagSDR);
+            cg.setIPOF(flagIPOF);
+            cg.setDebugMode(flagDebug);
+        };
+
         if (command == Command::Lex || command == Command::Parse || command == Command::EmitIR ||
             command == Command::Check) {
             auto lexStart = std::chrono::steady_clock::now();
@@ -2912,18 +2849,7 @@ int main(int argc, char* argv[]) {
             codegen.setVerbose(verbose);
             codegen.setMarch(marchCpu);
             codegen.setMtune(mtuneCpu);
-            codegen.setPIC(flagPIC);
-            codegen.setFastMath(flagFastMath);
-            codegen.setOptMax(flagOptMax);
-            codegen.setVectorize(flagVectorize);
-            codegen.setUnrollLoops(flagUnrollLoops);
-            codegen.setLoopOptimize(flagLoopOptimize);
-            codegen.setParallelize(flagParallelize);
-            codegen.setEGraphOptimize(flagEGraph);
-            codegen.setSuperoptimize(flagSuperopt);
-            codegen.setSuperoptLevel(flagSuperoptLevel);
-            codegen.setHardwareGraphOpt(flagHGOE);
-            codegen.setDebugMode(flagDebug);
+            applyCodegenFlags(codegen);
             codegen.setSourceFilename(sourceFile);
             codegen.generate(program.get());
             auto codegenEnd = std::chrono::steady_clock::now();
@@ -2977,18 +2903,7 @@ int main(int argc, char* argv[]) {
             codegen.setVerbose(verbose);
             codegen.setMarch(marchCpu);
             codegen.setMtune(mtuneCpu);
-            codegen.setPIC(flagPIC);
-            codegen.setFastMath(flagFastMath);
-            codegen.setOptMax(flagOptMax);
-            codegen.setVectorize(flagVectorize);
-            codegen.setUnrollLoops(flagUnrollLoops);
-            codegen.setLoopOptimize(flagLoopOptimize);
-            codegen.setParallelize(flagParallelize);
-            codegen.setEGraphOptimize(flagEGraph);
-            codegen.setSuperoptimize(flagSuperopt);
-            codegen.setSuperoptLevel(flagSuperoptLevel);
-            codegen.setHardwareGraphOpt(flagHGOE);
-            codegen.setDebugMode(flagDebug);
+            applyCodegenFlags(codegen);
             codegen.setSourceFilename(sourceFile);
             codegen.generate(program.get());
             auto codegenEnd = std::chrono::steady_clock::now();
@@ -3028,18 +2943,7 @@ int main(int argc, char* argv[]) {
             codegen.setVerbose(verbose);
             codegen.setMarch(marchCpu);
             codegen.setMtune(mtuneCpu);
-            codegen.setPIC(flagPIC);
-            codegen.setFastMath(flagFastMath);
-            codegen.setOptMax(flagOptMax);
-            codegen.setVectorize(flagVectorize);
-            codegen.setUnrollLoops(flagUnrollLoops);
-            codegen.setLoopOptimize(flagLoopOptimize);
-            codegen.setParallelize(flagParallelize);
-            codegen.setEGraphOptimize(flagEGraph);
-            codegen.setSuperoptimize(flagSuperopt);
-            codegen.setSuperoptLevel(flagSuperoptLevel);
-            codegen.setHardwareGraphOpt(flagHGOE);
-            codegen.setDebugMode(flagDebug);
+            applyCodegenFlags(codegen);
             codegen.setSourceFilename(sourceFile);
             codegen.generate(program.get());
 
@@ -3075,6 +2979,12 @@ int main(int argc, char* argv[]) {
         compiler.setUnrollLoops(flagUnrollLoops);
         compiler.setLoopOptimize(flagLoopOptimize);
         compiler.setParallelize(flagParallelize);
+        compiler.setEGraphOptimize(flagEGraph);
+        compiler.setSuperoptimize(flagSuperopt);
+        compiler.setSuperoptLevel(flagSuperoptLevel);
+        compiler.setHardwareGraphOpt(flagHGOE);
+        compiler.setSDR(flagSDR);
+        compiler.setIPOF(flagIPOF);
         compiler.setDebugMode(flagDebug);
         if (quiet) {
             compiler.setVerbose(false);

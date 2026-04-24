@@ -515,6 +515,14 @@ public:
         const BlockStmt*            body,
         const std::unordered_map<std::string, CTValue>& env = {});
 
+    /// Evaluate a single expression in the given environment.
+    /// Side effects (array mutations, local variable changes) stay inside a
+    /// temporary frame and are not propagated back.  Use this as a drop-in
+    /// replacement for per-expression constant folding (replaces tryFoldExprToConst).
+    CTValue evalSingleExpr(
+        const std::unordered_map<std::string, CTValue>& env,
+        const Expression* expr);
+
     // ── Builtin evaluator (exposed for bridge with existing ConstValue) ───
     /// Evaluate a named built-in function with fully-resolved arguments.
     /// Returns std::nullopt for unknown builtins, I/O functions, or when

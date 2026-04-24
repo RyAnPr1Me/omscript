@@ -1,21 +1,10 @@
-/// @file hardware_graph.cpp
-/// @brief Hardware Graph Optimization Engine (HGOE) implementation.
-///
 /// Implements hardware-aware compilation by:
-///   1. Building a structural model of the target CPU microarchitecture
 
 // Apply maximum compiler optimizations to this hot path.
-// Strength reduction and hardware-aware scheduling are on the critical path
-// for every compiled function when -march/-mtune are set.
 #ifdef __GNUC__
 #  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
 #endif
 ///   2. Converting LLVM IR functions into program dependency graphs
-///   3. Mapping program operations onto hardware execution units
-///   4. Applying hardware-specific transformations (FMA, prefetch, etc.)
-///   5. Providing a hardware-aware cost model for scheduling decisions
-///
-/// Activated when -march or -mtune flags are provided (including "native").
 
 #include "hardware_graph.h"
 #include <llvm/Config/llvm-config.h>
@@ -79,10 +68,6 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
 }
 
 /// Alias query used by HGOE memory-edge construction.
-/// Enhanced with:
-///   - TBAA metadata disambiguation (type-based alias analysis)
-///   - Non-overlapping access size checks
-///   - GEP index range analysis for provably disjoint array accesses
 [[nodiscard]] static bool hgoeMayAlias(const llvm::Instruction* a,
                                        const llvm::Instruction* b,
                                        const llvm::DataLayout& dl) {
@@ -100,19 +85,11 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
     if (ptrA == ptrB) return true;
 
     // ── TBAA metadata disambiguation ────────────────────────────────────────
-    // LLVM's TBAA (Type-Based Alias Analysis) metadata on load/store
-    // instructions encodes type hierarchy information.  Two accesses with
-    // TBAA tags from disjoint subtrees in the type hierarchy cannot alias.
-    // This is the same check LLVM's MachineScheduler uses.
     {
         auto* tbaaA = a->getMetadata(llvm::LLVMContext::MD_tbaa);
         auto* tbaaB = b->getMetadata(llvm::LLVMContext::MD_tbaa);
         if (tbaaA && tbaaB && tbaaA != tbaaB) {
             // Walk up the TBAA tree: if neither is an ancestor of the other,
-            // they are from disjoint type subtrees and cannot alias.
-            // Conservative fast path: if both have exactly 3 operands
-            // (standard TBAA scalar format) and their root nodes differ,
-            // they are guaranteed disjoint.
             auto getRootTag = [](const llvm::MDNode* md) -> const llvm::MDNode* {
                 const llvm::MDNode* cur = md;
                 unsigned depthLimit = 16; // prevent infinite loops on malformed MD
@@ -129,8 +106,6 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
             if (rootA && rootB && rootA != rootB)
                 return false;
             // Same root but different direct tags at the same tree depth:
-            // if neither tag is an ancestor of the other, they don't alias.
-            // Quick check: different tags with the same parent.
             if (tbaaA->getNumOperands() >= 2 && tbaaB->getNumOperands() >= 2) {
                 auto* parentA = llvm::dyn_cast<llvm::MDNode>(tbaaA->getOperand(1));
                 auto* parentB = llvm::dyn_cast<llvm::MDNode>(tbaaB->getOperand(1));
@@ -150,9 +125,6 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
     const bool hasOffB = getBaseAndConstByteOffset(ptrB, dl, baseB, offB);
     if (hasOffA && hasOffB && baseA == baseB && offA != offB) {
         // ── Non-overlapping access size check ────────────────────────────
-        // Even if offsets differ, accesses may overlap if they have
-        // different sizes.  Check that [offA, offA+sizeA) and
-        // [offB, offB+sizeB) are disjoint.
         auto getAccessSize = [&](const llvm::Instruction* inst) -> uint64_t {
             if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst))
                 return dl.getTypeStoreSize(ld->getType());
@@ -171,8 +143,6 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
             return true;
         }
         // Unknown access size but different offsets from the same base:
-        // cannot prove disjointness → conservative alias.
-        // (Fall through to underlying-object checks for completeness.)
     }
 
     // Fall back to underlying-object disambiguation.
@@ -216,8 +186,6 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
 }
 
 // ---------------------------------------------------------------------------
-// Resolve "native" to the actual host CPU name.
-// ---------------------------------------------------------------------------
 static std::string resolveNativeCpu(const std::string& cpu) {
     if (cpu == "native") {
         return llvm::sys::getHostCPUName().str();
@@ -225,8 +193,6 @@ static std::string resolveNativeCpu(const std::string& cpu) {
     return cpu;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Step 1 — Hardware Graph implementation
 // ═════════════════════════════════════════════════════════════════════════════
 
 unsigned HardwareGraph::addNode(ResourceType type, const std::string& name,
@@ -263,8 +229,6 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
     return result;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Step 2 — Program Graph implementation
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Classify an LLVM instruction into an OpClass.
@@ -321,8 +285,6 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
         return OpClass::Comparison;
 
     // Floating-point compare uses the FP pipeline (same ports as FADD/FMUL).
-    // On x86: VCMPPD/VCMPPS execute on P0/P1 (FMA unit) not integer ALU.
-    // On AArch64: FCMP/FCCMP execute on the FP pipe.
     case llvm::Instruction::FCmp:
         return OpClass::FPArith;
 
@@ -337,9 +299,6 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
         return OpClass::Conversion;
 
     // FP/cross-domain conversions go through the FP pipeline.
-    // On x86: CVTSI2SD/CVTTSD2SI etc. execute on P0/P1 (FMA unit).
-    // On AArch64: SCVTF/UCVTF/FCVTZS execute on the FP pipe.
-    // Using FPArith routes them to FMAUnit (correct on all supported ISAs).
     case llvm::Instruction::FPToUI:
     case llvm::Instruction::FPToSI:
     case llvm::Instruction::UIToFP:
@@ -373,16 +332,10 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
             return OpClass::FMA;
 
         // ── FP divider / sqrt unit ──────────────────────────────────────────
-        // sqrt shares the hardware divider port on both x86 (VSQRTSD runs on
-        // the divider unit, same port as VDIVSD) and AArch64 (FSQRT uses the
-        // FP divide pipeline).  Scheduling it early is critical for latency
-        // hiding since the divider is non-pipelined on most µarchs.
         case llvm::Intrinsic::sqrt:
             return OpClass::FPDiv;
 
         // ── FP pipeline — rounding / abs / sign / min / max ────────────────
-        // VROUNDPD/FRINTM/FRINTP execute on FMA ports (P0/P1 on x86, FP on
-        // AArch64).  fabs/copysign/minnum/maxnum likewise use the FP pipe.
         case llvm::Intrinsic::floor:
         case llvm::Intrinsic::ceil:
         case llvm::Intrinsic::round:
@@ -484,17 +437,6 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     }
 
     // Phase 2: Add data-dependency edges based on def-use chains.
-    // Use per-opcode default latency estimates for edge weights so that
-    // the critical-path computation in the abstract ProgramGraph is accurate
-    // even without a MicroarchProfile (which is not available here).
-    //
-    // These defaults are calibrated to modern OOO CPUs (Skylake-class x86,
-    // Apple M-series AArch64).  The per-opcode scheduler in scheduleBasicBlock
-    // uses the exact profile values; these defaults only affect the abstract
-    // ProgramGraph used by mapProgramToHardware and criticalPathLength.
-    // Use the default-constructed MicroarchProfile (conservative generic values)
-    // so that this code shares one authoritative latency table with the rest
-    // of the HGOE and never falls out of sync.
     static const MicroarchProfile kAbstractProfile = []{
         MicroarchProfile p;
         // Integer division: use 20 cycles for the abstract graph to match the
@@ -522,30 +464,12 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     }
 
     // Phase 3: Add memory ordering edges within each basic block.
-    // Track the last load and last store so we can add all necessary
-    // hazard edges:
-    //   Store → Store (WAW): output dependence
-    //   Store → Load  (RAW): true data dependence through memory
-    //   Load  → Store (WAR): anti-dependence — a store after a load to the
-    //                         same address must not be reordered before the load.
-    //
-    // Basic alias analysis: when both a load and a store use a GEP from the
-    // same base pointer with constant indices, we check whether the indices
-    // overlap.  Non-overlapping accesses can skip the memory edge, reducing
-    // false dependencies and enabling better scheduling.
     auto mayAlias = [&](const llvm::Instruction* a, const llvm::Instruction* b) -> bool {
         return hgoeMayAlias(a, b, dl);
     };
 
     for (auto& bb : func) {
         // Track ALL live stores and loads in the BB so that every possible
-        // memory hazard pair receives a dependency edge, not just the last
-        // store/load.  This closes a correctness gap in the original code:
-        //   store @A, 1
-        //   store @B, 2
-        //   load %x, @A     ← missed RAW from store @A with last-only tracking
-        // The pairwise loop is O(stores × loads) per BB which is fine since
-        // basic blocks are small in practice (typically < 100 instructions).
         std::vector<llvm::Instruction*> liveStores;
         std::vector<llvm::Instruction*> liveLoads;
         llvm::Instruction* lastBarrier = nullptr;
@@ -578,8 +502,6 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                     }
                 }
                 // Barrier serialises everything: clear tracked ops so later
-                // loads/stores need only depend on the barrier, not on ops
-                // that already have a transitive dependency through it.
                 liveStores.clear();
                 liveLoads.clear();
                 lastBarrier = &inst;
@@ -641,8 +563,6 @@ unsigned ProgramGraph::criticalPathLength() const {
     const size_t n = nodes_.size();
 
     // Build adjacency list (outgoing edges per node) and in-degree array in
-    // a single pass over edges_.  This avoids the O(N×E) inner-loop scan that
-    // the previous edge-scan approach had when the node count grows.
     std::vector<std::vector<std::pair<unsigned, unsigned>>> succ(n); // succ[u] = {(v, lat)}
     std::vector<unsigned> inDeg(n, 0);
     for (const auto& e : edges_) {
@@ -679,8 +599,6 @@ unsigned ProgramGraph::criticalPathLength() const {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Step 5 — Hardware-aware cost model
-// ═════════════════════════════════════════════════════════════════════════════
 
 HardwareCostModel::HardwareCostModel(const HardwareGraph& hw,
                                      const MicroarchProfile& profile)
@@ -706,8 +624,6 @@ OpClass HardwareCostModel::classifyInstruction(const llvm::Instruction* inst) co
 double HardwareCostModel::instructionCost(const llvm::Instruction* inst) const {
     if (!inst) return 0.0;
     // Delegate to the single authoritative latency function (getOpcodeLatency)
-    // rather than re-implementing per-opclass dispatch here.  The hardware graph
-    // is still available for structural queries (simulateExecution, etc.).
     return static_cast<double>(getOpcodeLatency(inst, profile_));
 }
 
@@ -823,32 +739,12 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     }
 
     // ── 4. Port/issue occupancy tracking (sparse, per cycle) ──────────────────
-    // Using unordered_map for O(1) average access; realistic programs have
-    // bounded cycle spread so map memory stays small.
-    //
-    // portUsed[cycle][pc] = number of ops of port class pc already issued at cycle.
-    // issueUsed[cycle]    = total ops issued at cycle (≤ issueWidth).
-    //
-    // For unordered_map<K, unsigned>::operator[], the inserted value is
-    // value-initialised to 0 (confirmed by the C++ standard), so incrementing
-    // a freshly inserted entry is well-defined.
-    // For unordered_map<K, std::array<unsigned, N>>::operator[], the array is
-    // also value-initialised (zero-filled) on first insertion.
     std::unordered_map<unsigned, std::array<unsigned, PC_COUNT>> portUsed;
     std::unordered_map<unsigned, unsigned> issueUsed;
     portUsed.reserve(n);
     issueUsed.reserve(n);
 
     // ── 5. Forward list scheduling (topological BFS) ──────────────────────────
-    // Process nodes in topological order.  For each node, compute the earliest
-    // cycle where (a) all predecessors have completed, (b) an issue slot is
-    // free, and (c) a port of the required class is free.
-    //
-    // Note: BFS topological order does not guarantee that the critical-path
-    // node is scheduled first when multiple nodes are ready simultaneously.
-    // For a cost-estimation use-case this is an acceptable approximation;
-    // the result may slightly over-count cycles compared to an optimal list
-    // schedule but never under-counts.
     std::vector<unsigned> completedAt(n, 0);
     std::vector<unsigned> scheduledAt(n, 0);
     std::vector<bool> isScheduled(n, false);
@@ -862,8 +758,6 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     unsigned liveValues = 0;
 
     // Track total scheduled instructions; when numScheduled < robSize the ROB
-    // cannot be full (inflight ≤ numScheduled), so the O(n) inflight scan can
-    // be skipped entirely — the fast path fires for the vast majority of BBs.
     unsigned numScheduled = 0;
     const unsigned robSize = static_cast<unsigned>(profile_.robSize);
 
@@ -908,9 +802,6 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         const unsigned pc = toPClass(node ? node->opClass : OpClass::Other);
 
         // Find the earliest cycle ≥ readyCycle where both the issue slot and
-        // the port slot for this op class are available.
-        // We cap the search at readyCycle + 500 to avoid pathological loops
-        // (in practice 1-10 iterations suffice for typical port utilisation).
         unsigned scheduleCycle = readyCycle;
         for (unsigned tries = 0; tries < 500; ++tries, ++scheduleCycle) {
             // Check global issue-width constraint.
@@ -926,9 +817,6 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
                     continue;
             }
             // Rename/ROB pressure: avoid over-issuing when too many uops are
-            // in-flight.  Fast path: if fewer instructions have been scheduled
-            // than the ROB capacity the buffer cannot be full, so skip the
-            // O(n) scan entirely — this covers the common case.
             if (robSize > 0 && numScheduled >= robSize &&
                 inflightAt(scheduleCycle) >= robSize)
                 continue;
@@ -1020,8 +908,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     return penalty;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Step 7 — Hardware database
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Return a Skylake (Intel 6th–10th gen) microarchitecture profile.
@@ -1168,8 +1054,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an Intel Alder Lake / Raptor Lake (Golden Cove P-core) profile.
-/// Alder Lake (2021): 5-wide integer backend, 3 load ports, 48 KB L1D.
-/// Raptor Lake (2022): same P-core µarch, larger caches.
 [[gnu::cold]] static MicroarchProfile alderlakeProfile() {
     MicroarchProfile p;
     p.name = "alderlake";
@@ -1223,8 +1107,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an AMD Zen 4 (Ryzen 7000 / EPYC Genoa) profile.
-/// Zen 4 (2022): 6-wide backend, 4 integer pipes, 2 FMA units,
-/// AVX-512 via 256-bit double-pump, 32 KB L1D, ROB=320.
 [[gnu::cold]] static MicroarchProfile zen4Profile() {
     MicroarchProfile p;
     p.name = "znver4";
@@ -1259,9 +1141,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.memoryLatency = 180;
     p.robSize = 320;
     // Zen 4: store-to-load forwarding = 4 cycles (same as L1D hit latency).
-    // Zen 4 uses 256-bit AVX-512 double-pump internally; the profile already
-    // reflects this with vectorWidth=256.  No additional throughput penalty
-    // needed since the 256-bit paths ARE the native paths.
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // 256-bit native paths; AVX-512 handled at profile level
     p.tputFPDiv = 1.0 / 13.0;
@@ -1334,8 +1213,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.memoryLatency = 120;
     p.robSize = 600;
     // Apple M1: store-to-load forwarding is ~4 cycles.  Store execution latency
-    // is 3 cycles (write to store buffer), but forwarding requires a store-buffer
-    // address match which adds 1 cycle → forwarding = 4 cycles > latStore.
     p.latStoLForward = 4;
     p.vec512Penalty = 1; // NEON 128-bit native; no 512-bit SIMD
     p.tputFPDiv = 1.0 / 10.0;
@@ -1353,8 +1230,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an ARM Neoverse V2 (server, 2023) profile.
-/// Used in AWS Graviton4, NVIDIA Grace, Google Axion.  8-wide dispatch,
-/// 256-bit SVE2, 6 integer pipes, 4 FMA units, ROB=256.
 [[gnu::cold]] static MicroarchProfile neoverseV2Profile() {
     MicroarchProfile p;
     p.name = "neoverse-v2";
@@ -1599,8 +1474,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an improved AMD Zen 5 profile (2024).
-/// Zen 5: 8-wide dispatch, 6 ALU pipes, 4× 256-bit vector units,
-/// native 512-bit AVX-512 (not double-pumped), ROB=448, latFPAdd=3.
 [[gnu::cold]] static MicroarchProfile zen5Profile() {
     MicroarchProfile p;
     p.name = "znver5";
@@ -1655,10 +1528,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an Intel Sapphire Rapids / Emerald Rapids profile.
-/// Sapphire Rapids (Xeon 4th Gen, 2023): 6 µops/cycle dispatch, 5 integer ports,
-/// AVX-512 native at 512 bits (not double-pumped like Skylake-AVX512),
-/// ROB doubled to 512, 3 load + 3 store ports.
-/// Emerald Rapids (Xeon 5th Gen, 2023): same µarch, minor improvements.
 [[gnu::cold]] static MicroarchProfile sapphireRapidsProfile() {
     MicroarchProfile p;
     p.name = "sapphirerapids";
@@ -1717,8 +1586,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an Apple M2 (Everest P-core, 2022) profile.
-/// M2 improves on M1 with wider vector units, more FMA units, and higher
-/// bandwidth.  The P-core has 8-wide dispatch, 6 integer pipes, 4 FMA units.
 [[gnu::cold]] static MicroarchProfile appleM2Profile() {
     MicroarchProfile p;
     p.name = "apple-m2";
@@ -1770,9 +1637,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an Intel Arrow Lake (Lion Cove P-core + Skymont E-core, 2024) profile.
-/// Arrow Lake removed Hyperthreading from P-cores and dropped AVX-512.
-/// Lion Cove improves dispatch to 6-wide vs 5-wide Raptor Lake P-cores.
-/// This profile covers the P-core execution model.
 [[gnu::cold]] static MicroarchProfile arrowLakeProfile() {
     MicroarchProfile p;
     p.name = "arrow-lake";
@@ -1838,8 +1702,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an Intel Granite Rapids (Redwood Cove P-core, 2024) profile.
-/// Xeon 6th Gen: enhanced Sapphire Rapids backend, wider dispatch,
-/// native AVX-512, larger ROB, faster integer execution.
 [[gnu::cold]] static MicroarchProfile graniteRapidsProfile() {
     MicroarchProfile p = sapphireRapidsProfile();
     p.name = "granite-rapids";
@@ -1876,9 +1738,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an AMD EPYC Zen4c (Bergamo, 2023) compact profile.
-/// Zen4c uses the same Zen 4 µarch but with smaller caches and higher
-/// core density (up to 128 cores/socket).  Same execution pipeline;
-/// reduced L2 per core (1 MB → 1 MB, but smaller L3 per core share).
 [[gnu::cold]] static MicroarchProfile zen4cProfile() {
     MicroarchProfile p = zen4Profile();
     p.name = "znver4c";
@@ -1940,9 +1799,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return a Qualcomm Oryon (Snapdragon X Elite, 2024) profile.
-/// Oryon is Qualcomm's custom ARMv9 P-core, debuting in the Snapdragon X
-/// Elite/Plus SoC for Windows laptops and competing directly with Apple M3.
-/// Key: 6-wide superscalar OoO, 5 int ALU, 4 FMA/NEON units, large ROB.
 [[gnu::cold]] static MicroarchProfile oryonProfile() {
     MicroarchProfile p;
     p.name = "oryon";
@@ -1991,9 +1847,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an Intel Sierra Forest (Crestmont E-core, 2024) profile.
-/// Sierra Forest is Intel's first E-core-only server CPU (Xeon 6 E-series).
-/// Crestmont is an improved Gracemont E-core: 3-wide in-order decode per
-/// cluster, 4 integer ALU pipes (modest OoO), no AVX-512, no SMT.
 [[gnu::cold]] static MicroarchProfile sierraForestProfile() {
     MicroarchProfile p;
     p.name = "sierra-forest";
@@ -2044,10 +1897,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an Intel Gracemont (Atom E-core, 2021-2024) standalone profile.
-/// Gracemont is Intel's efficiency E-core used in Alder/Raptor Lake hybrid
-/// CPUs and Sierra Forest servers.  It is a shallow in-order-ish 3-wide
-/// decode core — significantly narrower than the P-core Golden/Raptor Cove.
-/// In Alder/Raptor Lake it is paired with P-cores; here modelled standalone.
 [[gnu::cold]] static MicroarchProfile gracemontProfile() {
     MicroarchProfile p;
     p.name = "gracemont";
@@ -2098,8 +1947,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an ARM Cortex-A76 (high-performance mobile, 2019) profile.
-/// The A76 is a wide 4-issue OoO core found in many Cortex-based SoCs
-/// (Arm Mali-G76 era).  First core to match x86 laptop single-thread perf.
 [[gnu::cold]] static MicroarchProfile cortexA76Profile() {
     MicroarchProfile p;
     p.name = "cortex-a76";
@@ -2148,8 +1995,6 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an ARM Cortex-A55 (efficiency mobile, 2017–present) profile.
-/// The A55 is a compact 2-issue in-order core widely used as the efficiency
-/// cluster in big.LITTLE / DynamIQ designs paired with A75/A76/A78/X1.
 [[gnu::cold]] static MicroarchProfile cortexA55Profile() {
     MicroarchProfile p;
     p.name = "cortex-a55";
@@ -2198,18 +2043,12 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 }
 
 /// Return an NVIDIA Grace CPU (Neoverse V2-based, 2023) profile.
-/// Grace is NVIDIA's first CPU, used in the Grace-Hopper and Grace-Grace
-/// Superchips.  The CPU is a Neoverse V2 (72 cores) with HBM2e memory
-/// providing very high bandwidth (~500 GB/s shared across the chip).
 [[gnu::cold]] static MicroarchProfile nvidiaGraceProfile() {
     MicroarchProfile p = neoverseV2Profile();
     p.name = "nvidia-grace";
     // Same Neoverse V2 execution pipeline.  Key difference: HBM2e memory.
     p.memoryLatency = 80;       // HBM2e: ~80 ns at 3.1 GHz → ~250 cycles; 
                                  // effective with hardware prefetcher: ~80 cyc
-    // HBM bandwidth: ~500 GB/s total / 72 cores ≈ 6.9 GB/s per core.
-    // At 3.1 GHz → ~2.2 bytes/cycle per core (aggregate).  Use a higher value
-    // to reflect that many-core workloads can sustain more per-core bandwidth.
     p.memBandwidthBytesPerCycle = 20; // higher than DDR5; HBM delivers well
     p.l3Size = 114688;          // 117 MB Last-Level Cache (system level cache)
     p.l3Latency = 45;
@@ -2279,8 +2118,6 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         p.storePorts = 2;
         p.robSize = 352;     // Ice Lake ROB is 352
         // Ice Lake / Tiger Lake run 512-bit SIMD by double-pumping the 256-bit
-        // execution units (same as Skylake-AVX512).  This halves throughput:
-        // each 512-bit FMA/VecALU instruction occupies the port for 2 cycles.
         p.vec512Penalty = 2;
         return p;
     }
@@ -2469,10 +2306,6 @@ MicroarchProfile calibrateProfile(const MicroarchProfile& base,
         p.latIntDiv = scaleU(p.latIntDiv, hints.divScale);
         p.latFPDiv  = scaleU(p.latFPDiv,  hints.divScale);
         // Throughput (ops/cycle) is the reciprocal of latency.  When latency
-        // increases by divScale, throughput must decrease by the same factor
-        // (dividing by divScale).  E.g., divScale=2.0 → latency doubles,
-        // throughput halves: tput /= 2.0.  This is semantically consistent:
-        // a slower divider delivers fewer operations per cycle.
         if (p.tputIntDiv > 0.0 && hints.divScale > 0.0)
             p.tputIntDiv /= hints.divScale;
         if (p.tputFPDiv > 0.0 && hints.divScale > 0.0)
@@ -2541,16 +2374,6 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
                               profile.agus, 1.0, 1.0, 1);
 
     // Divider port throughput: use tputIntDiv if measured (non-zero), otherwise
-    // model the divider as a non-pipelined serial unit where throughput equals
-    // 1/latIntDiv (one new divide can start only after the previous one
-    // completes).  The initHWPort lambda uses busy = ceil(1/throughput), so
-    // passing 1.0/latIntDiv → busy = latIntDiv cycles, correctly blocking the
-    // port for the full latency of the previous operation.
-    //
-    // NOTE: The previous code passed latIntDiv as throughput (i.e. 25.0 for
-    // Skylake), which caused busy = ceil(1/25) = 1 cycle — the port was
-    // treated as free after a single cycle, letting unlimited divides be
-    // issued each cycle.  This was a significant throughput over-estimate.
     double divTput = (profile.tputIntDiv > 0.0)
         ? profile.tputIntDiv
         : 1.0 / static_cast<double>(std::max(profile.latIntDiv, 1u));
@@ -2589,9 +2412,6 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
                                  1, 1.0, static_cast<double>(profile.issueWidth), 1);
 
     // Reservation station (scheduler queue).
-    // The RS holds dispatched µops until their operands are ready.
-    // count = RS entries; throughput = issueWidth (how many µops can be
-    // issued from the RS per cycle); latency ≈ 1 cycle scheduling latency.
     unsigned rs = g.addNode(ResourceType::SchedulerQueue, "sched_queue",
                              profile.schedulerSize > 0 ? profile.schedulerSize : 64u,
                              1.0,
@@ -2659,8 +2479,6 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     return g;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Step 3 — Graph mapping optimizer (list scheduling)
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Map OpClass to the ResourceType that should execute it.
@@ -2730,14 +2548,6 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
 }
 
 /// Return the precise instruction latency in cycles using the exact LLVM
-/// opcode rather than the coarser OpClass grouping.
-///
-/// Notable special cases:
-///   PHI / BitCast / IntToPtr / PtrToInt — zero latency (register rename)
-///   FP conversion — uses the FP pipeline (latFPAdd)
-///   FMA intrinsic  — latFMA
-///   sqrt intrinsic — ≈ fdiv latency
-///   Unknown calls  — conservative 10-cycle estimate
 [[nodiscard]] static unsigned getOpcodeLatency(const llvm::Instruction* inst,
                                   const MicroarchProfile& profile) {
     // Conservative latency constants used when we cannot determine exact timing.
@@ -2755,8 +2565,6 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         return profile.latIntAdd;
     case llvm::Instruction::Select:
         // FP or vector result: uses FCSEL/BLENDVPD which go through the FP
-        // pipeline — same latency as FP-add on both x86 and AArch64.
-        // Integer result: CMOV / CSEL — single integer ALU cycle.
         return (inst->getType()->isFloatingPointTy() ||
                 inst->getType()->isVectorTy())
                ? profile.latFPAdd : profile.latIntAdd;
@@ -2783,9 +2591,6 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         return profile.latFPAdd;
     case llvm::Instruction::FNeg:
         // FNeg is a sign-bit flip: VXORPS/VANDNPS on x86 (1 cycle),
-        // FNEG on AArch64 (2 cycles, same as latFPAdd on most ARM profiles).
-        // Use the minimum of 1 and latFPAdd so fast CPUs (x86 vectorized) get
-        // the accurate 1-cycle model, while ARM profiles use their own latency.
         return (profile.isa == ISAFamily::X86_64) ? 1u : profile.latFPAdd;
     case llvm::Instruction::FMul:
         return profile.latFPMul;
@@ -2802,8 +2607,6 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         return profile.latIntAdd; // address arithmetic
 
     // ── SIMD / vector element operations ────────────────────────────────────
-    // These go through the vector execution units; use latFPAdd as a proxy
-    // since on most CPUs they share the same pipeline.
     case llvm::Instruction::ExtractElement:
     case llvm::Instruction::InsertElement:
         return profile.latFPAdd;
@@ -2827,11 +2630,6 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         return 0;
 
     // ── Type conversions ────────────────────────────────────────────────────
-    // ZExt/SExt/Trunc latency: on x86-64 and AArch64, narrowing truncations
-    // and zero-extensions between integer widths are typically implemented
-    // as MOV with register-renaming (zero latency for ABI-safe cases) or a
-    // single ALU cycle.  We model them as 1-cycle operations (not full ALU
-    // pipeline latency) because they never stall the issue slot.
     case llvm::Instruction::Trunc:
     case llvm::Instruction::ZExt:
     case llvm::Instruction::SExt:
@@ -2875,10 +2673,6 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         case llvm::Intrinsic::cttz:     return profile.latIntAdd;
         case llvm::Intrinsic::prefetch: return 0; // hint, no result latency
         // ── Transcendental / math intrinsics ───────────────────────────────
-        // On x86 these are typically library calls (80-250+ cycles).
-        // On AArch64, some may have native FRINT* instructions (2-4 cycles).
-        // We model conservative cycle counts so the scheduler hoists them
-        // early to hide the latency.
         case llvm::Intrinsic::floor:
         case llvm::Intrinsic::ceil:
         case llvm::Intrinsic::trunc:
@@ -2933,9 +2727,6 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     const size_t n = pg.nodeCount();
 
     // ── Annotate nodes with per-opcode latencies ──────────────────────────────
-    // Use `getOpcodeLatency` when the node has an instruction pointer (always
-    // for code built via buildFromFunction).  Fall back to the coarser
-    // OpClass-based latency for synthetic nodes.
     for (unsigned i = 0; i < n; ++i) {
         ProgramNode* node = pg.getNodeMut(i);
         if (!node) continue;
@@ -2946,8 +2737,6 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     }
 
     // ── Build adjacency lists for O(N+E) operations ───────────────────────────
-    // succList[u] = {(v, edge_latency)}  (outgoing edges)
-    // predList[v] = {(u, edge_latency)}  (incoming edges)
     std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n), predList(n);
     std::vector<unsigned> inDeg(n, 0);
     for (const auto& e : pg.edges()) {
@@ -2959,8 +2748,6 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     }
 
     // ── Compute priority (longest latency-weighted path to any sink) ──────────
-    // Iterative bottom-up Kahn traversal: process nodes in reverse topological
-    // order (sinks first) to propagate critical-path distances.
     std::vector<unsigned> priority(n, 0);
     {
         // Kahn's algorithm to get topological order.
@@ -2991,9 +2778,6 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     }
 
     // ── Per-port-type throughput budget ──────────────────────────────────────
-    // busy_cycles[rt] = how many cycles a port of this type is occupied per op.
-    // For pipelined units (ALU, FMA) this is 1.
-    // For non-pipelined units (divider on most CPUs) this is the full latency.
     auto portBusyCycles = [&](ResourceType rt) -> unsigned {
         switch (rt) {
         case ResourceType::IntegerALU:  return 1;
@@ -3134,13 +2918,8 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Step 4 — Hardware-aware transformations
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Detect and generate FMA: a*b + c → fma(a, b, c).
-/// Also handles: c - a*b → fma(-a, b, c)  (FNMADD pattern).
-/// Note: a*b - c → fma(a, b, -c) is handled separately by generateFMASub.
-/// Returns the number of FMAs generated.
 [[gnu::hot]] static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profile) {
     if (profile.fmaUnits == 0) return 0;
 
@@ -3152,9 +2931,6 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
             // Pattern: fadd(fmul(a, b), c) → fma(a, b, c)
             if (inst.getOpcode() == llvm::Instruction::FAdd) {
                 // IEEE 754-2008 §5.4.1: fused operations require `contract` permission.
-                // We check the fast-math flag on the fadd; the fmul's flag also
-                // contributes but in practice both are set together (e.g. -ffast-math,
-                // #pragma STDC FP_CONTRACT ON, or llvm's `reassoc contract` flags).
                 auto* fpAdd = llvm::cast<llvm::FPMathOperator>(&inst);
                 if (!fpAdd->hasAllowContract()) continue;
 
@@ -3188,9 +2964,6 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
             }
 
             // Pattern: fsub(c, fmul(a, b)) → fma(-a, b, c)
-            // This is the "negated fused multiply-subtract" (FNMADD) pattern.
-            // On x86, VFNMADD132/213/231 maps to this.
-            // Note: fsub(fmul(a,b), c) → fma(a,b,-c) is handled by generateFMASub.
             if (inst.getOpcode() == llvm::Instruction::FSub) {
                 llvm::Value* op0 = inst.getOperand(0);
                 llvm::Value* op1 = inst.getOperand(1);
@@ -3220,9 +2993,6 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
             }
 
             // Pattern: fneg(fma_result) where fma_result = fadd(fmul(a,b), c)
-            // → fma(-a, b, -c) (FNMSUB: fused negate-multiply-subtract)
-            // This matches the pattern: -(a*b + c) which is common in
-            // Newton-Raphson iterations and coordinate transforms.
             if (inst.getOpcode() == llvm::Instruction::FNeg) {
                 auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 if (inner && inner->getOpcode() == llvm::Instruction::FAdd &&
@@ -3267,11 +3037,6 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
 }
 
 /// Generate chained FMA for:
-///   a*b + c*d → fma(c, d, fma(a, b, 0.0))
-///   a*b - c*d → fma(a, b, fma(-c, d, 0.0))   (FMSUB chain)
-/// This leverages 2+ FMA units by expressing the computation as two
-/// dependent FMAs, which modern out-of-order processors can pipeline.
-/// Returns the number of FMA chains generated.
 [[gnu::hot]] static unsigned generateFMAChain(llvm::Function& func, const MicroarchProfile& profile) {
     if (profile.fmaUnits < 2) return 0;  // Need 2+ FMA units to benefit
 
@@ -3315,8 +3080,6 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
             }
 
             // Pattern: fsub(fmul(a,b), fmul(c,d)) → fma(a, b, fma(-c, d, 0.0))
-            // This is the chained FMSUB (fused multiply-subtract) pattern.
-            // On x86: VFMSUB + VFNMADD executed on 2 FMA units in parallel.
             if (inst.getOpcode() == llvm::Instruction::FSub) {
                 auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto* rhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
@@ -3362,15 +3125,6 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
     unsigned count = 0;
 
     // Compute a latency-driven prefetch distance.  To hide a full memory-
-    // level miss (L3 → DRAM), we need to prefetch far enough ahead so the
-    // hardware fetch completes before the data is needed.  A rough model:
-    //
-    //   prefetch_distance_bytes = (L3_latency_cycles / 2) * cache_line_size
-    //
-    // The /2 accounts for a typical loop throughput of ≈0.5 iterations/cycle
-    // (a conservative assumption that avoids over-prefetching on fast loops).
-    // We clamp to [2, 64] cache lines so we never insert a useless prefetch
-    // for a tiny latency or an enormous one that thrashes the cache.
     unsigned prefetchLines = (profile.l3Latency > 0)
         ? std::max(2u, std::min(64u, profile.l3Latency / (2 * profile.pipelineDepth + 1)))
         : 8u;
@@ -3409,9 +3163,6 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
             llvm::Type* ptrTy = ptr->getType();
 
             // Determine the prefetch offset.
-            // If the pointer is a GEP with a constant stride, prefetch
-            // strideBytes * prefetchLines ahead.  This is more accurate than
-            // always using the element-agnostic prefetchBytes heuristic.
             unsigned offsetBytes = prefetchBytes;
             if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
                 // Single-index GEP: stride is the element type's byte size.
@@ -3449,8 +3200,6 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
                 mod, llvm::Intrinsic::prefetch, {ptrTy});
 
             // Args: ptr, rw (0=read), locality (2=medium — L2/L3, not L1),
-            // cache_type (1=data).  Use locality=2 so the prefetch warms L2
-            // and L3 without polluting L1 with data that may not be used soon.
             builder.CreateCall(prefetchFn, {
                 prefetchAddr,
                 builder.getInt32(0),  // read
@@ -3465,13 +3214,6 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
 }
 
 /// Optimise branch layout for the hardware's branch predictor.
-/// Ensures the fall-through path is the most likely one, and annotates
-/// branches with profile weights when the outcome is predictable from
-/// structural information:
-///   • Exit-block detection: successor with ret/unreachable → unlikely
-///   • Null-pointer checks: ICmp(ptr, null) → null is rare → non-null path hot
-///   • Loop-closing back-edges: the latch branch is taken on most iterations
-/// Returns the number of branches optimized.
 static unsigned optimizeBranchLayout(llvm::Function& func,
                                       const MicroarchProfile& /*profile*/) {
     unsigned count = 0;
@@ -3507,12 +3249,6 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
         }
 
         // If the true branch is an exit (unlikely path), swap successors so
-        // the hot (non-exit) path is the fall-through.  To preserve semantics
-        // we must also invert the branch condition.  When the condition is a
-        // compare instruction (ICmp/FCmp), we invert its predicate directly
-        // — this is a zero-cost transformation that produces no extra
-        // instructions.  Otherwise fall back to branch-weight metadata which
-        // hints the backend without modifying control flow.
         if (trueIsExit && !falseIsExit) {
             llvm::Value* cond = br->getCondition();
             if (auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond)) {
@@ -3534,11 +3270,6 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
         }
 
         // ── Null-pointer check: ICmp(ptr, null) ──────────────────────────────
-        // Null dereferences are rare in correct programs.  When a branch
-        // checks whether a pointer is null, the non-null path is hot.
-        //   ICmp EQ  ptr, null  → branch to trueBB if null  → trueBB is cold
-        //   ICmp NE  ptr, null  → branch to trueBB if !null → trueBB is hot
-        // Skip if already annotated with branch weights.
         if (!br->getMetadata(llvm::LLVMContext::MD_prof)) {
             if (auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(br->getCondition())) {
                 llvm::Value* op0 = icmp->getOperand(0);
@@ -3569,10 +3300,6 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
         }
 
         // ── Loop-closing back-edge: branch target precedes current BB ────────
-        // If the true successor has a smaller linear order than the current BB,
-        // the true branch is a back-edge (loop-closing).  Back-edges are taken
-        // on every iteration except the last, so they are highly likely to be
-        // taken (weight ≈ 90%).  Annotate with branch weights if not already set.
         if (!br->getMetadata(llvm::LLVMContext::MD_prof)) {
             auto itCur  = bbOrder.find(&bb);
             auto itTrue = bbOrder.find(trueBB);
@@ -3602,8 +3329,6 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
 }
 
 /// Expand FMA generation to also cover fsub(fmul(a,b), c) → fma(a, b, -c).
-/// (Complements generateFMA which already handles fadd variants.)
-/// Returns the number of additional FMAs generated.
 static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& profile) {
     if (profile.fmaUnits == 0) return 0;
 
@@ -3649,19 +3374,6 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
 }
 
 /// Try to synthesize |absCV| as a 1- or 2-instruction shift+add/sub sequence.
-///
-/// Recognises three forms that are strictly cheaper than a multiply
-/// (latency 2 cycles vs 3, and use general ALU ports instead of the
-/// dedicated multiply port):
-///
-///   Power of 2 :  x << a              (1 shift, 1 cycle latency)
-///   Add form   :  (x << a) + (x << b) (2 shifts + 1 add, latency 2)
-///   Sub form   :  (x << a) - (x << b) (2 shifts + 1 sub, latency 2)
-///
-/// where, in the Add/Sub forms, b may be 0, which means the second operand
-/// is just `x` itself (no shift needed).
-///
-/// Returns the synthesised Value*, or nullptr if no 2-instruction form exists.
 [[nodiscard]] static llvm::Value*
 tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
                 llvm::Type* ty, uint64_t absCV, unsigned bitWidth) {
@@ -3707,8 +3419,6 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
     }
 
     // ── Form 4: (2^a + 1) * 2^b  → add(shl(x, a+b), shl(x, b)) ──────────
-    // Catches constants like 3*2^k, 5*2^k, 9*2^k, 17*2^k which are very
-    // common in array indexing (sizeof(struct) * index).
     {
         unsigned b = static_cast<unsigned>(__builtin_ctzll(absCV));
         uint64_t inner = absCV >> b;
@@ -3731,18 +3441,9 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
 }
 
 /// Integer strength reduction: replace multiply-by-small-constant with
-/// shifts and adds, which execute on more ports and have lower latency.
-///
-/// Covers ALL constants expressible as 2^a ± 2^b (a > b ≥ 0) in 2
-/// instructions, plus 3-set-bit constants in 3 instructions when the
-/// multiply unit is the throughput bottleneck.
-///
-/// Returns the number of multiplies strength-reduced.
 [[gnu::hot]] static unsigned integerStrengthReduce(llvm::Function& func,
                                        const MicroarchProfile& profile) {
     // Only profitable when we have more ALU ports than multiply units.
-    // On modern x86/ARM the integer multiplier is a single port with latency 3;
-    // a shift+add sequence uses latency 1+1=2 and two ALU ports in parallel.
     if (profile.intALUs < 2) return 0;
 
     unsigned count = 0;
@@ -3778,10 +3479,6 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
             llvm::Value* rep = tryShiftAddForm(builder, xv, ty, absCV, bitWidth);
 
             // ── 3-instruction form: 3 set bits → 2 shifts + 2 adds ──────────
-            // Latency is 3 cycles (same as mul) but uses general ALU ports
-            // instead of the scarce multiply port.  Only generate when the
-            // multiply port count is less than the number of ALU ports, i.e.
-            // when multiply throughput is the bottleneck.
             if (!rep && profile.mulPortCount < profile.intALUs &&
                 __builtin_popcountll(absCV) == 3) {
                 unsigned b0 = static_cast<unsigned>(__builtin_ctzll(absCV));
@@ -3819,14 +3516,6 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
 }
 
 /// Detect adjacent scalar load pairs that can be annotated for hardware
-/// load pairing / memory access coalescing.  Marks paired loads with
-/// llvm.access.group metadata to hint the backend's load-store unit.
-///
-/// Detects two patterns:
-///   1. Consecutive GEP indices (diff == 1): classic adjacent elements.
-///   2. GEP indices whose byte-offset difference is within one cache line:
-///      covers non-unit strides (e.g. struct fields) that share a cache line.
-/// Returns the number of load pairs identified.
 static unsigned markLoadStorePairs(llvm::Function& func,
                                     const MicroarchProfile& profile) {
     if (profile.loadPorts < 2) return 0;
@@ -3900,16 +3589,6 @@ static unsigned markLoadStorePairs(llvm::Function& func,
 }
 
 /// Detect natural loops and annotate their back-edge terminators with
-/// software-pipelining metadata:
-///   - llvm.loop.unroll.count  (based on MII from resource pressure)
-///   - llvm.loop.vectorize.enable + llvm.loop.vectorize.width
-///   - llvm.loop.interleave.count  (= unroll count for in-order cores)
-///
-/// Loop header detection uses linear BB ordering: a BB is a loop header if
-/// any of its predecessors appears later in the function's linear order (i.e.
-/// the predecessor is a latch with a backedge).
-///
-/// Returns the number of loops annotated.
 static unsigned softwarePipelineLoops(llvm::Function& func,
                                        const MicroarchProfile& profile) {
     if (func.isDeclaration()) return 0;
@@ -3950,8 +3629,6 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         if (hasUnsafeCall) continue;
 
         // ── Compute Resource MII (minimum initiation interval) ──────────────
-        // MII = max over all resource types of ceil(work[rt] / portCount[rt]).
-        // We count instructions in the header BB (the body of the innermost loop).
         std::unordered_map<int, unsigned> resWork;
         for (auto& inst : bb) {
             if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator()) continue;
@@ -3976,23 +3653,6 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         checkRT(ResourceType::DividerUnit);
 
         // ── Compute Recurrence MII (RecMII) ────────────────────────────────
-        // For loops with loop-carried dependencies (e.g. reduction: acc += a[i]),
-        // the hardware-imposed minimum is not just resource pressure but also
-        // the latency of the recurrence cycle.  RecMII = max over all PHI-based
-        // recurrences of the latency of the dependency chain from the PHI's
-        // back-edge value back to the PHI itself.
-        //
-        // Algorithm (per-PHI):
-        //   1. Forward-mark: BFS from phi via use-def edges within the loop
-        //      body to find all instructions reachable from phi ("onChain").
-        //   2. Walk backward from the back-edge value, at each step following
-        //      only the operand that is onChain (i.e., part of the recurrence
-        //      cycle), accumulating instruction latencies.
-        //   3. RecMII = max latency over all PHIs.
-        //
-        // This correctly handles multi-hop recurrences like:
-        //   acc = fma(a[i], b[i], fma(c[i], d[i], acc))
-        // where naive "follow first operand" would miss the recurrence path.
         unsigned recMII = 1;
         {
             // Build a local index of instructions in this BB and the latch.
@@ -4017,9 +3677,6 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
                 if (!backVal) continue;
 
                 // Step 1: Forward BFS from phi to mark all instructions in
-                // the loop body that are reachable via uses from phi.
-                // These form the "recurrence spine" — only these can be on
-                // the loop-carried dependency path.
                 std::unordered_set<const llvm::Instruction*> onChain;
                 {
                     std::queue<const llvm::Instruction*> wl;
@@ -4073,9 +3730,6 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         unsigned mii = std::max(resMII, recMII);
 
         // Unroll count: expose enough iterations to fill the pipeline.
-        // Upper-bound prevents excessive code-size growth from very deep pipelines
-        // combined with very short MII (e.g. a 14-stage pipeline with MII=1 would
-        // otherwise produce 14 unrolled copies).
         constexpr unsigned kMaxUnrollCount = 8;
         unsigned unroll = (profile.pipelineDepth + mii - 1) / mii;
         unroll = std::max(unroll, 2u);
@@ -4086,15 +3740,9 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         unsigned interleave = (profile.issueWidth > 2) ? unroll : 2u;
 
         // ── Vectorize width (element-size-aware, based on dominant loop type) ──
-        // OmScript supports all standard types (i8, i16, i32, i64, f32, f64).
-        // Use the dominant element bit-width of the loop body to compute the
-        // correct lane count: lanes = vectorWidth / elementBits.
-        // Wider elements → fewer lanes; narrower elements → more lanes.
         unsigned vecWidth = 0;
         if (profile.vecUnits > 0 && profile.vectorWidth >= 128) {
             // Survey the loop header's arithmetic instructions to find the
-            // dominant element width. We count the number of instructions
-            // that operate on each width and pick the most common.
             std::unordered_map<unsigned, unsigned> widthFreq;
             for (auto& loopInst : bb) {
                 if (llvm::isa<llvm::PHINode>(loopInst) || loopInst.isTerminator())
@@ -4157,8 +3805,6 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
 }
 
 /// Set LLVM target-cpu and target-features function attributes so the backend
-/// uses the right ISA extensions for the resolved microarchitecture.
-/// Only sets attributes that are not already explicitly present on the function.
 static void applyTargetAttributes(llvm::Function& func,
                                    const std::string& cpuName,
                                    const MicroarchProfile& profile) {
@@ -4185,8 +3831,6 @@ static void applyTargetAttributes(llvm::Function& func,
         addF("+sse4.2");
         addF("+popcnt");
         // BMI, BMI2, LZCNT, F16C, and FMA were introduced with Haswell (2013).
-        // Sandy Bridge / Ivy Bridge profiles have fmaUnits==0 since they
-        // predate FMA; use that as the proxy for "pre-Haswell baseline".
         if (profile.fmaUnits > 0) {
             addF("+bmi");
             addF("+bmi2");
@@ -4209,10 +3853,6 @@ static void applyTargetAttributes(llvm::Function& func,
             addF("+avx512dq");
         } else {
             // Explicitly disable AVX-512 when the profile uses 256-bit vectors.
-            // Some CPUs (e.g. znver4) include AVX-512 in their default feature
-            // set, but run AVX-512 double-pumped from 256-bit units.  The
-            // target-cpu attribute alone would enable AVX-512 code generation;
-            // we must negate it here to match the actual vector width.
             addF("-avx512f");
             addF("-avx512vl");
             addF("-avx512bw");
@@ -4258,14 +3898,9 @@ static void applyTargetAttributes(llvm::Function& func,
 }
 
 /// Detect `select(icmp slt x 0, sub(0, x), x)` and similar patterns and
-/// replace with `llvm.abs(x, false)`.
-/// Returns the number of abs patterns replaced.
 static unsigned generateIntegerAbs(llvm::Function& func,
                                     const MicroarchProfile& profile) {
     // llvm.abs is beneficial on all architectures that have a native abs-like
-    // instruction (x86 VABS* in AVX2, AArch64 ABS, RISC-V). Even without a
-    // native instruction the backend can emit `neg + cmov` which is 2 µops
-    // instead of 3 (cmp + neg + conditional move).
     if (profile.intALUs == 0) return 0;
 
     unsigned count = 0;
@@ -4342,12 +3977,6 @@ static unsigned generateIntegerAbs(llvm::Function& func,
 }
 
 /// Canonicalise `fadd fast x (fneg y)` → `fsub fast x y`.
-/// This avoids an extra FNeg instruction on CPUs that lack a native FNMADD,
-/// since the FP subtract maps directly to FSUBSS/FSUBD/VFNMADD on many arches.
-/// The transformation is only applied when the fadd has `nsz` or `reassoc`
-/// fast-math flags, or when the fneg result is only used by this fadd (so we
-/// know the fneg can be folded away).
-/// Returns the number of patterns replaced.
 static unsigned canonicalizeFaddFneg(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Instruction*>> work;
@@ -4367,8 +3996,6 @@ static unsigned canonicalizeFaddFneg(llvm::Function& func) {
                 auto* fneg = llvm::dyn_cast<llvm::UnaryOperator>(candidate);
                 if (!fneg || fneg->getOpcode() != llvm::Instruction::FNeg) continue;
                 // Only fold when the fneg result is used solely by this fadd,
-                // OR when the fadd has reassoc — in that case a separate fneg
-                // consumer can re-emit its own fneg.
                 if (!fneg->hasOneUse() && !fadd->hasAllowReassoc()) continue;
 
                 work.emplace_back(fadd, fneg);
@@ -4394,21 +4021,6 @@ static unsigned canonicalizeFaddFneg(llvm::Function& func) {
 }
 
 /// Replace FP division by a compile-time constant with a reciprocal multiply.
-///
-/// Pattern:  fdiv(x, C)  →  fmul(x, 1.0/C)
-///
-/// Requires the `arcp` (allow-reciprocal) fast-math flag on the division, which
-/// permits the compiler to use a reciprocal approximation.  With a constant
-/// divisor this is exact (not an approximation) at the same precision, so the
-/// transform is correct even without `afn` or `unsafe-fp-math`.
-///
-/// Benefit: FP division is 10-15 cycles on most CPUs (latFPDiv = 10-15),
-/// whereas FP multiply is 3-4 cycles (latFPMul = 3-4).  This is the single
-/// most impactful scalar FP transform for division-heavy code.
-///
-/// Also folds `fdiv(1.0, x)` → `fdiv(1.0, x)` (kept, backend emits RCPPS).
-///
-/// Returns the number of divisions replaced.
 static unsigned foldFPDivByConstant(llvm::Function& func,
                                      const MicroarchProfile& profile) {
     // Guard: only worth doing when div is materially slower than mul.
@@ -4450,8 +4062,6 @@ static unsigned foldFPDivByConstant(llvm::Function& func,
             if (!cFP) continue;
 
             // Compute 1.0 / C in the same FP semantics as the operation.
-            // APFloat(semantics, double) was removed in LLVM 18; use the
-            // double constructor then convert to the target semantics.
             llvm::APFloat recip(1.0); // start as double 1.0
             bool lossy = false;
             recip.convert(cFP->getValueAPF().getSemantics(),
@@ -4459,8 +4069,6 @@ static unsigned foldFPDivByConstant(llvm::Function& func,
             llvm::APFloat divisorVal = cFP->getValueAPF();
             auto status = recip.divide(divisorVal, llvm::APFloat::rmNearestTiesToEven);
             // Reject if division produced an inexact result that would change
-            // meaning (e.g., 1.0/3.0 is inexact but still exact to IEEE float
-            // precision — this is fine since arcp allows it).
             (void)status; // non-exact is acceptable with arcp
 
             // Build the reciprocal constant with the same type as the original.
@@ -4495,18 +4103,6 @@ static unsigned foldFPDivByConstant(llvm::Function& func,
 }
 
 /// Replace integer udiv/urem by a power-of-2 constant with logical shifts/masks.
-///
-/// These patterns may survive LLVM's InstCombine when constants are introduced
-/// late (e.g., by our own strength-reduction pass or by constant propagation
-/// after inlining), or when the function was not run through the full O2/O3 pipeline.
-///
-///   udiv(x, 2^k)  →  lshr(x, k)
-///   urem(x, 2^k)  →  and(x, 2^k - 1)
-///   sdiv(x, 2^k)  →  lshr(add(x, 2^k - 1), k)   [with rounding correction]
-///   sdiv(x, 1)    →  x   [free]
-///   udiv(x, 1)    →  x   [free]
-///
-/// Returns the number of operations folded.
 static unsigned foldDivByPow2(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -4543,8 +4139,6 @@ static unsigned foldDivByPow2(llvm::Function& func) {
                         llvm::ConstantInt::get(ty, divisor - 1), "urem.and");
                 } else { // SDiv by positive power-of-2
                     // Signed division by 2^k rounds toward zero.
-                    // Equivalent to: (x + ((x >> 63) & (2^k - 1))) >> k
-                    // where `x >> 63` is the sign-bit replication.
                     llvm::Value* signBit = builder.CreateAShr(x,
                         llvm::ConstantInt::get(ty, bitWidth - 1), "sdiv.sign");
                     llvm::Value* adj = builder.CreateAnd(signBit,
@@ -4570,24 +4164,6 @@ static unsigned foldDivByPow2(llvm::Function& func) {
 }
 
 /// Replace `icmp + select` patterns with integer min/max intrinsics, and
-/// `fcmp + select` patterns with FP min/max intrinsics.
-///
-/// This enables the backend to lower to VMIN/VMAX instructions (1 cycle on
-/// most CPUs) instead of a compare + conditional select (2+ µops).
-///
-/// Patterns:
-///   select(icmp slt(a, b), a, b)  →  smin(a, b)
-///   select(icmp sgt(a, b), a, b)  →  smax(a, b)
-///   select(icmp ult(a, b), a, b)  →  umin(a, b)
-///   select(icmp ugt(a, b), a, b)  →  umax(a, b)
-///   select(fcmp olt(a, b), a, b)  →  minnum(a, b)  [fast-math: nnan]
-///   select(fcmp ogt(a, b), a, b)  →  maxnum(a, b)  [fast-math: nnan]
-///
-/// Safety: for FP patterns we require the `nnan` flag to ensure NaN
-/// semantics are compatible with minnum/maxnum (which propagate NaN
-/// differently from a select under NaN inputs).
-///
-/// Returns the number of patterns folded.
 static unsigned foldMinMaxPatterns(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -4670,9 +4246,6 @@ static unsigned foldMinMaxPatterns(llvm::Function& func) {
                 if (!fcmp) continue;
 
                 // For FP min/max, require `nnan` flag on the select (or the cmp).
-                // minnum/maxnum semantics: if either operand is NaN, the result is
-                // the other operand.  A plain select propagates NaN as the true/false
-                // value.  With `nnan` the user asserts no NaN, so semantics match.
                 bool noNaN = false;
                 if (auto* fpSel = llvm::dyn_cast<llvm::FPMathOperator>(sel))
                     noNaN = fpSel->hasNoNaNs();
@@ -4736,19 +4309,6 @@ static unsigned foldMinMaxPatterns(llvm::Function& func) {
 }
 
 /// Replace `fmul(x, -1.0)` and `fmul(-1.0, x)` with `fneg(x)`.
-///
-/// FP multiply by -1.0 is semantically identical to FP negation for all
-/// well-defined values (including ±0, ±∞, and finite numbers).  The sign
-/// of a NaN result is implementation-defined by IEEE 754, so both forms
-/// may produce either sign of NaN — the transform is therefore safe even
-/// without fast-math flags.
-///
-/// Benefit: on every major architecture FNeg maps to a single-cycle
-/// instruction (VXORPS/VXORPD on x86, FNEG on ARM), while FMul uses
-/// the 4-cycle FP-multiply pipeline.  Eliminating the FMul also frees
-/// an FMA/FMul port for real multiply work.
-///
-/// Returns the number of multiplies replaced.
 static unsigned foldFPMulByNeg1(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -4807,25 +4367,6 @@ static unsigned foldFPMulByNeg1(llvm::Function& func) {
 }
 
 /// Expand `llvm.pow(x, N)` for small constant exponents to multiply chains.
-///
-/// Calling `pow(x, N)` for integer or half-integer N invokes the math
-/// library, which is 50–100 cycles.  For small constant N we can express
-/// the same value as a short sequence of fmul / sqrt instructions that
-/// execute in 4–12 cycles on modern CPUs.
-///
-/// Transforms applied (require `afn` or `reassoc` fast-math flag):
-///   pow(x, 0.0)  → 1.0          (exact)
-///   pow(x, 1.0)  → x            (exact, no flag needed)
-///   pow(x, 0.5)  → sqrt(x)      (requires nnan, so we use afn/reassoc)
-///   pow(x, 2.0)  → fmul(x, x)   (one extra rounding — requires reassoc)
-///   pow(x, 3.0)  → fmul(fmul(x,x), x)
-///   pow(x, 4.0)  → let t=fmul(x,x); fmul(t,t)
-///   pow(x, 5.0)  → let t=fmul(x,x); fmul(fmul(t,t), x)
-///   pow(x, -0.5) → 1/sqrt(x)    (requires afn)
-///   pow(x, -1.0) → 1/x (or fmul with arcp — handled by foldFPDivByConstant)
-///   pow(x, -2.0) → let t=fmul(x,x); 1/t (then arcp folds)
-///
-/// Returns the number of pow calls replaced.
 static unsigned foldPowBySmallInt(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -4882,9 +4423,6 @@ static unsigned foldPowBySmallInt(llvm::Function& func) {
                     result = fd; break; }
                 case -3:
                     // pow(x, -3) = 1/(x²·x): requires three multiplies + one divide.
-                    // The added complexity doesn't justify code generation here; the
-                    // library call is only marginally slower for this single case.
-                    // Fall through to the default (no transform).
                     break;
                 case -2: {
                     auto* fd = llvm::cast<llvm::Instruction>(
@@ -4984,19 +4522,6 @@ static unsigned foldPowBySmallInt(llvm::Function& func) {
 }
 
 /// Replace `sqrt(x * x)` with `fabs(x)`.
-///
-/// For any finite real x, √(x²) = |x|.  The transform avoids a ~10-cycle
-/// sqrt operation by substituting a 1-cycle sign-bit clear (FABS).
-///
-/// Safety conditions:
-///   • `nnan`: no NaN inputs, so x is a real number.
-///   • `ninf`: no infinities; |x| is finite.
-///   Both flags on the sqrt (or `fast`) are required.
-///
-/// The fmul operand's flags are also checked: it must be the only user of
-/// the fmul, or we would keep the fmul alive.
-///
-/// Returns the number of sqrt instructions replaced.
 static unsigned foldSqrtSquare(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -5044,20 +4569,6 @@ static unsigned foldSqrtSquare(llvm::Function& func) {
 }
 
 /// Replace `select(i1 cond, C_true, C_false)` with casts when the pair of
-/// constants is (1, 0) or (-1, 0) — patterns the backend can lower to a
-/// single SETCC or MOVZX/MOVSX instruction.
-///
-///   select(cond, i32  1, i32  0)  →  zext i1 cond to i32
-///   select(cond, i32 -1, i32  0)  →  sext i1 cond to i32
-///   select(cond, i32  0, i32  1)  →  zext i1 (not cond) to i32
-///     (not folded here — would need xor; left for InstCombine)
-///   select(cond, i64  1, i64  0)  →  zext i1 cond to i64
-///   select(cond, i64 -1, i64  0)  →  sext i1 cond to i64
-///
-/// This reduces a branch-like select sequence (2+ µops: SETCC + MOVZX or
-/// CMOV) to a single µop on architectures with an integrated SETCC.
-///
-/// Returns the number of selects replaced.
 static unsigned foldSelectToBoolCast(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -5116,25 +4627,6 @@ static unsigned foldSelectToBoolCast(llvm::Function& func) {
 }
 
 /// Hoist loop-invariant GEP instructions out of loop bodies into the loop's
-/// pre-header (the unique non-back-edge predecessor of the loop header).
-///
-/// GEP instructions whose base pointer and all index operands are defined
-/// outside the loop body are invariant — they compute the same address on
-/// every iteration and can be computed once in the pre-header.
-///
-/// Motivation: while LLVM's LICM pass normally handles this, our transforms
-/// (strength reduction, FMA generation, etc.) can introduce new GEP
-/// combinations that appear *after* LICM has run.  Running this pass last
-/// ensures newly created address computations are hoisted.
-///
-/// Algorithm:
-///   1. Detect loop headers (basic blocks with a back-edge predecessor).
-///   2. Identify the pre-header (unique non-back-edge predecessor).
-///   3. Collect all basic blocks in the loop (reachable from header, before latch).
-///   4. For each GEP in any loop BB: if all operands are defined outside the loop,
-///      move the GEP to the end of the pre-header (before its terminator).
-///
-/// Returns the number of GEPs hoisted.
 static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
 
@@ -5158,8 +4650,6 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
         if (!latch) continue; // not a loop header
 
         // Find the pre-header: unique predecessor of header that is NOT the latch.
-        // If there are multiple non-latch predecessors, we cannot safely hoist
-        // (the pre-header is ambiguous).
         llvm::BasicBlock* preHeader = nullptr;
         unsigned nonLatchPreds = 0;
         for (auto* pred : llvm::predecessors(&header)) {
@@ -5171,8 +4661,6 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
         if (nonLatchPreds != 1 || !preHeader) continue;
 
         // Collect all basic blocks in the loop body using a BFS from the header
-        // that stays within the back-edge cycle (stops at header when reached via latch).
-        // Simple approximation: all BBs between header and latch in linear order.
         unsigned headerOrd = bbOrder.at(&header);
         unsigned latchOrd  = bbOrder.at(latch);
         std::unordered_set<const llvm::BasicBlock*> loopBBs;
@@ -5183,9 +4671,6 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
         }
 
         // Collect GEPs to hoist from any loop BB.
-        // A GEP is invariant if ALL its operands (base + indices) are either:
-        //   • Constants, or
-        //   • Defined in a BB that is NOT in the loop (i.e., outside the loop).
         std::vector<llvm::GetElementPtrInst*> toHoist;
 
         for (auto& bb : func) {
@@ -5223,25 +4708,6 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
 }
 
 /// Rebalance linear chains of commutative+associative binary operations into
-/// balanced binary trees, reducing critical path depth.
-///
-/// A linear chain  ((a OP b) OP c) OP d  has depth 3 on a single-issue pipe.
-/// The balanced form  (a OP b) OP (c OP d)  has depth 2, exposing ILP.
-///
-/// For n operands in a chain, the linear form has depth n-1; the balanced
-/// tree has depth ceil(log2(n)).  For chains of 4+ operands on wide-issue
-/// CPUs this is a strict win.
-///
-/// Only applies to:
-///   - Integer:  Add, Mul, And, Or, Xor  (always associative)
-///   - Floating-point:  FAdd, FMul  only when the instruction has the
-///     `reassoc` fast-math flag (preserves IEEE semantics otherwise)
-///
-/// Guard: only rebalance when the critical-path reduction > 0 (chain ≥ 3
-/// operands) and the CPU has ≥ 2 integer ALU ports or ≥ 2 FMA units
-/// (spare capacity to execute the additional independent operations).
-///
-/// Returns the number of chains rebalanced.
 [[gnu::hot]] static unsigned rebalanceChainForILP(llvm::Function& func,
                                                     const MicroarchProfile& profile) {
     // Need spare execution units to benefit.
@@ -5253,10 +4719,6 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
 
     for (auto& bb : func) {
         // Collect instructions eligible to be a chain root: same binary opcode,
-        // single use in this BB, and the use is also the same opcode.
-        // We process bottom-up: find the deepest instruction in a chain
-        // (the one whose result leaves the chain, i.e. is used outside or
-        // is used by a different opcode), then walk up to collect operands.
 
         // isChainOp: true if the opcode is commutative+associative and we
         // are allowed to rebalance it (fast-math for FP, always for int).
@@ -5287,13 +4749,6 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
             if (processed.count(&rootInst)) continue;
 
             // Walk UP from the root to collect all instructions in the chain
-            // that have the same opcode, single use back to this chain, and
-            // are in the same BB.  Stop at instructions that have multiple
-            // users (their result must stay live) or are used outside the BB.
-            //
-            // "Chain" = connected component of same-opcode nodes where each
-            // internal node has exactly one user (the next in the chain).
-            // The root is the node whose user is NOT in the chain.
 
             // Check if rootInst is truly the root: its use is NOT the same op.
             bool isRoot = true;
@@ -5306,17 +4761,11 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
             if (!isRoot) continue;
 
             // Collect leaf operands via DFS: traverse all chain members.
-            // chainMembers: all instructions in the chain (except the root itself).
-            // leaves: the actual operand values that feed into the chain.
             std::vector<llvm::Instruction*> chainMembers;
             std::vector<llvm::Value*> leaves;
             unsigned opcode = rootInst.getOpcode();
 
             // Use a worklist of (instruction, operand_index).
-            // For each chain member, expand its operands:
-            //   - If operand is a chain-eligible instruction with one use →
-            //     add to chain and expand its operands.
-            //   - Otherwise → it's a leaf.
             std::function<void(llvm::Instruction*)> collect =
                 [&](llvm::Instruction* inst) {
                     for (unsigned i = 0; i < inst->getNumOperands(); ++i) {
@@ -5417,34 +4866,10 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
 }
 
 /// Convert simple if-then-else diamonds to select instructions when the
-/// branch misprediction penalty on the target CPU makes that more profitable.
-///
-/// Pattern:
-///   header:  br cond, then_bb, else_bb / merge_bb
-///   then_bb: %v = <pure_inst>;  br merge_bb        (≤ 2 instructions)
-///   merge_bb: %phi = phi [%v, then_bb], [%other, header]
-///
-/// Replace with (in header):
-///   %v = <pure_inst (hoisted)>
-///   %phi_val = select cond, %v, %other
-///
-/// Profitability: profitable when
-///   branchMispredictPenalty × kMissRate > cost(select) + cost(hoisted_inst)
-/// where kMissRate = 0.1 (10% estimated miss rate without PGO).
-///
-/// Safety guards:
-///   - then_bb has no side effects (no stores, calls, volatile loads)
-///   - then_bb has ≤ 2 non-PHI, non-branch instructions
-///   - The hoisted instruction's operands are all available in the header
-///   - then_bb has exactly one predecessor (header) and one successor (merge)
-///
-/// Returns the number of branches converted.
 static unsigned convertIfElseToSelect(llvm::Function& func,
                                        const MicroarchProfile& profile) {
     constexpr double kMissRate = 0.10;
     // Minimum misprediction penalty (in cycles) to justify conversion.
-    // select costs 1 cycle (ALU); a speculative pure inst costs its latency.
-    // We require: mispredictCycles > 2 * latIntAdd to ensure clear benefit.
     double mispredictCycles = profile.branchMispredictPenalty * kMissRate;
     if (mispredictCycles <= static_cast<double>(2 * profile.latIntAdd)) return 0;
 
@@ -5528,10 +4953,6 @@ static unsigned convertIfElseToSelect(llvm::Function& func,
                         if (opInst && opInst->getParent() == thenBB) continue; // def in thenBB
                         if (opInst && opInst->getParent() != &bb) {
                             // Must dominate header — conservative: only allow
-                            // values from outside the function (args) or defined
-                            // before the branch in the same function.
-                            // For safety, we only allow args and header-local defs.
-                            // NOTE: `op.get()` may be an Argument (not an Instruction).
                             operandsOk = false; break;
                         }
                         // If op is not an instruction (e.g., a function Argument or
@@ -5616,22 +5037,6 @@ static unsigned convertIfElseToSelect(llvm::Function& func,
 }
 
 /// Add `!nontemporal` metadata to streaming stores whose estimated working set
-/// exceeds the L1D cache capacity.  Non-temporal stores (MOVNT* on x86, STNPs
-/// on ARM) bypass the cache entirely, avoiding pollution and reducing write-
-/// combine overhead for large sequential writes.
-///
-/// Detection heuristic:
-///   - Store is inside a loop body (basic block with a back-edge to itself or
-///     a predecessor that appears later in linear order).
-///   - The store pointer is a GEP with a stride larger than one cache line,
-///     OR the function contains more unique store base pointers × estimated
-///     element size than L1D capacity.
-///
-/// Safety: non-temporal stores must NOT be used when the stored value will
-/// be read back soon (within the same loop iteration).  We conservatively
-/// skip stores whose pointer is also loaded in the same BB.
-///
-/// Returns the number of stores annotated.
 static unsigned insertNonTemporalHints(llvm::Function& func,
                                         const MicroarchProfile& profile) {
     if (func.isDeclaration()) return 0;
@@ -5713,22 +5118,6 @@ static unsigned insertNonTemporalHints(llvm::Function& func,
 }
 
 /// Replace integer multiply-by-minus-one with negation.
-///
-/// Pattern:  mul(x, -1)  →  sub(0, x)
-///
-/// This is the integer analogue of foldFPMulByNeg1.  On every modern
-/// architecture `neg` (or `sub reg, 0`) is a 1-cycle single-issue
-/// operation that dispatches to any ALU port, while integer multiply
-/// uses the dedicated multiplier (latency 3–4 cycles, one port).
-/// Freeing the multiply port for real multiplies improves IPC when the
-/// function contains other integer multiply operations.
-///
-/// Safety: integer arithmetic is defined modulo 2ⁿ, so `x × (−1)` ≡
-/// `−x (mod 2ⁿ)` always.  No overflow or undefined-behaviour flags
-/// are needed.  The transform is safe for any integer type, including
-/// vector integer types.
-///
-/// Returns the number of multiplies replaced.
 static unsigned foldIntMulByNeg1(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -5744,8 +5133,6 @@ static unsigned foldIntMulByNeg1(llvm::Function& func) {
             llvm::Value* op1 = inst.getOperand(1);
 
             // Check whether one of the operands is a constant -1 (all-ones bits).
-            // We handle: scalar ConstantInt, splat ConstantVector, and
-            // ConstantDataVector (the form LLVM uses for <N x iM> splatted constants).
             llvm::Value* other = nullptr;
             for (int s = 0; s < 2; ++s) {
                 llvm::Value* candidate = (s == 0) ? op0 : op1;
@@ -5793,23 +5180,6 @@ static unsigned foldIntMulByNeg1(llvm::Function& func) {
 }
 
 /// Fold `add(x, sub(0, y))` → `sub(x, y)`.
-///
-/// This is a direct follow-on to foldIntMulByNeg1.  That pass rewrites
-/// `mul(y, -1)` to `sub(0, y)`.  When the negated value is then added to
-/// another operand x, the net expression is `x + (-y)` = `x - y`, which is
-/// representable as a single SUB instruction.
-///
-/// Safety: modular integer arithmetic guarantees `x + (0 - y) ≡ x - y (mod 2ⁿ)`
-/// for every bit-pattern of x and y, with no exceptions.  We conservatively
-/// do NOT forward nsw/nuw from either the add or the inner sub — the resulting
-/// sub gets no overflow flags, which is the safest correct choice.
-///
-/// We only fold when the inner sub(0, y) has exactly one use (the add), so
-/// both instructions can be replaced by a single sub.  If the neg has other
-/// uses, keeping it alive is correct but we would not reduce the instruction
-/// count, so we skip that case.
-///
-/// Returns the number of add+neg pairs folded.
 static unsigned foldIntAddNeg(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -5870,16 +5240,6 @@ static unsigned foldIntAddNeg(llvm::Function& func) {
 }
 
 /// Replace `select(cond, x, x)` with `x`.
-///
-/// When both true-value and false-value of a select are the same SSA value,
-/// the condition is irrelevant and the select is a no-op.  This pattern
-/// arises after other transforms simplify one of the two arms of a
-/// conditional to match the other arm (e.g. after strength-reduction or
-/// after convertIfElseToSelect folds the arms).
-///
-/// Safety: always correct — the result is the same regardless of the condition.
-///
-/// Returns the number of selects eliminated.
 static unsigned foldSelectSameValue(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -5901,28 +5261,6 @@ static unsigned foldSelectSameValue(llvm::Function& func) {
 }
 
 /// Replace `fadd(x, x)` with `fmul(x, 2.0)` when the `reassoc` fast-math
-/// flag is set.
-///
-/// `x + x = 2*x` mathematically, but under strict IEEE 754 the two forms
-/// differ only in rounding of the final result — both produce the exact
-/// mathematical value when |x| fits in the format.  The `reassoc` flag
-/// explicitly permits this kind of reassociation.
-///
-/// Benefit: `fmul(x, 2.0)` is immediately eligible for FMA fusion by the
-/// subsequent `generateFMA` scan.  e.g.:
-///
-///   fadd reassoc x, x       →   fmul x, 2.0
-///   followed by:
-///   fadd contract (fmul x, 2.0), y  →  fma(x, 2.0, y)
-///
-/// This is a net gain of one FMA instruction replacing two separate
-/// instructions (the self-add and the add-with-y).
-///
-/// We only replace when the second operand is the same SSA value as the
-/// first (pointer equality), which guarantees exact semantic equivalence
-/// under reassoc.
-///
-/// Returns the number of self-adds replaced.
 static unsigned foldFAddSelf(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -5958,21 +5296,6 @@ static unsigned foldFAddSelf(llvm::Function& func) {
 }
 
 /// Eliminate double negation: fneg(fneg(x)) → x.
-///
-/// FMA generation, canonicalizeFaddFneg, and foldFPMulByNeg1 can each
-/// introduce an llvm::FNeg instruction.  When two such passes run in
-/// sequence on the same value a double negation can appear.  Removing
-/// it eliminates two instructions and their latency chain entirely.
-///
-/// Safety: `fneg(fneg(x))` equals `x` for all IEEE 754 values (finite,
-/// ±0, ±∞, NaN — FNeg only flips the sign bit).  No fast-math flags
-/// are required.
-///
-/// We only fold when the inner fneg has exactly one use (the outer one),
-/// so we can erase both.  If the inner fneg has other uses we would need
-/// to keep it alive, so we skip that case.
-///
-/// Returns the number of double negations eliminated.
 static unsigned foldFNegDouble(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -6004,38 +5327,6 @@ static unsigned foldFNegDouble(llvm::Function& func) {
 }
 
 /// Hoist loop-invariant pure instructions to the loop pre-header.
-///
-/// This is a generalisation of hoistLoopInvariantGEP: instead of only
-/// hoisting address-calculation GEPs we hoist ANY instruction that:
-///   1. Is pure (no side effects, no memory accesses, not a PHI or terminator).
-///   2. Has ALL operands defined outside the loop body.
-///   3. Is not already in the pre-header.
-///
-/// Hoisting such instructions avoids re-computing the same value on every
-/// loop iteration.  Unlike LLVM's own LICM this runs AFTER our transforms,
-/// so it catches invariant computations introduced by strength reduction,
-/// FMA generation, or GEP expansion that were not present when LLVM's
-/// LICM ran.
-///
-/// Loop detection uses the same linear-order back-edge heuristic as
-/// hoistLoopInvariantGEP.  GEPs are intentionally included so this
-/// supersedes that pass — both are still called for safety; in practice
-/// hoistLoopInvariantGEP will fire first and leave nothing for the GEP
-/// case here.
-///
-/// Instruction ordering is preserved: we collect candidates in forward
-/// program order and hoist them in that order, so that if instruction B
-/// uses the result of instruction A and both are invariant, A arrives in
-/// the pre-header before B.
-///
-/// Returns the number of instructions hoisted.
-/// Fold `shl/lshr/ashr(0, x)` → `0`.
-///
-/// Shifting zero by any amount yields zero.  This pattern can appear after
-/// strength reduction creates constants that cancel.  Always safe for all
-/// shift opcodes.
-///
-/// Returns the number of shifts eliminated.
 static unsigned foldShiftOfZero(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6066,12 +5357,6 @@ static unsigned foldShiftOfZero(llvm::Function& func) {
 }
 
 /// Fold `or(x, x)` → `x` and `and(x, x)` → `x`.
-///
-/// Idempotent bitwise operations.  The pattern arises when SSA construction
-/// or other passes duplicate an operand into both sides of a binary op.
-/// Always safe — same SSA value pointer equality guarantees semantics.
-///
-/// Returns the number of idempotent ops eliminated.
 static unsigned foldBitwiseIdempotent(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6095,12 +5380,6 @@ static unsigned foldBitwiseIdempotent(llvm::Function& func) {
 }
 
 /// Fold `xor(x, x)` → `0`.
-///
-/// Self-XOR always produces zero.  This can appear after register allocation
-/// hints or when strength reduction introduces temporary zero-init patterns.
-/// Always safe for all integer types and vectors.
-///
-/// Returns the number of self-XORs eliminated.
 static unsigned foldXorSelf(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6124,18 +5403,6 @@ static unsigned foldXorSelf(llvm::Function& func) {
 }
 
 /// Fold `fsub nnan x, x` → `0.0`.
-///
-/// `x - x` is mathematically zero, but under strict IEEE 754 the result
-/// depends on the sign of zero and NaN propagation:
-///   - `(+0) - (+0)` = `+0` in round-to-nearest but `-0` in round-down
-///   - `NaN - NaN` = `NaN`, not zero
-///
-/// The `nnan` (no-NaN) fast-math flag guarantees NaN is absent, making the
-/// fold safe for all finite values and ±0 (the result is always +0.0 in
-/// round-to-nearest, the default mode).  We also accept `nsz` (no-signed-zeros)
-/// which eliminates the round-down edge case.
-///
-/// Returns the number of self-subtracts eliminated.
 static unsigned foldFSubSelf(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6162,15 +5429,6 @@ static unsigned foldFSubSelf(llvm::Function& func) {
 }
 
 /// Fold `and(x, -1)` → `x`, `or(x, 0)` → `x`, `xor(x, 0)` → `x`.
-///
-/// These are identity operations for bitwise ops that LLVM's InstCombine
-/// typically catches but may remain after strength reduction or other
-/// transforms introduce them.
-///
-/// Also folds `and(x, 0)` → `0` (absorbing element) and
-/// `or(x, -1)` → `-1` (absorbing element).
-///
-/// Returns the number of ops folded.
 static unsigned foldBitwiseWithConstants(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6240,13 +5498,6 @@ static unsigned foldBitwiseWithConstants(llvm::Function& func) {
 }
 
 /// Fold `icmp eq x, x` → `true`, `icmp ne x, x` → `false`, and other
-/// trivially self-comparing patterns.  Also folds comparisons of known
-/// constants: `icmp eq 5, 5` → `true`.
-///
-/// These patterns appear after GVN, LICM, or our own transforms create
-/// situations where both operands of a comparison are identical.
-///
-/// Returns the number of comparisons folded.
 static unsigned foldTrivialICmp(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6309,17 +5560,6 @@ static unsigned foldTrivialICmp(llvm::Function& func) {
 }
 
 /// Fold redundant GEP arithmetic patterns:
-///   `gep(gep(base, i), j)` → `gep(base, i + j)` when both use constant
-///   indices into the same element type.
-///
-/// GEP chains are common after loop transformations or address reassociation.
-/// Merging them reduces the number of AGU µops and shortens address dependency
-/// chains, improving both throughput and latency.
-///
-/// Safety: the inner GEP must have a single use (this outer GEP) to ensure
-/// the intermediate pointer is not observed.
-///
-/// Returns the number of GEP pairs merged.
 static unsigned foldGEPArithmetic(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -6385,12 +5625,6 @@ static unsigned foldGEPArithmetic(llvm::Function& func) {
 }
 
 /// Fold `select(true, x, y)` → `x`, `select(false, x, y)` → `y`.
-///
-/// Select instructions with constant conditions can appear after constant
-/// propagation or our own convertIfElseToSelect creates them with known
-/// conditions.  These are dead weight that takes up decode bandwidth.
-///
-/// Returns the number of constant selects eliminated.
 static unsigned foldConstantSelect(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6414,11 +5648,6 @@ static unsigned foldConstantSelect(llvm::Function& func) {
 }
 
 /// Fold `not(not(x))` → `x` where not(x) = xor(x, -1).
-///
-/// Double negation patterns appear after boolean canonicalization or
-/// branch condition inversion creates two consecutive xor-with-all-ones.
-///
-/// Returns the number of double negations eliminated.
 static unsigned foldDoubleNot(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6475,17 +5704,6 @@ static unsigned foldDoubleNot(llvm::Function& func) {
 }
 
 /// Fold `trunc(zext(x))` → `x` when the original and final types match.
-///
-/// Extension followed by truncation back to the original type is a no-op.
-/// This pattern arises when type canonicalization or ABI-matching logic
-/// widens a value and a later consumer narrows it back.  Also handles
-/// `trunc(sext(x))` → `x` and the reverse `zext(trunc(x))` → `x` when
-/// types match (though the latter is less common).
-///
-/// Safety: when srcTy == dstTy, the composition of ext followed by trunc
-/// is the identity function regardless of sign extension semantics.
-///
-/// Returns the number of ext/trunc pairs eliminated.
 static unsigned foldTruncExt(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6543,13 +5761,6 @@ static unsigned foldTruncExt(llvm::Function& func) {
 }
 
 /// Fold `mul(x, 2^k)` → `shl(x, k)` for all power-of-2 constant multipliers.
-///
-/// More aggressive than integerStrengthReduce which only handles small
-/// constants with few set bits.  This catches any power-of-2 multiplier
-/// up to 2^62.  Shift is 1-cycle latency on all modern CPUs vs 3-cycle
-/// multiply.  Always safe for integer types.
-///
-/// Returns the number of multiplies replaced.
 static unsigned foldMulPow2(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -6595,12 +5806,6 @@ static unsigned foldMulPow2(llvm::Function& func) {
 }
 
 /// Fold `add(x, 0)` → `x` and `mul(x, 1)` → `x`.
-///
-/// Identity element elimination for arithmetic operations.  These patterns
-/// appear after constant folding, strength reduction, and induction variable
-/// simplification leave behind degenerate operations.
-///
-/// Returns the number of identity ops eliminated.
 static unsigned foldIdentityOps(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6669,17 +5874,6 @@ static unsigned foldIdentityOps(llvm::Function& func) {
 }
 
 /// Fold `shl(shl(x, a), b)` → `shl(x, a+b)` when both shifts are constant.
-///
-/// Also handles `lshr(lshr(x, a), b)` → `lshr(x, a+b)` and
-/// `ashr(ashr(x, a), b)` → `ashr(x, a+b)`.  These patterns appear after
-/// strength reduction creates shift chains.  The combined shift is faster
-/// (1 instruction instead of 2) and reduces dependency chain length.
-///
-/// Safety: a+b must not exceed the bit width; if it does the result is
-/// undefined (poison), which matches LLVM's semantics for oversized shifts.
-/// We clamp to bitWidth-1 to avoid surprising backend behaviour.
-///
-/// Returns the number of shift pairs merged.
 static unsigned foldConsecutiveShifts(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -6740,13 +5934,6 @@ static unsigned foldConsecutiveShifts(llvm::Function& func) {
 }
 
 /// Fold `bitcast(bitcast(x))` → `bitcast(x)` or `x` when types match.
-///
-/// Bitcast chains appear when type canonicalization or ABI-matching logic
-/// introduces intermediate casts.  If the source type of the outer bitcast
-/// matches the destination type, the result is a single bitcast from the
-/// original source, or just the original value if all three types match.
-///
-/// Returns the number of bitcast chains shortened.
 static unsigned foldBitcastChain(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6789,17 +5976,6 @@ static unsigned foldBitcastChain(llvm::Function& func) {
 }
 
 /// Local redundant load elimination (RLE) within basic blocks.
-///
-/// When a load reads from a pointer that was previously stored to with the
-/// same type and no intervening store to an aliasing address, the load can
-/// be replaced with the stored value.  This is a local form of the
-/// store-to-load forwarding that LLVM's GVN does globally.
-///
-/// Also eliminates repeated loads from the same pointer (load-after-load):
-/// if no intervening store may alias the pointer, the second load is
-/// redundant and can use the first load's result.
-///
-/// Returns the number of redundant loads eliminated.
 static unsigned eliminateRedundantLoads(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -6857,17 +6033,6 @@ static unsigned eliminateRedundantLoads(llvm::Function& func) {
 }
 
 /// Fold redundant extension chains: `sext(sext(x))` → `sext(x)`,
-/// `zext(zext(x))` → `zext(x)`.
-///
-/// Extension chains appear when type promotion or ABI matching generates
-/// intermediate widening steps (e.g. i8 → i32 → i64).  Collapsing them
-/// into a single extension is faster (1 instruction vs 2) and reduces
-/// register pressure.
-///
-/// Safety: sext(sext(x: iA → iB): iB → iC) == sext(x: iA → iC) by the
-/// sign-extension monotonicity property.  Same for zext.
-///
-/// Returns the number of extension chains collapsed.
 static unsigned foldRedundantExtensions(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -6911,28 +6076,12 @@ static unsigned foldRedundantExtensions(llvm::Function& func) {
 }
 
 /// Dead store elimination within basic blocks.
-///
-/// When two stores write to the same pointer and there are no intervening
-/// loads or calls that may read from that pointer, the first store is dead
-/// and can be eliminated.  This is a purely local (intra-BB) optimization
-/// that catches patterns missed by LLVM's DSE when our transforms introduce
-/// new stores (e.g. strength-reduced spills, redundant write-back).
-///
-/// We only eliminate when:
-///   1. Both stores use the same pointer operand (SSA pointer equality).
-///   2. No instruction between them may read from memory (conservative:
-///      any load, call, or atomic between the two stores blocks elimination).
-///   3. The stores have the same type (so the second fully overwrites the first).
-///
-/// Returns the number of dead stores eliminated.
 static unsigned sinkDeadStores(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
 
     for (auto& bb : func) {
         // Walk instructions in reverse: for each store, look backward for
-        // an earlier store to the same pointer with no intervening readers.
-        // We use a map from pointer → most-recent-store-index for O(n) scanning.
         std::vector<llvm::Instruction*> insts;
         insts.reserve(bb.size());
         for (auto& inst : bb) insts.push_back(&inst);
@@ -6977,27 +6126,6 @@ static unsigned sinkDeadStores(llvm::Function& func) {
 }
 
 /// Multi-level loop-invariant code motion.
-///
-/// Enhanced version of the original hoistLoopInvariantInst that supports
-/// hoisting instructions whose operands are themselves loop-invariant but
-/// defined inside the loop.  Uses iterative fixed-point analysis:
-///
-///   1. Mark all instructions with all-external operands as invariant.
-///   2. Re-scan: if an instruction's operands are all either external or
-///      already marked invariant, mark it invariant too.
-///   3. Repeat until no new instructions are marked.
-///
-/// This catches chains like:
-///   %a = add i64 %x, %y       ; x, y defined outside → invariant
-///   %b = shl i64 %a, 3        ; %a is invariant → also invariant
-///   %c = gep ... %b           ; %b is invariant → also invariant (if pure)
-///
-/// where the original single-pass version would only hoist %a.
-///
-/// Hoisting order: forward program order within each iteration, preserving
-/// def-use ordering.  Instructions are hoisted in batches per iteration.
-///
-/// Returns the total number of instructions hoisted.
 static unsigned hoistLoopInvariantInst(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
 
@@ -7058,9 +6186,6 @@ static unsigned hoistLoopInvariantInst(llvm::Function& func) {
                     if (inst.getParent() == preHeader) continue;
 
                     // All operands must be either:
-                    //   - constants
-                    //   - defined outside the loop
-                    //   - already in the invariant set
                     bool isInvariant = true;
                     for (unsigned i = 0; i < inst.getNumOperands(); ++i) {
                         llvm::Value* op = inst.getOperand(i);
@@ -7100,12 +6225,8 @@ static unsigned hoistLoopInvariantInst(llvm::Function& func) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// New algebraic & peephole transforms for HGOE overhaul
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Fold redundant PHI nodes: phi(x, x, ..., x) → x.
-/// When all incoming values are the same (after GVN, LICM, or jump threading),
-/// the PHI is a trivial identity and can be replaced.
 static unsigned foldRedundantPHIs(llvm::Function& func) {
     unsigned count = 0;
     bool changed = true;
@@ -7140,9 +6261,6 @@ static unsigned foldRedundantPHIs(llvm::Function& func) {
 }
 
 /// Fold add(add(x, C1), C2) → add(x, C1+C2): merge chained constant adds.
-/// This is the IR equivalent of LEA-style address combining.  After strength
-/// reduction and GEP merging, chained adds with constants are common.
-/// Folding them reduces critical-path depth and frees an ALU port.
 static unsigned foldChainedAdds(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -7236,10 +6354,6 @@ static unsigned foldSubSelf(llvm::Function& func) {
 }
 
 /// Narrow zext to trunc when the extension is followed by a truncation
-/// back to the original width: trunc(zext(x)) → x for matching types.
-/// Also handles sext: trunc(sext(x)) → x.
-/// This catches patterns left after loop unrolling where iterator widening
-/// introduces unnecessary zext→trunc pairs.
 static unsigned foldNarrowExtTrunc(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -7265,10 +6379,6 @@ static unsigned foldNarrowExtTrunc(llvm::Function& func) {
 }
 
 /// FP reassociation for latency reduction: turn linear fadd/fmul chains into
-/// balanced trees when `reassoc` flag is present.
-/// fadd(fadd(fadd(a, b), c), d) → fadd(fadd(a, b), fadd(c, d))
-/// This cuts the critical-path depth from O(n) to O(log n) for n-element reductions.
-/// Only applied when the instruction has the `reassoc` fast-math flag.
 static unsigned reassociateFPChains(llvm::Function& func) {
     unsigned count = 0;
     // Collect linear FP chains (fadd or fmul with reassoc).
@@ -7344,8 +6454,6 @@ static unsigned reassociateFPChains(llvm::Function& func) {
 }
 
 /// Fold or(shl(x, C1), lshr(x, C2)) → fshl(x, x, C1) when C1+C2 = bitwidth.
-/// This recognizes rotate-left idioms and lowers them to funnel-shift intrinsics
-/// which map to single-cycle ROL/ROR on x86 and EXTR on AArch64.
 static unsigned foldRotateIdiom(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -7399,8 +6507,6 @@ static unsigned foldRotateIdiom(llvm::Function& func) {
 }
 
 /// Fold extractvalue(insertvalue(base, val, idx), idx) → val.
-/// This pattern appears after SROA and struct returns where the value
-/// is immediately extracted from the aggregate it was just inserted into.
 static unsigned foldExtractInsert(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -7423,10 +6529,6 @@ static unsigned foldExtractInsert(llvm::Function& func) {
 }
 
 /// Fold select(cond, C1, C2) where C1 and C2 are constants and C2 = C1 + 1
-/// into add(zext(not(cond)), C1). This eliminates a conditional by converting
-/// to arithmetic. select(c, 5, 6) → add(zext(!c), 5).
-/// More generally: select(c, C1, C1+offset) → add(mul(zext(!c), offset), C1)
-/// but we only handle offset=1 and offset=-1 for single-instruction output.
 static unsigned foldSelectConsecutiveConsts(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -7463,8 +6565,6 @@ static unsigned foldSelectConsecutiveConsts(llvm::Function& func) {
 }
 
 /// Fold shl(1, x) → 1 << x as a power-of-two generation, and expose it
-/// for later transforms. More importantly: and(x, shl(1, n) - 1) → bit test.
-/// shl(1, C) where C is constant → direct constant (constant fold missed cases).
 static unsigned foldShlOneConst(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -7489,8 +6589,6 @@ static unsigned foldShlOneConst(llvm::Function& func) {
 }
 
 /// Fold mul(x, mul(y, C)) → mul(mul(x, y), C) when C is a power of 2.
-/// This groups the variable operands together and leaves the constant shift
-/// as the outermost operation, enabling strength reduction to a single shift.
 static unsigned foldMulAssocPow2(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -7523,9 +6621,6 @@ static unsigned foldMulAssocPow2(llvm::Function& func) {
 }
 
 /// Fold icmp(add(x, C1), C2) → icmp(x, C2-C1) for constant offsets.
-/// After loop unrolling and strength reduction, many comparisons have
-/// the form `(i + offset) < limit` which can be simplified to `i < limit - offset`.
-/// This is critical for loop bound tightening and vectorization.
 static unsigned foldCmpAddConst(llvm::Function& func) {
     unsigned count = 0;
     for (auto& bb : func) {
@@ -7604,16 +6699,11 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Run before FMA scan so the eliminated fmul doesn't confuse FMA matching.
     stats.fmaGenerated    += foldFPMulByNeg1(func);
     // fneg(fneg(x)) → x: double negation elimination.
-    // Run after foldFPMulByNeg1 (which may have introduced new FNeg) and
-    // after FMA generation (which introduces FNeg for FNMADD forms).
-    // No fast-math flags needed — safe for all IEEE 754 values.
     stats.fmaGenerated    += foldFNegDouble(func);
     // fsub nnan x, x → 0.0: self-cancel for FP subtraction.
     // Run after fneg folding so any newly-exposed self-subtracts are caught.
     stats.fmaGenerated    += foldFSubSelf(func);
     // fadd(x, x) → fmul(x, 2.0) with reassoc: exposes FMA fusion opportunities.
-    // Run before the FP div-by-constant fold and before FMA passes so that
-    // the resulting fmul(x, 2.0) can be fused: fma(x, 2.0, c).
     stats.fmaGenerated    += foldFAddSelf(func);
     // Re-run FMA passes once more so fmul(x,2.0) introduced by foldFAddSelf
     // can be immediately fused with adjacent fadd/fsub operations.
@@ -7638,8 +6728,6 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.branchesOptimized  = optimizeBranchLayout(func, profile);
     stats.loadsStorePaired   = markLoadStorePairs(func, profile);
     // Skip loop annotation when LTO is active — the LTO linker runs its own
-    // loop optimizer and forced unroll/vectorize metadata causes the LTO
-    // pipeline to spend excessive time or hang.
     stats.vectorExpanded     = enableLoopAnnotation
                                  ? softwarePipelineLoops(func, profile)
                                  : 0;
@@ -7647,13 +6735,8 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
     stats.intStrengthReduced += integerStrengthReduce(func, profile);
     // mul(x, 2^k) → shl(x, k): power-of-2 multiply replacement.
-    // More aggressive than integerStrengthReduce for exact powers of 2.
-    // Run right after integerStrengthReduce to catch remaining pow2 mul.
     stats.intStrengthReduced += foldMulPow2(func);
     // mul(x, -1) → sub(0, x): integer negate instead of multiply.
-    // Run after integerStrengthReduce so that the -1 constant is not
-    // mistaken for a shift-add form (which has no -1 case), and before
-    // generateIntegerAbs so that abs patterns using sub(0,x) are still seen.
     stats.intStrengthReduced += foldIntMulByNeg1(func);
     // add(x, sub(0,y)) → sub(x,y): fold add+neg created by foldIntMulByNeg1.
     // Run immediately after so the sub(0,y) pattern is fresh.
@@ -7732,49 +6815,14 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.intStrengthReduced += foldCmpAddConst(func);
 
     // select(cond, x, x) → x: eliminate selects where both arms are identical.
-    // Run BEFORE the loop-invariant hoists so any value that becomes available
-    // after select-collapse is itself eligible for hoisting.  Earlier transforms
-    // (convertIfElseToSelect, foldMinMaxPatterns, foldSelectToBoolCast,
-    // foldConstantSelect, foldSelectConsecutiveConsts) frequently simplify one
-    // arm to match the other, leaving exactly the pattern this fold targets.
     stats.intStrengthReduced += foldSelectSameValue(func);
 
     // Hoist loop-invariant GEP address calculations to the loop pre-header.
-    // Runs after the bulk of the strength-reduction transforms so all address
-    // computations introduced by our transforms are considered.
     stats.loadsStorePaired   += hoistLoopInvariantGEP(func);
     // Hoist ALL remaining pure loop-invariant instructions to the pre-header.
-    // This generalises hoistLoopInvariantGEP to cover strength-reduced constants,
-    // type conversions, and other invariant computations created by our transforms.
-    // Runs AFTER foldSelectSameValue so that values exposed by select-collapse
-    // are considered for hoisting.
     stats.loadsStorePaired   += hoistLoopInvariantInst(func);
 
     // ── Phase K convergence sweep ───────────────────────────────────────────
-    // The transform sequence above is linear-single-pass: each fold runs once,
-    // in a fixed order chosen so the most common "pre-condition" producers run
-    // before the consumers.  But many later transforms create patterns that an
-    // earlier-positioned fold would have caught:
-    //
-    //   * `foldChainedAdds` collapses add chains and may produce `add(x, 0)`
-    //     when the merged constant cancels — `foldIdentityOps` ran earlier and
-    //     would have erased it.
-    //   * `foldGEPArithmetic` and `foldMulPow2` produce constant operands that
-    //     `foldBitwiseWithConstants` would have folded.
-    //   * `foldRedundantPHIs` runs early; later transforms (rotate idiom, FMA
-    //     generation, select-sinking) can produce new trivially-redundant PHIs.
-    //   * `convertIfElseToSelect` + `foldSelectSameValue` may leave a
-    //     `select(cond, C, C)` that constant-folds via `foldConstantSelect`.
-    //   * Hoisting can leave behind `not(not(x))` chains whose inner `not` was
-    //     hoisted out of the loop while the outer remained — `foldDoubleNot`
-    //     would collapse them.
-    //
-    // Re-run the cheapest, purely-local O(N) folds once more.  These passes
-    // each scan the function once and return immediately when they find no
-    // pattern, so the cost when the main sequence already reached fixed-point
-    // is one linear scan per fold (≈microseconds for typical functions).  The
-    // expensive transforms (FMA generation, software-pipelining, prefetch
-    // insertion, branch layout, scheduling) are NOT repeated.
     stats.intStrengthReduced += foldIdentityOps(func);
     stats.intStrengthReduced += foldBitwiseWithConstants(func);
     stats.intStrengthReduced += foldConstantSelect(func);
@@ -7788,14 +6836,8 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     return stats;
 }
 // ═════════════════════════════════════════════════════════════════════════════
-// Step 3b — Schedule-driven instruction reordering
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Returns true if the instruction has memory side-effects relevant to
-/// ordering (loads, stores, atomics, and memory-touching calls).
-// ═════════════════════════════════════════════════════════════════════════════
-// Instruction fusion detection
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Fusion opportunity: two instructions that the CPU can execute as a single
 /// micro-op (or in a reduced number of cycles via macro-op fusion).
@@ -7811,9 +6853,6 @@ struct FusionPair {
 };
 
 /// Detect instruction fusion opportunities within a basic block.
-/// Returns pairs of instructions that should be scheduled adjacently to
-/// enable fusion on modern CPUs (Skylake: cmp+jcc, Zen: test+jcc,
-/// Apple M: load+op folding).
 static std::vector<FusionPair> detectFusionPairs(
         const std::vector<llvm::Instruction*>& moveable,
         const std::unordered_map<llvm::Instruction*, unsigned>& idx,
@@ -7824,26 +6863,18 @@ static std::vector<FusionPair> detectFusionPairs(
         auto* inst = moveable[i];
 
         // ── CmpBranch fusion: ICmp/Test + conditional branch ─────────────
-        // x86: TEST/CMP + JCC fuse into a single macro-op on Skylake+, Zen+
-        // AArch64: CMP + B.cond fuse on Apple M-series, Neoverse
         if (llvm::isa<llvm::ICmpInst>(inst) || llvm::isa<llvm::FCmpInst>(inst)) {
             // Check if the comparison result feeds a branch in this BB
             for (auto* user : inst->users()) {
                 auto* br = llvm::dyn_cast<llvm::BranchInst>(user);
                 if (!br || !br->isConditional()) continue;
                 // The branch is the terminator, so it's not in moveable[],
-                // but the compare should be last before it for fusion.
-                // Mark the compare as having a fusion affinity with the end.
-                // We use UINT_MAX as a sentinel for "schedule near terminator".
                 pairs.push_back({i, static_cast<unsigned>(moveable.size()),
                                  FusionPair::CmpBranch});
             }
         }
 
         // ── LoadOp fusion: Load + single-use ALU consumer ────────────────
-        // On x86, a load can fold into an ALU op's memory operand
-        // (e.g., ADD r, [mem] instead of MOV r2, [mem]; ADD r, r2).
-        // On AArch64, post-indexed load+op patterns are common.
         if (auto* load = llvm::dyn_cast<llvm::LoadInst>(inst)) {
             if (load->hasOneUse()) {
                 auto* user = load->user_back();
@@ -7869,8 +6900,6 @@ static std::vector<FusionPair> detectFusionPairs(
         }
 
         // ── Address folding: GEP + Load/Store ────────────────────────────
-        // GEP + load/store can fold the address calculation into the
-        // load/store's addressing mode, eliminating the separate AGU op.
         if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(inst)) {
             if (gep->hasOneUse()) {
                 auto* user = gep->user_back();
@@ -7886,9 +6915,6 @@ static std::vector<FusionPair> detectFusionPairs(
         }
 
         // ── IncBranch fusion: add/sub + compare + branch (loop counter) ──────
-        // Pattern: increment → compare → branch (tight loop counter pattern).
-        // Scheduling these adjacently helps branch prediction and enables
-        // macro-op fusion of the compare+branch portion.
         if (auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
             unsigned opc = binOp->getOpcode();
             if (opc == llvm::Instruction::Add || opc == llvm::Instruction::Sub) {
@@ -7908,14 +6934,8 @@ static std::vector<FusionPair> detectFusionPairs(
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Schedule DAG debug / visualization hooks
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Dump the scheduling dependency DAG to stderr for debugging.
-/// Each instruction is printed with its index, opcode, critical-path depth,
-/// latency, assigned resource, and lists of predecessors and successors.
-///
-/// Usage: set OMSC_DUMP_SCHEDULE=1 in the environment, or call directly.
 static void dumpScheduleDAG(
         const std::vector<llvm::Instruction*>& moveable,
         const std::vector<std::vector<std::pair<unsigned,unsigned>>>& succ,
@@ -7998,8 +7018,6 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
 }
 
 /// Returns true when the instruction's result lives in the vector/FP register
-/// file rather than the integer general-purpose register file.
-/// Used by the scheduler to track register pressure per physical register file.
 static bool producesVecOrFP(const llvm::Instruction* inst) {
     if (!inst) return false;
     llvm::Type* ty = inst->getType();
@@ -8031,18 +7049,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 }
 
 /// Per-basic-block list scheduler driven by the detailed hardware graph.
-///
-/// Algorithm:
-///   1. Collect moveable instructions (non-phi, non-terminator).
-///   2. Build a data+memory dependency DAG with explicit pred/succ lists.
-///   3. Annotate instructions with profile-derived latencies.
-///   4. Compute critical-path depth bottom-up.
-///   5. Model per-port-instance availability using real HardwareGraph nodes
-///      (their `throughput` field gives instructions/cycle for each port).
-/// Returns true if the instruction produces a 512-bit or wider fixed vector.
-/// Used to apply the double-pump throughput penalty on CPUs where 512-bit SIMD
-/// is implemented by running 256-bit units twice (e.g. Skylake-AVX512, Ice Lake).
-/// The penalty is a throughput effect only; latency is the same as 256-bit ops.
 [[nodiscard]] static bool isWideVectorOp(const llvm::Instruction* inst) {
     if (!inst) return false;
     llvm::Type* ty = inst->getType();
@@ -8053,15 +7059,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 }
 
 ///   6. List-schedule: at each logical cycle, pick up to issueWidth ready
-///      instructions ordered by:
-///        (a) critical-path remaining (latency hiding),
-///        (b) port pressure (schedule bottleneck resource first),
-///        (c) port diversity (prefer instructions that use a port type not
-///            yet issued this cycle, maximising IPC).
-///   7. Apply the schedule to the LLVM IR with moveBefore().
-///
-/// PHI nodes and the terminator are never moved.
-/// Returns estimated cycle count for the block.
 [[gnu::hot]] static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                                     const HardwareGraph& hw,
                                     const MicroarchProfile& profile,
@@ -8084,16 +7081,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     for (unsigned i = 0; i < n; ++i) idx[moveable[i]] = i;
 
     // ── 3. Per-opcode instruction latencies ──────────────────────────────────
-    // Computed first so that addEdge() can use lat[from] for data-dep edges.
-    // Load instructions get a tiered latency estimate based on likely cache level:
-    //   - Pointer-chasing load (ptr came from another load): likely L2/L3 miss
-    //     → latency = (l2Latency + l3Latency) / 2 cycles (conservative)
-    //   - GEP with stride larger than one cache line: likely L2 miss
-    //     → latency = l2Latency cycles
-    //   - Otherwise: L1 hit assumed → latency = latLoad (l1DLatency)
-    // This improves schedule quality for memory-bound code by prioritising
-    // high-miss-risk loads earlier, so more independent work can fill the
-    // pipeline while the miss resolves.
     auto estimateLoadLatency = [&](const llvm::Instruction* inst) -> unsigned {
         auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst);
         if (!ld) return getOpcodeLatency(inst, profile);
@@ -8133,22 +7120,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         lat[i] = estimateLoadLatency(moveable[i]);
 
     // ── 4. Build dependency DAG with per-edge latency ─────────────────────────
-    // Each edge is (to/from node, edge_latency).  Using per-edge latency gives
-    // the scheduler accurate information about how long a consumer must wait:
-    //
-    //   RAW register deps: edgeLat = lat[from]  — consumer needs the result
-    //   WAR  (Load→Store): edgeLat = 1          — store only needs to be issued
-    //                                              after the load; it does not
-    //                                              need to wait for the load to
-    //                                              complete (no data dependency)
-    //   WAW  (Store→Store): edgeLat = 1         — same ordering-only constraint
-    //   RAW  (Store→Load via memory): edgeLat = lat[from]  — load needs the
-    //                                              store's value (same as before)
-    //   Barrier edges: edgeLat = lat[from]      — full serialisation
-    //
-    // With the old code, WAR/WAW edges used lat[from] (the full load/store
-    // execution latency), which artificially inflated the critical-path depth
-    // of stores after loads and delayed their scheduling unnecessarily.
     using Edge = std::pair<unsigned, unsigned>; // (neighbor, edgeLat)
     std::vector<std::vector<Edge>> succ(n), pred(n);
     std::vector<unsigned> inDeg(n, 0);
@@ -8185,18 +7156,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // Memory ordering — alias-aware dependency analysis.
-    // Instead of conservatively chaining ALL memory ops sequentially, we
-    // separate loads and stores and only add edges where a true hazard
-    // exists.  Independent loads can execute in parallel on different
-    // load ports, significantly improving IPC on wide-issue CPUs.
-    //
-    // Hazards modelled:
-    //   WAW (Store → Store): output dependence on potentially-aliasing addrs
-    //   RAW (Store → Load):  true dependence (load must see store's value)
-    //   WAR (Load  → Store): anti-dependence (load must complete before
-    //                        store overwrites the same location)
-    //
-    // Load → Load: no dependency needed (reads never conflict).
     {
         // Helper: extract the memory pointer operand, or nullptr.
         auto getMemPtr = [](const llvm::Instruction* inst) -> const llvm::Value* {
@@ -8234,12 +7193,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     addEdge(stores[si], stores[sj], 1u);
 
         // RAW: Store → Load memory dep.
-        // When a load follows a store to the same (possibly aliased) address,
-        // the value is forwarded from the store buffer rather than going through
-        // the cache.  The forwarding latency (latStoLForward) is used as the
-        // edge weight: it is ≤ latStore on most x86 CPUs and > latStore on
-        // some ARM cores (e.g. Apple M-series) where address-match logic adds
-        // a cycle.  Using this precise latency improves schedule quality.
         for (unsigned stIdx : stores)
             for (unsigned ldIdx : loads)
                 if (ldIdx > stIdx && mayAlias(moveable[stIdx], moveable[ldIdx]))
@@ -8253,8 +7206,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     addEdge(ldIdx, stIdx, 1u);
 
         // Atomics / fences / calls are serialisation barriers — chain them
-        // with all preceding and succeeding memory ops.  Use full latency
-        // since barriers require completion ordering.
         int lastBarrier = -1;
         for (unsigned i = 0; i < n; ++i) {
             if (!hasMemoryEffect(moveable[i])) continue;
@@ -8280,11 +7231,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 5. Critical-path depth (bottom-up, per-edge latency) ─────────────────
-    // critPath[u] = length of the longest path from u's START to the last
-    // instruction's completion.  Using per-edge latency:
-    //   data dep edge (u→s, edgeLat=lat[u]): edgeLat + critPath[s]
-    //   ordering edge (u→s, edgeLat=1):      edgeLat + critPath[s]
-    // Baseline is lat[u] (instruction's own latency with no successors).
     std::vector<unsigned> critPath(n, 0);
     for (int i = static_cast<int>(n) - 1; i >= 0; --i) {
         auto ui = static_cast<unsigned>(i);
@@ -8294,9 +7240,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 5b. Dependency chain identification for ILP ──────────────────────────
-    // Identify independent dependency chains by walking the DAG. Instructions
-    // in different chains can execute in parallel, so we prefer interleaving
-    // them in the schedule to maximize ILP on wide-issue machines.
     std::vector<unsigned> chainId(n, 0);
     {
         unsigned nextChain = 0;
@@ -8322,10 +7265,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 5c. Critical-path slack (forward + backward pass) ────────────────────
-    // Slack = latest_start - earliest_start.  Instructions with zero slack
-    // are on the critical path.  Instructions with slack > 0 can be delayed
-    // without affecting the total schedule length, giving the scheduler
-    // freedom to optimise for register pressure or port diversity instead.
     std::vector<unsigned> earliestStart(n, 0);
     // Forward pass: earliest start = max(pred earliestStart + edgeLat).
     for (unsigned i = 0; i < n; ++i) {
@@ -8343,9 +7282,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6. Hardware port model from the actual HardwareGraph ──────────────────
-    // Each HardwareGraph node may represent multiple port instances (node->count).
-    // We create one PortSlot per physical port instance to accurately model
-    // port pressure — e.g. Skylake's 4 integer ALU ports each get a slot.
     struct PortSlot {
         unsigned nextFree   = 0;
         unsigned busyCycles = 1; ///< cycles this port is occupied per instruction
@@ -8406,18 +7342,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6a-bis. One-time precomputed per-instruction arrays ──────────────────
-    // These arrays depend only on the static instruction properties, not on
-    // the scheduling state, so they are computed once and reused every cycle.
-    //
-    // isLongLatencyCache: true for div/fdiv — should be started as early as
-    //   possible so the (shared, non-pipelined) divider stays busy while
-    //   independent work fills the rest of the pipeline.
-    // rtKeyCache:         resource-type dispatch key per instruction.  Used in
-    //   the sort comparator (tiers 6 and 6.5) and in the issue loop to look up
-    //   the appropriate PortSlot vector.  Avoids calling classifyOp() +
-    //   mapOpToResource() inside every pairwise comparison.
-    // missRiskCache:      estimated cache-miss risk for load instructions.
-    //   2 = large-stride GEP (likely L2+ access), 1 = other load, 0 = non-load.
     std::vector<bool>     isLongLatencyCache(n, false);
     std::vector<int>      rtKeyCache(n, 0);
     std::vector<unsigned> missRiskCache(n, 0);
@@ -8435,9 +7359,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(*it)) {
                         long long off = ci->getSExtValue();
                         // A byte offset larger than one cache line means the
-                        // element is in a different cache line from the base
-                        // pointer.  On a cold access this almost certainly
-                        // misses L1 and requires an L2 (or deeper) fetch.
                         if (std::abs(off) > static_cast<long long>(profile.cacheLineSize)) {
                             missRiskCache[i] = 2; // large stride → likely L2+ miss
                             break;
@@ -8456,8 +7377,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         portSizeCache[key] = static_cast<unsigned>(slots.size());
 
     // Port-load cache: sum of nextFree across all slots for each key.
-    // Maintained incrementally when a slot is occupied, so the sort comparator
-    // can evaluate tier-6.5 in O(1) instead of iterating all slot entries.
     std::unordered_map<int, unsigned> portLoadCache;
     portLoadCache.reserve(hwPorts.size());
     for (auto& [key, slots] : hwPorts) {
@@ -8467,13 +7386,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6a-ter. Load/store clustering by base address ────────────────────────
-    // LLVM MachineScheduler clusters loads and stores that access nearby memory
-    // (same base pointer, differing only in constant offset) so they are issued
-    // together.  This improves memory-level parallelism and reduces TLB pressure
-    // because coalesced accesses target the same cache line or page.
-    //
-    // clusterGroup[i] = hash of the base pointer for memory instruction i.
-    // Same group → prefer scheduling adjacently (tie-breaker in sort).
     std::vector<unsigned> clusterGroup(n, 0);
     {
         auto getBasePtr = [](const llvm::Instruction* inst) -> const llvm::Value* {
@@ -8503,11 +7415,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6a-quater. µop decomposition for store instructions ──────────────────
-    // LLVM models stores as two µops: a store-address µop (AGU port) and a
-    // store-data µop (store port).  Our current model dispatches stores to a
-    // single StoreUnit port.  To match LLVM's accuracy, consume BOTH an AGU
-    // slot and a StoreUnit slot for each store instruction during issue.
-    // We only do this if the profile has AGU ports modeled.
     bool modelStoreAGU = (profile.agus > 0) && policy.enableStoreUopSplit;
     if (modelStoreAGU) {
         // Ensure we have AGU port slots.
@@ -8516,22 +7423,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6a-quint. Register renaming model ────────────────────────────────────
-    // Modern OoO CPUs rename architectural registers to a much larger physical
-    // register file, effectively eliminating WAR and WAW hazards for registers.
-    // LLVM's MachineScheduler uses an anti-dep breaker to remove false register
-    // dependencies.  We model this by reducing WAR/WAW edge latencies to 0 when
-    // the instruction doesn't produce a value (void type) or when the target
-    // has enough rename registers.  The ROB-size relative to architectural regs
-    // gives a rough bound on rename register availability.
-    // The rename budget = ROB size / 2 — a conservative estimate of how many
-    // physical registers are available beyond the architectural set.
-    // (Note: intRegBudget/vecRegBudget are declared below in section 6c.
-    //  canRenameFreely is computed lazily via inline lambda to defer the
-    //  dependency on those variables.)
 
     // ── 6b. Detect instruction fusion opportunities ─────────────────────────
-    // Fusion pairs should be scheduled adjacently when possible to enable
-    // macro-op fusion (cmp+branch) or micro-op folding (load+op, GEP+load).
     auto fusionPairs = detectFusionPairs(moveable, idx, profile);
 
     // Build a fusion affinity map: for each instruction, what instruction
@@ -8543,14 +7436,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6c. Register pressure model ──────────────────────────────────────────
-    // Track live-value count per physical register file independently.
-    // Modern CPUs have completely separate integer and vector/FP register files
-    // (e.g. x86: 16 GPRs and 16/32 XMM/YMM/ZMM registers), so pressure in
-    // one file does not affect the other.  Using a single shared counter
-    // over-penalises code that mixes int and FP operations — splitting the
-    // budget eliminates false pressure signals and improves IPC for such code.
-    //
-    // Integer register budget: total GPRs minus SP and FP.
     unsigned intRegBudget = (profile.intRegisters > 2)
         ? profile.intRegisters - 2 : 14u;
     // Vector/FP register budget: total SIMD/FP registers (no SP/FP equiv.).
@@ -8596,12 +7481,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6c-bis. Cross-BB liveness hints ──────────────────────────────────────
-    // LLVM's MachineScheduler uses LiveIntervals to estimate register pressure
-    // at BB boundaries.  We approximate this: if the BB has multiple predecessors
-    // or successors, the live-in/live-out register counts are likely higher
-    // because values flow through this BB from/to multiple paths.
-    // Inflate the initial live-in count slightly to account for live-through
-    // values (values defined before this BB and used after it).
     if (policy.enableCrossBBLiveness) {
         // Count predecessors by looking at PHI incoming blocks — each unique
         // predecessor contributes at least one incoming edge.
@@ -8638,41 +7517,22 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6e. Reorder buffer pressure tracking ─────────────────────────────────
-    // Modern out-of-order CPUs retire instructions in order from a reorder
-    // buffer (ROB).  When the ROB fills, dispatch stalls.  We approximate
-    // ROB pressure by tracking how many instructions are inflight (scheduled
-    // but not yet retired, i.e., avail[] > currentCycle).
     unsigned robCapacity = profile.robSize > 0 ? profile.robSize : 224u;
     unsigned inflightCount = 0;
 
     // ── 6f. Reservation station pressure tracking ─────────────────────────────
-    // The RS (scheduler queue) holds dispatched µops that are waiting for
-    // operands or a free execution port.  When the RS is full, the front-end
-    // stalls even if the ROB still has capacity.  Track outstanding (issued but
-    // not yet completed) µop count and stall when it reaches rsCapacity.
     unsigned rsCapacity = profile.schedulerSize > 0 ? profile.schedulerSize : 64u;
 
     // ── 6g. Load buffer and store buffer capacity tracking ────────────────────
-    // Outstanding loads and stores occupy entries in the Load Buffer (MOB) and
-    // Store Buffer until they complete.  Track them independently.
     unsigned lbCapacity = profile.loadBufferEntries > 0 ? profile.loadBufferEntries : 64u;
     unsigned sbCapacity = profile.storeBufferEntries > 0 ? profile.storeBufferEntries : 36u;
     unsigned outstandingLoads  = 0;
     unsigned outstandingStores = 0;
 
     // ── 6h. Front-end decode-width gating ─────────────────────────────────────
-    // LLVM's MachineScheduler models the front-end decode bandwidth separately
-    // from the back-end issue width.  On many microarchitectures decodeWidth <
-    // issueWidth (e.g. Zen4: decode 4, issue 6), meaning the front-end is the
-    // bottleneck for non-fused instruction streams.  Model this by limiting
-    // dispatches per cycle to min(issueWidth, decodeWidth + fusionBonus).
-    // Fused instruction pairs (cmp+jcc, load+op) consume only 1 decode slot,
-    // so each fusion effectively gives us a free decode slot.
     unsigned decodeWidth = std::max(profile.decodeWidth, 1u);
 
     // Precompute which instructions are part of a fusion pair and would
-    // consume zero additional decode slots (the "second" instruction in a
-    // fusion pair is folded into the first's decode slot).
     std::vector<bool> isFusionSecond(n, false);
     for (const auto& fp : fusionPairs) {
         if (fp.second < n)
@@ -8680,10 +7540,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6i. Memory bandwidth tracking ─────────────────────────────────────────
-    // Model per-cache-level bandwidth limits to avoid issuing more loads per
-    // cycle than the memory subsystem can serve.  On bandwidth-limited code
-    // (streaming loops), this prevents the scheduler from piling up loads that
-    // would stall the pipeline waiting for the memory bus.
     unsigned l1BW = profile.l1DBandwidthBytesPerCycle > 0
                   ? profile.l1DBandwidthBytesPerCycle : 64u;  // default: 1 cache line/cycle
     unsigned loadsThisCycle = 0;
@@ -8705,23 +7561,12 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     unsigned maxCycle = 0;
 
     // ── Incremental ready queue ────────────────────────────────────────────────
-    // Instead of rescanning all n instructions each cycle (O(n²) total), we
-    // maintain an unordered_set of currently-ready instructions that is updated
-    // incrementally:
-    //   • Initialised with all root instructions (inDeg == 0).
-    //   • Dispatched instructions are erased when issued.
-    //   • Newly-eligible successors (inDeg drops to 0) are inserted immediately.
-    // Each cycle builds the local `ready` vector as a snapshot of this set,
-    // reducing per-cycle scan cost from O(n) to O(|readySet|).
     std::unordered_set<unsigned> readySet;
     readySet.reserve(std::max(n / 4u, 8u));
     for (unsigned i = 0; i < n; ++i)
         if (inDeg[i] == 0) readySet.insert(i);
 
     // Sort-cache vectors: hoisted outside the while loop so we allocate
-    // them once (n elements) rather than reallocating every scheduling cycle.
-    // Values are populated for ready instructions at the start of each cycle
-    // and are only read for instructions in the current ready list.
     std::vector<unsigned> rfsCache(n, 0);           // register-freeing score
     std::vector<unsigned> sdCache(n, 0);            // stall distance
     std::vector<bool>     fusCache(n, false);       // fusion affinity
@@ -8729,22 +7574,14 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     std::vector<unsigned> dynEarliestStartCache(n, 0); // actual data-ready cycle
 
     // Track recently-issued memory clusters for cluster affinity scheduling.
-    // When a load/store is issued, record its cluster group so the next cycle's
-    // sort can give preference to instructions in the same cluster.
     std::vector<unsigned> lastClusterMemOps;
     lastClusterMemOps.reserve(4);
 
     while (totalScheduled < n) {
         // Build this cycle's candidate list from the incremental ready set.
-        // The readySet contains exactly the instructions with inDeg == 0 that
-        // have not yet been dispatched, so no full O(n) scan is needed.
         std::vector<unsigned> ready(readySet.begin(), readySet.end());
 
         // Guard: a non-empty ready list is guaranteed for DAGs (SSA form).
-        // If we reach here with an empty ready list it means there is a cycle
-        // in the dependency graph (e.g. from improper IR).  Break the cycle
-        // by scheduling the first unscheduled instruction so the algorithm
-        // terminates; the resulting order may be suboptimal but is still safe.
         if (ready.empty()) {
             for (unsigned i = 0; i < n; ++i)
                 if (!done[i]) { ready.push_back(i); break; }
@@ -8752,8 +7589,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         }
 
         // Single O(n) scan: compute all stall-check quantities in one pass.
-        // Previously four separate loops; merging them reduces the per-cycle
-        // work from 4×O(n) to 1×O(n) and improves cache utilization.
         inflightCount     = 0;
         outstandingLoads  = 0;
         outstandingStores = 0;
@@ -8775,19 +7610,12 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         if (nextMemAvail == std::numeric_limits<unsigned>::max()) nextMemAvail = currentCycle + 1;
 
         // ROB full stall: on a real out-of-order CPU, dispatch is completely
-        // blocked when the reorder buffer is full.  Advance the clock to when
-        // the oldest in-flight instruction retires (completes), freeing one ROB
-        // entry.
         if (inflightCount >= robCapacity) {
             currentCycle = nextRetire;
             continue; // retry dispatch at the new cycle
         }
 
         // Reservation-station full stall: the RS holds µops that have been
-        // dispatched but not yet issued to an execution port.  It is drained
-        // as µops complete; advance the clock to when the next in-flight op
-        // finishes if the RS is at capacity.  rsCapacity is typically smaller
-        // than robCapacity so this check fires on deeper OoO windows first.
         if (inflightCount >= rsCapacity) {
             currentCycle = nextRetire;
             continue;
@@ -8800,22 +7628,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         }
 
         // Sort ready instructions for maximum throughput — 10-tier priority:
-        //   1. Critical path remaining (latency hiding)
-        //   2. Long-latency ops first (div/fdiv — start divider early)
-        //   2b. Dynamic earliest start: sooner data-ready cycle first (accuracy)
-        //   3. Loads first (hide memory latency, may miss in cache)
-        //   4. Stall distance (consumer work remaining — more = better hiding)
-        //   5. Fusion affinity (schedule fusion partners adjacently)
-        //   6. Port pressure (schedule bottleneck resource first)
-        //   6.5. Port utilization balance (even load across execution units)
-        //   7. Register pressure penalty (per register file — int vs vec/FP)
-        //   8. Register-freeing score (reduce live values)
-        //   9. ROB latency preference (short-latency when ROB is under pressure)
-        //  10. Instruction index (deterministic tie-break)
-        //
-        // ── Precompute per-instruction metrics for this cycle's sort ─────────
-        // All metrics are stored in arrays allocated before the while loop.
-        // Reset only the slots used by the current ready list, then populate.
         for (unsigned id : ready) {
             rfsCache[id] = 0; sdCache[id] = 0;
             fusCache[id] = false; rpCache[id] = 0;
@@ -8823,11 +7635,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         }
         for (unsigned id : ready) {
             // Dynamic earliest start: actual data-ready cycle using the real
-            // issuedAt values of predecessors recorded so far.  This is more
-            // accurate than the static earliestStart (which assumed chains start
-            // at cycle 0) because it reflects port-contention delays already
-            // experienced by earlier instructions in the same schedule.
-            // For ready instructions all predecessors are done (inDeg[id]==0).
             unsigned de = 0;
             for (auto [p, edgeLat] : pred[id])
                 if (done[p])
@@ -8880,22 +7687,14 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 return critPath[a] > critPath[b];
 
             // Tier 2: long-latency operations (div, fdiv) before other ops —
-            // start them early so the divider is busy while the rest proceeds.
-            // Uses isLongLatencyCache (precomputed once, O(1) lookup).
             if (isLongLatencyCache[a] != isLongLatencyCache[b])
                 return static_cast<bool>(isLongLatencyCache[a]);
 
             // Tier 2b: among equal critPath and latency class, schedule the
-            // instruction whose data is ready soonest.  This uses the actual
-            // recorded issuedAt times of predecessors (dynEarliestStartCache),
-            // which is more accurate than the static earliestStart that assumed
-            // chains start at cycle 0 — port-contention delays are reflected.
             if (dynEarliestStartCache[a] != dynEarliestStartCache[b])
                 return dynEarliestStartCache[a] < dynEarliestStartCache[b];
 
             // Tier 3: loads first — schedule early to hide memory latency.
-            // Within loads, prefer those with higher cache-miss risk
-            // (precomputed in missRiskCache, O(1) lookup).
             bool isLoadA = (missRiskCache[a] > 0);
             bool isLoadB = (missRiskCache[b] > 0);
             if (isLoadA != isLoadB)
@@ -8923,8 +7722,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 return portPressure[rtA] > portPressure[rtB];
 
             // Tier 6.5: Port utilization balance — prefer instructions that
-            // use the least-loaded port type.  portLoadCache and portSizeCache
-            // are maintained incrementally (O(1) lookup, no slot iteration).
             {
                 unsigned loadA = portLoadCache.count(rtA) ? portLoadCache.at(rtA) : 0;
                 unsigned loadB = portLoadCache.count(rtB) ? portLoadCache.at(rtB) : 0;
@@ -8947,11 +7744,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             if (rfsCache[a] != rfsCache[b]) return rfsCache[a] > rfsCache[b];
 
             // Tier 9: ROB pressure — when many instructions are inflight,
-            // prefer instructions that complete sooner (lower latency) to
-            // allow earlier retirement and free ROB entries.
-            // Enhanced: also activate when issue slots are nearly saturated
-            // (>50% inflight), not just at 75% ROB.  This improves retirement
-            // rate in compute-dense code where the ROB fills quickly.
             if (policy.enableROBPressure &&
                 (inflightCount > robCapacity * 3 / 4 ||
                  inflightCount > robCapacity / 2)) {
@@ -8960,9 +7752,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             }
 
             // Tier 9.5: Load/store cluster affinity — prefer memory instructions
-            // that share the same base object (cluster group) to improve memory-
-            // level parallelism and reduce TLB misses.  The last-issued cluster
-            // gets preference so loads/stores to the same array are grouped.
             if (clusterGroup[a] != 0 && clusterGroup[b] != 0) {
                 if (clusterGroup[a] != clusterGroup[b]) {
                     // Prefer the instruction in the same cluster as the most
@@ -8981,10 +7770,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         });
 
         // ── Beam search pruning ──────────────────────────────────────────────
-        // For large ready lists (> beamWidth), only consider the top-N
-        // candidates to prevent combinatorial explosion in very large BBs.
-        // The sorted order ensures the highest-priority instructions are kept.
-        // beamWidth is taken from the scheduler policy (default 32).
         if (policy.enableBeamPruning && ready.size() > policy.beamWidth)
             ready.resize(policy.beamWidth);
 
@@ -8998,15 +7783,10 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         storesThisCycle = 0;
 
         // Two-pass issue: first pass schedules instructions that use port
-        // types not yet used this cycle (maximises parallel unit utilisation);
-        // second pass fills remaining issue slots with any ready instruction.
         for (int pass = 0; pass < 2; ++pass) {
             for (unsigned id : ready) {
                 if (issued >= profile.issueWidth) break;
                 // ── Decode-width gating ──────────────────────────────────────
-                // The front-end decoder can only crack decodeWidth instructions
-                // per cycle.  Fused second-instructions don't consume a decode
-                // slot (they are folded into the first instruction's µop).
                 unsigned decodeCost = isFusionSecond[id] ? 0u : 1u;
                 if (decodedThisCycle + decodeCost > decodeWidth) continue;
                 if (done[id]) continue;
@@ -9033,8 +7813,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     issuedChainsThisCycle.count(chainId[id])) continue;
 
                 // Earliest start: max(currentCycle, predecessor availability).
-                // For data-dep edges (edgeLat = lat[p]): wait for result.
-                // For ordering edges (edgeLat = 1): wait one cycle after issue.
                 unsigned earliest = currentCycle;
                 for (auto [p, edgeLat] : pred[id]) {
                     if (done[p]) {
@@ -9055,11 +7833,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     }
                     startCycle = bestTime;
                     // Occupy the port for busyCycles (= reciprocal throughput).
-                    // Apply the 512-bit double-pump penalty on CPUs where 512-bit
-                    // SIMD is implemented by running 256-bit units twice (e.g.
-                    // Skylake-AVX512, Ice Lake).  Only FMA and VecALU ports are
-                    // affected; loads/stores of 512-bit data use the full-width
-                    // load/store paths and do not incur the double-pump penalty.
                     unsigned pumpFactor = 1u;
                     if (profile.vec512Penalty > 1 && isWideVectorOp(moveable[id]) &&
                         (rtKey == static_cast<int>(ResourceType::FMAUnit) ||
@@ -9067,8 +7840,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                         pumpFactor = profile.vec512Penalty;
                     }
                     // Update portLoadCache incrementally: subtract the old
-                    // nextFree value and add the new one so the sort comparator
-                    // can evaluate tier-6.5 in O(1) without scanning all slots.
                     unsigned oldNextFree = slots[chosenSlot].nextFree;
                     slots[chosenSlot].nextFree =
                         startCycle + slots[chosenSlot].busyCycles * pumpFactor;
@@ -9098,8 +7869,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     ++storesThisCycle;
 
                 // ── Store µop decomposition ──────────────────────────────────
-                // Model stores as two µops: store-address on AGU + store-data
-                // on StoreUnit.  Occupy both ports to match LLVM's model.
                 if (modelStoreAGU && llvm::isa<llvm::StoreInst>(moveable[id])) {
                     int aguKey = static_cast<int>(ResourceType::AGU);
                     auto aguIt = hwPorts.find(aguKey);
@@ -9117,8 +7886,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 }
 
                 // ── Load/store cluster tracking ──────────────────────────────
-                // Record this instruction's cluster group for affinity scheduling
-                // in subsequent cycles.
                 if (clusterGroup[id] != 0) {
                     // Keep a small window of recently issued cluster groups.
                     if (lastClusterMemOps.size() >= 4)
@@ -9133,8 +7900,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 issuedChainsThisCycle.insert(chainId[id]);
 
                 // ── Register pressure tracking (per register file) ──────────
-                // Instruction produces a value → increase live count in the
-                // appropriate register file (int or vector/FP).
                 if (!moveable[id]->getType()->isVoidTy() && lat[id] > 0) {
                     if (producesVecOrFP(moveable[id])) ++vecLive;
                     else ++intLive;
@@ -9155,8 +7920,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 }
 
                 // Decrement in-degrees of successors.
-                // Any successor whose in-degree reaches zero is now ready and
-                // is added to the incremental readySet for future cycles.
                 for (auto [s, _] : succ[id]) {
                     if (inDeg[s] > 0 && --inDeg[s] == 0)
                         readySet.insert(s);
@@ -9168,12 +7931,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         }
 
         // Advance the cycle counter.  If nothing was issued this cycle,
-        // skip ahead to the earliest time any port becomes free or any
-        // dispatched instruction's result becomes available, avoiding
-        // empty-cycle spin.  done[id] means "dispatched to the RS / execution
-        // unit"; avail[id] (set at dispatch time) is when the result is ready.
-        // Checking done[id] is correct: avail[] is only populated when
-        // done[id]=true, so the old `!done[id]` condition was always false.
         if (issued == 0) {
             unsigned nextEvent = currentCycle + 1;
             for (auto& [key, portSlots] : hwPorts)
@@ -9195,15 +7952,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                            maxCycle > 0 ? maxCycle : currentCycle);
 
     // ── 8b. Bidirectional scheduling: bottom-up comparison ──────────────────
-    // LLVM's GenericScheduler runs both top-down and bottom-up scheduling passes
-    // and picks the better result.  We implement a lightweight bottom-up pass:
-    // schedule from sinks (instructions with no successors) toward roots,
-    // using reverse critical-path depth as the primary sort key.
-    //
-    // The bottom-up approach is better for register-pressure-sensitive code
-    // (it naturally sinks definitions close to their uses), while top-down
-    // is better for latency-bound code (it prioritizes starting long chains).
-    // We keep whichever schedule produces fewer estimated cycles.
     unsigned topDownCycles = maxCycle > 0 ? maxCycle : currentCycle;
     if (policy.enableBidirectional && n >= 4) {
         // Compute "height" from roots: longest path from any root to this node.
@@ -9216,8 +7964,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         }
 
         // Bottom-up scheduling: process sinks first (high height, no successors).
-        // Use a simplified greedy: sort all instructions by bottom-up priority
-        // (height descending, then succs-first to reduce live ranges).
         std::vector<unsigned> buOrder(n);
         std::iota(buOrder.begin(), buOrder.end(), 0u);
         std::sort(buOrder.begin(), buOrder.end(), [&](unsigned a, unsigned b) {
@@ -9233,8 +7979,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         });
 
         // Simulate bottom-up schedule to estimate cycle count.
-        // Use a simple occupancy model: assign instructions to cycles respecting
-        // dependencies and issue width.
         std::vector<unsigned> buAvail(n, 0);
         std::vector<unsigned> buIssued(n, 0);
         std::vector<bool> buDone(n, false);
@@ -9263,10 +8007,6 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         unsigned bottomUpCycles = buMax;
 
         // If bottom-up produces fewer cycles, use its instruction order.
-        // `buOrder` is bottom-up (sinks first, deeper defs last); for IR
-        // emission we need topological order (defs before uses), so reverse.
-        // Without this reversal the emitted IR places consumers before their
-        // producers and fails module verification.
         if (bottomUpCycles < topDownCycles) {
             scheduled.clear();
             scheduled.reserve(n);
@@ -9421,17 +8161,10 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     if (pg.nodeCount() == 0) return stats;
 
     // Step 2b — Set target-cpu / target-features on the function so that
-    // LLVM's backend selects the correct ISA extensions (AVX2, AVX-512, etc.)
-    // and schedules for the specific microarchitecture during code emission.
     if (config.enableTransforms)
         applyTargetAttributes(func, cpuName, profile);
 
     // ── Cost model lambda (shared by scheduling and transform phases) ────────
-    // Compute total expected cycles for a function, accounting for:
-    //   • Per-opcode execution latencies (the critical path contribution)
-    //   • Statistical branch misprediction overhead (10% miss rate assumed
-    //     for general-purpose code without profile data).
-    //   • 512-bit double-pump penalty.
     auto estimateFuncCost = [&](llvm::Function& f) -> unsigned {
         constexpr double kBranchMissRate = 0.10;
         unsigned cost = 0;
@@ -9477,12 +8210,6 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     }
 
     // Step 4 — Iterative transform-schedule pipeline.
-    // Run transforms→schedule→transforms→schedule (up to 3 rounds), accepting
-    // each iteration only if cost improves.  This catches cascading simplification
-    // opportunities: transforms may expose new scheduling freedom, and better
-    // scheduling may expose dead code or new transform targets.
-    // LLVM's MachineScheduler effectively does this by running DAG mutations
-    // between scheduling passes — we explicitly iterate at the IR level.
     if (config.enableTransforms) {
         unsigned bestCost = estimateFuncCost(func);
         unsigned maxIters = config.schedulerPolicy.enableIterativeRefine
@@ -9521,9 +8248,6 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
         }
 
         // Log the total cost delta.
-        // bestCost was the initial cost before any transforms (only reduced on
-        // improvement), and the function's current state reflects the best
-        // schedule found.  Compute cycles saved as the difference.
         unsigned finalCost = estimateFuncCost(func);
         if (finalCost < bestCost)
             stats.totalScheduledCycles = bestCost - finalCost; // cycles saved
@@ -9591,12 +8315,8 @@ HGOEStats optimizeModule(llvm::Module& module, const HGOEConfig& config) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Pre-pipeline loop annotation for target-aware unrolling/vectorization
-// ═══════════════════════════════════════════════════════════════════════════════
 
 /// Estimate the native instruction cost of a single LLVM IR instruction,
-/// including the number of micro-ops it expands to and the registers it
-/// consumes.  Used pre-pipeline to predict resource pressure.
 struct NativeCostInfo {
     unsigned nativeOps;      // Number of backend micro-ops
     unsigned regsProduced;   // Number of output registers consumed
@@ -9686,16 +8406,6 @@ static NativeCostInfo estimateNativeCostDetailed(const llvm::Instruction& inst,
 }
 
 /// Annotate loops in a single function with target-optimal metadata.
-/// Must run BEFORE the LLVM optimization pipeline.
-///
-/// The algorithm models the target CPU's three main constraints:
-///   1. Register pressure: unrolled body must not exceed available GPRs
-///   2. I-cache footprint: unrolled body must fit in L1I with headroom
-///   3. Execution throughput: enough iterations to saturate the pipeline
-///
-/// For each loop, it computes per-iteration resource demands (µops,
-/// registers, divider usage) and selects the largest unroll factor that
-/// stays within all three budgets.
 static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
                                               const MicroarchProfile& profile) {
     if (func.isDeclaration()) return 0;
@@ -9740,8 +8450,6 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
         }
 
         // ── Analyse the loop body's resource demands ──────────────────────
-        // Scan all blocks that belong to the loop body (header + any blocks
-        // between header and latch inclusive).
         unsigned totalNativeOps = 0;
         unsigned totalRegsProduced = 0;
         unsigned maxLatency = 0;
@@ -9768,14 +8476,6 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
         if (totalNativeOps == 0) continue;
 
         // ── Constraint 1: Register pressure ──────────────────────────────
-        // On x86-64: 16 GPRs minus rsp (stack), rbp (frame) = 14 raw.
-        // Subtract baseline registers for loop induction variable, bound,
-        // and a conservative estimate for outer-loop context:
-        //   - PHI nodes in the header each hold a live value across the
-        //     back-edge (induction vars, accumulators)
-        //   - Each predecessor block may contribute additional live-ins
-        // We count PHI nodes + 2 (for the induction var's bound and step)
-        // as baseline, then subtract from the raw register budget.
         unsigned rawRegs = (profile.isa == ISAFamily::AArch64)
             ? (profile.intRegisters > 2 ? profile.intRegisters - 2 : 16)
             : (profile.intRegisters > 2 ? profile.intRegisters - 2 : 14);
@@ -9786,8 +8486,6 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
             else break; // PHIs are always at the start
         }
         // Each PHI occupies a register across the loop.  Add 2 for the
-        // induction variable's bound and step (which are loop-invariant
-        // but still occupy registers during the loop body).
         unsigned baselineRegs = phiCount + 2;
         unsigned usableRegs = rawRegs > baselineRegs
             ? rawRegs - baselineRegs : 2;
@@ -9799,10 +8497,6 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
             : 8;
 
         // ── Constraint 2: L1 I-cache footprint ───────────────────────────
-        // L1I is typically 32-64KB.  Each x86 instruction averages ~4.5
-        // bytes.  We budget 5% of L1I for the hot inner loop — conserv-
-        // ative because the remainder is needed for outer loops, function
-        // prologs, branch-miss recovery paths, and OS code.
         unsigned l1iBytes = profile.l1DSize * 1024; // approximate L1I ≈ L1D
         unsigned iCacheBudget = (l1iBytes * 5) / (100 * 5); // 5% / 5 bytes per op
         unsigned iCacheUnroll = totalNativeOps > 0
@@ -9810,9 +8504,6 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
             : 8;
 
         // ── Constraint 3: Pipeline saturation ────────────────────────────
-        // For an OOO core, unrolling helps fill the reorder buffer.
-        // Minimum 2, but don't force more than 4 — OOO scheduling
-        // already hides most latency without excessive unrolling.
         unsigned pipelineMin = std::min((profile.pipelineDepth + 7) / 8, 4u);
         pipelineMin = std::max(pipelineMin, 2u);
 
@@ -9823,8 +8514,6 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
         unroll = std::min(unroll, 8u);  // cap at 8 (GCC's typical max)
 
         // Loops with remainder/division by constant: LLVM expands these
-        // to multiply+shift sequences (5-6 µops each).  The pre-pipeline
-        // IR undercounts their cost, so clamp to avoid over-unrolling.
         bool hasRemByConst = false;
         for (auto& inst : bb) {
             if ((inst.getOpcode() == llvm::Instruction::SRem ||
@@ -9839,8 +8528,6 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
         if (hasRemByConst) unroll = std::min(unroll, 4u);
 
         // Loops with divider instructions: the divider is a scarce resource
-        // (usually 1 unit, not pipelined).  Over-unrolling creates a
-        // bottleneck waiting for the divider, wasting issue slots.
         if (usesDivider) unroll = std::min(unroll, 4u);
 
         // Loops with function calls: don't over-unroll because each call
@@ -9848,8 +8535,6 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
         if (hasCall) unroll = std::min(unroll, 2u);
 
         // Interleave count: for wide-issue OOO cores (issueWidth > 2),
-        // match the unroll count so the CPU can fill dispatch slots from
-        // independent iterations.  For narrow in-order cores, keep it low.
         unsigned interleave = (profile.issueWidth > 2) ? unroll : 2u;
 
         // Build loop metadata, preserving any existing entries (e.g. mustprogress).
@@ -9876,9 +8561,6 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
         }));
 
         // Add a target-aware vectorization width hint based on the CPU's SIMD
-        // register width.  This helps the vectorizer commit to the optimal VF
-        // without cost-model exploration overhead.  Only added when no explicit
-        // vectorize metadata is present (to preserve user @novectorize hints).
         {
             bool hasVecMD = false;
             if (auto* existingMD = latchTerm->getMetadata(llvm::LLVMContext::MD_loop)) {
@@ -9897,8 +8579,6 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
             }
             if (!hasVecMD && profile.vectorWidth >= 128 && profile.vecUnits > 0) {
                 // Determine the dominant element bit-width in the loop body
-                // (same approach as softwarePipelineLoops) so the vectorize width
-                // is expressed in lane count rather than always assuming 64-bit.
                 std::unordered_map<unsigned, unsigned> widthFreq;
                 for (auto& loopInst : bb) {
                     if (llvm::isa<llvm::PHINode>(loopInst) || loopInst.isTerminator())
@@ -9955,8 +8635,6 @@ unsigned annotateLoopsForTarget(llvm::Module& module, const HGOEConfig& config) 
 
 
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Precision metadata helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Metadata kind name used to store FP precision on individual instructions.
@@ -10018,8 +8696,6 @@ void propagatePrecision(llvm::Function& func) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Cache model construction
-// ═════════════════════════════════════════════════════════════════════════════
 
 CacheModel buildCacheModel(const MicroarchProfile& profile) {
     CacheModel cm;
@@ -10040,16 +8716,12 @@ CacheModel buildCacheModel(const MicroarchProfile& profile) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Cache-aware optimization pass
-// ═════════════════════════════════════════════════════════════════════════════
 
 /// Classify a memory access pattern from a GEP + loop structure.
 static AccessPattern classifyAccess(llvm::GetElementPtrInst* gep) {
     if (!gep) return AccessPattern::Unknown;
 
     // Check if the last index is an induction variable (AddRec / simple add).
-    // A single-index GEP with a loop-variant operand is sequential.
-    // A GEP with constant stride is strided.
     llvm::Value* lastIdx = gep->getOperand(gep->getNumOperands() - 1);
 
     // If the index is a PHI or add-of-phi, it's likely sequential or strided.
@@ -10069,8 +8741,6 @@ static AccessPattern classifyAccess(llvm::GetElementPtrInst* gep) {
 }
 
 /// Estimate the working set size (in bytes) for a loop body.
-/// Counts distinct base pointers accessed via GEP and multiplies by
-/// an estimated iteration count.
 static unsigned estimateWorkingSet(llvm::BasicBlock& bb, unsigned elementSize) {
     std::set<llvm::Value*> bases;
     for (auto& inst : bb) {
@@ -10084,8 +8754,6 @@ static unsigned estimateWorkingSet(llvm::BasicBlock& bb, unsigned elementSize) {
 }
 
 /// Insert cache-aware prefetch hints for strided loads in loop bodies.
-/// Unlike the simpler insertPrefetches in hardware transforms, this version
-/// uses the CacheModel to compute prefetch distances based on cache latencies.
 static unsigned insertCacheAwarePrefetches(llvm::Function& func,
                                             const MicroarchProfile& /*profile*/,
                                             const CacheModel& cache) {
@@ -10125,8 +8793,6 @@ static unsigned insertCacheAwarePrefetches(llvm::Function& func,
             FPPrecision prec = getInstructionPrecision(load);
 
             // Compute prefetch distance based on cache model.
-            // distance = (L2_latency / memory_throughput) * stride
-            // For sequential access, use cache line size as stride.
             unsigned stride = cache.l1LineSize;
             unsigned distance;
             if (prec == FPPrecision::Strict) {
@@ -10164,8 +8830,6 @@ static unsigned insertCacheAwarePrefetches(llvm::Function& func,
 }
 
 /// Add loop tiling metadata hints for loops whose working set exceeds L1.
-/// This doesn't transform the loop directly — it attaches metadata that
-/// downstream passes (LLVM's LoopTiling or Polly) can use.
 static unsigned addTilingHints(llvm::Function& func,
                                 const CacheModel& cache) {
     unsigned count = 0;

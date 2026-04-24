@@ -384,6 +384,7 @@ ptest_program "examples/array_shift_unshift_test.om" 19
 ptest_program "examples/macro_stringify_paste_test.om" 4
 ptest_program "examples/array_utility_test.om" 18
 ptest_program "examples/simd_register_test.om" 14
+ptest_program "examples/simd_widen_test.om" 42
 ptest_program "examples/register_test.om" 25
 ptest_program "examples/compound_assign_test.om" 42
 ptest_program "examples/null_coalesce_test.om" 5
@@ -774,6 +775,8 @@ ptest_program "examples/runtime_div_opt_test.om" 5
 ptest_program "examples/loop_ucmp_test.om" 5
 ptest_program "examples/dict_literal_test.om" 18
 ptest_program "examples/preprocessor_test.om" 12
+ptest_program "examples/preprocessor_modern_test.om" 13
+ptest_program "examples/preprocessor_typed_test.om" 6
 ptest_program "examples/dict_chaining_test.om" 16
 ptest_program "examples/ifelse_select_test.om" 37
 ptest_program "examples/const_float_fold_test.om" 7
@@ -828,6 +831,7 @@ ptest_program "examples/freeze_correctness_test.om" 42
 ptest_program "examples/reborrow_test.om" 100
 ptest_program "examples/allocator_annotation_test.om" 40
 ptest_program "examples/borrow_mut_syntax_test.om" 42
+ptest_program "examples/ref_borrow_test.om" 42
 ptest_program "examples/comptime_chain_test.om" 45
 ptest_program "examples/comptime_array_test.om" 478546148456
 ptest_program "examples/comptime_array_append_test.om" 18

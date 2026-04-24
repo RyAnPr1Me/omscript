@@ -133,6 +133,12 @@ class Compiler {
         hgoe_ = enable;
     }
 
+    /// Enable or disable Speculative Devectorization & Revectorization (default: true).
+    void setSDR(bool enable) { sdr_ = enable; }
+
+    /// Enable or disable the Implicit Phase Ordering Fixer (default: true).
+    void setIPOF(bool enable) { ipof_ = enable; }
+
   private:
     std::string readFile(const std::string& filename);
     bool verbose_ = false;
@@ -156,6 +162,8 @@ class Compiler {
     bool superopt_ = true;
     unsigned superoptLevel_ = 2;
     bool hgoe_ = true;
+    bool sdr_  = true;
+    bool ipof_ = true;
     std::string pgoGenPath_;
     std::string pgoUsePath_;
 };

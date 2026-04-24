@@ -577,15 +577,51 @@ The **preprocessor** runs before lexical analysis, transforming source text by e
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 ```
 
+**Typed function-like macro** (optional `: <type>` per parameter, optional
+`-> <returnType>` after the parameter list):
+```omscript
+#define SQUARE(x: int) -> int          ((x) * (x))
+#define SCALE(x: float, k: int) -> float ((x) * (k))
+#define GREET(s: string) -> string     (s)
+```
+
+Recognised parameter types: `int`, `uint`, `float`, `double`, `string`,
+`bool`, `any`. Untyped parameters (and the catch-all `any`) accept any
+argument shape. The return-type annotation is informational only.
+
+When the preprocessor expands a typed macro it classifies the *syntactic
+shape* of each argument (a string literal, a numeric literal, a bare
+identifier, a parenthesised expression, …) and rejects an obvious
+mismatch — for example calling `SQUARE("hi")` is reported at preprocess
+time instead of producing a downstream parse error. Identifiers and
+general expressions are accepted for any declared type, since they may
+expand or evaluate to the right shape.
+
 **Syntax**:
 - Object-like: `#define NAME body`
 - Function-like: `#define NAME(param1, param2, ...) body`
+- Typed function-like: `#define NAME(p1: T1, p2: T2, ...) -> R body`
 - No space allowed between `NAME` and `(` in function-like macros
 - Macro body extends to end of line (or use `\` for continuation)
 - Macros are substituted in subsequent source text
-- Recursive expansion is supported (depth limit: 64)
+- Recursive expansion is supported up to a hard limit of 256 nested
+  expansions; true *cyclic* macro definitions (e.g. `#define A B` and
+  `#define B A`) are detected and reported as a deterministic error
+  instead of silently truncating
 
-**Stringification and token pasting**: Not currently implemented. Macros perform textual substitution only.
+**Stringification (`#param`)** and **token pasting (`a ## b`)** are
+supported in function-like macro bodies — see §3.2.
+
+**Diagnostics emitted by `#define` and friends**:
+| Condition | Severity |
+|---|---|
+| `#define` / `#undef` of a reserved predefined macro (`__FILE__`, `__LINE__`, `__VERSION__`, `__DATE__`, `__TIME__`, `__BASE_FILE__`, `__OS__`, `__ARCH__`, `__COUNTER__`, `__VECTOR_WIDTH__`, the `__SIMD_*__` family) | **error** |
+| Function-like macro called with the wrong number of arguments | **error** |
+| Typed function-like macro argument shape clearly incompatible with declared type | **error** |
+| Cyclic macro expansion or > 256 levels of nesting | **error** |
+| Macro redefined with a body that differs from the previous definition | warning |
+| `#undef` of a macro that was never defined | warning |
+| Function-like macro uses a parameter more than once and the matching argument looks like a function call (multi-evaluation footgun) | warning |
 
 #### 3.1.2 `#undef` — Undefine Macro
 
@@ -595,6 +631,9 @@ Removes a macro definition:
 #undef TEMP
 // TEMP is no longer defined
 ```
+
+`#undef` of a name that was never defined emits a warning, and `#undef`
+of a reserved predefined macro is a hard error.
 
 #### 3.1.3 `#if` / `#elif` / `#else` / `#endif` — Conditional Compilation
 
@@ -613,8 +652,9 @@ Conditionally include source text based on compile-time expressions:
 **Evaluation**:
 - `#if` and `#elif` conditions are integer expressions evaluated at preprocessing time
 - Macros in conditions are expanded before evaluation
-- Supported operators: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, `(`, `)`
-- `defined(NAME)` checks if macro `NAME` is defined (returns 1 or 0)
+- Supported operators (in C-style precedence): unary `! - + ~`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `|`, `&&`, `||`, ternary `? :`, parentheses
+- Hex integer literals (`0xFF`, `0X1A`) are supported alongside decimal
+- `defined(NAME)` (or `defined NAME`) checks if macro `NAME` is defined (returns 1 or 0)
 - Undefined identifiers evaluate to 0
 
 **Example with `defined`**:
@@ -624,7 +664,18 @@ Conditionally include source text based on compile-time expressions:
 #endif
 ```
 
-#### 3.1.4 `#ifdef` / `#ifndef` — Test Macro Definition
+**Example using bitwise / shift / ternary**:
+```omscript
+#define FLAGS 0x0F
+#if (FLAGS & 0x08) != 0
+    #define HAS_BIT3 1
+#endif
+#if (1 << 4) == 16 ? 1 : 0
+    #define POW2_OK 1
+#endif
+```
+
+#### 3.1.4 `#ifdef` / `#ifndef` / `#elifdef` / `#elifndef` — Test Macro Definition
 
 Shorthand for testing macro presence:
 ```omscript
@@ -640,6 +691,20 @@ Shorthand for testing macro presence:
 Equivalent to:
 - `#ifdef X` → `#if defined(X)`
 - `#ifndef X` → `#if !defined(X)`
+
+The C23-style shorthands `#elifdef X` and `#elifndef X` chain the same test in an `#if` ladder:
+
+```omscript
+#ifdef USE_NEON
+    // ...
+#elifdef USE_AVX2
+    // ...
+#elifndef USE_SCALAR
+    // ...
+#else
+    // ...
+#endif
+```
 
 #### 3.1.5 `#error` — Emit Compilation Error
 
@@ -782,10 +847,28 @@ The preprocessor defines the following macros automatically:
 |-------|-------|-------------|
 | `__FILE__` | `"filename"` | Current source file name (string) |
 | `__LINE__` | `123` | Current line number (integer) |
+| `__BASE_FILE__` | `"main.om"` | Top-level source as passed on the command line — preserved across `#line` (string) |
+| `__DATE__` | `"Jan 23 2026"` | Compilation date in C-style `Mmm dd yyyy` form (string) |
+| `__TIME__` | `"14:05:09"` | Compilation time in `HH:MM:SS` form (string) |
 | `__VERSION__` | `"0.1.0"` | OmScript compiler version (string) |
 | `__OS__` | `"linux"` / `"windows"` / `"macos"` | Target operating system (string) |
 | `__ARCH__` | `"x86_64"` / `"aarch64"` / `"arm"` | Target architecture (string) |
 | `__COUNTER__` | `0`, `1`, ... | Global counter, increments on each use (integer) |
+| `__VECTOR_WIDTH__` | `4` / `8` / `16` | Natural i32-lane SIMD width on the host the compiler was built for (integer) |
+| `__SIMD_SSE2__` … `__SIMD_AVX512F__` | `1` (defined only if available) | Defined when the corresponding x86 SIMD feature is present in the compiler build |
+| `__SIMD_NEON__` | `1` (defined only on ARM) | Defined when ARM NEON is available in the compiler build |
+
+The SIMD-feature macros let portable user code conditionally pick a vector width:
+
+```omscript
+#if defined(__SIMD_AVX512F__)
+    var v: i32x16 = ...;
+#elifdef __SIMD_AVX2__
+    var v: i32x8  = ...;
+#else
+    var v: i32x4  = ...;
+#endif
+```
 
 **Example**:
 ```omscript
@@ -1056,11 +1139,48 @@ ages = map_set(ages, "Charlie", 35);
 var has_bob: int = map_has(ages, "Bob");         // 1
 ```
 
-#### 4.4.3 SIMD Vector Types: `vec4<f32>`, `vec8<i32>`, etc.
+#### 4.4.3 SIMD Vector Types: `f32x4`, `i32x8`, `i16x8`, …
 
-**Status**: SIMD vector types are **mentioned in comments** but **not currently implemented** in the parser or type system. This is a future feature.
+OmScript supports first-class fixed-width SIMD vector types as variable
+annotations. The compiler lowers them to LLVM `<N x T>` vectors so the
+backend's vectorizer and the host's native SIMD instructions are used
+directly.
 
-**Anticipated syntax**: `vecN<T>` where `N` is 2, 4, 8, 16, etc., and `T` is a scalar type (e.g., `vec4<f32>` for 4-element float vector).
+**Naming**: `<elemType>x<lanes>`, where `elemType` is `i8`, `u8`, `i16`,
+`u16`, `i32`, `u32`, `i64`, `u64`, `f32`, or `f64` and `lanes` matches a
+natural SSE / AVX / AVX-512 width:
+
+| Lane width | SSE2 (128-bit) | AVX2 (256-bit) | AVX-512 (512-bit) |
+|------------|----------------|----------------|-------------------|
+| 8-bit  | `i8x16`, `u8x16`     | `i8x32`, `u8x32`        | — |
+| 16-bit | `i16x8`, `u16x8`     | `i16x16`, `u16x16`      | — |
+| 32-bit | `i32x4`, `u32x4`, `f32x4` | `i32x8`, `u32x8`, `f32x8` | `i32x16`, `u32x16`, `f32x16` |
+| 64-bit | `i64x2`, `u64x2`, `f64x2` | `i64x4`, `u64x4`, `f64x4` | `i64x8`, `u64x8`, `f64x8` |
+
+Signed and unsigned integer types share the same LLVM vector
+representation; signedness is carried via the annotation and per-instruction
+opcodes (`SDiv` vs `UDiv`, etc.).
+
+**Operations**:
+- Construction from an array literal of the matching length:
+  `var v: f32x4 = [1.0, 2.0, 3.0, 4.0];`
+- Element-wise arithmetic: `+`, `-`, `*`, `/`, `%`
+- Element-wise bitwise (integer vectors only): `&`, `|`, `^`, `<<`, `>>`
+- Lane read: `v[i]` (lifts narrow elements to the default expression width)
+- Lane write: `v[i] = x`
+
+**Pick a width portably** with the `__VECTOR_WIDTH__` predefined macro and
+the `__SIMD_*__` feature macros — see §3.3.
+
+**Example**:
+```omscript
+fn main() -> int {
+    var a: i32x8 = [1, 2, 3, 4, 5, 6, 7, 8];
+    var b: i32x8 = [1, 1, 1, 1, 1, 1, 1, 1];
+    var c: i32x8 = a + b;       // element-wise add
+    return c[2] + c[7];         // 4 + 9 = 13
+}
+```
 
 #### 4.4.4 Pointer Type: `ptr` / `ptr<T>`
 
@@ -1087,11 +1207,29 @@ var p: ptr<int> = &x;  // Pointer to x
 
 #### 4.4.5 Reference Type: `ref` / `&T`
 
-**Status**: Reference types are **mentioned in comments** (e.g., `reborrow ref = &src`) but **not fully formalized** in the type system. This is a future feature or internal representation.
+**Status**: Reference types are partially supported as **borrow-variable annotations**. A variable declared `borrow [mut] var r:&T = &x;` is a true pointer-backed alias for `x`: reads of `r` auto-deref to `T`, and writes through a `borrow mut` reference write back to `*ptr` (so the source variable observes the update). Reference types as struct fields, function parameters, return types, or in expression position are not yet formalized.
 
-**Syntax**: `&T` may denote a borrowed reference to `T`.
+**Syntax**: `&T` denotes a borrowed reference to `T`. The initializer must be an `&<lvalue>` expression (e.g. `&x`, not just `x`).
 
-**Semantics**: References are similar to pointers but enforce borrow-checking rules (see §5 for `borrow` and `move` keywords).
+**Semantics**:
+- The alloca for `r` holds a pointer (`ptr` in LLVM IR), not a `T`.
+- Reading `r` emits `load ptr` then `load T` (auto-deref); narrow integer types are sign- or zero-extended to the default expression width based on the `i*`/`u*` annotation.
+- Writing `r = v` (only legal when declared `borrow mut`) coerces `v` to `T` and stores through the held pointer. Writing through an immutable `&T` is a compile-time error.
+- Borrow-checker rules are unchanged: while `r` is alive, the source `x` cannot be moved, mut-borrowed (via another mut alias), or — for a `borrow mut` — read.
+
+**Example**:
+```omscript
+fn main() -> int {
+    var x:i64 = 4;
+    {
+        borrow mut r:&i64 = &x;
+        r = 40;          // write-through: x is now 40
+    }
+    return x + 2;        // 42
+}
+```
+
+**Out of scope (future work)**: `&T` to struct fields or array elements (use `reborrow` today), `&T` parameters / return types, comparisons of references, multi-level `&&T`.
 
 #### 4.4.6 Struct Type
 

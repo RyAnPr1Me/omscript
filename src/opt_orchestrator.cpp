@@ -36,22 +36,21 @@ PassRegistry& PassRegistry::instance() {
 
 uint32_t PassRegistry::registerPass(PassMetadata meta) {
     meta.id = nextId_++;
+    const size_t idx = passes_.size();
     passes_.push_back(std::move(meta));
-    return passes_.back().id;
+    byId_[passes_[idx].id]     = idx;
+    byName_[passes_[idx].name] = idx;
+    return passes_[idx].id;
 }
 
 const PassMetadata* PassRegistry::find(uint32_t id) const noexcept {
-    for (const auto& p : passes_) {
-        if (p.id == id) return &p;
-    }
-    return nullptr;
+    auto it = byId_.find(id);
+    return (it != byId_.end()) ? &passes_[it->second] : nullptr;
 }
 
 const PassMetadata* PassRegistry::find(const std::string& name) const noexcept {
-    for (const auto& p : passes_) {
-        if (p.name == name) return &p;
-    }
-    return nullptr;
+    auto it = byName_.find(name);
+    return (it != byName_.end()) ? &passes_[it->second] : nullptr;
 }
 
 std::vector<uint32_t> PassRegistry::topologicalOrder(
@@ -300,12 +299,57 @@ static void registerAllPasses() {
 // OptimizationOrchestrator
 // ─────────────────────────────────────────────────────────────────────────────
 
+namespace {
+
+/// The standard analysis dependency graph, shared by every pipeline run.
+/// Created once at first call and reused; the non-owning pointers in
+/// AnalysisValidity and AnalysisCache point into this static.
+const AnalysisDependencyGraph& defaultDepGraph() noexcept {
+    static const AnalysisDependencyGraph g = AnalysisDependencyGraph::createDefault();
+    return g;
+}
+
+} // anonymous namespace
+
 OptimizationOrchestrator::OptimizationOrchestrator(OptimizationLevel optLevel,
                                                      bool verbose,
                                                      CodeGenerator* codegen,
                                                      OptimizationManager* manager) noexcept
     : optLevel_(optLevel), verbose_(verbose), codegen_(codegen), manager_(manager) {
     registerAllPasses();
+}
+
+// ── buildDispatch ─────────────────────────────────────────────────────────────
+//
+// Returns the per-pass runner map used by both runPassPipeline and runToProvide.
+// Centralised here so the 10-entry table only appears once; the two callers
+// just call buildDispatch() and pass the result along.
+
+std::unordered_map<uint32_t, PassScheduler::Runner>
+OptimizationOrchestrator::buildDispatch() {
+    using R = PassScheduler::Runner;
+    return {
+        {PassId::kStringTypes,     R([this](Program* p, OptimizationContext& c){ runStringTypes(p, c); })},
+        {PassId::kArrayTypes,      R([this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); })},
+        {PassId::kConstantReturns, R([this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); })},
+        {PassId::kPurity,          R([this](Program* p, OptimizationContext& c){ runPurity(p, c); })},
+        {PassId::kEffects,         R([this](Program* p, OptimizationContext& c){ runEffects(p, c); })},
+        {PassId::kSynthesis,       R([this](Program* p, OptimizationContext& c){ runSynthesis(p, c); })},
+        {PassId::kCFCTRE,          R([this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); })},
+        {PassId::kEGraph,          R([this](Program* p, OptimizationContext& c){ runEGraph(p, c); })},
+        {PassId::kRangeAnalysis,   R([this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); })},
+        {PassId::kRLC,             R([this](Program* p, OptimizationContext& c){ runRLC(p, c); })},
+    };
+}
+
+// ── makeScheduler — shared scheduler construction helper ─────────────────────
+
+PassScheduler OptimizationOrchestrator::makeScheduler(OptimizationContext& ctx) {
+    PassScheduler s = manager_ ? manager_->createScheduler(ctx) : PassScheduler(ctx);
+#ifndef NDEBUG
+    if (!manager_) s.setStrictMode(true);
+#endif
+    return s;
 }
 
 // ── runPrepasses ─────────────────────────────────────────────────────────────
@@ -330,37 +374,14 @@ void OptimizationOrchestrator::runInvalidated(Program* program, OptimizationCont
 //
 // Demand-driven entry point: runs the minimum set of passes needed to ensure
 // that factKey is valid in ctx.  Delegates to PassScheduler::runToProvide()
-// after building the same dispatch map as runPassPipeline.
+// using the shared dispatch map built by buildDispatch().
 
 bool OptimizationOrchestrator::runToProvide(const std::string& factKey,
                                              Program* program,
                                              OptimizationContext& ctx) {
-    using Runner = std::function<void(Program*, OptimizationContext&)>;
-    const std::unordered_map<uint32_t, Runner> dispatch = {
-        {PassId::kStringTypes,     [this](Program* p, OptimizationContext& c){ runStringTypes(p, c); }},
-        {PassId::kArrayTypes,      [this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); }},
-        {PassId::kConstantReturns, [this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); }},
-        {PassId::kPurity,          [this](Program* p, OptimizationContext& c){ runPurity(p, c); }},
-        {PassId::kEffects,         [this](Program* p, OptimizationContext& c){ runEffects(p, c); }},
-        {PassId::kSynthesis,       [this](Program* p, OptimizationContext& c){ runSynthesis(p, c); }},
-        {PassId::kCFCTRE,          [this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); }},
-        {PassId::kEGraph,          [this](Program* p, OptimizationContext& c){ runEGraph(p, c); }},
-        {PassId::kRangeAnalysis,   [this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); }},
-        {PassId::kRLC,             [this](Program* p, OptimizationContext& c){ runRLC(p, c); }},
-    };
-
-    // Attach the dependency graph (same as runPassPipeline does for static runs).
-    static const AnalysisDependencyGraph kDefaultDepGraph =
-        AnalysisDependencyGraph::createDefault();
-    ctx.setDependencyGraph(&kDefaultDepGraph);
-
-    PassScheduler scheduler = manager_
-        ? manager_->createScheduler(ctx)
-        : PassScheduler(ctx);
-#ifndef NDEBUG
-    if (!manager_) scheduler.setStrictMode(true);
-#endif
-
+    const auto dispatch = buildDispatch();
+    ctx.setDependencyGraph(&defaultDepGraph());
+    PassScheduler scheduler = makeScheduler(ctx);
     const bool ok = scheduler.runToProvide(factKey, program, dispatch);
     if (ok) syncFactsToContext(program, ctx);
     return ok;
@@ -386,44 +407,20 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
                                                 OptimizationContext& ctx,
                                                 bool skipValid) {
     // ── Dispatch map ─────────────────────────────────────────────────────
-    // Maps a stable PassId to the per-pass wrapper that runs the work.
-    // Built once per call (IDs are assigned at static-init time, so they are
-    // stable for the lifetime of the process).
-    const std::unordered_map<uint32_t, PassScheduler::Runner> dispatch = {
-        {PassId::kStringTypes,     [this](Program* p, OptimizationContext& c){ runStringTypes(p, c); }},
-        {PassId::kArrayTypes,      [this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); }},
-        {PassId::kConstantReturns, [this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); }},
-        {PassId::kPurity,          [this](Program* p, OptimizationContext& c){ runPurity(p, c); }},
-        {PassId::kEffects,         [this](Program* p, OptimizationContext& c){ runEffects(p, c); }},
-        {PassId::kSynthesis,       [this](Program* p, OptimizationContext& c){ runSynthesis(p, c); }},
-        {PassId::kCFCTRE,          [this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); }},
-        {PassId::kEGraph,          [this](Program* p, OptimizationContext& c){ runEGraph(p, c); }},
-        {PassId::kRangeAnalysis,   [this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); }},
-        {PassId::kRLC,             [this](Program* p, OptimizationContext& c){ runRLC(p, c); }},
-    };
+    const auto dispatch = buildDispatch();
 
     const auto& reg   = PassRegistry::instance();
     const auto  order = reg.topologicalOrder(); // dependency-sorted IDs
 
     // Install the standard analysis dependency graph so that invalidating one
-    // fact automatically cascades to all facts computed from it.  The graph is
-    // created once and stored as a static to avoid repeated allocation across
-    // pipeline runs.  The non-owning pointers in AnalysisValidity and
-    // AnalysisCache point into this static.
-    static const AnalysisDependencyGraph kDefaultDepGraph =
-        AnalysisDependencyGraph::createDefault();
-    ctx.setDependencyGraph(&kDefaultDepGraph);
+    // fact automatically cascades to all facts computed from it.
+    ctx.setDependencyGraph(&defaultDepGraph());
 
     // Construct a PassScheduler for this pipeline run.
     // When an OptimizationManager is available, use it as the factory so the
     // scheduler inherits the manager's strict-mode policy.  Otherwise fall back
     // to a standalone scheduler constructed from ctx.
-    PassScheduler scheduler = manager_
-        ? manager_->createScheduler(ctx)
-        : PassScheduler(ctx);
-#ifndef NDEBUG
-    if (!manager_) scheduler.setStrictMode(true);
-#endif
+    PassScheduler scheduler = makeScheduler(ctx);
 
     const auto tPipelineStart = std::chrono::steady_clock::now();
 
@@ -500,18 +497,7 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
     }
 }
 
-// ── Per-pass wrappers ─────────────────────────────────────────────────────────
-//
-// Each wrapper:
-//   1. Delegates to the corresponding CodeGenerator method.
-//   2. Marks the produced fact valid in ctx.validity().
-//   3. Increments the pass counter (done by runPassPipeline, not here).
-//
-// Phase B: runPassPipeline checks that all required facts are valid before
-// calling each wrapper, and records wall-clock timing around the call.
-// runPrepasses / runInvalidated are now driven by PassRegistry::topologicalOrder()
-// rather than a hardcoded sequence, so adding or reordering passes only
-// requires a metadata change in registerAllPasses().
+// ── Per-pass wrappers — delegate to CodeGenerator, mark fact valid ────────────
 
 void OptimizationOrchestrator::runStringTypes(Program* program, OptimizationContext& ctx) {
     codegen_->preAnalyzeStringTypes(program);
@@ -549,31 +535,18 @@ void OptimizationOrchestrator::runCFCTRE(Program* program, OptimizationContext& 
 }
 
 void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& ctx) {
-    // Before running the e-graph, populate the pure-user-functions set so
-    // the optimizer can include expressions containing calls to those functions.
-    // A pure function always returns the same value for the same arguments, so
-    // algebraic rules (distributivity, commutativity, etc.) can fire across
-    // call boundaries — e.g. 2*f(x) + 3*f(x) → 5*f(x).
+    // Populate pure-user-functions so algebraic rules can fire across call boundaries.
     std::unordered_set<std::string> pureUserFuncs;
     for (const auto& [name, ff] : ctx.allFacts()) {
         if (ff.isPure) pureUserFuncs.insert(name);
     }
     ctx.egraph().setPureUserFuncs(std::move(pureUserFuncs));
-
-    // Delegate the level/flag guard to CodeGenerator (it knows enableEGraph_).
-    // If the guard passes, CodeGenerator configures the subsystem from its own
-    // settings and then calls ctx.egraph().optimizeProgram().
     codegen_->runEGraphPass(program, ctx);
     ctx.validity().egraph = true;
 }
 
 void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationContext& ctx) {
-    // Synthesize ValueRange facts from CFCTRE results AND simple AST patterns.
-    // Phase 1: constant returns (from CFCTRE).
-    // Phase 2: structural patterns — collect ALL return expressions recursively,
-    //          compute a conservative ValueRange for each, and join them.
-    //          This handles multi-return functions (if-else, early returns, etc.)
-    //          which previously received no range information at all.
+    // Synthesize ValueRange facts from CFCTRE results and AST return-expression analysis.
     if (!program) {
         ctx.validity().rangeAnalysis = true;
         return;
@@ -756,20 +729,7 @@ void OptimizationOrchestrator::runRLC(Program* program, OptimizationContext& ctx
 }
 
 // ── syncFactsToContext ────────────────────────────────────────────────────────
-//
-// Completes the FunctionFacts stored in OptimizationContext by filling in
-// derived facts and CF-CTRE results that are not written directly by the
-// individual analysis passes.
-//
-// Note: raw analysis facts (isConstFoldable, constIntReturn, constStringReturn,
-// effects) are now written directly into OptimizationContext by the analysis
-// passes themselves (Phase F), so this function only needs to:
-//   1. Re-assert raw facts from CodeGenerator as a safety net (ensures facts
-//      set before optCtx_ was wired up — e.g. @const_eval in generateFunction —
-//      are still visible).
-//   2. Compute derived facts (isPure) that depend on the raw facts.
-//   3. Populate CF-CTRE results (isDead, foldedByCFCTRE, uniformCTReturn) that
-//      are only available after runCFCTRE() completes.
+// Fill derived facts and CF-CTRE results into OptimizationContext after passes run.
 
 void OptimizationOrchestrator::syncFactsToContext(Program* program,
                                                    OptimizationContext& ctx) const {
@@ -779,10 +739,8 @@ void OptimizationOrchestrator::syncFactsToContext(Program* program,
         const std::string& name = func->name;
         FunctionFacts& ff = ctx.mutableFacts(name);
 
-        // ── Safety-net: assert raw facts from CodeGenerator accessors ─────
-        // Analysis passes now write these directly, but functions declared
-        // with @const_eval before optCtx_ was live (e.g. during early IR
-        // emission) may not have been written yet.
+        // Safety-net: assert raw facts — @const_eval functions declared before
+        // optCtx_ was live may not have been written by analysis passes.
         if (!ff.isConstFoldable)
             ff.isConstFoldable = codegen_->isConstEvalFunction(name);
         if (!ff.constIntReturn)
@@ -798,20 +756,16 @@ void OptimizationOrchestrator::syncFactsToContext(Program* program,
             }
         }
 
-        // ── Derived: purity ───────────────────────────────────────────────
+        // Derived purity.
         ff.isPure = ff.effects.isReadNone() || ff.isConstFoldable;
 
-        // ── CF-CTRE: dead-function detection ─────────────────────────────
+        // CF-CTRE results.
         if (ctx.ctEngine()) {
-            ff.isDead          = ctx.ctEngine()->deadFunctions().count(name) > 0;
-            ff.foldedByCFCTRE  = ctx.ctEngine()->foldableCallees().count(name) > 0;
-
-            // Uniform return value (same constant on every call path).
+            ff.isDead         = ctx.ctEngine()->deadFunctions().count(name) > 0;
+            ff.foldedByCFCTRE = ctx.ctEngine()->foldableCallees().count(name) > 0;
             const auto& uniform = ctx.ctEngine()->uniformReturnValues();
             auto it = uniform.find(name);
-            if (it != uniform.end()) {
-                ff.uniformCTReturn = it->second;
-            }
+            if (it != uniform.end()) ff.uniformCTReturn = it->second;
         }
     }
 }

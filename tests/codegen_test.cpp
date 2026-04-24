@@ -6369,6 +6369,61 @@ TEST(CodegenTest, SimdF64x2Vector) {
 }
 
 // ===========================================================================
+// Typed struct fields — DataLayout-driven sizing and per-field LLVM types
+// ===========================================================================
+
+// A struct with a `f64` field must store doubles, not ints; before this was
+// fixed every field was implicitly i64 and float values were FPToSI-truncated.
+TEST(CodegenTest, StructFieldTypedF64PreservesPrecision) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "struct V { x: f64, y: f64, } "
+        "fn main() -> int { var v: V = V { x: 1.5, y: 2.5 }; return to_int(v.x + v.y); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    // The underlying StructType must have two double elements (DataLayout-sized),
+    // not two i64s.
+    auto* sty = llvm::StructType::getTypeByName(mod->getContext(), "omsc.struct.V");
+    ASSERT_NE(sty, nullptr);
+    ASSERT_EQ(sty->getNumElements(), 2u);
+    EXPECT_TRUE(sty->getElementType(0)->isDoubleTy());
+    EXPECT_TRUE(sty->getElementType(1)->isDoubleTy());
+}
+
+// Mixed-type fields must each get their own narrow LLVM type, not be padded
+// out to i64 slots.
+TEST(CodegenTest, StructFieldTypedMixedTypes) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "struct M { a: i32, b: f64, c: u8, } "
+        "fn main() -> int { var m: M = M { a: 7, b: 3.5, c: 250 }; return m.a + m.c; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* sty = llvm::StructType::getTypeByName(mod->getContext(), "omsc.struct.M");
+    ASSERT_NE(sty, nullptr);
+    ASSERT_EQ(sty->getNumElements(), 3u);
+    EXPECT_TRUE(sty->getElementType(0)->isIntegerTy(32));
+    EXPECT_TRUE(sty->getElementType(1)->isDoubleTy());
+    EXPECT_TRUE(sty->getElementType(2)->isIntegerTy(8));
+}
+
+// Untyped fields keep their legacy i64 representation so existing programs
+// that rely on the uniform-slot layout are not broken.
+TEST(CodegenTest, StructFieldUntypedDefaultsToI64) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "struct U { x, y, } "
+        "fn main() -> int { var u: U = U { x: 1, y: 2 }; return u.x + u.y; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* sty = llvm::StructType::getTypeByName(mod->getContext(), "omsc.struct.U");
+    ASSERT_NE(sty, nullptr);
+    ASSERT_EQ(sty->getNumElements(), 2u);
+    EXPECT_TRUE(sty->getElementType(0)->isIntegerTy(64));
+    EXPECT_TRUE(sty->getElementType(1)->isIntegerTy(64));
+}
+
+// ===========================================================================
 // Register keyword
 // ===========================================================================
 

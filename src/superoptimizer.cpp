@@ -1,19 +1,6 @@
-/// @file superoptimizer.cpp
-/// @brief Superoptimizer implementation for LLVM IR.
-///
 /// Finds globally optimal instruction sequences by combining:
-///   - Idiom recognition (popcount, bswap, rotate, min/max, abs, etc.)
-///   - Algebraic identity simplification on LLVM IR
-///   - Branch-to-select conversion for simple diamond CFGs
-///   - Enumerative synthesis with concrete verification
-///
-/// The superoptimizer operates as a late-stage pass after LLVM's standard
-/// pipeline, targeting patterns that individual passes miss or that require
-/// cross-instruction analysis.
 
 // Apply maximum compiler optimizations to this hot path.
-// The idiom detection and algebraic simplification loops dominate
-// the post-LLVM optimization time for large programs.
 #ifdef __GNUC__
 #  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
 #endif
@@ -55,13 +42,8 @@ namespace superopt {
 using namespace llvm::PatternMatch;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Cost model
-// ─────────────────────────────────────────────────────────────────────────────
 
 // Thread-local cost override.  Set by superoptimizeFunction/superoptimizeModule
-// when the caller provides a hardware-profile-driven cost function via
-// SuperoptimizerConfig::costFn.  This ensures a single authoritative cost
-// source is used for all synthesis, idiom, and candidate-selection decisions.
 static thread_local const std::function<double(const llvm::Instruction*)>*
     g_costFn = nullptr;
 
@@ -81,12 +63,6 @@ double instructionCost(const llvm::Instruction* inst) {
         return 0.0;
 
     // IntToPtr/PtrToInt: while these are nominally free in the backend,
-    // they destroy pointer provenance information which prevents LLVM's
-    // alias analysis (BasicAA) from proving noalias between pointers
-    // that went through an i64 round-trip.  This blocks LICM, GVN, and
-    // vectorization.  Assigning a cost of 1.5 incentivizes the
-    // superoptimizer to prefer patterns that avoid unnecessary
-    // pointer-integer conversions.
     case llvm::Instruction::IntToPtr:
     case llvm::Instruction::PtrToInt:
         return 1.5;
@@ -191,8 +167,6 @@ double blockCost(const llvm::BasicBlock* bb) {
     return cost;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Concrete evaluator
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
@@ -369,8 +343,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection helpers
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Check if a value has exactly one use.
 [[nodiscard]] [[gnu::always_inline]] static inline bool hasOneUse(llvm::Value* v) {
@@ -394,9 +366,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 /// Recursively check if a value is known to be non-negative (sign bit = 0).
-/// This goes beyond computeKnownBits by tracking through nuw-flagged arithmetic,
-/// XOR of non-negative values, and loop induction variable PHI nodes that
-/// start from 0 and increment by a positive step.
 
 /// Check whether a constant (scalar ConstantInt or vector splat/element-wise)
 /// has all elements strictly positive (> 0).
@@ -448,15 +417,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     unsigned op = inst->getOpcode();
 
     // add: if both operands are non-negative, the result is non-negative when:
-    //   (a) nuw flag is set (guarantees no unsigned wrap), OR
-    //   (b) nsw flag is set (signed overflow is poison, so the result must be
-    //       representable as a non-negative i64), OR
-    //   (c) both operands have at least 2 leading zero bits known (i.e., both
-    //       are < 2^62), so their sum is < 2^63 and the sign bit stays 0.
-    //       This is a key OmScript advantage: for-loop iterators and their
-    //       derived expressions (XOR, AND, OR of loop vars) typically fit in
-    //       far fewer than 62 bits, so this handles patterns like
-    //       ((i^j) + k) where i,j,k are loop iterators.
     if (op == llvm::Instruction::Add) {
         if (isValueNonNegative(inst->getOperand(0), DL, depth + 1) &&
             isValueNonNegative(inst->getOperand(1), DL, depth + 1)) {
@@ -470,8 +430,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
             unsigned leadingZeros0 = kb0.countMinLeadingZeros();
             unsigned leadingZeros1 = kb1.countMinLeadingZeros();
             // Each operand fits in (bitWidth - leadingZeros) bits.
-            // Their sum fits in max(bw0, bw1) + 1 bits.
-            // If max(bw0, bw1) + 1 <= 63, the sum is < 2^63 (non-negative).
             unsigned bw = kb0.getBitWidth();  // typically 64 for i64
             unsigned maxBits = std::max(bw - leadingZeros0, bw - leadingZeros1) + 1;
             // bw - 1 is the sign bit position (63 for i64); if the sum
@@ -500,21 +458,12 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     }
 
     // urem: result of unsigned remainder is always in [0, divisor), so
-    // it's always non-negative.  This is critical for post-unroll srem→urem
-    // conversion: after loop unrolling, patterns like
-    //   %t = urem i64 %x, 37
-    //   %t2 = add i64 %t, 1
-    //   %t3 = srem i64 %t2, 37   ← can be converted to urem because t2 >= 0
-    // become provable.
     if (op == llvm::Instruction::URem) return true;
 
     // udiv: result of unsigned division is always non-negative
     if (op == llvm::Instruction::UDiv) return true;
 
     // srem by positive constant: result is always in (-(divisor-1), divisor-1)
-    // When the dividend is non-negative, srem is equivalent to urem and the
-    // result is in [0, divisor-1).  Even when the dividend is negative, the
-    // absolute value of srem is bounded.  For the non-negative case specifically:
     if (op == llvm::Instruction::SRem) {
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst->getOperand(1))) {
             if (ci->getSExtValue() > 0 &&
@@ -530,17 +479,12 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     }
 
     // sdiv by positive constant with non-negative dividend: result is in [0, dividend/C],
-    // so it is always non-negative.  Mirrors the SRem case above.  This enables
-    // downstream adds/muls on quotients to get NSW/NUW flags without needing
-    // an extra llvm.assume.
     if (op == llvm::Instruction::SDiv) {
         if (isValueNonNegative(inst->getOperand(0), DL, depth + 1)) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst->getOperand(1))) {
                 if (ci->getSExtValue() > 0) return true;
             }
             // Runtime positive divisor: if it's provably non-negative (and
-            // non-zero — assumed by the caller as sdiv by zero is UB), the
-            // quotient is also non-negative.
             if (isValueNonNegative(inst->getOperand(1), DL, depth + 1)) return true;
         }
     }
@@ -552,9 +496,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     if (op == llvm::Instruction::ZExt) return true;
 
     // sext: non-negative if the source value is non-negative (sign extension
-    // preserves the sign).  This is critical for srem→urem after LLVM truncates
-    // modulo operations to narrow types: e.g., `srem i64 x, 193` may become
-    // `trunc i64 → i16`, `srem i16, 193`, `sext i16 → i64`.
     if (op == llvm::Instruction::SExt) {
         return isValueNonNegative(inst->getOperand(0), DL, depth + 1);
     }
@@ -572,8 +513,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         // bits, then the truncated result is non-negative.
         if (leadingZeros >= srcBits - (dstBits - 1)) return true;
         // Otherwise, if the source is non-negative and bounded by a small
-        // constant (e.g., result of srem by a constant that fits in the
-        // truncated type), still mark as non-negative.
         if (isValueNonNegative(inst->getOperand(0), DL, depth + 1)) {
             // Check if the source is bounded by the truncated type's signed max.
             // srem result is bounded by divisor - 1.
@@ -592,9 +531,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     }
 
     // and: bitmask with a positive constant always produces a non-negative
-    // result.  e.g. x & 1  →  result ∈ {0,1}, always ≥ 0.
-    // More generally, x & C where C ∈ [0, INT64_MAX] has the sign bit cleared
-    // so the result is non-negative regardless of x.
     if (op == llvm::Instruction::And) {
         auto checkNonNegConst = [](llvm::Value* v) -> bool {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v))
@@ -638,11 +574,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     }
 
     // shl nsw: if operand is non-negative, result is non-negative.
-    // nsw (no signed wrap) on shl guarantees the sign bit was not
-    // changed by the shift, so x >= 0 → (x shl k nsw) >= 0.
-    // Note: nuw alone is NOT sufficient — shl nuw only guarantees that
-    // no bits are shifted out of the top, but the result's sign bit can
-    // still be set by a 1-bit in the source shifted into position 63.
     if (op == llvm::Instruction::Shl) {
         if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
             if (bo->hasNoSignedWrap()) {
@@ -652,17 +583,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     }
 
     // Intrinsic calls with non-negative results:
-    //   abs(x)        — absolute value is always non-negative by definition.
-    //   umin/umax     — unsigned min/max results are always in [0, UINT64_MAX],
-    //                   which interpreted as i64 never has the sign bit set when
-    //                   both inputs are < 2^63.  We conservatively check that
-    //                   at least one operand is non-negative (the min/max result
-    //                   is bounded by the non-negative operand).
-    //   smin(a,b)     — signed min is non-negative when both a and b are ≥ 0.
-    //   smax(a,b)     — signed max is non-negative when at least one is ≥ 0
-    //                   (the result >= the non-negative operand).
-    // These enable NSW/NUW propagation through min/max chains in hot loops
-    // (e.g. clamp patterns, saturating accumulation).
     if (auto* call = llvm::dyn_cast<llvm::CallInst>(inst)) {
         if (auto* callee = call->getCalledFunction()) {
             switch (callee->getIntrinsicID()) {
@@ -686,18 +606,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     }
 
     // PHI node: check if all incoming values (excluding self-references) are
-    // non-negative.  This handles loop induction variables that start from 0
-    // and increment by a positive step, as well as PHIs from loop unrolling
-    // where incoming values are other PHI nodes or or-disjoint increments.
-    //
-    // Cycle detection: a thread-local set of PHIs currently under analysis
-    // prevents infinite recursion when back-edges form cycles through select
-    // or other expressions that contain the PHI (e.g. Collatz x variable:
-    //   phi = [init, select(x&1, 3*phi+1, phi>>1)]).
-    // When we re-encounter a phi already being analyzed, we return true
-    // (assume non-negative inductively) — the base case is checked below
-    // on the non-back-edge incoming values, and the back-edge check tests
-    // whether the update expression preserves non-negativity given non-neg input.
     if (auto* phi = llvm::dyn_cast<llvm::PHINode>(inst)) {
         // Cycle guard: if we're already analyzing this phi in the current
         // call chain, assume it's non-negative (inductive hypothesis).
@@ -730,27 +638,16 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
                     continue;  // or disjoint with phi is non-negative if phi is ✓
                 }
                 // Modular reduction pattern: srem(expr, positive_const) as
-                // back-edge value.  The srem result is in (-C+1, C-1) for
-                // divisor C.  If the initial value of the PHI is non-negative,
-                // and the back-edge computes srem of an expression derived from
-                // this PHI with a positive constant, the result is non-negative
-                // because the PHI's range is always [0, C-1).
-                // Pattern: phi = [init, srem(f(phi), C)]  where C > 0
                 if (addInst->getOpcode() == llvm::Instruction::SRem) {
                     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(addInst->getOperand(1))) {
                         if (ci->getSExtValue() > 0) {
                             // Check if this srem uses the phi (directly or indirectly)
-                            // and initial values are non-negative.
-                            // This handles patterns like: a = (a + i*7) % 97
                             continue;  // srem with positive divisor → non-negative ✓
                         }
                     }
                 }
             }
             // SRem as direct incoming value (not wrapped in BinaryOperator check)
-            // Also trace through sext/zext/extractelement to find the srem at the
-            // root.  LLVM's SLP vectorizer may pack two srem operations into a vector
-            // srem, producing: sext(extractelement(srem(<2 x i16>, <i16 C1, i16 C2>), N))
             {
                 llvm::Value* sremCandidate = incoming;
                 // Peel through sext/zext
@@ -818,8 +715,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     }
 
     // Intrinsic calls with known non-negative results.
-    // Note: computeKnownBits at depth=0 does not analyse call instructions,
-    // so we must handle these explicitly.
     if (auto* ci = llvm::dyn_cast<llvm::CallInst>(inst)) {
         if (auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(ci)) {
             switch (ii->getIntrinsicID()) {
@@ -855,8 +750,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — bit rotation
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: (x << c) | (x >> (bitwidth - c))  →  rotate left by c
@@ -897,8 +790,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     return match;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — absolute value
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: select(x < 0, -x, x)  →  abs(x)
@@ -954,8 +845,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     }
 
     // Pattern 2b: Reverse XOR-subtract trick: (x >> (W-1)) + (x ^ (x >> (W-1)))
-    // Some compilers emit abs as: signBit = ashr x, W-1; result = (signBit + x) ^ signBit
-    // or: result = add(ashr(x, W-1), xor(x, ashr(x, W-1)))
     if (inst->getOpcode() == llvm::Instruction::Add) {
         for (int side = 0; side < 2; ++side) {
             auto* ashr = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(side));
@@ -980,15 +869,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     }
 
     // Pattern 3: abs(a - b) from select(a > b, a-b, b-a) or select(a < b, b-a, a-b)
-    //
-    // This is the canonical "absolute difference" or "distance" pattern:
-    //   if (a > b) return a - b; else return b - a;
-    // Which can be expressed as: abs(a - b)
-    //
-    // The select has:
-    //   cond: icmp sgt a, b  or  icmp sge a, b  or  icmp slt a, b  or  icmp sle a, b
-    //   true: a - b  (or b - a, depending on predicate)
-    //   false: b - a  (or a - b)
     if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
         auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition());
         if (cmp) {
@@ -1029,8 +909,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     return std::nullopt;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — min/max
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: select(icmp slt a, b, a, b) → smin(a, b)
@@ -1114,8 +992,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — power-of-2 test
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: (x & (x - 1)) == 0  →  ctpop(x) <= 1
 [[nodiscard]] static std::optional<IdiomMatch> detectPowerOf2Test(llvm::Instruction* inst) {
@@ -1144,8 +1020,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     return match;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — bit field extract
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: (x >> shift) & mask  where mask = (1 << width) - 1
@@ -1179,8 +1053,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — sign extension
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: (x << (bw-n)) >> (bw-n)  →  sext from n bits
 /// This pattern manually sign-extends an n-bit value stored in a wider integer.
@@ -1211,8 +1083,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     return match;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — conditional negation
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: select(cond, sub(0, x), x)  →  conditional negation
@@ -1270,15 +1140,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — clear lowest set bit (x & (x-1))
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: x & (x - 1) → clear lowest set bit (used in is_power_of_2, bit-loop)
-/// Pattern: and(x, sub(x, 1))
-/// NOTE: x & (-x) isolates the lowest set bit VALUE (= 1 << ctz(x)), not the
-/// count.  We do NOT replace x & (-x) with cttz(x) because that changes the
-/// result (e.g., 12 & -12 = 4, but cttz(12) = 2).  LLVM's backend already
-/// emits `blsi` for x & (-x) on BMI1 targets, so no IR transformation is needed.
 [[nodiscard]] static std::optional<IdiomMatch> detectClearLowestBit(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::And) return std::nullopt;
 
@@ -1301,19 +1164,13 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     if (!x) return std::nullopt;
 
     // x & (x-1) is already optimal: on BMI1 x86, the backend emits `blsr`.
-    // No beneficial IR transformation exists, so we return nullopt to leave
-    // the pattern as-is and let LLVM's backend handle it.
     (void)x;
     return std::nullopt;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — byte swap
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: (x >> 24) | ((x >> 8) & 0xFF00) | ((x << 8) & 0xFF0000) | (x << 24)
-/// This is a 32-bit byte swap pattern.  Also detects the simpler 16-bit form:
-/// ((x >> 8) & 0xFF) | (x << 8)
 [[nodiscard]] static std::optional<IdiomMatch> detectByteSwap(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::Or) return std::nullopt;
 
@@ -1346,13 +1203,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — population count (Hamming weight)
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect the "subtract and mask" population count pattern:
-/// x = x - ((x >> 1) & 0x5555555555555555)
-/// This is the first step of the standard Brian Kernighan or divide-and-conquer
-/// popcount algorithm.  We detect the pattern and replace with llvm.ctpop.
 [[nodiscard]] static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
 
@@ -1387,25 +1239,10 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Idiom detection — count leading zeros via bit-smearing
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect the "bit smear then popcount" CLZ pattern:
-///   x |= x >> 1; x |= x >> 2; x |= x >> 4; ... ; return bitwidth - popcount(x)
-///
-/// This function specifically detects the bit-smear-popcount CLZ idiom,
-/// where all bits below the highest set bit are smeared to 1 via a chain
-/// of OR-shift operations, and then popcount is subtracted from the bit
-/// width to yield the number of leading zeros.
-///
-/// We detect the end of the pattern: sub(bitwidth, ctpop(or-chain(x)))
-/// where the or-chain is at least one stage of or(x, lshr(x, k)).
-/// The de Bruijn lookup variant is left for future work.
 [[nodiscard]] static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst) {
     // Detect bit-smear sequence ending with popcount subtraction:
-    //   x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
-    //   return 64 - popcount(x);
-    // The de Bruijn lookup variant is left for future work.
 
     // We detect the end of the pattern: sub(bitwidth, ctpop(or-chain))
     if (inst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
@@ -1437,8 +1274,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 
     llvm::Value* x = orInst->getOperand(0);
     // Walk up the OR chain to find the original x
-    // The chain looks like: or(or(or(x, lshr(x,1)), lshr(or(x,lshr(x,1)),2)), ...)
-    // Just find the deepest x
     while (auto* innerOr = llvm::dyn_cast<llvm::BinaryOperator>(x)) {
         if (innerOr->getOpcode() != llvm::Instruction::Or) break;
         x = innerOr->getOperand(0);
@@ -1452,11 +1287,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     return match;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Saturating addition: select(add_overflow(a,b), MAX, a+b) → uadd.sat(a,b)
-// Patterns detected:
-//   1. select(icmp ugt (a+b), a, MAX_UINT, a+b)  (unsigned overflow via wrap)
-//   2. select(extractvalue(@llvm.uadd.with.overflow(a,b), 1), MAX, sum)
 // ─────────────────────────────────────────────────────────────────────────────
 [[nodiscard]] static std::optional<IdiomMatch> detectSaturatingAdd(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
@@ -1524,9 +1354,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Saturating subtraction: select(icmp ult a b, 0, a-b) → usub.sat(a,b)
-// Pattern: clamp subtraction to zero instead of wrapping unsigned
-// ─────────────────────────────────────────────────────────────────────────────
 [[nodiscard]] static std::optional<IdiomMatch> detectSaturatingSub(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel) return std::nullopt;
@@ -1587,14 +1414,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Conditional increment/decrement idiom detection
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: select(cond, x+1, x) or select(cond, x-1, x)
-/// These patterns arise from if/else branches that conditionally adjust a
-/// counter.  Replacing with x + zext(cond) or x - zext(cond) eliminates
-/// the select instruction and produces a single add/sub with a zero-extended
-/// boolean, which is cheaper on all microarchitectures.
 [[nodiscard]] static std::optional<IdiomMatch> detectConditionalIncrement(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel) return std::nullopt;
@@ -1642,15 +1463,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     }
 
     // Reverse patterns: select(cond, x, x+1) → x + zext(!cond)
-    // These are handled by LLVM's instcombine (select canonicalization),
-    // so we don't need to detect them here.
 
     // Pattern 3: select(cond, C+1, C) where C is a constant integer  →  C + zext(cond)
-    // This is a specialization of Pattern 1 for constant bases. It arises naturally
-    // when boolean conditions are accumulated: `count += (x > 0)` compiles to
-    //   result = select(x > 0, count+1, count)
-    // which reduces to count + zext(x>0).  When `count` starts as a literal like 0
-    // or 1, the trueVal and falseVal are integer constants differing by 1.
     {
         auto cvTrue  = getConstIntValue(trueVal);
         auto cvFalse = getConstIntValue(falseVal);
@@ -1677,16 +1491,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hacker's Delight §5-2: Average of two integers without overflow
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: (a & b) + ((a ^ b) >> 1)  →  floor((a + b) / 2) without overflow
-/// Also:   (a + b) >> 1  when NSW/NUW flags prove no overflow (already handled
-///         by LLVM InstCombine, but our pattern handles the explicit safe form).
-///
-/// Hacker's Delight §5-2: "Average of two integers without overflow":
-///   unsigned avg = (a & b) + ((a ^ b) >> 1)
-///   This is exactly llvm.uavg.u(a, b) — one instruction on modern x86 with AVX512.
 [[nodiscard]] static std::optional<IdiomMatch> detectAverageWithoutOverflow(llvm::Instruction* inst) {
     // Pattern: add(and(a, b), lshr(xor(a, b), 1))
     if (inst->getOpcode() != llvm::Instruction::Add) return std::nullopt;
@@ -1735,20 +1541,10 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hacker's Delight §2-1: Sign of an integer
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: select(x > 0, 1, select(x < 0, -1, 0))  →  sign(x)
-/// Or the arithmetic version: (x >> 63) | ((-x) >>> 63)  Hacker's Delight §2-7
-/// Canonical LLVM: (x >> (N-1)) - ((-x) >> (N-1))  (for signed)
-///   or:  ashr(x, N-1) | zext(icmp sgt x, 0)  (alternative)
-///
-/// Replaces with: select(x > 0, 1, ashr(x, bitwidth-1))
-/// which is 2 ops (icmp + select/or) vs 3-5 ops for the naive form.
 [[nodiscard]] static std::optional<IdiomMatch> detectSignFunction(llvm::Instruction* inst) {
     // Pattern 1: or(ashr(x, 63), zext(icmp sgt(x, 0)))
-    // = (x >> 63) | (x > 0 ? 1 : 0)
-    // For signed: negative→-1, zero→0, positive→1
     if (inst->getOpcode() == llvm::Instruction::Or) {
         auto* ashrInst = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0));
         auto* zextInst = llvm::dyn_cast<llvm::CastInst>(inst->getOperand(1));
@@ -1815,17 +1611,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hacker's Delight §3-1: Next power of 2
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect the bit-smear pattern for "ceiling to next power of 2":
-///   x = x - 1
-///   x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32
-///   x = x + 1
-/// This is equivalent to: x == 0 ? 1 : 1 << (64 - ctlz(x-1))
-/// Or simpler: (x <= 1) ? 1 : (1 << (64 - ctlz(x - 1)))
-///
-/// We detect the accumulated OR pattern and replace with CLZ-based computation.
 [[nodiscard]] static std::optional<IdiomMatch> detectNextPowerOf2(llvm::Instruction* inst) {
     // Final instruction must be: add(%smeared, 1)
     if (inst->getOpcode() != llvm::Instruction::Add) return std::nullopt;
@@ -1886,8 +1673,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     return match;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
 [[gnu::hot]] std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
@@ -1968,8 +1753,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     return results;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Idiom replacement — emit optimal intrinsics
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Replace a detected idiom with an optimal instruction sequence.
@@ -2092,10 +1875,6 @@ static bool replaceIdiom(IdiomMatch& match) {
 
     case Idiom::BitFieldExtract: {
         // Replace shift-and-mask with a normalized shift+and sequence
-        // (this helps subsequent passes recognize the pattern).
-        // operands[0] = base value x
-        // operands[1] = shift amount
-        // operands[2] = original bit mask (e.g., 7 for a 3-bit field)
         llvm::Value* x = match.operands[0];
         llvm::Value* shift = match.operands.size() > 1 ? match.operands[1] : nullptr;
         llvm::Value* origMask = match.operands.size() > 2 ? match.operands[2] : nullptr;
@@ -2134,12 +1913,6 @@ static bool replaceIdiom(IdiomMatch& match) {
 
     case Idiom::ConditionalIncrement: {
         // Replace select(cond, x+1, x) → x + zext(cond, type)
-        // This eliminates the select and the intermediate add, producing
-        // a single zext + add sequence that is cheaper on all targets.
-        //
-        // Reuse an existing zext(cond, intTy) in the same basic block to
-        // avoid creating a duplicate that prevents value-equality checks in
-        // downstream passes (applyAlgebraicSimplifications, select chains).
         llvm::Value* x = match.operands[0];
         llvm::Value* cond = match.operands[1];
         llvm::Value* ext = nullptr;
@@ -2184,32 +1957,9 @@ static bool replaceIdiom(IdiomMatch& match) {
 
     case Idiom::AverageWithoutOverflow: {
         // Hacker's Delight §5-2: (a & b) + ((a ^ b) >> 1)
-        // Replace with the equivalent 2-instruction sequence that directly
-        // expresses the average, which LLVM's backend can lower to VAVG or
-        // a single add + shift on targets that support it.
-        // We emit: (a + b) >> 1 with overflow-safe arithmetic:
-        //   tmp = add(a, b)  — may overflow, but we handle with nsw trick
-        // Actually we re-emit the canonical form so LLVM InstCombine can
-        // further optimize:  (a & b) + ((a ^ b) >> 1)  is already optimal
-        // for unsigned average.  Just return true to mark as handled — the
-        // pattern is already the optimal 3-instruction form and the idiom
-        // detection will prevent the synthesis pass from trying to "improve"
-        // it further with more expensive sequences.
-        //
-        // For the actual lowering: emit the average directly using the form
-        // that LLVM recognizes as uavg_sat-eligible:
-        //   result = lshr(add_nuw(a, b), 1)  when both are non-negative
-        // or keep the original pattern. Since this runs on verified non-negative
-        // contexts, use the simpler form:
         llvm::Value* a = match.operands[0];
         llvm::Value* b = match.operands[1];
         // (a | b) - ((a ^ b) >> 1) is equivalent and sometimes cheaper:
-        // But the simplest canonical form for LLVM to recognize is:
-        // lshr(add(zext(a, i128), zext(b, i128)), 1) truncated — too complex.
-        // Instead: the original pattern (a&b)+((a^b)>>1) is already the
-        // 3-op Hacker's Delight form. We improve it to (a|b)-((a^b)>>1)
-        // which uses the same 3 instructions but may have better ILP
-        // because OR has no carry chain unlike AND:
         llvm::Value* orVal = builder.CreateOr(a, b, "avg.or");
         llvm::Value* xorVal = builder.CreateXor(a, b, "avg.xor");
         llvm::Value* shrVal = builder.CreateLShr(xorVal,
@@ -2221,9 +1971,6 @@ static bool replaceIdiom(IdiomMatch& match) {
 
     case Idiom::SignFunction: {
         // Hacker's Delight §2-7: sign of integer
-        // Replace with: ashr(x, bw-1) | zext(x > 0)
-        // = -1 for x<0, 0 for x==0, 1 for x>0
-        // 2 instructions vs 3-5 for the naive form.
         llvm::Value* x = match.operands[0];
         unsigned bw = match.bitWidth;
         llvm::Value* shiftAmt = llvm::ConstantInt::get(intTy, bw - 1);
@@ -2238,9 +1985,6 @@ static bool replaceIdiom(IdiomMatch& match) {
 
     case Idiom::NextPowerOf2: {
         // Hacker's Delight §3-1: next power of 2 (ceiling)
-        // Replace bit-smear pattern with CLZ-based computation:
-        //   x == 0 ? 1 : 1 << (bw - ctlz(x - 1))
-        // This is 4-5 instructions vs 10+ for the bit-smear.
         llvm::Value* x = match.operands[0];
         unsigned bw = match.bitWidth;
         llvm::Function* ctlz = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::ctlz, {intTy});
@@ -2263,10 +2007,6 @@ static bool replaceIdiom(IdiomMatch& match) {
 
     case Idiom::ConditionalNeg: {
         // select(cond, -x, x) → (x ^ mask) - mask  where mask = -sext(cond)
-        // This replaces a conditional negation with branchless two's complement:
-        //   mask = sext(cond)    (all-1s if true, all-0s if false)
-        //   result = (x ^ mask) - mask
-        // 3 instructions and fully branchless on all targets.
         llvm::Value* x = match.operands[0];
         llvm::Value* cond = match.operands[1];
         llvm::Value* ext = builder.CreateSExt(cond, intTy, "cneg.sext");
@@ -2278,8 +2018,6 @@ static bool replaceIdiom(IdiomMatch& match) {
 
     case Idiom::SignExtend: {
         // (x << (bw-n)) >> (bw-n) → trunc to n bits + sext back to bw
-        // The canonical trunc+sext form lets the backend lower to a single
-        // MOVSX/SXTB instruction instead of a shift pair.
         llvm::Value* x = match.operands[0];
         unsigned srcBits = match.bitWidth;
         llvm::Type* narrowTy = llvm::IntegerType::get(ctx, srcBits);
@@ -2294,8 +2032,6 @@ static bool replaceIdiom(IdiomMatch& match) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Algebraic simplification on LLVM IR
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Apply algebraic identity simplifications that LLVM's instcombine may miss
@@ -2670,12 +2406,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // Pattern: srem x, C → urem x, C  when x is known non-negative
-            // and C is a positive constant.  Unsigned remainder avoids the
-            // sign-correction fixup that srem requires (saves ~6 instructions
-            // in the lowered code for non-power-of-2 divisors like 37).
-            // This is a key advantage the superoptimizer provides over
-            // standard LLVM passes that may not prove non-negativity across
-            // complex expressions involving loop induction variables.
             if (!simplified && inst.getOpcode() == llvm::Instruction::SRem) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     if (ci->getSExtValue() > 0) {
@@ -2919,16 +2649,11 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // Pattern: (a + b) ^ (a & b) → (a | b)
-            // Proof: a+b = (a^b) + 2*(a&b), but (a+b)^(a&b) = a|b is only valid
-            // when there's no carry.  For general values: (a^b) + (a&b) = a|b is NOT
-            // true.  So skip this — it's not a correct identity for all inputs.
 
             // Pattern: (x << c) | (x >> (bitwidth - c)) → rotate left
             // These are already handled by the idiom recognizer, so skip here.
 
             // Pattern: zext(trunc(x)) where no bits lost → x
-            // Only valid when upper bits are known zero.
-            // Leave to LLVM's instcombine as it has proper known-bits analysis.
 
             // Pattern: select(cond, x, undef) → x
             if (!simplified && llvm::isa<llvm::SelectInst>(inst)) {
@@ -3053,11 +2778,6 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
             // ── Signed rem/sub by power-of-2 — non-negative dividend fast path ─
-            // srem(x, 2^n) → and(x, 2^n - 1) when x is provably non-negative.
-            // Safe because srem == urem for non-negative dividends.  Avoids the
-            // 25-cycle signed remainder operation entirely.  Critical for loops
-            // where the induction variable (always ≥ 0) is used in modulo
-            // expressions like `i % 8` to compute bucket indices or alignment.
             if (!simplified && inst.getOpcode() == llvm::Instruction::SRem) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     int64_t c = ci->getSExtValue();
@@ -3073,12 +2793,6 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
             // sub(x, srem(x, 2^n)) → and(x, ~(2^n - 1)) when x is non-negative.
-            // This is the "floor to nearest multiple of 2^n" pattern that users
-            // commonly write as `x - (x % 8)` to align a byte offset to a cache
-            // line, SIMD boundary, or page size.  With a non-negative x the
-            // signed mod is equal to the unsigned mod, so:
-            //   x - (x & (C-1))  =  x & ~(C-1)
-            // Saves 1 srem (≈25 cycles) + 1 sub → 1 and (1 cycle).
             if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
                 llvm::Value* dividend = inst.getOperand(0);
                 if (auto* sremInst =
@@ -3106,11 +2820,6 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
             // sub(x, and(x, C-1)) → and(x, ~(C-1)) for power-of-2 C, valid for ALL x.
-            // This fires when the srem→urem→urem_pow2 chain has already simplified
-            // srem(x, C) to and(x, C-1), leaving sub(x, and(x, C-1)) in the IR.
-            // Identity: x = (x & ~(C-1)) + (x & (C-1)), so
-            //           x - (x & (C-1)) = x & ~(C-1), unconditionally.
-            // No sign constraint needed — this is a pure bitwise identity.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
                 llvm::Value* lhs = inst.getOperand(0);
                 if (auto* andInst =
@@ -3151,9 +2860,6 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
             // sdiv x, -1 → 0 - x  (negate via nsw sub from zero)
-            // Guard: INT_MIN / -1 is undefined behaviour (overflows).  The
-            // LLVM `sub nsw` carries the same UB semantics as C negation, so
-            // this transformation is correct under LLVM's poison / UB rules.
             if (!simplified && inst.getOpcode() == llvm::Instruction::SDiv) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     if (ci->isMinusOne()) {
@@ -3166,18 +2872,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // sdiv(x, 2) bias-shift simplification for products of consecutive integers.
-            //
-            // `sdiv x, 2` when x = a*(a+1) or x = a*(a-1) is always exact
-            // (the product of consecutive integers is always even), so it can
-            // be reduced to `ashr x, 1` which is one instruction instead of
-            // the 3-instruction bias-shift sequence that synthesis would emit.
-            //
-            // By catching this BEFORE synthesis, we prevent synthesis from
-            // converting sdiv→(lshr + add + ashr) and then having the pattern
-            // survive to the output as dead overhead.
-            //
-            // Correctness: for any integer a, exactly one of {a, a+1} is even,
-            // so a*(a+1) mod 2 = 0, meaning ashr and sdiv agree exactly.
             if (!simplified && inst.getOpcode() == llvm::Instruction::SDiv) {
                 if (isConstInt(inst.getOperand(1), 2)) {
                     llvm::Value* x = inst.getOperand(0);
@@ -3206,9 +2900,6 @@ static bool replaceIdiom(IdiomMatch& match) {
 
                     if (isConsecutiveMul(x)) {
                         // x = a*(a+1) or a*(a-1): always even → ashr by 1 is exact.
-                        // Use arithmetic shift (handles negative 'a' correctly):
-                        //   ashr(-2 * -1, 1) = ashr(2, 1) = 1 ✓  (sdiv would give 1)
-                        //   ashr(-3 * -4, 1) = ashr(12, 1) = 6 ✓
                         llvm::IRBuilder<> builder(&inst);
                         simplified = builder.CreateAShr(
                             x,
@@ -3859,8 +3550,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── Nested AND/OR/XOR with constants ─────────────────────────────
-            // (x | c) & c → c  [OR sets c-bits; AND keeps only c-bits → always c]
-            // Proof: (x | c) has all bits of c set. ANDing with c yields exactly c.
             if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
                 auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto c2 = getConstIntValue(inst.getOperand(1));
@@ -4313,8 +4002,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── (a | b) - (a & b) → a ^ b ────────────────────────────────────
-            // Proof: OR = XOR + AND (in terms of bit-counting).
-            //   a|b = a^b + a&b  →  (a|b) - (a&b) = a^b  ✓
             if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
                 auto* orInst  = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto* andInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
@@ -4332,11 +4019,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── sdiv x, 2^n with nsw → arithmetic-shift + round-up correction ──
-            // NOTE: sdiv x, 2^n is NOT simply ashr(x, n) for signed values.  The
-            // correct sequence is: ashr(x + ((x >> 63) & (2^n - 1)), n).  LLVM's
-            // InstCombine already emits this sequence, so we leave signed power-of-2
-            // divisions entirely to LLVM's existing pass rather than risk introducing
-            // an unsound transformation here.
 
             // ── select(cond, x, x) → x ──────────────────────────────────────
             // Identical true/false arms in a select are dead control flow.
@@ -4364,20 +4046,12 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── select(cond, x+1, x) → x + zext(cond)  [conditional increment] ──
-            // ── select(cond, x-1, x) → x - zext(cond)  [conditional decrement] ──
-            // These arise when the idiom recognition phase (Phase 1) replaces inner
-            // select(C, N+1, N) with add(N, zext(C)), and an outer select(D, inner, x)
-            // then becomes select(D, x+1, x) after the inner is simplified.
-            // Running this in the algebraic phase ensures the full chain collapses.
             if (!simplified) {
                 if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst)) {
                     llvm::Value* cond   = sel->getCondition();
                     llvm::Value* trueV  = sel->getTrueValue();
                     llvm::Value* falseV = sel->getFalseValue();
                     // Pattern: select(cond, x+1, x) where trueV = add(x, 1) or add(1, x)
-                    // Also handles the case where trueV's base and falseV are equivalent
-                    // zext instructions of the same source (arising from idiom replacement
-                    // creating a new zext while an equivalent one already existed).
                     auto zextSrc = [](llvm::Value* v) -> llvm::Value* {
                         if (auto* z = llvm::dyn_cast<llvm::ZExtInst>(v))
                             return z->getOperand(0);
@@ -4432,8 +4106,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── or(and(x, mask), and(y, ~mask)) → select ────────────────────
-            // Bit-select pattern: pick bits from x where mask=1, y where mask=0
-            // This can be lowered to a single blend instruction on x86 (vpblendvb)
             if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
                 auto* and1 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto* and2 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
@@ -4447,9 +4119,6 @@ static bool replaceIdiom(IdiomMatch& match) {
                         // c1 and c2 are complementary masks
                         llvm::IRBuilder<> builder(&inst);
                         // (x & mask) | (y & ~mask) → select on a per-bit basis
-                        // For constants, just fold: (x & c1) | (y & c2)
-                        // This is already optimal, but establish the equivalence
-                        // for further optimization passes to exploit.
                     }
                 }
             }
@@ -4493,9 +4162,6 @@ static bool replaceIdiom(IdiomMatch& match) {
                     simplified = builder.CreateZExt(notCond, sel->getType(), "bool_notzext");
                 }
                 // select(cond, x, 0) → and(x, sext(cond))
-                // Branchless masking: sext(i1 cond) produces 0 or -1 (all ones),
-                // so AND keeps x unchanged when true and zeroes it when false.
-                // This is more amenable to vectorization than select.
                 if (!simplified && isConstInt(sel->getFalseValue(), 0) &&
                     !isConstInt(sel->getTrueValue(), 1) &&
                     sel->getType()->isIntegerTy()) {
@@ -4517,8 +4183,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── Redundant truncation elimination ─────────────────────────
-            // and(x, 0xFF) where x is known < 256 → x
-            // (More generally: and(x, mask) where x's value range fits in mask)
             if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
                 if (auto* maskCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     uint64_t mask = maskCI->getZExtValue();
@@ -4537,8 +4201,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── min/max via select canonicalization ──────────────────────
-            // select(icmp slt a, b, a, b) → already handled by idiom recognizer
-            // select(icmp sgt a, 0, a, sub(0, a)) → abs(a)  [when not already caught]
             if (!simplified && llvm::isa<llvm::SelectInst>(inst)) {
                 auto* sel = llvm::cast<llvm::SelectInst>(&inst);
                 if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition())) {
@@ -4602,16 +4264,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── Div-mod identity: (a / b) * b + (a % b) → a ─────────────────
-            // This is an exact arithmetic identity for integer division:
-            //   (a / b) * b + (a % b) = a  for any non-zero b and any a.
-            // Users sometimes write this by accident when they mean a round-trip
-            // through division (e.g., alignment checks), or as the inverse of
-            // modular reduction to verify the quotient.
-            //
-            // We detect two forms:
-            //   Form 1: add( mul(sdiv(a,b), b), srem(a,b) ) → a
-            //   Form 2: add( mul(udiv(a,b), b), urem(a,b) ) → a
-            // The operands to add may be in either order.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
                 for (unsigned addLHS = 0; addLHS < 2 && !simplified; ++addLHS) {
                     auto* mulInst = llvm::dyn_cast<llvm::BinaryOperator>(
@@ -4650,17 +4302,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── x / C * C → x - (x % C)  [floor-to-multiple for integer x] ──
-            // This is the "round down to multiple of C" pattern.  For pow-2 C
-            // with non-negative x, this is just `x & ~(C-1)`.  But even for
-            // arbitrary C and signed x, we can express it as `x - (x % C)`.
-            // We don't emit the subtraction form here because it introduces a
-            // new div/rem, but we CAN simplify the converse:
-            //   x - (x % C) → x & ~(C-1)  when C is pow-2 and x >= 0
-            // (already handled by the unsigned-rem → and pattern above)
-            //
-            // What IS worth doing here: recognize x/C*C when C is a known-
-            // power-of-2 constant and x is known non-negative, and simplify to
-            // and(x, ~(C-1)) which is 1 instruction vs 2.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
                 llvm::Value* xv = nullptr;
                 int64_t cvDiv = 0, cvMul = 0;
@@ -4704,8 +4345,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── neg(neg(x)) → x  (double negation elimination) ───────────────
-            // sub(0, sub(0, x)) = x.  This arises when two sign flips are applied
-            // in sequence, e.g., `(0 - (0 - v))` in user code or after inlining.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
                 if (isConstInt(inst.getOperand(0), 0)) {
                     auto* innerSub = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
@@ -4749,9 +4388,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── and(or(x, y), and(x, ~y)) → 0  / impossible mask ─────────────
-            // or(x, y) has bits where x or y are set, and(x, ~y) has bits where
-            // x is set but y is not.  Their AND can simplify in specific cases;
-            // however, the general form is not simple.  Skip.
 
             // ── or(and(x, C), and(x, ~C)) → x  [partition complement mask] ───
             // When two AND-masks are complements, their OR reconstructs x.
@@ -5040,9 +4676,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── neg(x - y) → y - x  [negate of a difference] ────────────────
-            // Pattern: sub(0, sub(x, y)) → sub(y, x)
-            // This canonical form exposes (y - x) directly to downstream passes
-            // (SCEV, CSE, loop strength reduction) that look for `sub` patterns.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
                 if (isConstInt(inst.getOperand(0), 0)) {
                     if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1))) {
@@ -5058,8 +4691,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── add(x, neg(y)) → sub(x, y)  [canonical add-of-negate] ────────
-            // Pattern: add(x, sub(0, y)) → sub(x, y)
-            // Helps LLVM CSE match `x - y` computed in two different styles.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
                 // Check rhs = sub(0, y)
                 if (auto* rhsOp = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1))) {
@@ -5088,10 +4719,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── (x ^ y) ^ y → x  [non-constant double XOR cancellation] ──────
-            // XOR is self-inverse: (x ^ y) ^ y = x ^ (y ^ y) = x ^ 0 = x.
-            // This is the non-constant-y extension of the existing
-            // `xor(xor(x, C), C) → x` constant pattern.  Arises after
-            // canonicalization passes rewrite comparisons like `swap ^ mask ^ mask`.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
                 llvm::Value* outerRhs = inst.getOperand(1);  // y
                 if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
@@ -5115,11 +4742,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── (a + b) - (a + c) → b - c  [cancel common addend] ────────────
-            // (a + b) - (a + c) = b - c.  Arises frequently in offset
-            // arithmetic (pointer + base - pointer + base = offset difference),
-            // loop index expressions, and address computation simplification.
-            // Only fires when the inner adds are single-use so we don't
-            // duplicate computations.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
                 auto* addLhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto* addRhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
@@ -5157,12 +4779,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── and(or(x, C), C) → C  [absorption + collapse] ────────────────
-            // Since (x | C) forces all C-bits to 1, ANDing with C extracts
-            // exactly those C-bits, giving C regardless of x.
-            // Proof: (x | C) & C = C, since ∀bit: C[i]=1 → (x|C)[i]=1 → 1 & 1 = 1
-            //                                       C[i]=0 → result bit = 0 = C[i].
-            // Arises after De Morgan rewrites and select-to-bitwise conversions
-            // produce (val | bitmask) & bitmask patterns.
             if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
@@ -5187,11 +4803,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── or(and(x, M), and(y, ~M)) → select-via-mask (bitmask mux) ────
-            // This is the bitwise MUX pattern: selects bits from x where M is 1,
-            // bits from y where M is 0.  Lowering to a single AND+ANDN+OR is
-            // better than two ANDs + OR when the backend can use ANDN (BMI1).
-            // We canonicalize to: (x & M) | (y & ~M) form for backend matching.
-            // If already in that form, skip — but catch the reversed operand case.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
                 auto* lhsAnd = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto* rhsAnd = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
@@ -5214,9 +4825,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── mul(x, -1) → sub(0, x) — negate via subtraction ──────────────
-            // On all modern CPUs, sub from zero is 1 cycle vs. mul which is 3+.
-            // LLVM InstCombine usually handles this but the superoptimizer catches
-            // cases where InstCombine was inhibited by nsw/nuw flags.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     if (ci->isMinusOne()) {
@@ -5235,9 +4843,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── and(x, (1 << n) - 1) where n known → trunc+zext ─────────────
-            // When x is wider than needed and we mask to the low n bits, this
-            // exposes the type narrowing to the backend which can use smaller
-            // registers / avoid zero-extension penalties.
             if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     const llvm::APInt& mask = ci->getValue();
@@ -5254,8 +4859,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── xor(and(x, C), C) → and(not(x), C) — DeMorgan for masked ────
-            // Pattern from: (x & C) ^ C = ~x & C  (flip C-bits of x)
-            // The ANDN form is a single µop with BMI1 vs. 2 µops (AND+XOR).
             if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
@@ -5274,8 +4877,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── or(shl(x, C), lshr(x, W-C)) → fshl(x, x, C) — rotate left ──
-            // Rotate idiom: merge into funnel shift for single-cycle execution.
-            // LLVM catches most of these but not when inserted by our transforms.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
                 auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
@@ -5367,11 +4968,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── sext(trunc(x)) → ashr(shl(x, C), C) when narrowing then widening
-            // This catches sign-extension of narrow types that LLVM represents
-            // as trunc+sext but could be done with shift pairs when the backend
-            // has fast shifts (which modern OoO CPUs always do).
-            // More importantly, it exposes the bit-width to the scheduler.
-            // (Only match when sext and trunc have matching bit widths)
 
             // ── add(shl(x, C), shl(y, C)) → shl(add(x, y), C) ──────────────
             // Factor out common shift — reduces shift count from 2 to 1.
@@ -5407,8 +5003,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── (a + b) - a → b  /  (b + a) - a → b  [add-sub cancellation] ─────
-            // Pattern: sub(add(A, B), A) → B   or   sub(add(A, B), B) → A
-            // Also handles: sub(add(B, A), A) → B  (commutative)
             if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
                 auto* addOp = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 llvm::Value* subRHS = inst.getOperand(1);
@@ -5422,8 +5016,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── a + (b - a) → b  /  (b - a) + a → b  [sub-add cancellation] ──────
-            // Pattern: add(A, sub(B, A)) → B   (already exists as add(x, sub(y, x)))
-            // Additional: add(sub(B, A), A) → B
             if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
                 // Try both orderings: sub(B, A) + A and A + sub(B, A)
                 for (int side = 0; side < 2 && !simplified; ++side) {
@@ -5456,8 +5048,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── mul(x, 2^k) → shl(x, k)  [multiply by exact power-of-2] ──────────
-            // LLVM InstCombine handles this at -O1+, but post-superopt passes may
-            // create new multiplies that haven't been through InstCombine.
             if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
                 for (int side = 0; side < 2 && !simplified; ++side) {
                     auto c = getConstIntValue(inst.getOperand(side));
@@ -5478,8 +5068,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── mul(x, 2^k + 1) → shl(x, k) + x  [near-power-of-2 multiply] ──────
-            // 2 ops (shl + add) vs 1 multiply at 3-cycle latency.
-            // Also catches: mul(x, 2^k - 1) → shl(x, k) - x
             if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
                 for (int side = 0; side < 2 && !simplified; ++side) {
                     auto c = getConstIntValue(inst.getOperand(side));
@@ -5545,23 +5133,8 @@ static bool replaceIdiom(IdiomMatch& match) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Comparison canonicalization
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Canonicalize integer comparisons to simplify downstream analyses.
-///
-/// Transformations:
-///   icmp ult x, C+1  →  icmp ule x, C   (strict→non-strict with C-1)
-///   icmp ugt x, C-1  →  icmp uge x, C   (strict→non-strict with C+1)
-///   icmp slt x, C+1  →  icmp sle x, C
-///   icmp sgt x, C-1  →  icmp sge x, C
-///   icmp eq  (zext x), 0  →  icmp eq x, 0   (narrowing)
-///   icmp ne  (zext x), 0  →  icmp ne x, 0
-///   icmp ult (and x, C), 1 →  icmp eq (and x, C), 0  (test == 0)
-///   icmp ugt (and x, C), 0 →  icmp ne (and x, C), 0  (test != 0)
-///
-/// These help LLVM's CVP and SimplifyCFG produce tighter value ranges
-/// and more efficient branch layout.
 [[gnu::hot]] static unsigned applyComparisonCanonicalization(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::ICmpInst*, llvm::Value*>> replacements;
@@ -5650,9 +5223,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── icmp uge x, 1 → icmp ne x, 0 ────────────────────────────────
-            // Complement of `icmp ult x, 1 → icmp eq x, 0`.  Normalises the
-            // ≥1 form to a simpler inequality on 0 that CVP and SimplifyCFG
-            // recognise more reliably as a non-zero check.
             if (pred == llvm::CmpInst::ICMP_UGE && isConstInt(rhs, 1)) {
                 llvm::IRBuilder<> builder(cmp);
                 llvm::Value* zero = llvm::ConstantInt::get(rhs->getType(), 0);
@@ -5663,17 +5233,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── icmp eq (shl x, C), 0 → icmp eq x, 0 ─────────────────────
-            // ── icmp ne (shl x, C), 0 → icmp ne x, 0 ─────────────────────
-            // If we're only testing whether (x << C) is zero, that's equivalent
-            // to testing whether x is zero (shifting zero gives zero; any non-zero
-            // value shifted left by a constant < bitwidth remains non-zero because
-            // the shift only drops low bits, but the _result_ being zero requires
-            // the input itself to be zero when the shift is within bitwidth).
-            // More precisely: `shl x, C` is 0 iff x == 0 (for 0 < C < bitwidth),
-            // because the shift cannot make a non-zero value zero (it would require
-            // all significant bits to be in the dropped positions, but shl drops LOW
-            // bits and x's MSB always survives unless C >= bitwidth).
-            // Therefore the test is exact for any C in [1, bitwidth-1].
             if ((pred == llvm::CmpInst::ICMP_EQ || pred == llvm::CmpInst::ICMP_NE) &&
                 isConstInt(rhs, 0)) {
                 if (auto* shlInst = llvm::dyn_cast<llvm::BinaryOperator>(lhs)) {
@@ -5698,11 +5257,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── icmp eq (sext x), 0 → icmp eq x, 0 ──────────────────────────
-            // ── icmp ne (sext x), 0 → icmp ne x, 0 ──────────────────────────
-            // Sign-extension preserves the zero value: sext(x)==0 iff x==0.
-            // Eliminates the wider comparison type, enabling the test to run
-            // on the narrower type (e.g., i32 instead of i64), reducing
-            // instruction latency and improving scalar replacement.
             if ((pred == llvm::CmpInst::ICMP_EQ || pred == llvm::CmpInst::ICMP_NE) &&
                 isConstInt(rhs, 0)) {
                 if (auto* sextInst = llvm::dyn_cast<llvm::SExtInst>(lhs)) {
@@ -5718,14 +5272,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── icmp eq/ne (add x, C1), C2 → icmp eq/ne x, C2 - C1 ─────────
-            // For equality and inequality tests, modular arithmetic means:
-            //   (x + C1) == C2  iff  x == (C2 - C1)  (no overflow caveat needed)
-            // This folds a constant offset out of the comparison operand, making
-            // the comparison operand a plain value.  CVP and JumpThreading work
-            // better with plain-variable comparisons than offset ones.
-            // Also handles signed/unsigned ordered comparisons when the add has
-            // the corresponding no-wrap flag (nsw/nuw), ensuring the constant
-            // subtraction C2-C1 is valid for the comparison.
             if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(lhs)) {
                 if (addInst->getOpcode() == llvm::Instruction::Add) {
                     if (auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(addInst->getOperand(1))) {
@@ -5771,19 +5317,8 @@ static bool replaceIdiom(IdiomMatch& match) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PHI constant propagation
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Fold PHI nodes where all incoming values are the same constant or value.
-/// Also fold select instructions with a constant condition.
-///
-/// These patterns arise after earlier simplification passes reduce branches
-/// and constants propagate through the IR, leaving trivial PHI nodes.
-///
-/// Transformations:
-///   phi [C, B0], [C, B1], ... → C  (all-same incoming)
-///   select(true, A, B)  → A
-///   select(false, A, B) → B
 [[gnu::hot]] static unsigned propagatePhiConstants(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Value*, llvm::Value*>> replacements;
@@ -5828,21 +5363,8 @@ static bool replaceIdiom(IdiomMatch& match) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Select-of-select chain simplification (Souper-inspired)
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Simplify nested select chains that arise from ternary-heavy OmScript code.
-///
-/// Souper-style patterns:
-///   select(C, select(C, A, B), D)  →  select(C, A, D)   [redundant inner]
-///   select(C, A, select(C, B, D))  →  select(C, A, D)   [redundant inner]
-///   select(C, A, select(!C, B, D)) →  select(C, A, B)   [complementary cond]
-///   select(!C, select(C, A, B), D) →  select(C, B, D)   [complementary cond]
-///   select(C, X, select(C2, X, Y)) where C implies C2   → select(C, X, Y)
-///
-/// Also handles known-bits narrowing:
-///   select(C, or(X, mask), and(X, ~mask))  → xor(X, and(mask, sext(C)))
-///   when the select arms differ only in specific bits.
 [[gnu::hot]] static unsigned simplifySelectChains(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -5989,18 +5511,8 @@ static bool replaceIdiom(IdiomMatch& match) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Known-bits narrowing (Souper-inspired)
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Use LLVM's KnownBits analysis to narrow operations when we can prove
-/// certain bits are always zero or one.  This catches patterns that LLVM's
-/// InstCombine misses because they require deeper analysis.
-///
-/// Souper-style optimizations:
-///   - or(X, mask) where KnownBits(X) already has those bits set → X
-///   - and(X, mask) where KnownBits(X) already has those bits zero → X
-///   - shl(X, C) where top C bits of X are known zero → nuw shl
-///   - Truncation when KnownBits proves value fits in narrower type
 [[gnu::hot]] static unsigned applyKnownBitsNarrowing(llvm::Function& func) {
     if (func.empty()) return 0;
     const llvm::DataLayout& DL = func.getParent()->getDataLayout();
@@ -6011,17 +5523,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             if (!inst.getType()->isIntegerTy()) continue;
 
             // ── sdiv(x, 2) bias-shift elimination when x is known even ──────
-            // LLVM lowers `sdiv x, 2` to the canonical 3-instruction sequence:
-            //   %sign   = lshr x, (bitWidth-1)   ; 0 if x≥0, 1 if x<0
-            //   %biased = add  x, %sign           ; x + rounding-bias
-            //   %result = ashr %biased, 1
-            //
-            // When x is provably even (KnownBits shows bit 0 = 0), the bias is
-            // always 0 (since the division is exact) and we can reduce to just:
-            //   %result = ashr x, 1
-            //
-            // Common case: n*(n+1)/2 (triangular numbers), array_len/2, even
-            // alignment computations.
             if (inst.getOpcode() == llvm::Instruction::AShr) {
                 if (isConstInt(inst.getOperand(1), 1)) {
                     // inst = ashr(%biased, 1)
@@ -6163,9 +5664,6 @@ static bool replaceIdiom(IdiomMatch& match) {
                 if (bo && !bo->hasNoUnsignedWrap()) {
                     if (auto* subCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                         // Safe only for the constant-subtrahend form (X - C).
-                        // X >= C (unsigned) is guaranteed if the minimum value of X >= C.
-                        // Minimum value of X with leadingZeros known-zero bits is 0.
-                        // But we can prove X >= C if the known-one bits of X are >= C.
                         llvm::KnownBits kb = llvm::computeKnownBits(inst.getOperand(0), DL);
                         llvm::APInt cVal = subCI->getValue();
                         // If the minimum possible value of X (= known-one bits) >= C,
@@ -6179,8 +5677,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // mul(X, C): add NUW when KnownBits proves no unsigned overflow
-            // X * C fits in bitWidth iff the leading zeros of X are enough:
-            //   ceil_log2(C) <= leadingZeros(X)
             if (inst.getOpcode() == llvm::Instruction::Mul) {
                 auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
                 if (bo && !bo->hasNoUnsignedWrap()) {
@@ -6206,18 +5702,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── NSW inference on add(X, Y) / sub(X, Y) for non-negative operands ─
-            // When KnownBits proves BOTH operands are non-negative (sign bit known
-            // zero), the signed result cannot overflow:
-            //   add: each operand ∈ [0, INT64_MAX], so the sum ∈ [0, 2*INT64_MAX].
-            //        Signed overflow fires only if the sum > INT64_MAX; the sign
-            //        bit of the result is never set without first passing INT64_MAX.
-            //        LLVM's SCEV proves non-overflow via NSW, enabling tighter
-            //        induction-variable ranges in loops.
-            //   sub: each operand ∈ [0, INT64_MAX], so X-Y ∈ [-INT64_MAX, INT64_MAX],
-            //        which is representable in signed i64 without overflow.
-            //        NSW allows SCEV to track countdown loops correctly and enables
-            //        the loop unroller to generate valid NUW/NSW increments.
-            // These cases are NOT handled by the existing constant-operand code above.
             if (inst.getOpcode() == llvm::Instruction::Add ||
                 inst.getOpcode() == llvm::Instruction::Sub) {
                 auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
@@ -6232,14 +5716,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── add(X, Y) → or(X, Y) when bits are disjoint ─────────────────
-            // If KnownBits proves X and Y have no overlapping set bits
-            // (i.e., for every bit position, at most one of X or Y can have
-            // that bit set), then the carry-chain in the adder never fires and
-            // add(X, Y) = or(X, Y) = X | Y.  The OR form is cheaper to reason
-            // about (no overflow semantics), enables more KnownBits propagation,
-            // and allows the backend to fuse with bit-manipulation sequences.
-            // Disjointness condition: (~KnownZero(X)) & (~KnownZero(Y)) == 0,
-            // i.e., possibleBits(X) & possibleBits(Y) == 0.
             if (inst.getOpcode() == llvm::Instruction::Add) {
                 auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
                 if (bo) {
@@ -6260,15 +5736,6 @@ static bool replaceIdiom(IdiomMatch& match) {
             }
 
             // ── sext(x) → zext(x) when KnownBits shows sign bit is zero ─────
-            // Sign extension fills the new high bits with copies of the source
-            // sign bit.  When KnownBits proves the source's sign bit is always
-            // 0, sext and zext produce the same result.  Replacing sext with
-            // zext is semantically equivalent but gives downstream analyses a
-            // stronger signal: zext is known non-negative (sign bit = 0),
-            // which enables more NSW/NUW flag inference, SCEV range tightening,
-            // and unsigned comparison folding.  It also allows the backend to
-            // lower the extension with a cheaper zero-fill (e.g., movzx vs.
-            // movsx on x86-64).
             if (auto* sextInst = llvm::dyn_cast<llvm::SExtInst>(&inst)) {
                 llvm::Value* src = sextInst->getOperand(0);
                 llvm::KnownBits kb = llvm::computeKnownBits(src, DL);
@@ -6290,17 +5757,8 @@ static bool replaceIdiom(IdiomMatch& match) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Branch simplification
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Convert simple diamond-shaped branch patterns to select instructions.
-/// Pattern:
-///   if (cond) { x = a; } else { x = b; }
-/// Becomes:
-///   x = select(cond, a, b)
-///
-/// This is profitable when the branches are small (1-2 instructions each)
-/// and the values are cheap to compute unconditionally.
 static unsigned simplifyBranches(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::BranchInst*> toProcess;
@@ -6367,8 +5825,6 @@ static unsigned simplifyBranches(llvm::Function& func) {
     return count;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MACS: Modular-Addition-to-Conditional-Subtract
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Returns true if value v is provably in [0, hi) through !range metadata,
@@ -6452,21 +5908,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 }
 
 /// Replace `urem(add(a, b), C)` with `select(s < C, s, s - C)` when both
-/// operands of the add are provably in [0, C).
-///
-/// Motivation: for modular-arithmetic loops (Fibonacci, iterative modular
-/// exponentiation, etc.) the induction variables stay in [0, C).  After
-/// the first iteration LLVM knows each carry value is in [0, C) via the
-/// !range metadata we attach to urem results.  CVP propagates this through
-/// the loop PHI so the add has operands in [0, C) ⊂ [0, 2C); but LLVM's
-/// own InstCombine sometimes misses this when the PHI comes from a select
-/// (the prior MACS result) rather than a urem directly.  This pass fills
-/// the gap so ALL unrolled iterations use the fast 2-cycle conditional
-/// subtract instead of the 25-cycle division.
-///
-/// Cost:  urem (div) ≈ 25 cycles  →  add + icmp + sub + select ≈ 4 cycles.
-/// The transformation is always safe: for a, b ∈ [0, C), a+b ∈ [0, 2C),
-/// so `(a+b) % C == (a+b < C) ? (a+b) : (a+b - C)`.
 [[gnu::hot]] static unsigned applyMacs(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -6513,29 +5954,8 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Select operand sinking (a.k.a. "select factoring")
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Factor a common operand out of both arms of a select:
-///
-///   select(cond, binop(x, a), binop(x, b))  →  binop(x, select(cond, a, b))
-///   select(cond, binop(a, x), binop(b, x))  →  binop(select(cond, a, b), x)
-///
-/// where `binop` is a pure, no-side-effect integer operation (add/sub/mul/
-/// and/or/xor/shl/lshr/ashr) and `x` is the identical value in both arms.
-///
-/// Motivation: simplifyBranches (branch→select) converts `if/else` diamonds
-/// to select instructions, but when both branches compute `acc op val` and
-/// only `val` differs, the result is `select(cond, acc+a, acc+b)`.  The idiom
-/// recogniser cannot see the abs/min/max pattern hidden inside; this pass
-/// factors it out to `acc + select(cond, a, b)`, exposing the inner select for
-/// idiom detection.
-///
-/// Example:
-///   if (x < 0) acc += -x; else acc += x;
-///   → (after simplifyBranches)  acc_new = select(x<0, acc+neg_x, acc+x)
-///   → (after this pass)          acc_new = acc + select(x<0, neg_x, x)
-///   → (after detectAbsoluteValue) acc_new = acc + llvm.abs(x)
 [[gnu::hot]] static unsigned applySelectSinking(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -6577,8 +5997,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             // Case 1: left operand is the common factor  →  binop(x, select(a, b))
             if (tL == fL) {
                 // For Sub: select(c, x-a, x-b) → x - select(c, a, b).
-                // This is valid because both arms have the same minuend x.
-                // Note: select(c, a-x, b-x) is handled by Case 2 below.
                 llvm::Value* inner = builder.CreateSelect(
                     sel->getCondition(), tR, fR, "sel.sink");
                 replacement = builder.CreateBinOp(opcode, tL, inner, "binop.sink");
@@ -6611,8 +6029,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Synthesis engine
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Simple enumerative synthesis: try to find a cheaper equivalent for
 /// a single instruction using a small library of templates.
@@ -6624,19 +6040,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
     double oldCost = instructionCost(inst);
 
     // Template 1: Multiply by constant → optimal shift+add/sub sequence.
-    //
-    // Uses Non-Adjacent Form (NAF) to find the minimum-digit signed binary
-    // representation of the constant.  NAF guarantees no two adjacent nonzero
-    // digits, giving the fewest add/sub operations for any constant.
-    //
-    // Cost model (default threshold 0.8):
-    //   mul cost = 3.0;  shl = 1.0;  add/sub = 1.0
-    //   1 NAF digit (power-of-2): 1 shift → cost 1.0 < 2.4  ✓
-    //   2 NAF digits (one at pos 0): 1 shift + 1 add/sub → cost 2.0 < 2.4  ✓
-    //   2 NAF digits (both nonzero at pos>0): 2 shifts + 1 add/sub → 3.0 ≥ 2.4  ✗
-    //     BUT: emit these anyway — the critical-path latency is 2 cycles vs 3 for
-    //     mul, which improves IPC even at equal throughput cost.  We apply a
-    //     slightly relaxed threshold (1.05×) for latency-improving sequences.
     if (inst->getOpcode() == llvm::Instruction::Mul) {
         auto cval = getConstIntValue(inst->getOperand(1));
         llvm::Value* var = inst->getOperand(0);
@@ -6651,8 +6054,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
         llvm::Type* ty = inst->getType();
 
         // Compute Non-Adjacent Form (NAF) of c.
-        // Algorithm: at each step, if odd and would create two adjacent nonzeros,
-        // use digit -1 (borrow), else +1.
         struct NafDigit { unsigned pos; int sign; };  // sign: +1 or -1
         std::vector<NafDigit> naf;
         {
@@ -6716,11 +6117,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
     }
 
     // Template 4: Signed division by power-of-2 → arithmetic shift with
-    // sign-bit correction.  For non-negative x, sdiv x, 2^n == x >> n.
-    // For negative x, we need to add (2^n - 1) before shifting to round
-    // toward zero (C/LLVM semantics) instead of toward negative infinity.
-    //   sdiv x, 2^n → (x + (x >> 63) & (2^n - 1)) >> n
-    // This replaces a 25-cycle division with ~4 cycles of shifts+add+and.
     if (!replacement && inst->getOpcode() == llvm::Instruction::SDiv) {
         auto cval = getConstIntValue(inst->getOperand(1));
         if (cval && *cval > 1 && (*cval & (*cval - 1)) == 0) {
@@ -6743,15 +6139,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
     }
 
     // Template 5: Signed remainder by power-of-2 → mask with sign correction.
-    //   srem x, 2^n → x - ((x + (x >> 63) & (2^n - 1)) >> n) * 2^n
-    // Simplified: for non-negative x, same as urem.  For negative x, needs
-    // sign correction.  We use the identity:
-    //   srem x, 2^n = x - (sdiv x, 2^n) * 2^n
-    // where sdiv is already lowered to shifts above.  But we can do better:
-    //   srem x, C = x - (x / C) * C  [generic identity]
-    // For power-of-2 C with corrected division:
-    //   t = (x + ((x >> 63) & (C-1))) >> n
-    //   srem = x - (t << n)
     if (!replacement && inst->getOpcode() == llvm::Instruction::SRem) {
         auto cval = getConstIntValue(inst->getOperand(1));
         if (cval && *cval > 1 && (*cval & (*cval - 1)) == 0) {
@@ -6774,8 +6161,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 
     if (replacement) {
         // Walk the newly created instruction tree and sum costs.
-        // Avoid counting the original instruction or values defined outside
-        // the current block (which pre-existed and are not our responsibility).
         double newCost = 0.0;
         std::vector<llvm::Value*> worklist = {replacement};
         std::unordered_set<llvm::Value*> visited;
@@ -6791,14 +6176,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
         }
 
         // Use a slightly relaxed threshold (1.05×) when the replacement
-        // also reduces critical-path latency (i.e., newCost ≤ oldCost but
-        // with shorter chains), so that 2-shift+add sequences are accepted
-        // for x*c where c has 2 NAF digits with both positions > 0.
-        // The standard threshold is 0.8 × oldCost; the relaxed threshold
-        // allows up to 1.05 × oldCost for pure latency improvements.
-        // At the default threshold of 0.8, 1.05 / 0.8 ≈ 1.3125, so we
-        // clamp by min(threshold * 1.3125, 1.05) to generalise across
-        // custom threshold values while targeting 1.05 at the default.
         static constexpr double kLatencyRelaxedTarget = 1.05;
         static constexpr double kDefaultThresholdReciprocal = 1.0 / 0.8;  // ≈ 1.25
         bool latencyImproved = (newCost > 0.0 && newCost <= oldCost);
@@ -6817,36 +6194,8 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Loop idiom recognition — popcount and floor-log2
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Recognise two high-value loop idioms that users commonly write as loops
-/// but whose optimal implementation is a single hardware instruction:
-///
-///  1. **Popcount loop** (Kernighan/shift variant):
-///       c = 0; while (x != 0) { c += x & 1; x >>= 1; }
-///     Optimal: c = llvm.ctpop(x_init)
-///     Saves up to 64 iterations of (AND + ADD + LShr + CMP + BR) → 1 instruction.
-///
-///  2. **Floor-log2 loop** (shift-and-count variant):
-///       r = 0; while (x > 1) { x >>= 1; r++; }
-///     Optimal: r = 63 - llvm.ctlz(x_init, false)
-///     Equivalently: r = llvm.ctlz(1, false) - llvm.ctlz(x_init, false) on any width.
-///     Saves up to 63 iterations → 1 CTZ/CLZ + 1 SUB = 2 instructions.
-///
-/// Detection uses LLVM's phi-node loop structure.  Both patterns have exactly
-/// two phi nodes in the loop header: a shifting variable (x) and an accumulator.
-///
-/// Safety guards:
-///  - Popcount: x_init must be the only loop-variant value consumed outside the
-///    loop (via the accumulator's lcssa phi).
-///  - Log2: x_init must be > 0 at the call site (otherwise ctlz returns 64 which
-///    would underflow to -1).  We only emit the replacement when the preheader
-///    already guards `x > 1` (the standard loop-entry test).
-///
-/// Both replacements preserve exact signed semantics because ctpop/ctlz are
-/// defined for all i64 inputs and `63 - ctlz(x, false)` equals the floor-log2
-/// of x for any positive x.
 [[gnu::hot]] static unsigned recognizeLoopIdioms(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
     unsigned count = 0;
@@ -6859,8 +6208,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
     // from a successor (i.e., a back-edge indicates a loop).
     for (auto& bb : func) {
         // ── Candidate screening ───────────────────────────────────────────
-        // We look for loop bodies that contain EXACTLY the phi chain and the
-        // bit-manipulation ops; anything else (stores, calls, etc.) disqualifies.
 
         // Count phis in this block
         unsigned phiCount = 0;
@@ -6874,10 +6221,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
         if (phiCount != 2 || !xPhi || !accPhi) continue;
 
         // The block must have exactly one back-edge (self-loop or backedge from body)
-        // Simple check: the back-edge predecessor must be this block or a single body block.
-        // We handle the common case: header IS the body (single-block loop).
-        // If one incoming value comes from a predecessor that is a successor of bb,
-        // we have a back-edge.
 
         // Find preheader edge and back-edge for each phi
         auto getEdges = [&](llvm::PHINode* phi) ->
@@ -6886,9 +6229,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             for (unsigned i = 0; i < 2; ++i) {
                 llvm::BasicBlock* inBB = phi->getIncomingBlock(i);
                 // If this predecessor has bb as its successor (i.e., bb is in its
-                // successor list and inBB dominates after bb) → back-edge.
-                // Simple heuristic: if inBB is not a predecessor of bb's preheader
-                // and IS a successor of bb → it's the latch.
                 bool isBackEdge = false;
                 for (auto* succ : llvm::successors(&bb)) {
                     if (succ == inBB || inBB == &bb) { isBackEdge = true; break; }
@@ -6900,8 +6240,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
         };
 
         // Identify which phi is the shifting x and which is the accumulator.
-        // Heuristic: find the phi whose latch value is lshr(%self, 1).
-        // Also handle the case where xPhi/accPhi are assigned in the wrong order.
         for (int swap = 0; swap < 2; ++swap) {
             if (swap) std::swap(xPhi, accPhi);
 
@@ -6921,8 +6259,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             if (!isConstInt(xNextInst->getOperand(1), 1)) continue;
 
             // Check for side effects in the block (other than the phi nodes and
-            // the branch — which we will replace).  Only allow: the xNext lshr,
-            // the accNext computation, and the terminator branch.
             unsigned nonPhiInsts = 0;
             bool hasSideEffects = false;
             for (auto& inst : bb) {
@@ -6934,9 +6270,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             if (hasSideEffects) continue;
 
             // ── Pattern 1: Popcount loop ──────────────────────────────────
-            // accNext = add(accPhi, and(xPhi, 1))   -or-  add(and(xPhi,1), accPhi)
-            // Exit condition: icmp ult xPhi, 2  (equivalent to x == 0 or x == 1)
-            // or: icmp eq xPhi, 0 (also valid)
             bool isPopcount = false;
             if (nonPhiInsts <= 4) {
                 auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(accNext);
@@ -6960,8 +6293,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             }
 
             // ── Pattern 2: Floor-log2 loop ───────────────────────────────
-            // accNext = add(accPhi, 1)
-            // Exit condition: icmp ule xPhi, 1  i.e., x <= 1  (after LLVM norm: ugt x, 3)
             bool isLog2 = false;
             if (!isPopcount && nonPhiInsts <= 3) {
                 auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(accNext);
@@ -6976,12 +6307,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             }
 
             // ── Pattern 3: Count-trailing-zeros loop ─────────────────────
-            // Same phi structure as log2 (xNext = lshr(x, 1), accNext = add(acc, 1))
-            // but the exit condition is based on the low bit of xPhi:
-            //   loop while (xPhi & 1) == 0   →   exit when (xPhi & 1) != 0
-            // Replacement: cttz(xInit, false)
-            //
-            // We distinguish from log2 by inspecting the branch condition.
             bool isCttz = false;
             if (!isPopcount && !isLog2 && nonPhiInsts <= 4) {
                 auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(accNext);
@@ -7005,8 +6330,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
                                 if (isConstInt(rhs, 0)) {
                                     auto pred = icmp->getPredicate();
                                     // Accept eq (continue while low-bit clear) or
-                                    // ne (exit when low-bit set; loop body is the
-                                    // ne-false/eq-true branch).
                                     if (pred == llvm::ICmpInst::ICMP_EQ ||
                                         pred == llvm::ICmpInst::ICMP_NE) {
                                         // lhs must be (xPhi & 1)
@@ -7033,8 +6356,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             if (!isPopcount && !isLog2 && !isCttz) continue;
 
             // ── Find the exit value (the accumulator's out-of-loop use) ──
-            // The accumulator should exit the loop via an LCSSA phi in the
-            // exit block, or be directly used in the exit block.
             llvm::BasicBlock* exitBB = nullptr;
             for (auto* succ : llvm::successors(&bb)) {
                 if (succ != &bb) { exitBB = succ; break; }
@@ -7044,8 +6365,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             if (!exitBB) continue;
 
             // Find the accumulator value available after the loop.
-            // It's either the accPhi itself (if exit goes straight to exit)
-            // or an LCSSA phi in the exit block.
             llvm::Value* resultVal = nullptr;
             // Look for a phi in exitBB that takes accPhi or accNext from bb
             for (auto& phi : exitBB->phis()) {
@@ -7069,8 +6388,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             }
 
             // ── Emit the replacement before the loop ─────────────────────
-            // Insert replacement in the preheader (= the block that has the
-            // init edge to xPhi from outside the loop).
             llvm::BasicBlock* preheaderBB = nullptr;
             for (unsigned i = 0; i < xPhi->getNumIncomingValues(); ++i) {
                 llvm::BasicBlock* pred = xPhi->getIncomingBlock(i);
@@ -7090,27 +6407,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
                 replacement = builder.CreateCall(ctpopFn, {xInit}, "loop.ctpop");
             } else if (isLog2) {
                 // floor_log2(x) = 63 - ctlz(x, true)   [for x ≥ 2]
-                //
-                // The loop body only runs when x > 1 (preheader guard).  For the
-                // non-loop path (x ≤ 1), the LCSSA phi already produces 0
-                // (the accumulator init).  The loop produces 63 - ctlz(x, true)
-                // for x ≥ 2.
-                //
-                // To correctly cover BOTH paths through the LCSSA phi we use:
-                //   select(x > 1, 63 - ctlz(x, false), 0)
-                //
-                // Verification:
-                //   x = 0 → select false → 0 ✓  (loop never runs)
-                //   x = 1 → select false → 0 ✓  (loop never runs)
-                //   x = 2 → select true  → 63 - ctlz(2,false)=63-62=1 ✓
-                //   x = 4 → select true  → 63 - ctlz(4,false)=63-61=2 ✓
-                //   x = -1 → select false (signed > 1 is false) → 0
-                //           but loop also gives 0 for negative x (never enters)
-                //
-                // Use is_zero_undef=false for safety: LLVM may speculatively
-                // evaluate both arms of a select, so ctlz(0, true) could be
-                // undefined when x=0. ctlz(0, false)=64 is safe (result is
-                // discarded by the select anyway since guardCmp is false).
                 llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(M,
                     llvm::Intrinsic::ctlz, {i64Ty});
                 llvm::Constant* falseVal = llvm::ConstantInt::getFalse(ctx);
@@ -7126,18 +6422,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
                     llvm::ConstantInt::get(i64Ty, 0), "loop.log2.sel");
             } else {
                 // isCttz: count trailing zeros
-                //   while ((x & 1) == 0) { x >>= 1; count++; }
-                // Replacement: cttz(xInit, false)
-                //
-                // Correctness:
-                //   xInit = 0  → cttz(0, false) = 64  (loop would run forever;
-                //               this case is UB in most callers, but cttz(0,false)
-                //               is well-defined as 64 in LLVM).
-                //   xInit = 1  → cttz(1) = 0    ✓  (loop never runs, acc = 0)
-                //   xInit = 4  → cttz(4) = 2    ✓  (two right-shifts)
-                //   xInit = -8 → cttz(-8) = 3   ✓  (three trailing zeros)
-                //
-                // Use is_zero_undef=false for safety (same reasoning as ctlz above).
                 llvm::Function* cttzFn = OMSC_GET_INTRINSIC(M,
                     llvm::Intrinsic::cttz, {i64Ty});
                 llvm::Constant* falseVal = llvm::ConstantInt::getFalse(ctx);
@@ -7149,17 +6433,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
             resultVal->replaceAllUsesWith(replacement);
 
             // Eliminate the loop body by making the loop's terminating branch
-            // always go to the exit block.  For a single-block loop, the
-            // terminator of bb (the loop header) is the conditional branch
-            // "if exit-cond → exitBB else → bb".
-            //
-            // Strategy:
-            //   1. If the preheader has a CONDITIONAL branch whose true/false
-            //      successor is bb, redirect it to exitBB (bypass the loop).
-            //   2. Otherwise (unconditional preheader branch), replace the
-            //      loop body's branch with an unconditional branch to exitBB.
-            //      This makes the loop execute at most once and LLVM's
-            //      simplifycfg / DCE will remove the dead body.
             bool loopBypassed = false;
             auto* preheaderTerm = preheaderBB->getTerminator();
             if (auto* br = llvm::dyn_cast<llvm::BranchInst>(preheaderTerm)) {
@@ -7191,9 +6464,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 
             if (!loopBypassed) {
                 // Preheader unconditionally enters the loop.
-                // Make the loop's body-branch always exit on first iteration.
-                // The loop header's terminator is: br cond, exitBB, bb
-                // We change it to: br exitBB  (unconditional)
                 auto* bodyTerm = bb.getTerminator();
                 if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bodyTerm)) {
                     if (br->isConditional()) {
@@ -7212,11 +6482,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
                             (void)newBr;
                             bodyTerm->eraseFromParent();
                             // Remove bb from PHI nodes in the loop header.
-                            // (the back-edge is now dead)
-                            // If a PHI had exactly 2 incoming values (preheader
-                            // + back-edge), removing the back-edge leaves it with
-                            // 1 incoming value which is invalid in LLVM IR.  We
-                            // must replace such PHIs with their remaining value.
                             llvm::SmallVector<llvm::PHINode*, 4> toCollapse;
                             for (auto& phi2 : bb.phis()) {
                                 if (phi2.getNumIncomingValues() == 2) {
@@ -7260,23 +6525,8 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Triangular sum loop idiom recognition
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect loops of the form:
-///   for (i = 0; i < n; i++) { acc += i; }
-/// and replace with the closed-form triangular number formula:
-///   acc = n * (n - 1) / 2
-///
-/// The loop has exactly two PHI nodes in the header:
-///   - induction variable:   i_next = i + 1
-///   - accumulator:          acc_next = acc + i     (or acc + i*k for linear sum)
-///
-/// Replacement: n*(n-1)/2 (exact, no overflow for n < 2^32).
-/// Uses an arithmetic shift right by 1 to implement the divide-by-2 cheaply.
-///
-/// This fires after the loop is lowered from OmScript's `for (i in 0...n)` to
-/// the standard LLVM canonical loop form.
 [[gnu::hot]] static unsigned recognizeTriangularSumLoops(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
     unsigned count = 0;
@@ -7381,8 +6631,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
         if (!icmpCond) continue;
 
         // Accept: icmp slt iPhi, n  (loop while i < n)
-        //    and: icmp ult iPhi, n
-        //    and: icmp sgt n, iPhi  (swapped)
         llvm::Value* tripCount = nullptr;
         {
             auto pred = icmpCond->getPredicate();
@@ -7457,21 +6705,8 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Loop strength reduction — convert i*C to incremental addition
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect simple loop-induction-variable multiplications and convert them
-/// to additive induction variables.  For example:
-///
-///   for (i = 0; i < n; i++) { use(i * 7); }
-///   →
-///   iv = 0;
-///   for (i = 0; i < n; i++) { use(iv); iv += 7; }
-///
-/// This replaces a 3-cycle multiply with a 1-cycle add per iteration.
-/// LLVM's own strength reduction catches many of these, but our version
-/// runs earlier and handles patterns across basic blocks that LLVM misses
-/// in the presence of OmScript's ownership-aware IR.
 [[gnu::hot]] static unsigned loopStrengthReduce(llvm::Function& func) {
     unsigned count = 0;
 
@@ -7479,8 +6714,6 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
         // Look for phi nodes — indicators of loop headers
         for (auto& phi : bb.phis()) {
             // Check if this phi is a simple integer induction variable:
-            //   %iv = phi [init, preheader], [%iv.next, latch]
-            //   %iv.next = add %iv, step
             if (!phi.getType()->isIntegerTy()) continue;
             if (phi.getNumIncomingValues() != 2) continue;
 
@@ -7586,14 +6819,8 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Constant Modulo Strength Reduction
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Magic number for unsigned division by constant d.
-/// For d in [3, 2^32], udiv(x, d) = mulhu(x, magic) >> shift.
-/// When needsAdd is true, uses the "add-fixup" form:
-///   t = mulhu(x, magic)
-///   q = (t + ((x - t) >> 1)) >> shift
 struct UDivMagic {
     uint64_t magic;
     unsigned shift;
@@ -7601,15 +6828,8 @@ struct UDivMagic {
 };
 
 /// Compute the magic number for unsigned 64-bit division by constant d.
-/// Based on the algorithm from Warren's "Hacker's Delight", Chapter 10.
-/// For d in [3, 2^32], the simple (no add-fixup) form always works.
 static UDivMagic computeUDivMagic64(uint64_t d) {
     // For each shift value s, try magic = ceil(2^(64+s) / d).
-    // The formula floor(x/d) = mulhu(x, magic) >> s is valid when:
-    //   magic * d - 2^(64+s) < 2^s   (no-add case, magic < 2^64)
-    //   OR use add-fixup form         (when magic >= 2^64)
-    // Upper bound: s=63 gives pow2 = 2^127 which fits in __uint128_t;
-    // s=64 would require 2^128 which overflows __uint128_t.
     for (unsigned s = 0; s <= 63; ++s) {
         __uint128_t pow2 = (__uint128_t)1 << (64 + s);
         __uint128_t m = (pow2 + d - 1) / d;  // ceil(2^(64+s) / d)
@@ -7633,16 +6853,6 @@ static UDivMagic computeUDivMagic64(uint64_t d) {
 }
 
 /// Expand `urem i64 %x, C` to a multiplicative-inverse sequence:
-///   quotient = mulhu(x, magic) >> shift
-///   remainder = x - quotient * C
-///
-/// All operations (zext, mul, lshr, trunc, mul, sub) are individually
-/// vectorizable, enabling the loop vectorizer to process modulo operations
-/// in SIMD lanes.  LLVM's backend already does this for scalar code, but
-/// doing it at IR level exposes the pattern to the loop vectorizer.
-///
-/// Cost:  urem (scalar) ≈ 25 cycles → mul+shift+mul+sub ≈ 8 cycles
-///        urem (vector) = scalarized div ≈ 25*VF → vectorized mul+shift ≈ 3*VF+4
 static unsigned expandURemByConstant(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -7659,15 +6869,6 @@ static unsigned expandURemByConstant(llvm::Function& func) {
             uint64_t d = divisorCI->getZExtValue();
 
             // Handle non-power-of-2 constants in [3, 2^32).
-            // Power-of-2 is already handled as x & (d-1) by algebraic simplification.
-            // Extending the limit from 1024 to 2^32 captures all 32-bit hash/prime
-            // constants (e.g., 65521 for Adler-32, 1000003, 999983, 16777213) —
-            // each urem-by-constant replaces a ~25-cycle hardware division with a
-            // ~5-8 cycle magic-multiply sequence that is also vectorizable.
-            // We cap at 2^32-1 because the i128 arithmetic in computeUDivMagic64
-            // is exact for all d < 2^64, but constants > 32 bits are uncommon
-            // in practice and the larger magic values can stress the register
-            // allocator on narrow pipelines.
             if (d < 3 || d >= (uint64_t(1) << 32)) continue;
             if ((d & (d - 1)) == 0) continue;  // skip power-of-2
 
@@ -7694,8 +6895,6 @@ static unsigned expandURemByConstant(llvm::Function& func) {
                 }
             } else {
                 // Add-fixup case:
-                //   t = mulhu(x, magic)
-                //   q = (t + ((x - t) >> 1)) >> shift
                 llvm::Value* xWide = builder.CreateZExt(x, i128Ty, "modsr.zext");
                 llvm::Value* magicVal = llvm::ConstantInt::get(i128Ty, magic.magic);
                 llvm::Value* prod = builder.CreateMul(xWide, magicVal, "modsr.mul",
@@ -7728,28 +6927,8 @@ static unsigned expandURemByConstant(llvm::Function& func) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Small Switch → Select Chain Lowering
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Lower a switch instruction with ≤4 non-default cases to a chain of
-/// select instructions.  This eliminates control flow inside hot loops,
-/// enabling vectorization and removing branch misprediction penalties.
-///
-/// Pattern (before):
-///   switch i64 %val, label %default [
-///     i64 0, label %case0
-///     i64 1, label %case1
-///     i64 2, label %case2
-///   ]
-///   ; merge block has PHIs selecting values from each case
-///
-/// Pattern (after):
-///   %c0 = icmp eq i64 %val, 0
-///   %c1 = icmp eq i64 %val, 1
-///   %c2 = icmp eq i64 %val, 2
-///   %s2 = select i1 %c2, CASE2_VAL, DEFAULT_VAL
-///   %s1 = select i1 %c1, CASE1_VAL, %s2
-///   %result = select i1 %c0, CASE0_VAL, %s1
 static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
     unsigned count = 0;
     llvm::SmallVector<llvm::SwitchInst*, 4> toProcess;
@@ -7757,11 +6936,6 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
     for (auto& bb : func) {
         if (auto* sw = llvm::dyn_cast<llvm::SwitchInst>(bb.getTerminator())) {
             // Handle switches up to 16 non-default cases.  A 16-case switch
-            // produces at most 4 levels of cascaded selects (depth = log₂(16)).
-            // Each select is 1 cycle (CMOV on x86), so the worst case is 4
-            // cycles vs. a branch-mispredict penalty of 15-20 cycles on modern
-            // OoO CPUs (Haswell+, Zen2+).  This is profitable for any switch
-            // that isn't dominated by a perfectly-predicted branch.
             if (sw->getNumCases() >= 2 && sw->getNumCases() <= 16) {
                 toProcess.push_back(sw);
             }
@@ -7786,9 +6960,6 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
         for (auto& caseIt : sw->cases()) {
             llvm::BasicBlock* caseBB = caseIt.getCaseSuccessor();
             // Reject if a case branches directly to the merge block.  In that
-            // situation the PHI in mergeBB has an incoming value from switchBB
-            // (not from an intermediate caseBB), so getIncomingValueForBlock
-            // would return null and we'd incorrectly use defaultVal.
             if (caseBB == mergeBB) { allConverge = false; break; }
             auto* caseTerm = llvm::dyn_cast<llvm::BranchInst>(caseBB->getTerminator());
             if (!caseTerm || !caseTerm->isUnconditional() ||
@@ -7861,12 +7032,6 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
 
         if (transformed) {
             // Replace the switch with an unconditional branch to the merge block.
-            //
-            // Step 1: Remove switchBB as a predecessor of each case/default block.
-            // This makes those blocks unreachable (they had no other predecessor).
-            // NOTE: removePredecessor on the case blocks is a no-op for their PHIs
-            // (they have none), but it is required to maintain correct predecessor
-            // lists so that later passes don't treat the case blocks as reachable.
             for (auto& caseIt : sw->cases()) {
                 llvm::BasicBlock* caseBB = caseIt.getCaseSuccessor();
                 caseBB->removePredecessor(switchBB);
@@ -7874,16 +7039,6 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
             defaultBB->removePredecessor(switchBB);
 
             // Step 2: Remove mergeBB's stale PHI entries from now-dead case/default
-            // blocks.  After step 1, the case/default blocks lost their only
-            // predecessor.  They still have an unconditional branch to mergeBB, so
-            // mergeBB still lists them as predecessors — but those edges are dead.
-            // Calling mergeBB->removePredecessor(caseBB) strips the dead incoming
-            // entries from every PHI in mergeBB, leaving only the new entry added
-            // above via phi.addIncoming(result, switchBB).
-            // Without this step, PHIs with stale dead-block entries confuse
-            // IPSCCP / SCCP: they see multiple lattice-conflicting inputs and
-            // conservatively fold the PHI to "overdefined" (=bottom), which
-            // in practice produces 0 after constant propagation.
             for (auto& caseIt : sw->cases()) {
                 llvm::BasicBlock* caseBB = caseIt.getCaseSuccessor();
                 mergeBB->removePredecessor(caseBB);
@@ -7900,27 +7055,8 @@ static unsigned lowerSmallSwitchToSelect(llvm::Function& func) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Switch Table → Branchless Arithmetic
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Analyze constant global arrays used as switch lookup tables and replace
-/// GEP+load pairs with branchless arithmetic when possible:
-///
-/// 1. Boolean table (all values 0 or 1): replace with bitmask test.
-///    table[i] → (BITMASK >> i) & 1
-///    Eliminates memory access entirely — single shift+and.
-///
-/// 2. Arithmetic progression (values = base + stride*i): replace with
-///    formula.  table[i] → base + stride*i.  Common in sequential scoring.
-///
-/// 3. Packed byte table (values fit in 8 bits, ≤8 entries): pack the whole
-///    table into a 64-bit immediate, extract byte with shift.
-///    table[i] → (PACKED >> (i*8)) & 0xFF
-///
-/// These transformations eliminate the conditional branch (range check +
-/// br to lookup block) by replacing the load with pure arithmetic, which
-/// the CPU can execute speculatively without a misprediction penalty and
-/// which the vectorizer can handle inside loops.
 static unsigned analyzeSwitchTableGlobals(llvm::Function& func) {
     unsigned count = 0;
     llvm::Module* M = func.getParent();
@@ -8156,20 +7292,8 @@ static unsigned analyzeSwitchTableGlobals(llvm::Function& func) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Assume-based Bounds Check Elimination
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Propagate conditions from llvm.assume intrinsics to eliminate redundant
-/// comparisons in dominated basic blocks.  Uses a simple dominance check:
-/// if block A dominates block B, and A contains llvm.assume(cond), then
-/// any identical comparison in B can be replaced with `true`.
-///
-/// Targets patterns generated by OmScript's for-loop bounds checking:
-///   llvm.assume(i < len)  →  later icmp ult i, len  →  replaced with true
-///
-/// Also handles:
-///   llvm.assume(len > 0)  →  later icmp ugt len, 0  →  replaced with true
-///   llvm.assume(i < len)  →  later icmp uge i, len  →  replaced with false
 static unsigned eliminateRedundantBoundsChecks(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
 
@@ -8277,16 +7401,12 @@ static unsigned eliminateRedundantBoundsChecks(llvm::Function& func) {
     for (auto& [inst, replacement] : replacements) {
         inst->replaceAllUsesWith(replacement);
         // The icmp is now dead (no uses, no side effects) — remove it to keep
-        // the IR clean.  The Phase 5 dead-code-elimination pass would catch
-        // this too, but erasing here avoids a second scan.
         inst->eraseFromParent();
         ++count;
     }
     return count;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Dead code elimination
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Remove dead (unused) instructions that were left behind by other
@@ -8319,8 +7439,6 @@ static unsigned eliminateDeadCode(llvm::Function& func) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main superoptimizer entry points
-// ─────────────────────────────────────────────────────────────────────────────
 
 SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
                                            const SuperoptimizerConfig& config) {
@@ -8328,17 +7446,6 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     if (func.isDeclaration()) return stats;
 
     // Install the hardware cost model for this function's optimization session.
-    // g_costFn is thread-local so parallel superoptimizeModule calls are safe.
-    //
-    // Priority order:
-    //   1. config.costModel — the unified CostModel interface from OptimizationManager
-    //   2. config.costFn    — the legacy std::function<> (backward compatibility)
-    //   3. nullptr          — fall back to the built-in latency table
-    //
-    // When costModel is set, we wrap it in a local std::function so that
-    // g_costFn (which holds a const pointer to std::function) can point to it.
-    // The local wrapper lives on the stack and is valid for the duration of
-    // this function; CostGuard restores the previous value on exit.
     const auto* prevFn = g_costFn;
     std::function<double(const llvm::Instruction*)> costModelFn;
     if (config.costModel) {
@@ -8356,12 +7463,6 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     } costGuard{&g_costFn, prevFn};
 
     // Phase 0.5: Loop idiom recognition — replace common loop patterns with
-    // single hardware instructions:
-    //   popcount loop: while(x){c+=x&1;x>>=1} → llvm.ctpop(x_init)
-    //   floor-log2 loop: while(x>1){x>>=1;r++} → 63 - llvm.ctlz(x_init)
-    //   triangular sum: for(i=0;i<n;i++){acc+=i;} → n*(n-1)/2
-    // Runs before all other phases so that the replaced loops are dead and
-    // DCE can clean them up.  The loop body is dead-code-eliminated in Phase 5.
     if (config.enableIdiomRecognition) {
         unsigned loopIdioms = recognizeLoopIdioms(func);
         loopIdioms += recognizeTriangularSumLoops(func);
@@ -8381,9 +7482,6 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     }
 
     // Phase 2: Algebraic simplification — multi-pass until fixed point.
-    // Each iteration may expose new patterns (e.g. De Morgan laws produce
-    // new bitwise ops that the subsequent iteration can fold further).
-    // Cap at 3 iterations to keep compile time bounded.
     if (config.enableAlgebraic) {
         static constexpr int kAlgMaxPasses = 3;
         for (int pass = 0; pass < kAlgMaxPasses; ++pass) {
@@ -8394,8 +7492,6 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     }
 
     // Phase 2.4: Comparison canonicalization — normalize icmp predicates
-    // so that downstream passes (CVP, SimplifyCFG, ConstantPropagation) see
-    // a consistent form.
     if (config.enableAlgebraic) {
         stats.algebraicSimplified += applyComparisonCanonicalization(func);
     }
@@ -8407,32 +7503,17 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     }
 
     // Phase 2.46: Second-pass comparison canonicalization + PHI propagation.
-    // The algebraic pass (Phase 2) can expose new comparison patterns:
-    //   - De Morgan laws may produce new bitwise ops whose zero-test form
-    //     benefits from the shl/sext narrowing added above.
-    //   - The complement laws (a & ~a → 0, a | ~a → -1) produce constants
-    //     that cause select(const, A, B) to be foldable by propagatePhiConstants.
-    //   - add(x, neg(y)) → sub(x, y) canonicalization may cause a PHI whose
-    //     incoming sub-results are now all identical, making it trivially foldable.
-    // Running a second, quick pass after the algebraic phase catches these
-    // cascading simplifications without another full algebraic iteration.
     if (config.enableAlgebraic) {
         stats.algebraicSimplified += applyComparisonCanonicalization(func);
         stats.algebraicSimplified += propagatePhiConstants(func);
     }
 
     // Phase 2.5: Loop strength reduction — convert i*C to additive IVs
-    // Runs after algebraic simplification but before branch opts so that
-    // simplified multiply patterns are visible.
     if (config.enableAlgebraic) {
         stats.algebraicSimplified += loopStrengthReduce(func);
     }
 
     // Phase 2.8: Known-bits narrowing (Souper-inspired) — use KnownBits to
-    // prove redundant OR/AND masks, add NUW/NSW flags to shifts and adds.
-    // This enables downstream passes (LLVM InstCombine, loop vectorizer) to
-    // be more aggressive and is the same technique used by the Souper
-    // superoptimizer for "dataflow-guided" instruction simplification.
     if (config.enableAlgebraic) {
         stats.algebraicSimplified += applyKnownBitsNarrowing(func);
     }
@@ -8443,18 +7524,11 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     }
 
     // Phase 3.2: Select chain simplification (Souper-inspired) — flatten
-    // nested select(C, select(C, ...), ...) patterns that arise from OmScript
-    // ternary expressions and conditional logic.  Souper identifies these as
-    // high-value targets because they create unnecessary phi-like control flow.
     if (config.enableBranchOpt) {
         stats.branchesSimplified += simplifySelectChains(func);
     }
 
     // Phase 3.5: Select operand sinking — factor common operands out of both
-    // arms of a select, exposing idiom patterns to the recogniser.
-    //   select(cond, acc+a, acc+b) → acc + select(cond, a, b)
-    // This runs AFTER simplifyBranches (which creates the selects) and
-    // BEFORE idiom recognition so that abs/min/max patterns become visible.
     if (config.enableBranchOpt && config.enableIdiomRecognition) {
         unsigned sinkCount = applySelectSinking(func);
         if (sinkCount > 0) {
@@ -8472,48 +7546,26 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     }
 
     // Phase 3.8: MACS — Modular-Addition-to-Conditional-Subtract.
-    // Replace urem(add(a,b), C) with select(s<C, s, s-C) when a,b ∈ [0,C).
-    // This produces a 2-4 cycle operation vs the 25-cycle integer division,
-    // critical for tight loops like iterative Fibonacci modulo a large prime.
     if (config.enableAlgebraic) {
         stats.algebraicSimplified += applyMacs(func);
     }
 
     // Phase 3.9: Small switch → select chain lowering.
-    // Converts switch(x) with 2-8 cases that converge to a merge block with
-    // PHI nodes into a chain of icmp+select instructions.  Eliminates branch
-    // mispredictions and exposes the pattern to the vectorizer.
     if (config.enableBranchOpt) {
         stats.branchesSimplified += lowerSmallSwitchToSelect(func);
     }
 
     // Phase 3.91: Switch table global → branchless arithmetic.
-    // Analyzes constant global arrays used as switch lookup tables and
-    // replaces GEP+load with pure arithmetic where possible:
-    //   - Boolean table (0/1 entries) → bitmask shift-and (no memory access)
-    //   - Arithmetic progression → base + stride*i formula
-    //   - Byte-packed table (≤8 entries, values ≤255) → packed 64-bit immediate
-    // Runs after lowerSmallSwitchToSelect so that any remaining switch-table
-    // loads (created by LLVM's SimplifyCFG) are also handled.
     if (config.enableBranchOpt) {
         stats.branchesSimplified += analyzeSwitchTableGlobals(func);
     }
 
     // Phase 3.10: Assume-based bounds check elimination.
-    // Propagates conditions from llvm.assume intrinsics to dominated blocks,
-    // replacing redundant icmp comparisons with true/false constants.
-    // Targets OmScript for-loop bounds check patterns:
-    //   llvm.assume(i < len)  →  later icmp ult i, len  →  replaced with true
     if (config.enableAlgebraic) {
         stats.algebraicSimplified += eliminateRedundantBoundsChecks(func);
     }
 
     // Phase 4: Enumerative synthesis on remaining expensive instructions.
-    // Adaptive: skip synthesis for large functions to keep compile times bounded.
-    // Synthesis is O(N × templates) and provides diminishing returns on large
-    // functions that are already partially optimized by LLVM's own strength-
-    // reduction passes.  Threshold matches the post-superoptimizer cleanup
-    // limit in codegen_opt.cpp (2000 instructions) for consistency.
     if (config.enableSynthesis && func.getInstructionCount() <= 2000) {
         std::vector<llvm::Instruction*> candidates;
         for (auto& bb : func) {
@@ -8531,28 +7583,6 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     }
 
     // Phase 4.5: Post-synthesis cleanup (Phase K convergence pass).
-    //
-    // Enumerative synthesis in Phase 4 emits brand-new instruction sequences
-    // (e.g. multiplicative-inverse divides, popcount-via-Mul64-magic, byte
-    // permutation chains) that none of the earlier algebraic / canonicalization
-    // passes have ever seen.  A typical synthesis output is a 3-4 instruction
-    // sequence containing a constant multiply, a shift, and an `and` mask —
-    // these very often expose:
-    //
-    //   * new identity ops (and(x, -1), shl(x, 0)) that `applyAlgebraicSimplifications`
-    //     would fold,
-    //   * constant operands whose `KnownBits` allow narrowing or NUW/NSW flag
-    //     attachment in `applyKnownBitsNarrowing` (which then unlocks downstream
-    //     LLVM InstCombine/loop-vectorizer optimizations),
-    //   * comparison-against-constant patterns reachable by
-    //     `applyComparisonCanonicalization`,
-    //   * trivial PHIs created when synthesis replaced a value used across a
-    //     control-flow merge — caught by `propagatePhiConstants`.
-    //
-    // Without this pass the synthesis output reaches Phase 5 DCE and then the
-    // LLVM backend in its raw, un-cleaned form.  Gated on `synthReplacements > 0`
-    // so the cost is exactly zero when synthesis was disabled, skipped (function
-    // too large), or simply found nothing to replace.
     if (config.enableSynthesis && stats.synthReplacements > 0 && config.enableAlgebraic) {
         stats.algebraicSimplified += applyAlgebraicSimplifications(func);
         stats.algebraicSimplified += applyComparisonCanonicalization(func);
@@ -8582,23 +7612,11 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
     }
 
     // Parallel threshold: launch async tasks only when there are enough
-    // functions to amortize the thread-creation overhead (≥4 functions and
-    // more than one hardware thread available).  Below this threshold the
-    // sequential path is faster.
     const unsigned hwThreads = std::max(1u, std::thread::hardware_concurrency());
     const bool runParallel = funcs.size() >= 4 && hwThreads >= 2;
 
     if (runParallel) {
         // Launch one future per function so each function is processed on a
-        // worker thread independently.  LLVM IR operations on *different*
-        // functions are disjoint (separate basic-block / instruction lists),
-        // so concurrent modification is safe.  IRBuilder objects are created
-        // locally inside superoptimizeFunction which also makes them
-        // thread-local by construction.
-        // config is captured by value into each async task (SuperoptimizerConfig
-        // is a plain struct of flags/integers).  Value capture is intentional:
-        // it ensures each future has its own copy and cannot observe dangling
-        // references if any future outlives the current stack frame.
         std::vector<std::future<SuperoptimizerStats>> futures;
         futures.reserve(funcs.size());
         for (llvm::Function* fn : funcs) {
@@ -8640,12 +7658,6 @@ unsigned superopt::convertSRemToURem(llvm::Function& func) {
                 llvm::Value* lhs = inst.getOperand(0);
                 llvm::Value* rhs = inst.getOperand(1);
                 // Convert srem(a, b) → urem(a, b) when:
-                //   (a) dividend is non-negative, AND
-                //   (b) divisor is positive (constant or proven non-negative runtime value).
-                // Correctness: if a >= 0 and b > 0, srem(a,b) == urem(a,b)
-                // because the C/LLVM standard srem has the sign of the dividend,
-                // and a non-negative dividend with a positive divisor gives a
-                // non-negative remainder identical to unsigned remainder.
                 auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs);
                 const bool rhsPositive = (rhsConst && isConstantAllPositive(rhsConst))
                     || isValueNonNegative(rhs, DL);
@@ -8703,11 +7715,6 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             // Convert AShr to LShr when operand is non-negative.
-            // AShr (arithmetic shift right) fills with sign bit copies,
-            // LShr (logical shift right) fills with zeros.
-            // When the operand is non-negative, the sign bit is 0, so both
-            // produce the same result — but LShr is preferred by LLVM's
-            // backend for unsigned strength reduction of division/modulo.
             if (inst.getOpcode() == llvm::Instruction::AShr) {
                 if (isValueNonNegative(inst.getOperand(0), DL)) {
                     llvm::IRBuilder<> builder(&inst);
@@ -8720,15 +7727,6 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             }
 
             // ICmp signed → unsigned when both operands are non-negative.
-            // For non-negative i64 values, signed and unsigned order comparisons
-            // give the same result.  Converting to unsigned enables:
-            //   1. SCEV's unsigned trip-count analysis (more vectorization
-            //      opportunities without signed-overflow guards)
-            //   2. LLVM's loop vectorizer to use unsigned induction variables
-            //   3. Downstream passes (GVN, LICM) to hoist loop conditions
-            //      without requiring signed-range assumptions.
-            // We run this AFTER inferring NSW/NUW flags so that the maximum
-            // number of operands are proven non-negative.
             if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
                 if (cmp->isSigned() &&
                     isValueNonNegative(cmp->getOperand(0), DL) &&
@@ -8746,25 +7744,12 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             unsigned op = bo->getOpcode();
 
             // Add: if both operands are non-negative, nuw is safe because
-            // max(2^63-1 + 2^63-1) = 2^64-2 < 2^64.
-            // nsw is also safe when one operand is a 1-bit zext (value ∈ {0,1})
-            // and the other is non-negative, because adding at most 1 to a
-            // value in [0, 2^63-1] stays in [0, 2^63], and the signed max is
-            // 2^63-1 — so this is only safe when the non-zext operand is
-            // bounded below 2^63-1.  Use KnownBits to check the leading zeros.
             if (op == llvm::Instruction::Add) {
                 const bool lhsNonNeg = isValueNonNegative(bo->getOperand(0), DL);
                 const bool rhsNonNeg = isValueNonNegative(bo->getOperand(1), DL);
                 if (lhsNonNeg && rhsNonNeg) {
                     bo->setHasNoUnsignedWrap(true);
                     // Set NSW when KnownBits proves both operands have ≥ 2 leading zeros.
-                    // Then max(a+b) ≤ (2^62-1)+(2^62-1) = 2^63-2 < INT64_MAX, so signed
-                    // overflow cannot occur.  This applies to: 32-bit loop induction
-                    // variables (32+ leading zeros), modulo/urem results (≥ 1 leading
-                    // zero since result < divisor < 2^63), bounded accumulators, and
-                    // zext-of-bool operands (63 leading zeros).  More aggressive than
-                    // the prior zext-from-bool special case; enables LLVM SCEV/CVP to
-                    // derive tight trip counts and range-checked GEPs.
                     if (!bo->hasNoSignedWrap()) {
                         llvm::KnownBits lhsKB = llvm::computeKnownBits(bo->getOperand(0), DL);
                         llvm::KnownBits rhsKB = llvm::computeKnownBits(bo->getOperand(1), DL);
@@ -8779,13 +7764,6 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             }
 
             // Mul: if both operands are non-negative and nsw is already set,
-            // then the product is non-negative and fits in signed i64,
-            // which means it also fits in unsigned i64 (nuw is safe).
-            // Additionally, if both operands are non-negative and at least one
-            // is bounded to a small value (many leading zeros), we can infer
-            // nsw: if product_max ≤ INT64_MAX, signed overflow cannot occur.
-            // This handles common patterns like i*3 or i*7 where i < n and
-            // n fits in 32 bits (KnownBits shows 32+ leading zeros on i).
             if (op == llvm::Instruction::Mul) {
                 const bool lhsNN = isValueNonNegative(bo->getOperand(0), DL);
                 const bool rhsNN = isValueNonNegative(bo->getOperand(1), DL);
@@ -8813,14 +7791,6 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             }
 
             // Shl: infer NSW via KnownBits when the operand is non-negative and
-            // shifting cannot move any bit into the sign position.  For x << k:
-            //   lhsBits = 64 - countMinLeadingZeros(x)  (bits needed to hold x)
-            //   NSW is safe iff lhsBits + k < 64  (shift can't corrupt sign bit)
-            // Once NSW is set, NUW is also safe when x >= 0:
-            //   x >= 0 and NSW means result = x << k >= 0 and <= 2^63-1, so
-            //   unsigned overflow (result > 2^64-1) cannot occur.
-            // This enables LLVM SCEV to compute tight trip counts for expressions
-            // like `i << log2(stride)` in array-indexing loops.
             if (op == llvm::Instruction::Shl) {
                 const bool lhsNN = isValueNonNegative(bo->getOperand(0), DL);
                 if (!bo->hasNoSignedWrap() && lhsNN) {
@@ -8845,10 +7815,6 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             }
 
             // Sub: NUW (no unsigned wrap) requires a >= b, so we skip that.
-            // NSW (no signed wrap) IS provable when both operands are non-negative:
-            // a ∈ [0, 2^63-1], b ∈ [0, 2^63-1] → a-b ∈ [-(2^63-1), 2^63-1],
-            // which never overflows signed i64. This enables SCEV's trip-count
-            // and range analysis to derive tighter bounds for derived expressions.
             if (op == llvm::Instruction::Sub) {
                 if (!bo->hasNoSignedWrap() &&
                     isValueNonNegative(bo->getOperand(0), DL) &&
@@ -8860,14 +7826,6 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             }
 
             // LShr: the result is always ≤ the original operand and occupies at
-            // most (bitwidth - shiftAmount) bits, so it can never unsigned-overflow
-            // when used as a summand.  More precisely, `lshr x, k` produces a value
-            // in [0, x] ⊆ [0, UINT64_MAX], so there is no unsigned overflow in the
-            // shift result itself — it always fits in the type.  Setting NUW here
-            // does NOT mean "the shift itself wraps" (shifts don't produce UB via
-            // overflow), but it signals to downstream analyses (SCEV, InstCombine)
-            // that the result is non-negative and fits without wrapping, enabling
-            // tighter trip-count bounds for loops that use lshr results as indices.
             if (op == llvm::Instruction::LShr) {
                 if (!bo->hasNoUnsignedWrap()) {
                     bo->setHasNoUnsignedWrap(true);
@@ -8877,10 +7835,6 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             }
 
             // URem: result is always in [0, divisor-1], which trivially fits in
-            // the result type without unsigned wrap.  Setting NUW on the urem
-            // instruction signals SCEV and CVP that the value is bounded, enabling
-            // downstream analyses to tighten range constraints on expressions that
-            // use the remainder (e.g. `idx = urem(x, len)` as an array index).
             if (op == llvm::Instruction::URem) {
                 if (!bo->hasNoUnsignedWrap()) {
                     bo->setHasNoUnsignedWrap(true);
@@ -8890,10 +7844,6 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             }
 
             // UDiv: result is always ≤ dividend and fits in [0, UINT64_MAX],
-            // so there is no unsigned wrap.  Like URem, setting NUW here lets
-            // SCEV derive a tight upper bound on the quotient, enabling vectoriser
-            // and range-check analysis to reason about array accesses that use
-            // quotients as indices.
             if (op == llvm::Instruction::UDiv) {
                 if (!bo->hasNoUnsignedWrap()) {
                     bo->setHasNoUnsignedWrap(true);

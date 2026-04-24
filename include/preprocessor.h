@@ -15,6 +15,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace omscript {
@@ -43,6 +44,18 @@ class Preprocessor {
         std::vector<std::string> params;
         std::string body;
         mutable int counterValue = 0;
+        // ── Type-awareness fields (all optional; default = "untyped") ──
+        /// Per-parameter type annotation, parallel to `params`.  Empty
+        /// string means "any" (no checking).  Recognised values: "int",
+        /// "uint", "float", "string", "bool", "any".
+        std::vector<std::string> paramTypes;
+        /// Return type annotation (informational only — no checking).
+        std::string returnType;
+        // ── Safety fields ──
+        /// True for macros installed by the Preprocessor itself (predefs
+        /// like __FILE__, __SIMD_AVX2__, __VECTOR_WIDTH__, …).  Reserved
+        /// macros cannot be redefined or undefined by user code.
+        bool isReserved = false;
     };
 
     const std::unordered_map<std::string, MacroDef>& macroMap() const noexcept { return macros_; }
@@ -50,8 +63,16 @@ class Preprocessor {
   private:
     std::string filename_;
     std::unordered_map<std::string, MacroDef> macros_;
-    std::vector<std::string> warnings_;
+    /// Warnings collected during processing.  Mutable so that const
+    /// methods (substituteMacros, validateMacroCall) can append soft
+    /// diagnostics without giving up their const-correctness contract.
+    mutable std::vector<std::string> warnings_;
     int globalCounter_ = 0; ///< backing store for __COUNTER__
+    /// Set of macros currently being expanded — used by substituteMacros
+    /// to detect cycles like `#define A B` / `#define B A` and surface a
+    /// proper diagnostic instead of silently truncating at the depth
+    /// limit.  Mutable because substituteMacros / expandSimple are const.
+    mutable std::unordered_set<std::string> expanding_;
 
     void handleDefine(const std::string& rest, int lineNo);
 
@@ -69,6 +90,19 @@ class Preprocessor {
     static bool isIdentChar(char c)  noexcept;
     static std::string trimLeft(const std::string& s);
     static std::string trim(const std::string& s);
+
+    /// Lightweight argument-shape classifier used by typed function-like
+    /// macros.  Returns one of "int", "float", "string", "bool",
+    /// "ident", "expr", or "" (empty/unknown).  The result is compared
+    /// against the declared param type in `validateMacroArgs`.
+    static std::string classifyArg(const std::string& a);
+
+    /// Validate function-like macro invocation: arity + per-arg types.
+    /// Throws DiagnosticError on mismatch.  Adds warnings for footguns
+    /// like multi-evaluation of a function-call argument.
+    void validateMacroCall(const std::string& name, const MacroDef& def,
+                           const std::vector<std::string>& args,
+                           int lineNo) const;
 };
 
 } // namespace omscript
