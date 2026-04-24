@@ -1,16 +1,4 @@
-/// @file cfctre.cpp
-/// @brief CF-CTRE — Cross-Function Compile-Time Reasoning Engine (implementation).
-///
 /// Implements deterministic, fuel-bounded, memoised compile-time evaluation
-/// of pure OmScript functions operating on integer/float/string/array values.
-///
-/// Architecture:
-///   CTValue  — immutable value wrapper (scalars inline, arrays by handle)
-///   CTArray  — fixed-length array stored on the compile-time heap
-///   CTHeap   — deterministic handle-based allocator for compile-time arrays
-///   CTFrame  — per-call execution context (locals, heap ptr, control signals)
-///   CTEngine — main evaluator: expression/statement walker, builtin table,
-///              memoisation, pipeline-SIMD tiles, purity analysis, runPass
 
 #include "cfctre.h"
 #include "ast.h"
@@ -30,8 +18,6 @@
 
 namespace omscript {
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CTValue implementation
 // ═══════════════════════════════════════════════════════════════════════════
 
 CTValue CTValue::fromU64(uint64_t v) noexcept {
@@ -131,8 +117,6 @@ bool CTValue::isTruthy() const noexcept {
 }
 
 // Append a compact, deterministic representation to `out` for memoisation.
-// Uses a stack buffer + snprintf to avoid std::ostringstream overhead for
-// the common scalar cases (integers, floats, booleans).
 void CTValue::appendMemoHash(std::string& out) const {
     char buf[32];                           // enough for "X:" + 20-digit int64
     switch (kind) {
@@ -189,9 +173,6 @@ std::string CTValue::memoHash() const {
 }
 
 // ── Global symbolic-ID counter ────────────────────────────────────────────────
-// Thread-local so different compiler threads never collide on symIds.  We use
-// a simple incrementing counter rather than a global atomic so symId assignment
-// is branch-free and has zero inter-thread contention.
 static thread_local uint32_t g_symIdCounter{0};
 
 CTValue CTValue::symbolic() noexcept {
@@ -213,23 +194,16 @@ bool CTValue::operator==(const CTValue& o) const noexcept {
     case CTValueKind::UNINITIALIZED:   return true;
     case CTValueKind::SYMBOLIC:
         // Two symbolic values are "equal" iff they refer to the same symbolic
-        // variable (same symId, both non-zero).  This allows the branch-merge
-        // in IF_STMT to avoid re-marking a variable as symbolic when both
-        // branches left it unchanged.
         return symId != 0 && symId == o.symId;
     }
     return false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CTArray implementation
-// ═══════════════════════════════════════════════════════════════════════════
 
 CTArray::CTArray(uint64_t n, const CTValue& fill)
     : len(n), data(static_cast<size_t>(n), fill) {}
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CTHeap implementation
 // ═══════════════════════════════════════════════════════════════════════════
 
 CTArrayHandle CTHeap::alloc(uint64_t n, const CTValue& fill) {
@@ -294,8 +268,6 @@ CTArray* CTHeap::getMut(CTArrayHandle h) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CTEngine implementation
-// ═══════════════════════════════════════════════════════════════════════════
 
 CTEngine::CTEngine() = default;
 
@@ -339,9 +311,6 @@ CTArrayHandle CTEngine::snapshotArray(CTArrayHandle src) {
     const CTArray* orig = heap_.get(src);
     if (!orig) return CT_NULL_HANDLE;
     // Phase E: immutable arrays can be aliased directly — no copy needed.
-    // Since no one will ever call store() on an immutable handle, sharing
-    // the underlying data is safe and avoids O(n) heap allocation during
-    // memoisation of large constant arrays.
     if (heap_.isImmutable(src)) return src;
     const CTArrayHandle dst = heap_.alloc(orig->len);
     CTArray* copy = heap_.getMut(dst);
@@ -426,9 +395,6 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
     if (result.isSymbolic()) return std::nullopt;
 
     // Don't cache results produced with symbolic args: the result is only
-    // valid for the specific combination of concrete args that drove the
-    // evaluation; other callers with different concrete values for the same
-    // args might produce a different result.
     if (!hasSymbolic) {
         // Snapshot array results before storing in cache (so cache is stable).
         CTValue cached = result;
@@ -436,10 +402,6 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
             cached.arr = snapshotArray(cached.arr);
         memoCache_[key] = cached;
         // Record this function as CF-CTRE-foldable: it produced a concrete
-        // result for at least one set of concrete arguments.  The codegen will
-        // use this to apply InlineHint so LLVM preferentially inlines the
-        // function, exposing the same folding opportunities at remaining runtime
-        // call sites where arguments aren't compile-time constants.
         if (!result.isSymbolic() && !fn->parameters.empty())
             foldableCallees_.insert(fn->name);
     }
@@ -491,8 +453,6 @@ bool CTEngine::executeBody(CTFrame& frame, const BlockStmt* body) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// evalExpr — evaluate a single AST expression
-// ═══════════════════════════════════════════════════════════════════════════
 
 CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     if (!e) return CTValue::uninit();
@@ -518,9 +478,6 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         auto it = frame.locals.find(id->name);
         if (it != frame.locals.end()) {
             // If the local is symbolic but we have a branch constraint that
-            // narrows it to an exact concrete value, fold it here.  This
-            // enables constant folding inside if-branch bodies even when the
-            // variable is symbolic in the outer frame.
             if (it->second.isSymbolic()) {
                 auto cit = frame.constraints.find(id->name);
                 if (cit != frame.constraints.end() && cit->second.isConcrete()) {
@@ -734,23 +691,11 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// evalBinaryOp
-// ═══════════════════════════════════════════════════════════════════════════
 
 CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const CTValue& rhs) {
     if (!lhs.isKnown() || !rhs.isKnown()) return CTValue::uninit();
 
     // ── Algebraic identities (Phase B) ───────────────────────────────────────
-    // When exactly one operand is symbolic and the other is a concrete special
-    // value (identity element or absorbing element), we can fold without needing
-    // to know the value of the symbolic operand.
-    //
-    // These are SEMANTICALLY DERIVED from the algebraic laws, not from pattern
-    // matching on AST structure.  Each rule is annotated with the algebraic
-    // justification.
-    //
-    // Also covers SAME-IDENTITY rules: when both operands are the SAME symbolic
-    // variable (same non-zero symId), certain operations reduce to a constant.
     if (lhs.isSymbolic() || rhs.isSymbolic()) {
         const bool lSym = lhs.isSymbolic();
         const bool rSym = rhs.isSymbolic();
@@ -916,8 +861,6 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// evalUnaryOp
-// ═══════════════════════════════════════════════════════════════════════════
 
 CTValue CTEngine::evalUnaryOp(const std::string& op, const CTValue& val) {
     if (!val.isKnown()) return CTValue::uninit();
@@ -939,8 +882,6 @@ CTValue CTEngine::evalUnaryOp(const std::string& op, const CTValue& val) {
     return CTValue::uninit();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// evalTypeCast — integer type-cast builtins
 // ═══════════════════════════════════════════════════════════════════════════
 
 CTValue CTEngine::evalTypeCast(const std::string& name, const CTValue& val) {
@@ -976,8 +917,6 @@ CTValue CTEngine::evalTypeCast(const std::string& name, const CTValue& val) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// evalCall — dispatch builtin or user function
-// ═══════════════════════════════════════════════════════════════════════════
 
 CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
                             const std::string& fnName,
@@ -1007,10 +946,6 @@ CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
         it->second->body && args.size() == it->second->parameters.size()) {
 
         // ── Phase D: partial-specialisation cache lookup ──────────────────
-        // Before executing, check whether we have a cached concrete result for
-        // this (fnName, arg-pattern) combination.  Covers the case where some
-        // args are symbolic but the function was previously found to produce a
-        // concrete result for this exact mix of concrete/symbolic arguments.
         const std::string specKey = partialSpecKey(fnName, args);
         {
             auto sit = specCache_.find(specKey);
@@ -1043,8 +978,6 @@ CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
     return CTValue::uninit();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// evalBuiltin — all pure built-in functions
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Helper lambdas (defined at function scope to access args cleanly).
@@ -1692,8 +1625,6 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
 
     // ── Character classification predicates ──────────────────────────────
-    // C <cctype> functions require the argument to be in [0, UCHAR_MAX] or EOF.
-    // OmScript passes character code points as int64_t; out-of-range → false.
     if (name == "is_upper" && n == 1) {
         if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isupper(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
@@ -1870,14 +1801,6 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
 
     // ── std::synthesize (program synthesis stdlib function) ──────────────
-    // Recognized as "std__synthesize" (scope-resolved flat name from the
-    // `std::` namespace lowering) or "std_synthesize" (legacy flat name).
-    // Signature: std::synthesize(examples, [ops], [max_depth], [cost_hint])
-    //   examples  : int[][]  — each inner array = [in0,in1,...,inN-1,expected]
-    //   ops       : string[] — allowed operators (optional)
-    //   max_depth : int      — expression depth limit (optional, default 4)
-    //   cost_hint : string   — "size"|"speed" (optional, default "speed")
-    // Returns the synthesized expression's value on the first example's inputs.
     if ((name == "std__synthesize" || name == "std_synthesize") && n >= 1) {
         // Argument 0: examples must be a concrete array of arrays.
         CTArrayHandle examplesH = arrArg(0);
@@ -2124,28 +2047,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     return std::nullopt;
 }
-//
 // When a for-range loop body consists only of simple scalar accumulations
-// (x += delta, x -= delta, x *= c, x ^= c, x &= c, x |= c, x = expr,
-//  x++ / x--) whose operands are loop-invariant or linear in the loop
-// variable, the engine computes the post-loop state in O(1) using
-// closed-form arithmetic:
-//
-//   for (i in start...end) { x += d;    }  →  x += N * d
-//   for (i in start...end) { x += i;    }  →  x += N*start + step*N*(N-1)/2
-//   for (i in start...end) { x += a*i+b;}  →  x += a*Σi + b*N
-//   for (i in start...end) { x *= c;    }  →  x *= c^N
-//   for (i in start...end) { x ^= c;    }  →  x ^= (N%2 ? c : 0)
-//   for (i in start...end) { x &= c;    }  →  x &= c   (N≥1)
-//   for (i in start...end) { x |= c;    }  →  x |= c   (N≥1)
-//   for (i in start...end) { x = c;     }  →  x = c    (last-write)
-//   for (i in start...end) { x = a*i+b; }  →  x = a*(last_i) + b
-//   for (i in start...end) { x++;       }  →  x += N
-//
-// Multiple independent effects on different variables are all applied.
-// Any body statement that cannot be classified causes the analysis to
-// abort and the caller falls back to direct iteration.
-// ═══════════════════════════════════════════════════════════════════════════
 
 // ── Linear expression descriptor ─────────────────────────────────────────
 // Represents value = coefA * loopVar + coefB where coefA == 0 is invariant.
@@ -2156,8 +2058,6 @@ struct LRLinear {
 };
 
 // Classify an expression as a*iv + b, returning {false} if unrepresentable.
-// modVars:  variables written in the loop body — treated as non-invariant.
-// The loop variable itself is NOT in modVars; it is recognized by name (iv).
 static LRLinear lrLinearize(
     const Expression*                                   e,
     const std::string&                                  iv,
@@ -2253,10 +2153,6 @@ static LRLinear lrLinearize(
     }
 
     // ── Built-in calls over loop-invariant operands ──────────────────────
-    // Recognize abs(c), min(a, b), max(a, b) when their argument(s) reduce to
-    // a loop-invariant LRLinear (a == 0).  This significantly broadens loop
-    // reasoning coverage: previously a single `min(x, c)` inside a loop body
-    // would force the analyzer to bail out and fall back to direct iteration.
     case ASTNodeType::CALL_EXPR: {
         auto* call = static_cast<const CallExpr*>(e);
         const std::string& fn = call->callee;
@@ -2476,8 +2372,6 @@ static bool lrAnalyzeBody(
             }
 
             // x = min(x, expr)  /  x = max(x, expr)  /  x = min(expr, x) etc.
-            // Reduction patterns: pre-iteration value of x is reduced with
-            // a loop-invariant or linear expression every iteration.
             if (rhs->type == ASTNodeType::CALL_EXPR) {
                 auto* call = static_cast<const CallExpr*>(rhs);
                 const std::string& fn = call->callee;
@@ -2519,8 +2413,6 @@ static bool lrAnalyzeBody(
 }
 
 // Apply a set of loop effects after N full iterations.
-// start, step define the induction variable sequence:
-//   iv_k = start + k * step,  k in [0, N)
 static void lrApplyEffects(
     CTFrame&                        frame,
     const std::vector<LREffect>&    effects,
@@ -2529,10 +2421,6 @@ static void lrApplyEffects(
     int64_t                         N)
 {
     // Sum of the induction variable over all N iterations:
-    //   Σiv = N*start + step * N*(N-1)/2
-    // Use __int128 to avoid signed overflow during intermediate computation;
-    // the final wrap-around cast to int64 (via uint64) matches OmScript's
-    // wrapping arithmetic semantics.
     const __int128 bigN    = static_cast<__int128>(N);
     const __int128 bigS    = static_cast<__int128>(start);
     const __int128 bigStep = static_cast<__int128>(step);
@@ -2621,9 +2509,6 @@ static void lrApplyEffects(
         case LREffect::Kind::MIN:
         case LREffect::Kind::MAX: {
             // x = min/max(x, a*iv + b) for k = 0..N-1.
-            // Since a*iv + b is monotonic in iv (or constant when a == 0),
-            // the reduced value over [0, N-1] occurs at one of the endpoints.
-            // Use signed __int128 to avoid intermediate signed overflow.
             const __int128 ivFirst128 = static_cast<__int128>(start);
             const __int128 ivLast128  = ivFirst128 +
                 static_cast<__int128>(step) * static_cast<__int128>(N - 1);
@@ -2648,8 +2533,6 @@ static void lrApplyEffects(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CTEngine::tryReasonForLoop
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool CTEngine::tryReasonForLoop(CTFrame& frame, const ForStmt* fs,
@@ -2754,21 +2637,6 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
         CTValue cond = evalExpr(frame, ifs->condition.get());
 
         // ── Path-sensitive branch merge ───────────────────────────────────
-        // When the condition is symbolic, evaluate both branches independently
-        // on frame forks.  If they agree (same return value, or same local
-        // variable state), fold to the agreed result without needing to know
-        // which branch would actually be taken at runtime.
-        //
-        // Safety notes:
-        //   • Frame locals are deep-copied per branch; the heap pointer is
-        //     shared.  Any array allocations made by abandoned branches leave
-        //     dangling handles in the heap (no future reference → harmless
-        //     memory waste, not a correctness issue).
-        //   • fuel_ is saved/restored per branch and set to max(both) so
-        //     we charge fairly for the more expensive branch.
-        //   • We only fold Case 1 (both return non-array concrete values) or
-        //     Case 2 (both fall through, locals agree or diverge → symbolic),
-        //     not any state where break/continue signals differ.
         if (cond.isSymbolic() && fuel_ + 2 <= kMaxInstructions) {
             const int64_t savedFuel = fuel_;
 
@@ -2776,10 +2644,6 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             CTFrame thenF = frame;
             thenF.hasReturned = false; thenF.didBreak = false; thenF.didContinue = false;
             // Narrow variable ranges inside each branch based on the branch condition.
-            // E.g., if cond is (x > 5) we add x → [6, INT64_MAX] to thenF.constraints
-            // and x → [INT64_MIN, 5] to elseF.constraints.  These constraints are used
-            // in IDENTIFIER_EXPR to resolve symbolic variables to concrete values when
-            // the interval narrows to a single point.
             CTFrame elsePreF = frame;   // pre-narrow else frame (shared setup)
             elsePreF.hasReturned = false; elsePreF.didBreak = false; elsePreF.didContinue = false;
             narrowBranchConstraints(ifs->condition.get(), thenF, elsePreF);
@@ -2796,8 +2660,6 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             fuel_ = std::max(fuelAfterThen, fuelAfterElse);
 
             // Case 1: both branches return the same concrete non-array value.
-            // The result is independent of the condition → constant fold.
-            // Helper: branch returned a concrete scalar/string value we can merge.
             auto isConcreteScalarReturn = [](const CTFrame& f) {
                 return f.hasReturned &&
                        !f.returnValue.isArray() &&
@@ -2813,9 +2675,6 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             }
 
             // Case 2: neither branch returns or breaks — merge locals.
-            // Variables that agree across both branches keep their value;
-            // variables that diverge are marked symbolic so downstream code
-            // can still proceed (conservatively) without aborting.
             if (thenOk && !thenF.hasReturned && !thenF.didBreak &&
                 elseOk && !elseF.hasReturned && !elseF.didBreak) {
                 // Apply merged state: iterate over all keys in both branches.
@@ -2877,9 +2736,6 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
         }
 
         // ── Symbolic reasoning path ───────────────────────────────────────
-        // Attempt O(1) closed-form analysis before falling back to iteration.
-        // For bodies that contain only simple scalar accumulations this avoids
-        // the O(N) fuel cost and enables evaluation of million-iteration loops.
         if (tryReasonForLoop(frame, fs, startV, endV, step, N)) {
             frame.locals.erase(fs->iteratorVar);
             return true;
@@ -3067,8 +2923,6 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Pipeline SIMD tile execution
-// ═══════════════════════════════════════════════════════════════════════════
 
 bool CTEngine::evalPipelineStmt(CTFrame& frame, const Statement* s) {
     auto* ps = static_cast<const PipelineStmt*>(s);
@@ -3176,47 +3030,11 @@ void CTEngine::executeTile(CTFrame& frame,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CTEngine::narrowBranchConstraints
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Given the condition expression of an if-statement and two frame copies
-// (then-branch frame and else-branch frame), this function extracts simple
-// linear inequality/equality constraints on named variables and adds them to
-// the respective frame's constraint maps.
-//
-// Supported patterns (LHS must be a variable identifier, RHS a concrete int):
-//   var op literal       e.g.  x < 10,  y == 5
-//   literal op var       e.g.  0 < x   (equivalent to x > 0)
-//
-// The constraint is expressed as a CTInterval and stored in
-//   frame.constraints[varName]
-// which is checked in evalExpr IDENTIFIER_EXPR to fold the symbolic variable
-// to its concrete value when the interval is a single point.
-// ─────────────────────────────────────────────────────────────────────────────
-// CTEngine::narrowBranchConstraints — internal helpers
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// The public narrowBranchConstraints supports compound conditions:
-//   • A && B          — both narrowings applied on then-branch (intersection).
-//                       No narrowing on else (only one of A, B must be false).
-//   • A || B          — both narrowings applied on else-branch (each negated).
-//                       No narrowing on then (only one of A, B must be true).
-//   • !A              — swaps then/else of A.
-//   • Atomic compares — `var ∘ literal` and `var ∘ var` (when constraint info
-//                       on at least one variable is concrete).
-//
-// Compound conditions are decomposed recursively up to a small depth budget
-// (kCompoundDepthBudget) to avoid pathological nesting.  This significantly
-// improves Q2 dead-branch detection for typical guard expressions like
-// `if (i >= 0 && i < n)` and `if (x < 0 || x > 100)`.
 
 namespace {
 constexpr int kCompoundDepthBudget = 6;
 
 // Atomic narrowing: handle one comparison (varName op literal) with optional
-// variable-to-variable refinement using existing constraints.  Updates the
-// thenC/elseC out-maps with the new bounds for the affected variable(s),
-// intersecting with any pre-existing constraint to compose with outer guards.
 inline void mergeConstraint(
     std::unordered_map<std::string, omscript::CTInterval>& dst,
     const std::string& var,
@@ -3423,19 +3241,6 @@ void CTEngine::narrowBranchConstraints(const Expression* cond,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CTEngine::partialSpecKey
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Builds a partial-specialization cache key for the given (fnName, args) pair.
-// Unlike memoCache_ (which only stores results for all-concrete args), the
-// specCache_ stores concrete results even when some args are symbolic —
-// as long as the result is concrete.  Two calls with the same fnName and the
-// SAME concrete values for concrete positions AND the SAME symIds for symbolic
-// positions will produce the same key.
-//
-// Format: "fnName|H1,H2,...Hn" where Hi is:
-//   - memoHash() for concrete args
-//   - "SYM:id" for symbolic args (so sym-3 != sym-7 but two uses of sym-3 agree)
 std::string CTEngine::partialSpecKey(const std::string& fnName,
                                       const std::vector<CTValue>& args) const
 {
@@ -3450,8 +3255,6 @@ std::string CTEngine::partialSpecKey(const std::string& fnName,
     return key;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// runPass — whole-program CF-CTRE analysis
 // ═══════════════════════════════════════════════════════════════════════════
 
 void CTEngine::runPass(const Program* program) {
@@ -3831,16 +3634,6 @@ void CTEngine::runPass(const Program* program) {
     graph_.nodes.erase(std::unique(graph_.nodes.begin(), graph_.nodes.end()), graph_.nodes.end());
 
     // ── Phase 7: uniform return value detection ────────────────────────────
-    // For each pure function with parameters, execute it with all-symbolic args.
-    // If the result is concrete, the function always returns the same constant
-    // regardless of its arguments — a stronger guarantee than just purity.
-    //
-    // Example:  fn getVersion(x: int) { return 3 }
-    //   → evaluated with SYMBOLIC x → result = 3 (concrete, not symbolic)
-    //   → registered in uniformReturnValues_["getVersion"] = 3
-    //
-    // This enables the codegen to replace all calls with the constant value,
-    // and the LLVM optimizer to DCE the (now-dead) calls.
     for (auto& fn : program->functions) {
         if (!fn->body) continue;
         if (!pureFunctions_.count(fn->name)) continue;
@@ -3861,15 +3654,6 @@ void CTEngine::runPass(const Program* program) {
     }
 
     // ── Phase 8: dead function detection ──────────────────────────────────
-    // BFS over the call graph from all entry points.  Functions not reachable
-    // from any entry point are "dead" and can be removed by the LLVM DCE pass.
-    //
-    // Entry points: functions named "main", or any function that is not in the
-    // call graph as a callee (i.e., not called from any other function) — these
-    // could be externally visible (exported) and must be conservatively live.
-    //
-    // Conservative rule: if we can't find ANY entry point, skip dead function
-    // detection to avoid false positives.
     {
         // Build callee → callers reverse index AND forward callees index.
         std::unordered_map<std::string, std::vector<std::string>> callees;
@@ -3923,30 +3707,11 @@ void CTEngine::runPass(const Program* program) {
     }
 
     // ── Phase 9: abstract interpretation (Q1–Q5) ──────────────────────────
-    // Run after all other passes so that purity, uniform-return, and
-    // global-const information is fully populated before we start deriving
-    // abstract values for each function.
     runAbstractInterpretation(program);
 
     // ── Phase 10: inter-call-site pre-evaluation ──────────────────────────
-    //
-    // Walk every function body looking for call expressions whose arguments
-    // are all compile-time constants (integer/float/string literals, or names
-    // registered in globalConsts_/enumConsts_) calling a pure user function.
-    // For each such call site we evaluate the callee immediately, populating
-    // memoCache_ so that the codegen's call-site folding (which also goes
-    // through executeFunction) gets instant cache hits rather than re-executing.
-    //
-    // This is more aggressive than Phase 4 (zero-arg functions only) and
-    // complements Phase 7 (symbolic-arg uniform-return detection): it covers
-    // all-concrete multi-arg calls without requiring the codegen to drive the
-    // evaluation.
-    //
-    // The walk reuses the Phase 5 call-expression visitor pattern.
     {
         // Helper: try to resolve a single expression to a CTValue using only
-        // the already-known constants (no frame execution — just literal and
-        // global/enum lookup).  Returns nullopt for anything more complex.
         auto tryResolveLiteral = [&](const Expression* ex) -> std::optional<CTValue> {
             if (!ex) return std::nullopt;
             if (ex->type == ASTNodeType::LITERAL_EXPR) {
@@ -4072,16 +3837,6 @@ void CTEngine::runPass(const Program* program) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CTInterval — arithmetic transfer functions
-// ═══════════════════════════════════════════════════════════════════════════════
-//
-// Each function computes the interval that tightly contains all possible
-// results of the operation.  The derivation is from the mathematical
-// definition of the operation — NOT from pattern matching on AST structure.
-//
-// Overflow is handled conservatively: if both bounds fit in int64, we track
-// the precise interval; if either bound would overflow, we return TOP.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 namespace {
@@ -4281,8 +4036,6 @@ CTInterval CTEngine::getExitRange(const std::string& fnName,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CTAbstractInterpreter — implementation
-// ═══════════════════════════════════════════════════════════════════════════════
 
 // Helper: look up a variable's abstract value in env, defaulting to TOP.
 static CTInterval envGet(const CTAbstractEnv& env, const std::string& name) {
@@ -4338,8 +4091,6 @@ CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
         CTInterval rhs = analyzeExpr(bin->right.get(), env, result);
 
         // Arithmetic operations: apply the appropriate transfer function.
-        // The transfer function is derived from the DEFINITION of the operation,
-        // not from recognising a specific pattern in the AST.
         CTInterval res = CTInterval::top();
         const std::string& op = bin->op;
 
@@ -4368,10 +4119,6 @@ CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
         }
 
         // Q4: Range-conditioned cheaper rewrites.
-        // We DERIVE that a substitution is valid by reasoning about the operand ranges.
-        // Example: x / 4 → x >> 2 is correct iff x ≥ 0 (proven by lhs range analysis).
-        // This is NOT pattern matching — the rule is derived from the semantic identity
-        //   ∀ x ≥ 0: x / 2^k = x >> k   (property of integer arithmetic)
         if (op == "/" && !rhs.isTop() && rhs.isConcrete() && rhs.lo > 0 &&
             lhs.isNonNegative()) {
             int64_t divisor = rhs.lo;
@@ -4448,9 +4195,6 @@ CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
 }
 
 // Helper for compound condition narrowing (used by narrowCondition).
-// Decomposes A && B, A || B, and !A recursively before narrowing atomic
-// comparisons.  Same propagation rules as CTEngine::narrowBranchConstraints
-// but operating on a CTAbstractEnv (per-function abstract domain).
 namespace {
 constexpr int kAINarrowDepthBudget = 6;
 }
@@ -4619,8 +4363,6 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         CTInterval condRange = analyzeExpr(ifs->condition.get(), env, result);
 
         // Derive reachability from the condition's abstract value.
-        // This is REASONING, not pattern matching: we ask the interval "can
-        // you ever be true (≠ 0)?" or "can you ever be false (= 0)?".
         const bool condCanBeTrue  = !condRange.isBottom() &&
                                      (condRange.isTop() || condRange.includes(0) == false ||
                                       !condRange.isConcrete() || condRange.lo != 0);
@@ -4647,18 +4389,6 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         narrowCondition(ifs->condition.get(), thenEnv, elseEnv);
 
         // After narrowing compound/atomic conditions, check whether any
-        // variable was narrowed to BOTTOM — that means the condition is
-        // unsatisfiable on that branch, so the branch is provably dead.
-        //
-        // SOUNDNESS: we only flag a branch as dead from narrowing when the
-        // contradicting variable was TOP in the ENTRY env.  This restricts the
-        // signal to "the compound condition itself is a tautological
-        // contradiction" (e.g. `x >= 100 && x < 50`).  We deliberately do NOT
-        // trust narrowed-to-BOTTOM evidence when the variable already had a
-        // concrete or narrow value, because abstract interpretation analyses
-        // loop bodies in a single pass before widening, so a stale concrete
-        // value (e.g. `i = exact(1)` before reaching the loop back-edge) could
-        // otherwise produce a spurious dead-branch annotation.
         auto bottomFromTopVarOnly = [&](const CTAbstractEnv& narrowed) -> bool {
             for (auto& [name, iv] : narrowed) {
                 if (!iv.isBottom()) continue;
@@ -4691,17 +4421,6 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
     }
 
     // ── For loop (Q1: induction variable range) ───────────────────────────
-    //
-    // The range of the induction variable is DERIVED from the semantics of
-    // the loop: we evaluate the start and end expressions as abstract values,
-    // then compute the range that i takes at loop body entry.
-    //
-    // This is not matching the pattern "for i in 0..n" — it's computing:
-    //   start_iv = analyzeExpr(start), end_iv = analyzeExpr(end)
-    //   i_range  = [start_iv.lo, end_iv.hi - 1]   (when both are known ranges)
-    //
-    // The same analysis works for: for i in getStart()..getEnd() when those
-    // functions have been CT-evaluated to known values.
     case ASTNodeType::FOR_STMT: {
         auto* fs = static_cast<const ForStmt*>(s);
         CTInterval startI = analyzeExpr(fs->start.get(), env, result);
@@ -4822,8 +4541,6 @@ CTAnalysisResult CTAbstractInterpreter::analyzeFunction(const FunctionDecl* fn) 
     if (!fn || !fn->body) return result;
 
     // Initial environment: parameters start as TOP (any value).
-    // This ensures we derive ranges purely from what the function body
-    // can prove about them — not from assumptions about call sites.
     CTAbstractEnv env;
     for (auto& param : fn->parameters)
         env[param.name] = CTInterval::top();

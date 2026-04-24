@@ -1,8 +1,4 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// ipof_pass.cpp — Implicit Phase Ordering Fixer (IPOF)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// See ipof_pass.h for the full algorithm description.
 
 #include "ipof_pass.h"
 
@@ -42,8 +38,6 @@ namespace omscript::ipof {
 namespace {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Utilities
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// FNV-1a 64-bit hash over the opcodes + type IDs of all instructions in @p F.
 /// Cheap enough to run before/after every local re-run as a cycle detector.
@@ -74,8 +68,6 @@ static unsigned instrCount(const llvm::Function& F) noexcept {
     return n;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Step 1 — Missed opportunity detection
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct MissedOp {
@@ -180,11 +172,6 @@ static std::vector<MissedOp> step1Detect(llvm::Function& F, const IpofConfig& cf
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 2 — Dependency-hint graph
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// For each group of missed ops in a function, compute the ordered set of
-// sub-passes needed to fix them (the "pass sequence").
 
 enum class PassSeq {
     FoldThenDCE,       // InstSimplify + ADCE
@@ -218,13 +205,8 @@ static PassSeq selectPassSeq(const std::vector<MissedOp>& ops) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 3 — Local re-run of the selected pass sequence
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Apply @p seq to @p F (function-level) or to the whole @p M (module-level
-/// when seq == InlineFoldDCE).  Returns true if any transformation fired.
-/// The sub-passes used (InstSimplify, ADCE, EarlyCSE, MemCpyOpt, SimplifyCFG,
-/// AlwaysInliner) do not require a hardware-accurate TTI.
 static bool applyPassSeq(PassSeq seq, llvm::Function& F, llvm::Module& M) {
     llvm::PassBuilder PB;
     llvm::LoopAnalysisManager LAM;
@@ -274,8 +256,6 @@ static bool applyPassSeq(PassSeq seq, llvm::Function& F, llvm::Module& M) {
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-function driver
 // ─────────────────────────────────────────────────────────────────────────────
 
 static IpofStats runOnFunction(llvm::Function& F,
@@ -351,8 +331,6 @@ static IpofStats runOnFunction(llvm::Function& F,
 
 } // anonymous namespace
 
-// ─────────────────────────────────────────────────────────────────────────────
-// runIPOF — public entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
 IpofStats runIPOF(llvm::Module& module, const IpofConfig& cfg) {

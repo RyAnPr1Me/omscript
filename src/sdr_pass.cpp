@@ -1,8 +1,4 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// sdr_pass.cpp — Speculative Devectorization & Revectorization (SDR)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// See sdr_pass.h for the algorithm overview and phase descriptions.
 
 #include "sdr_pass.h"
 
@@ -29,8 +25,6 @@ namespace omscript::sdr {
 
 namespace {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Return the FixedVectorType if @p v has one, otherwise nullptr.
@@ -91,12 +85,6 @@ static int64_t extractLaneIndex(const llvm::ExtractElementInst* ee) noexcept {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 1 — Detect suboptimal SIMD regions
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Classifies each FixedVectorType-producing instruction into one of the four
-// RegionKind categories.  Applies a lane-use fraction threshold before
-// emitting an SdrRegion.
 
 /// Compute the used-lane bitmask for @p vecInst by walking all users.
 /// Returns {usedMask, usedLaneCount}.
@@ -120,8 +108,6 @@ static std::pair<uint64_t, unsigned> computeUsedLanes(llvm::Instruction* vecInst
 }
 
 /// Detect a horizontal reduction pattern rooted at @p vecInst.
-/// Pattern: all lanes extracted and fed into an associative binary arith tree.
-/// Returns true when all lanes are consumed and only by a single arith tree.
 static bool detectReduction(llvm::Instruction* vecInst) {
     auto* fvt = llvm::cast<llvm::FixedVectorType>(vecInst->getType());
     const unsigned totalLanes = fvt->getNumElements();
@@ -137,8 +123,6 @@ static bool detectReduction(llvm::Instruction* vecInst) {
     if (extracts.size() != totalLanes) return false;
 
     // Verify that every extract feeds only arithmetic users and that
-    // the arith users form a tree (each has at most one non-extract input).
-    // We do a single-level check here (deep analysis is handled in phase 4).
     for (auto* ee : extracts) {
         for (llvm::User* eu : ee->users()) {
             auto* inst = llvm::dyn_cast<llvm::Instruction>(eu);
@@ -218,16 +202,6 @@ static std::vector<SdrRegion> phase1Detect(llvm::Function& F,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 2 — Devectorize: explode vector SSA into per-lane scalar values
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// For each vector instruction root, extract each lane into a scalar using
-// ExtractElement, then patch users of the vector via scalar->vector
-// round-trip (InsertElement chains) so the rest of the function sees
-// the same type.  The original vector instruction is left in place; phases
-// 3 and 4 will clean it up once they know what to do with the scalars.
-//
-// Returns a mapping: lane index → scalar Value* for the root instruction.
 
 using ScalarLanes = std::vector<llvm::Value*>; // index → scalar value
 
@@ -248,13 +222,6 @@ static ScalarLanes devectorize(SdrRegion& region, llvm::IRBuilder<>& builder) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 3 — Scalar dataflow analysis
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Walk the scalar lanes produced by devectorize() and:
-//   • confirm which lanes are actually consumed downstream (live-lane mask)
-//   • detect whether the reduction pattern holds in the scalar form
-//   • compute the minimum vector width that covers all live lanes
 
 struct DataflowResult {
     uint64_t liveMask      = 0;
@@ -293,16 +260,6 @@ static DataflowResult phase3Analyze(const SdrRegion& region,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 4 — Revectorize intelligently
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Decision tree:
-//   1. If isReduction → replace extract+arith chain with llvm.vector.reduce.*
-//   2. If liveCount < origLanes && enableNarrowing →
-//        rebuild as smaller FixedVectorType (narrow), gate by TTI cost.
-//   3. If liveCount > origLanes && enableWidening && target supports wider →
-//        rebuild as wider FixedVectorType (widen), gate by TTI cost.
-//   4. Otherwise → passthrough (leave scalar, possibly cheaper).
 
 /// Map a binary opcode to the corresponding llvm.vector.reduce.* intrinsic ID.
 /// Returns Intrinsic::not_intrinsic for unsupported opcodes.
@@ -338,9 +295,6 @@ static void replaceExtractUsers(llvm::Value* vec,
 }
 
 /// Build a narrow vector from the live subset of lanes and insert it into the
-/// function.  @p liveScalars must already be in lane-index order (may contain
-/// nullptrs for dead lanes, which are filled with undef).
-/// Returns the new FixedVectorType instruction or nullptr if rebuild failed.
 static llvm::Value* buildNarrowVector(llvm::Instruction* insertBefore,
                                        llvm::Type* elemTy,
                                        const std::vector<llvm::Value*>& liveScalars,
@@ -525,17 +479,12 @@ static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
         }
 
         // ── Case 4: Passthrough — leave as scalar ─────────────────────────
-        // Scalar fallback: just leave the devectorized scalars in place.
-        // Subsequent DCE passes will eliminate the original vector op if its
-        // only users were the extract instructions we already replaced.
         ++stats.passthrough;
     }
 
     return stats;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Per-function driver
 // ─────────────────────────────────────────────────────────────────────────────
 
 static SdrStats runOnFunction(llvm::Function& F,
@@ -598,8 +547,6 @@ static SdrStats runOnFunction(llvm::Function& F,
 
 } // anonymous namespace
 
-// ─────────────────────────────────────────────────────────────────────────────
-// runSDR — public entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
 SdrStats runSDR(llvm::Module& module,

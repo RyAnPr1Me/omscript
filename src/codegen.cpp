@@ -91,9 +91,6 @@ using omscript::VarDecl;
 using omscript::WhileStmt;
 
 /// Concurrency builtin names.  User functions that call any of these must NOT
-/// be marked nosync/nofree/willreturn because those attributes promise to the
-/// optimizer that the function performs no synchronization, never frees memory,
-/// and always returns — all of which are violated by pthreads primitives.
 static const std::unordered_set<std::string> kConcurrencyBuiltins = {"thread_create", "thread_join",  "mutex_new",
                                                                      "mutex_lock",    "mutex_unlock", "mutex_destroy"};
 
@@ -191,8 +188,6 @@ static bool usesConcurrencyPrimitive(const omscript::FunctionDecl* func) {
 }
 
 /// Returns true if the expression is a simple value with no side effects
-/// (literal or identifier).  Used by algebraic identity optimizations to
-/// determine if an operand can be safely dropped.
 inline bool isPureExpression(const Expression* expr) {
     return expr->type == ASTNodeType::LITERAL_EXPR || expr->type == ASTNodeType::IDENTIFIER_EXPR;
 }
@@ -248,9 +243,6 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
     auto* rightLiteral = dynamic_cast<LiteralExpr*>(right.get());
 
     // Algebraic identity optimizations (one side is a literal)
-    // Note: when the result is a constant that drops the non-literal operand
-    // (e.g. 0*x→0, x*0→0, 1**x→1, x**0→1), we only apply the optimization
-    // if the dropped operand is pure (no side effects like function calls).
     if (leftLiteral && leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
         const long long lval = leftLiteral->intValue;
         if (lval == 0 && op == "+")
@@ -637,11 +629,6 @@ void optimizeOptMaxStatement(Statement* stmt) {
 namespace omscript {
 
 // File-scope SIMD type registry — single source of truth for the
-// `<elem>x<lanes>` annotations OmScript exposes as first-class vector types.
-// Add a row here to expose a new vector type; resolveAnnotatedType() walks
-// this table.  Signed and unsigned integer rows share the same LLVM
-// representation; signedness is carried per-instruction via the annotation
-// (CreateSDiv vs CreateUDiv, ZExt vs SExt on lane reads, etc.).
 struct SimdTypeRow {
     const char* name;   // OmScript annotation, e.g. "i32x8"
     unsigned bits;      // element bit width (8, 16, 32, 64)
@@ -885,27 +872,9 @@ CodeGenerator::CodeGenerator(OptimizationLevel optLevel)
 CodeGenerator::~CodeGenerator() = default;
 
 // ---------------------------------------------------------------------------
-// TBAA metadata initialization
-// ---------------------------------------------------------------------------
 
 void CodeGenerator::initTBAAMetadata() {
     // Build a TBAA type hierarchy so LLVM knows that different memory regions
-    // are distinct types.  This allows LLVM to freely reorder loads/stores
-    // across different categories and hoist invariant loads out of loops.
-    //
-    // LLVM scalar TBAA format (path-based):
-    //   Root:    !{ !"label" }
-    //   Type:    !{ !"label", !root, i64 0 }        (0 = may-alias-others)
-    //   Access:  !{ !type, !type, i64 0 }            (offset 0, not constant)
-    //
-    // Hierarchy:
-    //   OmScript TBAA (root)
-    //   ├── array length      — slot 0 of arrays/maps
-    //   ├── array element     — slots 1+ of arrays
-    //   ├── struct field      — struct field loads/stores
-    //   ├── string data       — string character byte accesses
-    //   ├── map key           — key slots in map layout
-    //   └── map value         — value slots in map layout
     auto& C = *context;
     tbaaRoot_ = llvm::MDNode::get(C, {llvm::MDString::get(C, "OmScript TBAA")});
 
@@ -959,9 +928,6 @@ void CodeGenerator::initTBAAMetadata() {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 256))
     });
     // !range [0, 65): bit-count i64 results (popcount/clz/ctz).
-    // These always return a value in [0, 64]; the upper bound is exclusive
-    // so 65 is the correct sentinel.  This lets CVP/LVI prove (clz(x) > 64)
-    // is always false and enables tighter bounds propagation through arithmetic.
     bitcountRangeMD_ = llvm::MDNode::get(C, {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 65))
@@ -974,9 +940,6 @@ llvm::MDNode* CodeGenerator::getOrCreateFieldTBAA(const std::string& structType,
     if (it != tbaaStructFieldCache_.end()) return it->second;
 
     // Build a unique per-field TBAA type node as a child of tbaaStructTypeNode_.
-    // Two accesses to different fields will have sibling type nodes that do not alias.
-    // A generic struct-field access using tbaaStructField_ still aliases all per-field
-    // accesses because tbaaStructTypeNode_ is their common ancestor.
     auto& C = *context;
     auto* zero = llvm::ConstantAsMetadata::get(
         llvm::ConstantInt::get(llvm::Type::getInt64Ty(C), 0));
@@ -1043,11 +1006,6 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (ann == "i32" || ann == "u32")
         return llvm::Type::getInt32Ty(*context);                // i32/u32
     // -----------------------------------------------------------------------
-    // SIMD vector types — table-driven against the file-scope
-    // `kSimdTypeRegistry`.  See the comment on that table for naming
-    // conventions and the supported width matrix.  To add a new vector
-    // type, append a row to the registry; no code change here is needed.
-    // -----------------------------------------------------------------------
     for (const SimdTypeRow& r : kSimdTypeRegistry) {
         if (ann == r.name) {
             llvm::Type* elemTy =
@@ -1058,12 +1016,6 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
             return llvm::FixedVectorType::get(elemTy, r.lanes);
         }
     }
-    // -----------------------------------------------------------------------
-    // Pointer-holding types — use LLVM pointer type instead of i64.
-    // This preserves pointer provenance through LLVM's alias analysis.
-    // Without this, ptr→i64→ptr round-trips at alloca boundaries destroy
-    // BasicAA / SCEVAA tracking, preventing LICM from hoisting loads and
-    // the vectorizer from proving non-aliasing.
     // -----------------------------------------------------------------------
     if (ann == "string")
         return llvm::PointerType::getUnqual(*context);
@@ -1081,9 +1033,6 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::PointerType::getUnqual(*context);
 
     // General iN/uN handler for arbitrary bit widths [1..256].
-    // Handles i2, i3, ..., i128, u128, i256, u256, etc.
-    // Must come AFTER the specific i8/u8, i16/u16, i32/u32 checks above.
-    // i64/u64 and others also fall through to here (returning i64 as before).
     {
         const std::string& a = ann;
         if (a.size() >= 2 && (a[0] == 'i' || a[0] == 'u')) {
@@ -1110,8 +1059,6 @@ llvm::StructType* CodeGenerator::getOrCreateStructLLVMType(const std::string& na
         return cached->second;
 
     // Look up declared field metadata.  Prefer the rich StructField list
-    // (which carries per-field type annotations); fall back to the bare name
-    // list for legacy untyped structs (every field becomes i64).
     auto declIt = structFieldDecls_.find(name);
     auto namesIt = structDefs_.find(name);
 
@@ -1122,9 +1069,6 @@ llvm::StructType* CodeGenerator::getOrCreateStructLLVMType(const std::string& na
             llvm::Type* t = fd.typeName.empty() ? getDefaultType()
                                                 : resolveAnnotatedType(fd.typeName);
             // bool fields would otherwise become i1, which has weird ABI
-            // properties (1 bit -> still allocated as a byte but storage size
-            // can confuse callers); promote to i8 so loads/stores match the
-            // declared boolean width.
             if (t->isIntegerTy(1))
                 t = llvm::Type::getInt8Ty(*context);
             elemTypes.push_back(t);
@@ -1136,8 +1080,6 @@ llvm::StructType* CodeGenerator::getOrCreateStructLLVMType(const std::string& na
     }
 
     // Use a non-packed, named struct so LLVM applies the target DataLayout's
-    // natural alignment / padding (matches the C ABI for the same field
-    // sequence).  A named struct also makes IR dumps readable.
     llvm::StructType* sty =
         llvm::StructType::create(*context, elemTypes, "omsc.struct." + name, /*isPacked=*/false);
     structLLVMTypes_[name] = sty;
@@ -1147,11 +1089,6 @@ llvm::StructType* CodeGenerator::getOrCreateStructLLVMType(const std::string& na
 llvm::Value* CodeGenerator::liftFieldLoad(llvm::Value* v, const std::string& annot) {
     llvm::Type* ty = v->getType();
     // Integers narrower than the default expression width get extended so the
-    // rest of the expression machinery (which assumes i64-ish operands) keeps
-    // working transparently.  Signedness is taken from the annotation: types
-    // starting with 'u' (e.g. u8, u32, uint) are zero-extended; everything
-    // else is sign-extended.  i1 was already promoted to i8 in the StructType,
-    // but handle it here too for robustness.
     if (ty->isIntegerTy()) {
         const unsigned bits = ty->getIntegerBitWidth();
         if (bits < 64) {
@@ -1201,9 +1138,6 @@ llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
 
 llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
     // When the value is already i1 (from a comparison), it IS the boolean
-    // — no need to generate a redundant `icmp ne i1 %v, 0`.  This saves
-    // one instruction per condition check and produces cleaner IR that
-    // LLVM's branch analysis and vectorizer can process more efficiently.
     if (v->getType()->isIntegerTy(1)) {
         return v;
     }
@@ -1299,8 +1233,6 @@ void CodeGenerator::endScope() {
     }
 
     // Release all borrows introduced in this scope before restoring variables.
-    // This must happen first so that checkConstModification / borrow-state
-    // queries made during scope teardown see the correct unlocked state.
     if (!borrowScopeStack_.empty()) {
         for (const auto& info : borrowScopeStack_.back()) {
             releaseBorrow(info.refVar);
@@ -1487,9 +1419,6 @@ llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function
     llvm::IRBuilder<> entryBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
     auto* alloca = entryBuilder.CreateAlloca(type ? type : getDefaultType(), nullptr, name);
     // Set explicit alignment for i64 allocas — the default type in OmScript.
-    // This avoids backend alignment computation overhead and ensures that
-    // loads/stores from these allocas can use aligned instructions (movq
-    // instead of unaligned loads on x86-64).
     llvm::Type* allocaType = type ? type : getDefaultType();
     if (allocaType->isIntegerTy(64) || allocaType->isDoubleTy() || allocaType->isPointerTy()) {
         alloca->setAlignment(llvm::Align(8));
@@ -1507,11 +1436,6 @@ void CodeGenerator::codegenError(const std::string& message, const ASTNode* node
 }
 
 // ---------------------------------------------------------------------------
-// Lazy C library function declarations
-// ---------------------------------------------------------------------------
-// These helpers ensure each C library function is declared at most once in
-// the LLVM module, eliminating duplicated getFunction()/Create() blocks
-// that were previously scattered across multiple built-in handlers.
 
 llvm::Function* CodeGenerator::declareExternalFn(llvm::StringRef name, llvm::FunctionType* ty) {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, name, module.get());
@@ -1596,8 +1520,6 @@ CodeGenerator::CountingLoopInfo CodeGenerator::emitCountingLoop(
     }
 
     // Body: delegate to caller.  After bodyFn returns the insert point must
-    // be inside bodyBB (the caller emits the body AND the back-edge increment
-    // + branch using the idx PHI and loopBB pointer provided).
     builder->SetInsertPoint(bodyBB);
     bodyFn(idx, loopBB);
 
@@ -1609,8 +1531,6 @@ CodeGenerator::CountingLoopInfo CodeGenerator::emitCountingLoop(
 }
 
 // ── IR emit helpers ───────────────────────────────────────────────────────────
-// These helpers collapse the 3-4 line TBAA metadata + load/store/alloc
-// patterns that appear 200+ times across the codegen files into single calls.
 
 llvm::Value* CodeGenerator::emitLoadArrayLen(llvm::Value* arrPtr,
                                               const llvm::Twine& name) {
@@ -1691,8 +1611,6 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addRetAttr(llvm::Attribute::NonNull);
     // allocsize(0): parameter 0 is the allocation size — enables LLVM to
-    // reason about the returned buffer size for alias analysis and to
-    // eliminate redundant bounds checks on the allocated memory.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, std::nullopt));
     // allockind("alloc,uninitialized"): malloc returns freshly allocated
     // memory; LLVM treats it as an allocation function for AA and LICM.
@@ -1700,22 +1618,14 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
                                        static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
                                                              llvm::AllocFnKind::Uninitialized)));
     // inaccessiblememonly: malloc only touches allocator-internal state
-    // (inaccessible to the caller) — allows LICM to hoist malloc calls out
-    // of loops when the size argument is loop-invariant.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         *context, llvm::MemoryEffects::inaccessibleMemOnly()));
     // align(16): malloc on 64-bit Linux/macOS (glibc, musl, Darwin) guarantees
-    // at least 16-byte aligned returns (_Alignof(max_align_t) == 16).  Telling
-    // LLVM about this alignment enables aligned vector loads/stores on every
-    // heap-allocated buffer (arrays, strings, maps) without runtime checks.
     fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
     return fn;
 }
 
 // aligned_alloc(size_t alignment, size_t size) -> void*
-// Used by alloc<T>(n) when the element type's ABI alignment exceeds 16 bytes
-// (e.g., SIMD vector types).  The C11 aligned_alloc function requires that
-// `size` be a multiple of `alignment`; callers must ensure this.
 llvm::Function* CodeGenerator::getOrDeclareAlignedAlloc() {
     if (auto* fn = module->getFunction("aligned_alloc"))
         return fn;
@@ -1754,8 +1664,6 @@ llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addRetAttr(llvm::Attribute::NonNull); // OmScript assumes alloc always succeeds
     // allocsize(0, 1): allocation size is arg0 * arg1 — enables LLVM to
-    // reason about the returned buffer size for alias analysis and to
-    // eliminate redundant bounds checks on the allocated memory.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, 1));
     // allockind("alloc,zeroed"): calloc returns zeroed freshly allocated memory.
     fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
@@ -1941,8 +1849,6 @@ llvm::Function* CodeGenerator::getOrDeclareExit() {
     fn->addFnAttr(llvm::Attribute::NoReturn);
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     // cold: exit() is an error-handling/termination path — marking it cold
-    // tells the branch predictor and code layout to keep the exit call site
-    // out of the hot I-cache region, improving performance of normal paths.
     fn->addFnAttr(llvm::Attribute::Cold);
     return fn;
 }
@@ -2005,8 +1911,6 @@ llvm::Function* CodeGenerator::getOrDeclareFree() {
     fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
                                        static_cast<uint64_t>(llvm::AllocFnKind::Free)));
     // memory(argmem: readwrite, inaccessiblemem: readwrite): free reads the
-    // pointed-to allocation metadata and returns the block to the allocator's
-    // internal (inaccessible) structures.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::get(*context, llvm::Attribute::AllocatedPointer));
@@ -2226,14 +2130,6 @@ llvm::Function* CodeGenerator::getOrDeclareSrand() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     // Deliberately *not* adding NoSync: srand mutates a hidden global PRNG
-    // that rand() reads.  While `inaccessibleMemOnly` already prevents the
-    // optimizer from reordering srand past rand(), omitting NoSync adds a
-    // belt-and-braces ordering guarantee so future passes that treat NoSync
-    // as an excuse to hoist/sink a call cannot move the seed relative to
-    // the consumer.  srand is called at most once per program, so the lost
-    // "nosync"-only optimization is negligible.
-    // srand() only modifies global PRNG state (inaccessible to the caller);
-    // it must not be reordered past rand() but can float past local stores.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context,
         llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
@@ -2250,8 +2146,6 @@ llvm::Function* CodeGenerator::getOrDeclareTimeFunc() {
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
     // memory(inaccessiblemem: read): time() reads the OS clock (inaccessible
-    // to the LLVM optimizer) and optionally writes through its pointer arg
-    // (always null in OmScript), so treat as read-only inaccessible memory.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context,
         llvm::MemoryEffects::inaccessibleMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
@@ -2301,8 +2195,6 @@ llvm::Function* CodeGenerator::getOrDeclareStrndup() {
     // to reason about the returned buffer size for alias analysis.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 1, std::nullopt));
     // allockind("alloc,uninitialized"): strndup allocates new heap memory (the
-    // content is initialised by the function itself, but from LLVM's perspective
-    // the returned block is freshly allocated).
     fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
                                        static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
                                                              llvm::AllocFnKind::Uninitialized)));
@@ -2523,8 +2415,6 @@ llvm::Function* CodeGenerator::getOrDeclareAccess() {
 }
 
 // ---------------------------------------------------------------------------
-// pthread function declarations for concurrency primitives
-// ---------------------------------------------------------------------------
 
 llvm::Function* CodeGenerator::getOrDeclarePthreadCreate() {
     if (auto* fn = module->getFunction("pthread_create"))
@@ -2640,8 +2530,6 @@ llvm::Function* CodeGenerator::getOrDeclareSetenv() {
     return fn;
 }
 // ── BigInt runtime helper declarations ──────────────────────────────────────
-// All bigint* functions take/return opaque pointers to heap-allocated OmBigInt
-// objects.  The convention matches bigint_runtime.h (C ABI).
 
 namespace {
 /// Shorthand: (ptr) -> ptr — the most common bigint binary-op signature.
@@ -2836,50 +2724,8 @@ llvm::Function* CodeGenerator::getOrDeclareBigintShr() {
     return fn;
 }
 // ---------------------------------------------------------------------------
-//
-// Layout (all i64):
-//   slot 0: capacity (power of 2, always >= 8)
-//   slot 1: size     (number of active key-value pairs)
-//   slot 2 + i*3 + 0: hash_i  (0 = empty, 1 = tombstone, >=2 = occupied)
-//   slot 2 + i*3 + 1: key_i
-//   slot 2 + i*3 + 2: val_i
-//
-// Total allocation: (2 + 3 * capacity) * 8 bytes
-//
-// Hash function: "Rotate-Accumulate" (RA) hash — 4 IR instructions.
-//
-//   h  = key * 0xD6E8FEB86659FD93     (multiply: primary avalanche)
-//   r  = ror(h, 37)                    (rotate right by prime 37)
-//   h  = h + r                         (add: carry-propagation mixing)
-//   h |= 2                             (reserve sentinels 0 and 1)
-//
-// Novel design rationale:
-//
-// 1. SINGLE MULTIPLY: The large odd constant 0xD6E8FEB86659FD93 (from the
-//    murmur3/splitmix family) spreads bits across the full 64-bit word.
-//    For sequential integer keys, the products are perfectly spaced with
-//    zero collisions modulo any power of 2.
-//
-// 2. ROTATE (not shift): `ror(h, 37)` is a lossless permutation — no
-//    information is destroyed, unlike `h >> k` which discards k low bits.
-//    37 is prime and coprime to 64, maximizing the bit displacement:
-//    every bit moves to a position 37 away (mod 64) with no fixed points
-//    and no short cycles.  Compiles to a single `ror` instruction.
-//
-// 3. ADD (not XOR): Addition provides strictly superior mixing via carry
-//    propagation — a single bit flip at position i affects all positions
-//    >= i through the carry chain.  XOR only affects position i.  This
-//    is the key novelty: after rotate-add, every output bit depends on
-//    ~half of all input bits through the combined multiply+carry chains.
-//
-// Performance: 4 IR instructions → 4 machine instructions on x86
-// (imul, ror, add, or).  Critical-path latency ~5 cycles (mul=3, ror=1,
-// add=1, or folded).  The shortest dependency chain possible for a
-// quality hash.
 
 /// Emit the Rotate-Accumulate hash for a 64-bit integer key.
-/// Returns a hash value guaranteed >= 2 (0=empty, 1=tombstone reserved).
-/// Only 4 LLVM IR instructions: mul, fshr (ror), add, or.
 llvm::Value* CodeGenerator::emitKeyHash(llvm::Value* key) {
     auto* i64Ty = getDefaultType();
 
@@ -2888,17 +2734,12 @@ llvm::Value* CodeGenerator::emitKeyHash(llvm::Value* key) {
         key, llvm::ConstantInt::get(i64Ty, 0xD6E8FEB86659FD93ULL), "h.mul");
 
     // Step 2: rotate right by 37 (prime, coprime to 64) — lossless permutation.
-    // llvm.fshr(h, h, 37) = (h concat h) >> 37 = ror(h, 37).
-    // Compiles to a single `ror` on x86 / `ror` on ARM64.
     llvm::Function* fshr = OMSC_GET_INTRINSIC(
         module.get(), llvm::Intrinsic::fshr, {i64Ty});
     llvm::Value* rotated = builder->CreateCall(
         fshr, {h, h, llvm::ConstantInt::get(i64Ty, 37)}, "h.rot");
 
     // Step 3: add (not xor) — carry propagation provides additional mixing.
-    // A bit flip at position i propagates to all positions > i via carry.
-    // NUW only (not NSW): the add can produce any 64-bit value including
-    // signed overflow, but unsigned wrapping is intentional hash behavior.
     h = builder->CreateAdd(h, rotated, "h.mix", /*HasNUW=*/true, /*HasNSW=*/false);
 
     // Step 4: ensure hash >= 2 (0=empty, 1=tombstone are reserved).
@@ -2911,8 +2752,6 @@ static void setHashMapFnAttrs(llvm::Function* fn) {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     // AlwaysInline: these are small helpers (typically < 50 LLVM IR instructions)
-    // that benefit greatly from inlining at all opt levels to enable CSE of
-    // hash computations and elimination of redundant loads.
     fn->addFnAttr(llvm::Attribute::AlwaysInline);
 }
 
@@ -2936,8 +2775,6 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
     builder->SetInsertPoint(entryBB);
 
     // capacity = 8, total slots = 2 + 3*8 = 26, bytes = 26*8 = 208
-    // Layout: [len, cap, key0, val0, hash0, key1, val1, hash1, ...]
-    //   2 header slots + capacity * 3 slots (key+val+hash) = 2 + 3*cap slots
     static constexpr int64_t kInitCapacity    = 8;
     static constexpr int64_t kSlotsPerBucket  = 3;    // key, value, hash
     static constexpr int64_t kHeaderSlots     = 2;    // length, capacity
@@ -3012,9 +2849,6 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     capLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
     llvm::Value* cap = capLoad;
     // Capacity is always a power of 2 >= 8.  Communicate this to LLVM:
-    //  (a) !range metadata:  cap ∈ [8, 2^62)  — eliminates dead zero-checks
-    //  (b) llvm.assume(cap & (cap-1) == 0)    — lets CorrelatedValuePropagation
-    //      prove slot < cap after slot & mask, enabling downstream optimizations
     {
         llvm::Metadata* rangeMD[] = {
             llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 8)),
@@ -3074,8 +2908,6 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     builder->CreateCondBr(isTomb, nextBB, occupBB);
 
     // Occupied: first compare stored hash vs computed hash (cheap i64 cmp).
-    // On mismatch we skip the key load entirely — avoids a cache miss on
-    // probe chains where most slots hold different keys.
     builder->SetInsertPoint(occupBB);
     auto* checkKeyBB = llvm::BasicBlock::Create(*context, "checkkey", fn);
     llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
@@ -3123,8 +2955,6 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         builder->CreateMul(cap, llvm::ConstantInt::get(i64Ty, 3), "cap3thr", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "threshold");
     llvm::Value* needGrow = builder->CreateICmpUGT(newSize, threshold, "needgrow");
     // Growth is rare: only triggered when load factor exceeds 75%, which
-    // happens at most log2(N) times over N insertions.  Weight accordingly
-    // so the branch predictor and code layout favor the no-grow path.
     llvm::MDNode* growWeights = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
     builder->CreateCondBr(needGrow, growBB, insertBB, growWeights);
 
@@ -3881,8 +3711,6 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSize() {
 }
 
 // ---------------------------------------------------------------------------
-// String type inference helpers
-// ---------------------------------------------------------------------------
 
 bool CodeGenerator::isPreAnalysisStringExpr(Expression* expr, const std::unordered_set<size_t>& paramStringIndices,
                                             const FunctionDecl* func) const {
@@ -4008,10 +3836,6 @@ void CodeGenerator::scanStmtForStringCalls(Statement* stmt) {
 
 void CodeGenerator::preAnalyzeStringTypes(Program* program) {
     // Seed string type information from explicit type annotations.
-    // When a parameter is annotated as `: string` or a function has
-    // `-> string` return type, we know the type without flow analysis.
-    // This bootstraps the fixpoint loop so that downstream callers/callees
-    // of annotated functions get correct string type propagation immediately.
     for (auto& func : program->functions) {
         // Seed string-returning functions from return type annotations.
         if (func->returnType == "string") {
@@ -4026,8 +3850,6 @@ void CodeGenerator::preAnalyzeStringTypes(Program* program) {
     }
 
     // Iteratively propagate string type information until no new facts are learned.
-    // Each iteration may uncover new string-returning functions or string parameters,
-    // which in turn enables further propagation in the next iteration.
     bool changed = true;
     while (changed) {
         changed = false;
@@ -4048,8 +3870,6 @@ void CodeGenerator::preAnalyzeStringTypes(Program* program) {
             }
 
             // Scan all call sites in this function's body to find which parameters
-            // of other functions receive string arguments.
-            // Track change by counting total entries before/after.
             size_t prevTotal = 0;
             for (auto& kv : funcParamStringTypes_)
                 prevTotal += kv.second.size();
@@ -4212,10 +4032,6 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         if (stringVars_.count(id->name) > 0)
             return true;
         // Check the LLVM alloca type: a pointer-typed alloca is a string ONLY
-        // if the variable is not known to be another pointer-holding type
-        // (array, struct, dict).  Since resolveAnnotatedType now returns ptr
-        // for arrays/structs/dicts, we must exclude those to avoid false
-        // positives that would misroute array indexing to strlen-based paths.
         if (arrayVars_.count(id->name) || dictVarNames_.count(id->name)
             || structVars_.count(id->name) || stringArrayVars_.count(id->name)
             || ptrVarNames_.count(id->name)
@@ -4273,8 +4089,6 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
         return true;
     }
     // str_split() always returns an array of strings.
-    // push(strArr, elem) returns a string array if the input is one.
-    // array_concat/array_copy preserve the string-array type of the input.
     if (expr->type == ASTNodeType::CALL_EXPR) {
         auto* call = static_cast<CallExpr*>(expr);
         if (call->callee == "str_split")
@@ -4310,13 +4124,6 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Detect preferred SIMD vector width from the target's CPU features.
-    // The width is expressed in *i64 lanes* since OmScript's default type
-    // is i64.  AVX-512 has 512-bit registers → 8 × i64; AVX2 has 256-bit
-    // registers → 4 × i64; SSE2/NEON has 128-bit registers → 2 × i64.
-    // Using the correct width avoids over-requesting: for example, hinting
-    // VF=8 on AVX2 would require the vectorizer to split across two
-    // registers and may cause harmful type widening (i64 → i128 for
-    // modulo-by-constant patterns) that has no native hardware support.
     {
         std::string cpu, features;
         resolveTargetCPU(cpu, features);
@@ -4371,29 +4178,18 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Set fast-math flags on the builder for all generated FP operations.
-    // This enables FMA fusion (a*b+c -> fmadd), reassociation, reciprocal
-    // approximations, and better SIMD vectorization of floating-point loops.
     if (useFastMath_) {
         llvm::FastMathFlags FMF;
         FMF.setFast(); // enables all unsafe FP optimizations
         builder->setFastMathFlags(FMF);
     } else if (optimizationLevel >= OptimizationLevel::O2) {
         // At O2+, enable FP contraction (a*b+c → fma) without full
-        // fast-math.  This matches clang's default -ffp-contract=on
-        // behaviour: FMA contraction is safe — it produces a more precise
-        // result (one rounding instead of two) and utilises hardware FMA
-        // units, improving throughput on modern CPUs.  No other unsafe FP
-        // transformations (reassociation, reciprocal approximation, etc.)
-        // are enabled, preserving IEEE-754 semantics for everything else.
         llvm::FastMathFlags FMF;
         FMF.setAllowContract(true);
         builder->setFastMathFlags(FMF);
     }
 
     // Forward-declare all functions so that any function can reference any
-    // other regardless of source-file ordering (enables mutual recursion).
-    // Operator overload functions must be appended to program->functions
-    // BEFORE this loop so they get forward-declared like any other function.
     for (auto& structDecl : program->structs) {
         for (auto& overload : structDecl->operators) {
             if (overload.impl) {
@@ -4410,11 +4206,6 @@ void CodeGenerator::generate(Program* program) {
         paramTypes.reserve(func->parameters.size());
         for (auto& param : func->parameters) {
             // Type annotation enforcement: when a parameter has no explicit
-            // type we fall back to the default i64 instead of raising an
-            // error.  This matches the historical behaviour and keeps the
-            // (large) corpus of examples and tests with untyped parameters
-            // working.  An explicit `:T` annotation is still preferred and
-            // disambiguates non-i64 types.
             if (param.typeName.empty()) {
                 paramTypes.push_back(getDefaultType());
             } else {
@@ -4425,51 +4216,24 @@ void CodeGenerator::generate(Program* program) {
         llvm::Type* retType = resolveAnnotatedType(func->returnType);
         llvm::FunctionType* funcType = llvm::FunctionType::get(retType, paramTypes, false);
         // Non-main functions use InternalLinkage at O2+ (equivalent to C's
-        // `static`).  This tells the optimizer that no external code can call
-        // the function, enabling:
-        //   - fastcc calling convention (GlobalOpt promotes eligible internals)
-        //   - deeper recursive inlining (the inliner has full visibility)
-        //   - better alias analysis (no escaping through external callers)
-        // "main" must remain ExternalLinkage so the linker can find it.
         auto linkage = (func->name != "main" && optimizationLevel >= OptimizationLevel::O2)
                            ? llvm::Function::InternalLinkage
                            : llvm::Function::ExternalLinkage;
         llvm::Function* function =
             llvm::Function::Create(funcType, linkage, func->name, module.get());
         // Optimization-enabling attributes for all user functions:
-        // nounwind   – omscript has no C++ exceptions; elides LSDA / unwind tables
-        //              and turns calls into simpler instructions.
-        // mustprogress – every function is required to make forward progress;
-        //              unlocks loop-idiom recognition (auto-memset/memcpy detection).
         function->addFnAttr(llvm::Attribute::NoUnwind);
         function->addFnAttr(llvm::Attribute::MustProgress);
         // prefer-vector-width: use the target-aware preferred SIMD width
-        // detected from CPU features.  AVX-512 → 512, AVX2 → 256, SSE → 128.
-        // This balances vectorization throughput with avoiding expensive type
-        // promotion on targets without wide vector support.
         function->addFnAttr("prefer-vector-width",
             std::to_string(preferredVectorWidth_ * 64));
         // nosync, nofree, willreturn — these promise the optimizer that the
-        // function never synchronizes, never frees memory, and always returns.
-        // These promises are WRONG for functions that use concurrency
-        // primitives (mutex_lock blocks, mutex_destroy frees, thread_join
-        // blocks), so we only add them when the function body is
-        // concurrency-free.
         if (!usesConcurrencyPrimitive(func.get())) {
             function->addFnAttr(llvm::Attribute::NoSync);
             function->addFnAttr(llvm::Attribute::NoFree);
             function->addFnAttr(llvm::Attribute::WillReturn);
         }
         // noundef on all parameters and the return value — omscript always
-        // initializes every variable, so the optimizer can assume no undef/
-        // poison values flow through function boundaries.  This strengthens
-        // SCEV, value-range propagation, and alias analysis.
-        // signext/zeroext on integer params/return — enables better codegen on
-        // targets where the calling convention requires extension (e.g. AArch64).
-        // Unsigned type annotations (u8, u16, u32, u64) get zeroext instead
-        // of signext, which enables more efficient codegen and lets LLVM prove
-        // non-negativity for range analysis and strength reduction.
-        // Float (double) params/return must NOT get signext/zeroext.
         for (unsigned i = 0; i < func->parameters.size(); ++i) {
             function->addParamAttr(i, llvm::Attribute::NoUndef);
             if (paramTypes[i]->isIntegerTy()) {
@@ -4488,12 +4252,6 @@ void CodeGenerator::generate(Program* program) {
                 function->addRetAttr(llvm::Attribute::SExt);
         }
         // For functions with pointer return types (-> string, -> int[], -> dict,
-        // -> StructType): OmScript guarantees non-null (runtime aborts on
-        // allocation failure) and at least 8 bytes dereferenceable (every
-        // array/string has a valid header slot).  These attributes propagate
-        // through the optimizer and caller context even at O0, helping the
-        // inliner and GVN prove non-null access without the full optimization
-        // pipeline.
         if (retType->isPointerTy() && optimizationLevel >= OptimizationLevel::O1) {
             function->addRetAttr(llvm::Attribute::NonNull);
             function->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(
@@ -4515,9 +4273,6 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Process struct declarations: store field layouts for struct operations.
-    // When hot/cold field attributes are present, reorder fields so that
-    // hot fields are grouped first (cache-friendly) and cold fields last.
-    // This improves spatial locality for performance-critical access patterns.
     for (auto& structDecl : program->structs) {
         if (!structDecl->fieldDecls.empty()) {
             // Check if any field has hot or cold annotations.
@@ -4571,27 +4326,10 @@ void CodeGenerator::generate(Program* program) {
             structDefs_[structDecl->name] = structDecl->fields;
         }
         // Eagerly build the LLVM StructType so that the field offsets/sizes
-        // computed by DataLayout become available everywhere the struct is
-        // used (literal codegen, field access/assignment, reborrow, etc.).
         getOrCreateStructLLVMType(structDecl->name);
     }
 
     // ── Optimization pre-pass sequence ────────────────────────────────────
-    //
-    // All pre-pass analyses and AST transforms are coordinated by the
-    // OptimizationOrchestrator, which:
-    //   1. Runs each pass in dependency order (string types → array types →
-    //      constant returns → purity → effects → synthesis → CF-CTRE → egraph)
-    //   2. Records which facts are valid in the OptimizationContext
-    //   3. Syncs the per-function analysis results into optCtx_ so that
-    //      codegen can query a single surface instead of multiple maps.
-    //
-    // Behavior is identical to the previous inline sequence; the Orchestrator
-    // simply makes the dependency graph explicit and facts centrally available.
-    //
-    // A shared OptimizationManager is created here and stored in optMgr_ so
-    // that the IR-level pipeline (runOptimizationPasses) can share the same
-    // cost model and legality service without constructing a second manager.
     optCtx_ = std::make_unique<OptimizationContext>();
     optCtx_->setCTEngine(ctEngine_.get());
     optMgr_ = std::make_unique<OptimizationManager>();
@@ -4620,22 +4358,6 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Infer memory effect attributes on user-defined functions.
-    // After all function bodies have been generated, scan LLVM IR to detect
-    // functions that only read memory (readonly) or don't access memory at
-    // all (readnone).  This enables interprocedural optimizations: LICM can
-    // hoist readonly calls out of loops, and the inliner uses memory effects
-    // to avoid unnecessary spills around call sites.
-    //
-    // Also infer argmem-only (memory(argmem: ...)) for functions whose
-    // non-local memory accesses all trace back to function arguments.
-    // argmemonly enables LLVM to prove that calls don't alias globals or
-    // heap state, unlocking store-to-load forwarding and dead store
-    // elimination across call sites.
-    //
-    // We run multiple fixpoint iterations so that memory effects propagate
-    // interprocedurally: once a callee gets readnone/readonly from iteration N,
-    // its callers can be promoted in iteration N+1.  Converges in O(call depth)
-    // passes — typically 2-3 for real programs.
     if (optimizationLevel >= OptimizationLevel::O1) {
         bool memEffChanged = true;
         while (memEffChanged) {
@@ -4658,12 +4380,6 @@ void CodeGenerator::generate(Program* program) {
             for (auto& arg : func.args())
                 funcArgs.insert(&arg);
             // Helper: strip GEP chains to find the underlying allocation.
-            // A store to `getelementptr(alloca, ...)` is still a local write.
-            // Helper: strip GEP/BitCast/IntToPtr/PtrToInt chains to find
-            // the underlying pointer source.  OmScript uses i64 as the
-            // default type, so values frequently pass through IntToPtr and
-            // PtrToInt conversions.  Stripping these is essential for
-            // accurate memory-effect inference.
             auto stripPointerCasts = [](llvm::Value* ptr) -> llvm::Value* {
                 for (unsigned i = 0; i < 16; ++i) { // depth limit
                     if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
@@ -4684,8 +4400,6 @@ void CodeGenerator::generate(Program* program) {
                 return llvm::isa<llvm::AllocaInst>(stripPointerCasts(ptr));
             };
             // Helper: strip chains and check if the base is a function
-            // argument or a load from a function argument (one level of
-            // indirection covers OmScript's array-of-pointers pattern).
             auto isArgDerived = [&](llvm::Value* ptr) -> bool {
                 ptr = stripPointerCasts(ptr);
                 if (funcArgs.count(ptr))
@@ -4701,9 +4415,6 @@ void CodeGenerator::generate(Program* program) {
                 for (auto& I : BB) {
                     if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I)) {
                         // Stores to allocas (local variables) don't count as
-                        // external writes — they're promoted to SSA by mem2reg.
-                        // Also check through GEP chains (struct field / array
-                        // element stores) whose base is an alloca.
                         if (!isLocalAlloca(SI->getPointerOperand())) {
                             hasMemoryWrite = true;
                             if (!isArgDerived(SI->getPointerOperand()))
@@ -4748,8 +4459,6 @@ void CodeGenerator::generate(Program* program) {
                 memEffChanged = true;
             } else if (!hasUnknownSideEffect && allAccessesThroughArgs) {
                 // All non-local memory accesses go through function arguments.
-                // This enables LLVM to prove non-interference with globals and
-                // heap allocations not passed to this function.
                 if (!hasMemoryWrite) {
                     func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                         *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
@@ -4768,18 +4477,6 @@ void CodeGenerator::generate(Program* program) {
         } // end while memEffChanged
 
         // Speculatable inference: after memory effects have converged, any
-        // user function that is memory(none) + willreturn + nounwind is by
-        // definition speculatable — it has no observable side effects and
-        // always returns.  Marking it speculatable allows LLVM to:
-        //   - hoist calls out of loops (LICM treats speculatable calls as pure)
-        //   - eliminate duplicate calls (CSE / GVN merge call results)
-        //   - speculate calls past conditional branches (SimplifyCFG/InstCombine)
-        //   - prove that hoisting the call from a taken branch to a join point
-        //     does not change program behavior
-        // We only apply this to non-recursive user functions (recursive +
-        // speculatable would let LLVM speculate recursive calls past the
-        // base-case branch, turning finite recursion into infinite recursion).
-        // @pure functions already get Speculatable earlier; skip them here.
         for (auto& func : module->functions()) {
             if (func.isDeclaration() || func.getName() == "main")
                 continue;
@@ -4815,9 +4512,6 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Infer norecurse attribute on user-defined functions.
-    // A function that never calls itself (directly or indirectly through
-    // internal functions) can be marked norecurse, which enables IPSCCP and
-    // the inliner to reason more aggressively about call effects.
     if (optimizationLevel >= OptimizationLevel::O1) {
         // Build a set of function names for quick lookup.
         std::unordered_set<std::string> allFunctions;
@@ -4838,9 +4532,6 @@ void CodeGenerator::generate(Program* program) {
                             break;
                         }
                         // Handle indirect calls through IntToPtr/PtrToInt chains:
-                        // OmScript may cast function pointers through integer
-                        // types, making getCalledFunction() return nullptr.
-                        // Strip casts to recover the underlying function.
                         if (!calledFn) {
                             llvm::Value* calledVal = CI->getCalledOperand();
                             for (unsigned d = 0; d < 8; ++d) {
@@ -4871,10 +4562,6 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Apply OPTMAX per-function optimization passes BEFORE the module-wide IPO
-    // pipeline.  This ensures the aggressively-optimized OPTMAX function bodies
-    // feed into the inliner and constant-propagation passes in
-    // runOptimizationPasses(), rather than being optimized on already-inlined
-    // (and possibly dead) copies after IPO has run.
     if (hasOptMaxFunctions && enableOptMax_) {
         if (verbose_) {
             std::cout << "  [opt] Running OPTMAX per-function optimization passes..." << '\n';
@@ -4883,19 +4570,6 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Mark all constant global variables with unnamed_addr at O2+.
-    // unnamed_addr tells LLVM that the address of the global is not
-    // significant — only its value matters — allowing:
-    //   1. ConstantMerge to merge identical globals regardless of address.
-    //   2. The linker to merge constants from different TUs (when LTO is used).
-    //   3. Backend to place the constant in a read-only section closer to
-    //      the code that uses it, improving I-cache locality.
-    //
-    // We apply this to all constant (isConstant=true) globals except those
-    // already marked unnamed_addr or local_unnamed_addr, and except
-    // externally-visible globals (which may be referenced by address from
-    // other TUs, though OmScript programs are single-TU).
-    //
-    // This is a cheap pre-optimizer annotation pass — O(globals) time.
     if (optimizationLevel >= OptimizationLevel::O2) {
         for (auto& gv : module->globals()) {
             if (!gv.isConstant()) continue;
@@ -4904,10 +4578,6 @@ void CodeGenerator::generate(Program* program) {
             // external code might rely on (e.g. exported string constants).
             if (gv.hasExternalLinkage()) continue;
             // Skip globals that are address-taken in non-load instructions
-            // (i.e. their pointer escapes beyond simple loads).  A simple
-            // heuristic: if all uses are loads or GEP-then-loads, unnamed_addr
-            // is safe.  We check this conservatively: only mark if no use is
-            // a store, call (with the global as a pointer arg), or phi.
             bool addrTakenAsValue = false;
             for (auto* user : gv.users()) {
                 if (llvm::isa<llvm::LoadInst>(user)) continue;
@@ -4969,9 +4639,6 @@ void CodeGenerator::generate(Program* program) {
     // Print optimization statistics when verbose mode is enabled.
     if (verbose_) {
         // Pull in CF-CTRE / abstract-interpretation statistics so they appear
-        // in the consolidated [opt-report] block.  These are computed by the
-        // CTEngine during runCFCTRE() and would otherwise only be visible in
-        // the [cfctre] verbose lines.
         if (ctEngine_) {
             const auto& s = ctEngine_->stats();
             optStats_.pureFunctions     = static_cast<unsigned>(s.pureFunctionsDetected);
@@ -5021,9 +4688,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // Detect direct self-recursion.  Used for:
-    //   - norecurse attribute (O1+): helps interprocedural alias analysis
-    //     and enables GlobalOpt to internalize/eliminate the function.
-    //   - alwaysinline guard (O3): prevents infinite inliner loops.
     bool isSelfRecursive = false;
     if (func->name != "main" && optimizationLevel >= OptimizationLevel::O1 && func->body) {
         // exprCheck: walk an expression tree for a direct call to func->name.
@@ -5083,28 +4747,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // Hint small helper functions for inlining at O2+.  OPTMAX functions
-    // already get aggressive optimization; non-main functions with few
-    // statements benefit from being inlined into their callers.
-    // 8 statements covers most simple accessors and arithmetic helpers;
-    // O3 doubles the threshold to capture larger helpers.
-    // At O3, functions at or below the kAlwaysInlineStatements threshold get
-    // the stronger alwaysinline attribute — the inliner will unconditionally
-    // inline them regardless of call-site weight, eliminating all call
-    // overhead for tiny predicates, accessors, and single-operation helpers.
-    // Recursive functions are explicitly excluded: alwaysinline on a directly
-    // recursive function causes the inliner to loop infinitely.
-    // The "deep" statement count walks into nested blocks/loops to capture
-    // the true code complexity.  A function with 3 top-level statements that
-    // contains triple-nested for-loops has a deep count of ~9, preventing
-    // it from being unconditionally inlined where it would inflate code size
-    // and cause I-cache pressure.
     static constexpr size_t kMaxInlineHintStatements = 10;
     static constexpr size_t kMaxInlineHintStatementsO3 = 20;
     static constexpr size_t kAlwaysInlineStatements = 8;
     // Recursive deep statement counter — counts all statements in nested
-    // blocks, loops, and if/else chains.  Loop bodies are double-counted
-    // because loop codegen (header, latch, condition, increment, metadata)
-    // emits roughly 2× more IR than a plain statement.
     std::function<size_t(Statement*)> deepStmtCount = [&](Statement* s) -> size_t {
         if (!s) return 0;
         if (auto* blk = dynamic_cast<BlockStmt*>(s)) {
@@ -5129,19 +4775,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     const size_t inlineThreshold =
         (optimizationLevel >= OptimizationLevel::O3) ? kMaxInlineHintStatementsO3 : kMaxInlineHintStatements;
     // Zero-cost abstraction guarantee: lambda functions and very small
-    // helpers (struct accessors, predicates) get alwaysinline at O2+.
-    // This ensures that abstractions like lambdas passed to array_map /
-    // array_filter / array_reduce are fully inlined, eliminating all call
-    // overhead.  At O3, a higher deep-statement threshold is used.
-    //
-    // At O1, we also add InlineHint for small functions (but never AlwaysInline).
-    // This is critical to prevent a compiler hang: LLVM's O1 interprocedural
-    // constant-propagation passes (IPSCCP, FunctionSpecializationPass) can hang
-    // when multiple functions call inner functions containing while-loops with
-    // constant integer arguments (e.g. collatz_steps(837799), fib_iter(150)).
-    // Adding InlineHint causes the inliner to eliminate those cross-function
-    // constant-argument call sites before the IPO passes see them, avoiding
-    // the expensive analysis.
     static constexpr size_t kAlwaysInlineStatementsO2 = 4;
     const bool isLambda = func->name.rfind("__lambda_", 0) == 0;
     if (func->name != "main" && optimizationLevel >= OptimizationLevel::O1 && func->body &&
@@ -5156,8 +4789,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             }
         } else {
             // O1: hint small non-recursive functions for inlining only.
-            // No AlwaysInline — that would force inlining even of larger
-            // functions, bloating code size at a level meant for fast compilation.
             if (!isSelfRecursive) {
                 function->addFnAttr(llvm::Attribute::InlineHint);
             }
@@ -5186,21 +4817,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
     if (func->hintPure) {
         // @pure: function has no side effects and does not read/write memory
-        // beyond its arguments.  This is a COMPILE-TIME GUARANTEE — the
-        // programmer asserts purity.  Enables aggressive CSE, LICM, dead
-        // call elimination, and speculative execution.
         function->setOnlyReadsMemory();
         function->setDoesNotThrow();
         function->setDoesNotFreeMemory();
         // NoSync: the function does not communicate with other threads via
-        // memory or synchronization primitives.  Required for LLVM to move
-        // the call freely across other memory operations.
         function->setNoSync();
         // Speculatable + willreturn are only safe on non-recursive pure
-        // functions.  For a recursive function, speculatable lets LLVM
-        // hoist/speculate recursive calls past the base-case branch
-        // (converting branches into selects), which turns finite recursion
-        // into infinite recursion and a guaranteed stack overflow.
         if (!isSelfRecursive) {
             function->setWillReturn();
             function->addFnAttr(llvm::Attribute::Speculatable);
@@ -5208,8 +4830,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
     if (func->hintConstEval) {
         // @const_eval: mark the function for compile-time evaluation when
-        // called with all-constant arguments.  At the LLVM level, mark it
-        // as pure + inline so that any fallback runtime call is efficient.
         if (optCtx_) optCtx_->mutableFacts(func->name).isConstFoldable = true;
         function->addFnAttr(llvm::Attribute::InlineHint);
         function->setOnlyReadsMemory();
@@ -5217,9 +4837,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->setWillReturn();
     }
     // Auto-apply LLVM memory-effect attributes based on inferred effects.
-    // Only applied when @pure is NOT already set (which sets readonly explicitly).
-    // Query the unified OptimizationContext so IR emission uses the single
-    // canonical fact surface (populated by syncFactsToContext before codegen).
     if (!func->hintPure && optCtx_) {
         const FunctionEffects& fx = optCtx_->effects(func->name);
         if (fx.isReadNone()) {
@@ -5242,15 +4859,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
 
         // Overhauled effect-axis attribution (independent of memory effects):
-        //   • nounwind    when the function provably never throws/aborts/exits.
-        //   • willreturn  when the function provably terminates and is not
-        //                 self-recursive (we don't prove termination through
-        //                 cycles).
-        //   • argmemonly  when the function only touches memory reachable via
-        //                 its arguments (no globals, no I/O, no allocation,
-        //                 no indirect calls) and is not already readnone/none.
-        //   • readonly per pointer-typed argument that the function's
-        //                 effect summary guarantees is never mutated.
         if (fx.isNoUnwind() && !func->hintNoUnwind /* already applied below */)
             function->setDoesNotThrow();
         if (fx.willReturn() && !isSelfRecursive)
@@ -5260,9 +4868,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             function->setOnlyAccessesArgMemory();
         }
         // Per-parameter readonly: tag pointer arguments that the analysis
-        // proved are never mutated.  Matches LLVM verifier rules — only valid
-        // on byval/pointer arguments.  Skip when @restrict already promised
-        // file-/function-wide noalias semantics that imply argmemonly.
         if (!fx.paramMutated.empty()) {
             const std::size_t n = std::min<std::size_t>(
                 fx.paramMutated.size(), function->arg_size());
@@ -5279,28 +4884,17 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
     if (func->hintStatic) {
         // @static: use internal linkage so the function is only visible within
-        // the translation unit.  Enables better interprocedural optimizations
-        // (constant propagation, dead argument elimination) because LLVM knows
-        // no external code can call it.
         function->setLinkage(llvm::GlobalValue::InternalLinkage);
     }
     if (func->hintFlatten) {
         // @flatten: inline all callees into this function.  This is the
-        // opposite of @noinline — it tells the optimizer to aggressively
-        // inline everything called from this function.
         function->addFnAttr("flatten");
     }
     if (func->hintRestrict || fileNoAlias_) {
         // @restrict / @noalias / file-level @noalias: tell LLVM this function
-        // only accesses memory through its arguments (argmem).  This enables
-        // aggressive alias-based optimizations: the optimizer can prove that
-        // separate call sites don't alias, enabling load/store reordering
-        // and vectorization.
         function->setOnlyAccessesArgMemory();
         function->setDoesNotThrow();
         // Mark all pointer parameters as noalias — OmScript's ownership
-        // semantics guarantee that distinct variables cannot alias the same
-        // memory region unless explicitly declared.
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NoAlias);
@@ -5310,18 +4904,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     if (func->hintMinSize) {
         // @minsize: optimize for minimum code size.  Maps to LLVM's OptimizeForSize
-        // + MinSize attributes which instruct the backend to prefer smaller code
-        // sequences over faster ones (fewer bytes, not fewer cycles).  Useful for
-        // rarely-called functions or embedded/size-critical scenarios.
         function->addFnAttr(llvm::Attribute::OptimizeForSize);
         function->addFnAttr(llvm::Attribute::MinSize);
     }
     if (func->hintOptNone) {
         // @optnone: disable all optimizations for this function.  Maps to LLVM's
-        // OptimizeNone attribute which completely bypasses the optimizer for the
-        // function.  Useful for debugging (keep variable values observable in a
-        // debugger), testing (force a specific code path without optimization),
-        // or isolating performance regressions.
         function->addFnAttr(llvm::Attribute::OptimizeNone);
         // OptimizeNone requires NoInline per LLVM verifier rules.
         function->addFnAttr(llvm::Attribute::NoInline);
@@ -5330,15 +4917,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
     if (func->hintNoUnwind) {
         // @nounwind: function never throws C++ exceptions.  Maps to LLVM's
-        // NoUnwind attribute which enables the compiler to omit exception-handling
-        // (unwind) tables for this function, saving code size and allowing
-        // more aggressive inlining across call boundaries.
         function->addFnAttr(llvm::Attribute::NoUnwind);
     }
 
     // @allocator(size=N) / @allocator(size=N, count=M): mark as allocator wrapper.
-    // Adds allocsize, noalias return (only for pointer returns), WillReturn,
-    // and NoUnwind so LLVM's alias analysis can track allocation sizes.
     if (func->allocatorSizeParam >= 0) {
         const unsigned sizeIdx  = static_cast<unsigned>(func->allocatorSizeParam);
         if (func->allocatorCountParam >= 0) {
@@ -5357,40 +4939,21 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // OmScript uses a flag-based error model (not C++ exceptions / DWARF
-    // unwind), so all user-defined functions are inherently nounwind.  Adding
-    // this unconditionally (at O2+) lets LLVM:
-    //   1. Omit .eh_frame / .gcc_except_table sections → smaller binaries
-    //   2. Inline across call boundaries without needing invoke/landingpad
-    //   3. Eliminate dead exception-handling code in the backend
     if (optimizationLevel >= OptimizationLevel::O2 &&
         !function->hasFnAttribute(llvm::Attribute::NoUnwind)) {
         function->addFnAttr(llvm::Attribute::NoUnwind);
     }
 
     // At O2+, align function entry to 16 bytes for better I-cache locality
-    // and branch target prediction.  Hot functions get 32-byte alignment to
-    // avoid crossing cache-line boundaries on the entry block.
     if (optimizationLevel >= OptimizationLevel::O2) {
         function->setAlignment(func->hintHot ? llvm::Align(32) : llvm::Align(16));
 
         // mustprogress: tells LLVM that every loop in this function will
-        // eventually terminate (no infinite spin-loops).  This enables:
-        //   1. Dead store elimination through loops
-        //   2. LICM of loads/stores across loop boundaries
-        //   3. Loop deletion when the loop body has no observable side effects
-        // OmScript programs don't intentionally spin-loop, so this is safe for
-        // all user functions.  Functions with @optnone are excluded.
         if (!function->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
             function->addFnAttr(llvm::Attribute::MustProgress);
         }
 
         // OmScript's ownership model guarantees that pointer parameters
-        // (arrays, strings) are always valid (non-null) distinct allocations.
-        // Mark ALL pointer parameters as nonnull at O2+ — this lets LLVM
-        // eliminate null-checks and enables speculative loads/hoisting.
-        // noalias is handled by the default fallback below (line ~4013+)
-        // which applies to all functions regardless of optimization level,
-        // since no-aliasing is a language-level invariant.
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
@@ -5399,13 +4962,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.
-    // The OPTMAX annotation is the user's compile-time guarantee that the
-    // function is safe and well-behaved, enabling maximum optimization.
     if (inOptMaxFunction) {
         // OPTMAX is the user's guarantee that this function always terminates,
-        // has no side effects on synchronization, and doesn't free memory that
-        // callers depend on.  These attributes enable LLVM to speculate calls,
-        // hoist them out of loops, and eliminate dead calls.
         function->addFnAttr(llvm::Attribute::WillReturn);
         function->addFnAttr(llvm::Attribute::NoSync);
         for (unsigned i = 0; i < function->arg_size(); ++i) {
@@ -5413,16 +4971,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 function->addParamAttr(i, llvm::Attribute::NoAlias);
                 function->addParamAttr(i, llvm::Attribute::NonNull);
                 // OmScript arrays always have a valid header (at least 8 bytes
-                // for the length slot), so pointer parameters are dereferenceable.
-                // This enables LLVM to speculate loads and hoist them above
-                // null/bounds checks without runtime verification.
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
                 // OmScript arrays/strings are allocated via calloc/malloc which
-                // guarantees at least 16-byte alignment on 64-bit Linux.  The
-                // align(16) attribute communicates this to LLVM's vectorizer,
-                // enabling aligned vector load/store instructions (movdqa, vmovdqa)
-                // and better SLP vectorization on heap-allocated buffers.
                 function->addParamAttr(i, llvm::Attribute::getWithAlignment(
                     *context, llvm::Align(16)));
                 OMSC_ADD_NOCAPTURE(function, i);
@@ -5431,14 +4982,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // @hot functions at O2+: add nonnull and noalias on pointer parameters.
-    // OmScript's ownership model guarantees arrays/strings passed to
-    // functions are always valid (non-null) allocations.  This lets LLVM
-    // eliminate null-checks and enables speculative loads.
-    // noalias is safe because OmScript's ownership semantics guarantee that
-    // distinct parameters cannot alias the same memory region — the borrow
-    // checker prevents multiple mutable references to the same allocation.
-    // This is equivalent to C's __restrict qualifier and is critical for
-    // enabling vectorization of loops that access multiple array parameters.
     if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2 && !inOptMaxFunction) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
@@ -5455,12 +4998,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // Default noalias fallback: OmScript's ownership model guarantees that
-    // distinct pointer parameters never alias the same memory region — the
-    // borrow checker prevents multiple mutable references.  Applied at all
-    // optimization levels (including O0) because this is a language-level
-    // invariant, not a heuristic.  The guard excludes functions already
-    // handled above (@optmax, @hot, @restrict, file-level @noalias) to
-    // avoid redundant attribute additions.
     if (!inOptMaxFunction && !currentFuncHintHot_
         && !func->hintRestrict && !fileNoAlias_) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
@@ -5468,41 +5005,23 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 function->addParamAttr(i, llvm::Attribute::NoAlias);
                 function->addParamAttr(i, llvm::Attribute::NonNull);
                 // OmScript arrays always have a valid header: at least 8 bytes
-                // for the i64 length slot.  This is the minimum dereferenceable
-                // size for any OmScript pointer (arrays, strings).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
                 // OmScript arrays/strings are allocated by calloc/malloc which
-                // guarantees at least 16-byte alignment on 64-bit Linux/macOS.
-                // align(16) communicates the actual guarantee (not just the
-                // conservative lower bound), enabling LLVM to use aligned
-                // vector instructions on all heap pointer parameters.
                 function->addParamAttr(i, llvm::Attribute::getWithAlignment(
                     *context, llvm::Align(16)));
                 // OmScript's ownership model ensures pointer parameters are
-                // never captured (stored into global state or returned as
-                // pointers).  The borrow checker prevents escaping references.
-                // nocapture enables LLVM to prove the pointer doesn't escape,
-                // allowing stack promotion and more aggressive alias analysis.
                 OMSC_ADD_NOCAPTURE(function, i);
             }
         }
     }
 
     // OmScript is a single-threaded language — no concurrent memory access
-    // is possible.  nosync tells LLVM that this function does not communicate
-    // with other threads via memory or synchronization primitives, enabling
-    // store-to-load forwarding and dead store elimination across calls.
     if (optimizationLevel >= OptimizationLevel::O2 && !inOptMaxFunction) {
         function->addFnAttr(llvm::Attribute::NoSync);
     }
 
     // Emit range return attribute when a narrowed ValueRange is known for
-    // this function.  The range attribute constrains the return value's
-    // integer interval for LLVM's CVP/LVI passes, enabling tighter bounds
-    // propagation into callers without requiring inlining.
-    // Only applied to i64-returning functions (the primary integer type).
-    // getWithRange requires LLVM 19+.
 #if LLVM_VERSION_MAJOR >= 19
     if (optCtx_ && function->getReturnType()->isIntegerTy(64)) {
         if (auto rng = optCtx_->returnRange(func->name)) {
@@ -5538,25 +5057,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     currentFuncHintHot_ = func->hintHot;
 
     // @optmax: enable full fast-math flags for all float operations in this
-    // function.  The user's @optmax annotation is a compile-time guarantee
-    // that the function is safe and well-behaved, which includes IEEE-754
-    // relaxation.  Enabling all FMF flags (nnan, ninf, nsz, arcp, contract,
-    // reassoc, afn) allows LLVM to:
-    //   1. Form FMA instructions (fmul+fadd → fmadd): 2x float throughput
-    //   2. Reassociate float reductions for vectorization (sum += a[i])
-    //   3. Eliminate NaN/Inf checks on known-finite values
-    //   4. Use reciprocal approximations for division
-    // The flags are saved and restored after the function body so they don't
-    // leak into subsequent non-OPTMAX functions.
-    // Guard: when useFastMath_ is already globally enabled, the builder's FMF
-    // is already set to fast (line 2314-2316), so no per-function override is
-    // needed.  The save/restore is still correct — savedFMF captures the
-    // existing fast flags and restores them identically.
     const llvm::FastMathFlags savedFMF = builder->getFastMathFlags();
     if (inOptMaxFunction && !useFastMath_ && currentOptMaxConfig_.fastMath) {
         // fast_math=true (or safety=off, which implies it): enable all fast-math
-        // optimizations — FMA fusion, reassociation, reciprocal approximations,
-        // relaxed NaN/Inf semantics, and no-signed-zeros.
         llvm::FastMathFlags FMF;
         FMF.setFast();
         builder->setFastMathFlags(FMF);
@@ -5632,17 +5135,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         if (paramStrIt != funcParamStringTypes_.end() && paramStrIt->second.count(paramIdx))
             stringVars_.insert(param.name);
         // Pre-populate arrayVars_ for parameters known to receive array arguments.
-        // This ensures !nonnull and !range annotations propagate to loads of
-        // array parameter variables inside the function body.
         if (paramArrIt != funcParamArrayTypes_.end() && paramArrIt->second.count(paramIdx))
             arrayVars_.insert(param.name);
 
         // @prefetch: emit llvm.prefetch at function entry for annotated params.
-        // This hints to the CPU to load the parameter's memory into cache
-        // before it is accessed, reducing memory latency.  The parameter
-        // value is interpreted as a memory address (i64 → ptr cast); the
-        // caller is responsible for passing a valid pointer-sized value
-        // (e.g. an array or string reference).
         if (param.hintPrefetch) {
             prefetchedParams_.insert(param.name);
             llvm::Value* ptrVal = builder->CreateLoad(argIt->getType(), alloca, param.name + ".pf.load");
@@ -5664,10 +5160,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // @optmax assumes=[...]: emit llvm.assume intrinsics for each assertion
-    // in the config.  Assumptions help LLVM prove range/sign/non-null facts
-    // that the programmer guarantees but the compiler cannot derive.
-    // Supported patterns: "var > N", "var >= N", "var != N", "var == N",
-    // "var < N", "var <= N" where var is a parameter name and N is an integer.
     if (inOptMaxFunction && !currentOptMaxConfig_.assumes.empty()) {
         llvm::Function* assumeIntr = OMSC_GET_INTRINSIC(
             module.get(), llvm::Intrinsic::assume);
@@ -5707,9 +5199,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // @optmax memory.prefetch=true: auto-prefetch all pointer-type parameters
-    // at function entry.  This hints the CPU to load the pointed-to data into
-    // the L1/L2 cache before the first access, hiding memory latency for
-    // array-heavy numeric functions.
     if (inOptMaxFunction && currentOptMaxConfig_.memory.prefetch) {
         llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
             module.get(), llvm::Intrinsic::prefetch,
@@ -5739,8 +5228,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // Pre-pass: collect all catch(code) blocks in this function body,
-    // assign integer IDs to string codes, and create BasicBlocks for each.
-    // Must happen before generating the body so throw sites can reference BBs.
     buildCatchTable(func->body->statements, function);
 
     // Generate function body
@@ -5749,9 +5236,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // Add default return if needed
     if (!builder->GetInsertBlock()->getTerminator()) {
         // @prefetch enforcement: at function exit, emit cache invalidation
-        // (prefetch with locality=0 "no temporal reuse") for any @prefetch
-        // parameters.  The default return path means the prefetched memory
-        // is NOT being transferred out (returned), so we evict it.
         for (const auto& pfParam : prefetchedParams_) {
             auto it = namedValues.find(pfParam);
             if (it != namedValues.end()) {
@@ -5794,8 +5278,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // Force register promotion for functions that use the `register` keyword.
-    // Run mem2reg immediately so register-annotated allocas are promoted to
-    // SSA registers regardless of the global optimization level.
     if (!registerVars_.empty()) {
         llvm::legacy::FunctionPassManager fpm(module.get());
         fpm.add(llvm::createPromoteMemoryToRegisterPass());
@@ -5845,9 +5327,6 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         break;
     case ASTNodeType::CONTINUE_STMT: {
         // Search backwards through the loop stack for the nearest enclosing loop
-        // (not switch) that has a non-null continueTarget.  Switch statements push
-        // a context with nullptr continueTarget so that 'break' exits the switch,
-        // but 'continue' must skip over switch contexts to reach the loop.
         llvm::BasicBlock* continueTarget = nullptr;
         for (auto it = loopStack.rbegin(); it != loopStack.rend(); ++it) {
             if (it->continueTarget != nullptr) {
@@ -5973,8 +5452,6 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateRangeAnnot(static_cast<RangeAnnotExpr*>(expr));
     case ASTNodeType::COMPTIME_EXPR: {
         // comptime { ... } — evaluate the block at compile time.
-        // Primary: use CF-CTRE engine (richer cross-function evaluation + memoisation).
-        // Fallback: existing tryConstEvalFull (maintains backward compatibility).
         auto* ct = static_cast<ComptimeExpr*>(expr);
 
         // Try CF-CTRE first (available after runCFCTRE has been called).
@@ -5983,8 +5460,6 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
                                                          buildComptimeEnv());
             if (ctResult) {
                 // Stash the CT value so the VarDecl handler can register it
-                // under the variable name, making it visible to subsequent
-                // comptime blocks in the same function scope.
                 lastComptimeCtResult_ = *ctResult;
                 if (ctResult->isInt()) {
                     return llvm::ConstantInt::get(getDefaultType(), ctResult->asI64(), /*isSigned=*/true);
@@ -6034,19 +5509,6 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
 } // namespace omscript
 
 // ---------------------------------------------------------------------------
-// Compile-time function evaluation for @const_eval
-// ---------------------------------------------------------------------------
-// Simple AST-level interpreter for integer-only functions.  Supports:
-//   - Integer arithmetic (+, -, *, /, %, **, &, |, ^, <<, >>)
-//   - Comparisons (==, !=, <, <=, >, >=)
-//   - Logical operators (&&, ||, !)
-//   - Unary operators (-, ~)
-//   - If/else statements
-//   - Return statements
-//   - Variable declarations and assignments
-//   - Recursive calls to @const_eval functions
-//
-// Returns std::nullopt for unsupported constructs, falling back to runtime.
 namespace omscript {
 
 std::optional<int64_t> CodeGenerator::tryConstEval(
@@ -6287,13 +5749,6 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
 }
 
 // ── Unified Compile-Time Expression & Function Evaluator ─────────────────
-//
-// evalConstBuiltin: shared helper called by both tryFoldExprToConst and
-// tryConstEvalFull.  Given an already-evaluated argument list (ConstValues),
-// applies the named built-in pure function and returns the result.
-// Returns nullopt if the builtin is unknown, impure, or the args are the
-// wrong type/count.
-// ─────────────────────────────────────────────────────────────────────────────
 std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     const std::string& name,
     const std::vector<CodeGenerator::ConstValue>& args)
@@ -6963,8 +6418,6 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         return std::nullopt;
     }
     // ── Character classification predicates ─────────────────────────────
-    // C <cctype> functions require the argument to be in [0, UCHAR_MAX] or EOF.
-    // OmScript passes character code points as int64_t; out-of-range → false.
     if (name == "is_upper" && n == 1) {
         if (auto v = intArg(0)) return CV::fromInt((*v >= 0 && *v <= 127 && std::isupper(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
@@ -7070,16 +6523,6 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
         return std::nullopt;
     }
     // ── String: str_split (returns array of strings), str_join ───────────
-    // str_split not easily representable in ConstValue (array of strings)
-    // str_join requires array of strings — skip for ConstValue evaluator.
-    // ── General iN/uN constant cast (for comptime evaluation) ─────────────────
-    // u64(x), i64(x), int(x), uint(x) — identity; all OmScript integers are i64.
-    // u32(x), i32(x) — truncate to 32 bits (zero/sign extend back to i64).
-    // u16(x), i16(x) — truncate to 16 bits.
-    // u8(x),  i8(x)  — truncate to 8 bits.
-    // bool(x)        — normalise to 0 or 1.
-    // Arbitrary uN(x)/iN(x) for N in [1..256] — mask/sign-extend as appropriate.
-    // For N > 64, ConstValue only holds i64, so upper bits are truncated.
     {
         const std::string& nm = name;
         unsigned castBits = 0; bool castUnsigned = false;
@@ -7110,15 +6553,6 @@ std::optional<CodeGenerator::ConstValue> CodeGenerator::evalConstBuiltin(
     return std::nullopt;
 }
 // using all statically-known information (constIntFolds_, constStringFolds_,
-// OptimizationContext constant-return facts, enumConstants_).
-// This is the "call-site evaluator" — it knows about constants in the CURRENT
-// function's scope and delegates to tryConstEvalFull for nested calls.
-//
-// tryConstEvalFull: evaluate a function body with a known argument environment.
-// This is the "body evaluator" — it keeps its own local int+string+array env
-// seeded from the caller-provided argEnv, and handles all common statement/
-// expression forms. Returns nullopt if any step requires runtime information.
-// ─────────────────────────────────────────────────────────────────────────────
 
 std::optional<CodeGenerator::ConstValue>
 CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
@@ -7133,11 +6567,6 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         return std::nullopt;
     }
     // `@range[lo, hi] expr` is a pure hint at the value level; for
-    // constant-folding purposes it is transparent.  If the inner folds
-    // to a constant within [lo, hi] we return it; if it folds to a
-    // constant outside [lo, hi] we still return it (the same constant
-    // codegen will reject with a hard error — folding mustn't silently
-    // suppress that diagnostic).
     case ASTNodeType::RANGE_ANNOT_EXPR: {
         auto* ra = static_cast<RangeAnnotExpr*>(expr);
         return tryFoldExprToConst(ra->inner.get(), depth + 1);
@@ -7242,8 +6671,6 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
         if (bin->op == "-")  return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) - static_cast<uint64_t>(b)));
         if (bin->op == "*")  return ConstValue::fromInt(static_cast<int64_t>(static_cast<uint64_t>(a) * static_cast<uint64_t>(b)));
         // Division/modulo: guard against division-by-zero AND the i64 overflow
-        // case INT64_MIN / -1 (which traps on x86 IDIV).  Return nullopt for
-        // both so the compiler falls back to runtime evaluation.
         if (bin->op == "/" && b != 0) {
             if (a == std::numeric_limits<int64_t>::min() && b == -1) return std::nullopt;
             return ConstValue::fromInt(a / b);
@@ -7363,8 +6790,6 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
 }
 
 // tryFoldInt / tryFoldStr: convenience wrappers used by generateBuiltin.
-// Evaluate an expression to an integer or string constant using all
-// currently-available compile-time information.
 std::optional<int64_t> CodeGenerator::tryFoldInt(Expression* e) const {
     if (!e) return std::nullopt;
     if (auto cv = tryFoldExprToConst(e))
@@ -7379,17 +6804,6 @@ std::optional<std::string> CodeGenerator::tryFoldStr(Expression* e) const {
 }
 
 // tryConstEvalFull: Aggressively evaluate a function body at compile time.
-// Handles the full statement/expression repertoire needed to constant-fold
-// non-trivial pure functions (hash functions, lookup tables, etc.):
-//   Expressions: literals, identifiers, binary/unary/ternary ops, string
-//     indexing (s[i] → ASCII int), postfix/prefix ++/--, function calls (both
-//     builtins and recursive user functions), enum/scope-resolution.
-//   Statements: return, var decl (const + non-const), assignment, if/else,
-//     for-range loops, while, do-while, foreach over strings, switch, break,
-//     continue, blocks.
-//   Fuel limit: each loop iteration counts against a per-call fuel counter
-//   (kFuelLimit = 10 000); if exceeded the function returns nullopt so the
-//   compiler falls back to runtime codegen.
 std::optional<CodeGenerator::ConstValue>
 CodeGenerator::tryConstEvalFull(
     const FunctionDecl* func,
@@ -7406,8 +6820,6 @@ CodeGenerator::tryConstEvalFull(
     std::unordered_map<std::string, ConstValue> env(argEnv);
     std::optional<ConstValue> retVal;
     // Last bare expression value — used to implicitly return the result of a
-    // final expression statement when there is no explicit `return` keyword.
-    // This enables `comptime { str_to_u64_fast("hello"); }` without `return`.
     std::optional<ConstValue> lastBareExprVal;
     // Signals set by break/continue statements, cleared by loop handlers.
     bool breakSeen    = false;
@@ -7551,9 +6963,6 @@ CodeGenerator::tryConstEvalFull(
         }
 
         // ── @range[lo, hi] expr ─────────────────────────────────────────
-        // Transparent during constant evaluation: the annotation is a
-        // hint to the optimizer, not a value transform.  Codegen will
-        // separately reject constants outside the declared range.
         case ASTNodeType::RANGE_ANNOT_EXPR: {
             auto* ra = static_cast<RangeAnnotExpr*>(e);
             return evalE(ra->inner.get());
@@ -7790,10 +7199,6 @@ CodeGenerator::tryConstEvalFull(
                 return false;
             }
             // Any other expr (x++, f(), etc.): evaluate for side effects.
-            // If the expression is not foldable (e.g. it calls a function with
-            // I/O or other side effects) evalE returns nullopt → give up.
-            // Also record the result as the implicit return candidate so that
-            // `comptime { expr; }` without an explicit `return` still works.
             auto v = evalE(es->expression.get());
             if (v) lastBareExprVal = *v;
             return v.has_value();
@@ -7954,9 +7359,6 @@ CodeGenerator::tryConstEvalFull(
         case ASTNodeType::BLOCK: {
             auto* blk = static_cast<BlockStmt*>(s);
             // Track variables declared in this block so they can be removed
-            // (or their shadowed values restored) when the block exits.
-            // This correctly handles shadowing: if inner `var x` shadows outer
-            // `x`, we save the outer value and restore it on exit.
             std::vector<std::pair<std::string, std::optional<ConstValue>>> scopeGuard;
             for (auto& stmt : blk->statements) {
                 if (stmt->type == ASTNodeType::VAR_DECL) {
@@ -8027,27 +7429,14 @@ CodeGenerator::tryConstEvalFull(
     int depth) const {
     if (!body || depth > 48) return std::nullopt;
     // Synthesize a minimal FunctionDecl pointing at the block.
-    // We use a raw pointer without ownership transfer — the block is owned
-    // by the ComptimeExpr AST node that called us.
     FunctionDecl synFn("__comptime__", {}, {}, nullptr);
     // Temporarily assign the body pointer for the duration of evaluation.
-    // We must restore it (set to nullptr) before the synFn destructor runs
-    // to avoid double-free since synFn doesn't own the body.
     synFn.body.reset(const_cast<BlockStmt*>(body));
     auto result = tryConstEvalFull(&synFn, argEnv, depth);
     synFn.body.release(); // release without deleting — body is not owned here
     return result;
 }
 // Pre-pass over the program AST that identifies zero-parameter, pure functions
-// whose return value is always the same compile-time constant.
-//
-// Uses tryConstEvalFull with an empty argument environment to evaluate each
-// zero-parameter function body.  The analysis runs as a fixed-point loop
-// because a function may depend on another not yet classified:
-//   fn a() { return "hello"; }          // classified in iteration 1
-//   fn b() { return a() + " world"; }   // classified in iteration 2 (uses a)
-//
-// Results are stored in the unified OptimizationContext (optCtx_).
 void CodeGenerator::analyzeConstantReturnValues(Program* program) {
     if (optimizationLevel < OptimizationLevel::O1) return;
 
@@ -8080,19 +7469,6 @@ void CodeGenerator::analyzeConstantReturnValues(Program* program) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// runCFCTRE: Cross-Function Compile-Time Reasoning Engine pipeline phase.
-//
-// Initialises or resets the CTEngine, registers all program functions and
-// enum/global constants, then runs the full CF-CTRE analysis pass.  After
-// this call:
-//   - ctEngine_->isPure(fnName)        — fast O(1) purity query
-//   - ctEngine_->executeFunction(...)  — memoised CT evaluation
-//   - ctEngine_->evalComptimeBlock(...)— block-level CT evaluation
-//
-// Also propagates CT results back into OptimizationContext so that
-// the existing tryFoldExprToConst / tryConstEvalFull machinery benefits from
-// CF-CTRE's richer analysis.
 // ─────────────────────────────────────────────────────────────────────────────
 void CodeGenerator::runCFCTRE(Program* program) {
     if (!program) return;
@@ -8146,10 +7522,6 @@ void CodeGenerator::runCFCTRE(Program* program) {
     }
 
     // Apply Phase 8 dead-function hints: mark unreachable functions as cold
-    // so LLVM's HotColdSplitting / GlobalDCE can eliminate them.  We use
-    // hintCold rather than removing the function body so that the LLVM IR
-    // is still valid; GlobalDCE removes the body after DCE confirms no callers.
-    // Explicitly @noinline so the inliner doesn't try to inline dead code.
     if (!ctEngine_->deadFunctions().empty()) {
         const auto& dead = ctEngine_->deadFunctions();
         for (auto& fn : program->functions) {
@@ -8180,17 +7552,6 @@ void CodeGenerator::runCFCTRE(Program* program) {
     }
 
     // ── CF-CTRE-guided inline hints ────────────────────────────────────────
-    // Functions that CF-CTRE successfully evaluated (with concrete arguments)
-    // are prime candidates for inlining at the remaining runtime call sites:
-    // once inlined, LLVM's IPSCCP pass can propagate the same constants and
-    // produce the same constant-folded output for statically-known arguments.
-    //
-    // We apply InlineHint (not AlwaysInline) so LLVM's cost model still gates
-    // excessively-large callees — the hint is advisory, not mandatory.
-    //
-    // Skipped for: @noinline functions (explicit user opt-out), zero-parameter
-    // functions (already folded to global constants above), and functions not
-    // in the foldable set (no evidence that inlining would expose folding).
     if (ctEngine_ && optimizationLevel >= OptimizationLevel::O2) {
         const auto& foldable = ctEngine_->foldableCallees();
         for (auto& fn : program->functions) {
@@ -8206,22 +7567,11 @@ void CodeGenerator::runCFCTRE(Program* program) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// runSynthesisPass — public wrapper (delegates to the free function in
-// synthesize.h so the Orchestrator can call it without include gymnastics).
-// ─────────────────────────────────────────────────────────────────────────────
 
 void CodeGenerator::runSynthesisPass(Program* program, bool verbose) {
     ::omscript::runSynthesisPass(program, verbose);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// runEGraphPass — conditional wrapper called by the Orchestrator.
-//
-// 1. Checks the optimization level and enableEGraph_ flag.
-// 2. Configures the EGraphSubsystem in the OptimizationContext based on the
-//    current optimization level (higher levels = more liberal node limits).
-// 3. Delegates to ctx.egraph().optimizeProgram() so all e-graph work goes
-//    through the subsystem (config + stats are tracked there).
 // ─────────────────────────────────────────────────────────────────────────────
 
 void CodeGenerator::runEGraphPass(Program* program, OptimizationContext& ctx) {
@@ -8266,9 +7616,6 @@ void CodeGenerator::runEGraphPass(Program* program, OptimizationContext& ctx) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ctValueToConstValue / constValueToCTValue — bridge between the two
-// value representations used inside CodeGenerator.
-// ─────────────────────────────────────────────────────────────────────────────
 
 CodeGenerator::ConstValue CodeGenerator::ctValueToConstValue(const CTValue& v) const {
     switch (v.kind) {
@@ -8300,9 +7647,6 @@ CTValue CodeGenerator::constValueToCTValue(const ConstValue& v) const {
         if (!ctEngine_) return CTValue::uninit();
         CTArrayHandle h = ctEngine_->heap().nextHandle();
         // Use the non-const heap via ctEngine_ (cast is safe — evaluation already done).
-        // We create a snapshot of the inline array into the CT heap.
-        // Accessing ctEngine_'s heap requires a const_cast here because
-        // CTHeap::alloc/store are non-const operations.
         CTHeap& hp = const_cast<CTHeap&>(ctEngine_->heap());
         h = hp.alloc(static_cast<uint64_t>(v.arrVal.size()));
         for (size_t i = 0; i < v.arrVal.size(); ++i)
@@ -8316,18 +7660,6 @@ CTValue CodeGenerator::constValueToCTValue(const ConstValue& v) const {
 }
 
 // buildComptimeEnv: snapshot all compile-time-known local variables into a
-// CTValue map that can be passed as the 'env' parameter to evalComptimeBlock.
-// This lets comptime{} blocks reference variables declared earlier in the
-// same function body (e.g. a 'var base = comptime {...}' array that is
-// referenced in a later 'var transformed = comptime { multi_stage(base); }').
-//
-// Sources:
-//   • constIntFolds_   — integer vars whose current value is compile-time known
-//   • constStringFolds_ — string vars similarly known
-//   • constArrayFolds_  — array vars folded to a vector<ConstValue>; each is
-//                          converted to a fresh CT heap array handle via
-//                          constValueToCTValue so the CF-CTRE evaluator can
-//                          index into it.
 std::unordered_map<std::string, CTValue>
 CodeGenerator::buildComptimeEnv() const {
     std::unordered_map<std::string, CTValue> env;
@@ -8347,26 +7679,10 @@ CodeGenerator::buildComptimeEnv() const {
 }
 
 // autoDetectConstEvalFunctions: identify user-defined functions with parameters
-// that are "pure" (no I/O, no global mutations, arithmetic/logic/conditional
-// bodies only) and register them as const-foldable in OptimizationContext.
-// This enables the existing tryConstEval/tryConstEvalFull machinery to fold
-// calls to these functions at compile time when all arguments are constants,
-// without requiring explicit @const_eval annotations.
-//
-// Purity is detected via a fixed-point analysis:
-//   - A function is pure if its body contains only pure statements/expressions
-//   - A call expression is pure only if the callee is a known-pure function
-//   - The fixed-point loop handles mutual recursion (A calls B calls A) by
-//     conservatively marking mutually-recursive functions as not pure
-//
-// Runs at O1+ after analyzeConstantReturnValues so that zero-arg const funcs
-// are already in OptimizationContext and can be recognized as pure calls.
 void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
     if (!program || optimizationLevel < OptimizationLevel::O1) return;
 
     // Purity queries now delegated to the unified BuiltinEffectTable.
-    // BuiltinEffectTable::isPure(name)   replaces kPureBuiltins.count(name)
-    // BuiltinEffectTable::isImpure(name) replaces kImpureBuiltins.count(name)
 
     // Build index of all user function declarations for O(1) lookup.
     std::unordered_map<std::string, const FunctionDecl*> allFuncs;
@@ -8378,8 +7694,6 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
     std::unordered_set<std::string> knownPure;
 
     // Seed with explicitly @const_eval-annotated functions (from AST) and any
-    // functions already classified as const-foldable / const-returning by
-    // earlier passes (e.g., analyzeConstantReturnValues already ran).
     for (const auto& func : program->functions) {
         if (func->hintConstEval)
             knownPure.insert(func->name);
@@ -8537,8 +7851,6 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
     };
 
     // Fixed-point iteration: keep adding functions to knownPure until no more
-    // can be classified.  This handles call chains A→B→C where B and C must
-    // be proven pure before A can be classified.
     bool changed = true;
     while (changed) {
         changed = false;
@@ -8574,52 +7886,6 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
 }
 
 // inferFunctionEffects: AST-level side-effect analysis (overhauled).
-//
-// For every user function in the program, computes a FunctionEffects summary
-// across the following axes:
-//   readsMemory  — function loads from heap memory: array element, string
-//                  subscript, struct field, or calls a read-only builtin.
-//   writesMemory — function writes to heap memory (arr[i]=, obj.field=,
-//                  push/pop/sort/reverse/…) or calls a mutating callee.
-//   hasIO        — function calls any I/O builtin (print/input/file_*/sleep…).
-//   hasMutation  — function mutates parameter-reachable memory observable
-//                  outside the callee (heap writes, ++/-- on a parameter).
-//   mayThrow     — function may throw, panic, abort, or exit.
-//   mayNotReturn — function may fail to return (calls a noreturn callee).
-//   allocates    — function performs heap allocation.
-//   deallocates  — function frees heap memory.
-//   hasIndirectCall — function calls an unresolved name (not a known builtin
-//                  and not a user function in scope).
-//   readsGlobal  / writesGlobal — function reads/writes a top-level global.
-//   paramMutated — bitmask: which parameters are mutated by this function or
-//                  one of its callees.  Drives per-arg LLVM `readonly` /
-//                  `noalias` attribution.
-//
-// The analysis is a conservative fixed-point over the call graph: a function
-// inherits the effects of every callee.  Mutual recursion is handled by
-// initialising all unknown functions as "no effects" and iterating to a
-// fixed point.  Self-recursion is no longer pre-pessimised — the fixed point
-// converges naturally and yields the tightest summary consistent with the
-// body's other effects.
-//
-// Notable correctness fixes vs. the previous implementation:
-//   • Assignment to a local variable is NOT a memory effect (locals are
-//     stack-only and not visible to the caller).  Only assignments to
-//     parameters or globals contribute writesMemory/hasMutation/writesGlobal.
-//   • Reads of a global variable contribute readsGlobal (formerly invisible).
-//   • A call whose callee resolves to neither a builtin nor a user function
-//     pessimises every effect axis (formerly silently treated as pure).
-//   • Throwing builtins (panic/abort/exit/error/assert) now contribute
-//     mayThrow / mayNotReturn so `nounwind` and `willreturn` can be inferred
-//     when those callees are absent.
-//
-// Results are used in function codegen to:
-//   1. Automatically add LLVM memory-effect attributes (readnone/readonly/
-//      argmemonly) plus nosync/nounwind/willreturn/speculatable.
-//   2. Apply per-argument `readonly` to pointer parameters that are not
-//      mutated by the function or any of its callees.
-//   3. Emit a compiler warning when @pure is used on a function whose body
-//      contains detectable I/O or mutation.
 void CodeGenerator::inferFunctionEffects(Program* program) {
     if (!program) return;
 
@@ -8654,8 +7920,6 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
     std::function<FunctionEffects(const Statement*,  const FunctionDecl*)> stmtEffects;
 
     // Mark target name as a parameter mutation if the name resolves to a
-    // parameter of the enclosing function; or as writesGlobal if it's a
-    // global; otherwise (local var) record nothing.
     auto markNameStore = [&](const std::string& name, const FunctionDecl* self,
                              FunctionEffects& fx) {
         if (!self) return;
@@ -8810,8 +8074,6 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
                     fx.readsGlobal     = fx.readsGlobal     || cf.readsGlobal;
                     fx.writesGlobal    = fx.writesGlobal    || cf.writesGlobal;
                     // If the callee mutates its parameter i, and we passed a
-                    // bare identifier that resolves to one of OUR parameters,
-                    // then we mutate that parameter too.
                     if (self) {
                         std::size_t n = std::min(cf.paramMutated.size(),
                                                  call->arguments.size());
@@ -8854,9 +8116,6 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
             fx.mergeFrom(exprEffects(b->left.get(),  self));
             fx.mergeFrom(exprEffects(b->right.get(), self));
             // Division/modulo by a non-constant or zero divisor emits a
-            // runtime div-by-zero check that calls puts() + exit(1) — model
-            // it as a possibly-throwing/non-returning effect rather than I/O,
-            // so callers can still be readonly w.r.t. memory.
             if (b->op == "/" || b->op == "%") {
                 auto* lit = dynamic_cast<const LiteralExpr*>(b->right.get());
                 bool divisorIsNonZeroConst = lit &&
@@ -8969,9 +8228,6 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
             fx.mergeFrom(exprEffects(ws->condition.get(), self));
             fx.mergeFrom(stmtEffects(ws->body.get(),      self));
             // A `while (true)` with no break is a non-terminating loop.
-            // Without proper break/return analysis we conservatively mark
-            // any while whose condition is a non-zero integer literal as
-            // possibly non-returning.
             if (auto* lit = dynamic_cast<const LiteralExpr*>(ws->condition.get())) {
                 if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue != 0)
                     fx.mayNotReturn = true;
@@ -9018,8 +8274,6 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
             auto* th = static_cast<const ThrowStmt*>(stmt);
             if (th->value) fx.mergeFrom(exprEffects(th->value.get(), self));
             // throw is an observable, possibly-non-returning effect.  It's
-            // not technically I/O, but treat it as such for the purposes of
-            // the existing readnone/readonly attribute gates.
             fx.hasIO        = true;
             fx.mayThrow     = true;
             fx.mayNotReturn = true;
@@ -9042,9 +8296,6 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
     };
 
     // ── Fixed-point iteration over the call graph ─────────────────────────
-    // Keep iterating until no function's summary changes.  We bound the
-    // number of iterations to (functions * effect-bits) which is a strict
-    // upper bound on the lattice height.
     const std::size_t kMaxIters =
         std::max<std::size_t>(8, program->functions.size() * 16);
     bool changed = true;
@@ -9104,11 +8355,6 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
 
 namespace omscript {
 // maintaining a pool of interned global string constants.  When the
-// same string content is used in multiple places, this returns a
-// pointer to the single canonical global, enabling:
-//   1. Reduced data section size (no duplicate string constants)
-//   2. Pointer-equality comparison for identical strings
-//   3. Better D-cache utilization (fewer unique cache lines)
 llvm::GlobalVariable* CodeGenerator::internString(const std::string& content) {
     auto it = internedStrings_.find(content);
     if (it != internedStrings_.end()) {
@@ -9134,8 +8380,6 @@ llvm::GlobalVariable* CodeGenerator::internString(const std::string& content) {
 
 llvm::Value* CodeGenerator::emitComptimeArray(const std::vector<ConstValue>& elems) {
     // Build [N+1 x i64] constant with OmScript's array layout:
-    //   slot 0  = N (the length)
-    //   slot 1…N = element values
     auto* i64Ty = llvm::Type::getInt64Ty(*context);
     size_t N = elems.size();
     std::vector<llvm::Constant*> vals;
@@ -9182,16 +8426,8 @@ void CodeGenerator::generateAssume(AssumeStmt* stmt) {
 }
 
 // ---------------------------------------------------------------------------
-// Escape analysis for stack allocation
-// ---------------------------------------------------------------------------
-// Check whether a local array variable escapes the current function scope.
-// Returns true if the array is safe for stack allocation (no escape).
-// Conservative: we only return true when we can PROVE it doesn't escape.
-// ---------------------------------------------------------------------------
 
 /// Scan an expression tree for any use of varName that would cause escape:
-///  - passed as an argument to a function call
-///  - used as the object of a return statement (detected at statement level)
 static bool exprUsesVar(Expression* expr, const std::string& varName) {
     if (!expr) return false;
     if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
@@ -9346,9 +8582,6 @@ bool CodeGenerator::doesVarEscapeCurrentScope(const std::string& varName) const 
         // for any escaping use after the declaration.
         if (varEscapesInBlock(declBlock, varName, declIdx + 1)) return true;
         // If the var was declared in a nested block, also check the rest of
-        // the top-level function body (statements after the containing
-        // if/while/for that holds declBlock) — conservative: just scan all
-        // top-level statements for any use.
         if (declBlock != body) {
             return varEscapesInBlock(body, varName, 0);
         }
@@ -9358,11 +8591,6 @@ bool CodeGenerator::doesVarEscapeCurrentScope(const std::string& varName) const 
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// IndexAssign detection: returns true if a variable is the target of any
-// `varName[i] = expr` write anywhere in a function body.  Used by the
-// read-only-global array literal optimization, which can only fire when the
-// variable is provably never written through.
 // ---------------------------------------------------------------------------
 
 /// Forward decl: scan a statement subtree for an IndexAssign targeting varName.
@@ -9473,29 +8701,10 @@ bool CodeGenerator::doesVarHaveIndexAssign(const std::string& varName) const {
 }
 
 // ---------------------------------------------------------------------------
-// Read-only-use analysis for the read-only-global array literal optimization.
-//
-// A variable is "read-only" iff every textual reference to it in the
-// function body is one of:
-//   * `varName[i]`               — IndexExpr read (array operand is the var)
-//   * `len(varName)`, `print(varName)`, etc. — argument to a non-mutating
-//     built-in (BuiltinEffectTable::isMutating == false)
-//   * Argument to a user function known-pure to the CT-engine
-// Anything else (return varName, var x = varName, varName[i] = …, pass to
-// an unknown/mutating callee) makes the variable non-read-only.
-//
-// Only used to gate the ro-global allocation strategy where the data lives
-// in a `.rodata` constant.  Writing through such a pointer would segfault,
-// so we must conservatively rule out every potential write site at compile
-// time.
-// ---------------------------------------------------------------------------
 
 namespace {
 
 // A reference to varName is "OK if it is the array operand of an IndexExpr
-// read, or it appears strictly inside a call argument whose callee is known
-// non-mutating".  We walk the AST and shortcut to false on the first
-// non-OK use.
 
 struct ReadOnlyUseChecker {
     const std::string& var;
@@ -9519,8 +8728,6 @@ struct ReadOnlyUseChecker {
         if (BuiltinEffectTable::isReadOnly(callee)) return true;
         if (BuiltinEffectTable::isMutating(callee)) return false;
         // I/O builtins (print, etc.) read their args without mutating.
-        // Conservative: only allow when it's flagged as pure or read-only.
-        // User functions: trust the CT-engine purity result.
         if (ctEngine && ctEngine->isPure(callee)) return true;
         return false;
     }
@@ -9533,16 +8740,12 @@ struct ReadOnlyUseChecker {
         case ASTNodeType::IDENTIFIER_EXPR:
             if (static_cast<const IdentifierExpr*>(e)->name == var) {
                 // Bare identifier reference outside a recognized read-only
-                // context (CallExpr handled elsewhere; IndexExpr handled in
-                // its case).  Conservative: treat as a violation.
                 violation = true;
             }
             return;
         case ASTNodeType::INDEX_EXPR: {
             auto* idx = static_cast<const IndexExpr*>(e);
             // `var[i]` read is always OK; only the index sub-expression
-            // needs further inspection (var must not appear inside it as
-            // anything but a read).
             if (!isVarIdent(idx->array.get())) {
                 visitExpr(idx->array.get());
             }
@@ -9616,8 +8819,6 @@ struct ReadOnlyUseChecker {
         }
         default:
             // Conservative for unknown expression kinds: if `var` appears
-            // inside, flag as a violation.  We do this by structural walk
-            // through known sub-nodes — but for safety bail out.
             violation = true;
             return;
         }

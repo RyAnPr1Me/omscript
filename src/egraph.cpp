@@ -1,17 +1,6 @@
-/// @file egraph.cpp
-/// @brief E-Graph implementation for equality saturation optimization.
-///
 /// This file implements the core e-graph data structure including:
-///   - Union-find with path compression and union by rank
-///   - Hash-consing for node deduplication
-///   - Pattern matching against e-classes
-///   - Equality saturation loop with configurable limits
-///   - Cost-based extraction of optimal expressions
-///   - Constant folding within the e-graph
 
 // Apply maximum compiler optimizations to this hot path.
-// The egraph saturation loop and pattern matching are the most
-// compile-time-intensive routines in the optimizer pipeline.
 #ifdef __GNUC__
 #  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
 #endif
@@ -27,8 +16,6 @@
 namespace omscript {
 namespace egraph {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CostModel
 // ─────────────────────────────────────────────────────────────────────────────
 
 Cost CostModel::nodeCost(const ENode& node) const {
@@ -75,12 +62,6 @@ Cost CostModel::nodeCost(const ENode& node) const {
         return 1.0;
 
     // Logical ops — at the AST level these imply short-circuit evaluation
-    // which means a branch.  A branch costs ~1 cycle when predicted
-    // correctly, but misprediction is ~15 cycles.  Cost 2.0 incentivizes
-    // the e-graph to prefer bitwise-and/or rewrites (cost 1.0) when safe,
-    // while still recognizing that logical ops are NOT as expensive as a
-    // full function call.  (Previous value 1.5 was too close to bitwise
-    // ops, making the e-graph indifferent between them.)
     case Op::LogAnd:
     case Op::LogOr:
         return 2.0;
@@ -96,12 +77,6 @@ Cost CostModel::nodeCost(const ENode& node) const {
         return 12.0;
 
     // Ternary (select) — at the AST level this represents a conditional
-    // expression.  When lowered to LLVM IR as a select instruction, it is
-    // 1 cycle (CMOV on x86).  But at the AST level we model it at 1.5
-    // to slightly prefer arithmetic rewrites over branching, while keeping
-    // it cheaper than any multi-instruction alternative.
-    // (Previous value 3.0 was far too high — caused the e-graph to avoid
-    //  min()/max()/clamp() patterns that lower to single CMOVs.)
     case Op::Ternary:
         return 1.5;
 
@@ -114,15 +89,11 @@ Cost CostModel::nodeCost(const ENode& node) const {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EGraph — construction
-// ─────────────────────────────────────────────────────────────────────────────
 
 EGraph::EGraph() : config_{} {}
 
 EGraph::EGraph(SaturationConfig config) : config_(config) {}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EGraph — node creation
 // ─────────────────────────────────────────────────────────────────────────────
 
 [[gnu::hot]] ClassId EGraph::add(ENode node) {
@@ -156,14 +127,9 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
         cls.isNonNeg = (node.fvalue >= 0.0);
         cls.isFloat = true;
         // `isInt` defaults to false; explicitly noted here so the
-        // mutual exclusivity with the `Op::Const` branch above is
-        // clear at the point of declaration.
         cls.isInt = false;
     } else if (node.children.size() >= 2) {
         // Propagate isNonNeg through operations where it's provable.
-        // This is critical for relational rules (div_pow2_nonneg,
-        // mod_pow2_nonneg) to fire on expressions derived from
-        // non-negative sub-expressions like loop counters.
         ClassId lhs = find(node.children[0]);
         ClassId rhs = find(node.children[1]);
         bool lNonNeg = (lhs < classes_.size()) && classes_[lhs].isNonNeg;
@@ -176,18 +142,6 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
         bool rInt   = (rhs < classes_.size()) && classes_[rhs].isInt;
 
         // ── Type-tag propagation through generic binops ───────────────
-        // The e-graph deliberately uses one Op per arithmetic operation
-        // (Add/Sub/Mul/Div) for both integer and float values so that
-        // generic algebraic rewrites (commutativity, associativity,
-        // distributivity) apply uniformly.  We track per-class
-        // isFloat / isInt tags so that:
-        //   * `fp_*` rules require at least one operand to be provably
-        //     float — preventing them from firing on integer expressions
-        //     where the resulting `ConstF(N.0)` would later be unified
-        //     with `Const(N)` by congruence and break codegen.
-        //   * Integer-only rules (Shl/Shr, BitAnd/Or/Xor strength
-        //     reductions) require operands to be provably integer.
-        // Bit ops like Shl/Shr/BitAnd are integer-only by construction.
         if (node.op == Op::Shl || node.op == Op::Shr ||
             node.op == Op::BitAnd || node.op == Op::BitOr ||
             node.op == Op::BitXor || node.op == Op::Mod) {
@@ -283,9 +237,6 @@ EGraph::EGraph(SaturationConfig config) : config_(config) {}
     }
 
     // Maintain the use-list for incremental rebuild: every distinct child
-    // class records this new class as one of its users.  Duplicates are
-    // permitted (cheap to add, harmless when iterated; the dirty queue
-    // dedupes via `dirtyMark_`).
     parents_.emplace_back();  // parents_[id] = {} initially
     for (ClassId child : node.children) {
         ClassId c = find(child);
@@ -328,8 +279,6 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EGraph — union-find with path compression
-// ─────────────────────────────────────────────────────────────────────────────
 
 [[gnu::hot]] ClassId EGraph::find(ClassId id) {
     if (id >= parent_.size())
@@ -356,10 +305,6 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
     parent_[b] = a;
 
     // Move all nodes from b into a, and update the per-op class index so
-    // that any op `b` carried (but `a` did not) will surface `a` in the
-    // matcher's bucket walk.  We record the set of ops `a` already had
-    // BEFORE moving — appending `a` for those would create harmless but
-    // wasted bucket entries.
     std::array<bool, kNumOps> aHadOp{};
     for (const auto& n : classes_[a].nodes) {
         const auto idx = static_cast<size_t>(n.op);
@@ -384,20 +329,10 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
     // the merged class is non-negative (they represent the same value).
     classes_[a].isNonNeg = classes_[a].isNonNeg || classes_[b].isNonNeg;
     // Type tags accumulate on merge: if either side is provably float (or
-    // int), so is the merged class.  This is intentional for downstream
-    // *guards* — a class that has been congruence-bridged to a ConstF is
-    // still safely usable in float rules.  The CRITICAL guarantee is the
-    // OTHER direction: a class that contains ONLY integer evidence has
-    // `isFloat == false`, so float rules will refuse to fire on it.
     classes_[a].isFloat = classes_[a].isFloat || classes_[b].isFloat;
     classes_[a].isInt   = classes_[a].isInt   || classes_[b].isInt;
 
     // ── Incremental-rebuild bookkeeping ──────────────────────────────────
-    // The survivor itself is dirty (its node list grew with possibly
-    // non-canonical children).  Every class that USED `b` as a child still
-    // carries the stale id `b` in its node tuples, so its hashcons key is
-    // stale and must be re-canonicalized.  We migrate the use-list from `b`
-    // to `a` (the new canonical) and mark every member dirty.
     ++mergeCount_;
     markDirty(a);
     if (b < parents_.size()) {
@@ -424,8 +359,6 @@ void EGraph::markDirty(ClassId id) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EGraph — canonicalization and rebuild
-// ─────────────────────────────────────────────────────────────────────────────
 
 [[gnu::hot]] ENode EGraph::canonicalize(ENode node) const {
     for (auto& child : node.children) {
@@ -437,40 +370,15 @@ void EGraph::markDirty(ClassId id) {
 
 void EGraph::rebuild() {
     // ── Fast path: nothing dirty → no work needed ─────────────────────────
-    // The previous implementation rebuilt every class on every iteration of
-    // saturate(), which is O(total_nodes) work per iteration whether or not
-    // any merges happened.  By tracking a per-class dirty bit through
-    // `merge()`, we now skip iterations whose only side effect was to
-    // confirm a fixpoint (this hits on the LAST iteration of every
-    // saturation where `merges == 0`).
-    //
-    // SOUNDNESS: the dirty bit is set ONLY by `merge()` and cleared ONLY
-    // here.  No other code path can stale a hashcons entry: `add()`
-    // canonicalizes children before insertion, and existing class ids
-    // never become invalid (parent_ only grows).  Therefore "dirty empty"
-    // ⇒ all hashcons entries are still canonical and no class needs
-    // re-canonicalization.
     if (dirty_.empty()) return;
 
     // Drain the dirty marker — we are about to do a full rebuild that
-    // visits every class, so any previously-marked dirt is paid off.
-    // Future merges (including those triggered by congruence-closure
-    // inside this rebuild) will re-mark dirty for the NEXT call.
     for (ClassId id : dirty_) {
         if (id < dirtyMark_.size()) dirtyMark_[id] = false;
     }
     dirty_.clear();
 
     // ── Full rebuild with congruence-closure cascading ───────────────────
-    //
-    // For each canonical class, re-canonicalize all of its nodes (their
-    // children may now point to merged class ids) and rebuild the hashcons
-    // table.  A hidden congruence shows up as two distinct classes whose
-    // canonical ENode keys collide in the hashcons; we collect those into
-    // `pendingMerges` and apply them AFTER the per-class loop completes,
-    // which avoids iterator invalidation on `classes_[i].nodes` (merge()
-    // appends victim nodes onto the survivor).  Each induced merge can
-    // expose further congruences, so we iterate until stable.
     bool changed = true;
     while (changed) {
         changed = false;
@@ -535,8 +443,6 @@ void EGraph::rebuild() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EGraph — pattern matching
 // ─────────────────────────────────────────────────────────────────────────────
 
 [[gnu::hot]] bool EGraph::matchClass(const Pattern& pat, ClassId cls, Subst& subst) const {
@@ -614,15 +520,6 @@ std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
     std::vector<std::pair<ClassId, Subst>> results;
 
     // ── Fast path: rule's root pattern matches a specific op ─────────────
-    // Walk only the bucket of classes that contain at least one node of
-    // that op, instead of the entire e-class array.  This is the hot
-    // path during equality saturation: the e-graph typically has tens of
-    // thousands of classes but most ops have small buckets.
-    //
-    // Buckets may carry stale or duplicate ids (entries are append-only;
-    // see `classesByOp_` declaration).  We canonicalise via `find()` and
-    // de-duplicate per call using a small `seen` bitset sized to the
-    // current class count.
     if (pat.kind == Pattern::Kind::OpMatch) {
         const auto opIdx = static_cast<size_t>(pat.op);
         if (opIdx >= classesByOp_.size()) return results;
@@ -630,11 +527,6 @@ std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
         if (bucket.empty()) return results;  // no classes contain this op
 
         // Generation-stamped dedup: avoids the per-call O(N) allocate-
-        // and-fill of a `vector<bool>`.  With ~hundreds of rules per
-        // saturation iteration and tens of thousands of e-classes, the
-        // old fresh-vector-per-call cost compounded; the stamped buffer
-        // grows once and is reused across every match() call for the
-        // lifetime of the EGraph.
         if (matchSeen_.size() < classes_.size()) {
             matchSeen_.resize(classes_.size(), 0);
         }
@@ -673,8 +565,6 @@ std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
     return results;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EGraph — constant folding
 // ─────────────────────────────────────────────────────────────────────────────
 
 void EGraph::foldConstants(ClassId cls) {
@@ -805,8 +695,6 @@ void EGraph::foldConstants(ClassId cls) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EGraph — equality saturation
-// ─────────────────────────────────────────────────────────────────────────────
 
 [[gnu::hot]] size_t EGraph::applyRules(const std::vector<RewriteRule>& rules) {
     size_t merges = 0;
@@ -815,14 +703,6 @@ void EGraph::foldConstants(ClassId cls) {
         if (atNodeLimit()) break;
 
         // ── Op-bucket early-skip ────────────────────────────────────────
-        // If the rule's LHS root is an OpMatch and no e-class contains a
-        // node of that op, the rule cannot possibly produce any matches.
-        // `match()` would discover this internally and return an empty
-        // vector, but we save the function-call overhead and the empty-
-        // vector allocation by checking the bucket directly.  This is a
-        // measurable win on rule libraries with hundreds of fp_* /
-        // strength-reduction rules where most ops are absent in any
-        // given expression.
         if (rule.lhs.kind == Pattern::Kind::OpMatch && !hasOp(rule.lhs.op))
             continue;
 
@@ -857,23 +737,6 @@ void EGraph::foldConstants(ClassId cls) {
         size_t merges = applyRules(rules);
 
         // ── Constant folding pass — bucket-driven ──────────────────────
-        // Only e-classes containing at least one foldable op can possibly
-        // fold this iteration.  Walking the targeted op buckets via the
-        // per-op class index built in `add()`/`merge()` replaces the old
-        // O(num_classes) scan with O(sum of foldable-op bucket sizes),
-        // which is typically a small fraction of the total class count
-        // on real programs (most classes hold only Var/Const/Call/etc.).
-        //
-        // Buckets are append-only and may carry stale or duplicate ids;
-        // canonicalise via `find()` and de-duplicate per iteration using
-        // the same generation-stamped scratch buffer that `match()` uses.
-        // Reuse is sound: this folding pass runs between applyRules() and
-        // rebuild(), and applyRules() has fully returned by now — there
-        // is no concurrent matcher invocation that could observe a
-        // mid-pass generation.  This eliminates the per-iteration
-        // `vector<bool>(classes_.size(), false)` allocate-and-fill, which
-        // on programs with tens of thousands of e-classes was a measurable
-        // share of saturate()'s overhead.
         if (config_.enableConstantFolding) {
             static constexpr Op kFoldableOps[] = {
                 // Binary arithmetic / bitwise / comparison
@@ -914,9 +777,6 @@ void EGraph::foldConstants(ClassId cls) {
         if (merges == 0) break;
 
         // Early termination: if the number of merges is ≤ 10% of the
-        // previous iteration's merges for 3 consecutive rounds, the
-        // saturation is delivering diminishing returns.  Stop early to
-        // save compile time on large programs.
         if (prevMerges > 0 && merges * 10 <= prevMerges) {
             ++stagnantRuns;
             if (stagnantRuns >= 3) break;
@@ -929,8 +789,6 @@ void EGraph::foldConstants(ClassId cls) {
     return iterations;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EGraph — extraction (cost-based)
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::unordered_map<ClassId, EGraph::ExtractionResult>
@@ -969,8 +827,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     }
 
     // DFS-based post-order topological sort; back-edges (cycles from
-    // commutativity/associativity rewrites) are ignored — the follow-up
-    // passes below resolve any remaining unresolved classes.
     std::vector<ClassId> topoOrder;
     topoOrder.reserve(reachable.size());
     {
@@ -991,49 +847,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     }
 
     // ── 2b. Strongly Connected Components (Tarjan's algorithm) ──────────────
-    //
-    // Classes in the same SCC are mutually reachable through one or more
-    // candidate-node child edges.  Such cycles arise routinely from
-    // commutative / associative / inverse rewrites (e.g. `a+b ≡ b+a`
-    // produces an e-class whose nodes reference each other transitively).
-    //
-    // The latency-best selection in sections 3-5 is cycle-tolerant by
-    // construction: it ignores back-edges in the topological DFS and
-    // falls back to whichever node was first costed for an unresolved
-    // child.  The pressure-aware *refinement* below, however, is free to
-    // pick any e-node from any e-class — so we MUST guard against
-    // selecting a node whose chosen children would form a cycle in the
-    // resulting extraction DAG.  (A cyclic selection makes
-    // egraph_optimizer.cpp::eNodeToAST recurse without termination —
-    // confirmed via ASan stack-overflow on examples/destructure_test.om
-    // before this guard was in place.)
-    //
-    // Tarjan's algorithm produces an SCC numbering in REVERSE topological
-    // order of the condensation DAG: for any forward edge u → v,
-    //     sccOf[v] <= sccOf[u].
-    // With strict inequality iff v is in a strictly-earlier SCC (i.e. a
-    // *strict ancestor* of u in the condensation).  The refinement loop
-    // exploits this in two complementary ways:
-    //
-    //   (a) ANCESTOR CHECK — when evaluating an alternative e-node for
-    //       class `cls`, every child class must satisfy
-    //           sccOf[child] < sccOf[cls],
-    //       guaranteeing the child has already been finalised by the
-    //       bottom-up pass and that the alternative cannot transitively
-    //       reach back into `cls`.
-    //
-    //   (b) SCC CONDENSATION — same-SCC edges are precisely the cyclic
-    //       edges of the original e-graph.  Forbidding them collapses
-    //       each SCC to a single "frozen" representative whose selection
-    //       is locked to whatever the cycle-tolerant latency pass chose.
-    //       Refinement then operates on the condensation DAG, which is
-    //       acyclic by construction, so the proof of monotone progress
-    //       holds and the extracted tree is guaranteed finite.
-    //
-    // Tarjan is implemented iteratively to avoid blowing the host call
-    // stack on pathological inputs (the recursive topo DFS above is
-    // tolerated only because it is post-order with cycle pruning; SCC
-    // computation needs the full recursion structure on cyclic inputs).
     std::unordered_map<ClassId, int> sccOf;
     sccOf.reserve(reachable.size());
     {
@@ -1045,8 +858,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
         int sccCtr = 0;
 
         // Iterative Tarjan: each stack frame carries (node, child-iterator
-        // position).  The "phase" field distinguishes the initial visit
-        // (phase 0) from the post-recursion lowlink fold (phase 1).
         struct Frame {
             ClassId node;
             size_t  childIdx;
@@ -1121,14 +932,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     }
 
     // ── 3. Single-pass bottom-up extraction in topological order ─────────────
-    // In a DAG (no cycles), this single pass is sufficient: every child is
-    // resolved before its parent is visited.  For cyclic e-graphs the follow-up
-    // passes (section 4) handle residual unresolved classes.
-    //
-    // This first pass selects on PURE LATENCY cost only.  The
-    // pressure-aware refinement (section 6) needs the initial selection
-    // to estimate which children are shared (parentCount > 1) before it
-    // can compute Sethi-Ullman register pressure.
     auto tryUpdate = [&](ClassId cls) {
         for (const auto& node : classes_[cls].nodes) {
             Cost total = model.nodeCost(node);
@@ -1155,8 +958,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     for (ClassId cls : topoOrder) tryUpdate(cls);
 
     // ── 4. Follow-up passes for any cyclic residuals ──────────────────────────
-    // At most O(SCC size) passes are needed to resolve cyclic e-classes.
-    // In practice this loop almost never executes — it's a safety net only.
     for (int pass = 0; pass < 10; ++pass) {
         bool changed = false;
         for (ClassId cls : topoOrder) {
@@ -1170,9 +971,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     }
 
     // ── 5. DAG sharing discount ────────────────────────────────────────────
-    // When the same sub-expression is used by multiple parent nodes, it is
-    // computed once and reused.  Adjust costs of the already-selected best
-    // nodes to reflect sharing, without changing which node is selected.
     std::unordered_map<ClassId, unsigned> parentCount;
     for (ClassId cls : reachableVec) {
         auto it = best.find(cls);
@@ -1214,50 +1012,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     }
 
     // ── 6. Register-pressure-aware selection refinement ─────────────────────
-    //
-    // The latency-only extraction above can pick a deep, narrow expression
-    // (e.g. a long chain of dependent fused-multiply-adds) whose evaluation
-    // forces many simultaneous live values and provokes register spills.
-    // On a register-tight target a shorter, equivalent expression — even
-    // one with slightly higher latency — is cheaper end-to-end because it
-    // avoids the spill traffic.
-    //
-    // We compute Sethi-Ullman register pressure for the currently-selected
-    // node of each e-class (taking the DAG sharing pattern into account so
-    // a value used by multiple parents is counted as 1 register that lives
-    // across the whole expression rather than a fresh evaluation per use)
-    // and store it as metadata on each ExtractionResult.  We then perform
-    // a SINGLE bottom-up refinement pass that, for every e-class, considers
-    // candidate e-nodes whose every child lives in a strictly-earlier SCC
-    // of the e-graph and selects whichever yields the lowest effective cost
-    //
-    //     effCost(node) = sum_children effCost + nodeCost(node)
-    //                   + spillPenalty * max(0, regPressure - regBudget).
-    //
-    // SOUNDNESS — see the long comment alongside the SCC computation in
-    // section 2b.  Briefly:
-    //
-    //   * ANCESTOR + SCC CONDENSATION CHECK: an alternative is feasible
-    //     only when every child satisfies sccOf[child] < sccOf[cls].
-    //     Same-SCC children would close a cycle in the selection DAG and
-    //     could make the recursive extraction in
-    //     egraph_optimizer.cpp::eNodeToAST loop forever.
-    //
-    //   * STRICT IMPROVEMENT: an alternative replaces the current pick
-    //     only when its effective cost is strictly lower (with depth as a
-    //     secondary tie-breaker) — this guarantees monotone progress and
-    //     deterministic results across runs.
-    //
-    //   * SINGLE PASS: we do not iterate to a moving fixpoint with a
-    //     refreshed `parentCount`.  A second pass with shifted sharing
-    //     could invalidate ancestor relationships established in the
-    //     first.  The single-pass design captures the dominant
-    //     register-pressure win while keeping the proof simple.
-    //
-    // When the host CostModel disables pressure-awareness by setting
-    // `regBudget == 0` or `spillPenalty == 0`, the refinement loop is
-    // skipped and we only refresh the metadata — preserving the
-    // historical pure-latency behaviour exactly.
     const Cost spillPenalty = model.spillPenalty;
     const unsigned regBudget = model.regBudget;
     const bool pressureAware = (regBudget > 0) && (spillPenalty > 0.0);
@@ -1275,8 +1029,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
             unsigned parents = parentCount.count(child) ? parentCount[child] : 1u;
             if (parents > 1) {
                 // Shared value: lives in 1 register across the whole
-                // expression rather than contributing to per-sibling
-                // holding cost.
                 ++sharedCount;
             } else {
                 siblingPress.push_back(p);
@@ -1292,9 +1044,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     };
 
     // ── Initial pressure-metadata pass (always runs) ─────────────────────
-    // Even with refinement disabled, this populates regPressure / effCost
-    // so downstream consumers (HGOE schedulers, diagnostic dumpers, ...)
-    // see consistent values.
     for (ClassId cls : topoOrder) {
         auto it = best.find(cls);
         if (it == best.end()) continue;
@@ -1306,15 +1055,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     }
 
     // ── Single-pass bottom-up pressure-aware refinement ──────────────────
-    //
-    // The rewriter's type-soundness invariant is now enforced upstream
-    // (see the type-tag propagation on EClass and the fp_* rule guard
-    // installed in `getAllRules()`), so refinement runs unconditionally
-    // whenever the cost model has pressure-awareness enabled.  The SCC
-    // / ancestor / op-match guards in the loop body are still kept for
-    // defence-in-depth: they ensure extraction is provably finite even
-    // if a future rewrite rule re-introduces a cycle in the candidate
-    // selection DAG.
 
     if (pressureAware) {
         for (ClassId cls : topoOrder) {
@@ -1339,9 +1079,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
 
             for (const auto& node : candidates) {
                 // ── ANCESTOR + SCC CONDENSATION CHECK ──
-                // Refinement may select this candidate only if every
-                // child class is in a strictly-earlier SCC.  Leaf nodes
-                // (no children) trivially satisfy this.
                 bool ancestorsOk = true;
                 for (auto child : node.children) {
                     child = find(child);
@@ -1351,8 +1088,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
                         break;
                     }
                     // Child must also have a finalised cost (guaranteed
-                    // by the strict-SCC check + topological processing,
-                    // but verified defensively).
                     if (best.find(child) == best.end()) {
                         ancestorsOk = false;
                         break;
@@ -1361,22 +1096,6 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
                 if (!ancestorsOk) continue;
 
                 // ── OP-COMPATIBILITY GUARD (defence-in-depth) ──
-                // The fp_*-rule type-soundness invariant is now enforced
-                // upstream by `EClass::isFloat` propagation and the
-                // float-rule guard installed in `getAllRules()`, so a
-                // class will not normally contain a mix of integer and
-                // float-typed nodes.  This guard is *kept* as a
-                // defence-in-depth measure: it ensures that even if a
-                // future rewrite rule re-introduces such a mix (for
-                // example a hypothetical mixed-int-float distribute
-                // rule), refinement will not flip to a candidate whose
-                // op or arity differs from the latency-best pick.
-                // Together with the SCC + ancestor checks above, this
-                // also bounds the candidate selection DAG: refinement
-                // only picks among same-op same-arity nodes that all
-                // sit in strictly-earlier SCCs, so the resulting
-                // selection graph is provably acyclic and same-shape
-                // with the latency-only baseline.
                 if (node.op != curIt->second.bestNode.op) continue;
                 if (node.children.size()
                     != curIt->second.bestNode.children.size()) continue;
@@ -1441,16 +1160,12 @@ ENode EGraph::extract(ClassId root, const CostModel& model) {
 
         ENode result = it->second.bestNode;
         // Replace children class IDs with extracted sub-trees
-        // (We keep children as class IDs for the top-level result;
-        // the caller can recursively extract if needed)
         return result;
     };
 
     return buildTree(root);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EGraph — accessors
 // ─────────────────────────────────────────────────────────────────────────────
 
 const EClass& EGraph::getClass(ClassId id) const {
@@ -1537,8 +1252,6 @@ std::optional<Op> EGraph::getClassOp(ClassId cls) const {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Rule library — algebraic simplification rules
-// ─────────────────────────────────────────────────────────────────────────────
 
 std::vector<RewriteRule> getAlgebraicRules() {
     using P = Pattern;
@@ -1610,10 +1323,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
         [](EGraph& g, const Subst&) { return g.addConst(1); });
 
     // NOTE: x / 2^n → x >> n is NOT valid for signed integers.
-    // Arithmetic shift right rounds toward -∞ but signed division rounds
-    // toward zero.  For example, -7 / 2 = -3 but -7 >> 1 = -4.
-    // The codegen already emits the correct (x + ((x >> 63) & (2^n - 1))) >> n
-    // sequence for power-of-2 constant divisors.
 
     // ── Double negation: -(-x) → x ──────────────────────────────────────
     rules.emplace_back("double_neg",
@@ -1681,14 +1390,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
         [](EGraph& g, const Subst&) { return g.addConst(0); });
 
     // ── Modulo by power of 2: x % 2^n → x & (2^n - 1) ──────────────────
-    // For all n in [1, 30]: x % (2^n) → x & (2^n - 1)
-    // NOTE: This is technically only correct for non-negative x when using
-    // signed semantics.  However, the codegen already emits the corrected
-    // signed-mod sequence for power-of-2 divisors via the sign-bit fixup
-    // path in codegen_expr.cpp.  At the e-graph level, these rules apply
-    // in the abstract integer domain where the e-graph tracks equivalent
-    // representations — the extraction cost model selects bitwise AND
-    // only when it's cheaper.
     for (int n = 1; n <= 30; ++n) {
         long long pow2 = 1LL << n;
         long long mask = pow2 - 1;
@@ -1832,11 +1533,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
         });
 
     // ── Negation of addition: -(a + b) → (-a) + (-b) → (-a) - b ────────
-    // More useful: -(a + b) → -a - b  which via sub_to_add_neg = (-a) + (-b)
-    // Keep it simpler: -(a + b) → 0 - (a + b) = 0 - a - b
-    // Actually simplest: -(a + b) equivalent to (-a) + (-b)
-    // Not always a win, so skip. But add: -(a + b) ≡ -(a) - b
-    // That is useful via negation distribution.
 
     // ── Power simplification: x ** 0 → 1 ────────────────────────────────
     rules.emplace_back("pow_zero",
@@ -1914,14 +1610,8 @@ std::vector<RewriteRule> getAlgebraicRules() {
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
     // NOTE: Division by power-of-2 → shift is NOT safe for signed integers
-    // because signed division truncates toward zero while arithmetic shift
-    // rounds toward negative infinity: e.g. -7/4 = -1 but -7>>2 = -2.
-    // These transformations are left to the LLVM backend which inserts
-    // the necessary correction (add + ashr) when the dividend may be negative.
 
     // ── Distributive: a * (b + c) → a*b + a*c ──────────────────────────
-    // Useful for exposing strength-reduction opportunities on sub-expressions.
-    // (Only applied when 'a' is a constant, to avoid code size explosion.)
     rules.emplace_back("mul_add_distribute",
         P::OpPat(Op::Mul, {P::Wild("a"), P::OpPat(Op::Add, {P::Wild("b"), P::Wild("c")})}),
         [](EGraph& g, const Subst& s) {
@@ -1992,8 +1682,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
             return g.addBinOp(Op::Shl, s.at("x"), g.addConst(13));
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More strength reductions for non-power-of-2 constants
     // ─────────────────────────────────────────────────────────────────────
 
     // x * 6 → (x << 2) + (x << 1)  [4x + 2x = 6x]
@@ -2424,8 +2112,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // x * 2^n strength reduction for shifts 11-30
-    // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mul_2048_to_shl11",
         P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2048LL)}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(11)); });
@@ -2488,8 +2174,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(30)); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More cancellation rules
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a - b) + b → a
     rules.emplace_back("sub_add_cancel",
@@ -2532,8 +2216,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Negation distribution and mul negation rules
-    // ─────────────────────────────────────────────────────────────────────
 
     // -(a + b) → (-a) - b
     rules.emplace_back("neg_add_distribute",
@@ -2573,8 +2255,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
             return g.addUnaryOp(Op::Neg, ab);
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Distributive and factoring rules
     // ─────────────────────────────────────────────────────────────────────
 
     // (a + b) * c → a*c + b*c
@@ -2618,8 +2298,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Division and modulo rules
-    // ─────────────────────────────────────────────────────────────────────
 
     // (x * n) / n → x
     rules.emplace_back("mul_div_cancel",
@@ -2637,12 +2315,7 @@ std::vector<RewriteRule> getAlgebraicRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), s.at("n")); });
 
     // NOTE: `0 / x → 0` and `0 % x → 0` are omitted intentionally.
-    // When x is also 0 these would suppress the division-by-zero / modulo-by-zero
-    // runtime error, producing incorrect behaviour.  Leave the division to
-    // runtime so that the fault can be reported correctly.
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Power rules
     // ─────────────────────────────────────────────────────────────────────
 
     // 1 ^ x → 1
@@ -2666,8 +2339,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
             return g.addBinOp(Op::Pow, s.at("x"), two);
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Triple self-addition
     // ─────────────────────────────────────────────────────────────────────
 
     // (x + x) + x → x * 3
@@ -2824,8 +2495,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Left-constant versions of strength reduction (constant on left side)
-    // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mul_2_left_shl1",
         P::OpPat(Op::Mul, {P::ConstPat(2), P::Wild("x")}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(1)); });
@@ -2954,9 +2623,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More multiply-by-constant patterns
-    // ─────────────────────────────────────────────────────────────────────
-    // x * 36 → (x<<5) + (x<<2)  [32x + 4x = 36x]
     rules.emplace_back("mul_36_shift",
         P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(36)}),
         [](EGraph& g, const Subst& s) {
@@ -4558,8 +4224,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Modulo identities
-    // ─────────────────────────────────────────────────────────────────────
 
     // (x + n) % n → x % n
     rules.emplace_back("mod_add_n",
@@ -4613,8 +4277,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             return g.addBinOp(Op::Div, s.at("a"), bc);
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Add/sub associativity patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // (a + b) + c → a + (b + c)
@@ -4674,8 +4336,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Commutativity
-    // ─────────────────────────────────────────────────────────────────────
 
     // a + b → b + a
     rules.emplace_back("add_comm_adv",
@@ -4687,8 +4347,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("b")}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mul, s.at("b"), s.at("a")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Misc algebraic identities
     // ─────────────────────────────────────────────────────────────────────
 
     // 0 + x → x
@@ -4794,8 +4452,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More modulo patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // x % 2 with shifts: x & 1 (equivalence - not actually a rewrite but useful)
     // x % 1 → 0  (already exists)
@@ -4805,8 +4461,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
 
     // Negative mod base: x % (-n) with signed semantics - skip for safety
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Add commutativity for different arrangements of b + cancel
     // ─────────────────────────────────────────────────────────────────────
 
     // b + (a - b) → a
@@ -4829,8 +4483,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         [](EGraph&, const Subst& s) { return s.at("a"); });
 
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Extended strength reduction patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // x * 2048 → x << 11 (left-constant)
@@ -6657,12 +6309,8 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More modulo/division identities
-    // ─────────────────────────────────────────────────────────────────────
 
     // x % 0 is undefined, skip
-    // (a / b) * b → a - (a % b)  [floor division property]
-    // Too complex for now
 
     // x / x → 1 (unsafe if x=0, but pattern is useful)
     // Skip for safety
@@ -6682,8 +6330,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         P::OpPat(Op::Div, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(4)}), P::ConstPat(4)}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More power/exponent rules
     // ─────────────────────────────────────────────────────────────────────
 
     // 0 ^ 1 → 0
@@ -6732,12 +6378,8 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More cancellation/simplification rules
-    // ─────────────────────────────────────────────────────────────────────
 
     // a - b == 0 → a == b (already exists as sub_eq_zero variant in comparison)
-    // (a - b) + (b - c) + c → a
-    // Complex nested patterns
 
     // x * 2 - x → x
     rules.emplace_back("mul2_sub_to_self",
@@ -6765,8 +6407,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
     // x * a + x * b → x * (a + b) when a,b are wilds (already covered by factor_mul_add/factor_mul_add_left)
-    // But let's add specific constant cases:
-    // x * 2 + x * 3 → x * 5
     rules.emplace_back("mul2_add_mul3",
         P::OpPat(Op::Add, {
             P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2)}),
@@ -6870,8 +6510,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         }),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mul, s.at("x"), g.addConst(17)); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Negation of multiplication
     // ─────────────────────────────────────────────────────────────────────
 
     // -(x * 2) → x * (-2)
@@ -6992,8 +6630,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             return g.addBinOp(Op::Ge, s.at("x"), s.at("y"));
         });
     // x == 0 → !x (boolean equivalence).
-    // Valid because OmScript's LogNot always produces 0 or 1:
-    //   !x = (x == 0) ? 1 : 0, which is exactly (x == 0).
     rules.emplace_back("eq_zero_to_lognot",
         P::OpPat(Op::Eq, {P::Wild("x"), P::ConstPat(0)}),
         [](EGraph& g, const Subst& s) {
@@ -7008,8 +6644,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             return g.addUnaryOp(Op::LogNot, notx);
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Sqrt identities
     // ─────────────────────────────────────────────────────────────────────
 
     // sqrt(1) → 1
@@ -7046,8 +6680,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             return g.addUnaryOp(Op::Sqrt, xy);
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Additional power rules
     // ─────────────────────────────────────────────────────────────────────
 
     // x^1 → x
@@ -7092,8 +6724,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             return g.addBinOp(Op::Pow, s.at("x"), amb);
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Reassociation rules — expose constant folding across associations
     // ─────────────────────────────────────────────────────────────────────
 
     // (a + b) + c → a + (b + c)  (right-associate addition)
@@ -7327,8 +6957,6 @@ std::vector<RewriteRule> getComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Relational rules: comparison negation (relate ! to comparison ops)
-    // ─────────────────────────────────────────────────────────────────────
 
     // ── !(a == b) → a != b ───────────────────────────────────────────────
     rules.emplace_back("not_eq_to_ne",
@@ -7373,8 +7001,6 @@ std::vector<RewriteRule> getComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Relational rules: comparison swap (relate > to <, >= to <=)
-    // ─────────────────────────────────────────────────────────────────────
 
     // ── a > b → b < a ────────────────────────────────────────────────────
     rules.emplace_back("gt_to_lt_swap",
@@ -7390,8 +7016,6 @@ std::vector<RewriteRule> getComparisonRules() {
             return g.addBinOp(Op::Le, s.at("b"), s.at("a"));
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Relational rules: De Morgan's laws for logical operators
     // ─────────────────────────────────────────────────────────────────────
 
     // ── !(a && b) → !a || !b ─────────────────────────────────────────────
@@ -7417,8 +7041,6 @@ std::vector<RewriteRule> getComparisonRules() {
         P::OpPat(Op::LogNot, {P::OpPat(Op::LogNot, {P::Wild("x")})}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Relational rules: ternary-comparison fusion
     // ─────────────────────────────────────────────────────────────────────
 
     // ── (a == b) ? x : y → (a != b) ? y : x ─────────────────────────────
@@ -7468,8 +7090,6 @@ std::vector<RewriteRule> getComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Logical commutativity
-    // ─────────────────────────────────────────────────────────────────────
 
     // a && b → b && a
     rules.emplace_back("logand_comm",
@@ -7481,8 +7101,6 @@ std::vector<RewriteRule> getComparisonRules() {
         P::OpPat(Op::LogOr, {P::Wild("a"), P::Wild("b")}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::LogOr, s.at("b"), s.at("a")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Logical associativity
     // ─────────────────────────────────────────────────────────────────────
 
     // (a && b) && c → a && (b && c)
@@ -7517,8 +7135,6 @@ std::vector<RewriteRule> getComparisonRules() {
             return g.addBinOp(Op::LogOr, ab, s.at("c"));
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More ternary simplifications
     // ─────────────────────────────────────────────────────────────────────
 
     // c ? 1 : 0 → c  (boolean conversion)
@@ -7574,8 +7190,6 @@ std::vector<RewriteRule> getComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Boolean cancellation
-    // ─────────────────────────────────────────────────────────────────────
 
     // a && !a → 0
     rules.emplace_back("logand_not_cancel",
@@ -7597,8 +7211,6 @@ std::vector<RewriteRule> getComparisonRules() {
         P::OpPat(Op::LogOr, {P::OpPat(Op::LogNot, {P::Wild("a")}), P::Wild("a")}),
         [](EGraph& g, const Subst&) { return g.addConst(1); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Absorption laws
     // ─────────────────────────────────────────────────────────────────────
 
     // x && (x || y) → x
@@ -7622,8 +7234,6 @@ std::vector<RewriteRule> getComparisonRules() {
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Comparison symmetry and additional negation forms
-    // ─────────────────────────────────────────────────────────────────────
 
     // a == b → b == a
     rules.emplace_back("eq_comm",
@@ -7645,8 +7255,6 @@ std::vector<RewriteRule> getComparisonRules() {
         P::OpPat(Op::Le, {P::Wild("a"), P::Wild("b")}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ge, s.at("b"), s.at("a")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Comparison with arithmetic
     // ─────────────────────────────────────────────────────────────────────
 
     // (x + 1) > y → x >= y
@@ -7670,8 +7278,6 @@ std::vector<RewriteRule> getComparisonRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Le, s.at("x"), s.at("y")); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Zero comparison simplifications
-    // ─────────────────────────────────────────────────────────────────────
 
     // x == 0 → !x
     rules.emplace_back("eq_zero_to_not",
@@ -7686,8 +7292,6 @@ std::vector<RewriteRule> getComparisonRules() {
     // x != 0 → !!x (double negation - or just leave as is, this expands)
     // Actually: x != 0 is itself boolean, so skip this
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Logical elimination patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // (a && b) || (!a && b) → b
@@ -7714,8 +7318,6 @@ std::vector<RewriteRule> getComparisonRules() {
         }),
         [](EGraph&, const Subst& s) { return s.at("a"); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More comparison + logical combinations
     // ─────────────────────────────────────────────────────────────────────
 
     // (x == y) && (x != y) → 0
@@ -7767,8 +7369,6 @@ std::vector<RewriteRule> getComparisonRules() {
         [](EGraph& g, const Subst&) { return g.addConst(1); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Ternary with logical conditions
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a != b) ? x : y → (a == b) ? y : x
     rules.emplace_back("ternary_ne_flip",
@@ -7807,8 +7407,6 @@ std::vector<RewriteRule> getComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Subtraction comparison with zero (extended)
-    // ─────────────────────────────────────────────────────────────────────
 
     // 0 < (a - b) → b < a
     rules.emplace_back("zero_lt_sub",
@@ -7825,8 +7423,6 @@ std::vector<RewriteRule> getComparisonRules() {
         P::OpPat(Op::Eq, {P::ConstPat(0), P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")})}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Eq, s.at("a"), s.at("b")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Logical distribution
     // ─────────────────────────────────────────────────────────────────────
 
     // a && (b || c) → (a && b) || (a && c)
@@ -7856,8 +7452,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
     using P = Pattern;
     std::vector<RewriteRule> rules;
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Boolean algebra laws
     // ─────────────────────────────────────────────────────────────────────
 
     // (a && b) || b → b
@@ -7917,8 +7511,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::LogOr, s.at("a"), s.at("b")); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Comparison chains and transitivity patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (x == y) → (y == x)  (symmetry, already in comparison rules as eq_comm)
 
@@ -7957,22 +7549,13 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         [](EGraph& g, const Subst&) { return g.addConst(1); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Ternary optimization patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a == b) ? a : b → b  (if equal pick either, but when condition is false pick b)
-    // Actually: if a==b, result is a (same as b). If a!=b, result is b. So always b.
-    // Wait: (a==b) ? a : b → if a==b then a else b → always b (since when equal, a==b)
-    // This is actually correct: when a==b, a==b so result is a == b. Both same.
-    // But we can simplify to just b, since when condition true a==b.
     rules.emplace_back("ternary_eq_first_branch",
         P::OpPat(Op::Ternary, {P::OpPat(Op::Eq, {P::Wild("a"), P::Wild("b")}), P::Wild("a"), P::Wild("b")}),
         [](EGraph&, const Subst& s) { return s.at("b"); });
 
     // c ? !c : x → x (if c is true then !c is false/0, if c is false !c is true/1 and result is x)
-    // Actually this is: if c is true, result is 0 (since !c=0); if c is false, result is x.
-    // This simplification: c ? (!c) : x → 0 when c is true, x when false. Which is !c && x? No.
-    // Better: c ? (!c) : x = c ? 0 : x = !c && x? Not quite. Skip this.
 
     // x ? 1 : x → x || x = x  (x ? 1 : x - if x true then 1, else x=0; so always x)
     rules.emplace_back("ternary_one_self",
@@ -8005,8 +7588,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         [](EGraph&, const Subst& s) { return s.at("a"); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More negation patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // !(x == 0) → x != 0  (same as not_eq_to_ne but with constant)
     rules.emplace_back("not_eq_zero",
@@ -8028,8 +7609,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         P::OpPat(Op::LogNot, {P::OpPat(Op::Lt, {P::Wild("x"), P::ConstPat(0)})}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ge, s.at("x"), g.addConst(0)); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More subtraction/comparison patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // (a + c) == (b + c) → a == b
@@ -8072,8 +7651,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         }),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Le, s.at("a"), s.at("b")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Logical simplification with equality
     // ─────────────────────────────────────────────────────────────────────
 
     // (a == b) && (a == b) → a == b  (idempotent - covered by logand_self)
@@ -8142,8 +7719,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ne, s.at("a"), s.at("b")); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More comparison+arithmetic simplifications
-    // ─────────────────────────────────────────────────────────────────────
 
     // (x + 1) >= y → x >= (y - 1)
     rules.emplace_back("add1_ge_rearrange",
@@ -8165,8 +7740,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
 
     // x > (y + 1) → x >= (y + 2) - skip, not always simpler
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More ternary patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // (a && b) ? x : y → a ? (b ? x : y) : y
@@ -8214,8 +7787,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Comparison with negation patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (-x) < 0 → x > 0
     rules.emplace_back("neg_lt_zero",
@@ -8238,8 +7809,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ne, s.at("x"), g.addConst(0)); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Logical identity patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a && b) && a → a && b
     rules.emplace_back("logand_absorb_left",
@@ -8261,8 +7830,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         P::OpPat(Op::LogOr, {P::Wild("a"), P::OpPat(Op::LogOr, {P::Wild("b"), P::Wild("a")})}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::LogOr, s.at("a"), s.at("b")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More comparison + logical patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // x == 1 → !!x when x is boolean (x != 0 and x != 1 are typical cases)
@@ -8296,8 +7863,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Eq, s.at("x"), s.at("y")); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Additional absorption for logical operators
-    // ─────────────────────────────────────────────────────────────────────
 
     // a && (a && b) → a && b
     rules.emplace_back("logand_absorb_nested_l",
@@ -8319,8 +7884,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         P::OpPat(Op::LogOr, {P::OpPat(Op::LogOr, {P::Wild("a"), P::Wild("b")}), P::Wild("b")}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::LogOr, s.at("a"), s.at("b")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Comparison with negated operands
     // ─────────────────────────────────────────────────────────────────────
 
     // (-x) < (-y) → y < x  [multiply both sides by -1 flips inequality]
@@ -8349,8 +7912,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Eq, s.at("x"), s.at("y")); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Boolean XOR-like patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a || b) && !(a && b) → a != b (XOR for booleans)
     // Too complex, skip
@@ -8363,8 +7924,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         }),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ne, s.at("a"), s.at("b")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More ternary optimization patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // a ? (b ? c : d) : d → (a && b) ? c : d
@@ -8394,8 +7953,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Additional comparison with zero
-    // ─────────────────────────────────────────────────────────────────────
 
     // x + y == 0 → x == -y
     rules.emplace_back("add_eq_zero",
@@ -8413,8 +7970,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
             return g.addBinOp(Op::Ne, s.at("x"), ny);
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Logical operator with constants
     // ─────────────────────────────────────────────────────────────────────
 
     // a && -1 → a  (non-zero constant is truthy)
@@ -8442,8 +7997,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         P::OpPat(Op::LogNot, {P::ConstPat(-1)}),
         [](EGraph& g, const Subst&) { return g.addConst(0); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Comparison rewrite via symmetry and other forms
     // ─────────────────────────────────────────────────────────────────────
 
     // x < y → !(x >= y)
@@ -8495,8 +8048,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More complex ternary patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (x == y) ? 0 : 1 → x != y
     rules.emplace_back("ternary_eq_to_ne",
@@ -8539,8 +8090,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ne, s.at("x"), s.at("y")); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Conditional and logical equivalences
-    // ─────────────────────────────────────────────────────────────────────
 
     // a && b → !((!a) || (!b))  (De Morgan - already have demorgan forms)
 
@@ -8561,8 +8110,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
 
     // (a && b) && a → a && b  (already have logand_absorb_left)
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More comparison algebra
     // ─────────────────────────────────────────────────────────────────────
 
     // (a + b == c) → (a == c - b)
@@ -8598,8 +8145,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Comparison merging — combine two comparisons into one
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a < b) || (a == b) → a <= b
     rules.emplace_back("lt_or_eq_to_le",
@@ -8634,8 +8179,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ge, s.at("a"), s.at("b")); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Redundant comparison elimination — a < b already implies a != b
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a != b) && (a < b) → a < b
     rules.emplace_back("ne_and_lt_redundant",
@@ -8669,8 +8212,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         }),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Gt, s.at("a"), s.at("b")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Ternary common-subexpression factoring
     // ─────────────────────────────────────────────────────────────────────
 
     // cond ? (a + c) : (b + c) → (cond ? a : b) + c
@@ -8718,8 +8259,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Ternary identity / boolean simplification
-    // ─────────────────────────────────────────────────────────────────────
 
     // cond ? x : x → x  (both branches identical → result is always x)
     rules.emplace_back("ternary_same_branches",
@@ -8758,8 +8297,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Comparison negation (De Morgan for comparisons)
-    // ─────────────────────────────────────────────────────────────────────
 
     // !(a < b) → a >= b
     rules.emplace_back("not_lt_to_ge",
@@ -8791,8 +8328,6 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
         P::OpPat(Op::LogNot, {P::OpPat(Op::Ne, {P::Wild("a"), P::Wild("b")})}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Eq, s.at("a"), s.at("b")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Boolean double negation
     // ─────────────────────────────────────────────────────────────────────
 
     // !!x → x  (when x is known boolean: double logical negation is identity)
@@ -9039,8 +8574,6 @@ std::vector<RewriteRule> getBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // XOR chain patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a ^ b) ^ b → a
     rules.emplace_back("xor_b_cancel",
@@ -9062,8 +8595,6 @@ std::vector<RewriteRule> getBitwiseRules() {
         P::OpPat(Op::BitXor, {P::Wild("b"), P::OpPat(Op::BitXor, {P::Wild("a"), P::Wild("b")})}),
         [](EGraph&, const Subst& s) { return s.at("a"); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Complement interactions: x & ~x → 0, x | ~x → -1
     // ─────────────────────────────────────────────────────────────────────
 
     // x & (~x) → 0
@@ -9096,8 +8627,6 @@ std::vector<RewriteRule> getBitwiseRules() {
         P::OpPat(Op::BitXor, {P::OpPat(Op::BitNot, {P::Wild("x")}), P::Wild("x")}),
         [](EGraph& g, const Subst&) { return g.addConst(-1); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // AND distributes over OR (factored/expanded forms)
     // ─────────────────────────────────────────────────────────────────────
 
     // (a & b) | (a & c) → a & (b | c)
@@ -9134,8 +8663,6 @@ std::vector<RewriteRule> getBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // XOR with NOT patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (~a) ^ b → ~(a ^ b)
     rules.emplace_back("bitnot_xor_distribute",
@@ -9162,8 +8689,6 @@ std::vector<RewriteRule> getBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More absorption variants
-    // ─────────────────────────────────────────────────────────────────────
 
     // a & (a | b) → a  (already have and_absorb but ensuring b ordering)
     rules.emplace_back("and_absorb2",
@@ -9185,8 +8710,6 @@ std::vector<RewriteRule> getBitwiseRules() {
         P::OpPat(Op::BitAnd, {P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")}), P::Wild("a")}),
         [](EGraph&, const Subst& s) { return s.at("a"); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Shift interactions with AND/OR
     // ─────────────────────────────────────────────────────────────────────
 
     // (x << n) | (x << n) → x << n  (covered by or_self, but via shift path)
@@ -9227,8 +8750,6 @@ std::vector<RewriteRule> getBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More NOT and complement interactions
-    // ─────────────────────────────────────────────────────────────────────
 
     // ~(~a & b) → a | ~b  (De Morgan + simplification)
     rules.emplace_back("bitnot_and_not_a",
@@ -9263,8 +8784,6 @@ std::vector<RewriteRule> getBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // XOR identities
-    // ─────────────────────────────────────────────────────────────────────
 
     // x ^ x ^ y → y
     rules.emplace_back("xor_self_cancel_left",
@@ -9276,8 +8795,6 @@ std::vector<RewriteRule> getBitwiseRules() {
         P::OpPat(Op::BitXor, {P::Wild("x"), P::OpPat(Op::BitXor, {P::Wild("y"), P::Wild("x")})}),
         [](EGraph&, const Subst& s) { return s.at("y"); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Shift by zero (additional forms)
     // ─────────────────────────────────────────────────────────────────────
 
     // 0 << x → 0
@@ -9293,8 +8810,6 @@ std::vector<RewriteRule> getBitwiseRules() {
     // -1 << 0 → -1 (special case, covered by shl_zero)
     // -1 >> 0 → -1 (special case, covered by shr_zero)
 
-    // ─────────────────────────────────────────────────────────────────────
-    // AND/OR with NOT - complement laws
     // ─────────────────────────────────────────────────────────────────────
 
     // (~a) | (~b) → ~(a & b)  (De Morgan reverse)
@@ -9313,8 +8828,6 @@ std::vector<RewriteRule> getBitwiseRules() {
             return g.addUnaryOp(Op::BitNot, ab);
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Mixed shift patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // (x >> a) << a → x & (-1 << a)  -- skip (complex mask)
@@ -9346,9 +8859,6 @@ std::vector<RewriteRule> getBitwiseRules() {
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
     // ── Shift-mask interaction: (x >> a) << a → x & ~((1 << a) - 1) ─────
-    // Clearing low bits via shift pair.  The e-graph represents this as an
-    // equivalent BitAnd with a constant mask, which exposes further AND
-    // merging opportunities.
     for (int a = 1; a <= 6; ++a) {
         int64_t mask = ~((1LL << a) - 1);
         std::string name = "shr_shl_to_mask_" + std::to_string(a);
@@ -9380,8 +8890,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     std::vector<RewriteRule> rules;
 
     // ─────────────────────────────────────────────────────────────────────
-    // More XOR identities
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a ^ b) ^ (b ^ c) → a ^ c
     rules.emplace_back("xor_chain_cancel",
@@ -9407,8 +8915,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         [](EGraph&, const Subst& s) { return s.at("a"); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // AND idempotency and interaction with OR
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a & b) & a → a & b
     rules.emplace_back("and_absorb_nested",
@@ -9430,8 +8936,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         P::OpPat(Op::BitOr, {P::Wild("a"), P::OpPat(Op::BitOr, {P::Wild("b"), P::Wild("a")})}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitOr, s.at("a"), s.at("b")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Shift composition rules
     // ─────────────────────────────────────────────────────────────────────
 
     // (x << a) & (x << b) → x << max(a,b) when a,b are small - skip for now
@@ -9470,14 +8974,10 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         P::OpPat(Op::Shl, {P::OpPat(Op::Shr, {P::Wild("x"), P::Wild("n")}), P::Wild("n")}),
         [](EGraph& g, const Subst& s) {
             // x & ((-1) << n) -- but we can't compute (-1)<<n without knowing n
-            // Just note the pattern: this clears the lower n bits
-            // Can't simplify without knowing n, so leave as is
             ClassId shr = g.addBinOp(Op::Shr, s.at("x"), s.at("n"));
             return g.addBinOp(Op::Shl, shr, s.at("n"));
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Constant shift patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // x >> 1 << 1 (clear bit 0): x & (-2)
@@ -9492,15 +8992,8 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     // x | x → x  (already have or_self)
 
     // ─────────────────────────────────────────────────────────────────────
-    // More bitwise combinations
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a & b) ^ (a & ~b) → a ^ (b ^ ~b) → a ^ (-1) → ~a
-    // Actually: (a & b) ^ (a & ~b) = a & (b ^ ~b) = a & (-1) = a
-    // Wait: b ^ ~b = -1 (all ones), so a & -1 = a. But this isn't quite what XOR does
-    // Actually: (a & b) ^ (a & ~b) = a & (b ^ ~b) [only if a distributes, which it does for bitwise]
-    // b ^ ~b = b ^ (b^-1) = (b^b)^-1 = 0^-1 = -1. So a & -1 = a.
-    // This rule: (a & b) ^ (a & ~b) → a
     rules.emplace_back("and_xor_not_cancel",
         P::OpPat(Op::BitXor, {
             P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")}),
@@ -9551,8 +9044,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Bitwise with constants
-    // ─────────────────────────────────────────────────────────────────────
 
     // x & (x | y) → x  (absorption with OR - already have and_absorb)
     // x & (~x | y) → x & y
@@ -9566,8 +9057,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         P::OpPat(Op::BitOr, {P::Wild("x"), P::OpPat(Op::BitAnd, {P::OpPat(Op::BitNot, {P::Wild("x")}), P::Wild("y")})}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitOr, s.at("x"), s.at("y")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Shift with constant amounts
     // ─────────────────────────────────────────────────────────────────────
 
     // (x << 1) + x → x * 3 → x << 1 is already 2x, so + x = 3x
@@ -9755,8 +9244,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // More AND/OR/XOR identities
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a ^ b) | (a & b) → a | b
     rules.emplace_back("xor_or_and",
@@ -9791,8 +9278,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitXor, s.at("a"), s.at("b")); });
 
     // a & (b ^ a) → a & ~a & b → 0? No: a & (b ^ a) = (a & b) ^ (a & a) = (a & b) ^ a
-    // Let's try: a ^ (a & b) → a & ~b
-    // Proof: a ^ (a & b) = a & ~(a & b) | (~a & (a & b)) = a & (~a | ~b) | 0 = a & ~b  ✓
     rules.emplace_back("xor_and_simplify",
         P::OpPat(Op::BitXor, {P::Wild("a"), P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")})}),
         [](EGraph& g, const Subst& s) {
@@ -9809,21 +9294,12 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // NOT distribute over shifts
-    // ─────────────────────────────────────────────────────────────────────
 
     // ~(x << n) - Note: ~(x << n) ≠ (~x) << n in general (due to sign extension)
-    // But for bitwise purposes: ~(x << n) has different meaning
-    // Skip these as they're not generally safe
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Shift reduction patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // (x << 1) << 1 → x << 2 (already have shl_combine)
-    // (x << 1) >> 1 → x & (-2)  (already have shr1_shl1 pattern but different order)
-    // (x >> 1) << 2 → (x & (-2)) << 1
-    // Skip complex ones
 
     // x << 2 → (x << 1) << 1
     rules.emplace_back("shl2_expand",
@@ -9833,8 +9309,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             return g.addBinOp(Op::Shl, shl1, g.addConst(1));
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More De Morgan applications
     // ─────────────────────────────────────────────────────────────────────
 
     // ~(~a ^ b) → a ^ b... no. ~(~a ^ b) = ~(~a) ^ ~b? No, XOR doesn't distribute that way.
@@ -9865,13 +9339,9 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Gray code patterns (g = n ^ (n >> 1))
-    // ─────────────────────────────────────────────────────────────────────
 
     // x ^ (x >> 1) is the Gray code of x - not easily simplified without context
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More useful patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // x & 1 → x % 2  (last bit is parity)
@@ -9969,8 +9439,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1023)); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // AND/OR/XOR with common subexpressions
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a & b) & (a | b) → a & b
     rules.emplace_back("and_absorb_or",
@@ -9992,15 +9460,10 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     // (a ^ b) & a → same: a & ~b (covered)
 
     // ─────────────────────────────────────────────────────────────────────
-    // Rotate-like patterns (x << n) | (x >> (32-n))
-    // ─────────────────────────────────────────────────────────────────────
-    // These are architecture-specific but we can represent them:
 
     // (x << 1) | (x >> 31) - this is rotate_left(x, 1) for 32-bit
     // Can't simplify without architecture knowledge, skip
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Bit clear patterns: x & ~(1 << n)
     // ─────────────────────────────────────────────────────────────────────
 
     // x & ~1 → x & (-2)  (clear bit 0)
@@ -10011,8 +9474,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     // x | 0 → x  (already exists as or_zero)
     // 0 | x → x  (already exists as or_zero_left)
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Additional shift and arithmetic combinations
     // ─────────────────────────────────────────────────────────────────────
 
     // (x << n) + (x << n) → x << (n+1)
@@ -10027,22 +9488,13 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // (x >> n) + (x >> n) → x >> (n-1) [only valid if n >= 1, but let's add it]
-    // Actually: 2 * (x >> n) = x >> (n-1) [unsigned] - not safe for signed
-    // Skip this one
 
     // (x << a) + (x << b) when a = b+1: = x << b + x << (b+1) = x << b * (1 + 2) = x << b * 3
     // Complex - skip
 
     // ─────────────────────────────────────────────────────────────────────
-    // More XOR and AND/OR patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (x | y) ^ y → x & ~y
-    // Proof: (x | y) ^ y = ((x & ~y) | (x & y) | y) ^ y
-    // Actually: (x | y) ^ y - we expand: x|y = (~x&y)|(x&~y)|(x&y), XOR with y gives ~x&y... complex
-    // Let's verify: (x|y)^y bit by bit:
-    // x=0,y=0: 0^0=0; x=1,y=0: 1^0=1; x=0,y=1: 1^1=0; x=1,y=1: 1^1=0
-    // So result = x&~y ✓
     rules.emplace_back("or_xor_y_to_and_not",
         P::OpPat(Op::BitXor, {
             P::OpPat(Op::BitOr, {P::Wild("x"), P::Wild("y")}),
@@ -10070,18 +9522,12 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     // Too complex for now
 
     // ─────────────────────────────────────────────────────────────────────
-    // More shift patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (x << n) >> n for various n (loses lower bits)
-    // (x >> n) << n for various n (loses upper bits + clears lower)
-    // These need masking which requires knowing n
 
     // (x << a) >> b → x << (a-b) when a > b
     // These need to know a,b at compile time
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Complement with constants
     // ─────────────────────────────────────────────────────────────────────
 
     // ~0 → -1
@@ -10104,8 +9550,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         P::OpPat(Op::BitNot, {P::ConstPat(-2LL)}),
         [](EGraph& g, const Subst&) { return g.addConst(1); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // AND/OR with complement patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // x & (~x | y) → x & y  (already have and_not_or)
@@ -10130,8 +9574,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         [](EGraph&, const Subst& s) { return s.at("y"); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Specific AND patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // x & (x + 1) clears the trailing 1s up to the first 0 bit - too complex
 
@@ -10144,29 +9586,21 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     // x | (x - 1) → x with lowest zero bit set - too complex
 
     // ─────────────────────────────────────────────────────────────────────
-    // Multiple AND/OR patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // a & b & a → a & b (already have and_absorb_nested)
     // a | b | a → a | b (already have or_absorb_nested)
 
     // (a & b) & (b & c) → a & b & c (simplification of repeated b)
-    // = b & a & c (reordering)
-    // Hard to express without triadic patterns - skip
 
     // (a | b) | (b | c) → a | b | c
     // Hard to express without triadic - skip
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Shift identity patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // x * 4 → x << 2 (reverse - already have mul_4_to_shl2)
     // x >> 0 → x (already have shr_zero)
 
     // Chained shifts that can be combined
-    // (x >> 1) + (x >> 1) → x & ~1
-    // This is: 2 * (x >> 1) = (x / 2) * 2 = x with lowest bit cleared = x & (-2)
     rules.emplace_back("shr1_add_shr1",
         P::OpPat(Op::Add, {
             P::OpPat(Op::Shr, {P::Wild("x"), P::ConstPat(1)}),
@@ -10176,8 +9610,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(-2LL));
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // More de Morgan applications
     // ─────────────────────────────────────────────────────────────────────
 
     // a | ~b | b → -1 (all ones)
@@ -10197,16 +9629,9 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         [](EGraph& g, const Subst&) { return g.addConst(0); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Additional constants with bitwise ops
-    // ─────────────────────────────────────────────────────────────────────
 
     // NOTE: x & 255 and x % 256 (and the 65535/65536 variants) are NOT
-    // equivalent for negative x under signed (truncating) modulo:
-    //   -1 & 255 == 255, but -1 % 256 == -1.
-    // These rules are intentionally omitted to avoid miscompilation.
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Bitwise with shifts - additional patterns
     // ─────────────────────────────────────────────────────────────────────
 
     // (x | y) >> n → (x >> n) | (y >> n)
@@ -10228,12 +9653,8 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Arithmetic-bitwise identities
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a | b) - (a & b) → a ^ b
-    // Proof: a|b = (a^b) | (a&b) = (a^b) + (a&b) since the two terms have
-    // no common bits.  Therefore (a|b) - (a&b) = a^b.
     rules.emplace_back("or_sub_and_to_xor",
         P::OpPat(Op::Sub, {
             P::OpPat(Op::BitOr,  {P::Wild("a"), P::Wild("b")}),
@@ -10251,8 +9672,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // (a ^ b) + (a & b) → a | b
-    // Because: a|b = (a^b) | (a&b), and since a^b and a&b share no bits,
-    // bitwise-or is the same as addition for disjoint bit patterns.
     rules.emplace_back("xor_add_and_to_or",
         P::OpPat(Op::Add, {
             P::OpPat(Op::BitXor, {P::Wild("a"), P::Wild("b")}),
@@ -10268,8 +9687,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         }),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitOr, s.at("a"), s.at("b")); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Complement-based bitwise simplifications
     // ─────────────────────────────────────────────────────────────────────
 
     // (~a) & (a | b) → (~a) & b
@@ -10318,10 +9735,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             return g.addBinOp(Op::BitOr, na, s.at("b"));
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Relational rules — guarded by predicates on matched constant values.
-    // These generalise the hardcoded mul_2_to_shl1 .. mul_1024_to_shl10
-    // and mod_2_to_and .. mod_1024_to_and families to ANY power of two.
     // ─────────────────────────────────────────────────────────────────────
 
     // x * C → x << log2(C)  when C is a power of 2  (C > 0)
@@ -10373,11 +9786,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             return v > 1 && (v & (v - 1)) == 0;
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Relational strength reduction for multiply-by-constant.
-    // Converts x * C to shift-add sequences that are cheaper than hardware
-    // multiply on specific CPUs (3-cycle mul vs 1-cycle shift + 1-cycle add).
-    // The guard ensures C matches the specific constant pattern.
     // ─────────────────────────────────────────────────────────────────────
 
     // x * 3 → (x << 1) + x
@@ -10453,8 +9861,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Relational shift combining rules.
-    // ─────────────────────────────────────────────────────────────────────
 
     // (x << a) << b → x << (a + b)  when a, b are both constants
     rules.emplace_back("shl_shl_combine",
@@ -10486,8 +9892,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             return (*a + *b) < 64;
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Ternary/select optimizations
     // ─────────────────────────────────────────────────────────────────────
 
     // cond ? x : x → x  (same operands)
@@ -10526,12 +9930,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         [](EGraph&, const Subst& s) { return s.at("b"); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Shift-multiply distribution: (a << n) * b → (a * b) << n
-    // ─────────────────────────────────────────────────────────────────────
-    // Left-shift is equivalent to multiplication by a power of two.
-    // Distributing the shift outside the multiply can reduce the critical
-    // path length when the shift amount is known at compile time.
-    // Guard: shift amount must be a positive constant < 64 to avoid UB.
     for (int n = 1; n <= 6; ++n) {
         std::string name = "shl_mul_distribute_" + std::to_string(n);
         rules.emplace_back(name,
@@ -10551,12 +9949,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Nested modulo: (x % (c*d)) % d → x % d  when d > 0
-    // ─────────────────────────────────────────────────────────────────────
-    // If we take x mod (c*d), the result is in [0, c*d-1], and taking that
-    // mod d is equivalent to x mod d.  We handle common cases where the
-    // outer modulus is a known multiple of the inner modulus.
-    // (x % a) % b → x % b  when a is a constant multiple of b
     rules.emplace_back("mod_mod_divisible",
         P::OpPat(Op::Mod, {P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("a")}), P::Wild("b")}),
         [](EGraph& g, const Subst& s) {
@@ -10570,11 +9962,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // XOR with OR/AND distribution patterns
-    // ─────────────────────────────────────────────────────────────────────
-    // a ^ (a | b) → ~a & b
-    // Proof: a ^ (a | b) = (~a & (a | b)) | (a & ~(a | b))
-    //      = (~a & a) | (~a & b) | (a & ~a & ~b) = ~a & b  ✓
     rules.emplace_back("xor_or_simplify",
         P::OpPat(Op::BitXor, {P::Wild("a"), P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")})}),
         [](EGraph& g, const Subst& s) {
@@ -10591,9 +9978,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Ternary with negated comparison → simpler ternary
-    // ─────────────────────────────────────────────────────────────────────
-    // (a < b) ? 0 : 1 → a >= b
     rules.emplace_back("ternary_lt_0_1_to_ge",
         P::OpPat(Op::Ternary, {P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("b")}),
                                 P::ConstPat(0), P::ConstPat(1)}),
@@ -10610,11 +9994,6 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Bitwise-logical equivalence for boolean values
-    // ─────────────────────────────────────────────────────────────────────
-    // When both operands are boolean (0 or 1), bitwise ops are equivalent
-    // to logical ops, which have cheaper codegen (no masking).
-    // a & b → a && b  when both are boolean
     rules.emplace_back("bitand_to_logand_bool",
         P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")}),
         [](EGraph& g, const Subst& s) {
@@ -10653,8 +10032,6 @@ std::vector<RewriteRule> getRelationalRules() {
     using P = Pattern;
     std::vector<RewriteRule> rules;
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Multi-variable relational: cancel multiply-then-divide by same const
     // ─────────────────────────────────────────────────────────────────────
 
     // x * C / C → x
@@ -10709,8 +10086,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Bitfield extraction / insertion patterns
-    // ─────────────────────────────────────────────────────────────────────
 
     // (x & mask) >> a → (x >> a) & (mask >> a)  when mask has no low bits
     rules.emplace_back("mask_shift_normalize",
@@ -10736,8 +10111,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Comparison chain strength reduction
-    // ─────────────────────────────────────────────────────────────────────
 
     // (x >= C1) && (x <= C2) → (x - C1) <= (C2 - C1)
     rules.emplace_back("range_check_unsigned",
@@ -10759,8 +10132,6 @@ std::vector<RewriteRule> getRelationalRules() {
             return *hi >= *lo;
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Algebraic identities with multi-variable guards
     // ─────────────────────────────────────────────────────────────────────
 
     // (x + y) * (x - y) → x*x - y*y
@@ -10843,8 +10214,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Logical-to-bitwise lowering for boolean values
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a == 0) && (b == 0) → (a | b) == 0
     rules.emplace_back("combine_zero_checks_and",
@@ -10869,11 +10238,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Division by power-of-2 for non-negative values (SAFE for unsigned)
-    // Note: x / C → x >> log2(C) is UNSOUND for signed values because
-    // signed division rounds toward zero while arithmetic right shift
-    // rounds toward negative infinity.  We guard with isNonNeg analysis.
-    // ─────────────────────────────────────────────────────────────────────
 
     // x / C → x >> log2(C)  when x is non-negative and C is power-of-2
     rules.emplace_back("div_pow2_nonneg",
@@ -10896,9 +10260,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Modulo by power-of-2 for non-negative values → bitwise AND
-    // x % C → x & (C - 1)  when x is non-negative and C is power-of-2
-    // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mod_pow2_nonneg",
         P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c")}),
         [](EGraph& g, const Subst& s) {
@@ -10914,9 +10275,6 @@ std::vector<RewriteRule> getRelationalRules() {
             return xClass.isNonNeg;
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Algebraic factoring: x*a + x*b → x*(a+b)  where a, b are constants
-    // This reduces two multiplies + one add to one multiply + one add.
     // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("factor_const_mul",
         P::OpPat(Op::Add, {
@@ -10951,11 +10309,6 @@ std::vector<RewriteRule> getRelationalRules() {
             return a.has_value() && b.has_value();
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Modulo strength reduction for non-negative values
-    // x % C → (x - (x / C) * C) which LLVM then strength-reduces
-    // But more importantly, when x is non-neg, srem → urem which is cheaper.
-    // These rules propagate non-negativity through chains.
     // ─────────────────────────────────────────────────────────────────────
 
     // (a % C) + b where a%C is non-neg by analysis → result is non-neg if b is too
@@ -11003,11 +10356,7 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // (x & mask) where mask = C-1 and C is power-of-2 → x % C (for non-neg x)
-    // This enables subsequent mod optimizations on the AND result
-    // Note: the reverse direction (mod→AND) is already handled by mod_pow2_nonneg
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Shift-based division strength reduction
     // ─────────────────────────────────────────────────────────────────────
 
     // x / C → multiply-shift sequence for non-power-of-2 constants (non-neg only)
@@ -11026,8 +10375,6 @@ std::vector<RewriteRule> getRelationalRules() {
             return *c == (1LL << *n);
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Distributive law optimizations
     // ─────────────────────────────────────────────────────────────────────
 
     // x * C1 + x * C2 → x * (C1 + C2)  (factor out common multiplicand)
@@ -11060,8 +10407,6 @@ std::vector<RewriteRule> getRelationalRules() {
             return c1.has_value() && c2.has_value();
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Strength reduction: x * (2^n - 1) → (x << n) - x
     // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mul_to_shl_sub",
         P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
@@ -11101,9 +10446,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Collatz-style: 3*x+1 → (x << 1) + x + 1  (saves mul cost 3→2+1)
-    // Pattern: (x * 3) + 1 → (x + x + x) + 1 → ((x<<1) + x) + 1
-    // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mul3_add1_to_shl_add",
         P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)}), P::ConstPat(1)}),
         [](EGraph& g, const Subst& s) {
@@ -11122,10 +10464,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Division of even values: x/2 → x>>1  when x is known even
-    // Detected via x = (y * 2), (y << 1), or x%2==0 analysis
-    // ─────────────────────────────────────────────────────────────────────
-    // (x * 2) / 2 → x  (no guard needed; exact divide)
     rules.emplace_back("mul2_div2_cancel",
         P::OpPat(Op::Div, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2)}), P::ConstPat(2)}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
@@ -11136,13 +10474,8 @@ std::vector<RewriteRule> getRelationalRules() {
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Ternary + comparison fusion (min/max at AST level)
-    // These enable the cost model to pick the cheapest representation.
-    // ─────────────────────────────────────────────────────────────────────
 
     // (a < b) ? a : b  and  (a <= b) ? a : b  →  min(a, b) idiom
-    // We represent min/max via ternary with a canonical comparison,
-    // but we also give the optimizer the dual form for cost comparison.
 
     // (a > b) ? a : b → (a < b) ? b : a  (normalize comparisons)
     rules.emplace_back("ternary_gt_to_lt_swap",
@@ -11193,9 +10526,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Modulo-comparison strength reduction (common in Collatz/sieve)
-    // x % 2 == 0  →  (x & 1) == 0  (bitwise cheaper than modulo)
-    // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mod2_eq0_to_and1_eq0",
         P::OpPat(Op::Eq, {P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2)}), P::ConstPat(0)}),
         [](EGraph& g, const Subst& s) {
@@ -11212,9 +10542,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Conditional half: (x % 2 == 0) ? (x / 2) : y  →  ((x & 1) == 0) ? (x >> 1) : y
-    // This chains the mod2→and1 + div2→shr1 optimizations in a single ternary
-    // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("collatz_even_branch",
         P::OpPat(Op::Ternary, {
             P::OpPat(Op::Eq, {P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2)}), P::ConstPat(0)}),
@@ -11230,13 +10557,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Non-negative division by small constants via multiply-high + shift
-    // x / 3 → (x * 0x5556) >> 16  for x in [0, 65535] — but at AST level
-    // we don't know bit-widths. Instead, these rules help the e-graph
-    // represent the division as a cheaper form that the LLVM backend can
-    // lower optimally. The key insight: marking x as non-negative lets
-    // LLVM use udiv instead of sdiv, which is ~2x cheaper on x86.
-    // ─────────────────────────────────────────────────────────────────────
 
     // x / C → 0  when x is non-negative and C > max_possible_x
     // (useful when x is known to be a small value like a boolean or %result)
@@ -11251,9 +10571,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Mod of boolean: (bool_expr) % C → bool_expr  when C > 1
-    // If x is 0 or 1, then x%C = x for any C > 1
-    // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mod_of_boolean",
         P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c")}),
         [](EGraph&, const Subst& s) { return s.at("x"); },
@@ -11264,10 +10581,6 @@ std::vector<RewriteRule> getRelationalRules() {
             return xClass.isBoolean;
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Nested ternary simplification
-    // (c ? a : b) where c = (x == 0): (x == 0) ? a : b
-    // This enables short-circuit evaluation and branch-free select
     // ─────────────────────────────────────────────────────────────────────
 
     // (x == 0) ? 0 : f(x)  → trivially 0 when x==0 (identity)
@@ -11297,8 +10610,6 @@ std::vector<RewriteRule> getRelationalRules() {
             return xClass.isNonNeg;
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Comparison with arithmetic: simplify comparisons involving ±1
     // ─────────────────────────────────────────────────────────────────────
 
     // (a - 1) >= 0 → a > 0  (when a is non-negative integer)
@@ -11330,10 +10641,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Multiply-then-shift strength reduction for common scale factors
-    // ─────────────────────────────────────────────────────────────────────
-    // These patterns arise in fixed-point arithmetic and hash computations
-    // where a multiplication by a small constant is followed by a shift.
 
     // (x * 3) >> 1 → x + (x >> 1)  (approximate divide by 2/3)
     rules.emplace_back("mul3_shr1",
@@ -11360,9 +10667,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Division chain folding: (x / C1) / C2 → x / (C1 * C2)
-    // Guard: C1*C2 must not overflow and both must be positive.
-    // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("div_chain_fold",
         P::OpPat(Op::Div, {P::OpPat(Op::Div, {P::Wild("x"), P::Wild("c1")}), P::Wild("c2")}),
         [](EGraph& g, const Subst& s) {
@@ -11379,10 +10683,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Modulo chain folding: (x % C1) % C2 → x % C2  when C2 divides C1
-    // If C1 is a multiple of C2, then x % C1 is in [0, C1-1], and since
-    // C2 divides C1, (x % C1) % C2 produces the same result as x % C2.
-    // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mod_chain_fold",
         P::OpPat(Op::Mod, {P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c1")}), P::Wild("c2")}),
         [](EGraph& g, const Subst& s) {
@@ -11395,10 +10695,6 @@ std::vector<RewriteRule> getRelationalRules() {
             return (*c1 % *c2) == 0;
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Power-of-two modulo for non-negative: x % (2^n) → x & (2^n - 1)
-    // This generalises the hardcoded mod_2/4/8/.../1024 patterns to ANY
-    // power-of-two modulus, catching x%2048, x%4096, x%8192, etc.
     // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mod_any_pow2_to_and",
         P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c")}),
@@ -11415,9 +10711,6 @@ std::vector<RewriteRule> getRelationalRules() {
             return g.isClassNonNeg(s.at("x"));
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Division by power-of-two for non-negative: x / (2^n) → x >> n
-    // Generalises to ANY power-of-two divisor beyond the existing 2048/4096.
     // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("div_any_pow2_to_shr",
         P::OpPat(Op::Div, {P::Wild("x"), P::Wild("c")}),
@@ -11438,8 +10731,6 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Ternary min/max with same operand: min(a, a) → a, max(a, a) → a
-    // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("ternary_lt_same_is_identity",
         P::OpPat(Op::Ternary, {
             P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("a")}),
@@ -11454,10 +10745,6 @@ std::vector<RewriteRule> getRelationalRules() {
         }),
         [](EGraph&, const Subst& s) { return s.at("a"); });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Double comparison elimination: (a > b) == 1 → a > b
-    // Since comparisons already produce 0 or 1, comparing the result
-    // against 1 is redundant.
     // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("cmp_eq1_identity",
         P::OpPat(Op::Eq, {P::Wild("x"), P::ConstPat(1)}),
@@ -11494,12 +10781,6 @@ std::vector<RewriteRule> getRelationalRules() {
             return g.isClassBoolean(s.at("x"));
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Generalized multiply by power-of-2 → left shift.
-    // x * 2^n → x << n  for ANY power of 2.
-    // The specific mul_2_to_shl1 … mul_8192_to_shl13 rules cover small
-    // powers; this guard-based rule handles ALL remaining powers up to 2^62
-    // (e.g. x * 65536 → x << 16, x * 1<<32 → x << 32, etc.).
     // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mul_pow2_to_shl_general",
         P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
@@ -11660,9 +10941,6 @@ std::vector<RewriteRule> getFloatingPointRules() {
         });
 
     // ── Division by power-of-2 → multiply by reciprocal ───────────────
-    // These are exact in IEEE-754 because 0.25 and 0.125 are exactly
-    // representable, and multiplication is faster than division on most
-    // hardware (3-5 cycles vs 20-35 cycles).
 
     // x / 4.0 → x * 0.25
     rules.emplace_back("fp_div4_to_mul_quarter",
@@ -11707,23 +10985,16 @@ std::vector<RewriteRule> getFloatingPointRules() {
         });
 
     // ── FP double negation ─────────────────────────────────────────────
-    // -(-x) → x  (exact: IEEE-754 negation flips sign bit, doing it twice
-    // restores the original bit pattern, including NaN/Inf/-0.0)
     rules.emplace_back("fp_double_neg",
         P::OpPat(Op::Neg, {P::OpPat(Op::Neg, {P::Wild("x")})}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
     // ── FP subtract zero ──────────────────────────────────────────────
-    // x - 0.0 → x  (exact: subtracting +0.0 preserves the original value
-    // and sign, even for -0.0: (-0.0) - (+0.0) = -0.0)
     rules.emplace_back("fp_sub_zero",
         P::OpPat(Op::Sub, {P::Wild("x"), P::ConstFPat(0.0)}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
     // ── FP add zero ───────────────────────────────────────────────────
-    // 0.0 + x → x  (exact: adding +0.0 to any value is a no-op;
-    // (+0.0) + (-0.0) = +0.0 = -0.0 in IEEE comparison, but we only
-    // apply when the constant is literally 0.0)
     rules.emplace_back("fp_add_zero_left",
         P::OpPat(Op::Add, {P::ConstFPat(0.0), P::Wild("x")}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
@@ -11821,8 +11092,6 @@ std::vector<RewriteRule> getFloatingPointRules() {
         });
 
     // ── FP multiply/divide by 1.0 identity ─────────────────────────────
-    // x * 1.0 → x  (exact: IEEE-754 multiply by 1.0 preserves the value,
-    // including sign and special values: NaN*1=NaN, Inf*1=Inf, -0.0*1=-0.0)
     rules.emplace_back("fp_mul_one_right",
         P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(1.0)}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
@@ -11836,10 +11105,6 @@ std::vector<RewriteRule> getFloatingPointRules() {
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
     // ── FP reciprocal chains ────────────────────────────────────────────
-    // 1.0 / (1.0 / x) → x  (exact: two reciprocals cancel out; both are
-    // IEEE-754 exact for powers of 2, and the pattern is always valid
-    // because dividing by the reciprocal restores the original value
-    // modulo rounding — the e-graph cost model will select the cheaper form)
     rules.emplace_back("fp_recip_recip",
         P::OpPat(Op::Div, {P::ConstFPat(1.0),
                            P::OpPat(Op::Div, {P::ConstFPat(1.0), P::Wild("x")})}),
@@ -11857,8 +11122,6 @@ std::vector<RewriteRule> getFloatingPointRules() {
         });
 
     // ── FP distributive factoring ───────────────────────────────────────
-    // (x*z) + (y*z) → (x+y)*z  (factor out common multiplicand; reduces
-    // two multiplications + one addition to one addition + one multiplication)
     rules.emplace_back("fp_distribute_factor_right",
         P::OpPat(Op::Add, {
             P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("z")}),
@@ -11889,8 +11152,6 @@ std::vector<RewriteRule> getFloatingPointRules() {
         });
 
     // ── FP subtract self → zero ─────────────────────────────────────────
-    // x - x → 0.0  (exact: IEEE-754 x - x = +0.0 for all finite x;
-    // NaN - NaN = NaN, but the e-graph cost model handles that case)
     rules.emplace_back("fp_sub_self",
         P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("x")}),
         [](EGraph& g, const Subst&) { return g.addConstF(0.0); });
@@ -11943,8 +11204,6 @@ std::vector<RewriteRule> getFloatingPointRules() {
         });
 
     // ── FP division of same → one ───────────────────────────────────────
-    // x / x → 1.0  (IEEE-754: x/x = 1.0 for all non-zero finite x;
-    // 0/0 = NaN, Inf/Inf = NaN, but these are exceptional)
     rules.emplace_back("fp_div_self",
         P::OpPat(Op::Div, {P::Wild("x"), P::Wild("x")}),
         [](EGraph& g, const Subst&) { return g.addConstF(1.0); });
@@ -11953,12 +11212,6 @@ std::vector<RewriteRule> getFloatingPointRules() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Strength Reduction Rules
-// ───────────────────────────────────────────────────────────────────────────
-// Additional algebraic simplifications that reduce expensive operations
-// (multiply, divide, modulo) to cheaper ones (shift, add, sub, bitwise).
-// These complement LLVM's own strength reduction by catching patterns at
-// the AST level before lowering, enabling cross-expression optimizations.
 
 std::vector<RewriteRule> getStrengthReductionRules() {
     using P = Pattern;
@@ -12073,8 +11326,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // ── (a + b)^2 → a^2 + 2*a*b + b^2 ─────────────────────────────────
-    // Expands squaring of sums; enables the extractor to choose the
-    // representation with the fewest operations.
     rules.emplace_back("square_of_sum",
         P::OpPat(Op::Mul, {
             P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")}),
@@ -12091,8 +11342,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // ── a*c + b*c + d*c → (a + b + d) * c  (triple factoring) ──────────
-    // Factor a common multiplier out of three terms.  The extractor will
-    // pick this form when it's cheaper than three separate multiplications.
     rules.emplace_back("factor_triple",
         P::OpPat(Op::Add, {
             P::OpPat(Op::Add, {
@@ -12288,14 +11537,8 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // ── Non-negative squaring ───────────────────────────────────────────
-    // x * x → result is always non-negative (informational: the analysis
-    // propagation marks x*x as non-neg, enabling downstream nsw/nuw flags)
-    // This rule doesn't transform — it's handled by analysis propagation.
 
     // ── Multiply-by-constant then divide cancellation ───────────────────
-    // (x * C) / C → x  (already exists as mul_div_cancel)
-    // (x << N) >> N → x & ((1 << (64-N)) - 1)  (shift cancel with mask)
-    // Only for non-negative x where the high bits are zero.
     rules.emplace_back("shl_shr_cancel_nonneg",
         P::OpPat(Op::Shr, {P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("n")}), P::Wild("n")}),
         [](EGraph&, const Subst& s) { return s.at("x"); },
@@ -12309,8 +11552,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // ── Boolean arithmetic simplifications ──────────────────────────────
-    // bool_expr * C → 0 or bool_expr or C based on value
-    // bool * bool → bool & bool  (cheaper: AND vs MUL)
     rules.emplace_back("mul_booleans_to_and",
         P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("b")}),
         [](EGraph& g, const Subst& s) {
@@ -12323,13 +11564,8 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // bool + bool → bool | bool when both are disjoint (max value 1)
-    // Actually bool + bool can be 0, 1, or 2, so this is NOT safe.
-    // But: bool | bool is safe (max 1) — skip this rule.
 
     // ── Mod distribute over multiplication ──────────────────────────────
-    // (a * b) % C → ((a % C) * (b % C)) % C  when a, b non-negative
-    // This is useful for modular arithmetic chains where intermediate
-    // values can be reduced early, preventing overflow.
     rules.emplace_back("mod_distribute_mul_nonneg",
         P::OpPat(Op::Mod, {P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("b")}), P::Wild("c")}),
         [](EGraph& g, const Subst& s) {
@@ -12347,12 +11583,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // ── Multiply-by-power-of-two-plus/minus-one strength reduction ─────
-    // x * (2^n + 1) → (x << n) + x
-    // x * (2^n - 1) → (x << n) - x  (already covered by existing rules)
-    // These patterns cover common constants not already in the algebraic
-    // rules.  The shift+add/sub sequence avoids the multiplier and reduces
-    // latency on most x86-64 micro-architectures.
-    // 129 = 2^7 + 1
     rules.emplace_back("mul_129_shift",
         P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(129)}),
         [](EGraph& g, const Subst& s) {
@@ -12428,8 +11658,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // ── Add then negate patterns ────────────────────────────────────────
-    // -(a + b) → (-a) + (-b)  (distribute negation over addition)
-    // This can expose further simplification when one of a or b is known.
     rules.emplace_back("neg_add_distribute",
         P::OpPat(Op::Neg, {P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")})}),
         [](EGraph& g, const Subst& s) {
@@ -12447,9 +11675,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // ── Conditional negation: ternary(c, -x, x) → (x ^ mask) - mask ────
-    // where mask = -sext(c).  This is a branchless two's complement negate.
-    // At the AST e-graph level we express it as:  ternary(c, neg(x), x) → sub(xor(x, neg(c)), neg(c))
-    // which the cost model will prefer when the ternary is more expensive.
     rules.emplace_back("cond_neg_to_xor_sub",
         P::OpPat(Op::Ternary, {P::Wild("c"), P::OpPat(Op::Neg, {P::Wild("x")}), P::Wild("x")}),
         [](EGraph& g, const Subst& s) {
@@ -12550,8 +11775,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // ── Multiply-accumulate patterns ────────────────────────────────────
-    // a + (b * c) + (d * e) → a + (b*c + d*e)  (group multiplies for MAC)
-    // a * b + a * c → a * (b + c)  (factor common multiply — already have this)
 
     // ── Difference of squares ───────────────────────────────────────────
     // a*a - b*b → (a+b) * (a-b)
@@ -12591,8 +11814,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // ── Ternary (select) chain simplification ───────────────────────────
-    // These rules simplify nested ternary expressions at the AST level,
-    // complementing the IR-level select-chain pass in the superoptimizer.
 
     // ternary(C, ternary(C, A, B), D) → ternary(C, A, D)
     rules.emplace_back("ternary_redundant_inner_true",
@@ -12686,8 +11907,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // ── Suboptimal user code patterns ───────────────────────────────────
-    // These rules handle common patterns where users write suboptimal code
-    // and the compiler should still produce optimal output.
 
     // x^4 → (x*x)*(x*x)  [two multiplies instead of three]
     rules.emplace_back("pow4_to_mul",
@@ -12725,37 +11944,19 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         });
 
     // x - (x % c) → (x / c) * c  [floor-to-multiple, common user pattern]
-    // NOTE: This rule is bidirectional with the existing div_mul_to_sub_mod
-    // rule.  Temporarily removed because the bidirectionality increases e-graph
-    // node count enough to interact with the DAG-sharing cost discount and
-    // cause the extractor to select incorrect representations for unrelated
-    // expressions.  The identity is still correct at the IR level via
-    // constantModuloStrengthReduce in the superoptimizer.
 
     // NOTE: div-by-power-of-2 → shift is NOT safe at the AST level because
-    // OmScript integers are signed i64.  For negative values:
-    //   -7 / 2 = -3 (truncation toward zero)
-    //   -7 >> 1 = -4 (arithmetic shift, floor toward -infinity)
-    // The srem→urem conversion in the LLVM pipeline handles the safe case.
 
     return rules;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Advanced Optimization Rules (Phase 2 — overhaul)
-// ───────────────────────────────────────────────────────────────────────────
-// These rules target patterns that fall through the cracks between the
-// existing rule categories.  They are mathematically provable identities
-// that improve code quality by exposing cheaper instruction sequences.
 
 std::vector<RewriteRule> getAdvancedOptRules() {
     using P = Pattern;
     std::vector<RewriteRule> rules;
 
     // ── Distributive law: (a + b) * c → a*c + b*c ─────────────────────────
-    // Only beneficial when c is a small constant (avoids turning 1 mul into
-    // 2 muls unless one arm can be strength-reduced).  Guarded by constant
-    // check: only fire when c ∈ {2, 3, 4, 5, 7, 8, 9, 15, 16}.
     for (int64_t c : {2, 3, 4, 5, 7, 8, 9, 15, 16}) {
         rules.emplace_back("distribute_small_" + std::to_string(c),
             P::OpPat(Op::Mul, {
@@ -12770,8 +11971,6 @@ std::vector<RewriteRule> getAdvancedOptRules() {
     }
 
     // ── Reverse distribution: a*c + b*c → (a + b) * c ─────────────────────
-    // Factor common multiplier back out — the extractor picks whichever is
-    // cheaper (distributed shifts vs. single multiply).
     for (int64_t c : {2, 3, 4, 5, 7, 8, 9, 15, 16}) {
         rules.emplace_back("factor_small_" + std::to_string(c),
             P::OpPat(Op::Add, {
@@ -12785,8 +11984,6 @@ std::vector<RewriteRule> getAdvancedOptRules() {
     }
 
     // ── Difference of squares: a*a - b*b → (a+b) * (a-b) ─────────────────
-    // The product form often has shorter critical path when a+b and a-b can
-    // be computed in parallel, then multiplied.
     rules.emplace_back("diff_of_squares",
         P::OpPat(Op::Sub, {
             P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("a")}),
@@ -12799,15 +11996,8 @@ std::vector<RewriteRule> getAdvancedOptRules() {
         });
 
     // ── Horner's rule for degree-2: a*x*x + b*x + c → (a*x + b)*x + c ───
-    // Reduces the critical path from 4 muls to 2 by using Horner evaluation.
-    // Pattern: add(add(mul(mul(a, x), x), mul(b, x)), c)
-    //       →  add(mul(add(mul(a, x), b), x), c)
 
     // ── min(x, 0) → and(x, ashr(x, 63)) for signed 64-bit ───────────────
-    // Branchless minimum with zero using arithmetic shift to extract sign.
-    // The pattern x < 0 ? x : 0 becomes a 2-instruction sequence.
-    // (This is recognized at LLVM level but exposing it in the egraph allows
-    //  cost-based extraction to choose between it and the original.)
 
     // ── Square of sum: (a+b)*(a+b) → a*a + 2*a*b + b*b ───────────────────
     // The expanded form may allow more CSE if a*a or b*b appear elsewhere.
@@ -12895,8 +12085,6 @@ std::vector<RewriteRule> getAdvancedOptRules() {
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitOr, s.at("x"), s.at("y")); });
 
     // ── a * (b / a) → b  when a is non-zero ──────────────────────────────
-    // Division followed by multiplication with the same divisor is identity.
-    // Guard: a must be a non-zero constant (div by zero is UB).
     rules.emplace_back("mul_div_cancel",
         P::OpPat(Op::Mul, {P::Wild("a"), P::OpPat(Op::Div, {P::Wild("b"), P::Wild("a")})}),
         [](EGraph& /*g*/, const Subst& s) -> ClassId {
@@ -12932,8 +12120,6 @@ std::vector<RewriteRule> getAdvancedOptRules() {
         });
 
     // ── Horner's method for degree-2: a*x*x + b*x → x*(a*x + b) ─────────
-    // Reduces 3 multiplications to 2 by Horner evaluation.
-    // Pattern: (a*x)*x + b*x  →  (a*x + b) * x
     rules.emplace_back("horner_deg2_ab",
         P::OpPat(Op::Add, {
             P::OpPat(Op::Mul, {
@@ -12975,29 +12161,6 @@ std::vector<RewriteRule> getAllRules() {
     auto fpRules = getFloatingPointRules();
 
     // ── Type guard: fp_* rules must only fire on float-typed operands ──
-    //
-    // The e-graph deliberately uses a single Op for each arithmetic
-    // operation (Op::Add for both `int+int` and `float+float`, etc.)
-    // so that algebraic rewrites apply uniformly.  But the *floating-
-    // point-specific* rules below introduce `ConstF(N.0)` literals on
-    // their RHS — and if such a rule fires on a class that represents
-    // an integer expression, the resulting `Mul(x, ConstF(2.0))` ends
-    // up unified (via congruence closure) with the original
-    // `Mul(x, Const(2))`.  That bridges the two constant classes:
-    // `Const(2) ≡ ConstF(2.0)` becomes a derived equality, and
-    // extraction is then free to pick `ConstF(2.0)` as the right
-    // operand of an integer `Shl`, breaking codegen.
-    //
-    // Fix: wrap every fp_* rule with a guard that requires at least
-    // one bound wildcard's class to be provably float-typed
-    // (`EClass::isFloat`).  Float-typed classes are seeded by
-    // `Op::ConstF` literals and propagated through arithmetic in
-    // `EGraph::add` / `EGraph::merge`.  Pure-integer expressions
-    // therefore never trigger fp_* rules and the cross-type bridge
-    // can no longer form.
-    //
-    // Chains with any pre-existing guard on the rule (some fp_* rules
-    // already had value-based guards like `x != 0`).
     for (auto& rule : fpRules) {
         RuleGuard prev = rule.guard;
         rule.guard = [prev](const EGraph& g, const Subst& s) -> bool {

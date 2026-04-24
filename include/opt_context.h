@@ -2,34 +2,6 @@
 #ifndef OPT_CONTEXT_H
 #define OPT_CONTEXT_H
 
-/// @file opt_context.h
-/// @brief Unified Optimization Context for the OmScript compiler.
-///
-/// This header provides four foundational abstractions:
-///
-///  1. BuiltinEffectTable — the SINGLE canonical source of truth for the
-///     purity and side-effect classification of every built-in function.
-///     Replaces the previously scattered local tables:
-///       • kPureBuiltins / kImpureBuiltins  in autoDetectConstEvalFunctions()
-///       • kIOBuiltins / kMutatingBuiltins / kReadBuiltins  in inferFunctionEffects()
-///     All queries go through this one table so a single edit propagates
-///     everywhere.
-///
-///  2. FunctionFacts — per-function analysis results accumulated across
-///     all pre-passes, stored in one place instead of spread across
-///     separate maps inside CodeGenerator.
-///
-///  3. EGraphSubsystem — the e-graph equality-saturation optimizer as a
-///     first-class subsystem of the optimization pipeline.  Owned by
-///     OptimizationContext; configured before the egraph pre-pass runs;
-///     exposes per-run statistics after the pass completes.  Calling code
-///     (Orchestrator, CodeGenerator) accesses the e-graph exclusively
-///     through this subsystem rather than the egraph:: free functions.
-///
-///  4. OptimizationContext — owns the FunctionFacts store, the EGraphSubsystem,
-///     analysis-validity flags, and a non-owning pointer to the CTEngine.
-///     Provides a single query surface for codegen to ask questions like
-///     "is this function pure?" without knowing which analysis pass answered.
 
 #include "ast.h"      // FunctionEffects, OptMaxConfig, etc.
 #include "cfctre.h"   // CTValue, CTEngine
@@ -45,29 +17,7 @@
 
 namespace omscript {
 
-// ─────────────────────────────────────────────────────────────────────────────
 // BuiltinEffects — per-builtin effect descriptor
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// Every built-in function in OmScript is described by this struct.
-/// The four fields map directly onto the query predicates callers need:
-///
-///   constFoldable   → safe to evaluate at compile time when all arguments
-///                     are known constants (replaces kPureBuiltins).
-///   readsMemory     → may load from heap arrays, strings, or maps; safe for
-///                     LLVM's readonly attribute (replaces kReadBuiltins).
-///   writesMemory    → mutates heap memory: push/pop/sort/map_set/…
-///                     (replaces kMutatingBuiltins).
-///   hasIO           → performs observable I/O: print/input/file_*/sleep/…
-///                     (replaces kIOBuiltins).
-///
-/// Derived predicates (implemented as free functions below):
-///   isPureBuiltin(n)     ≡ table[n].constFoldable
-///   isImpureBuiltin(n)   ≡ table[n].writesMemory || table[n].hasIO
-///   isIOBuiltin(n)       ≡ table[n].hasIO
-///   isMutatingBuiltin(n) ≡ table[n].writesMemory && !table[n].hasIO
-///   isReadOnlyBuiltin(n) ≡ table[n].readsMemory && !table[n].writesMemory
-///                             && !table[n].hasIO
 struct BuiltinEffects {
     bool constFoldable = false; ///< Can be evaluated at compile time
     bool readsMemory   = false; ///< Accesses heap/array/string memory
@@ -79,13 +29,7 @@ struct BuiltinEffects {
     bool deallocates   = false; ///< Releases heap memory
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BuiltinEffectTable — static singleton lookup table
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// Provides O(1) lookup of the effect descriptor for any built-in name.
-/// Returns a default-constructed BuiltinEffects{} (all false) for unknown
-/// names so callers can treat unknowns conservatively without extra branches.
+// BuiltinEffectTable — static singleton lookup table; O(1) by name, unknown → all false
 class BuiltinEffectTable {
 public:
     /// Return the effect descriptor for built-in @p name.
@@ -149,13 +93,7 @@ private:
     static const std::unordered_map<std::string, BuiltinEffects>& table() noexcept;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ValueRange — inclusive interval for an integer expression
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// Tracks a conservative closed interval [lo, hi] for an integer value.
-/// Used to record known bounds on function return values and to guide
-/// the backend in emitting tighter LLVM !range metadata.
+// ValueRange — conservative closed interval [lo, hi] for an integer value
 struct ValueRange {
     int64_t lo = std::numeric_limits<int64_t>::min(); ///< Inclusive lower bound
     int64_t hi = std::numeric_limits<int64_t>::max(); ///< Inclusive upper bound
@@ -189,13 +127,7 @@ struct ValueRange {
     int64_t constVal() const noexcept { return lo; }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FunctionFacts — per-function analysis results
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// All analysis results produced by the pre-pass sequence are stored here
-/// rather than across half a dozen independent maps in CodeGenerator.
-/// The Orchestrator populates this struct; CodeGenerator reads from it.
+// FunctionFacts — per-function analysis results (populated by Orchestrator, read by CodeGenerator)
 struct FunctionFacts {
     // ── Purity / effect ───────────────────────────────────────────────────
     bool isPure          = false; ///< No side effects; safe for LLVM readnone
@@ -217,21 +149,7 @@ struct FunctionFacts {
     std::optional<ValueRange> returnRange; ///< Known bounds on the return value
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AnalysisValidity — tracks which analyses are up-to-date
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// Each bit corresponds to one analysis pass.  When a transform invalidates
-/// an analysis (e.g., AST mutation from the e-graph invalidates purity facts),
-/// the orchestrator clears the corresponding flag and re-runs the pass before
-/// any consumer reads from it again.
-///
-/// **Adding a new analysis fact:**
-///   1. Add a `bool` field below (follow the existing naming pattern).
-///   2. Add one entry to `fieldTable()` in the cpp — that is the *only* place
-///      the string→field mapping needs to appear.  All three dispatch methods
-///      (`isValid`, `markValid`, `invalidate`) and `invalidateFunctionFacts`
-///      derive their behaviour from the same table.
+// AnalysisValidity — validity flags for each analysis pass; cleared when the AST changes
 struct AnalysisValidity {
     bool stringTypes     = false; ///< preAnalyzeStringTypes() has run
     bool arrayTypes      = false; ///< preAnalyzeArrayTypes() has run
@@ -245,13 +163,6 @@ struct AnalysisValidity {
     bool rlc             = false; ///< Region Lifetime Coalescing pass has run
 
     // ── Dispatch table ────────────────────────────────────────────────────
-    //
-    // Returns a pointer to the `bool` field for @p fact, or nullptr if the
-    // fact name is not recognised.  Uses C++ pointer-to-member (PMF) so that
-    // `isValid`, `markValid`, and `invalidate` all derive from one table
-    // rather than three parallel if-chains.
-    //
-    // Adding a new analysis fact: add one Row here.
     bool* fieldFor(std::string_view fact) noexcept {
         struct Row { std::string_view name; bool AnalysisValidity::* field; };
         static constexpr Row kTable[] = {
@@ -281,13 +192,9 @@ struct AnalysisValidity {
     /// Mark all facts invalid (call when the AST is modified).
     void invalidateAll() noexcept { *this = {}; }
 
-    /// Mark only the facts that depend on function bodies (called when a
-    /// single function's body changes, e.g., after synthesis or loop fusion).
+    /// Mark only function-body-derived facts invalid (for single-function edits).
     void invalidateFunctionFacts() noexcept {
-        // These five facts are derived from the function body and must be
-        // recomputed when any function is modified.  The list deliberately
-        // excludes string_types, array_types, and rlc which are structural
-        // facts that survive single-function edits.
+        // Excludes string_types, array_types, and rlc (structural facts that survive single-function edits).
         static constexpr std::string_view kBodyFacts[] = {
             "constant_returns", "purity", "effects", "cfctre", "range_analysis"
         };
@@ -295,19 +202,13 @@ struct AnalysisValidity {
             if (bool* fp = fieldFor(f)) *fp = false;
     }
 
-    /// Return true if the analysis fact identified by @p fact is currently valid.
-    /// @p fact should be one of the AnalysisFact::k* string literals defined in
-    /// opt_pass.h (e.g. "purity", "effects").  Unknown fact names return false.
+    /// Return true if @p fact is currently valid. Unknown fact names return false.
     bool isValid(std::string_view fact) const noexcept {
         const bool* fp = fieldFor(fact);
         return fp && *fp;
     }
 
-    /// Mark the analysis fact identified by @p fact as invalid (stale).
-    /// Called by PassScheduler::applyInvalidation() after a transformation pass.
-    /// If a dependency graph is attached, all transitive dependents of @p fact
-    /// are also marked invalid (cascading invalidation).
-    /// Unknown fact names are silently ignored.
+    /// Mark @p fact invalid; cascades through the dependency graph if attached. Unknown names ignored.
     void invalidate(std::string_view fact) noexcept {
         auto markInvalid = [this](std::string_view f) noexcept {
             if (bool* fp = fieldFor(f)) *fp = false;
@@ -320,12 +221,7 @@ struct AnalysisValidity {
         }
     }
 
-    /// Mark the analysis fact identified by @p fact as valid (freshly produced).
-    /// Used by PassScheduler::applyInvalidation() to re-validate the facts a
-    /// pass just produced after the dependency-graph cascade — the cascade may
-    /// have transitively invalidated a fact that the pass itself provides
-    /// (e.g. synthesis depends on purity and also invalidates purity).
-    /// Unknown fact names are silently ignored.
+    /// Mark @p fact valid. Unknown fact names are silently ignored.
     void markValid(std::string_view fact) noexcept {
         if (bool* fp = fieldFor(fact)) *fp = true;
     }
@@ -343,25 +239,7 @@ private:
     const AnalysisDependencyGraph* depGraph_ = nullptr;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AnalysisCache — typed analysis result store with invalidation
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// A typed, key-value cache for analysis results.  Keys are AnalysisKey strings
-/// (the same tokens used in AnalysisFact and AnalysisValidity).  Values are
-/// stored as std::any so heterogeneous analysis results (dependence summaries,
-/// alias sets, SCEV facts, etc.) can be cached without a common base class.
-///
-/// **Usage**
-/// ```cpp
-/// cache.put<DependenceSummary>("dep_summary", std::move(ds));
-/// const auto* ds = cache.get<DependenceSummary>("dep_summary");
-/// cache.invalidate("dep_summary");
-/// cache.invalidateByContract(passContract);
-/// ```
-///
-/// **Thread safety**: NOT thread-safe.  Owned by OptimizationContext and
-/// accessed single-threaded during the pre-pass pipeline.
+// AnalysisCache — typed key-value store (std::any values) for analysis results with invalidation
 class AnalysisCache {
 public:
     AnalysisCache()  = default;
@@ -375,15 +253,13 @@ public:
     AnalysisCache(AnalysisCache&&)            = default;
     AnalysisCache& operator=(AnalysisCache&&) = default;
 
-    /// Store a value of type T under key @p k.
-    /// Replaces any existing value for that key.
+    /// Store a value of type T under key @p k, replacing any existing entry.
     template<class T>
     void put(const AnalysisKey& k, T value) {
         store_[k] = std::move(value);
     }
 
-    /// Retrieve a const pointer to the stored value of type T for key @p k.
-    /// Returns nullptr if the key is not found or the stored type is not T.
+    /// Retrieve a const pointer to T for key @p k; nullptr if not found or wrong type.
     template<class T>
     const T* get(const AnalysisKey& k) const noexcept {
         auto it = store_.find(k);
@@ -391,8 +267,7 @@ public:
         return std::any_cast<T>(&it->second);
     }
 
-    /// Retrieve a mutable pointer to the stored value of type T for key @p k.
-    /// Returns nullptr if the key is not found or the stored type is not T.
+    /// Retrieve a mutable pointer to T for key @p k; nullptr if not found or wrong type.
     template<class T>
     T* get(const AnalysisKey& k) noexcept {
         auto it = store_.find(k);
@@ -405,9 +280,7 @@ public:
         return store_.count(k) > 0;
     }
 
-    /// Remove the cached value for key @p k (if present).
-    /// If a dependency graph has been attached (via setDependencyGraph()),
-    /// all transitive dependents of @p k are also evicted.
+    /// Remove cached value for @p k; also evicts transitive dependents if a dep-graph is attached.
     void invalidate(const AnalysisKey& k) noexcept {
         if (depGraph_) {
             for (const auto& dep : depGraph_->getAllDependents(k))
@@ -418,15 +291,12 @@ public:
     }
 
     /// Remove all cached values whose keys appear in @p meta.invalidates_.
-    /// Cascades through the dependency graph (if attached) for each key.
     void invalidateByContract(const PassMetadata& meta) noexcept {
         for (const char* key : meta.invalidates_)
             invalidate(key);
     }
 
-    /// Attach a dependency graph so that invalidating a fact also invalidates
-    /// all facts that were computed using it.  Non-owning pointer: the graph
-    /// must outlive the cache.  Passing nullptr detaches any existing graph.
+    /// Attach a dependency graph (non-owning); cascades invalidation. Passing nullptr detaches.
     void setDependencyGraph(const AnalysisDependencyGraph* graph) noexcept {
         depGraph_ = graph;
     }
@@ -446,27 +316,14 @@ private:
     const AnalysisDependencyGraph*            depGraph_ = nullptr;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EGraphConfig — configuration for one EGraphSubsystem run
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// Mirrors the fields of `egraph::SaturationConfig` but lives in the public
-/// optimization-system surface so callers (CodeGenerator, tests) can adjust
-/// them without knowing the internal `SaturationConfig` type.
-///
-/// Default values match the existing behaviour of `egraph::optimizeExpression`.
+// EGraphConfig — public mirror of egraph::SaturationConfig; defaults match egraph::optimizeExpression
 struct EGraphConfig {
     size_t maxNodes            = 10000; ///< Node limit per expression graph
     size_t maxIterations       = 15;    ///< Saturation iteration cap
     bool   enableConstFolding  = true;  ///< Enable constant-folding during saturation
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EGraphStats — per-run statistics produced by EGraphSubsystem
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// Reset at the start of each call to optimizeProgram/optimizeFunction.
-/// Available for query (e.g., verbose logging) after the pass completes.
+// EGraphStats — per-run statistics; reset at start of optimizeProgram/optimizeFunction
 struct EGraphStats {
     unsigned expressionsAttempted  = 0; ///< Expressions submitted to the e-graph
     unsigned expressionsSimplified = 0; ///< Expressions that changed after extraction
@@ -477,31 +334,7 @@ struct EGraphStats {
     void reset() noexcept { *this = {}; }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EGraphSubsystem — e-graph equality-saturation as an optimization subsystem
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// This is the single entry point for all e-graph equality-saturation
-/// optimization.  It is owned by `OptimizationContext` and accessed via
-/// `ctx.egraph()`.
-///
-/// **Why a subsystem rather than free functions?**
-///
-///   Free functions (`egraph::optimizeProgram`) cannot carry per-run state,
-///   configuration, or statistics without global variables.  Making the e-graph
-///   a subsystem allows:
-///     • Configuration injection per compilation (e.g., tighter node limits at
-///       lower optimization levels).
-///     • Per-run statistics aggregation for verbose output and future profiling.
-///     • A stable interface point for future changes (e.g., per-function rule
-///       sets, incremental saturation, external rule plugins).
-///
-/// **Usage**
-/// ```cpp
-/// ctx.egraph().setConfig({.maxNodes = 20000, .maxIterations = 20});
-/// ctx.egraph().optimizeProgram(program);
-/// if (verbose) print(ctx.egraph().stats());
-/// ```
+// EGraphSubsystem — e-graph equality-saturation optimizer owned by OptimizationContext
 class EGraphSubsystem {
 public:
     EGraphSubsystem()  = default;
@@ -509,12 +342,11 @@ public:
 
     // ── Configuration ─────────────────────────────────────────────────────
 
-    /// Replace the current configuration.  Must be called before any
-    /// optimize* call; ignored after the pass has started running.
+    /// Replace the current configuration before any optimize* call.
     void setConfig(EGraphConfig cfg) noexcept { config_ = cfg; }
     const EGraphConfig& config() const noexcept { return config_; }
 
-    /// Build the egraph::SaturationConfig from our config for internal use.
+    /// Build egraph::SaturationConfig from our config for internal use.
     egraph::SaturationConfig toSaturationConfig() const noexcept {
         egraph::SaturationConfig sc;
         sc.maxNodes            = config_.maxNodes;
@@ -523,8 +355,7 @@ public:
         return sc;
     }
 
-    /// Build the egraph::EGraphOptContext from our config and pure-user-funcs.
-    /// This is what all internal optimize* calls use.
+    /// Build egraph::EGraphOptContext from our config and pure-user-funcs.
     egraph::EGraphOptContext toOptContext() const noexcept {
         egraph::EGraphOptContext ctx;
         ctx.config        = toSaturationConfig();
@@ -570,19 +401,7 @@ private:
     std::unordered_set<std::string> pureUserFuncs_;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OptimizationContext — the unified analysis hub
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// Owns the per-function facts table, analysis-validity flags, the
-/// EGraphSubsystem, and a non-owning pointer to the CTEngine (owned by
-/// CodeGenerator since the engine contains the memoisation cache that
-/// outlives the context).
-///
-/// **Lifetime**: created at the top of CodeGenerator::generate() and lives
-/// for the duration of that call.  CodeGenerator passes a pointer to it into
-/// the Orchestrator; the Orchestrator populates it during the pre-pass
-/// sequence; and CodeGenerator queries it during IR emission.
+// OptimizationContext — owns FunctionFacts, AnalysisValidity, EGraphSubsystem, and CTEngine ref
 class OptimizationContext {
 public:
     explicit OptimizationContext() = default;
@@ -599,8 +418,7 @@ public:
         facts_[funcName] = std::move(facts);
     }
 
-    /// Return the facts for @p funcName.  If the function has not been
-    /// analysed, a default-constructed FunctionFacts is returned.
+    /// Return the facts for @p funcName, or a default-constructed FunctionFacts if unknown.
     const FunctionFacts& getFacts(const std::string& funcName) const noexcept {
         static const FunctionFacts kDefault;
         auto it = facts_.find(funcName);
@@ -673,71 +491,49 @@ public:
     const AnalysisValidity& validity() const noexcept { return validity_; }
 
     // ── CTEngine reference ────────────────────────────────────────────────
-    /// Non-owning pointer to the CTEngine that owns the memoisation cache.
-    /// Set once by CodeGenerator::generate() before the Orchestrator runs.
+    /// Non-owning pointer to the CTEngine; set once before the Orchestrator runs.
     void setCTEngine(CTEngine* engine) noexcept { ctEngine_ = engine; }
     CTEngine* ctEngine() const noexcept { return ctEngine_; }
 
-    // ── CTEngine query proxies ────────────────────────────────────────────
-    //
-    // These methods forward the CT-analysis queries used by IR-emission code
-    // (codegen_expr.cpp, codegen_stmt.cpp, codegen_builtins.cpp, codegen_opt.cpp)
-    // so that those call sites do not need to reach through to ctEngine_ directly.
-    //
-    // All return a safe default (false / empty / top) when ctEngine_ is null,
-    // which can happen during unit tests or when CFCTRE is disabled.
-    //
-    // This is the single choke-point for all runtime analysis queries:
-    // adding a new query here rather than in a codegen sub-file ensures the
-    // contract is documented and safe-default behaviour is handled once.
+    // ── CTEngine query proxies — all return safe defaults when ctEngine_ is null ──
 
-    /// True when @p name is classified as compile-time-pure by CFCTRE.
-    /// Distinct from the AST-level OptimizationContext::isPure() which reflects
-    /// the effect-analysis pass; this mirrors CTEngine's own purity cache.
+    /// True when @p name is compile-time-pure per CFCTRE (distinct from isPure()).
     bool isCTPure(const std::string& name) const noexcept {
         return ctEngine_ && ctEngine_->isPure(name);
     }
 
-    /// Return the strength-reduced operator token for @p binExpr, or an empty
-    /// string if no cheaper rewrite was found during the CFCTRE range pass.
+    /// Strength-reduced operator token for @p binExpr, or empty if none found.
     const std::string& cheaperRewrite(const Expression* binExpr) const noexcept {
         static const std::string kEmpty;
         if (!ctEngine_) return kEmpty;
         return ctEngine_->cheaperRewrite(binExpr);
     }
 
-    /// True when CFCTRE determined that the then-branch of @p ifStmt is dead
-    /// (condition is always false at compile time).
+    /// True when CFCTRE determined the then-branch of @p ifStmt is dead.
     bool isThenBranchDead(const Statement* ifStmt) const noexcept {
         return ctEngine_ && ctEngine_->isThenBranchDead(ifStmt);
     }
 
-    /// True when CFCTRE determined that the else-branch of @p ifStmt is dead
-    /// (condition is always true at compile time).
+    /// True when CFCTRE determined the else-branch of @p ifStmt is dead.
     bool isElseBranchDead(const Statement* ifStmt) const noexcept {
         return ctEngine_ && ctEngine_->isElseBranchDead(ifStmt);
     }
 
-    /// Return the abstract integer exit-range of @p varName in function @p fnName.
-    /// Returns CTInterval::top() (unknown) when ctEngine_ is null or the range
-    /// was not computed.
+    /// Abstract integer exit-range of @p varName in @p fnName; CTInterval::top() if unknown.
     CTInterval getExitRange(const std::string& fnName,
                             const std::string& varName) const noexcept {
         if (!ctEngine_) return CTInterval::top();
         return ctEngine_->getExitRange(fnName, varName);
     }
 
-    /// Execute @p fnName with compile-time-known @p args via CFCTRE.
-    /// Returns std::nullopt when ctEngine_ is null or execution failed.
+    /// Execute @p fnName with CT-known @p args; nullopt if ctEngine_ is null or failed.
     std::optional<CTValue> executeFunction(const std::string&          fnName,
                                            const std::vector<CTValue>& args) const {
         if (!ctEngine_) return std::nullopt;
         return ctEngine_->executeFunction(fnName, args);
     }
 
-    /// Return the map of functions whose return value is uniform (same constant
-    /// on every execution path) as determined by CFCTRE.
-    /// Returns a reference to an empty map when ctEngine_ is null.
+    /// Uniform-return-value map from CFCTRE; empty map when ctEngine_ is null.
     const std::unordered_map<std::string, CTValue>& uniformReturnValues() const noexcept {
         static const std::unordered_map<std::string, CTValue> kEmpty;
         if (!ctEngine_) return kEmpty;
@@ -750,37 +546,14 @@ public:
     }
 
     // ── E-Graph subsystem ─────────────────────────────────────────────────
-    ///
-    /// The e-graph subsystem is the canonical entry point for equality-saturation
-    /// optimization.  It is owned by the context, configured before the egraph
-    /// pre-pass, and carries per-run statistics after the pass completes.
-    ///
-    /// Access via: ctx.egraph().*
     EGraphSubsystem&       egraph()       noexcept { return egraph_; }
     const EGraphSubsystem& egraph() const noexcept { return egraph_; }
 
     // ── Analysis cache ────────────────────────────────────────────────────
-    ///
-    /// The typed analysis cache stores heterogeneous analysis results keyed by
-    /// AnalysisKey strings.  PassScheduler::applyInvalidation() evicts entries
-    /// for any fact that a transformation pass declares as invalidated, ensuring
-    /// cached results are never used after the underlying analysis becomes stale.
     AnalysisCache&       cache()       noexcept { return cache_; }
     const AnalysisCache& cache() const noexcept { return cache_; }
 
-    // ── Analysis dependency graph ─────────────────────────────────────────
-    ///
-    /// When attached, the dependency graph is shared between AnalysisValidity
-    /// and AnalysisCache so that invalidating a single fact cascades to all
-    /// facts that were computed from it — without callers needing to enumerate
-    /// the transitive closure manually.
-    ///
-    /// The graph is typically set once at construction time (from the default
-    /// graph created by AnalysisDependencyGraph::createDefault()) and remains
-    /// constant for the lifetime of the context.
-    ///
-    /// Non-owning: the caller is responsible for ensuring the graph outlives
-    /// this context.  Pass nullptr to detach.
+    // ── Analysis dependency graph — non-owning; shared by validity_ and cache_ ──
     void setDependencyGraph(const AnalysisDependencyGraph* graph) noexcept {
         validity_.setDependencyGraph(graph);
         cache_.setDependencyGraph(graph);
