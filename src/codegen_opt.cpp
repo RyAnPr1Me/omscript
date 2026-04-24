@@ -162,6 +162,18 @@ namespace omscript {
 
 namespace {
 
+/// Hardware-profile–driven cost model wrapping hgoe::instrCostFromProfile.
+/// Installed into the OptimizationManager when a microarchitecture profile is
+/// available so that all cost-driven components (superoptimizer, polyopt,
+/// loop-transform profitability) share the same authoritative latency source.
+struct HGOECostModel final : public omscript::CostModel {
+    hgoe::MicroarchProfile profile;
+    explicit HGOECostModel(hgoe::MicroarchProfile p) : profile(std::move(p)) {}
+    double instructionCost(const llvm::Instruction* i) const override {
+        return hgoe::instrCostFromProfile(i, profile);
+    }
+};
+
 struct UnifiedExecutionModel {
     unsigned opcacheLoopUopBudget = 256;
     unsigned streamingMinElements = 4096;
@@ -4400,13 +4412,6 @@ void CodeGenerator::runOptimizationPasses() {
                 // Capture profile by value — no lifetime dependency on any graph.
                 hgoe::MicroarchProfile capturedProfile = *profileOpt;
                 // Install into the OptimizationManager as the shared cost oracle.
-                struct HGOECostModel final : public omscript::CostModel {
-                    hgoe::MicroarchProfile profile;
-                    explicit HGOECostModel(hgoe::MicroarchProfile p) : profile(std::move(p)) {}
-                    double instructionCost(const llvm::Instruction* i) const override {
-                        return hgoe::instrCostFromProfile(i, profile);
-                    }
-                };
                 optMgr.setCostModel(std::make_unique<HGOECostModel>(capturedProfile));
                 // Wire the shared model into the superoptimizer config.
                 superConfig.costModel = optMgr.costModel();

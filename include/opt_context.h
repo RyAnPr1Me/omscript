@@ -225,17 +225,58 @@ struct FunctionFacts {
 /// an analysis (e.g., AST mutation from the e-graph invalidates purity facts),
 /// the orchestrator clears the corresponding flag and re-runs the pass before
 /// any consumer reads from it again.
+///
+/// **Adding a new analysis fact:**
+///   1. Add a `bool` field below (follow the existing naming pattern).
+///   2. Add one entry to `fieldTable()` in the cpp — that is the *only* place
+///      the string→field mapping needs to appear.  All three dispatch methods
+///      (`isValid`, `markValid`, `invalidate`) and `invalidateFunctionFacts`
+///      derive their behaviour from the same table.
 struct AnalysisValidity {
-    bool stringTypes    = false; ///< preAnalyzeStringTypes() has run
-    bool arrayTypes     = false; ///< preAnalyzeArrayTypes() has run
+    bool stringTypes     = false; ///< preAnalyzeStringTypes() has run
+    bool arrayTypes      = false; ///< preAnalyzeArrayTypes() has run
     bool constantReturns = false; ///< analyzeConstantReturnValues() has run
-    bool purity         = false; ///< autoDetectConstEvalFunctions() has run
-    bool effects        = false; ///< inferFunctionEffects() has run
-    bool synthesis      = false; ///< runSynthesisPass() has run
-    bool cfctre         = false; ///< runCFCTRE() has run
-    bool egraph         = false; ///< egraph::optimizeProgram() has run
-    bool rangeAnalysis  = false; ///< Value range analysis has run
-    bool rlc            = false; ///< Region Lifetime Coalescing pass has run
+    bool purity          = false; ///< autoDetectConstEvalFunctions() has run
+    bool effects         = false; ///< inferFunctionEffects() has run
+    bool synthesis       = false; ///< runSynthesisPass() has run
+    bool cfctre          = false; ///< runCFCTRE() has run
+    bool egraph          = false; ///< egraph::optimizeProgram() has run
+    bool rangeAnalysis   = false; ///< Value range analysis has run
+    bool rlc             = false; ///< Region Lifetime Coalescing pass has run
+
+    // ── Dispatch table ────────────────────────────────────────────────────
+    //
+    // Returns a pointer to the `bool` field for @p fact, or nullptr if the
+    // fact name is not recognised.  Uses C++ pointer-to-member (PMF) so that
+    // `isValid`, `markValid`, and `invalidate` all derive from one table
+    // rather than three parallel if-chains.
+    //
+    // Adding a new analysis fact: add one Row here.
+    bool* fieldFor(std::string_view fact) noexcept {
+        struct Row { std::string_view name; bool AnalysisValidity::* field; };
+        static constexpr Row kTable[] = {
+            {"string_types",     &AnalysisValidity::stringTypes    },
+            {"array_types",      &AnalysisValidity::arrayTypes     },
+            {"constant_returns", &AnalysisValidity::constantReturns},
+            {"purity",           &AnalysisValidity::purity         },
+            {"effects",          &AnalysisValidity::effects        },
+            {"synthesis",        &AnalysisValidity::synthesis      },
+            {"cfctre",           &AnalysisValidity::cfctre         },
+            {"egraph",           &AnalysisValidity::egraph         },
+            {"range_analysis",   &AnalysisValidity::rangeAnalysis  },
+            {"rlc",              &AnalysisValidity::rlc            },
+        };
+        for (const auto& row : kTable) {
+            if (row.name == fact)
+                return &(this->*(row.field));
+        }
+        return nullptr;
+    }
+    const bool* fieldFor(std::string_view fact) const noexcept {
+        return const_cast<AnalysisValidity*>(this)->fieldFor(fact);
+    }
+
+    // ── Public interface ──────────────────────────────────────────────────
 
     /// Mark all facts invalid (call when the AST is modified).
     void invalidateAll() noexcept { *this = {}; }
@@ -243,28 +284,23 @@ struct AnalysisValidity {
     /// Mark only the facts that depend on function bodies (called when a
     /// single function's body changes, e.g., after synthesis or loop fusion).
     void invalidateFunctionFacts() noexcept {
-        constantReturns = false;
-        purity          = false;
-        effects         = false;
-        cfctre          = false;
-        rangeAnalysis   = false;
+        // These five facts are derived from the function body and must be
+        // recomputed when any function is modified.  The list deliberately
+        // excludes string_types, array_types, and rlc which are structural
+        // facts that survive single-function edits.
+        static constexpr std::string_view kBodyFacts[] = {
+            "constant_returns", "purity", "effects", "cfctre", "range_analysis"
+        };
+        for (std::string_view f : kBodyFacts)
+            if (bool* fp = fieldFor(f)) *fp = false;
     }
 
     /// Return true if the analysis fact identified by @p fact is currently valid.
     /// @p fact should be one of the AnalysisFact::k* string literals defined in
     /// opt_pass.h (e.g. "purity", "effects").  Unknown fact names return false.
     bool isValid(std::string_view fact) const noexcept {
-        if (fact == "string_types")     return stringTypes;
-        if (fact == "array_types")      return arrayTypes;
-        if (fact == "constant_returns") return constantReturns;
-        if (fact == "purity")           return purity;
-        if (fact == "effects")          return effects;
-        if (fact == "synthesis")        return synthesis;
-        if (fact == "cfctre")           return cfctre;
-        if (fact == "egraph")           return egraph;
-        if (fact == "range_analysis")   return rangeAnalysis;
-        if (fact == "rlc")              return rlc;
-        return false; // unknown fact — conservatively not valid
+        const bool* fp = fieldFor(fact);
+        return fp && *fp;
     }
 
     /// Mark the analysis fact identified by @p fact as invalid (stale).
@@ -273,23 +309,12 @@ struct AnalysisValidity {
     /// are also marked invalid (cascading invalidation).
     /// Unknown fact names are silently ignored.
     void invalidate(std::string_view fact) noexcept {
-        // Helper to mark one fact flag false.
         auto markInvalid = [this](std::string_view f) noexcept {
-            if (f == "string_types")      { stringTypes     = false; return; }
-            if (f == "array_types")       { arrayTypes      = false; return; }
-            if (f == "constant_returns")  { constantReturns = false; return; }
-            if (f == "purity")            { purity          = false; return; }
-            if (f == "effects")           { effects         = false; return; }
-            if (f == "synthesis")         { synthesis       = false; return; }
-            if (f == "cfctre")            { cfctre          = false; return; }
-            if (f == "egraph")            { egraph          = false; return; }
-            if (f == "range_analysis")    { rangeAnalysis   = false; return; }
-            if (f == "rlc")               { rlc             = false; return; }
+            if (bool* fp = fieldFor(f)) *fp = false;
         };
-
         if (depGraph_) {
-            const auto deps = depGraph_->getAllDependents(std::string(fact));
-            for (const auto& d : deps) markInvalid(d);
+            for (const auto& d : depGraph_->getAllDependents(std::string(fact)))
+                markInvalid(d);
         } else {
             markInvalid(fact);
         }
@@ -302,16 +327,7 @@ struct AnalysisValidity {
     /// (e.g. synthesis depends on purity and also invalidates purity).
     /// Unknown fact names are silently ignored.
     void markValid(std::string_view fact) noexcept {
-        if (fact == "string_types")      { stringTypes     = true; return; }
-        if (fact == "array_types")       { arrayTypes      = true; return; }
-        if (fact == "constant_returns")  { constantReturns = true; return; }
-        if (fact == "purity")            { purity          = true; return; }
-        if (fact == "effects")           { effects         = true; return; }
-        if (fact == "synthesis")         { synthesis       = true; return; }
-        if (fact == "cfctre")            { cfctre          = true; return; }
-        if (fact == "egraph")            { egraph          = true; return; }
-        if (fact == "range_analysis")    { rangeAnalysis   = true; return; }
-        if (fact == "rlc")              { rlc             = true; return; }
+        if (bool* fp = fieldFor(fact)) *fp = true;
     }
 
     /// Attach a dependency graph so that invalidating a fact also invalidates

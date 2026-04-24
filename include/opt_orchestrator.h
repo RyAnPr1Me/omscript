@@ -36,6 +36,7 @@
 #include "opt_context.h"
 #include "opt_pass.h"
 #include "optimization_manager.h" // OptimizationManager
+#include <unordered_map>
 #include <vector>
 
 namespace omscript {
@@ -143,6 +144,15 @@ private:
     void runEGraph         (Program* program, OptimizationContext& ctx);
     void runRangeAnalysis  (Program* program, OptimizationContext& ctx);
     void runRLC            (Program* program, OptimizationContext& ctx);
+
+    /// Build the PassId → runner dispatch map used by runPassPipeline and
+    /// runToProvide.  Defined once here so the 10-entry table never needs to
+    /// be duplicated across call sites.
+    std::unordered_map<uint32_t, PassScheduler::Runner> buildDispatch();
+
+    /// Construct a PassScheduler, inheriting strict-mode from the manager
+    /// (debug builds) or using a standalone scheduler when no manager is set.
+    PassScheduler makeScheduler(OptimizationContext& ctx);
 
     /// Copy analysis results from the CodeGenerator's per-pass output into
     /// the unified OptimizationContext so callers can query a single surface.

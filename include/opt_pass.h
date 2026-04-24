@@ -106,10 +106,10 @@ public:
     /// OMSC_REGISTER_PASS macro.  Returns the assigned ID.
     uint32_t registerPass(PassMetadata meta);
 
-    /// Look up a pass by ID.  Returns nullptr if not found.
+    /// Look up a pass by ID.  Returns nullptr if not found.  O(1).
     const PassMetadata* find(uint32_t id) const noexcept;
 
-    /// Look up a pass by name.  Returns nullptr if not found.
+    /// Look up a pass by name.  Returns nullptr if not found.  O(1).
     const PassMetadata* find(const std::string& name) const noexcept;
 
     /// All registered passes in stable ID order.
@@ -129,31 +129,11 @@ private:
     PassRegistry& operator=(const PassRegistry&) = delete;
 
     std::vector<PassMetadata> passes_;
+    /// O(1) index: stable pass ID → index into passes_.
+    std::unordered_map<uint32_t, size_t> byId_;
+    /// O(1) index: pass name → index into passes_.
+    std::unordered_map<std::string, size_t> byName_;
     uint32_t nextId_ = 1;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// IPass — common interface for AST-level passes
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// Passes that operate on the AST implement this interface so the Orchestrator
-/// can run them polymorphically without knowing their concrete type.
-/// IR-level passes (which live inside LLVM's PassManager) do not implement
-/// this interface; they are described only by their metadata.
-class Program; // forward declaration (defined in ast.h)
-class OptimizationContext; // forward declaration
-
-class IPass {
-public:
-    virtual ~IPass() = default;
-
-    /// Return the static metadata for this pass.
-    virtual const PassMetadata& metadata() const noexcept = 0;
-
-    /// Execute the pass.
-    /// @param program  The AST being compiled (may be modified for transforms).
-    /// @param ctx      The optimization context (read facts before, write after).
-    virtual void run(Program* program, OptimizationContext& ctx) = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -187,42 +167,16 @@ namespace PassId {
 using AnalysisKey = std::string;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// IRInvariant — structural invariants of LLVM IR that passes establish or consume
+// PassContract — pass fact declarations (invalidates_facts used by AnalysisCache)
 // ─────────────────────────────────────────────────────────────────────────────
 ///
-/// IR invariants describe *structural* properties of the LLVM IR (as opposed to
-/// analysis *facts* about program semantics).  They are consumed by passes that
-/// require the IR to be in a specific shape (e.g. loop vectorizer needs
-/// LoopSimplify) and established by normalization passes that guarantee that shape.
+/// A PassContract lists the analysis facts a pass requires, provides, and
+/// invalidates.  The invalidates_facts field is used by AnalysisCache::
+/// invalidateByContract().
 ///
-/// Passes declare consumed invariants in PassContract::requires_inv and
-/// established invariants in PassContract::establishes_inv.  Passes that
-/// break an invariant (e.g. a loop transform that rewrites induction variables)
-/// must list it in PassContract::invalidates_inv so the scheduler knows to
-/// re-run normalization before any subsequent consumer.
-enum class IRInvariant : uint32_t {
-    LoopSimplify  = 0, ///< Loops have dedicated preheaders and a single backedge
-    LCSSA         = 1, ///< Loop-Closed SSA form (uses of loop-defined values exit through PHIs)
-    CanonicalIV   = 2, ///< Induction variables are in canonical form (IndVarSimplify done)
-    SimplifiedCFG = 3, ///< Control-flow graph is simplified (SimplifyCFGPass done)
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PassContract — extended pass descriptor with IR invariant declarations
-// ─────────────────────────────────────────────────────────────────────────────
-///
-/// A PassContract is the complete, machine-verifiable specification of a pass's
-/// preconditions, postconditions, and side effects.  It extends the
-/// requires/provides/invalidates model of PassMetadata with IR-structural
-/// invariant declarations so the PassScheduler can:
-///
-///   • Reject or skip passes whose preconditions are unsatisfied.
-///   • Automatically invalidate stale analysis facts and IR invariants after
-///     any pass that modifies the IR.
-///   • Enable safe pass reordering and composition without manual bookkeeping.
-///
-/// Currently PassContract is an adjunct to PassMetadata; future work will
-/// migrate to it as the sole pass descriptor.
+/// NOTE: IRInvariant tracking (requires_inv / establishes_inv / invalidates_inv)
+/// is reserved for a future IR-level invariant scheduler.  Only the fact-level
+/// fields are populated and consumed today.
 struct PassContract {
     /// Analysis facts required before this pass runs.
     std::vector<AnalysisKey> requires_facts;
@@ -232,23 +186,6 @@ struct PassContract {
 
     /// Analysis facts invalidated (made stale) when this pass transforms the IR.
     std::vector<AnalysisKey> invalidates_facts;
-
-    /// IR invariants that must hold before this pass runs.
-    std::vector<IRInvariant> requires_inv;
-
-    /// IR invariants that this pass guarantees hold after it runs.
-    std::vector<IRInvariant> establishes_inv;
-
-    /// IR invariants that this pass breaks (must be re-established before the
-    /// next consumer that requires them).
-    std::vector<IRInvariant> invalidates_inv;
-
-    /// IR invariants that this pass provably preserves (does not break).
-    /// Provided as explicit documentation and as input to future scheduler
-    /// verification tools.  Semantically: any invariant listed here MUST NOT
-    /// appear in invalidates_inv and will remain established after this pass
-    /// completes, even if the pass modifies the IR.
-    std::vector<IRInvariant> preserves_inv;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
