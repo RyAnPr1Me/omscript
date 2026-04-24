@@ -63,7 +63,10 @@ class Preprocessor {
   private:
     std::string filename_;
     std::unordered_map<std::string, MacroDef> macros_;
-    std::vector<std::string> warnings_;
+    /// Warnings collected during processing.  Mutable so that const
+    /// methods (substituteMacros, validateMacroCall) can append soft
+    /// diagnostics without giving up their const-correctness contract.
+    mutable std::vector<std::string> warnings_;
     int globalCounter_ = 0; ///< backing store for __COUNTER__
     /// Set of macros currently being expanded — used by substituteMacros
     /// to detect cycles like `#define A B` / `#define B A` and surface a

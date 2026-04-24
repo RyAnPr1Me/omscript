@@ -245,7 +245,13 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
                     i++;
                     while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
                     const size_t ts = i;
-                    while (i < r.size() && (isIdentChar(r[i]) || r[i] == '*' || r[i] == '[' || r[i] == ']'))
+                    // Accept simple type names only (e.g. `int`, `f32x4`,
+                    // `string`).  Composite forms like `int*` or `int[]`
+                    // are not yet meaningful to the type-shape classifier
+                    // and would silently appear to type-check; reject them
+                    // up front by stopping at the first non-identifier
+                    // character.
+                    while (i < r.size() && isIdentChar(r[i]))
                         i++;
                     ptype = r.substr(ts, i - ts);
                 }
@@ -263,7 +269,9 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
             i += 2;
             while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
             const size_t ts = i;
-            while (i < r.size() && (isIdentChar(r[i]) || r[i] == '*' || r[i] == '[' || r[i] == ']'))
+            // Same simple-identifier restriction as the parameter type
+            // parser above — composite syntax isn't checked anywhere yet.
+            while (i < r.size() && isIdentChar(r[i]))
                 i++;
             def.returnType = r.substr(ts, i - ts);
         }
@@ -491,7 +499,7 @@ void Preprocessor::validateMacroCall(const std::string& name,
     for (size_t i = 0; i < expected; ++i) {
         if (!argLooksLikeCall(args[i])) continue;
         if (countParamUses(def.params[i]) > 1) {
-            const_cast<Preprocessor*>(this)->warnings_.push_back(
+            warnings_.push_back(
                 filename_ + ":" + std::to_string(lineNo) +
                 ": warning: macro '" + name + "' uses parameter '" +
                 def.params[i] + "' more than once and argument '" +
