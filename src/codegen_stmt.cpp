@@ -873,13 +873,13 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     // This is stronger than the LLVM-constant check below: it fires even when
     // the condition depends on non-constant values that happen to have a known
     // range (e.g., loop induction variables, narrowed conditional variables).
-    if (ctEngine_) {
-        if (ctEngine_->isThenBranchDead(stmt)) {
+    if (optCtx_) {
+        if (optCtx_->isThenBranchDead(stmt)) {
             // Condition is always false — only generate else branch.
             if (stmt->elseBranch) generateStatement(stmt->elseBranch.get());
             return;
         }
-        if (ctEngine_->isElseBranchDead(stmt)) {
+        if (optCtx_->isElseBranchDead(stmt)) {
             // Condition is always true — only generate then branch.
             generateStatement(stmt->thenBranch.get());
             return;
@@ -1828,8 +1828,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // themselves expressions with a narrower abstract value), inject
             // additional assumes to tell LLVM the tighter bounds.
             // This feeds into SCEV, CVP, and the loop vectorizer's cost model.
-            if (ctEngine_) {
-                CTInterval ivRange = ctEngine_->getExitRange(
+            if (optCtx_) {
+                CTInterval ivRange = optCtx_->getExitRange(
                     builder->GetInsertBlock()->getParent()->getName().str(),
                     stmt->iteratorVar);
                 // Only inject if the abstract range is tighter than what we

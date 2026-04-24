@@ -9352,7 +9352,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             expr->arguments.size() == declIt2->second->parameters.size()) {
 
             // Try CF-CTRE engine first (richer cross-function evaluation).
-            if (ctEngine_ && ctEngine_->isPure(expr->callee)) {
+            if (optCtx_ && optCtx_->isCTPure(expr->callee)) {
                 std::vector<CTValue> ctArgs;
                 ctArgs.reserve(expr->arguments.size());
                 bool allConst = true;
@@ -9374,7 +9374,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 // an early-exit guard based on the known args fires before the symbolic
                 // value is needed (e.g. `if n == 0 { return 0 }` with n=0).
                 if (allConst || anyConst) {
-                    auto ctResult = ctEngine_->executeFunction(expr->callee, ctArgs);
+                    auto ctResult = optCtx_->executeFunction(expr->callee, ctArgs);
                     if (ctResult) {
                         if (ctResult->isInt()) {
                             auto* ci = llvm::ConstantInt::get(getDefaultType(), ctResult->asI64());

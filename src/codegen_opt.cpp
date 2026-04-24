@@ -3942,9 +3942,9 @@ void CodeGenerator::runOptimizationPasses() {
     // Safety: we only fold calls to functions that CF-CTRE proved PURE — i.e.,
     // no I/O, no global side effects.  Removing a pure call is safe because it
     // produces no observable side effects.
-    if (ctEngine_ && optimizationLevel >= OptimizationLevel::O2) {
-        for (auto& [fnName, ctVal] : ctEngine_->uniformReturnValues()) {
-            if (!ctEngine_->isPure(fnName)) continue;
+    if (optCtx_ && optimizationLevel >= OptimizationLevel::O2) {
+        for (auto& [fnName, ctVal] : optCtx_->uniformReturnValues()) {
+            if (!optCtx_->isCTPure(fnName)) continue;
             auto* F = module->getFunction(fnName);
             if (!F || F->isDeclaration() || F->use_empty()) continue;
             llvm::Type* retType = F->getReturnType();

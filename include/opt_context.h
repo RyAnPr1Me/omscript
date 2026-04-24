@@ -678,6 +678,72 @@ public:
     void setCTEngine(CTEngine* engine) noexcept { ctEngine_ = engine; }
     CTEngine* ctEngine() const noexcept { return ctEngine_; }
 
+    // ── CTEngine query proxies ────────────────────────────────────────────
+    //
+    // These methods forward the CT-analysis queries used by IR-emission code
+    // (codegen_expr.cpp, codegen_stmt.cpp, codegen_builtins.cpp, codegen_opt.cpp)
+    // so that those call sites do not need to reach through to ctEngine_ directly.
+    //
+    // All return a safe default (false / empty / top) when ctEngine_ is null,
+    // which can happen during unit tests or when CFCTRE is disabled.
+    //
+    // This is the single choke-point for all runtime analysis queries:
+    // adding a new query here rather than in a codegen sub-file ensures the
+    // contract is documented and safe-default behaviour is handled once.
+
+    /// True when @p name is classified as compile-time-pure by CFCTRE.
+    /// Distinct from the AST-level OptimizationContext::isPure() which reflects
+    /// the effect-analysis pass; this mirrors CTEngine's own purity cache.
+    bool isCTPure(const std::string& name) const noexcept {
+        return ctEngine_ && ctEngine_->isPure(name);
+    }
+
+    /// Return the strength-reduced operator token for @p binExpr, or an empty
+    /// string if no cheaper rewrite was found during the CFCTRE range pass.
+    const std::string& cheaperRewrite(const Expression* binExpr) const noexcept {
+        static const std::string kEmpty;
+        if (!ctEngine_) return kEmpty;
+        return ctEngine_->cheaperRewrite(binExpr);
+    }
+
+    /// True when CFCTRE determined that the then-branch of @p ifStmt is dead
+    /// (condition is always false at compile time).
+    bool isThenBranchDead(const Statement* ifStmt) const noexcept {
+        return ctEngine_ && ctEngine_->isThenBranchDead(ifStmt);
+    }
+
+    /// True when CFCTRE determined that the else-branch of @p ifStmt is dead
+    /// (condition is always true at compile time).
+    bool isElseBranchDead(const Statement* ifStmt) const noexcept {
+        return ctEngine_ && ctEngine_->isElseBranchDead(ifStmt);
+    }
+
+    /// Return the abstract integer exit-range of @p varName in function @p fnName.
+    /// Returns CTInterval::top() (unknown) when ctEngine_ is null or the range
+    /// was not computed.
+    CTInterval getExitRange(const std::string& fnName,
+                            const std::string& varName) const noexcept {
+        if (!ctEngine_) return CTInterval::top();
+        return ctEngine_->getExitRange(fnName, varName);
+    }
+
+    /// Execute @p fnName with compile-time-known @p args via CFCTRE.
+    /// Returns std::nullopt when ctEngine_ is null or execution failed.
+    std::optional<CTValue> executeFunction(const std::string&          fnName,
+                                           const std::vector<CTValue>& args) const {
+        if (!ctEngine_) return std::nullopt;
+        return ctEngine_->executeFunction(fnName, args);
+    }
+
+    /// Return the map of functions whose return value is uniform (same constant
+    /// on every execution path) as determined by CFCTRE.
+    /// Returns a reference to an empty map when ctEngine_ is null.
+    const std::unordered_map<std::string, CTValue>& uniformReturnValues() const noexcept {
+        static const std::unordered_map<std::string, CTValue> kEmpty;
+        if (!ctEngine_) return kEmpty;
+        return ctEngine_->uniformReturnValues();
+    }
+
     // ── Iteration helpers ─────────────────────────────────────────────────
     const std::unordered_map<std::string, FunctionFacts>& allFacts() const noexcept {
         return facts_;

@@ -873,8 +873,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // semantic identity (e.g., ∀ x ≥ 0: x / 2^k ≡ x >> k), NOT from syntactic
     // pattern matching — the abstract interpreter derived x ≥ 0 from the
     // program's control flow and assignments.
-    if (ctEngine_) {
-        const std::string& altOp = ctEngine_->cheaperRewrite(expr);
+    if (optCtx_) {
+        const std::string& altOp = optCtx_->cheaperRewrite(expr);
         if (!altOp.empty() && !left->getType()->isVectorTy() &&
             !right->getType()->isVectorTy()) {
             llvm::Value* lI = toDefaultType(left);
