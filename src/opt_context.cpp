@@ -239,6 +239,30 @@ const std::unordered_map<std::string, BuiltinEffects>& BuiltinEffectTable::table
         {"random",          {false, false, false, true}},
         {"rand",            {false, false, false, true}},
         {"time",            {false, false, false, true}},
+
+        // ── Integer-specific operations ───────────────────────────────────────
+        {"mulhi",           {true,  false, false, false}},  // high-word of full multiply
+        {"mulhi_u",         {true,  false, false, false}},  // unsigned variant
+        {"absdiff",         {true,  false, false, false}},  // |a - b|
+        {"fast_sqrt",       {true,  false, false, false}},  // approximate sqrt
+
+        // ── Floating-point predicates ─────────────────────────────────────────
+        {"is_nan",          {true,  false, false, false}},
+        {"is_inf",          {true,  false, false, false}},
+
+        // ── 2-D column-major matrix builtins ──────────────────────────────────
+        {"mat_new",         {false, false, true,  false, false, false, true,  false}},
+        {"mat_fill",        {false, false, true,  false, false, false, true,  false}},
+        {"mat_get",         {false, true,  false, false}},
+        {"mat_set",         {false, true,  true,  false}},
+        {"mat_rows",        {true,  true,  false, false}},
+        {"mat_cols",        {true,  true,  false, false}},
+        {"mat_mul",         {true,  true,  false, false, false, false, true,  false}},
+        {"mat_transp",      {true,  true,  false, false, false, false, true,  false}},
+
+        // ── Program synthesis stdlib ──────────────────────────────────────────
+        {"std_synthesize",  {false, false, false, false}},  // internal compiler hook
+        {"std__synthesize", {false, false, false, false}},
     };
     // clang-format on
     return kTable;

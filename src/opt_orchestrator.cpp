@@ -12,6 +12,7 @@
 #include "codegen.h"   // CodeGenerator + OptimizationLevel
 #include "optimization_manager.h" // PassScheduler
 #include "alg_simp_pass.h"
+#include "const_fold_pass.h"
 #include "copy_prop_pass.h"
 #include "dce_pass.h"
 #include "cse_pass.h"
@@ -173,6 +174,7 @@ namespace PassId {
     uint32_t kCSE             = 0;
     uint32_t kAlgSimp         = 0;
     uint32_t kCopyProp        = 0;
+    uint32_t kConstFold       = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -361,6 +363,24 @@ static void registerAllPasses() {
         // range analysis, and any name-based facts are potentially stale.
         {AnalysisFact::kCSE, AnalysisFact::kRangeAnalysis},
     });
+
+    PassId::kConstFold = reg.registerPass({
+        0,
+        "const_fold",
+        "Constant Folding: evaluate binary/unary operations on literal integer operands (2+3→5, !0→1, etc.)",
+        PassPhase::ASTTransform,
+        PassKind::SemanticTransform,
+        // ConstFold runs early — before CFCTRE — so CFCTRE gets simpler input.
+        // It requires DCE so that dead branches are removed first (avoids
+        // wasting time folding unreachable code).
+        // CopyProp is listed as a prerequisite so that freshly substituted
+        // identifiers (now literals) are folded in one pipeline pass.
+        {AnalysisFact::kDCE, AnalysisFact::kCopyProp},
+        {AnalysisFact::kConstFold},
+        // Literal folding changes expression shapes; CSE keys and range
+        // analysis values derived from the old tree are stale.
+        {AnalysisFact::kCSE, AnalysisFact::kRangeAnalysis},
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -411,6 +431,7 @@ OptimizationOrchestrator::buildDispatch() {
         {PassId::kCSE,             R([this](Program* p, OptimizationContext& c){ runCSE(p, c); })},
         {PassId::kAlgSimp,         R([this](Program* p, OptimizationContext& c){ runAlgSimp(p, c); })},
         {PassId::kCopyProp,        R([this](Program* p, OptimizationContext& c){ runCopyProp(p, c); })},
+        {PassId::kConstFold,       R([this](Program* p, OptimizationContext& c){ runConstFold(p, c); })},
     };
 }
 
@@ -825,6 +846,15 @@ void OptimizationOrchestrator::runCopyProp(Program* program, OptimizationContext
     ctx.validity().copyProp = true;
     // CopyProp substitutes identifiers; CSE keys and range values are stale.
     ctx.validity().cse          = false;
+    ctx.validity().rangeAnalysis = false;
+}
+
+void OptimizationOrchestrator::runConstFold(Program* program, OptimizationContext& ctx) {
+    runConstFoldPass(program, verbose_);
+    ctx.validity().constFold = true;
+    // Literal folding replaces expression sub-trees; CSE keys and range-analysis
+    // values derived from the old tree are no longer valid.
+    ctx.validity().cse           = false;
     ctx.validity().rangeAnalysis = false;
 }
 

@@ -98,6 +98,7 @@ set(SRC
     src/cse_pass.cpp
     src/alg_simp_pass.cpp
     src/copy_prop_pass.cpp
+    src/const_fold_pass.cpp
 
     # Driver
     src/preprocessor.cpp

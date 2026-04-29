@@ -1036,40 +1036,10 @@ CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
 std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
                                                const std::vector<CTValue>& args) {
     // ── Fast reject: skip the entire if-chain for unknown names ──────────
-    static const std::unordered_set<std::string> kKnownBuiltins = {
-        "len","str_len","abs","push","pop","min","max","sign","clamp","pow",
-        "sqrt","gcd","lcm","log","log2","log10","exp2","is_even","is_odd","floor","ceil",
-        "round","to_char","is_alpha","is_digit","to_string","number_to_string",
-        "to_int","string_to_number","str_to_int","char_code","str_find",
-        "str_index_of","str_contains","str_starts_with","startswith",
-        "str_ends_with","endswith","str_substr","str_upper","str_lower",
-        "str_repeat","str_trim","str_reverse","str_count","str_replace",
-        "str_pad_left","str_pad_right","str_eq","str_concat","char_at",
-        "is_power_of_2","popcount","clz","ctz","bitreverse","bswap",
-        "rotate_left","rotate_right","saturating_add","saturating_sub",
-        "str_chars","typeof","array_fill","range","range_step","array_concat",
-        "array_slice","array_copy","sum","array_product","array_min",
-        "array_max","array_last","array_contains","index_of","array_find",
-        "is_upper","is_lower","is_space","is_alnum",
-        "fast_add","fast_sub","fast_mul","fast_div",
-        "precise_add","precise_sub","precise_mul","precise_div",
-        "sin","cos","tan","asin","acos","atan","atan2","exp","cbrt","hypot",
-        "fma","copysign","min_float","max_float",
-        "reverse","sort","array_remove","array_insert",
-        "array_any","array_every","array_count",
-        "str_split","str_join",
-        // int/uint/bool: type casts handled by evalTypeCast; iN/uN handled dynamically
-        "int","uint","bool",
-        // Program synthesis stdlib function (flat-name form of std::synthesize)
-        "std__synthesize","std_synthesize",
-        // Type-specific fast builtins
-        "mulhi","mulhi_u","absdiff","fast_sqrt","is_nan","is_inf",
-        // 2D column-major matrix builtins
-        "mat_new","mat_fill","mat_get","mat_set","mat_rows","mat_cols","mat_mul","mat_transp"
-    };
-    // Also accept iN/uN and __tw_*/__tf_* type-cast names (handled by evalTypeCast via evalCall).
-    // BuiltinEffectTable::isWidthCastName() is the canonical implementation of this check.
-    if (kKnownBuiltins.find(name) == kKnownBuiltins.end() && !BuiltinEffectTable::isWidthCastName(name)) {
+    // BuiltinEffectTable::contains() is the authoritative registry of all
+    // known OmScript builtins.  BuiltinEffectTable::isWidthCastName() covers
+    // the dynamically-named iN/uN and __tw_*/__tf_* cast intrinsics.
+    if (!BuiltinEffectTable::contains(name) && !BuiltinEffectTable::isWidthCastName(name)) {
         return std::nullopt;
     }
 

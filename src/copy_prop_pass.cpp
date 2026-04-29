@@ -324,6 +324,24 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
             break;
         }
 
+        case ASTNodeType::FOR_EACH_STMT: {
+            auto* fe = static_cast<ForEachStmt*>(stmt.get());
+            // Propagate into the collection expression (e.g. `for x in arr` →
+            // substitute arr if it is a copy alias).
+            count += propagateInExpr(fe->collection, map);
+            // The iterator variable is bound fresh each iteration; kill any
+            // prior copy entry for it before recursing into the body.
+            killName(map, fe->iteratorVar);
+            if (fe->body && fe->body->type == ASTNodeType::BLOCK) {
+                std::unordered_set<std::string> bodyWrites;
+                collectWrittenInStmt(fe->body.get(), bodyWrites);
+                for (const auto& w : bodyWrites) killName(map, w);
+                count += propagateInBlock(
+                    static_cast<BlockStmt*>(fe->body.get()), map);
+            }
+            break;
+        }
+
         case ASTNodeType::BLOCK:
             // Nested bare block: recurse with the current map (same scope).
             count += propagateInBlock(
