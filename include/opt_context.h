@@ -186,6 +186,7 @@ struct AnalysisValidity {
     bool dce             = false; ///< Dead Code Elimination pass has run
     bool cse             = false; ///< Common Subexpression Elimination pass has run
     bool algSimp         = false; ///< Algebraic Simplification pass has run
+    bool copyProp        = false; ///< Copy Propagation pass has run
 
     // ── Dispatch table ────────────────────────────────────────────────────
     bool* fieldFor(std::string_view fact) noexcept {
@@ -204,6 +205,7 @@ struct AnalysisValidity {
             {"dce",              &AnalysisValidity::dce            },
             {"cse",              &AnalysisValidity::cse            },
             {"alg_simp",         &AnalysisValidity::algSimp        },
+            {"copy_prop",        &AnalysisValidity::copyProp       },
         };
         for (const auto& row : kTable) {
             if (row.name == fact)

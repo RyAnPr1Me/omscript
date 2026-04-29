@@ -12,6 +12,7 @@
 #include "codegen.h"   // CodeGenerator + OptimizationLevel
 #include "optimization_manager.h" // PassScheduler
 #include "alg_simp_pass.h"
+#include "copy_prop_pass.h"
 #include "dce_pass.h"
 #include "cse_pass.h"
 
@@ -171,6 +172,7 @@ namespace PassId {
     uint32_t kDCE             = 0;
     uint32_t kCSE             = 0;
     uint32_t kAlgSimp         = 0;
+    uint32_t kCopyProp        = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -343,6 +345,22 @@ static void registerAllPasses() {
         // AlgSimp replaces expressions; any shape-derived facts are stale.
         {AnalysisFact::kRangeAnalysis},
     });
+
+    PassId::kCopyProp = reg.registerPass({
+        0,
+        "copy_prop",
+        "Copy Propagation: inline trivial var-alias copies (var y = x → substitute x at uses of y)",
+        PassPhase::ASTTransform,
+        PassKind::SemanticTransform,
+        // Run after CFCTRE + DCE so that only reachable, non-folded copies
+        // are processed.  AlgSimp runs first so that identity simplifications
+        // have already been applied, potentially producing more copy candidates.
+        {AnalysisFact::kCFCTRE, AnalysisFact::kDCE, AnalysisFact::kAlgSimp},
+        {AnalysisFact::kCopyProp},
+        // Substituting identifiers changes the shape of expressions; CSE,
+        // range analysis, and any name-based facts are potentially stale.
+        {AnalysisFact::kCSE, AnalysisFact::kRangeAnalysis},
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -392,6 +410,7 @@ OptimizationOrchestrator::buildDispatch() {
         {PassId::kDCE,             R([this](Program* p, OptimizationContext& c){ runDCE(p, c); })},
         {PassId::kCSE,             R([this](Program* p, OptimizationContext& c){ runCSE(p, c); })},
         {PassId::kAlgSimp,         R([this](Program* p, OptimizationContext& c){ runAlgSimp(p, c); })},
+        {PassId::kCopyProp,        R([this](Program* p, OptimizationContext& c){ runCopyProp(p, c); })},
     };
 }
 
@@ -798,6 +817,14 @@ void OptimizationOrchestrator::runAlgSimp(Program* program, OptimizationContext&
     ctx.validity().algSimp = true;
     // AlgSimp rewrites expressions; range facts derived from expression shapes
     // may be stale.
+    ctx.validity().rangeAnalysis = false;
+}
+
+void OptimizationOrchestrator::runCopyProp(Program* program, OptimizationContext& ctx) {
+    runCopyPropPass(program, verbose_);
+    ctx.validity().copyProp = true;
+    // CopyProp substitutes identifiers; CSE keys and range values are stale.
+    ctx.validity().cse          = false;
     ctx.validity().rangeAnalysis = false;
 }
 

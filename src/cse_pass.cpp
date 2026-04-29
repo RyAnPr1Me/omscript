@@ -20,6 +20,7 @@
 ///   the same CSE key.
 
 #include "cse_pass.h"
+#include "opt_pass.h"   // isCommutativeOp, isPureBinaryOp
 
 #include <algorithm>
 #include <iostream>
@@ -34,10 +35,6 @@ namespace omscript {
 // ─────────────────────────────────────────────────────────────────────────────
 // Expression canonicalisation helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-static const std::unordered_set<std::string> kCommutative = {
-    "+", "*", "&", "|", "^", "==", "!="
-};
 
 /// Return a string representation of a simple (leaf-level) expression,
 /// or "" if the expression is not a hoistable atom.
@@ -65,7 +62,7 @@ static std::string binaryKey(const std::string& op,
     if (l.empty() || r.empty()) return "";
 
     // Normalise commutative operators so a+b and b+a share the same key.
-    if (kCommutative.count(op) && l > r) std::swap(l, r);
+    if (isCommutativeOp(op) && l > r) std::swap(l, r);
 
     return op + ":" + l + ":" + r;
 }
@@ -81,11 +78,7 @@ static void collectKeys(const Expression* expr,
     if (expr->type == ASTNodeType::BINARY_EXPR) {
         const auto* bin = static_cast<const BinaryExpr*>(expr);
         // Only consider operators that are pure integer/bitwise ops.
-        static const std::unordered_set<std::string> kPureOps = {
-            "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>",
-            "==", "!=", "<", "<=", ">", ">="
-        };
-        if (kPureOps.count(bin->op)) {
+        if (isPureBinaryOp(bin->op)) {
             std::string key = binaryKey(bin->op, bin->left.get(), bin->right.get());
             if (!key.empty()) freq[key]++;
         }

@@ -97,6 +97,7 @@ set(SRC
     src/dce_pass.cpp
     src/cse_pass.cpp
     src/alg_simp_pass.cpp
+    src/copy_prop_pass.cpp
 
     # Driver
     src/preprocessor.cpp
