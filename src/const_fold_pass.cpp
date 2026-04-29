@@ -56,6 +56,16 @@ static unsigned foldExpr(std::unique_ptr<Expression>& expr);
 static unsigned foldInStmt(Statement* stmt);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper predicates
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// True when @p count is a valid bit-shift amount for a 64-bit integer:
+/// non-negative and strictly less than 64.
+static bool isValidShiftCount(int64_t count) noexcept {
+    return count >= 0 && count < 64;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // foldExpr — bottom-up literal folding for one expression node
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -92,8 +102,10 @@ static unsigned foldExpr(std::unique_ptr<Expression>& expr) {
             else result = lv % rv;
         }
         else if (op == "**") {
-            // Only fold small non-negative exponents to avoid huge literals.
-            if (rv < 0 || rv > 63) { valid = false; }
+            // Only fold small non-negative exponents to avoid overflow.
+            // rv == 63 would produce 2^63 for base=2, which overflows int64_t
+            // (INT64_MIN), so the bound is rv < 63 (i.e. at most 2^62).
+            if (rv < 0 || rv >= 63) { valid = false; }
             else {
                 result = 1;
                 for (int64_t i = 0; i < rv; ++i) result *= lv;
@@ -104,11 +116,11 @@ static unsigned foldExpr(std::unique_ptr<Expression>& expr) {
         else if (op == "|")  result = lv | rv;
         else if (op == "^")  result = lv ^ rv;
         else if (op == "<<") {
-            if (rv < 0 || rv >= 64) { valid = false; }
+            if (!isValidShiftCount(rv)) { valid = false; }
             else result = static_cast<int64_t>(static_cast<uint64_t>(lv) << rv);
         }
         else if (op == ">>") {
-            if (rv < 0 || rv >= 64) { valid = false; }
+            if (!isValidShiftCount(rv)) { valid = false; }
             else result = lv >> rv; // arithmetic right-shift
         }
         // ── Comparisons ───────────────────────────────────────────────────

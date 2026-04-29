@@ -209,6 +209,20 @@ static void collectWrittenInStmt(const Statement* stmt,
 // propagateInBlock — forward dataflow over one statement list
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Kill all names that @p body may write, then recurse into it.
+/// Used by while/do-while/for/foreach handlers so the identical
+/// "collect-writes, kill, recurse" pattern is not duplicated across
+/// every loop statement kind.
+static unsigned killAndRecurseBody(Statement* body, CopyMap& map) {
+    if (!body) return 0;
+    std::unordered_set<std::string> writes;
+    collectWrittenInStmt(body, writes);
+    for (const auto& w : writes) killName(map, w);
+    if (body->type == ASTNodeType::BLOCK)
+        return propagateInBlock(static_cast<BlockStmt*>(body), map);
+    return 0;
+}
+
 static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
     if (!block) return 0;
     unsigned count = 0;
@@ -280,29 +294,13 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
         case ASTNodeType::WHILE_STMT: {
             auto* ws = static_cast<WhileStmt*>(stmt.get());
             count += propagateInExpr(ws->condition, map);
-            // Conservatively kill all copies whose source might be modified in
-            // the body before recursing into it.
-            if (ws->body) {
-                std::unordered_set<std::string> bodyWrites;
-                collectWrittenInStmt(ws->body.get(), bodyWrites);
-                for (const auto& w : bodyWrites) killName(map, w);
-                if (ws->body->type == ASTNodeType::BLOCK)
-                    count += propagateInBlock(
-                        static_cast<BlockStmt*>(ws->body.get()), map);
-            }
+            count += killAndRecurseBody(ws->body.get(), map);
             break;
         }
 
         case ASTNodeType::DO_WHILE_STMT: {
             auto* dw = static_cast<DoWhileStmt*>(stmt.get());
-            if (dw->body) {
-                std::unordered_set<std::string> bodyWrites;
-                collectWrittenInStmt(dw->body.get(), bodyWrites);
-                for (const auto& w : bodyWrites) killName(map, w);
-                if (dw->body->type == ASTNodeType::BLOCK)
-                    count += propagateInBlock(
-                        static_cast<BlockStmt*>(dw->body.get()), map);
-            }
+            count += killAndRecurseBody(dw->body.get(), map);
             count += propagateInExpr(dw->condition, map);
             break;
         }
@@ -312,15 +310,9 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
             count += propagateInExpr(fs->start, map);
             count += propagateInExpr(fs->end,   map);
             count += propagateInExpr(fs->step,  map);
-            // Kill the loop variable and anything written inside the body.
+            // Kill the loop variable before recursing into the body.
             killName(map, fs->iteratorVar);
-            if (fs->body && fs->body->type == ASTNodeType::BLOCK) {
-                std::unordered_set<std::string> bodyWrites;
-                collectWrittenInStmt(fs->body.get(), bodyWrites);
-                for (const auto& w : bodyWrites) killName(map, w);
-                count += propagateInBlock(
-                    static_cast<BlockStmt*>(fs->body.get()), map);
-            }
+            count += killAndRecurseBody(fs->body.get(), map);
             break;
         }
 
@@ -332,13 +324,7 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
             // The iterator variable is bound fresh each iteration; kill any
             // prior copy entry for it before recursing into the body.
             killName(map, fe->iteratorVar);
-            if (fe->body && fe->body->type == ASTNodeType::BLOCK) {
-                std::unordered_set<std::string> bodyWrites;
-                collectWrittenInStmt(fe->body.get(), bodyWrites);
-                for (const auto& w : bodyWrites) killName(map, w);
-                count += propagateInBlock(
-                    static_cast<BlockStmt*>(fe->body.get()), map);
-            }
+            count += killAndRecurseBody(fe->body.get(), map);
             break;
         }
 

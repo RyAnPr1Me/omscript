@@ -74,8 +74,13 @@ static bool definitelyNotFloat(const Expression* expr) {
     case ASTNodeType::LITERAL_EXPR:
         return !isFloatLit(expr);
     case ASTNodeType::IDENTIFIER_EXPR:
-        // We cannot determine type of an identifier statically at this pass level;
-        // conservatively assume it might be float → return false.
+        // Type information for user-declared variables is not available at this
+        // pass level (the type-inference pass runs later).  We conservatively
+        // return false (may be float) which causes AlgSimp to skip identity
+        // rules like `x - x → 0` or `x / x → 1` for identifier operands.
+        // A future improvement would propagate type annotations to make this
+        // precise.  Integer-literal operands are always safe because integer
+        // literals never carry float semantics.
         return false;
     default:
         return false;

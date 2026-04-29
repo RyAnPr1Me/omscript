@@ -370,11 +370,12 @@ static void registerAllPasses() {
         "Constant Folding: evaluate binary/unary operations on literal integer operands (2+3→5, !0→1, etc.)",
         PassPhase::ASTTransform,
         PassKind::SemanticTransform,
-        // ConstFold runs early — before CFCTRE — so CFCTRE gets simpler input.
-        // It requires DCE so that dead branches are removed first (avoids
-        // wasting time folding unreachable code).
-        // CopyProp is listed as a prerequisite so that freshly substituted
-        // identifiers (now literals) are folded in one pipeline pass.
+        // ConstFold runs after DCE (dead branches removed first, so we don't waste
+        // time folding unreachable code) and after CopyProp (freshly substituted
+        // identifier literals are folded immediately in one pipeline pass).
+        // Because DCE itself requires CFCTRE, ConstFold transitively runs after
+        // CFCTRE — so CFCTRE's cross-function folding is already done when we
+        // arrive here, and ConstFold handles any residual literal arithmetic.
         {AnalysisFact::kDCE, AnalysisFact::kCopyProp},
         {AnalysisFact::kConstFold},
         // Literal folding changes expression shapes; CSE keys and range
