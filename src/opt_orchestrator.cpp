@@ -11,6 +11,7 @@
 #include "opt_orchestrator.h"
 #include "codegen.h"   // CodeGenerator + OptimizationLevel
 #include "optimization_manager.h" // PassScheduler
+#include "alg_simp_pass.h"
 #include "dce_pass.h"
 #include "cse_pass.h"
 
@@ -169,6 +170,7 @@ namespace PassId {
     uint32_t kRLC             = 0;
     uint32_t kDCE             = 0;
     uint32_t kCSE             = 0;
+    uint32_t kAlgSimp         = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -326,6 +328,21 @@ static void registerAllPasses() {
         // tracks exact variable counts or live ranges.
         {},
     });
+
+    PassId::kAlgSimp = reg.registerPass({
+        0,
+        "alg_simp",
+        "Algebraic Simplification: identity-element folding (x+0→x, x*1→x, x*0→0, x&&false→0, !!x→x, etc.)",
+        PassPhase::ASTTransform,
+        PassKind::CostTransform,
+        // Run after CFCTRE so that constant folding has already simplified
+        // sub-expressions, maximising the chance of a literal operand match.
+        // DCE runs first to avoid simplifying dead branches.
+        {AnalysisFact::kCFCTRE, AnalysisFact::kDCE},
+        {AnalysisFact::kAlgSimp},
+        // AlgSimp replaces expressions; any shape-derived facts are stale.
+        {AnalysisFact::kRangeAnalysis},
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -374,6 +391,7 @@ OptimizationOrchestrator::buildDispatch() {
         {PassId::kRLC,             R([this](Program* p, OptimizationContext& c){ runRLC(p, c); })},
         {PassId::kDCE,             R([this](Program* p, OptimizationContext& c){ runDCE(p, c); })},
         {PassId::kCSE,             R([this](Program* p, OptimizationContext& c){ runCSE(p, c); })},
+        {PassId::kAlgSimp,         R([this](Program* p, OptimizationContext& c){ runAlgSimp(p, c); })},
     };
 }
 
@@ -773,6 +791,14 @@ void OptimizationOrchestrator::runDCE(Program* program, OptimizationContext& ctx
 void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx) {
     runCSEPass(program, verbose_);
     ctx.validity().cse = true;
+}
+
+void OptimizationOrchestrator::runAlgSimp(Program* program, OptimizationContext& ctx) {
+    runAlgSimpPass(program, verbose_);
+    ctx.validity().algSimp = true;
+    // AlgSimp rewrites expressions; range facts derived from expression shapes
+    // may be stale.
+    ctx.validity().rangeAnalysis = false;
 }
 
 // ── syncFactsToContext ────────────────────────────────────────────────────────

@@ -96,6 +96,7 @@ set(SRC
     src/ipof_pass.cpp
     src/dce_pass.cpp
     src/cse_pass.cpp
+    src/alg_simp_pass.cpp
 
     # Driver
     src/preprocessor.cpp

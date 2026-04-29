@@ -2,6 +2,7 @@
 
 #include "cfctre.h"
 #include "ast.h"
+#include "opt_context.h"
 #include "synthesize.h"
 
 #include <algorithm>
@@ -1066,23 +1067,10 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         // 2D column-major matrix builtins
         "mat_new","mat_fill","mat_get","mat_set","mat_rows","mat_cols","mat_mul","mat_transp"
     };
-    // Also accept iN/uN type-cast names (handled by evalTypeCast via evalCall).
-    auto isIntWidthCastName = [](const std::string& nm) -> bool {
-        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
-        int bw = 0;
-        for (size_t j = 1; j < nm.size(); ++j) {
-            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
-            bw = bw * 10 + (nm[j] - '0');
-            if (bw > 256) return false;
-        }
-        return bw >= 1 && bw <= 256;
-    };
-    if (kKnownBuiltins.find(name) == kKnownBuiltins.end() && !isIntWidthCastName(name)) {
-        // Accept __tw_* and __tf_* width/type-specific builtins for comptime eval.
-        const bool isTW = name.size()>5 && name.substr(0,5)=="__tw_";
-        const bool isTF = name.size()>5 && name.substr(0,5)=="__tf_";
-        if (!isTW && !isTF)
-            return std::nullopt;
+    // Also accept iN/uN and __tw_*/__tf_* type-cast names (handled by evalTypeCast via evalCall).
+    // BuiltinEffectTable::isWidthCastName() is the canonical implementation of this check.
+    if (kKnownBuiltins.find(name) == kKnownBuiltins.end() && !BuiltinEffectTable::isWidthCastName(name)) {
+        return std::nullopt;
     }
 
     const size_t n = args.size();
@@ -3329,68 +3317,27 @@ void CTEngine::runPass(const Program* program) {
     }
 
     // ── Phase 3: auto-detect pure functions (fixed-point) ────────────────
-    static const std::unordered_set<std::string> kBuiltinPure = {
-        "abs","min","max","sign","clamp","pow","sqrt","floor","ceil","round",
-        "log","log2","log10","exp2","sin","cos","tan","asin","acos","atan",
-        "atan2","cbrt","hypot","fma","copysign","min_float","max_float",
-        "gcd","lcm","is_even","is_odd","is_power_of_2",
-        "popcount","clz","ctz","bswap","bitreverse","rotate_left","rotate_right",
-        "saturating_add","saturating_sub",
-        "to_int","to_float","to_string","number_to_string","string_to_number",
-        "str_to_int","char_code","to_char","str_len","len","typeof",
-        "char_at","str_eq","str_concat","str_find","str_index_of",
-        "str_starts_with","str_ends_with","startswith","endswith",
-        "str_upper","str_lower","str_trim","str_reverse","str_repeat",
-        "str_substr","str_count","str_replace","str_chars","str_pad_left",
-        "str_pad_right","is_alpha","is_digit",
-        "array_fill","range","range_step","array_concat","array_slice",
-        "array_copy","sum","array_product","array_min","array_max",
-        "array_last","array_contains","index_of","array_find",
-        // int/uint/bool type casts; iN/uN handled dynamically below
-        "bool","int","uint"
-    };
-    // iN/uN type-cast names (for N in [1..256]) are always pure.
-    // Also __tw_* (width-specific integer intrinsics) and __tf_* (f32 intrinsics).
-    auto isIntWidthCastNamePure = [](const std::string& nm) -> bool {
-        if (nm.size() > 5 && (nm.substr(0,5)=="__tw_" || nm.substr(0,5)=="__tf_"))
-            return true;
-        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
-        int bw = 0;
-        for (size_t j = 1; j < nm.size(); ++j) {
-            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
-            bw = bw * 10 + (nm[j] - '0');
-            if (bw > 256) return false;
-        }
-        return bw >= 1 && bw <= 256;
-    };
-
     // Detect whether a function body is pure (no I/O, no mutations of globals).
     // Uses a recursive helper with a visited set to handle mutual recursion.
+    // Builtin purity is delegated to BuiltinEffectTable (the authoritative
+    // single source of truth); we no longer maintain a local copy here.
     std::function<bool(const FunctionDecl*, std::unordered_set<std::string>&)> isPureBody;
     isPureBody = [&](const FunctionDecl* fn, std::unordered_set<std::string>& visiting) -> bool {
         if (!fn || !fn->body) return false;
-        if (kBuiltinPure.count(fn->name) || isIntWidthCastNamePure(fn->name)) return true;
+        if (BuiltinEffectTable::isPure(fn->name) || BuiltinEffectTable::isWidthCastName(fn->name)) return true;
         if (pureFunctions_.count(fn->name)) return true;
         if (visiting.count(fn->name)) return false; // conservatively not pure (recursion)
         visiting.insert(fn->name);
 
         // Walk the body; reject if any I/O or non-pure call is found.
-        static const std::unordered_set<std::string> kImpure = {
-            "print","println","write","print_char","input","input_line",
-            "file_read","file_write","file_append","file_exists",
-            "thread_create","thread_join","mutex_new","mutex_lock",
-            "mutex_unlock","mutex_destroy","time","sleep","random",
-            "exit","exit_program","assert"
-        };
-
         std::function<bool(const Statement*)>  pureS;
         std::function<bool(const Expression*)> pureE;
         pureE = [&](const Expression* ex) -> bool {
             if (!ex) return true;
             if (ex->type == ASTNodeType::CALL_EXPR) {
                 auto* call = static_cast<const CallExpr*>(ex);
-                if (kImpure.count(call->callee)) return false;
-                if (!kBuiltinPure.count(call->callee) && !isIntWidthCastNamePure(call->callee)) {
+                if (BuiltinEffectTable::isImpure(call->callee)) return false;
+                if (!BuiltinEffectTable::isPure(call->callee) && !BuiltinEffectTable::isWidthCastName(call->callee)) {
                     auto it = functions_.find(call->callee);
                     if (it != functions_.end()) {
                         if (!isPureBody(it->second, visiting)) return false;
