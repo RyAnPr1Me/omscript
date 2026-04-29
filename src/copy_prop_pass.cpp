@@ -40,7 +40,11 @@ namespace omscript {
 
 using CopyMap = std::unordered_map<std::string, std::string>;
 
-/// Resolve `name` through the copy map transitively (safe against cycles).
+/// Resolve `name` through the copy map.
+///
+/// Cycles cannot arise in practice: `killName()` removes any entry `b → a`
+/// before we insert `a → b`, so the map is always a forest.  The single-level
+/// lookup is therefore sufficient and cannot loop.
 static const std::string& resolve(const CopyMap& map,
                                   const std::string& name) noexcept {
     const auto it = map.find(name);

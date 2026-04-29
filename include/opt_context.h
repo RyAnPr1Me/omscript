@@ -95,8 +95,8 @@ public:
     /// statically because N is arbitrary; they are handled dynamically.
     static bool isWidthCastName(const std::string& nm) noexcept {
         // __tw_* and __tf_* generated width/type-specific builtins.
-        if (nm.size() > 5 && (nm[0] == '_' && nm[1] == '_') &&
-            (nm[2] == 't') && (nm[3] == 'w' || nm[3] == 'f') && nm[4] == '_')
+        if (nm.size() > 5 &&
+            (nm.substr(0, 5) == "__tw_" || nm.substr(0, 5) == "__tf_"))
             return true;
         // iN / uN width casts (e.g. i8, u32, i128).
         if (nm.size() < 2) return false;

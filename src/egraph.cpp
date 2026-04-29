@@ -1305,19 +1305,22 @@ std::vector<RewriteRule> getAlgebraicRules() {
     // Both right-constant (x * C) and left-constant (C * x) forms are generated
     // in one loop.  This replaces dozens of individually hand-written rules and
     // is the single authoritative source for all power-of-2 shift reductions.
-    for (int shift = 1; shift <= 30; ++shift) {
-        long long val = 1LL << shift;
-        // Right-constant: x * 2^n
-        rules.emplace_back("mul_pow2_" + std::to_string(shift),
+    //
+    // Loop variable `n` is the exponent (shift amount): 2^n is the constant
+    // factor, and the generated Shl node uses `n` directly as the shift count.
+    for (int n = 1; n <= 30; ++n) {
+        long long val = 1LL << n;
+        // Right-constant: x * 2^n  →  x << n
+        rules.emplace_back("mul_pow2_" + std::to_string(n),
             P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(val)}),
-            [shift](EGraph& g, const Subst& s) {
-                return g.addBinOp(Op::Shl, s.at("x"), g.addConst(shift));
+            [n](EGraph& g, const Subst& s) {
+                return g.addBinOp(Op::Shl, s.at("x"), g.addConst(n));
             });
-        // Left-constant: 2^n * x
-        rules.emplace_back("mul_pow2_left_" + std::to_string(shift),
+        // Left-constant: 2^n * x  →  x << n
+        rules.emplace_back("mul_pow2_left_" + std::to_string(n),
             P::OpPat(Op::Mul, {P::ConstPat(val), P::Wild("x")}),
-            [shift](EGraph& g, const Subst& s) {
-                return g.addBinOp(Op::Shl, s.at("x"), g.addConst(shift));
+            [n](EGraph& g, const Subst& s) {
+                return g.addBinOp(Op::Shl, s.at("x"), g.addConst(n));
             });
     }
 
