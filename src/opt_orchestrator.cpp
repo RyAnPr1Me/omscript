@@ -11,6 +11,8 @@
 #include "opt_orchestrator.h"
 #include "codegen.h"   // CodeGenerator + OptimizationLevel
 #include "optimization_manager.h" // PassScheduler
+#include "dce_pass.h"
+#include "cse_pass.h"
 
 #include <cassert>
 #include <chrono>
@@ -165,6 +167,8 @@ namespace PassId {
     uint32_t kEGraph          = 0;
     uint32_t kRangeAnalysis   = 0;
     uint32_t kRLC             = 0;
+    uint32_t kDCE             = 0;
+    uint32_t kCSE             = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -293,6 +297,35 @@ static void registerAllPasses() {
         {AnalysisFact::kRLC},               // provides rlc fact
         {AnalysisFact::kPurity, AnalysisFact::kEffects, AnalysisFact::kCFCTRE}, // invalidates after AST mutation
     });
+
+    PassId::kDCE = reg.registerPass({
+        0,
+        "dce",
+        "Dead Code Elimination: remove unreachable branches from constant-condition ifs/whiles and prune post-return stmts",
+        PassPhase::ASTTransform,
+        PassKind::CostTransform,
+        // DCE benefits from CFCTRE having folded constants into the AST, but
+        // operates on literal constants alone and is safe to run earlier.
+        {AnalysisFact::kCFCTRE},
+        {AnalysisFact::kDCE},
+        // Removing branches may invalidate range analysis results.
+        {AnalysisFact::kRangeAnalysis},
+    });
+
+    PassId::kCSE = reg.registerPass({
+        0,
+        "cse",
+        "Common Subexpression Elimination: hoist repeated pure binary subexpressions to compiler-managed temps",
+        PassPhase::ASTTransform,
+        PassKind::CostTransform,
+        // CSE introduces new VarDecl nodes; run after DCE so dead code does
+        // not generate spurious CSE candidates.
+        {AnalysisFact::kDCE},
+        {AnalysisFact::kCSE},
+        // Introduces new variable declarations — invalidates any fact that
+        // tracks exact variable counts or live ranges.
+        {},
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -339,6 +372,8 @@ OptimizationOrchestrator::buildDispatch() {
         {PassId::kEGraph,          R([this](Program* p, OptimizationContext& c){ runEGraph(p, c); })},
         {PassId::kRangeAnalysis,   R([this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); })},
         {PassId::kRLC,             R([this](Program* p, OptimizationContext& c){ runRLC(p, c); })},
+        {PassId::kDCE,             R([this](Program* p, OptimizationContext& c){ runDCE(p, c); })},
+        {PassId::kCSE,             R([this](Program* p, OptimizationContext& c){ runCSE(p, c); })},
     };
 }
 
@@ -726,6 +761,18 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
 void OptimizationOrchestrator::runRLC(Program* program, OptimizationContext& ctx) {
     codegen_->runRLCPass(program, verbose_);
     ctx.validity().rlc = true;
+}
+
+void OptimizationOrchestrator::runDCE(Program* program, OptimizationContext& ctx) {
+    runDCEPass(program, verbose_);
+    ctx.validity().dce = true;
+    // DCE removes code branches; range analysis results may be stale.
+    ctx.validity().rangeAnalysis = false;
+}
+
+void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx) {
+    runCSEPass(program, verbose_);
+    ctx.validity().cse = true;
 }
 
 // ── syncFactsToContext ────────────────────────────────────────────────────────

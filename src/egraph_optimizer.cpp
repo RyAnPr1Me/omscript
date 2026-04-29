@@ -16,6 +16,7 @@
 
 #include "ast.h"
 #include "egraph.h"
+#include "opt_context.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -334,18 +335,10 @@ static bool canRepresentInEGraph(const Expression* expr, const EGraphOptContext&
 
     case ASTNodeType::CALL_EXPR: {
         auto* call = static_cast<const CallExpr*>(expr);
-        // Allow known-pure builtins (no side effects, no I/O).
-        // Functions like print, input, swap, reverse, assert are excluded
-        // because they have observable side effects that the e-graph's
-        // rewrite rules could incorrectly eliminate or reorder.
-        static const std::unordered_set<std::string> pureBuiltins = {
-            "abs", "min", "max", "sign", "clamp", "pow", "sqrt",
-            "is_even", "is_odd", "len", "str_len", "to_string",
-            "to_int", "to_float", "typeof", "log2", "gcd",
-            "char_at", "str_eq", "str_find", "floor", "ceil", "round"
-        };
+        // Allow known-pure builtins (no side effects, no I/O) as classified
+        // by BuiltinEffectTable, plus user functions confirmed pure by analysis.
         const bool isKnownPure =
-            (pureBuiltins.count(call->callee) > 0) ||
+            BuiltinEffectTable::isPure(call->callee) ||
             (ctx.pureUserFuncs && ctx.pureUserFuncs->count(call->callee) > 0);
         if (!isKnownPure)
             return false;

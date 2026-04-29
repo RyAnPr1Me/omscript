@@ -69,6 +69,8 @@ namespace AnalysisFact {
     inline constexpr const char* kEGraph          = "egraph";
     inline constexpr const char* kRangeAnalysis   = "range_analysis";
     inline constexpr const char* kRLC             = "rlc";
+    inline constexpr const char* kDCE             = "dce";
+    inline constexpr const char* kCSE             = "cse";
 } // namespace AnalysisFact
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1301,14 +1301,23 @@ std::vector<RewriteRule> getAlgebraicRules() {
             return g.addBinOp(Op::Add, s.at("x"), s.at("x"));
         });
 
-    // ── Strength reduction: x * 2^n → x << n (for common powers of 2) ──
-    for (int shift = 2; shift <= 10; ++shift) {
+    // ── Strength reduction: x * 2^n → x << n  and  2^n * x → x << n ────
+    // Both right-constant (x * C) and left-constant (C * x) forms are generated
+    // in one loop.  This replaces dozens of individually hand-written rules and
+    // is the single authoritative source for all power-of-2 shift reductions.
+    for (int shift = 1; shift <= 30; ++shift) {
         long long val = 1LL << shift;
-        rules.emplace_back("mul_pow2_" + std::to_string(val),
+        // Right-constant: x * 2^n
+        rules.emplace_back("mul_pow2_" + std::to_string(shift),
             P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(val)}),
             [shift](EGraph& g, const Subst& s) {
-                ClassId shiftAmt = g.addConst(shift);
-                return g.addBinOp(Op::Shl, s.at("x"), shiftAmt);
+                return g.addBinOp(Op::Shl, s.at("x"), g.addConst(shift));
+            });
+        // Left-constant: 2^n * x
+        rules.emplace_back("mul_pow2_left_" + std::to_string(shift),
+            P::OpPat(Op::Mul, {P::ConstPat(val), P::Wild("x")}),
+            [shift](EGraph& g, const Subst& s) {
+                return g.addBinOp(Op::Shl, s.at("x"), g.addConst(shift));
             });
     }
 
@@ -1550,64 +1559,6 @@ std::vector<RewriteRule> getAlgebraicRules() {
         [](EGraph& g, const Subst& s) {
             return g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
         });
-
-    // ── Mul zero (integer-safe): x * 0 → 0 ──────────────────────────────
-    rules.emplace_back("mul_zero_right",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(0)}),
-        [](EGraph& g, const Subst&) { return g.addConst(0); });
-
-    rules.emplace_back("mul_zero_left",
-        P::OpPat(Op::Mul, {P::ConstPat(0), P::Wild("x")}),
-        [](EGraph& g, const Subst&) { return g.addConst(0); });
-
-    // ── Strength reduction chain: x * 2^n → x << n ──────────────────────
-    // These enable the cost model to select shifts over multiplies.
-    rules.emplace_back("mul_2_to_shl1",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId one = g.addConst(1);
-            return g.addBinOp(Op::Shl, s.at("x"), one);
-        });
-
-    rules.emplace_back("mul_4_to_shl2",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(4)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId two = g.addConst(2);
-            return g.addBinOp(Op::Shl, s.at("x"), two);
-        });
-
-    rules.emplace_back("mul_8_to_shl3_chain",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(8)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId three = g.addConst(3);
-            return g.addBinOp(Op::Shl, s.at("x"), three);
-        });
-
-    rules.emplace_back("mul_16_to_shl4_chain",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(16)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId four = g.addConst(4);
-            return g.addBinOp(Op::Shl, s.at("x"), four);
-        });
-
-    rules.emplace_back("mul_32_to_shl5",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(32)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId five = g.addConst(5);
-            return g.addBinOp(Op::Shl, s.at("x"), five);
-        });
-
-    rules.emplace_back("mul_64_to_shl6",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(64)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId six = g.addConst(6);
-            return g.addBinOp(Op::Shl, s.at("x"), six);
-        });
-
-    // ── Double negation: -(-x) → x ──────────────────────────────────────
-    rules.emplace_back("neg_neg",
-        P::OpPat(Op::Neg, {P::OpPat(Op::Neg, {P::Wild("x")})}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
 
     // NOTE: Division by power-of-2 → shift is NOT safe for signed integers
 
@@ -2112,66 +2063,9 @@ std::vector<RewriteRule> getAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    rules.emplace_back("mul_2048_to_shl11",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2048LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(11)); });
-    rules.emplace_back("mul_4096_to_shl12",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(4096LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(12)); });
-    rules.emplace_back("mul_8192_to_shl13",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(8192LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(13)); });
-    rules.emplace_back("mul_16384_to_shl14",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(16384LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(14)); });
-    rules.emplace_back("mul_32768_to_shl15",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(32768LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(15)); });
-    rules.emplace_back("mul_65536_to_shl16",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(65536LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(16)); });
-    rules.emplace_back("mul_131072_to_shl17",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(131072LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(17)); });
-    rules.emplace_back("mul_262144_to_shl18",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(262144LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(18)); });
-    rules.emplace_back("mul_524288_to_shl19",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(524288LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(19)); });
-    rules.emplace_back("mul_1048576_to_shl20",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(1048576LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(20)); });
-    rules.emplace_back("mul_2097152_to_shl21",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2097152LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(21)); });
-    rules.emplace_back("mul_4194304_to_shl22",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(4194304LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(22)); });
-    rules.emplace_back("mul_8388608_to_shl23",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(8388608LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(23)); });
-    rules.emplace_back("mul_16777216_to_shl24",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(16777216LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(24)); });
-    rules.emplace_back("mul_33554432_to_shl25",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(33554432LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(25)); });
-    rules.emplace_back("mul_67108864_to_shl26",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(67108864LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(26)); });
-    rules.emplace_back("mul_134217728_to_shl27",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(134217728LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(27)); });
-    rules.emplace_back("mul_268435456_to_shl28",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(268435456LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(28)); });
-    rules.emplace_back("mul_536870912_to_shl29",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(536870912LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(29)); });
-    rules.emplace_back("mul_1073741824_to_shl30",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(1073741824LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(30)); });
+    // NOTE: All pure power-of-2 multiply-to-shift rules (x * 2^n → x << n
+    // and 2^n * x → x << n for n = 1..30) are generated by the loop above
+    // and do not need to be repeated here.
 
     // ─────────────────────────────────────────────────────────────────────
 
@@ -2494,46 +2388,8 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             return g.addBinOp(Op::Mul, s.at("a"), omB);
         });
 
-    // ─────────────────────────────────────────────────────────────────────
-    rules.emplace_back("mul_2_left_shl1",
-        P::OpPat(Op::Mul, {P::ConstPat(2), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(1)); });
-    rules.emplace_back("mul_4_left_shl2",
-        P::OpPat(Op::Mul, {P::ConstPat(4), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(2)); });
-    rules.emplace_back("mul_8_left_shl3",
-        P::OpPat(Op::Mul, {P::ConstPat(8), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(3)); });
-    rules.emplace_back("mul_16_left_shl4",
-        P::OpPat(Op::Mul, {P::ConstPat(16), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(4)); });
-    rules.emplace_back("mul_32_left_shl5",
-        P::OpPat(Op::Mul, {P::ConstPat(32), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(5)); });
-    rules.emplace_back("mul_64_left_shl6",
-        P::OpPat(Op::Mul, {P::ConstPat(64), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(6)); });
-    rules.emplace_back("mul_128_left_shl7",
-        P::OpPat(Op::Mul, {P::ConstPat(128), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(7)); });
-    rules.emplace_back("mul_256_left_shl8",
-        P::OpPat(Op::Mul, {P::ConstPat(256), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(8)); });
-    rules.emplace_back("mul_512_left_shl9",
-        P::OpPat(Op::Mul, {P::ConstPat(512), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(9)); });
-    rules.emplace_back("mul_1024_left_shl10",
-        P::OpPat(Op::Mul, {P::ConstPat(1024), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(10)); });
-    rules.emplace_back("mul_2048_left_shl11",
-        P::OpPat(Op::Mul, {P::ConstPat(2048), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(11)); });
-    rules.emplace_back("mul_4096_left_shl12",
-        P::OpPat(Op::Mul, {P::ConstPat(4096), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(12)); });
-    rules.emplace_back("mul_8192_left_shl13",
-        P::OpPat(Op::Mul, {P::ConstPat(8192), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(13)); });
+    // NOTE: Left-constant power-of-2 shift rules (2^n * x → x << n) are
+    // generated programmatically in getAlgebraicRules() and are not repeated here.
 
     // Left-constant non-power-of-2 strength reductions
     rules.emplace_back("mul_3_left_shift",
@@ -12186,6 +12042,22 @@ std::vector<RewriteRule> getAllRules() {
     auto advOptRules = getAdvancedOptRules();
     rules.insert(rules.end(), std::make_move_iterator(advOptRules.begin()),
                  std::make_move_iterator(advOptRules.end()));
+
+    // ── Deduplication: keep only the first rule with each name ───────────
+    // This is a safety net that catches any accidental duplicate registrations
+    // across rule-generating functions, ensuring the rule set is canonical.
+    {
+        std::unordered_set<std::string> seen;
+        seen.reserve(rules.size());
+        size_t out = 0;
+        for (size_t i = 0; i < rules.size(); ++i) {
+            if (seen.insert(rules[i].name).second) {
+                if (out != i) rules[out] = std::move(rules[i]);
+                ++out;
+            }
+        }
+        rules.erase(rules.begin() + static_cast<ptrdiff_t>(out), rules.end());
+    }
 
     return rules;
 }

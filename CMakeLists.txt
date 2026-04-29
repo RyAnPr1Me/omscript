@@ -94,6 +94,8 @@ set(SRC
     src/loop_transform_framework.cpp
     src/sdr_pass.cpp
     src/ipof_pass.cpp
+    src/dce_pass.cpp
+    src/cse_pass.cpp
 
     # Driver
     src/preprocessor.cpp

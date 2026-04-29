@@ -161,6 +161,8 @@ struct AnalysisValidity {
     bool egraph          = false; ///< egraph::optimizeProgram() has run
     bool rangeAnalysis   = false; ///< Value range analysis has run
     bool rlc             = false; ///< Region Lifetime Coalescing pass has run
+    bool dce             = false; ///< Dead Code Elimination pass has run
+    bool cse             = false; ///< Common Subexpression Elimination pass has run
 
     // ── Dispatch table ────────────────────────────────────────────────────
     bool* fieldFor(std::string_view fact) noexcept {
@@ -176,6 +178,8 @@ struct AnalysisValidity {
             {"egraph",           &AnalysisValidity::egraph         },
             {"range_analysis",   &AnalysisValidity::rangeAnalysis  },
             {"rlc",              &AnalysisValidity::rlc            },
+            {"dce",              &AnalysisValidity::dce            },
+            {"cse",              &AnalysisValidity::cse            },
         };
         for (const auto& row : kTable) {
             if (row.name == fact)

@@ -144,6 +144,8 @@ private:
     void runEGraph         (Program* program, OptimizationContext& ctx);
     void runRangeAnalysis  (Program* program, OptimizationContext& ctx);
     void runRLC            (Program* program, OptimizationContext& ctx);
+    void runDCE            (Program* program, OptimizationContext& ctx);
+    void runCSE            (Program* program, OptimizationContext& ctx);
 
     /// Build the PassId → runner dispatch map used by runPassPipeline and
     /// runToProvide.  Defined once here so the 10-entry table never needs to
