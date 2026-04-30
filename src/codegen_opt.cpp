@@ -2192,6 +2192,30 @@ static void addCanonicalLoopBarrier(llvm::FunctionPassManager& FPM) {
     FPM.addPass(llvm::LCSSAPass());
 }
 
+// ── Canonical post-transformation cleanup helper ───────────────────────────────
+// Adds the standard redundancy-elimination + dead-code-removal + CFG-cleanup
+// sequence that follows any IR-mutating transformation (inlining, specialisation,
+// superoptimiser, constant propagation, …).
+//   withEarlyCSE : prepend EarlyCSEPass(UseMemorySSA=true) — enables memory-
+//                  SSA-based load/store redundancy elimination before GVN.
+//   withMemCpy   : include MemCpyOptPass after DSEPass — needed when the
+//                  transformation may have introduced memcpy/memmove patterns.
+static void addCanonicalCleanup(llvm::FunctionPassManager& FPM,
+                                bool withEarlyCSE = true,
+                                bool withMemCpy   = false) {
+    if (withEarlyCSE)
+        FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+    FPM.addPass(llvm::SCCPPass());
+    FPM.addPass(llvm::CorrelatedValuePropagationPass());
+    FPM.addPass(llvm::NewGVNPass());
+    FPM.addPass(llvm::DSEPass());
+    if (withMemCpy)
+        FPM.addPass(llvm::MemCpyOptPass());
+    FPM.addPass(llvm::InstCombinePass());
+    FPM.addPass(llvm::ADCEPass());
+    FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+}
+
 void CodeGenerator::runOptimizationPasses() {
     // Ensure the native target is initialized before we try to create a
     // TargetMachine.  These calls are idempotent and fast after the first.
@@ -3008,14 +3032,7 @@ void CodeGenerator::runOptimizationPasses() {
         // Post-recursive-inlining cleanup (new-PM).
         if (!inlinedFuncs.empty()) {
             llvm::FunctionPassManager PostInlineFPM;
-            PostInlineFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
-            PostInlineFPM.addPass(llvm::SCCPPass());
-            PostInlineFPM.addPass(llvm::CorrelatedValuePropagationPass());
-            PostInlineFPM.addPass(llvm::NewGVNPass());
-            PostInlineFPM.addPass(llvm::DSEPass());
-            PostInlineFPM.addPass(llvm::InstCombinePass());
-            PostInlineFPM.addPass(llvm::ADCEPass());
-            PostInlineFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+            addCanonicalCleanup(PostInlineFPM);
             runPostFPMOnFuncs(std::move(PostInlineFPM),
                               {inlinedFuncs.begin(), inlinedFuncs.end()});
         }
@@ -3122,14 +3139,7 @@ void CodeGenerator::runOptimizationPasses() {
                 SpecFPM.addPass(llvm::InstSimplifyPass());
                 SpecFPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
                 SpecFPM.addPass(llvm::PromotePass());
-                SpecFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
-                SpecFPM.addPass(llvm::SCCPPass());
-                SpecFPM.addPass(llvm::CorrelatedValuePropagationPass());
-                SpecFPM.addPass(llvm::NewGVNPass());
-                SpecFPM.addPass(llvm::DSEPass());
-                SpecFPM.addPass(llvm::InstCombinePass());
-                SpecFPM.addPass(llvm::ADCEPass());
-                SpecFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                addCanonicalCleanup(SpecFPM);
                 runPostFPMOnFuncs(std::move(SpecFPM), std::move(specFuncList));
             }
         }
@@ -3197,21 +3207,19 @@ void CodeGenerator::runOptimizationPasses() {
 
         // Post-superoptimizer cleanup (new-PM, functions ≤2000 instructions).
         if (totalSuperOpts > 0) {
-            std::vector<llvm::Function*> smallFuncs;
-            for (auto& func : *module) {
-                if (!func.isDeclaration() && func.getInstructionCount() <= 2000)
-                    smallFuncs.push_back(&func);
-            }
+            // Helper: collect all non-declaration functions up to a given size.
+            auto collectSmallFuncs = [&](unsigned maxInstrs) {
+                std::vector<llvm::Function*> out;
+                for (auto& func : *module)
+                    if (!func.isDeclaration() && func.getInstructionCount() <= maxInstrs)
+                        out.push_back(&func);
+                return out;
+            };
+
+            auto smallFuncs = collectSmallFuncs(2000);
             if (!smallFuncs.empty()) {
                 llvm::FunctionPassManager PSuperFPM;
-                PSuperFPM.addPass(llvm::SCCPPass());
-                PSuperFPM.addPass(llvm::CorrelatedValuePropagationPass());
-                PSuperFPM.addPass(llvm::NewGVNPass());
-                PSuperFPM.addPass(llvm::DSEPass());
-                PSuperFPM.addPass(llvm::MemCpyOptPass());
-                PSuperFPM.addPass(llvm::InstCombinePass());
-                PSuperFPM.addPass(llvm::ADCEPass());
-                PSuperFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                addCanonicalCleanup(PSuperFPM, /*withEarlyCSE=*/false, /*withMemCpy=*/true);
                 runPostFPMOnFuncs(std::move(PSuperFPM), std::move(smallFuncs));
             }
 
@@ -3229,11 +3237,7 @@ void CodeGenerator::runOptimizationPasses() {
 
                 // Lightweight cleanup after pass 2.  Without this, pass-2
                 if (total2 > 0) {
-                    std::vector<llvm::Function*> smallFuncs2;
-                    for (auto& func : *module) {
-                        if (!func.isDeclaration() && func.getInstructionCount() <= 2000)
-                            smallFuncs2.push_back(&func);
-                    }
+                    auto smallFuncs2 = collectSmallFuncs(2000);
                     if (!smallFuncs2.empty()) {
                         llvm::FunctionPassManager PSuperFPM2;
                         PSuperFPM2.addPass(llvm::SCCPPass());
