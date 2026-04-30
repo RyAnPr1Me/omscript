@@ -42,6 +42,7 @@
 #include <llvm/Transforms/AggressiveInstCombine/AggressiveInstCombine.h>
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
+#include <llvm/Transforms/IPO/Inliner.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/IPO/GlobalOpt.h>
 #include <llvm/Transforms/IPO/HotColdSplitting.h>
@@ -4486,11 +4487,14 @@ void CodeGenerator::optimizeOptMaxFunctions() {
 
     // ── Post-OPTMAX module-level cleanup ──────────────────────────────────
     // After aggressively inlining + optimising each OPTMAX function, run a
-    // two-round IPO sweep:
-    //   Round 1 — eliminate dead code and constant-fold globals.
-    //   Round 2 — re-propagate constants and arguments newly exposed by Round 1,
-    //             then run a lightweight function-level cleanup pass.
-    // This two-round structure is necessary because GlobalOpt / GlobalDCE can
+    // three-round IPO sweep:
+    //   Round 1  — eliminate dead code and constant-fold globals.
+    //   Round 1.5— inline callees that became small enough after Round 1.
+    //   Round 2  — re-propagate constants and arguments newly exposed by Round
+    //              1/1.5, derive richer attributes, then run function-level
+    //              cleanup including loop invariant code motion.
+    //   Round 3  — final DCE sweep to remove any code made dead by Round 2.
+    // This multi-round structure is necessary because GlobalOpt / GlobalDCE can
     // internalize globals and eliminate parameters that the per-function passes
     // could not see, exposing new constant-folding opportunities for IPSCCP.
     {
@@ -4507,7 +4511,25 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // that were fully inlined and have no remaining callers).
         PostIPO.addPass(llvm::GlobalDCEPass());
 
-        // ── Round 2: re-propagation after dead-code removal ───────────────
+        // ── Round 1.5: post-DCE inlining ─────────────────────────────────
+        // After GlobalOpt folds globals and GlobalDCE removes unreachable
+        // functions, many OPTMAX helpers that were previously too large to
+        // inline (due to dead branches, unreachable callee bodies, etc.) may
+        // now be small enough for the cost-model to approve.  Running the
+        // standard CGSCC inliner here captures those opportunities and
+        // eliminates the call overhead before the IPSCCP/attribute passes run.
+        //
+        // InlinerPass is a CGSCC pass so it needs the CGSCC adaptor.  We do
+        // NOT use AlwaysInlinerPass here because the AlwaysInline stubs were
+        // already cleaned up in PreIPO; this is a cost-model-driven inlining
+        // pass for remaining, non-trivially-inlinable callees.
+        PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::InlinerPass()));
+        // Re-run GlobalDCE after inlining to remove callee bodies that were
+        // fully inlined (no callers remaining).
+        PostIPO.addPass(llvm::GlobalDCEPass());
+
+        // ── Round 2: re-propagation after dead-code removal and inlining ──
         // IPSCCP round 2: GlobalOpt may have replaced globals with constants,
         // exposing new opportunities for interprocedural constant propagation.
         PostIPO.addPass(llvm::IPSCCPPass());
@@ -4524,16 +4546,45 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // Runs after ConstantMerge so the merged globals don't prevent body
         // comparison from succeeding.
         PostIPO.addPass(llvm::MergeFunctionsPass());
+        // Attributor round 2: after IPSCCP, ConstArgProp, and MergeFunctions
+        // have significantly reduced the module, re-run the Attributor to
+        // derive sharper memory effects, nonnull/align/dereferenceable ranges,
+        // and speculatable attributes for the remaining functions.  The
+        // leaner module (fewer functions, more inlined bodies, more constants)
+        // enables the Attributor to reach stronger fixed points than in PreIPO.
+        PostIPO.addPass(llvm::AttributorPass());
         // Lightweight function-level cleanup: fold the newly-constant arguments
-        // and eliminate any dead code they expose.
+        // and eliminate any dead code they expose, then hoist loop-invariant
+        // code that SCCP/ConstArgProp made invariant.
         {
             llvm::FunctionPassManager PostCleanFPM;
             addLightCleanup(PostCleanFPM);
+            // Module-level LICM + IndVarSimplify: after SCCP + ConstArgProp
+            // have folded arguments into loop bounds/conditions, the resulting
+            // loop invariants can now be hoisted.  Run inside a
+            // module-to-function adaptor so every OPTMAX function benefits.
+            // UseMemorySSA=true provides more precise hoisting decisions.
+            {
+                llvm::LoopPassManager PostCleanLPM;
+                PostCleanLPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
+                PostCleanLPM.addPass(llvm::IndVarSimplifyPass());
+                PostCleanFPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+                    std::move(PostCleanLPM), /*UseMemorySSA=*/true));
+            }
+            // A second SCCP + InstCombine sweep after LICM: hoisting may
+            // expose new constant-folding targets (e.g., a hoisted load of a
+            // now-constant global, or an induction variable whose range is now
+            // provably bounded).
+            PostCleanFPM.addPass(llvm::SCCPPass());
+            PostCleanFPM.addPass(llvm::InstCombinePass());
+            PostCleanFPM.addPass(llvm::ADCEPass());
             PostIPO.addPass(
                 llvm::createModuleToFunctionPassAdaptor(std::move(PostCleanFPM)));
         }
+
+        // ── Round 3: final dead-code sweep ───────────────────────────────
         // Final GlobalDCE: remove any additional dead functions/globals exposed
-        // by Round 2 constant propagation and function merging.
+        // by Round 2 constant propagation, function merging, and LICM.
         PostIPO.addPass(llvm::GlobalDCEPass());
         // StripDeadPrototypes: remove declaration stubs for functions that are
         // now fully dead (i.e., have no callers and no definitions remaining in
@@ -4542,6 +4593,18 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         PostIPO.addPass(llvm::StripDeadPrototypesPass());
 
         PostIPO.run(*module, MAMMax);
+    }
+
+    // OPTMAX Wave 3 barrier: after PostIPO.  Captures the net reduction from
+    // all three PostIPO rounds (DCE, inlining, re-propagation, LICM).
+    if (verbose_) {
+        unsigned omWave = 102;
+        auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
+        std::cout << "    [optmax-wave 3 / post-ipo] "
+                  << omSnapshot.definedFunctions << " functions, "
+                  << omSnapshot.totalInstructions << " instrs, "
+                  << omSnapshot.pureFunctions.size() << " pure"
+                  << '\n';
     }
 }
 
