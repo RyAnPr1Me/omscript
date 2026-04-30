@@ -3811,6 +3811,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     }
     FPMMax.addPass(llvm::LoopDistributePass());
     FPMMax.addPass(llvm::LoopFusePass());
+    // Eliminate loads of values that were stored earlier in the same loop
+    // iteration (stencil / window patterns).  This pass is in the main O3
+    // pipeline's vectorizer EP callback but was missing from the OPTMAX pipeline.
+    FPMMax.addPass(llvm::LoopLoadEliminationPass());
     // Sharpen value ranges one final time before the cost model runs.
     FPMMax.addPass(llvm::CorrelatedValuePropagationPass());
     FPMMax.addPass(llvm::BDCEPass());
@@ -3848,6 +3852,26 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     FPMMax.addPass(llvm::ADCEPass());
 
     // ── Run the OPTMAX pipeline on each OPTMAX function ───────────────────
+
+    // Before running the per-function pipeline, perform a module-level IPO
+    // pre-pass on the whole module to materialise any `alwaysinline` callees
+    // into OPTMAX function bodies and propagate constants across call boundaries.
+    // This enables the per-function passes below to see fully inlined bodies
+    // and better constant ranges.
+    {
+        llvm::ModulePassManager PreIPO;
+        // AlwaysInlinerPass: inline callees marked alwaysinline (set above for
+        // OPTMAX helper functions smaller than kAlwaysInlineThreshold).
+        PreIPO.addPass(llvm::AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/false));
+        // IPSCCP: propagate constants across all call boundaries in the module
+        // now that small helpers are inlined.
+        PreIPO.addPass(llvm::IPSCCPPass());
+        // InferFunctionAttrs: deduce NoUnwind/WillReturn/NoFree/NoSync for any
+        // remaining callees so the per-function pipeline sees their effects.
+        PreIPO.addPass(llvm::InferFunctionAttrsPass());
+        PreIPO.run(*module, MAMMax);
+    }
+
     constexpr int optMaxIterations = 5;
     for (llvm::Function* func : optMaxFuncs) {
         unsigned prevCount = func->getInstructionCount();

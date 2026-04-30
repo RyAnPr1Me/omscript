@@ -778,10 +778,13 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
         if (op == "/" || op == "/=") {
             if (lSym && rInt(1))  { ++stats_.algebraicFolds; return lhs; }
         }
-        // ── Power: x ** 0 = 1, x ** 1 = x ───────────────────────────────
+        // ── Power: x ** 0 = 1, x ** 1 = x, 1 ** x = 1 ──────────────────
         if (op == "**") {
             if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(1);
             if (lSym && rInt(1))  { ++stats_.algebraicFolds; return lhs; }
+            // 1 raised to any integer power is always 1.
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 1)
+                { ++stats_.algebraicFolds; return CTValue::fromI64(1); }
         }
         // ── Bitwise AND: x & 0 = 0, x & -1 = x, x & x = x ──────────────
         if (op == "&" || op == "&=") {
@@ -809,11 +812,43 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
         if (op == ">>" || op == ">>=" || op == "<<" || op == "<<=" || op == ">>>") {
             if (lSym && rInt(0))  { ++stats_.algebraicFolds; return lhs; }
         }
-        // ── Modulo: x % ±1 = 0 ───────────────────────────────────────────
+        // ── Modulo: x % ±1 = 0, x % x = 0 ──────────────────────────────
         if (op == "%" || op == "mod" || op == "%=") {
             if (rhs.isConcrete() && rhs.isInt() &&
                 (rhs.asI64() == 1 || rhs.asI64() == -1))
                 return CTValue::fromI64(0);
+            if (sameVar) { ++stats_.algebraicFolds; return CTValue::fromI64(0); }
+        }
+        // ── Logical AND short-circuits and identities ─────────────────────
+        // x && 0 = 0, 0 && x = 0 (short-circuit regardless of x)
+        // x && 1 = x, 1 && x = x (identity when the concrete side is true)
+        if (op == "&&") {
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
+            if (lSym && rhs.isConcrete() && rhs.isInt() && rhs.asI64() != 0)
+                { ++stats_.algebraicFolds; return lhs; }
+            if (rSym && lhs.isConcrete() && lhs.isInt() && lhs.asI64() != 0)
+                { ++stats_.algebraicFolds; return rhs; }
+        }
+        // ── Logical OR short-circuits and identities ──────────────────────
+        // x || 1 = 1, 1 || x = 1 (short-circuit when concrete side is true)
+        // x || 0 = x, 0 || x = x (identity when the concrete side is false)
+        if (op == "||") {
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() != 0) return lhs;
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() != 0) return rhs;
+            if (lSym && rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0)
+                { ++stats_.algebraicFolds; return lhs; }
+            if (rSym && lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0)
+                { ++stats_.algebraicFolds; return rhs; }
+        }
+        // ── Same-variable comparisons ──────────────────────────────────────
+        // x == x → 1, x != x → 0, x < x → 0, x <= x → 1, x > x → 0, x >= x → 1.
+        // These arise naturally in induction-variable guard patterns.
+        if (sameVar) {
+            if (op == "==" || op == "<=" || op == ">=")
+                { ++stats_.algebraicFolds; return CTValue::fromI64(1); }
+            if (op == "!=" || op == "<"  || op == ">")
+                { ++stats_.algebraicFolds; return CTValue::fromI64(0); }
         }
 
         return CTValue::symbolic();
@@ -3356,6 +3391,10 @@ void CTEngine::runPass(const Program* program) {
                 auto* d = static_cast<const VarDecl*>(st);
                 return !d->initializer || pureE(d->initializer.get());
             }
+            if (st->type == ASTNodeType::MOVE_DECL) {
+                auto* md = static_cast<const MoveDecl*>(st);
+                return !md->initializer || pureE(md->initializer.get());
+            }
             if (st->type == ASTNodeType::EXPR_STMT) {
                 auto* es = static_cast<const ExprStmt*>(st);
                 return pureE(es->expression.get());
@@ -3679,8 +3718,12 @@ void CTEngine::runPass(const Program* program) {
 
     // ── Phase 10: inter-call-site pre-evaluation ──────────────────────────
     {
-        // Helper: try to resolve a single expression to a CTValue using only
-        auto tryResolveLiteral = [&](const Expression* ex) -> std::optional<CTValue> {
+        // Helper: try to resolve a single expression to a concrete CTValue.
+        // Handles literals, global/enum constants, unary negation on any
+        // resolvable sub-expression, and binary arithmetic on two resolvable
+        // sub-expressions.  Recursive, so -1, 2 + 3 * 4, etc. all work.
+        std::function<std::optional<CTValue>(const Expression*)> tryResolveLiteral;
+        tryResolveLiteral = [&](const Expression* ex) -> std::optional<CTValue> {
             if (!ex) return std::nullopt;
             if (ex->type == ASTNodeType::LITERAL_EXPR) {
                 auto* lit = static_cast<const LiteralExpr*>(ex);
@@ -3704,6 +3747,27 @@ void CTEngine::runPass(const Program* program) {
                 const std::string flat = sr->scopeName + "_" + sr->memberName;
                 auto eit = enumConsts_.find(flat);
                 if (eit != enumConsts_.end()) return CTValue::fromI64(eit->second);
+            }
+            // Unary negation / logical-not on a resolvable sub-expression.
+            if (ex->type == ASTNodeType::UNARY_EXPR) {
+                auto* un = static_cast<const UnaryExpr*>(ex);
+                auto inner = tryResolveLiteral(un->operand.get());
+                if (inner) {
+                    CTValue v = evalUnaryOp(un->op, *inner);
+                    if (v.isConcrete()) return v;
+                }
+                return std::nullopt;
+            }
+            // Binary arithmetic on two resolvable sub-expressions (e.g. 2 + 3 * 4).
+            if (ex->type == ASTNodeType::BINARY_EXPR) {
+                auto* bin = static_cast<const BinaryExpr*>(ex);
+                auto l = tryResolveLiteral(bin->left.get());
+                auto r = tryResolveLiteral(bin->right.get());
+                if (l && r) {
+                    CTValue v = evalBinaryOp(bin->op, *l, *r);
+                    if (v.isConcrete()) return v;
+                }
+                return std::nullopt;
             }
             return std::nullopt;
         };
@@ -4331,11 +4395,8 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         CTInterval condRange = analyzeExpr(ifs->condition.get(), env, result);
 
         // Derive reachability from the condition's abstract value.
-        const bool condCanBeTrue  = !condRange.isBottom() &&
-                                     (condRange.isTop() || condRange.includes(0) == false ||
-                                      !condRange.isConcrete() || condRange.lo != 0);
-        const bool condCanBeFalse = !condRange.isBottom() &&
-                                     (condRange.isTop() || condRange.includes(0));
+        // condAlwaysTrue:  condition range cannot contain 0 and is a concrete range.
+        // condAlwaysFalse: condition is the single concrete value 0.
         const bool condAlwaysTrue  = condRange.isRange() &&
                                       !condRange.includesZero() && !condRange.isTop();
         const bool condAlwaysFalse = condRange.isConcrete() && condRange.lo == 0;
@@ -4350,7 +4411,6 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
             analyzeStmt(ifs->thenBranch.get(), env, result);
             return true;
         }
-        (void)condCanBeTrue; (void)condCanBeFalse; // suppress warnings
 
         // Branch is genuinely conditional — analyse both arms with narrowed envs.
         CTAbstractEnv thenEnv = env, elseEnv = env;
@@ -4401,13 +4461,22 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         CTInterval ivRange;
         if (startI.isRange() && endI.isRange() && stepI.isRange() &&
             !startI.isTop() && !endI.isTop() && !stepI.isTop()) {
-            // Positive step: i goes from start to end-1
             if (stepI.lo > 0) {
+                // Positive step: i iterates from start (inclusive) to end (exclusive).
+                // Range: [startI.lo, endI.hi - 1]
                 int64_t loIV = startI.lo;
                 int64_t hiIV;
-                safeAddI64(endI.hi, -1, hiIV);  // end is exclusive
+                safeAddI64(endI.hi, -1, hiIV);
+                ivRange = CTInterval::range(loIV, hiIV);
+            } else if (stepI.hi < 0) {
+                // Negative step: i iterates from start (inclusive) down to end (exclusive).
+                // Range: [endI.lo + 1, startI.hi]
+                int64_t loIV;
+                int64_t hiIV = startI.hi;
+                safeAddI64(endI.lo, 1, loIV);
                 ivRange = CTInterval::range(loIV, hiIV);
             } else {
+                // Step includes zero or straddles positive/negative — conservatively TOP.
                 ivRange = CTInterval::top();
             }
         } else {
@@ -4559,8 +4628,10 @@ void CTEngine::runAbstractInterpretation(const Program* program) {
             analysisSafeDiv_.insert(e);
             ++stats_.safeDivisions;
         }
-        for (auto* e : res.safeArithmetic)
+        for (auto* e : res.safeArithmetic) {
             analysisSafeArith_.insert(e);
+            ++stats_.safeArithmetic;
+        }
     }
 }
 

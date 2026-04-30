@@ -5462,6 +5462,7 @@ void CodeGenerator::runCFCTRE(Program* program) {
                   << s.deadBranchesEliminated << " dead branches, "
                   << s.safeArrayAccesses      << " safe array accesses, "
                   << s.safeDivisions          << " safe divisions, "
+                  << s.safeArithmetic         << " safe arithmetic ops, "
                   << s.cheaperRewritesFound   << " cheaper rewrites" << '\n';
     }
 
