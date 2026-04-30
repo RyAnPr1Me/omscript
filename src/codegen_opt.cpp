@@ -3977,6 +3977,10 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     FPM.addPass(CrossIterLoadReusePass());
     FPM.addPass(LoopInvariantReciprocalHoistPass());
     FPM.addPass(MACPatternPass());
+    // Post-MAC cleanup: CSE and GVN to exploit newly-created fmuladd patterns
+    // immediately, before bounds-check and constraint passes see the IR.
+    FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+    FPM.addPass(llvm::NewGVNPass());
     // Bounds-check–aware passes: omitted for safety=Off (the caller guarantees
     // accesses are always in bounds, so these passes provide no new information).
     if (safety != SafetyLevel::Off) {
@@ -3987,6 +3991,11 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     FPM.addPass(llvm::GuardWideningPass());
     FPM.addPass(llvm::SCCPPass());
     FPM.addPass(llvm::InstCombinePass());
+    // AggressiveInstCombine catches non-trivial multi-use and multi-instruction
+    // patterns that standard InstCombine misses (e.g., rotate idioms, select
+    // chains, bitfield extractions).  Runs before TreeHeightReduction so the
+    // tree balancer sees a clean, already-simplified expression tree.
+    FPM.addPass(llvm::AggressiveInstCombinePass());
     FPM.addPass(TreeHeightReductionPass());
     FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
     FPM.addPass(AdvancedBranchWeightAnnotationPass());
@@ -4058,6 +4067,9 @@ static llvm::FunctionPassManager buildOptMaxVecFPM(const OptMaxConfig& cfg) {
     FPM.addPass(llvm::VectorCombinePass());
     // LoadStoreVectorizer: combine adjacent scalar loads/stores.
     FPM.addPass(llvm::LoadStoreVectorizerPass());
+    // Software prefetch after vectorization: now that loops are widened, the
+    // prefetch distance can target the vectorized stride rather than scalar.
+    FPM.addPass(llvm::LoopDataPrefetchPass());
 
     // ── Phase 5: Post-vectorization cleanup ──────────────────────────────
     FPM.addPass(llvm::AggressiveInstCombinePass());
@@ -4073,6 +4085,23 @@ static llvm::FunctionPassManager buildOptMaxVecFPM(const OptMaxConfig& cfg) {
     FPM.addPass(llvm::MemCpyOptPass());
     FPM.addPass(llvm::NewGVNPass());
     FPM.addPass(llvm::InstCombinePass());
+    // Float2Int: convert float operations to integer when the values are
+    // provably representable as integers (e.g., float indices, loop counters).
+    // Runs after GVN so the integer ranges are well-known.
+    FPM.addPass(llvm::Float2IntPass());
+    // DivRemPairs: reuse quotient from div for rem to save an extra divide.
+    FPM.addPass(llvm::DivRemPairsPass());
+    // InferAlignment / AlignmentFromAssumptions: refine alignment metadata
+    // for vector loads/stores after vectorization to allow the back-end to
+    // emit aligned move instructions (vmovaps vs vmovups on x86).
+    FPM.addPass(llvm::InferAlignmentPass());
+    FPM.addPass(llvm::AlignmentFromAssumptionsPass());
+    // ConstantHoisting: materialize expensive constants (e.g. large immediates
+    // introduced by the vectorizer) once per function rather than once per use.
+    FPM.addPass(llvm::ConstantHoistingPass());
+    // SeparateConstOffsetFromGEP: factor constant byte offsets out of GEP
+    // chains so the back-end can fold them into addressing modes directly.
+    FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
     FPM.addPass(llvm::VectorCombinePass());
     FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
     FPM.addPass(llvm::LoopSinkPass());
@@ -4274,6 +4303,15 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     PTOMax.LoopInterleaving  = true;
     // Unrolling is handled explicitly in buildOptMaxScalarFPM.
     PTOMax.LoopUnrolling     = false;
+    // Aggressive inlining threshold for OPTMAX: 3000 (vs the O3 default of 225).
+    // OPTMAX functions are hot kernels where larger-body inlining pays off by
+    // exposing constant arguments, enabling vectorization, and eliminating call
+    // overhead inside tight loops.
+    PTOMax.InlinerThreshold  = 3000;
+    // Enable cross-function optimizations unconditionally for OPTMAX.
+    PTOMax.MergeFunctions    = true;
+    PTOMax.CallGraphProfile  = true;
+    PTOMax.ForgetAllSCEVInLoopUnroll = true;
 
     llvm::PassBuilder PBMax(tm.get(), PTOMax);
     llvm::LoopAnalysisManager  LAMMax;
@@ -4525,6 +4563,16 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // pass for remaining, non-trivially-inlinable callees.
         PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
             llvm::InlinerPass()));
+        // Post-inlining attribute refresh: after the inliner folds callees into
+        // callers, run PostOrderFunctionAttrs + Attributor at CGSCC granularity
+        // to re-derive memory-effect, nounwind, and purity attributes for the
+        // merged bodies.  This ensures Round 2 IPSCCP and ConstArgProp start
+        // from the sharpest possible attribute set.
+        PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::PostOrderFunctionAttrsPass()));
+        PostIPO.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::AttributorCGSCCPass()));
         // Re-run GlobalDCE after inlining to remove callee bodies that were
         // fully inlined (no callers remaining).
         PostIPO.addPass(llvm::GlobalDCEPass());
@@ -4546,6 +4594,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // Runs after ConstantMerge so the merged globals don't prevent body
         // comparison from succeeding.
         PostIPO.addPass(llvm::MergeFunctionsPass());
+        // Re-run function attrs (post-order + reverse) before the full Attributor
+        // so Attributor starts from the most up-to-date deduction state.
+        PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::PostOrderFunctionAttrsPass()));
+        PostIPO.addPass(llvm::ReversePostOrderFunctionAttrsPass());
         // Attributor round 2: after IPSCCP, ConstArgProp, and MergeFunctions
         // have significantly reduced the module, re-run the Attributor to
         // derive sharper memory effects, nonnull/align/dereferenceable ranges,
@@ -4553,6 +4606,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // leaner module (fewer functions, more inlined bodies, more constants)
         // enables the Attributor to reach stronger fixed points than in PreIPO.
         PostIPO.addPass(llvm::AttributorPass());
+        // IPSCCP round 3: Attributor may have promoted functions to readnone or
+        // derived new constant return values; propagate those immediately before
+        // the cleanup FPM so the cleanup sees fully folded constants.
+        PostIPO.addPass(llvm::IPSCCPPass());
         // Lightweight function-level cleanup: fold the newly-constant arguments
         // and eliminate any dead code they expose, then hoist loop-invariant
         // code that SCCP/ConstArgProp made invariant.

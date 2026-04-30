@@ -417,7 +417,21 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "mutex_destroy",
                                                                 "typeof",
                                                                 "unreachable",
-                                                                "write"};
+                                                                "write",
+                                                                // Numeric type-cast functions: i32(x), u8(x), etc.
+                                                                // These are parsed as CallExpr nodes and handled
+                                                                // as builtins; they must be whitelisted so that
+                                                                // OPTMAX functions can call them without error.
+                                                                "i8",  "u8",
+                                                                "i16", "u16",
+                                                                "i32", "u32",
+                                                                "i64", "u64",
+                                                                "f32", "f64",
+                                                                "to_i8",  "to_u8",
+                                                                "to_i16", "to_u16",
+                                                                "to_i32", "to_u32",
+                                                                "to_i64", "to_u64",
+                                                                "to_f32", "to_f64"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
