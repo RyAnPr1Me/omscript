@@ -251,6 +251,7 @@ const std::unordered_map<std::string, BuiltinEffects>& BuiltinEffectTable::table
         {"is_inf",          {true,  false, false, false}},
 
         // ── 2-D column-major matrix builtins ──────────────────────────────────
+        // Extended 8-field layout: {CF, RM, WM, IO, hasMutation, hasSync, allocates, noalias}
         {"mat_new",         {false, false, true,  false, false, false, true,  false}},
         {"mat_fill",        {false, false, true,  false, false, false, true,  false}},
         {"mat_get",         {false, true,  false, false}},

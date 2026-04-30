@@ -9,13 +9,16 @@
 ///
 /// Float safety:
 ///   Rules that are unsound for IEEE-754 floats (e.g. x*0→0 is wrong for NaN)
-///   are only applied when BOTH operands are provably integer-type.  We detect
-///   this by checking that no involved literal is a float literal, and that the
-///   expression does not contain a float-typed identifier (we conservatively
-///   skip when we cannot determine the type of an identifier at the AST level).
-///   Simple integer-operand rules (x+0→x, x*1→x) are safe for floats *except*
-///   where documented, and we keep the conservative approach of only applying
-///   these rules when at least one operand is a non-float literal.
+///   are only applied when BOTH operands are provably integer-type.  The guard
+///   function `definitelyInteger(expr)` returns true only when the expression
+///   contains no float literals and no identifier nodes (whose types are unknown
+///   at the AST level).  For unknown identifiers it conservatively returns false
+///   ("may be float"), so identity rules like `x - x → 0` or `x / x → 1` are
+///   only applied when both sides are integer literals or sub-expressions that
+///   consist only of integer literals.  Simple literal-operand rules (x+0→x,
+///   x*1→x) are safe for floats *except* where documented, and we keep the
+///   conservative approach of only applying them when at least one operand is
+///   a non-float literal.
 
 #include "alg_simp_pass.h"
 
@@ -58,29 +61,31 @@ static bool sameIdent(const Expression* a, const Expression* b) {
         == static_cast<const IdentifierExpr*>(b)->name;
 }
 
-/// True when @p expr is definitely not a floating-point expression.
-/// We use a conservative check: if either side of any sub-expression is a
-/// float literal we consider it floating-point.
-static bool definitelyNotFloat(const Expression* expr) {
+/// True when @p expr is provably of integer type:
+///   - Returns true  if every reachable leaf is an integer literal.
+///   - Returns false for float literals (definitely-float) and for
+///     IDENTIFIER_EXPR nodes (unknown type — conservatively treated as
+///     "may be float" until a type-inference pass is available).
+/// This three-valued logic (definitely-integer / definitely-float / unknown)
+/// maps to the boolean as: true = "safe to apply integer-only rules",
+/// false = "unsafe or unknown".
+static bool definitelyInteger(const Expression* expr) {
     if (!expr) return true;
     if (isFloatLit(expr)) return false;
     switch (expr->type) {
     case ASTNodeType::BINARY_EXPR: {
         const auto* b = static_cast<const BinaryExpr*>(expr);
-        return definitelyNotFloat(b->left.get()) && definitelyNotFloat(b->right.get());
+        return definitelyInteger(b->left.get()) && definitelyInteger(b->right.get());
     }
     case ASTNodeType::UNARY_EXPR:
-        return definitelyNotFloat(static_cast<const UnaryExpr*>(expr)->operand.get());
+        return definitelyInteger(static_cast<const UnaryExpr*>(expr)->operand.get());
     case ASTNodeType::LITERAL_EXPR:
         return !isFloatLit(expr);
     case ASTNodeType::IDENTIFIER_EXPR:
         // Type information for user-declared variables is not available at this
-        // pass level (the type-inference pass runs later).  We conservatively
-        // return false (may be float) which causes AlgSimp to skip identity
-        // rules like `x - x → 0` or `x / x → 1` for identifier operands.
-        // A future improvement would propagate type annotations to make this
-        // precise.  Integer-literal operands are always safe because integer
-        // literals never carry float semantics.
+        // pass level (the type-inference pass runs later).  Conservatively
+        // return false so that rules like `x - x → 0` or `x / x → 1` are
+        // never misapplied to float-typed identifiers.
         return false;
     default:
         return false;
@@ -169,7 +174,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 return count;
             }
             // x - x → 0  (safe for integers only)
-            if (sameIdent(L, R) && definitelyNotFloat(L)) {
+            if (sameIdent(L, R) && definitelyInteger(L)) {
                 expr = makeInt(0);
                 ++count;
                 return count;
@@ -191,12 +196,12 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 return count;
             }
             // x * 0 → 0  and  0 * x → 0  (integers only — NaN*0≠0 for floats)
-            if (isIntLit(R, 0) && definitelyNotFloat(L)) {
+            if (isIntLit(R, 0) && definitelyInteger(L)) {
                 expr = makeInt(0);
                 ++count;
                 return count;
             }
-            if (isIntLit(L, 0) && definitelyNotFloat(R)) {
+            if (isIntLit(L, 0) && definitelyInteger(R)) {
                 expr = makeInt(0);
                 ++count;
                 return count;
@@ -229,7 +234,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 return count;
             }
             // x / x → 1  (integers, non-zero assumption; conservative — only ident)
-            if (sameIdent(L, R) && definitelyNotFloat(L)) {
+            if (sameIdent(L, R) && definitelyInteger(L)) {
                 expr = makeInt(1);
                 ++count;
                 return count;
@@ -245,7 +250,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 return count;
             }
             // x % x → 0  (non-zero assumption; conservative — only ident)
-            if (sameIdent(L, R) && definitelyNotFloat(L)) {
+            if (sameIdent(L, R) && definitelyInteger(L)) {
                 expr = makeInt(0);
                 ++count;
                 return count;
@@ -262,7 +267,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
             if (isIntLit(R, 0)) {
                 // x ** 0 → 1  (integers; 0**0 is defined as 1 in OmScript)
-                if (definitelyNotFloat(L)) {
+                if (definitelyInteger(L)) {
                     expr = makeInt(1);
                     ++count;
                     return count;
@@ -347,7 +352,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
         // ── Self-identifier comparisons ────────────────────────────────────
         // These are only safe for integers because NaN comparisons for floats
         // do not satisfy the reflexive property (NaN != NaN).
-        if (sameIdent(L, R) && definitelyNotFloat(L)) {
+        if (sameIdent(L, R) && definitelyInteger(L)) {
             if (op == "==" || op == "<=" || op == ">=") {
                 // x == x → 1,  x <= x → 1,  x >= x → 1
                 expr = makeInt(1);
