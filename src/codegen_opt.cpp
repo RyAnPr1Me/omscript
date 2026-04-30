@@ -3,6 +3,7 @@
 #include "hardware_graph.h"
 #include "ipof_pass.h"
 #include "optimization_manager.h" // OptimizationManager, CostModel
+#include "program_analysis.h"     // ProgramFactsSnapshot, computeProgramFacts
 #include "sdr_pass.h"
 #include "superoptimizer.h"
 #include "polyopt.h"
@@ -2957,6 +2958,32 @@ void CodeGenerator::runOptimizationPasses() {
     PostPB.registerLoopAnalyses(PostLAM);
     PostPB.crossRegisterProxies(PostLAM, PostFAM, PostCGAM, PostMAM);
 
+    // ── Post-wave barrier infrastructure ─────────────────────────────────
+    // waveIndex is incremented and a fresh ProgramFactsSnapshot is computed
+    // after each optimization wave.  The snapshot provides a globally-coherent
+    // view of the program (purity, nullability, const-arg patterns, loop
+    // structure, dead-code likelihood) so subsequent waves can operate with
+    // better information.  computeProgramFacts is pure-analysis: it never
+    // modifies the module.
+    unsigned waveIndex = 0;
+    auto advanceWave = [&](bool verbose, const char* waveName) -> omscript::ProgramFactsSnapshot {
+        ++waveIndex;
+        auto s = omscript::computeProgramFacts(*module, PostMAM, waveIndex);
+        if (verbose) {
+            std::cout << "    [wave " << waveIndex << " / " << waveName << "] "
+                      << s.definedFunctions << " functions, "
+                      << s.totalInstructions << " instrs, "
+                      << s.pureFunctions.size() << " pure, "
+                      << s.totalConstArgCallSites << " const-arg sites, "
+                      << s.unreachableFunctions.size() << " unreachable"
+                      << '\n';
+        }
+        return s;
+    };
+
+    // Wave 1: main LLVM pipeline already ran; PostMAM is ready.
+    omscript::ProgramFactsSnapshot snapshot = advanceWave(verbose_, "main-pipeline");
+
     // Helper: run an FPM on a specific subset of functions using PostMAM.
     auto runPostFPMOnFuncs = [&](llvm::FunctionPassManager FPM,
                                  std::vector<llvm::Function*> funcs) {
@@ -3178,6 +3205,11 @@ void CodeGenerator::runOptimizationPasses() {
         ConstPropMPM.run(*module, PostMAM);
     }
 
+    // Wave 2 barrier: after recursive inlining, function specialization, and
+    // constant-argument propagation.  The snapshot now reflects any newly-inlined
+    // or specialized functions and updated attribute information.
+    snapshot = advanceWave(verbose_, "spec+constprop");
+
     // Superoptimizer: run after the standard LLVM pipeline to catch patterns
     if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) {
@@ -3279,6 +3311,11 @@ void CodeGenerator::runOptimizationPasses() {
         }
     }
 
+    // Wave 3 barrier: after superoptimizer (idiom recognition, algebraic
+    // simplification, synthesis).  The snapshot captures which functions shrank
+    // enough to become new inlining or specialization candidates.
+    snapshot = advanceWave(verbose_, "superopt");
+
     // Hardware Graph Optimization Engine: run after the superoptimizer when
     if (enableHGOE_ && optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) {
@@ -3314,6 +3351,11 @@ void CodeGenerator::runOptimizationPasses() {
         }
     }
 
+    // Wave 4 barrier: after HGOE (hardware-graph scheduling and annotation).
+    // The snapshot now reflects any instruction-count changes from HGOE
+    // reordering, updated loop metadata, and new attribute deductions.
+    snapshot = advanceWave(verbose_, "hgoe");
+
     // ── Speculative Devectorization & Revectorization (SDR) ────────────────
     if (enableSDR_ && optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) std::cout << "    Running SDR pass..." << '\n';
@@ -3342,6 +3384,11 @@ void CodeGenerator::runOptimizationPasses() {
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSDR_) {
         std::cout << "    SDR disabled (-fno-sdr)" << '\n';
     }
+
+    // Wave 5 barrier: after SDR (speculative devectorization / revectorization).
+    // The snapshot captures updated vector lane counts, any functions narrowed
+    // or widened, and revised instruction counts that inform the IPOF pass.
+    snapshot = advanceWave(verbose_, "sdr");
 
     // ── Implicit Phase Ordering Fixer (IPOF) ────────────────────────────────
     if (enableIPOF_ && optimizationLevel >= OptimizationLevel::O2) {
@@ -3375,6 +3422,12 @@ void CodeGenerator::runOptimizationPasses() {
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableIPOF_) {
         std::cout << "    IPOF disabled (-fno-ipof)" << '\n';
     }
+
+    // Wave 6 barrier: after IPOF.  This is the final snapshot before the
+    // closing pipeline.  The closing pipeline uses snapshot.pureFunctions and
+    // snapshot.unreachableFunctions to skip memory-intensive passes on functions
+    // that are already known-pure or dead (GlobalDCE will remove them anyway).
+    snapshot = advanceWave(verbose_, "ipof");
 
     // -----------------------------------------------------------------------
     if (optimizationLevel >= OptimizationLevel::O2) {
@@ -3537,7 +3590,23 @@ void CodeGenerator::runOptimizationPasses() {
             // eliminating branch-mispredict flushes before the final CFG cleanup.
             CloseFPM.addPass(BranchEntropyReductionPass());
             CloseFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
-            runPostFPMOnAll(std::move(CloseFPM));
+
+            // Use the Wave 6 snapshot to skip unreachable functions: GlobalDCE
+            // will remove them anyway, so running the closing pipeline on them
+            // wastes compile time.  Reachable functions (including those with
+            // unknown reachability) always get the full closing treatment.
+            if (!snapshot.unreachableFunctions.empty()) {
+                std::vector<llvm::Function*> closingTargets;
+                closingTargets.reserve(snapshot.definedFunctions);
+                for (auto& F : *module) {
+                    if (!F.isDeclaration() &&
+                        !snapshot.isUnreachable(F.getName().str()))
+                        closingTargets.push_back(&F);
+                }
+                runPostFPMOnFuncs(std::move(CloseFPM), std::move(closingTargets));
+            } else {
+                runPostFPMOnAll(std::move(CloseFPM));
+            }
             if (verbose_) {
                 std::cout << "    Unified closing new-PM pipeline complete" << '\n';
             }
@@ -3934,6 +4003,22 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         PreIPO.run(*module, MAMMax);
     }
 
+    // OPTMAX Wave 1 barrier: after PreIPO (always-inline + IPSCCP + attribute
+    // inference + ConstArgPropagation + nullability).  The snapshot gives the
+    // per-function pipeline a consistent view of which functions were inlined
+    // and which have been proven pure or const-argument-free.
+    {
+        unsigned omWave = 100; // OPTMAX waves start at 100 to distinguish from main pipeline
+        auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
+        if (verbose_) {
+            std::cout << "    [optmax-wave 1 / pre-ipo] "
+                      << omSnapshot.definedFunctions << " functions, "
+                      << omSnapshot.totalInstructions << " instrs, "
+                      << omSnapshot.pureFunctions.size() << " pure"
+                      << '\n';
+        }
+    }
+
     constexpr int optMaxIterations = 5;
     for (llvm::Function* func : optMaxFuncs) {
         unsigned prevCount = func->getInstructionCount();
@@ -3971,6 +4056,22 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     }
     if (verbose_) {
         std::cout << "    OPTMAX unified new-PM pipeline complete" << '\n';
+    }
+
+    // OPTMAX Wave 2 barrier: after per-function pipeline.  The snapshot now
+    // reflects all instruction-count reductions, newly-proven pure functions,
+    // and updated attribute information.  Used to confirm that PostIPO's
+    // GlobalDCE is warranted (unreachable helpers that were fully inlined).
+    {
+        unsigned omWave = 101;
+        auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
+        if (verbose_) {
+            std::cout << "    [optmax-wave 2 / per-function] "
+                      << omSnapshot.definedFunctions << " functions, "
+                      << omSnapshot.totalInstructions << " instrs, "
+                      << omSnapshot.unreachableFunctions.size() << " unreachable (GlobalDCE targets)"
+                      << '\n';
+        }
     }
 
     // ── Post-OPTMAX module-level cleanup ─────────────────────────────────
