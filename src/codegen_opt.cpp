@@ -4216,6 +4216,31 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                     // no side effects.  Mark readnone so LLVM treats calls to this
                     // function like arithmetic expressions — fully hoistable, CSE-
                     // able, and dead-call-eliminable.
+                    //
+                    // Diagnostic guard: in verbose mode, warn if the function body
+                    // contains calls to intrinsics or external functions that may
+                    // have observable side effects (I/O, memory allocation, etc.).
+                    // This catches programmer errors where safety=Off is misapplied
+                    // to a function that actually has side effects.
+                    if (verbose_) {
+                        for (auto& BB : func) {
+                            for (auto& I : BB) {
+                                if (auto* call = llvm::dyn_cast<llvm::CallBase>(&I)) {
+                                    llvm::Function* callee = call->getCalledFunction();
+                                    if (callee && !callee->isIntrinsic()
+                                            && callee->isDeclaration()) {
+                                        llvm::errs()
+                                            << "omsc: note: [optmax safety=Off] '"
+                                            << func.getName()
+                                            << "' calls external function '"
+                                            << callee->getName()
+                                            << "' — readnone annotation may be "
+                                               "incorrect if it has side effects\n";
+                                    }
+                                }
+                            }
+                        }
+                    }
                     func.setMemoryEffects(llvm::MemoryEffects::none());
                 } else {
                     // May access globals/inaccessible mem, but definitely cannot
