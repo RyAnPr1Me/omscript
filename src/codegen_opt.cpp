@@ -3926,6 +3926,19 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
             unrollOpts.setFullUnrollMaxCount(256);
         FPM.addPass(llvm::LoopUnrollPass(unrollOpts));
     }
+    // Post-unroll induction variable canonicalization: unrolling can create
+    // chains of induction variable updates (e.g. i.0=i.1+4, i.1=i.2+4, …)
+    // that IndVarSimplify can collapse into a single canonical form.  This
+    // reduces the trip-count expression complexity that the vectorizer cost
+    // model sees, improving vectorization decisions for partially-unrolled
+    // loops.  UseMemorySSA=true is required for the loop adaptor because
+    // LICMPass (which IndVarSimplify may invoke as a helper) needs MemorySSA.
+    {
+        llvm::LoopPassManager LPMPostUnroll;
+        LPMPostUnroll.addPass(llvm::IndVarSimplifyPass());
+        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+            std::move(LPMPostUnroll), /*UseMemorySSA=*/true));
+    }
     // Post-unroll redundancy elimination.
     FPM.addPass(llvm::NewGVNPass());
     FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
@@ -3978,6 +3991,17 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     FPM.addPass(AdvancedBranchWeightAnnotationPass());
     FPM.addPass(ConditionalStoreSinkPass());
     FPM.addPass(BranchEntropyReductionPass());
+    FPM.addPass(llvm::ADCEPass());
+    // Final Phase 3 sweep: re-run SCCP + InstCombine + ADCE to fold any
+    // constant opportunities exposed by the preceding scalar passes
+    // (BranchEntropyReduction, ConditionalStoreSink, TreeHeightReduction, etc.
+    // can all expose new simplification targets).  This ensures the function is
+    // in the most reduced canonical form before entering the vectorization FPM,
+    // where a cleaner scalar representation leads to wider and more accurate
+    // cost-model decisions.
+    FPM.addPass(llvm::SCCPPass());
+    FPM.addPass(llvm::CorrelatedValuePropagationPass());
+    FPM.addPass(llvm::InstCombinePass());
     FPM.addPass(llvm::ADCEPass());
 
     return FPM;
@@ -4082,6 +4106,22 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // NoFree: OPTMAX functions don't free heap memory, enabling the
         // optimizer to sink/hoist loads past calls to these functions.
         func.addFnAttr(llvm::Attribute::NoFree);
+        // Speculatable (safety=Off only): the function is a pure mathematical
+        // kernel with no side effects — the user has explicitly opted out of
+        // safety checks, so LLVM may reorder and speculate calls above branches
+        // and into select operands.  This enables aggressive if-conversion and
+        // call-hoisting out of loops that contain conditionally-executed OPTMAX
+        // calls.  Not applied when safety=On/Relaxed because those functions
+        // may still read/write through pointer parameters in ways that prevent
+        // safe speculation without alias checks.
+        {
+            const std::string nameStrSafe = name.str();
+            auto cfgSafeIt = optMaxFunctionConfigs_.find(nameStrSafe);
+            if (cfgSafeIt != optMaxFunctionConfigs_.end()
+                    && cfgSafeIt->second.safety == SafetyLevel::Off) {
+                func.addFnAttr(llvm::Attribute::Speculatable);
+            }
+        }
         // Mark small OPTMAX helpers as always-inline candidates.
         if (func.getInstructionCount() < kAlwaysInlineThreshold
                 && !func.hasFnAttribute(llvm::Attribute::NoInline)) {
@@ -4133,6 +4173,16 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                 }
                 ++argIdx;
             }
+            // Additionally, assert argmemonly: the function exclusively accesses
+            // memory through its (noalias/restrict) pointer arguments and does not
+            // read or write any global variables, thread-locals, or other
+            // non-parameter memory.  This is a valid programmer assertion when
+            // memory.noalias=true is used — the function operates on explicitly-
+            // passed buffers only.  With this, alias analysis can prove that a
+            // call to this function cannot clobber any memory not reachable through
+            // its arguments, enabling load/store hoisting past calls and dead-store
+            // elimination across call boundaries.
+            func.setMemoryEffects(llvm::MemoryEffects::argMemOnly());
         }
 
         optMaxFuncs.push_back(&func);
@@ -4194,6 +4244,20 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // InferFunctionAttrs: deduce NoUnwind/WillReturn/NoFree/NoSync for any
         // remaining callees so the per-function pipeline sees their effects.
         PreIPO.addPass(llvm::InferFunctionAttrsPass());
+        // Attributor (module-level): derives richer attributes than
+        // PostOrderFunctionAttrsPass alone.  Specifically deduces memory effects
+        // (readnone / readmem / argmemonly), nonnull with dereferenceable ranges,
+        // precise alignment constraints, nocapture on globals, and speculatable
+        // for effectless functions — all expressed as LLVM attributes that the
+        // per-function FPMs can exploit for alias analysis, code motion, and
+        // redundancy elimination.  Runs after InferFunctionAttrs so it starts
+        // from the basic attribute set.
+        PreIPO.addPass(llvm::AttributorPass());
+        // AttributorCGSCC: context-sensitive Attributor pass at CGSCC granularity.
+        // Works bottom-up through the call graph SCC by SCC, enabling more precise
+        // deduction for mutually-recursive function groups.
+        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::AttributorCGSCCPass()));
         // ConstArgPropagation: for internal functions where every call site
         // passes the same concrete constant, replace the formal argument with
         // that constant — enabling SCCP / InstCombine to fold much deeper.
@@ -4219,7 +4283,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     }
 
     // OPTMAX Wave 1 barrier: after PreIPO (always-inline + CalledValueProp +
-    // IPSCCP + InferFunctionAttrs + ConstArgProp + nullability +
+    // IPSCCP + InferFunctionAttrs + Attributor + ConstArgProp + nullability +
     // ArgumentPromotion + function-attr inference).
     {
         unsigned omWave = 100; // OPTMAX waves start at 100 to distinguish from main pipeline
