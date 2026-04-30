@@ -5,16 +5,18 @@ set -eu
 # ──────────────────────────────────────────────────────────────
 #  OmScript Benchmark Suite  (Fair Edition)
 #
-#  53 diverse micro-benchmarks covering distinct workloads.
+#  86 diverse micro-benchmarks covering distinct workloads.
 #  No category is over-represented.  Both OM and C implementations
 #  are idiomatic and use the same algorithm.
 #
 #  Comparison modes:
-#    - BENCH_MODE=fair (default): symmetric aggressive flags for both OM and C,
-#      both compiled with clang (same LLVM backend) — OM wins through better
-#      IR quality (OPTMAX annotations, superoptimizer, srem→urem, etc.)
-#    - BENCH_MODE=omsc-fast: conservative C baseline for demonstrating OM's
-#      ceiling performance
+#    - BENCH_MODE=fair (default): C gets exactly the same compiler flags as OM
+#      (both use -O3 -march=native -mtune=native -fvectorize -funroll-loops).
+#      No C-exclusive flags. Each language wins through its own source-level
+#      optimization features: OM via OPTMAX/@hot/@flatten/@vectorize, C via
+#      __attribute__((hot/pure/const)), __restrict__, __builtin_assume, and
+#      #pragma clang loop vectorize / BH_IVDEP.
+#    - BENCH_MODE=omsc-fast: conservative C baseline to demonstrate OM ceiling
 #    - Override compiler with BENCH_CC=<cc>
 #
 #  Methodology:
@@ -24,6 +26,7 @@ set -eu
 #      robustness against outliers — more data than median, more
 #      resistant to noise than full average
 #    - CPU pinning (taskset) when available for reduced jitter
+#    - Microsecond-resolution timing (µs); displayed as X.Y ms
 #    - Standard deviation reported; noisy benchmarks flagged (~)
 #    - Short-duration benchmarks (<10 ms) flagged (⏱) as unreliable
 #    - Geometric mean as primary aggregate metric (not skewed
@@ -63,7 +66,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=85
+NUM_BENCHMARKS=86
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -2413,16 +2416,48 @@ cat > bench.c << 'CEOF'
 #include <string.h>
 #include <math.h>
 
+/* ── Max source-level optimization (language features, not extra flags) ───
+ *
+ * These are the C equivalents of OM's per-function annotations:
+ *   BH_HOT    ↔  @hot              (mark as frequently executed)
+ *   BH_PURE   ↔  @pure             (result depends only on args, may read mem)
+ *   BH_CONST  ↔  @pure + no reads  (result depends only on args, no mem reads)
+ *   BH_FLATTEN↔  @flatten          (inline all callees into this function)
+ *   BH_FP     ↔  fast_math=true    (FP reassociation, approx allowed)
+ *   BH_IVDEP  ↔  @vectorize        (no loop-carried dependency → vectorize)
+ *
+ * BH_HOT is applied globally via #pragma clang attribute / #pragma GCC optimize
+ * so every bench function is marked hot without per-function repetition.
+ * ──────────────────────────────────────────────────────────────────────── */
+#define BH_PURE    __attribute__((pure))
+#define BH_CONST   __attribute__((const))
+#define BH_FLATTEN __attribute__((flatten))
+#ifdef __clang__
+/* Clang has no per-function fast-math attribute; BH_FP is a no-op here.
+ * Global -ffast-math would enable it but risks changing integer-from-float
+ * results and tripping the correctness check.  OM uses per-function
+ * fast_math=true via @optmax; C accepts this minor asymmetry for correctness. */
+#  define BH_FP    /* fast-math: no clang per-function attribute */
+#  define BH_IVDEP _Pragma("clang loop vectorize(enable) interleave(enable) unroll(enable)")
+/* Apply __attribute__((hot)) to every function in this file. */
+#  pragma clang attribute push (__attribute__((hot)), apply_to=function)
+#else
+/* GCC supports __attribute__((optimize)) per function. */
+#  define BH_FP    __attribute__((optimize("O3,fast-math")))
+#  define BH_IVDEP _Pragma("GCC ivdep")
+#  pragma GCC optimize ("hot")
+#endif
+
 typedef struct { long x, y; } Point;
 
 /* helpers */
-static long gcd(long a, long b) {
+static BH_CONST long gcd(long a, long b) {
     if (a < 0) a = -a;
     if (b < 0) b = -b;
     while (b) { long t = b; b = a % b; a = t; }
     return a;
 }
-static long log2i(long n) {
+static BH_CONST long log2i(long n) {
     if (n <= 0) return -1;
     long r = 0;
     while (n >>= 1) r++;
@@ -2442,7 +2477,7 @@ static long bench_math(long n) {
 }
 
 /*  1 ── float_math ────────────────────────────── */
-static long bench_floatmath(long n) {
+static BH_FP long bench_floatmath(long n) {
     double acc = 1.0;
     for (long i = 1; i < n; i++) {
         double fi = (double)i;
@@ -2544,7 +2579,7 @@ static long bench_branch(long n) {
 }
 
 /*  8 ── if_else_chain ─────────────────────────── */
-static inline long classify(long x) {
+static BH_CONST inline long classify(long x) {
     if (x < 10)    return 1;
     if (x < 100)   return 2;
     if (x < 1000)  return 3;
@@ -2571,7 +2606,7 @@ static long bench_while(long n) {
 }
 
 /* 10 ── recursion_fib ─────────────────────────── */
-static long fib(long n) {
+static BH_PURE long fib(long n) {
     if (n <= 1) return n;
     return fib(n - 1) + fib(n - 2);
 }
@@ -2603,9 +2638,9 @@ static long bench_arrindex(long n) {
 }
 
 /* 13 ── function_calls ────────────────────────── */
-static inline long add_one(long x) { return x + 1; }
-static inline long add_two(long x) { return add_one(add_one(x)); }
-static inline long add_four(long x) { return add_two(add_two(x)); }
+static BH_CONST inline long add_one(long x) { return x + 1; }
+static BH_CONST inline long add_two(long x) { return add_one(add_one(x)); }
+static BH_CONST inline long add_four(long x) { return add_two(add_two(x)); }
 static long bench_calls(long n) {
     long sum = 0;
     for (long i = 0; i < n; i++)
@@ -2637,7 +2672,7 @@ static long bench_bitintrinsics(long n) {
 }
 
 /* 16 ── polynomial_eval ───────────────────────── */
-static inline long poly_eval(long x) {
+static BH_CONST inline long poly_eval(long x) {
     long r = 3;
     r = r * x + 2;
     r = r * x + 1;
@@ -2656,6 +2691,7 @@ static long bench_poly(long n) {
 /* 17 ── reduction ─────────────────────────────── */
 static long bench_reduction(long n) {
     long sum = 0, sum2 = 0;
+    BH_IVDEP
     for (long i = 1; i < n; i++) {
         sum += i * i;
         sum2 += i * i * i;
@@ -2730,9 +2766,9 @@ static long bench_combined(long n) {
 
 /* 19 ── matrix_multiply ───────────────────────── */
 static long bench_matmul(long n) {
-    long *a = calloc(n * n, sizeof(long));
-    long *b = calloc(n * n, sizeof(long));
-    long *c = calloc(n * n, sizeof(long));
+    long * __restrict__ a = calloc(n * n, sizeof(long));
+    long * __restrict__ b = calloc(n * n, sizeof(long));
+    long * __restrict__ c = calloc(n * n, sizeof(long));
     for (long i = 0; i < n; i++)
         for (long j = 0; j < n; j++) {
             a[i * n + j] = (i + j) % 97;
@@ -2741,11 +2777,13 @@ static long bench_matmul(long n) {
     for (long i = 0; i < n; i++)
         for (long j = 0; j < n; j++) {
             long s = 0;
+            BH_IVDEP
             for (long k = 0; k < n; k++)
                 s += a[i * n + k] * b[k * n + j];
             c[i * n + j] = s;
         }
     long sum = 0;
+    BH_IVDEP
     for (long i = 0; i < n * n; i++) sum += c[i];
     free(a); free(b); free(c);
     return sum;
@@ -2833,13 +2871,14 @@ static long bench_bsearch(long n) {
 
 /* 25 ── dot_product ────────────────────────────── */
 static long bench_dot(long n) {
-    long *a = malloc(n * sizeof(long));
-    long *b = malloc(n * sizeof(long));
+    long * __restrict__ a = malloc(n * sizeof(long));
+    long * __restrict__ b = malloc(n * sizeof(long));
     for (long i = 0; i < n; i++) {
         a[i] = (i * 3 + 1) % 1000;
         b[i] = (i * 7 + 2) % 1000;
     }
     long sum = 0;
+    BH_IVDEP
     for (long i = 0; i < n; i++) {
         sum += a[i] * b[i];
     }
@@ -2917,15 +2956,15 @@ static long bench_strength(long n) {
 }
 
 /* 31 ── idiom_patterns ─────────────────────────── */
-static inline long my_abs(long x) {
+static BH_CONST inline long my_abs(long x) {
     if (x < 0) return -x;
     return x;
 }
-static inline long my_min(long a, long b) {
+static BH_CONST inline long my_min(long a, long b) {
     if (a < b) return a;
     return b;
 }
-static inline long my_max(long a, long b) {
+static BH_CONST inline long my_max(long a, long b) {
     if (a > b) return a;
     return b;
 }
@@ -2947,7 +2986,7 @@ static long bench_idioms(long n) {
 }
 
 /* 32 ── fma_compute ────────────────────────────── */
-static long bench_fma(long n) {
+static BH_FP long bench_fma(long n) {
     double a = 1.0;
     double b = 0.9999999;
     double c = 0.0000001;
@@ -2965,7 +3004,8 @@ static long bench_fma(long n) {
 
 /* 33 ── negative_offset ────────────────────────── */
 static long bench_negoffset(long n) {
-    long* arr = (long*)calloc(n, sizeof(long));
+    long * __restrict__ arr = (long*)calloc(n, sizeof(long));
+    BH_IVDEP
     for (long i = 0; i < n; i++) {
         arr[i] = i * 3 + 1;
     }
@@ -3062,16 +3102,18 @@ static long bench_expchain(long n) {
 
 /* 39 ── for_each ────────────────────────────────── */
 static long bench_foreach(long n) {
-    long *arr = malloc(n * sizeof(long));
+    long * __restrict__ arr = malloc(n * sizeof(long));
+    BH_IVDEP
     for (long i = 0; i < n; i++) arr[i] = (i * 7 + 3) % 10000;
     long sum = 0;
+    BH_IVDEP
     for (long i = 0; i < n; i++) sum += arr[i];
     free(arr);
     return sum;
 }
 
 /* 40 ── lcm_gcd ─────────────────────────────────── */
-static long lcm_c(long a, long b) {
+static BH_CONST long lcm_c(long a, long b) {
     long g = a;
     long bb = b;
     while (bb) { long t = bb; bb = g % bb; g = t; }
@@ -3122,12 +3164,14 @@ static long bench_strformat(long n) {
 /* Zip two arrays of m elements, accumulate sum of combined result. */
 static long bench_arrayzip(long n) {
     long m = n / 1000 + 2;
-    long *a = malloc(m * sizeof(long));
-    long *b = malloc(m * sizeof(long));
+    long * __restrict__ a = malloc(m * sizeof(long));
+    long * __restrict__ b = malloc(m * sizeof(long));
+    BH_IVDEP
     for (long j = 0; j < m; j++) { a[j] = j * 3 % 997; b[j] = j * 7 % 997; }
     long acc = 0;
     for (long k = 0; k < n; k++) {
         long s = 0;
+        BH_IVDEP
         for (long j = 0; j < m; j++) s += (a[j] + b[j]) % 997;
         acc += s % 997;
     }
@@ -3178,7 +3222,7 @@ static long bench_dictlookup(long n) {
 
 /* 46 ── array_sort_search ───────────────────────── */
 /* qsort + upper-half sum, reinit each iter. Matches OM algorithm exactly. */
-static int cmp_long(const void *a, const void *b) {
+static BH_CONST int cmp_long(const void *a, const void *b) {
     long x = *(const long *)a, y = *(const long *)b;
     return (x > y) - (x < y);
 }
@@ -3205,6 +3249,7 @@ static long bench_simdsaxpy(long n) {
     long iters = n / m;
     long acc = 0;
     for (long k = 0; k < iters; k++) {
+        BH_IVDEP
         for (int j = 0; j < m; j++) acc += x[j] * y[j];
         acc %= 1000000007L;
     }
@@ -3239,7 +3284,7 @@ static long bench_timesloop(long n) {
 
 /* 50 ── str_process ─────────────────────────────── */
 /* str_reverse + str_upper + str_count chain, N iterations. */
-static int str_count_c(const char *s, char c) {
+static BH_PURE int str_count_c(const char *s, char c) {
     int cnt = 0;
     while (*s) { if (*s++ == c) cnt++; }
     return cnt;
@@ -3313,14 +3358,14 @@ static long bench_arraypred(long n) {
 /* the OM operator-lowered form, making the benchmark a fair measure  */
 /* of operator dispatch overhead (OM should be equal or faster).      */
 typedef struct { long x, y; } Vec2;
-static inline Vec2 vec2_add(Vec2 a, Vec2 b) { return (Vec2){ a.x+b.x, a.y+b.y }; }
-static inline Vec2 vec2_sub(Vec2 a, Vec2 b) { return (Vec2){ a.x-b.x, a.y-b.y }; }
-static inline long vec2_dot(Vec2 a, Vec2 b)  { return a.x*b.x + a.y*b.y; }
-static inline long vec2_cmp(Vec2 a, Vec2 b)  {
+static BH_CONST inline Vec2 vec2_add(Vec2 a, Vec2 b) { return (Vec2){ a.x+b.x, a.y+b.y }; }
+static BH_CONST inline Vec2 vec2_sub(Vec2 a, Vec2 b) { return (Vec2){ a.x-b.x, a.y-b.y }; }
+static BH_CONST inline long vec2_dot(Vec2 a, Vec2 b)  { return a.x*b.x + a.y*b.y; }
+static BH_CONST inline long vec2_cmp(Vec2 a, Vec2 b)  {
     long la = a.x*a.x + a.y*a.y, lb = b.x*b.x + b.y*b.y;
     return (la > lb) - (la < lb);
 }
-static inline Vec2 vec2_wadd(Vec2 a, Vec2 b) { return (Vec2){ a.x+b.x*2, a.y+b.y*2 }; }
+static BH_CONST inline Vec2 vec2_wadd(Vec2 a, Vec2 b) { return (Vec2){ a.x+b.x*2, a.y+b.y*2 }; }
 static long bench_opoverload(long n) {
     long acc = 0;
     for (long i = 0; i < n; i++) {
@@ -3502,11 +3547,14 @@ static long bench_enum_dispatch(long n) {
 /* 64 ── loop_fuse ─────────────────────────────────────────── */
 /* C baseline: two separate loops (unfused); same final result. */
 static long bench_loopfuse(long n) {
-    long *a = malloc(n * sizeof(long));
-    long *b = malloc(n * sizeof(long));
+    long * __restrict__ a = malloc(n * sizeof(long));
+    long * __restrict__ b = malloc(n * sizeof(long));
+    BH_IVDEP
     for (long i = 0; i < n; i++) a[i] = (i * 3 + 1) % 1000;
+    BH_IVDEP
     for (long i = 0; i < n; i++) b[i] = (i * 7 + 2) % 1000;
     long sum = 0;
+    BH_IVDEP
     for (long i = 0; i < n; i++) sum += a[i] + b[i];
     free(a); free(b);
     return sum;
@@ -3515,11 +3563,14 @@ static long bench_loopfuse(long n) {
 /* 65 ── parallel_reduce ───────────────────────────────────── */
 /* C equivalent: plain sequential elementwise transform. */
 static long bench_parallel(long n) {
-    long *src = malloc(n * sizeof(long));
-    long *dst = malloc(n * sizeof(long));
+    long * __restrict__ src = malloc(n * sizeof(long));
+    long * __restrict__ dst = malloc(n * sizeof(long));
+    BH_IVDEP
     for (long i = 0; i < n; i++) src[i] = (i * 7 + 3) % 10000;
+    BH_IVDEP
     for (long i = 0; i < n; i++) dst[i] = src[i] * src[i] + src[i];
     long sum = 0;
+    BH_IVDEP
     for (long i = 0; i < n; i++) sum += dst[i];
     free(src); free(dst);
     return sum;
@@ -3625,7 +3676,7 @@ static long bench_chainedcmp(long n) {
 
 /* 73 ── defer_scope ────────────────────────────────────────── */
 /* C: explicit malloc + free; matches OM defer invalidate pattern. */
-static long process_chunk_c2(long *data, long size) {
+static BH_PURE long process_chunk_c2(long *data, long size) {
     long sum = 0;
     for (long i = 0; i < size; i++) sum += data[i];
     return sum;
@@ -3646,8 +3697,8 @@ static long bench_defer(long n) {
 
 /* 74 ── generic_clamp ──────────────────────────────────────── */
 /* C: separate typed inline helpers — matches OM generic clamp<T>. */
-static inline long  clamp_l(long x, long lo, long hi)    { return x < lo ? lo : (x > hi ? hi : x); }
-static inline double clamp_d(double x, double lo, double hi) { return x < lo ? lo : (x > hi ? hi : x); }
+static BH_CONST inline long  clamp_l(long x, long lo, long hi)    { return x < lo ? lo : (x > hi ? hi : x); }
+static BH_CONST inline double clamp_d(double x, double lo, double hi) { return x < lo ? lo : (x > hi ? hi : x); }
 static long bench_generics(long n) {
     long acc = 0;
     for (long i = 0; i < n; i++) {
@@ -3680,10 +3731,12 @@ static long bench_foreach_str(long n) {
 /* 76 ── ownership ─────────────────────────────────────────── */
 /* C: __restrict__ + const pointer; equivalent to OM freeze+borrow. */
 static long bench_ownership(long n) {
-    long *arr = malloc(n * sizeof(long));
+    long * __restrict__ arr = malloc(n * sizeof(long));
+    BH_IVDEP
     for (long i = 0; i < n; i++) arr[i] = (i * 7 + 3) % 10000;
-    const long * restrict view = arr;
+    const long * __restrict__ view = arr;
     long sum = 0;
+    BH_IVDEP
     for (long i = 0; i < n; i++) sum += view[i];
     free(arr);
     return sum;
@@ -3757,9 +3810,11 @@ static long bench_register(long n) {
 /* C: __builtin_assume (clang) or __builtin_unreachable guard (gcc). */
 static long bench_assume(long n) {
     __builtin_assume(n > 0);
-    long *arr = malloc((size_t)n * sizeof(long));
+    long * __restrict__ arr = malloc((size_t)n * sizeof(long));
+    BH_IVDEP
     for (long i = 0; i < n; i++) arr[i] = (i * 13 + 7) % 10000;
     long sum = 0;
+    BH_IVDEP
     for (long i = 0; i < n; i++) sum += arr[i];
     free(arr);
     return sum;
@@ -3806,7 +3861,7 @@ static long bench_with_scope(long n) {
 
 /* 84 ── error_hotpath ──────────────────────────────────────── */
 /* C: branch-on-zero guard without exceptions. */
-static inline long safe_divide_c(long x, long y) {
+static BH_CONST inline long safe_divide_c(long x, long y) {
     if (y == 0) return -1;
     return x / y;
 }
@@ -3819,7 +3874,7 @@ static long bench_error_hotpath(long n) {
 
 /* 85 ── trig_math ─────────────────────────────────────────── */
 /* C: libm sin/cos/floor/ceil/round — same operations as OM builtins. */
-static long bench_trig(long n) {
+static BH_FP long bench_trig(long n) {
     double acc = 0.0;
     for (long i = 0; i < n; i++) {
         double fi = (double)i * 0.001;
@@ -3831,6 +3886,11 @@ static long bench_trig(long n) {
     }
     return (long)acc;
 }
+
+/* ── Close the global hot-attribute push ─────────────────────── */
+#ifdef __clang__
+#  pragma clang attribute pop
+#endif
 
 int main(void) {
     build_crc_table_c();
@@ -3962,12 +4022,17 @@ if [ -z "$CC" ]; then
     fi
 fi
 if [ "$BENCH_MODE" = "fair" ]; then
-    # fair: both sides compiled with the same backend (clang = LLVM, same as OM)
-    # and identical flags so OM wins only through better IR quality, not flag tricks.
-    # -fno-pie matches OM's default static relocation model (no GOT overhead).
-    C_FLAGS="-O3 -march=native -mtune=native -fno-plt -fno-pie -lm"
+    # fair: symmetric flags — C gets exactly the same optimization flags as OM.
+    # OM_FLAGS = -O3 -march=native -mtune=native -fvectorize -funroll-loops -floop-optimize -fparallelize
+    # C gets the subset that clang/gcc understand: -O3 -march=native -mtune=native -fvectorize -funroll-loops.
+    # No C-exclusive flags (no -fno-pie, -fno-plt, -fno-semantic-interposition, etc.).
+    # OM wins only through language-level optimization: OPTMAX annotations, superoptimizer,
+    # e-graph rewrites, @hot/@flatten/@vectorize, and per-function fast_math/safety=relaxed.
+    # C wins only through language-level optimization: __attribute__((hot/pure/const)),
+    # __restrict__, #pragma loop hints, and __builtin_prefetch / __builtin_expect.
+    C_FLAGS="-O3 -march=native -mtune=native -fvectorize -funroll-loops -lm"
 else
-    C_FLAGS="-O2 -mtune=generic -fno-unroll-loops -fno-tree-vectorize -fno-plt -lm"
+    C_FLAGS="-O2 -mtune=generic -fno-unroll-loops -fno-tree-vectorize -lm"
 fi
 
 echo "Compiling OM ($OMSC $OM_FLAGS) …"
@@ -3993,6 +4058,22 @@ else
     echo -e "  ${GRN}✓ OM compilation completed in a reasonable time.${RST}"
 fi
 echo ""
+
+# ─── ENVIRONMENT CHECK ────────────────────────────────────────
+# Warn if the CPU frequency governor is not in 'performance' mode.
+# Non-performance governors (powersave, schedutil, ondemand) allow the CPU
+# to clock down between benchmark invocations, causing artificially high
+# timings and elevated variance — exactly the noise we are trying to avoid.
+if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+    gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
+    if [ "$gov" = "performance" ]; then
+        echo -e "  ${GRN}✓ CPU governor: performance (minimal clock jitter)${RST}"
+    else
+        echo -e "  ${YEL}⚠ CPU governor: $gov — set to 'performance' for best accuracy:${RST}"
+        echo -e "  ${YEL}    sudo cpupower frequency-set -g performance${RST}"
+    fi
+    echo ""
+fi
 
 # ─── HELPERS ──────────────────────────────────────────────────
 declare -a RATIOS
@@ -4048,13 +4129,13 @@ run_one() {
         cs=$(date +%s%N)
         echo "$id $n" | $TASKSET ./bench_c > /dev/null
         ce=$(date +%s%N)
-        ct=$(( (ce - cs) / 1000000 ))
+        ct=$(( (ce - cs) / 1000 ))
         c_runs+=("$ct")
 
         os=$(date +%s%N)
         echo "$id $n" | $TASKSET ./bench_om > /dev/null
         oe=$(date +%s%N)
-        ot=$(( (oe - os) / 1000000 ))
+        ot=$(( (oe - os) / 1000 ))
         om_runs+=("$ot")
     done
 
@@ -4100,9 +4181,11 @@ run_one() {
     # Use trimmed mean as the primary timing metric for ratio calculation.
     # Falls back to median for very short benchmarks where integer division
     # artifacts in the trimmed mean could distort results.
+    # Threshold is 3000 µs (3 ms): below this the trimmed mean may quantise
+    # to 0 when most runs land on the same integer µs value.
     local c_primary=$c_trimmed
     local om_primary=$om_trimmed
-    if [ "$c_trimmed" -lt 3 ] || [ "$om_trimmed" -lt 3 ]; then
+    if [ "$c_trimmed" -lt 3000 ] || [ "$om_trimmed" -lt 3000 ]; then
         c_primary=$ct
         om_primary=$ot
     fi
@@ -4112,7 +4195,7 @@ run_one() {
 
     local ratio
     if [ "$c_primary" -eq 0 ]; then
-        if [ "$om_primary" -le 1 ]; then ratio=100; else ratio=$(( om_primary * 1000 )); fi
+        if [ "$om_primary" -le 1000 ]; then ratio=100; else ratio=9999; fi
     else
         ratio=$(( om_primary * 100 / c_primary ))
     fi
@@ -4144,13 +4227,21 @@ run_one() {
         noise=" ${YEL}~${RST}"
     fi
     # Flag benchmarks under 10 ms as potentially unreliable due to
-    # timing resolution — 1 ms jitter on a 5 ms test is 20% noise.
-    if [ "$c_primary" -lt 10 ] || [ "$om_primary" -lt 10 ]; then
+    # process-spawn overhead (~1-3 ms per invocation) dominating the signal.
+    if [ "$c_primary" -lt 10000 ] || [ "$om_primary" -lt 10000 ]; then
         noise="${noise} ${YEL}⏱${RST}"
     fi
 
-    printf "  %-22s  C: %6d ms (±%3d)  OM: %6d ms (±%3d)  %4d%%  %b%b\n" \
-           "$name" "$c_primary" "$c_stddev" "$om_primary" "$om_stddev" "$ratio" "$tag" "$noise"
+    # Format times as decimal milliseconds (µs ÷ 1000, 1 decimal place).
+    local c_ms_i=$(( c_primary / 1000 )) c_ms_d=$(( (c_primary % 1000) / 100 ))
+    local c_sd_i=$(( c_stddev  / 1000 )) c_sd_d=$(( (c_stddev  % 1000) / 100 ))
+    local o_ms_i=$(( om_primary / 1000 )) o_ms_d=$(( (om_primary % 1000) / 100 ))
+    local o_sd_i=$(( om_stddev  / 1000 )) o_sd_d=$(( (om_stddev  % 1000) / 100 ))
+    printf "  %-22s  C: %6d.%1d ms (±%5d.%1d)  OM: %6d.%1d ms (±%5d.%1d)  %4d%%  %b%b\n" \
+           "$name" \
+           "$c_ms_i" "$c_ms_d" "$c_sd_i" "$c_sd_d" \
+           "$o_ms_i" "$o_ms_d" "$o_sd_i" "$o_sd_d" \
+           "$ratio" "$tag" "$noise"
 }
 
 # ─── RUN ──────────────────────────────────────────────────────
@@ -4158,10 +4249,10 @@ echo "╔═══════════════════════�
 echo "║         Per-Function Benchmarks  (trimmed mean of $RUNS runs, $WARMUP_RUNS warmup)               ║"
 echo "╚═══════════════════════════════════════════════════════════════════════════════════╝"
 echo ""
-printf "  ${BLD}%-22s  %-20s %-20s %-7s %-12s${RST}\n" \
+printf "  ${BLD}%-22s  %-28s %-28s %-7s %-12s${RST}\n" \
        "BENCHMARK" "C TIME" "OM TIME" "RATIO" "STATUS"
-printf "  %-22s  %-20s %-20s %-7s %-12s\n" \
-       "─────────────────────" "───────────────────" "───────────────────" "──────" "──────────"
+printf "  %-22s  %-28s %-28s %-7s %-12s\n" \
+       "─────────────────────" "───────────────────────────" "───────────────────────────" "──────" "──────────"
 
 for (( id=0; id<NUM_BENCHMARKS; id++ )); do
     run_one "$id" "${BENCH_N[$id]}" "${BENCH_NAME[$id]}"
@@ -4169,9 +4260,9 @@ done
 
 echo ""
 echo -e "  ${YEL}~${RST} = noisy benchmark (stddev > 15% of trimmed mean); results may be unreliable."
-echo -e "  ${YEL}⏱${RST} = very short benchmark (<10 ms); timing resolution may dominate."
+echo -e "  ${YEL}⏱${RST} = very short benchmark (<10 ms); process-spawn overhead may dominate."
 echo "  ± values show standard deviation across runs."
-echo "  Times use trimmed mean (drop 2 highest + 2 lowest of $RUNS runs)."
+echo "  Times are trimmed mean (drop 2 highest + 2 lowest of $RUNS runs), displayed as X.Y ms (µs precision)."
 
 if [ "$MISMATCH" -eq 1 ]; then
     echo ""
@@ -4210,12 +4301,12 @@ for si in "${!SCALE_IDS[@]}"; do
             cs=$(date +%s%N)
             echo "$sid $sn" | $TASKSET ./bench_c > /dev/null
             ce=$(date +%s%N)
-            sc_runs+=("$(( (ce - cs) / 1000000 ))")
+            sc_runs+=("$(( (ce - cs) / 1000 ))")
 
             os=$(date +%s%N)
             echo "$sid $sn" | $TASKSET ./bench_om > /dev/null
             oe=$(date +%s%N)
-            so_runs+=("$(( (oe - os) / 1000000 ))")
+            so_runs+=("$(( (oe - os) / 1000 ))")
         done
         IFS=$'\n' sc_s=($(printf '%s\n' "${sc_runs[@]}" | sort -n)); unset IFS
         IFS=$'\n' so_s=($(printf '%s\n' "${so_runs[@]}" | sort -n)); unset IFS
@@ -4223,7 +4314,9 @@ for si in "${!SCALE_IDS[@]}"; do
         ot=${so_s[2]}
 
         if [ "$ct" -gt 0 ]; then ratio=$(( ot * 100 / ct )); else ratio=100; fi
-        printf "x%-2d C:%4dms OM:%4dms (%3d%%)  " "$mult" "$ct" "$ot" "$ratio"
+        local ct_i=$(( ct / 1000 )) ct_d=$(( (ct % 1000) / 100 ))
+        local ot_i=$(( ot / 1000 )) ot_d=$(( (ot % 1000) / 100 ))
+        printf "x%-2d C:%5d.%1dms OM:%5d.%1dms (%3d%%)  " "$mult" "$ct_i" "$ct_d" "$ot_i" "$ot_d" "$ratio"
     done
     echo ""
 done
@@ -4281,13 +4374,13 @@ for (( id=0; id<NUM_BENCHMARKS; id++ )); do
     r=${RATIOS[$id]}
     c=${C_TIMES[$id]}
     o=${OM_TIMES[$id]}
-    # For very short benchmarks (<10 ms), use absolute difference instead of
-    # ratio — 1 ms of timing noise on a 5 ms benchmark is 20% even though
-    # the actual performance is identical.  Consider "tied" if within 2 ms.
-    if [ "$c" -lt 10 ] && [ "$o" -lt 10 ]; then
+    # For very short benchmarks (<10 ms = 10000 µs), use absolute difference
+    # instead of ratio — process-spawn jitter on a 5 ms benchmark is ~20% even
+    # when the actual performance is identical.  Treat as tied if within 2 ms.
+    if [ "$c" -lt 10000 ] && [ "$o" -lt 10000 ]; then
         diff=$(( o - c ))
         if [ "$diff" -lt 0 ]; then diff=$(( -diff )); fi
-        if [ "$diff" -le 2 ]; then
+        if [ "$diff" -le 2000 ]; then
             # Within timing noise — treat as tied regardless of ratio.
             COUNT_EQUAL=$((COUNT_EQUAL + 1))
             continue
@@ -4305,6 +4398,10 @@ for (( id=0; id<NUM_BENCHMARKS; id++ )); do
     SUM_OM=$(( SUM_OM + OM_TIMES[$id] ))
 done
 if [ "$SUM_C" -gt 0 ]; then OVERALL=$(( SUM_OM * 100 / SUM_C )); else OVERALL=100; fi
+
+# Convert µs sums to ms for display.
+SUM_C_MS=$(( SUM_C / 1000 ))
+SUM_OM_MS=$(( SUM_OM / 1000 ))
 
 GEOMEAN=$(awk -v n="$NUM_BENCHMARKS" 'BEGIN {
     sum = 0; count = 0
@@ -4325,7 +4422,7 @@ echo ""
 echo "  Individual results:  $COUNT_FASTER faster, $COUNT_EQUAL tied, $COUNT_SLOWER slower (out of $NUM_BENCHMARKS)"
 echo ""
 printf "  Aggregate (sum):    C: %d ms   OM: %d ms   (%d%%)\n" \
-       "$SUM_C" "$SUM_OM" "$OVERALL"
+       "$SUM_C_MS" "$SUM_OM_MS" "$OVERALL"
 printf "  Geometric mean:     %d%%  ← primary metric (unbiased by outliers)\n" "$GEOMEAN"
 echo ""
 
