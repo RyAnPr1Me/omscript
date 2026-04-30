@@ -207,19 +207,9 @@ static PassSeq selectPassSeq(const std::vector<MissedOp>& ops) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Apply @p seq to @p F (function-level) or to the whole @p M (module-level
-static bool applyPassSeq(PassSeq seq, llvm::Function& F, llvm::Module& M) {
-    llvm::PassBuilder PB;
-    llvm::LoopAnalysisManager LAM;
-    llvm::FunctionAnalysisManager FAM;
-    llvm::CGSCCAnalysisManager CGAM;
-    llvm::ModuleAnalysisManager MAM;
-
-    PB.registerModuleAnalyses(MAM);
-    PB.registerCGSCCAnalyses(CGAM);
-    PB.registerFunctionAnalyses(FAM);
-    PB.registerLoopAnalyses(LAM);
-    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-
+static bool applyPassSeq(PassSeq seq, llvm::Function& F, llvm::Module& M,
+                         llvm::FunctionAnalysisManager& FAM,
+                         llvm::ModuleAnalysisManager& MAM) {
     if (seq == PassSeq::InlineFoldDCE) {
         // Module-level: inliner must run at module scope.
         llvm::ModulePassManager MPM;
@@ -260,7 +250,9 @@ static bool applyPassSeq(PassSeq seq, llvm::Function& F, llvm::Module& M) {
 
 static IpofStats runOnFunction(llvm::Function& F,
                                 llvm::Module& M,
-                                const IpofConfig& cfg) {
+                                const IpofConfig& cfg,
+                                llvm::FunctionAnalysisManager& FAM,
+                                llvm::ModuleAnalysisManager& MAM) {
     IpofStats stats;
     if (F.isDeclaration()) return stats;
 
@@ -288,7 +280,7 @@ static IpofStats runOnFunction(llvm::Function& F,
         seenHashes.insert(hashBefore);
 
         // Apply.
-        applyPassSeq(seq, F, M);
+        applyPassSeq(seq, F, M, FAM, MAM);
         ++stats.rerunsApplied;
 
         const unsigned after = instrCount(F);
@@ -345,11 +337,24 @@ IpofStats runIPOF(llvm::Module& module, const IpofConfig& cfg) {
         cfg.aggressionLevel == 1 ? 1u :
         cfg.aggressionLevel == 2 ? 2u : 3u);
 
+    // Build analysis managers once for the whole module.  Recreating them per
+    // function (the old approach) paid O(N) construction cost for N functions.
+    llvm::PassBuilder PB;
+    llvm::LoopAnalysisManager LAM;
+    llvm::FunctionAnalysisManager FAM;
+    llvm::CGSCCAnalysisManager CGAM;
+    llvm::ModuleAnalysisManager MAM;
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
     IpofStats total;
 
     for (llvm::Function& F : module) {
         if (F.isDeclaration()) continue;
-        IpofStats fs = runOnFunction(F, module, eff);
+        IpofStats fs = runOnFunction(F, module, eff, FAM, MAM);
         total.opportunitiesFound   += fs.opportunitiesFound;
         total.opportunitiesActed   += fs.opportunitiesActed;
         total.rerunsApplied        += fs.rerunsApplied;

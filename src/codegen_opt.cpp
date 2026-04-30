@@ -2216,6 +2216,28 @@ static void addCanonicalCleanup(llvm::FunctionPassManager& FPM,
     FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
 }
 
+// ── Lightweight post-propagation cleanup ──────────────────────────────────────
+// Adds the minimal four-pass sequence that is sufficient after any constant-
+// propagation step (ConstArgPropagation, SCCP, etc.) where only folding and
+// dead-code removal are needed — no GVN or MemorySSA required.
+static void addLightCleanup(llvm::FunctionPassManager& FPM) {
+    FPM.addPass(llvm::SCCPPass());
+    FPM.addPass(llvm::InstCombinePass());
+    FPM.addPass(llvm::ADCEPass());
+    FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+}
+
+// ── Memory promotion preamble ──────────────────────────────────────────────────
+// Promotes alloca-based memory to SSA registers (SROA → mem2reg) preceded by
+// MemorySSA-backed EarlyCSE to maximise the number of scalar defs available to
+// the subsequent analysis passes.  Used at the head of every fresh function
+// pipeline (optimizeFunction and the OPTMAX per-function pipeline).
+static void addMemoryPromotion(llvm::FunctionPassManager& FPM) {
+    FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
+    FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+    FPM.addPass(llvm::PromotePass());
+}
+
 void CodeGenerator::runOptimizationPasses() {
     // Ensure the native target is initialized before we try to create a
     // TargetMachine.  These calls are idempotent and fast after the first.
@@ -3151,10 +3173,7 @@ void CodeGenerator::runOptimizationPasses() {
         ConstPropMPM.addPass(ConstArgPropagationPass());
         // Follow up with function-level cleanup to fold the newly-constant args.
         llvm::FunctionPassManager ConstPropFPM;
-        ConstPropFPM.addPass(llvm::SCCPPass());
-        ConstPropFPM.addPass(llvm::InstCombinePass());
-        ConstPropFPM.addPass(llvm::ADCEPass());
-        ConstPropFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+        addLightCleanup(ConstPropFPM);
         ConstPropMPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(ConstPropFPM)));
         ConstPropMPM.run(*module, PostMAM);
     }
@@ -3240,10 +3259,7 @@ void CodeGenerator::runOptimizationPasses() {
                     auto smallFuncs2 = collectSmallFuncs(2000);
                     if (!smallFuncs2.empty()) {
                         llvm::FunctionPassManager PSuperFPM2;
-                        PSuperFPM2.addPass(llvm::SCCPPass());
-                        PSuperFPM2.addPass(llvm::InstCombinePass());
-                        PSuperFPM2.addPass(llvm::ADCEPass());
-                        PSuperFPM2.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                        addLightCleanup(PSuperFPM2);
                         runPostFPMOnFuncs(std::move(PSuperFPM2), std::move(smallFuncs2));
                     }
                 }
@@ -3559,9 +3575,7 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
 
     // Build the per-function pipeline.
     llvm::FunctionPassManager FPMFunc;
-    FPMFunc.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
-    FPMFunc.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
-    FPMFunc.addPass(llvm::PromotePass());
+    addMemoryPromotion(FPMFunc);
     FPMFunc.addPass(llvm::InstCombinePass());
     FPMFunc.addPass(llvm::ReassociatePass());
     FPMFunc.addPass(llvm::NewGVNPass());
@@ -3697,9 +3711,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
 
     // ── Phase 1: Memory promotion and early canonicalization ──────────────
     llvm::FunctionPassManager FPMMax;
-    FPMMax.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
-    FPMMax.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
-    FPMMax.addPass(llvm::PromotePass());
+    addMemoryPromotion(FPMMax);
     FPMMax.addPass(llvm::InstCombinePass());
     FPMMax.addPass(llvm::AggressiveInstCombinePass());
     FPMMax.addPass(llvm::ReassociatePass());
