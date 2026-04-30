@@ -3705,6 +3705,15 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     FPMMax.addPass(llvm::BDCEPass());
     FPMMax.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
     FPMMax.addPass(llvm::ADCEPass());
+    // CallSiteSplitting: clone call sites at branch points so that the two
+    // clones receive different constant arguments, enabling SCCP / InstCombine
+    // to fold each clone individually (e.g. f(cond ? 1 : 0) → two specialised
+    // direct calls that are then individually constant-folded).
+    FPMMax.addPass(llvm::CallSiteSplittingPass());
+    // InstSimplify: a faster and more conservatively correct complement to
+    // InstCombine that fires in more contexts (e.g. after attribute deduction
+    // from the PreIPO).  Run after CallSiteSplitting so the split clones benefit.
+    FPMMax.addPass(llvm::InstSimplifyPass());
 
     // ── Phase 2: Loop canonicalization and invariant hoisting ─────────────
     addCanonicalLoopBarrier(FPMMax);
@@ -3712,10 +3721,18 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         llvm::LoopPassManager LPM;
         LPM.addPass(llvm::LoopRotatePass());
         LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
+        // LoopInterchange: reorder loop nesting for better cache behaviour when
+        // traversing multi-dimensional arrays (e.g., row-major vs column-major).
+        // Running before unswitch lets the reordered loops be unswitched too.
+        LPM.addPass(llvm::LoopInterchangePass());
         LPM.addPass(llvm::SimpleLoopUnswitchPass(/*NonTrivial=*/true));
         LPM.addPass(llvm::LoopIdiomRecognizePass());
         LPM.addPass(llvm::IndVarSimplifyPass());
         LPM.addPass(llvm::LoopPredicationPass());
+        // LoopBoundSplit: split a loop at its bounds checks to create a hot
+        // checked-out-of-range path and a fast in-bounds path; the fast path
+        // then becomes vectorisable because it has no conditional guard.
+        LPM.addPass(llvm::LoopBoundSplitPass());
         LPM.addPass(llvm::LoopDeletionPass());
         LPM.addPass(llvm::LoopInstSimplifyPass());
         LPM.addPass(llvm::LoopSimplifyCFGPass());
@@ -3740,6 +3757,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                                 /*ForgetSCEV=*/true)));
     // Post-unroll cleanup: NewGVN merges values made equal by unrolled IVs
     FPMMax.addPass(llvm::NewGVNPass());
+    // EarlyCSE: eliminate common sub-expressions exposed by unrolling before
+    // InstCombine sees them — catches memory-based redundancies that NewGVN
+    // does not handle (e.g., repeated loads from the same address across the
+    // duplicated iteration bodies).
+    FPMMax.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
     FPMMax.addPass(llvm::InstCombinePass());
     FPMMax.addPass(llvm::CorrelatedValuePropagationPass());
     FPMMax.addPass(llvm::JumpThreadingPass());
@@ -3761,6 +3783,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     FPMMax.addPass(llvm::LibCallsShrinkWrapPass());
     FPMMax.addPass(llvm::DSEPass());
     FPMMax.addPass(llvm::MemCpyOptPass());
+    // MergedLoadStoreMotion: hoist loads from and sink stores into the post-
+    // dominator when both branches of an if-then-else produce/consume the same
+    // address (diamond CFG pattern).  Reduces dynamic memory bandwidth and
+    // exposes GVN opportunities on the hoisted loads.
+    FPMMax.addPass(llvm::MergedLoadStoreMotionPass());
     // Store widening: merge consecutive narrow stores into wide stores.
     FPMMax.addPass(StoreWideningPass());
     // MAPR: hoist independent loads above non-aliasing preceding stores to
@@ -3804,6 +3831,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // Re-rotate loops before LICM.  Phase 2.5 (LoopUnroll/UnrollAndJam)
         LPM.addPass(llvm::LoopRotatePass());
         LPM.addPass(llvm::IndVarSimplifyPass());
+        // LoopInterchange (second run): after unrolling and scalar optimizations,
+        // the vectorizer cost model may be able to make a better nesting decision
+        // than it could in Phase 2.  A second interchange pass here ensures the
+        // innermost loop has the smallest stride before LoopVectorize fires.
+        LPM.addPass(llvm::LoopInterchangePass());
         LPM.addPass(llvm::LoopVersioningLICMPass());
         LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
         FPMMax.addPass(llvm::createFunctionToLoopPassAdaptor(
@@ -3853,11 +3885,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
 
     // ── Run the OPTMAX pipeline on each OPTMAX function ───────────────────
 
-    // Before running the per-function pipeline, perform a module-level IPO
-    // pre-pass on the whole module to materialise any `alwaysinline` callees
-    // into OPTMAX function bodies and propagate constants across call boundaries.
-    // This enables the per-function passes below to see fully inlined bodies
-    // and better constant ranges.
+    // ── Module-level IPO pre-pass ─────────────────────────────────────────
+    // Run before the per-function pipeline to materialise alwaysinline callees,
+    // propagate constants across call boundaries, and sharpen function attributes
+    // so the per-function passes see fully inlined bodies and better value ranges.
     {
         llvm::ModulePassManager PreIPO;
         // AlwaysInlinerPass: inline callees marked alwaysinline (set above for
@@ -3869,6 +3900,21 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // InferFunctionAttrs: deduce NoUnwind/WillReturn/NoFree/NoSync for any
         // remaining callees so the per-function pipeline sees their effects.
         PreIPO.addPass(llvm::InferFunctionAttrsPass());
+        // ConstArgPropagation: for internal functions where every call site
+        // passes the same concrete constant, replace the formal argument with
+        // that constant — enabling SCCP / InstCombine to fold much deeper.
+        PreIPO.addPass(ConstArgPropagationPass());
+        // InterproceduralNullability: annotate pointer arguments as nonnull
+        // when every call site passes a provably non-null value, unlocking
+        // GetElementPtr folding and bounds-check elimination.
+        PreIPO.addPass(InterproceduralNullabilityPass());
+        // PostOrderFunctionAttrs: infer nounwind / readonly / writeonly / pure
+        // attributes in bottom-up CGSCC order so callers can reason about effects.
+        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::PostOrderFunctionAttrsPass()));
+        // ReversePostOrderFunctionAttrs: propagate attribute information
+        // top-down so callees inherit caller assumptions (e.g. nounwind context).
+        PreIPO.addPass(llvm::ReversePostOrderFunctionAttrsPass());
         PreIPO.run(*module, MAMMax);
     }
 
@@ -3909,6 +3955,24 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     }
     if (verbose_) {
         std::cout << "    OPTMAX unified new-PM pipeline complete" << '\n';
+    }
+
+    // ── Post-OPTMAX module-level cleanup ─────────────────────────────────
+    // After aggressively inlining + optimising each OPTMAX function individually,
+    // run a final module-level IPO sweep to reclaim dead code and globals that
+    // the per-function passes could not see.
+    {
+        llvm::ModulePassManager PostIPO;
+        // GlobalOpt: constant-fold and internalize simple global variables that
+        // now have known initializer values after inlining and IPSCCP.
+        PostIPO.addPass(llvm::GlobalOptPass());
+        // DeadArgumentElimination: remove function arguments that are never
+        // used after specialisation / constant propagation.
+        PostIPO.addPass(llvm::DeadArgumentEliminationPass());
+        // GlobalDCE: remove dead global variables and functions (e.g., helpers
+        // that were fully inlined and have no remaining callers).
+        PostIPO.addPass(llvm::GlobalDCEPass());
+        PostIPO.run(*module, MAMMax);
     }
 }
 
