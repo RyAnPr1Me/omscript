@@ -3850,9 +3850,18 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
                                            /*OnlyWhenForced=*/false,
                                            /*ForgetSCEV=*/true);
         if (safetyOff)
-            unrollOpts.setFullUnrollMaxCount(512); // very aggressive — full unroll up to 512 iters
+            // safety=Off: the caller guarantees no early-exit conditions (e.g.,
+            // pure mathematical kernels).  Full-unroll up to 512 iterations
+            // eliminates induction variable overhead and enables aggressive
+            // constant folding.  The loop body should be small (≤10 instrs) for
+            // this to be beneficial — larger bodies are auto-limited by the
+            // unroller's code-size model.
+            unrollOpts.setFullUnrollMaxCount(512);
         else if (relaxed)
-            unrollOpts.setFullUnrollMaxCount(256); // moderate increase from default
+            // safety=Relaxed: moderately higher full-unroll threshold than the
+            // O3 default (which is typically 32–64).  Applied only to loops the
+            // unroller's cost model deems profitable.
+            unrollOpts.setFullUnrollMaxCount(256);
         FPM.addPass(llvm::LoopUnrollPass(unrollOpts));
     }
     // Post-unroll redundancy elimination.

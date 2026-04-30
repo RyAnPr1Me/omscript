@@ -209,9 +209,13 @@ struct ProgramFactsSnapshot {
 ///              FunctionAnalysisManagerModuleProxy is available.
 /// @param wave  The 1-based wave index to stamp into the snapshot.
 ///
-/// @note All LoopInfo queries are lazy: the FAM will recompute them from scratch
-///       only for the functions that are actually queried, avoiding the full cost
-///       of a module-wide loop analysis rebuild.
+/// @note LoopInfo queries use getCachedResult: loop structure is populated only
+///       when the FAM already holds a valid cached result for a given function.
+///       Functions whose LoopInfo has not been computed yet are silently skipped
+///       (topLevelLoopCount and maxLoopDepth remain 0).  This is intentional:
+///       computeProgramFacts is a pure-read operation that must not trigger new
+///       analysis passes.  Callers that need guaranteed loop structure should
+///       run a LoopAnalysis pass on the module before calling this function.
 ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
                                          llvm::ModuleAnalysisManager& MAM,
                                          unsigned wave);
