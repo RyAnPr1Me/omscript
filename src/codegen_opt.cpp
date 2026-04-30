@@ -4183,6 +4183,48 @@ void CodeGenerator::optimizeOptMaxFunctions() {
             // its arguments, enabling load/store hoisting past calls and dead-store
             // elimination across call boundaries.
             func.setMemoryEffects(llvm::MemoryEffects::argMemOnly());
+        } else {
+            // No explicit memory.noalias annotation — check whether the function
+            // has any pointer-type parameters at all.  If it has none, it cannot
+            // dereference argument memory, so we can exclude ArgMem from its
+            // memory-effect set regardless of the function body.
+            //
+            //   safety=Off:  the programmer asserts no UB and no global side
+            //       effects.  With no pointer params, the function is a pure
+            //       value-to-value computation → readnone (MemoryEffects::none()).
+            //       This lets LLVM freely CSE, hoist, and speculate calls to it.
+            //
+            //   safety=On/Relaxed: the function may still read global constants
+            //       or other module-level state, so we can only assert the
+            //       weaker "not ArgMem" invariant: exclude ArgMem from unknown().
+            //       The Attributor in PreIPO will tighten this further if the
+            //       function body proves to be readnone or readonly.
+            bool hasPointerParam = false;
+            for (auto& arg : func.args()) {
+                if (arg.getType()->isPointerTy()) {
+                    hasPointerParam = true;
+                    break;
+                }
+            }
+            if (!hasPointerParam) {
+                const SafetyLevel sl =
+                    (cfgIt != optMaxFunctionConfigs_.end())
+                    ? cfgIt->second.safety
+                    : SafetyLevel::On;
+                if (sl == SafetyLevel::Off) {
+                    // Pure value-to-value kernel: no pointer params, user asserts
+                    // no side effects.  Mark readnone so LLVM treats calls to this
+                    // function like arithmetic expressions — fully hoistable, CSE-
+                    // able, and dead-call-eliminable.
+                    func.setMemoryEffects(llvm::MemoryEffects::none());
+                } else {
+                    // May access globals/inaccessible mem, but definitely cannot
+                    // access ArgMem.  Subtract ArgMem from the unknown() bitset.
+                    func.setMemoryEffects(
+                        llvm::MemoryEffects::unknown()
+                            .getWithoutLoc(llvm::IRMemLocation::ArgMem));
+                }
+            }
         }
 
         optMaxFuncs.push_back(&func);
@@ -4279,12 +4321,45 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // ReversePostOrderFunctionAttrs: propagate attribute information
         // top-down so callees inherit caller assumptions (e.g. nounwind context).
         PreIPO.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        // AlwaysInline cleanup: after the AlwaysInlinerPass has run, any
+        // function that still has a definition (i.e., was NOT successfully
+        // inlined into all callers — e.g., it is recursive, address-taken, or
+        // referenced from a call site the inliner could not process) retains
+        // the AlwaysInline attribute.  This stale attribute is misleading:
+        //   - It signals to downstream inliners (ModuleInliner, CGSCC inliner)
+        //     that they MUST inline this function, which they cannot do either
+        //     (same reasons).  The repeated failed-inlining attempts waste
+        //     compile time.
+        //   - It interferes with PartialInliner, which skips functions marked
+        //     AlwaysInline on the assumption that the main inliner will handle
+        //     them — so they end up being neither fully nor partially inlined.
+        // Stripping the attribute from surviving definitions lets downstream
+        // passes make clean inlining decisions based on cost models.
+        {
+            struct AlwaysInlineCleanupPass
+                : public llvm::PassInfoMixin<AlwaysInlineCleanupPass> {
+                llvm::PreservedAnalyses run(llvm::Module& M,
+                                            llvm::ModuleAnalysisManager&) {
+                    bool changed = false;
+                    for (auto& F : M) {
+                        if (!F.isDeclaration()
+                                && F.hasFnAttribute(llvm::Attribute::AlwaysInline)) {
+                            F.removeFnAttr(llvm::Attribute::AlwaysInline);
+                            changed = true;
+                        }
+                    }
+                    return changed ? llvm::PreservedAnalyses::none()
+                                   : llvm::PreservedAnalyses::all();
+                }
+            };
+            PreIPO.addPass(AlwaysInlineCleanupPass());
+        }
         PreIPO.run(*module, MAMMax);
     }
 
     // OPTMAX Wave 1 barrier: after PreIPO (always-inline + CalledValueProp +
     // IPSCCP + InferFunctionAttrs + Attributor + ConstArgProp + nullability +
-    // ArgumentPromotion + function-attr inference).
+    // ArgumentPromotion + function-attr inference + AlwaysInline cleanup).
     {
         unsigned omWave = 100; // OPTMAX waves start at 100 to distinguish from main pipeline
         auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
