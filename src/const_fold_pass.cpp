@@ -22,7 +22,9 @@
 
 #include "const_fold_pass.h"
 
+#include <cmath>
 #include <cstdint>
+#include <climits>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -43,9 +45,31 @@ static bool asInt(const Expression* e, int64_t& out) {
     return true;
 }
 
+/// Return the float value of a FLOAT LiteralExpr, or false otherwise.
+static bool asFloat(const Expression* e, double& out) {
+    if (!e || e->type != ASTNodeType::LITERAL_EXPR) return false;
+    const auto* lit = static_cast<const LiteralExpr*>(e);
+    if (lit->literalType != LiteralExpr::LiteralType::FLOAT) return false;
+    out = lit->floatValue;
+    return true;
+}
+
+/// Promote an integer or float literal to double.  Returns false if the
+/// expression is neither.
+static bool asDouble(const Expression* e, double& out) {
+    int64_t iv = 0;
+    if (asInt(e, iv)) { out = static_cast<double>(iv); return true; }
+    return asFloat(e, out);
+}
+
 /// Make a fresh INTEGER literal node with value @p v.
 static std::unique_ptr<Expression> makeLit(int64_t v) {
     return std::make_unique<LiteralExpr>(static_cast<long long>(v));
+}
+
+/// Make a fresh FLOAT literal node with value @p v.
+static std::unique_ptr<Expression> makeFLit(double v) {
+    return std::make_unique<LiteralExpr>(v);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,63 +105,104 @@ static unsigned foldExpr(std::unique_ptr<Expression>& expr) {
         count += foldExpr(bin->left);
         count += foldExpr(bin->right);
 
-        int64_t lv = 0, rv = 0;
-        if (!asInt(bin->left.get(), lv) || !asInt(bin->right.get(), rv))
-            break; // Not both integer literals — leave as-is.
-
         const std::string& op = bin->op;
-        int64_t result = 0;
-        bool    valid  = true;
 
-        // ── Arithmetic ────────────────────────────────────────────────────
-        if      (op == "+")  result = lv + rv;
-        else if (op == "-")  result = lv - rv;
-        else if (op == "*")  result = lv * rv;
-        else if (op == "/") {
-            if (rv == 0) { valid = false; } // skip: div-by-zero
-            else result = lv / rv;
-        }
-        else if (op == "%") {
-            if (rv == 0) { valid = false; } // skip: mod-by-zero
-            else result = lv % rv;
-        }
-        else if (op == "**") {
-            // Only fold small non-negative exponents to avoid overflow.
-            // rv == 63 would produce 2^63 for base=2, which overflows int64_t
-            // (INT64_MIN), so the bound is rv < 63 (i.e. at most 2^62).
-            if (rv < 0 || rv >= 63) { valid = false; }
-            else {
-                result = 1;
-                for (int64_t i = 0; i < rv; ++i) result *= lv;
+        // ── Integer × Integer folding ─────────────────────────────────────
+        {
+            int64_t lv = 0, rv = 0;
+            if (asInt(bin->left.get(), lv) && asInt(bin->right.get(), rv)) {
+                int64_t result = 0;
+                bool    valid  = true;
+
+                if      (op == "+")  result = lv + rv;
+                else if (op == "-")  result = lv - rv;
+                else if (op == "*")  result = lv * rv;
+                else if (op == "/") {
+                    if (rv == 0 || (lv == LLONG_MIN && rv == -1))
+                        { valid = false; }
+                    else result = lv / rv;
+                }
+                else if (op == "%") {
+                    if (rv == 0 || (lv == LLONG_MIN && rv == -1))
+                        { valid = false; }
+                    else result = lv % rv;
+                }
+                else if (op == "**") {
+                    // rv == 63 would produce 2^63 for base=2, overflowing int64_t.
+                    if (rv < 0 || rv >= 63) { valid = false; }
+                    else {
+                        result = 1;
+                        for (int64_t i = 0; i < rv; ++i) result *= lv;
+                    }
+                }
+                else if (op == "&")  result = lv & rv;
+                else if (op == "|")  result = lv | rv;
+                else if (op == "^")  result = lv ^ rv;
+                else if (op == "<<") {
+                    if (!isValidShiftCount(rv)) { valid = false; }
+                    else result = static_cast<int64_t>(static_cast<uint64_t>(lv) << rv);
+                }
+                else if (op == ">>") {
+                    if (!isValidShiftCount(rv)) { valid = false; }
+                    else result = lv >> rv;
+                }
+                else if (op == "==") result = (lv == rv) ? 1 : 0;
+                else if (op == "!=") result = (lv != rv) ? 1 : 0;
+                else if (op == "<")  result = (lv  < rv) ? 1 : 0;
+                else if (op == "<=") result = (lv <= rv) ? 1 : 0;
+                else if (op == ">")  result = (lv  > rv) ? 1 : 0;
+                else if (op == ">=") result = (lv >= rv) ? 1 : 0;
+                else if (op == "&&") result = (lv && rv) ? 1 : 0;
+                else if (op == "||") result = (lv || rv) ? 1 : 0;
+                else valid = false;
+
+                if (valid) { expr = makeLit(result); ++count; break; }
             }
         }
-        // ── Bitwise ───────────────────────────────────────────────────────
-        else if (op == "&")  result = lv & rv;
-        else if (op == "|")  result = lv | rv;
-        else if (op == "^")  result = lv ^ rv;
-        else if (op == "<<") {
-            if (!isValidShiftCount(rv)) { valid = false; }
-            else result = static_cast<int64_t>(static_cast<uint64_t>(lv) << rv);
-        }
-        else if (op == ">>") {
-            if (!isValidShiftCount(rv)) { valid = false; }
-            else result = lv >> rv; // arithmetic right-shift
-        }
-        // ── Comparisons ───────────────────────────────────────────────────
-        else if (op == "==") result = (lv == rv) ? 1 : 0;
-        else if (op == "!=") result = (lv != rv) ? 1 : 0;
-        else if (op == "<")  result = (lv  < rv) ? 1 : 0;
-        else if (op == "<=") result = (lv <= rv) ? 1 : 0;
-        else if (op == ">")  result = (lv  > rv) ? 1 : 0;
-        else if (op == ">=") result = (lv >= rv) ? 1 : 0;
-        // ── Boolean (treat integer 0 = false, non-zero = true) ────────────
-        else if (op == "&&") result = (lv && rv) ? 1 : 0;
-        else if (op == "||") result = (lv || rv) ? 1 : 0;
-        else valid = false; // unknown operator — leave as-is
 
-        if (valid) {
-            expr = makeLit(result);
-            ++count;
+        // ── Float × Float (or mixed Int/Float) folding ────────────────────
+        // Both operands must be numeric literals (int or float).  The result
+        // is float unless both operands are integer AND the operator produces
+        // a float naturally (**, mixed arithmetic).
+        {
+            double lv = 0.0, rv = 0.0;
+            const bool lIsFloat = asFloat(bin->left.get(),  lv);
+            const bool rIsFloat = asFloat(bin->right.get(), rv);
+            // Promote integer operand if the other side is a float.
+            const bool lOk = lIsFloat || (lIsFloat == false && asDouble(bin->left.get(),  lv));
+            const bool rOk = rIsFloat || (rIsFloat == false && asDouble(bin->right.get(), rv));
+            const bool eitherFloat = lIsFloat || rIsFloat;
+
+            if (eitherFloat && lOk && rOk) {
+                bool valid = true;
+                // Comparison / boolean → integer result even for float ops.
+                if      (op == "==") { expr = makeLit(lv == rv ? 1 : 0); ++count; break; }
+                else if (op == "!=") { expr = makeLit(lv != rv ? 1 : 0); ++count; break; }
+                else if (op == "<")  { expr = makeLit(lv  < rv ? 1 : 0); ++count; break; }
+                else if (op == "<=") { expr = makeLit(lv <= rv ? 1 : 0); ++count; break; }
+                else if (op == ">")  { expr = makeLit(lv  > rv ? 1 : 0); ++count; break; }
+                else if (op == ">=") { expr = makeLit(lv >= rv ? 1 : 0); ++count; break; }
+                else if (op == "&&") { expr = makeLit((lv != 0.0 && rv != 0.0) ? 1 : 0); ++count; break; }
+                else if (op == "||") { expr = makeLit((lv != 0.0 || rv != 0.0) ? 1 : 0); ++count; break; }
+
+                // Arithmetic → float result.
+                double result = 0.0;
+                if      (op == "+")  result = lv + rv;
+                else if (op == "-")  result = lv - rv;
+                else if (op == "*")  result = lv * rv;
+                else if (op == "/") {
+                    if (rv == 0.0) valid = false; // skip: may be intentional
+                    else result = lv / rv;
+                }
+                else if (op == "%") {
+                    if (rv == 0.0) valid = false;
+                    else result = std::fmod(lv, rv);
+                }
+                else if (op == "**") result = std::pow(lv, rv);
+                else valid = false;
+
+                if (valid) { expr = makeFLit(result); ++count; }
+            }
         }
         break;
     }
@@ -147,21 +212,32 @@ static unsigned foldExpr(std::unique_ptr<Expression>& expr) {
         auto* un = static_cast<UnaryExpr*>(expr.get());
         count += foldExpr(un->operand);
 
-        int64_t v = 0;
-        if (!asInt(un->operand.get(), v)) break;
-
         const std::string& op = un->op;
-        int64_t result = 0;
-        bool    valid  = true;
 
-        if      (op == "-") result = -v;
-        else if (op == "~") result = ~v;
-        else if (op == "!") result = v ? 0 : 1;
-        else valid = false;
+        // Integer unary folding.
+        {
+            int64_t v = 0;
+            if (asInt(un->operand.get(), v)) {
+                bool    valid  = true;
+                int64_t result = 0;
+                if      (op == "-") {
+                    if (v == LLONG_MIN) valid = false; // overflow guard
+                    else result = -v;
+                }
+                else if (op == "~") result = ~v;
+                else if (op == "!") result = v ? 0 : 1;
+                else valid = false;
+                if (valid) { expr = makeLit(result); ++count; break; }
+            }
+        }
 
-        if (valid) {
-            expr = makeLit(result);
-            ++count;
+        // Float unary folding.
+        {
+            double v = 0.0;
+            if (asFloat(un->operand.get(), v)) {
+                if      (op == "-") { expr = makeFLit(-v);             ++count; }
+                else if (op == "!") { expr = makeLit(v == 0.0 ? 1:0); ++count; }
+            }
         }
         break;
     }
@@ -173,11 +249,18 @@ static unsigned foldExpr(std::unique_ptr<Expression>& expr) {
         count += foldExpr(tern->thenExpr);
         count += foldExpr(tern->elseExpr);
 
-        // If the condition is a known integer literal we can select a branch.
-        int64_t cv = 0;
-        if (asInt(tern->condition.get(), cv)) {
-            expr = cv ? std::move(tern->thenExpr) : std::move(tern->elseExpr);
-            ++count;
+        // If the condition is a known integer or float literal select a branch.
+        {
+            int64_t cv = 0;
+            if (asInt(tern->condition.get(), cv)) {
+                expr = cv ? std::move(tern->thenExpr) : std::move(tern->elseExpr);
+                ++count; break;
+            }
+            double fv = 0.0;
+            if (asFloat(tern->condition.get(), fv)) {
+                expr = fv != 0.0 ? std::move(tern->thenExpr) : std::move(tern->elseExpr);
+                ++count; break;
+            }
         }
         break;
     }
