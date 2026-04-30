@@ -162,6 +162,12 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 ++count;
                 return count;
             }
+            if (isIntLit(L, 0)) {
+                // 0 - x → -x
+                expr = std::make_unique<UnaryExpr>("-", std::move(bin->right));
+                ++count;
+                return count;
+            }
             // x - x → 0  (safe for integers only)
             if (sameIdent(L, R) && definitelyNotFloat(L)) {
                 expr = makeInt(0);
@@ -195,6 +201,17 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 ++count;
                 return count;
             }
+            // x * -1 → -x   and   -1 * x → -x
+            if (isIntLit(R, -1)) {
+                expr = std::make_unique<UnaryExpr>("-", std::move(bin->left));
+                ++count;
+                return count;
+            }
+            if (isIntLit(L, -1)) {
+                expr = std::make_unique<UnaryExpr>("-", std::move(bin->right));
+                ++count;
+                return count;
+            }
         }
 
         // ── Division identity ──────────────────────────────────────────────
@@ -205,9 +222,31 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 ++count;
                 return count;
             }
+            if (isIntLit(R, -1)) {
+                // x / -1 → -x
+                expr = std::make_unique<UnaryExpr>("-", std::move(bin->left));
+                ++count;
+                return count;
+            }
             // x / x → 1  (integers, non-zero assumption; conservative — only ident)
             if (sameIdent(L, R) && definitelyNotFloat(L)) {
                 expr = makeInt(1);
+                ++count;
+                return count;
+            }
+        }
+
+        // ── Modulo identities ──────────────────────────────────────────────
+        if (op == "%") {
+            if (isIntLit(R, 1)) {
+                // x % 1 → 0
+                expr = makeInt(0);
+                ++count;
+                return count;
+            }
+            // x % x → 0  (non-zero assumption; conservative — only ident)
+            if (sameIdent(L, R) && definitelyNotFloat(L)) {
+                expr = makeInt(0);
                 ++count;
                 return count;
             }
@@ -229,6 +268,12 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                     return count;
                 }
             }
+            // 1 ** x → 1  (pure LHS only; side-effecting RHS must still execute)
+            if (isIntLit(L, 1)) {
+                expr = makeInt(1);
+                ++count;
+                return count;
+            }
         }
 
         // ── Bitwise identities ─────────────────────────────────────────────
@@ -236,6 +281,13 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             if (isIntLit(R, 0) || isIntLit(L, 0)) {
                 // x & 0 → 0,  0 & x → 0
                 expr = makeInt(0);
+                ++count;
+                return count;
+            }
+            // x & x → x
+            if (sameIdent(L, R)) {
+                expr = std::make_unique<IdentifierExpr>(
+                    static_cast<IdentifierExpr*>(L)->name);
                 ++count;
                 return count;
             }
@@ -250,6 +302,13 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             if (isIntLit(L, 0)) {
                 // 0 | x → x
                 expr = std::move(bin->right);
+                ++count;
+                return count;
+            }
+            // x | x → x
+            if (sameIdent(L, R)) {
+                expr = std::make_unique<IdentifierExpr>(
+                    static_cast<IdentifierExpr*>(L)->name);
                 ++count;
                 return count;
             }
@@ -280,6 +339,24 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             if (isIntLit(R, 0)) {
                 // x << 0 → x,  x >> 0 → x
                 expr = std::move(bin->left);
+                ++count;
+                return count;
+            }
+        }
+
+        // ── Self-identifier comparisons ────────────────────────────────────
+        // These are only safe for integers because NaN comparisons for floats
+        // do not satisfy the reflexive property (NaN != NaN).
+        if (sameIdent(L, R) && definitelyNotFloat(L)) {
+            if (op == "==" || op == "<=" || op == ">=") {
+                // x == x → 1,  x <= x → 1,  x >= x → 1
+                expr = makeInt(1);
+                ++count;
+                return count;
+            }
+            if (op == "!=" || op == "<" || op == ">") {
+                // x != x → 0,  x < x → 0,  x > x → 0
+                expr = makeInt(0);
                 ++count;
                 return count;
             }

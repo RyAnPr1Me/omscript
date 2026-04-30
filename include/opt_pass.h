@@ -73,7 +73,6 @@ namespace AnalysisFact {
     inline constexpr const char* kCSE             = "cse";
     inline constexpr const char* kAlgSimp         = "alg_simp";
     inline constexpr const char* kCopyProp        = "copy_prop";
-    inline constexpr const char* kConstFold       = "const_fold";
 } // namespace AnalysisFact
 
 // ─────────────────────────────────────────────────────────────────────────────
