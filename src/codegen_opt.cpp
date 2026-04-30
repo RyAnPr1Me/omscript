@@ -3727,6 +3727,59 @@ struct OptMaxLoopAnnotationPass
             // the vectorizer and interleaver can proceed without alias checks.
             addMDFlag("llvm.loop.parallel_accesses");
         }
+        if (cfg.tileSize > 0) {
+            // loop.tileSize maps to llvm.loop.interleave.count: the tileSize
+            // value controls how many independent copies of the loop body the
+            // vectorizer should interleave (software pipelining for throughput).
+            // For example, tileSize=4 tells the cost model to issue 4
+            // independent iterations to fill latency slots on an out-of-order
+            // core, improving pipeline utilisation for memory-bound loops.
+            addMDInt("llvm.loop.interleave.count",
+                     static_cast<unsigned>(cfg.tileSize));
+        }
+        if (cfg.parallel) {
+            // loop.parallel=true: emit an access-group MDNode attached to the
+            // loop header so the vectorizer treats all memory accesses in this
+            // loop as belonging to a single access group — equivalent to
+            // annotating every load/store with !llvm.access.group and setting
+            // !llvm.loop.parallel_accesses to point at that group.  This allows
+            // LoopVectorize to vectorize without generating alias-check runtime
+            // guards, under the user's assertion that all accesses are safe to
+            // reorder.
+            llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(Ctx, {});
+            MDs.push_back(llvm::MDNode::get(
+                Ctx, {llvm::MDString::get(Ctx, "llvm.loop.parallel_accesses"),
+                      accessGroup}));
+            // Walk the loop blocks and attach the same access group to every
+            // load and store so the vectorizer can prove they're in the group.
+            for (llvm::BasicBlock* BB : L->blocks()) {
+                for (llvm::Instruction& I : *BB) {
+                    if (llvm::isa<llvm::LoadInst>(I) ||
+                        llvm::isa<llvm::StoreInst>(I)) {
+                        llvm::MDNode* existing =
+                            I.getMetadata(llvm::LLVMContext::MD_access_group);
+                        llvm::MDNode* updated =
+                            existing
+                            ? llvm::MDNode::get(
+                                  Ctx, {existing, accessGroup})
+                            : accessGroup;
+                        I.setMetadata(llvm::LLVMContext::MD_access_group,
+                                      updated);
+                    }
+                }
+            }
+        }
+        if (cfg.fuse) {
+            // loop.fuse=true: set llvm.loop.distribute.enable=false to prevent
+            // LoopDistributePass from splitting this loop into independent
+            // partitions.  This is the correct directive when the programmer
+            // wants adjacent loops to be fused together: LoopFusePass will
+            // merge them, but only if neither has been distributed first.
+            MDs.push_back(llvm::MDNode::get(
+                Ctx, {llvm::MDString::get(Ctx, "llvm.loop.distribute.enable"),
+                      llvm::ConstantAsMetadata::get(
+                          llvm::ConstantInt::getFalse(Ctx))}));
+        }
 
         if (MDs.size() == 1 && !existingMD)
             return; // Nothing to annotate
@@ -3789,6 +3842,12 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     FPM.addPass(llvm::InstCombinePass());
     FPM.addPass(llvm::AggressiveInstCombinePass());
     FPM.addPass(llvm::ReassociatePass());
+    // EarlyCSE (MemorySSA-backed): reassociation can expose common sub-
+    // expressions that are not yet visible to NewGVN (e.g., identical sums
+    // produced by rebalancing two separate expression trees into the same
+    // canonical form).  Running EarlyCSE here catches them cheaply before
+    // the more expensive NewGVN and SCCP analyses fire.
+    FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
     FPM.addPass(llvm::NewGVNPass());
     FPM.addPass(llvm::SCCPPass());
     FPM.addPass(llvm::CorrelatedValuePropagationPass());
@@ -3828,9 +3887,12 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     FPM.addPass(llvm::LoopDataPrefetchPass());
 
     // Apply user-specified LoopConfig hints to loop metadata so the unroller
-    // and vectoriser see them before they fire.
+    // and vectoriser see them before they fire.  All six LoopConfig fields are
+    // now wired up: vectorize, noVectorize, unrollCount, independent, tileSize,
+    // parallel, fuse.
     if (cfg.loop.vectorize || cfg.loop.noVectorize ||
-        cfg.loop.unrollCount > 0 || cfg.loop.independent) {
+        cfg.loop.unrollCount > 0 || cfg.loop.independent ||
+        cfg.loop.tileSize > 0 || cfg.loop.parallel || cfg.loop.fuse) {
         FPM.addPass(OptMaxLoopAnnotationPass(cfg.loop));
     }
 
@@ -4112,6 +4174,13 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // so the per-function passes see fully inlined bodies and better value ranges.
     {
         llvm::ModulePassManager PreIPO;
+        // EliminateAvailableExternally: strip available-externally linkage from
+        // function definitions that were imported only for inlining.  After
+        // AlwaysInliner fires, callers of these helpers no longer need their
+        // bodies — converting them back to declarations allows GlobalDCE (later)
+        // to fully remove them, reducing the module size seen by all subsequent
+        // passes.
+        PreIPO.addPass(llvm::EliminateAvailableExternallyPass());
         // AlwaysInlinerPass: inline callees marked alwaysinline (set above for
         // OPTMAX helper functions smaller than kAlwaysInlineThreshold).
         PreIPO.addPass(llvm::AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/false));
@@ -4221,6 +4290,9 @@ void CodeGenerator::optimizeOptMaxFunctions() {
             if (cfg.loop.noVectorize)      std::cout << ", loop.noVectorize";
             if (cfg.loop.unrollCount > 0)  std::cout << ", loop.unrollCount=" << cfg.loop.unrollCount;
             if (cfg.loop.independent)      std::cout << ", loop.independent";
+            if (cfg.loop.tileSize > 0)     std::cout << ", loop.tileSize=" << cfg.loop.tileSize;
+            if (cfg.loop.parallel)         std::cout << ", loop.parallel";
+            if (cfg.loop.fuse)             std::cout << ", loop.fuse";
             if (cfg.safety == SafetyLevel::Off)
                 std::cout << ", unroll.fullMax=512";
             else if (cfg.safety == SafetyLevel::Relaxed)
@@ -4282,6 +4354,12 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // specialisation clones (e.g., two identical vtable constants from
         // different specialisation versions of the same function).
         PostIPO.addPass(llvm::ConstantMergePass());
+        // MergeFunctions: merge functions with identical bodies that became
+        // identical after constant propagation and specialisation (e.g., two
+        // specialised versions of a template that folded to the same code).
+        // Runs after ConstantMerge so the merged globals don't prevent body
+        // comparison from succeeding.
+        PostIPO.addPass(llvm::MergeFunctionsPass());
         // Lightweight function-level cleanup: fold the newly-constant arguments
         // and eliminate any dead code they expose.
         {
@@ -4291,8 +4369,13 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                 llvm::createModuleToFunctionPassAdaptor(std::move(PostCleanFPM)));
         }
         // Final GlobalDCE: remove any additional dead functions/globals exposed
-        // by Round 2 constant propagation.
+        // by Round 2 constant propagation and function merging.
         PostIPO.addPass(llvm::GlobalDCEPass());
+        // StripDeadPrototypes: remove declaration stubs for functions that are
+        // now fully dead (i.e., have no callers and no definitions remaining in
+        // the module after GlobalDCE).  These stubs are harmless but they
+        // inflate the module symbol table and cause linker warnings.
+        PostIPO.addPass(llvm::StripDeadPrototypesPass());
 
         PostIPO.run(*module, MAMMax);
     }
