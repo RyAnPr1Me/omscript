@@ -4477,8 +4477,20 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // The FPMs are built per-function so that safety, aggressiveVec, and
     // LoopConfig hints can be tailored to each function's annotation without
     // shared-pipeline contamination.
+    //
+    // Size guard: the PreIPO/PostIPO rounds above may have inlined callees into
+    // OPTMAX functions, growing some of them well beyond their original size.
+    // Running the full scalar+vector FPM on a function with thousands of
+    // instructions causes LLVM's SLPVectorizer, LoopVectorize, and NewGVN to
+    // allocate data structures in O(n²) memory and crash.  Skip the expensive
+    // FPMs for functions that grew beyond this threshold; they have already
+    // benefited from the PreIPO constant propagation and inlining.
+    static constexpr unsigned kMaxOptMaxFPMInstructions = 5000;
     constexpr int optMaxScalarIterations = 5;
     for (llvm::Function* func : optMaxFuncs) {
+        // Re-check size here: the function may have grown during PreIPO/PostIPO.
+        if (func->getInstructionCount() > kMaxOptMaxFPMInstructions) continue;
+
         const std::string fname = func->getName().str();
         auto cfgIt2 = optMaxFunctionConfigs_.find(fname);
         const OptMaxConfig& cfg =

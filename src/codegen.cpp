@@ -4218,7 +4218,53 @@ void CodeGenerator::generate(Program* program) {
         std::cout << "  [opt] Running LLVM optimization pipeline..." << '\n';
     }
     if (runIRPasses_) {
-        // Run the optimization passes on a thread with a large stack (256 MB).
+        // ── Inliner-overflow guard ─────────────────────────────────────────
+        // The standard LLVM O3 inliner uses a per-call cost threshold (~225).
+        // When many small OPTMAX functions (each well below that threshold) are
+        // all called from a single non-OPTMAX dispatcher (e.g. a benchmark
+        // main()), the inliner collapses every one of them into that dispatcher,
+        // creating a function with tens of thousands of instructions.  LLVM's
+        // subsequent per-function O3 passes — JumpThreading, SLPVectorizer,
+        // NewGVN — either run in O(n²) time/memory and OOM, or use recursive
+        // DFS / back-tracking that overflows the call stack, both resulting in
+        // a SIGSEGV inside the compiler process.
+        //
+        // Fix: temporarily mark OPTMAX functions that have at least one
+        // non-OPTMAX caller as `noinline` so the standard inliner's cost model
+        // refuses to inline them into the non-OPTMAX caller.  The OPTMAX
+        // functions themselves are already fully optimised by the OPTMAX
+        // pipeline above; all module-level IPO passes (IPSCCP, GlobalDCE,
+        // GlobalOpt, ConstArgProp, etc.) still see the whole module and run
+        // unmodified.  AMX / HGOE / superoptimizer optimisations are unaffected
+        // because they run before this point.
+        //
+        // The `noinline` attribute is removed after runOptimizationPasses()
+        // completes so that no permanent change is made to the function
+        // attributes seen by the linker or any downstream LTO pass.
+        llvm::SmallVector<llvm::Function*, 64> inlinerGuardFuncs;
+        if (hasOptMaxFunctions && enableOptMax_ && module) {
+            for (auto& F : *module) {
+                if (F.isDeclaration()) continue;
+                if (!optMaxFunctions.count(F.getName())) continue;
+                if (F.hasFnAttribute(llvm::Attribute::NoInline)) continue;
+                bool hasNonOptMaxCaller = false;
+                for (auto* user : F.users()) {
+                    auto* CB = llvm::dyn_cast<llvm::CallBase>(user);
+                    if (!CB) { hasNonOptMaxCaller = true; break; }
+                    llvm::Function* caller = CB->getFunction();
+                    if (!caller || !optMaxFunctions.count(caller->getName())) {
+                        hasNonOptMaxCaller = true;
+                        break;
+                    }
+                }
+                if (hasNonOptMaxCaller) {
+                    F.addFnAttr(llvm::Attribute::NoInline);
+                    inlinerGuardFuncs.push_back(&F);
+                }
+            }
+        }
+
+        // Run the optimization passes on a thread with a large stack (512 MB).
         // LLVM's recursive passes (DominatorTree DFS, JumpThreading, NewGVN,
         // etc.) can overflow the default OS stack (~8–16 MB) when the module
         // contains a very large inlined call graph — e.g. a dispatch function
@@ -4238,6 +4284,11 @@ void CodeGenerator::generate(Program* program) {
                 pendingException = std::current_exception();
             }
         }, kOptStackBytes);
+
+        // Restore: remove the temporary noinline markers added above.
+        for (llvm::Function* F : inlinerGuardFuncs)
+            F->removeFnAttr(llvm::Attribute::NoInline);
+
         if (pendingException)
             std::rethrow_exception(pendingException);
         if (!ok) {
