@@ -4145,7 +4145,30 @@ void CodeGenerator::generate(Program* program) {
         if (verbose_) {
             std::cout << "  [opt] Running OPTMAX per-function optimization passes..." << '\n';
         }
-        optimizeOptMaxFunctions();
+        // Run OPTMAX in a thread with a large stack for the same reason as the
+        // standard pipeline below: the PostIPO inliner can create large function
+        // bodies inside optimizeOptMaxFunctions() that overflow LLVM's recursive
+        // passes (DominatorTree DFS, etc.) on the default 8–16 MB OS stack.
+        std::exception_ptr optMaxException;
+        llvm::CrashRecoveryContext CRCOptMax;
+        llvm::CrashRecoveryContext::Enable();
+        constexpr unsigned kOptMaxStackBytes = 256u * 1024u * 1024u; // 256 MB
+        const bool optMaxOk = CRCOptMax.RunSafelyOnThread([&]() {
+            try {
+                optimizeOptMaxFunctions();
+            } catch (...) {
+                optMaxException = std::current_exception();
+            }
+        }, kOptMaxStackBytes);
+        if (optMaxException)
+            std::rethrow_exception(optMaxException);
+        if (!optMaxOk) {
+            throw DiagnosticError(Diagnostic{
+                DiagnosticSeverity::Error, {"", 0, 0},
+                "LLVM optimizer crashed during OPTMAX optimization (likely a stack "
+                "overflow in a recursive pass on a very large inlined function). "
+                "Consider splitting the module or reducing the OPTMAX call graph depth."});
+        }
     }
 
     // Mark all constant global variables with unnamed_addr at O2+.
@@ -4207,7 +4230,7 @@ void CodeGenerator::generate(Program* program) {
         std::exception_ptr pendingException;
         llvm::CrashRecoveryContext CRC;
         llvm::CrashRecoveryContext::Enable();
-        constexpr unsigned kOptStackBytes = 256u * 1024u * 1024u; // 256 MB
+        constexpr unsigned kOptStackBytes = 512u * 1024u * 1024u; // 512 MB
         const bool ok = CRC.RunSafelyOnThread([&]() {
             try {
                 runOptimizationPasses();

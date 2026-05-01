@@ -4593,21 +4593,51 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // NOT use AlwaysInlinerPass here because the AlwaysInline stubs were
         // already cleaned up in PreIPO; this is a cost-model-driven inlining
         // pass for remaining, non-trivially-inlinable callees.
-        PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+        //
+        // Guard: temporarily mark all non-OPTMAX functions (e.g. main) as
+        // noinline before the inliner runs.  Without this, the CGSCC inliner
+        // with InlinerThreshold=3000 would pull every OPTMAX bench function
+        // (each well below 3000 cost units) into their non-OPTMAX callers,
+        // collapsing a large call graph into a single enormous function body
+        // whose basic-block count overwhelms LLVM's recursive DFS passes and
+        // causes a segfault.  Inlining within the OPTMAX call graph is still
+        // unrestricted; only the OPTMAX→non-OPTMAX boundary is guarded.
+        PostIPO.run(*module, MAMMax);
+    }
+    // Collect non-OPTMAX functions and temporarily mark them noinline so the
+    // Round 1.5 inliner cannot pull OPTMAX callees into them.
+    llvm::SmallVector<llvm::Function*, 16> tempNoInline;
+    for (auto& F : *module) {
+        if (F.isDeclaration()) continue;
+        if (optMaxFunctions.count(F.getName())) continue; // OPTMAX: leave as-is
+        if (F.hasFnAttribute(llvm::Attribute::NoInline)) continue;
+        F.addFnAttr(llvm::Attribute::NoInline);
+        tempNoInline.push_back(&F);
+    }
+    {
+        llvm::ModulePassManager PostIPO_inline;
+        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
             llvm::InlinerPass()));
         // Post-inlining attribute refresh: after the inliner folds callees into
         // callers, run PostOrderFunctionAttrs + Attributor at CGSCC granularity
         // to re-derive memory-effect, nounwind, and purity attributes for the
         // merged bodies.  This ensures Round 2 IPSCCP and ConstArgProp start
         // from the sharpest possible attribute set.
-        PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
             llvm::PostOrderFunctionAttrsPass()));
-        PostIPO.addPass(llvm::ReversePostOrderFunctionAttrsPass());
-        PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+        PostIPO_inline.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
             llvm::AttributorCGSCCPass()));
         // Re-run GlobalDCE after inlining to remove callee bodies that were
         // fully inlined (no callers remaining).
-        PostIPO.addPass(llvm::GlobalDCEPass());
+        PostIPO_inline.addPass(llvm::GlobalDCEPass());
+        PostIPO_inline.run(*module, MAMMax);
+    }
+    // Restore: remove the temporary noinline markers added above.
+    for (llvm::Function* F : tempNoInline)
+        F->removeFnAttr(llvm::Attribute::NoInline);
+    {
+        llvm::ModulePassManager PostIPO;
 
         // ── Round 2: re-propagation after dead-code removal and inlining ──
         // IPSCCP round 2: GlobalOpt may have replaced globals with constants,
