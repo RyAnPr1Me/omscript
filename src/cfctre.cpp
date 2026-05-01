@@ -389,7 +389,17 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
 
     CTValue result;
     if (frame.hasReturned)  result = frame.returnValue;
-    else if (frame.hasLastBare) result = frame.lastBareExpr;
+    else if (frame.hasLastBare) {
+        // IMPORTANT: only fall back to lastBareExpr if the function genuinely
+        // has no return statement (i.e. the body ran to completion without a
+        // ReturnStmt).  If executeBody returned false the likely cause is that
+        // evalExpr for the return value returned uninit — meaning we could not
+        // fully evaluate the return expression.  In that case we MUST NOT use
+        // lastBareExpr (which is a side-effecting expression's old/pre value,
+        // e.g. the old value of arr[i] before arr[i]++).
+        if (!ok) return std::nullopt;   // body failed → don't use stale lastBare
+        result = frame.lastBareExpr;
+    }
     else                    return std::nullopt;
 
     // SYMBOLIC result means we couldn't fully evaluate — don't fold to constant.
