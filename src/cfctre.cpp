@@ -1082,9 +1082,23 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // Helpers.
     auto intArg = [&](size_t i) -> std::optional<int64_t> {
-        if (i < n && args[i].isInt()) return args[i].asI64();
+        if (i >= n) return std::nullopt;
+        if (args[i].isInt()) return args[i].asI64();
+        // Accept float args that are exactly representable as integers.
+        if (args[i].isFloat()) {
+            const double fv = args[i].asF64();
+            const int64_t iv = static_cast<int64_t>(fv);
+            if (static_cast<double>(iv) == fv) return iv;
+        }
         return std::nullopt;
     };
+    auto dArg = [&](size_t i) -> std::optional<double> {
+        if (i >= n) return std::nullopt;
+        if (args[i].isFloat()) return args[i].asF64();
+        if (args[i].isInt())   return static_cast<double>(args[i].asI64());
+        return std::nullopt;
+    };
+    auto fromD = [](double v) -> CTValue { return CTValue::fromF64(v); };
     // strArg returns a pointer to the arg's string, avoiding a copy.
     auto strArg = [&](size_t i) -> const std::string* {
         if (i < n && args[i].isString()) return &args[i].asStr();
@@ -1156,50 +1170,75 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "min" && n == 2) {
         auto a = intArg(0), b = intArg(1);
         if (a && b) return CTValue::fromI64(std::min(*a, *b));
+        auto da = dArg(0), db = dArg(1);
+        if (da && db) return CTValue::fromF64(std::min(*da, *db));
         return std::nullopt;
     }
     if (name == "max" && n == 2) {
         auto a = intArg(0), b = intArg(1);
         if (a && b) return CTValue::fromI64(std::max(*a, *b));
+        auto da = dArg(0), db = dArg(1);
+        if (da && db) return CTValue::fromF64(std::max(*da, *db));
         return std::nullopt;
     }
 
     // ── sign ─────────────────────────────────────────────────────────────
     if (name == "sign" && n == 1) {
-        if (auto v = intArg(0))
-            return CTValue::fromI64(*v > 0 ? 1 : (*v < 0 ? -1 : 0));
+        if (auto v = dArg(0))
+            return CTValue::fromI64(*v > 0.0 ? 1 : (*v < 0.0 ? -1 : 0));
         return std::nullopt;
     }
 
     // ── clamp ────────────────────────────────────────────────────────────
     if (name == "clamp" && n == 3) {
-        auto v = intArg(0), lo = intArg(1), hi = intArg(2);
-        if (v && lo && hi) return CTValue::fromI64(std::max(*lo, std::min(*v, *hi)));
+        // Try float first (preserves float result for float inputs).
+        auto dv = dArg(0), dlo = dArg(1), dhi = dArg(2);
+        if (dv && dlo && dhi) {
+            const double res = std::max(*dlo, std::min(*dv, *dhi));
+            auto iv = intArg(0); auto ilo = intArg(1); auto ihi = intArg(2);
+            if (iv && ilo && ihi) return CTValue::fromI64(std::max(*ilo, std::min(*iv, *ihi)));
+            return CTValue::fromF64(res);
+        }
         return std::nullopt;
     }
 
     // ── pow ──────────────────────────────────────────────────────────────
     if (name == "pow" && n == 2) {
-        auto b = intArg(0), ex = intArg(1);
-        if (b && ex) {
-            if (*ex < 0) return (*b == 1) ? std::optional<CTValue>(CTValue::fromI64(1)) : std::nullopt;
-            int64_t r = 1, base = *b;
-            int64_t e = *ex;
-            while (e > 0) { if (e & 1) r *= base; base *= base; e >>= 1; }
-            return CTValue::fromI64(r);
+        auto db = dArg(0), de = dArg(1);
+        if (db && de) {
+            // If both are exact integers, keep integer semantics.
+            auto ib = intArg(0), ie = intArg(1);
+            if (ib && ie) {
+                if (*ie < 0) return (*ib == 1) ? std::optional<CTValue>(CTValue::fromI64(1)) : std::nullopt;
+                int64_t r = 1, base = *ib, e = *ie;
+                while (e > 0) { if (e & 1) r *= base; base *= base; e >>= 1; }
+                return CTValue::fromI64(r);
+            }
+            // Float pow.
+            return CTValue::fromF64(std::pow(*db, *de));
         }
         return std::nullopt;
     }
 
     // ── sqrt / floor / ceil / round ───────────────────────────────────────
     if (name == "sqrt" && n == 1) {
-        if (auto v = intArg(0))
-            if (*v >= 0) return CTValue::fromI64(static_cast<int64_t>(std::sqrt(static_cast<double>(*v))));
+        if (auto v = dArg(0)) {
+            if (*v >= 0.0) return CTValue::fromF64(std::sqrt(*v));
+        }
         return std::nullopt;
     }
-    if (name == "floor" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(*v); return std::nullopt; }
-    if (name == "ceil"  && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(*v); return std::nullopt; }
-    if (name == "round" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(*v); return std::nullopt; }
+    if (name == "floor" && n == 1) {
+        if (auto v = dArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::floor(*v)));
+        return std::nullopt;
+    }
+    if (name == "ceil"  && n == 1) {
+        if (auto v = dArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::ceil(*v)));
+        return std::nullopt;
+    }
+    if (name == "round" && n == 1) {
+        if (auto v = dArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::round(*v)));
+        return std::nullopt;
+    }
 
     // ── log2 / log / log10 / exp2 ─────────────────────────────────────────
     if (name == "log2" && n == 1) {

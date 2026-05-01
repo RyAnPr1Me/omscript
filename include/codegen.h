@@ -578,14 +578,16 @@ class CodeGenerator {
 
     /// Compile-time constant value (int, string, or array) for unified constant propagation.
     struct ConstValue {
-        enum class Kind { Integer, String, Array } kind = Kind::Integer;
+        enum class Kind { Integer, Float, String, Array } kind = Kind::Integer;
         int64_t intVal = 0;
+        double  floatVal = 0.0;
         std::string strVal;
         std::vector<ConstValue> arrVal;  // for Kind::Array
-        static ConstValue fromInt(int64_t v)     { return {Kind::Integer, v, {}, {}}; }
-        static ConstValue fromStr(std::string s) { return {Kind::String, 0, std::move(s), {}}; }
+        static ConstValue fromInt(int64_t v)     { ConstValue c; c.kind = Kind::Integer; c.intVal = v; return c; }
+        static ConstValue fromFloat(double v)    { ConstValue c; c.kind = Kind::Float;   c.floatVal = v; return c; }
+        static ConstValue fromStr(std::string s) { ConstValue c; c.kind = Kind::String;  c.strVal = std::move(s); return c; }
         static ConstValue fromArr(std::vector<ConstValue> a)
-                                                 { return {Kind::Array, 0, {}, std::move(a)}; }
+                                                 { ConstValue c; c.kind = Kind::Array;   c.arrVal = std::move(a); return c; }
     };
 
     /// Compile-time array values for `const` arrays (enables array index folding).
@@ -609,6 +611,7 @@ class CodeGenerator {
 
     /// Fold an expression to a compile-time integer or string (more powerful than getConstantInt).
     std::optional<int64_t>     tryFoldInt(Expression* e) const;
+    std::optional<double>      tryFoldFloat(Expression* e) const;
     std::optional<std::string> tryFoldStr(Expression* e) const;
 
     /// Emit a compile-time constant array as a private global (OmScript array layout).

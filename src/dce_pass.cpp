@@ -208,10 +208,35 @@ static DCEStats transformBlock(BlockStmt* block) {
 
     // Pass 2 — prune unreachable statements after a definite exit.
     // Find the first unconditional exit in the block.
+    // NOTE: throw is NOT a pruning boundary here because catch(code) blocks
+    // that follow a throw are intentional jump targets — removing them would
+    // delete live handlers and cause buildCatchTable to find an empty table.
     size_t cutoff = block->statements.size();
     for (size_t i = 0; i < block->statements.size(); ++i) {
-        if (isUnconditionalExit(block->statements[i].get())) {
-            cutoff = i + 1; // keep up to and including the exit statement
+        const Statement* s = block->statements[i].get();
+        if (!s) continue;
+        if (s->type == ASTNodeType::THROW_STMT) {
+            // A throw is only a pruning boundary if NO catch block follows it
+            // anywhere in the same block — i.e. it is truly unhandled.
+            bool hasCatchAfter = false;
+            for (size_t j = i + 1; j < block->statements.size(); ++j) {
+                if (block->statements[j] &&
+                    block->statements[j]->type == ASTNodeType::CATCH_STMT) {
+                    hasCatchAfter = true;
+                    break;
+                }
+            }
+            if (!hasCatchAfter) {
+                cutoff = i + 1;
+                break;
+            }
+            // Has catch handlers — do not prune; let codegen handle the jump table.
+            continue;
+        }
+        if (s->type == ASTNodeType::RETURN_STMT ||
+            s->type == ASTNodeType::BREAK_STMT  ||
+            s->type == ASTNodeType::CONTINUE_STMT) {
+            cutoff = i + 1;
             break;
         }
     }

@@ -5421,11 +5421,28 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
     return ctValueToConstValue(result);
 }
 
-// tryFoldInt / tryFoldStr: convenience wrappers used by generateBuiltin.
+// tryFoldInt / tryFoldFloat / tryFoldStr: convenience wrappers used by generateBuiltin.
 std::optional<int64_t> CodeGenerator::tryFoldInt(Expression* e) const {
     if (!e) return std::nullopt;
-    if (auto cv = tryFoldExprToConst(e))
+    if (auto cv = tryFoldExprToConst(e)) {
         if (cv->kind == ConstValue::Kind::Integer) return cv->intVal;
+        // Float constants that are exactly representable as integers can be
+        // used where integers are expected (e.g. is_even(4.0) → is_even(4)).
+        // Only truncate if the value has no fractional part.
+        if (cv->kind == ConstValue::Kind::Float) {
+            const double fv = cv->floatVal;
+            const int64_t iv = static_cast<int64_t>(fv);
+            if (static_cast<double>(iv) == fv) return iv;
+        }
+    }
+    return std::nullopt;
+}
+std::optional<double> CodeGenerator::tryFoldFloat(Expression* e) const {
+    if (!e) return std::nullopt;
+    if (auto cv = tryFoldExprToConst(e)) {
+        if (cv->kind == ConstValue::Kind::Float)   return cv->floatVal;
+        if (cv->kind == ConstValue::Kind::Integer) return static_cast<double>(cv->intVal);
+    }
     return std::nullopt;
 }
 std::optional<std::string> CodeGenerator::tryFoldStr(Expression* e) const {
@@ -5655,6 +5672,8 @@ CodeGenerator::ConstValue CodeGenerator::ctValueToConstValue(const CTValue& v) c
     case CTValueKind::CONCRETE_U64:
     case CTValueKind::CONCRETE_BOOL:
         return ConstValue::fromInt(v.asI64());
+    case CTValueKind::CONCRETE_F64:
+        return ConstValue::fromFloat(v.asF64());
     case CTValueKind::CONCRETE_STRING:
         return ConstValue::fromStr(v.asStr());
     case CTValueKind::CONCRETE_ARRAY: {
@@ -5674,6 +5693,7 @@ CodeGenerator::ConstValue CodeGenerator::ctValueToConstValue(const CTValue& v) c
 CTValue CodeGenerator::constValueToCTValue(const ConstValue& v) const {
     switch (v.kind) {
     case ConstValue::Kind::Integer: return CTValue::fromI64(v.intVal);
+    case ConstValue::Kind::Float:   return CTValue::fromF64(v.floatVal);
     case ConstValue::Kind::String:  return CTValue::fromString(v.strVal);
     case ConstValue::Kind::Array: {
         if (!ctEngine_) return CTValue::uninit();
@@ -6420,7 +6440,9 @@ llvm::Value* CodeGenerator::emitComptimeArray(const std::vector<ConstValue>& ele
     for (const auto& elem : elems) {
         // Only integer elements are supported in comptime arrays for now;
         // non-integer elements are clamped to 0 rather than failing hard.
-        int64_t v = (elem.kind == ConstValue::Kind::Integer) ? elem.intVal : 0;
+        int64_t v = (elem.kind == ConstValue::Kind::Integer) ? elem.intVal
+                  : (elem.kind == ConstValue::Kind::Float)   ? static_cast<int64_t>(elem.floatVal)
+                  : 0;
         vals.push_back(llvm::ConstantInt::get(i64Ty, v));
     }
     auto* arrTy = llvm::ArrayType::get(i64Ty, N + 1);

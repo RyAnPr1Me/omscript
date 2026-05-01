@@ -205,6 +205,54 @@ static void collectWrittenInStmt(const Statement* stmt,
     }
 }
 
+/// Recursively collect all names written anywhere inside @p stmt (including
+/// nested blocks, if/while/for bodies).  Used to conservatively kill the
+/// copy map before propagating into a loop condition.
+static void collectWrittenDeep(const Statement* stmt,
+                                std::unordered_set<std::string>& out) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case ASTNodeType::VAR_DECL:
+        out.insert(static_cast<const VarDecl*>(stmt)->name);
+        break;
+    case ASTNodeType::EXPR_STMT:
+        collectWrittenNames(static_cast<const ExprStmt*>(stmt)->expression.get(), out);
+        break;
+    case ASTNodeType::FOR_STMT: {
+        const auto* fs = static_cast<const ForStmt*>(stmt);
+        out.insert(fs->iteratorVar);
+        collectWrittenDeep(fs->body.get(), out);
+        break;
+    }
+    case ASTNodeType::FOR_EACH_STMT: {
+        const auto* fe = static_cast<const ForEachStmt*>(stmt);
+        out.insert(fe->iteratorVar);
+        collectWrittenDeep(fe->body.get(), out);
+        break;
+    }
+    case ASTNodeType::WHILE_STMT:
+        collectWrittenDeep(static_cast<const WhileStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::DO_WHILE_STMT:
+        collectWrittenDeep(static_cast<const DoWhileStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::IF_STMT: {
+        const auto* ifS = static_cast<const IfStmt*>(stmt);
+        collectWrittenDeep(ifS->thenBranch.get(), out);
+        collectWrittenDeep(ifS->elseBranch.get(), out);
+        break;
+    }
+    case ASTNodeType::BLOCK: {
+        const auto* blk = static_cast<const BlockStmt*>(stmt);
+        for (const auto& s : blk->statements)
+            collectWrittenDeep(s.get(), out);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // propagateInBlock — forward dataflow over one statement list
 // ─────────────────────────────────────────────────────────────────────────────
@@ -293,6 +341,16 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
 
         case ASTNodeType::WHILE_STMT: {
             auto* ws = static_cast<WhileStmt*>(stmt.get());
+            // Kill all names written anywhere in the body BEFORE propagating
+            // into the condition — otherwise a copy `v → x` would replace `v`
+            // in `while ((v & 1) == 0)` even though `v` is mutated inside the
+            // body, causing LLVM to fold the condition as loop-invariant and
+            // emit `noreturn`.
+            {
+                std::unordered_set<std::string> bodyWrites;
+                collectWrittenDeep(ws->body.get(), bodyWrites);
+                for (const auto& w : bodyWrites) killName(map, w);
+            }
             count += propagateInExpr(ws->condition, map);
             count += killAndRecurseBody(ws->body.get(), map);
             break;

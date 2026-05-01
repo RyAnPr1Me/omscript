@@ -1086,8 +1086,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::POW) {
         validateArgCount(expr, "pow", 2);
-        // Constant-fold pow(base, exp) when both are compile-time constants and exp >= 0.
-        // Eliminates the entire exponentiation loop at compile time.
+        // Constant-fold pow(base, exp) when both are compile-time constants.
+        // When either argument is a float (not an exact integer), use double arithmetic.
+        {
+            auto cvB = tryFoldExprToConst(expr->arguments[0].get());
+            auto cvE = tryFoldExprToConst(expr->arguments[1].get());
+            bool bIsFloat = cvB && cvB->kind == ConstValue::Kind::Float;
+            bool eIsFloat = cvE && cvE->kind == ConstValue::Kind::Float;
+            if (cvB && cvE && (bIsFloat || eIsFloat)) {
+                double fb = bIsFloat ? cvB->floatVal : static_cast<double>(cvB->intVal);
+                double fe = eIsFloat ? cvE->floatVal : static_cast<double>(cvE->intVal);
+                double result = std::pow(fb, fe);
+                return llvm::ConstantFP::get(getFloatType(), result);
+            }
+        }
+        // Integer constant-fold: both args must be exact integers.
         if (auto cb = tryFoldInt(expr->arguments[0].get())) {
             if (auto ce = tryFoldInt(expr->arguments[1].get())) {
                 int64_t b = *cb, e = *ce;
