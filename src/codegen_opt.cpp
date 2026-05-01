@@ -2309,9 +2309,16 @@ void CodeGenerator::runOptimizationPasses() {
         // Increase inliner threshold from the LLVM default (225) to account
         PTO.InlinerThreshold = 500;
     }
-    if (optimizationLevel == OptimizationLevel::O3) {
-        PTO.InlinerThreshold = 3000; // aggressive inlining for maximum IPC (compile time not a concern)
-    }
+    // NOTE: Do NOT further increase PTO.InlinerThreshold at O3 for the standard
+    // pipeline.  A threshold of 3000 in the standard pipeline causes the LLVM
+    // inliner to pull every callee (including all OPTMAX benchmark functions)
+    // into their callers indiscriminately.  When a large switch dispatches to
+    // 90+ functions, the resulting merged function has tens of thousands of basic
+    // blocks and exhausts LLVM's recursive-DFS stack (DominatorTree, GVN,
+    // SimplifyCFG), causing a SIGSEGV.  The OPTMAX-specific pipeline keeps its
+    // own PTOMax.InlinerThreshold = 3000 which is correct: OPTMAX functions are
+    // processed one at a time so the aggressive threshold only applies within a
+    // single hot kernel, never across an unlimited call graph.
     // ForgetAllSCEVInLoopUnroll forces SCEV to recompute trip counts after
     if (optimizationLevel >= OptimizationLevel::O2) {
         PTO.ForgetAllSCEVInLoopUnroll = true;
@@ -4152,10 +4159,35 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                 func.addFnAttr(llvm::Attribute::Speculatable);
             }
         }
-        // Mark small OPTMAX helpers as always-inline candidates.
+        // Mark small OPTMAX helpers as always-inline candidates, but ONLY when
+        // every call site is inside another OPTMAX function.  If any caller is
+        // non-OPTMAX (e.g. main, a runtime wrapper, or an exported entry point)
+        // forcing AlwaysInline causes the inliner to expand all OPTMAX bodies
+        // into that non-OPTMAX caller, potentially creating a single enormous
+        // function whose basic-block count overflows LLVM's recursive DFS passes
+        // (DominatorTree construction, SimplifyCFG, GVN) and causes a
+        // segmentation fault.  The cost-model IPO inliner (InlinerThreshold=3000)
+        // still handles cross-boundary inlining for these functions when it is
+        // profitable — this guard only prevents unconditional forced inlining.
         if (func.getInstructionCount() < kAlwaysInlineThreshold
                 && !func.hasFnAttribute(llvm::Attribute::NoInline)) {
-            func.addFnAttr(llvm::Attribute::AlwaysInline);
+            bool onlyCalledFromOptMax = true;
+            for (auto* user : func.users()) {
+                auto* CB = llvm::dyn_cast<llvm::CallBase>(user);
+                if (!CB) {
+                    // Address-taken or other non-call use — cannot guarantee
+                    // the function is only used within OPTMAX context.
+                    onlyCalledFromOptMax = false;
+                    break;
+                }
+                llvm::Function* caller = CB->getFunction();
+                if (!caller || !optMaxFunctions.count(caller->getName())) {
+                    onlyCalledFromOptMax = false;
+                    break;
+                }
+            }
+            if (onlyCalledFromOptMax)
+                func.addFnAttr(llvm::Attribute::AlwaysInline);
         }
 
         // aggressiveVec=true: hint to the back-end to use the widest available

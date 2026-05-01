@@ -13,6 +13,7 @@
 #include <limits>
 #include <sstream>
 #include <llvm/ADT/StringMap.h>
+#include <llvm/Support/CrashRecoveryContext.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
@@ -4194,7 +4195,35 @@ void CodeGenerator::generate(Program* program) {
         std::cout << "  [opt] Running LLVM optimization pipeline..." << '\n';
     }
     if (runIRPasses_) {
-        runOptimizationPasses();
+        // Run the optimization passes on a thread with a large stack (256 MB).
+        // LLVM's recursive passes (DominatorTree DFS, JumpThreading, NewGVN,
+        // etc.) can overflow the default OS stack (~8–16 MB) when the module
+        // contains a very large inlined call graph — e.g. a dispatch function
+        // that calls 90+ hot kernels, all of which the inliner folds into a
+        // single enormous function.  RunSafelyOnThread spawns a new thread
+        // with the requested stack size and installs a SIGSEGV handler so any
+        // remaining stack overflow is converted into a clean error rather than
+        // a silent crash.
+        std::exception_ptr pendingException;
+        llvm::CrashRecoveryContext CRC;
+        llvm::CrashRecoveryContext::Enable();
+        constexpr unsigned kOptStackBytes = 256u * 1024u * 1024u; // 256 MB
+        const bool ok = CRC.RunSafelyOnThread([&]() {
+            try {
+                runOptimizationPasses();
+            } catch (...) {
+                pendingException = std::current_exception();
+            }
+        }, kOptStackBytes);
+        if (pendingException)
+            std::rethrow_exception(pendingException);
+        if (!ok) {
+            throw DiagnosticError(Diagnostic{
+                DiagnosticSeverity::Error, {"", 0, 0},
+                "LLVM optimizer crashed during code generation (likely a stack "
+                "overflow in a recursive pass on a very large inlined function). "
+                "Consider splitting the module or reducing the call graph depth."});
+        }
     }
 
     // Finalize DWARF debug info before module verification.

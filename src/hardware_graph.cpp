@@ -8133,6 +8133,22 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     HGOEStats stats;
     if (func.isDeclaration()) return stats;
 
+    // HGOE is designed for individual hot-kernel functions.  Very large
+    // functions — e.g. a top-level dispatcher that has had many callees
+    // inlined into it by the standard O3 pipeline — would cause the
+    // scheduling data structures (per-instruction DAG, alias sets, port-
+    // pressure tables) to grow proportionally to the total instruction
+    // count, and the O(n²) alias-edge enumeration inside scheduleBasicBlock
+    // can exhaust memory or produce a SIGSEGV on functions with thousands of
+    // basic blocks.  Silently skip such functions: they are already
+    // well-optimised by LLVM's own inliner + vectorizer and benefit little
+    // from the micro-architectural scheduling HGOE adds.
+    static constexpr unsigned kMaxFuncInstructions = 5000;
+    if (func.getInstructionCount() > kMaxFuncInstructions) {
+        stats.activated = false;
+        return stats;
+    }
+
     // Resolve microarchitecture: prefer -mtune for scheduling, -march for features.
     // Resolve "native" to the actual host CPU name so the profile lookup succeeds.
     std::string marchResolved = resolveNativeCpu(config.marchCpu);
