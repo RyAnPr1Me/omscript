@@ -3963,6 +3963,15 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     FPM.addPass(llvm::ADCEPass());
 
     // ── Phase 3: Scalar optimizations ────────────────────────────────────
+    // FlattenCFG (safety=Off only): convert diamonds and if-ladders into
+    // straight-line code with select/shuffle before the scalar opts and
+    // vectorizer run.  This exposes data-parallel patterns to SLPVectorizer
+    // and LoopVectorize that would otherwise be guarded by branches.  Only
+    // enabled when safety=Off because it may introduce speculative execution
+    // of operands that are UB when the branch is not taken (e.g. divide-by-
+    // zero guarded by a conditional).
+    if (safetyOff)
+        FPM.addPass(llvm::FlattenCFGPass());
     FPM.addPass(llvm::SinkingPass());
     FPM.addPass(llvm::StraightLineStrengthReducePass());
     FPM.addPass(llvm::NaryReassociatePass());
@@ -4486,7 +4495,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // FPMs for functions that grew beyond this threshold; they have already
     // benefited from the PreIPO constant propagation and inlining.
     static constexpr unsigned kMaxOptMaxFPMInstructions = 5000;
-    constexpr int optMaxScalarIterations = 5;
+    constexpr int optMaxScalarIterations = 8;
     for (llvm::Function* func : optMaxFuncs) {
         // Re-check size here: the function may have grown during PreIPO/PostIPO.
         if (func->getInstructionCount() > kMaxOptMaxFPMInstructions) continue;
@@ -4567,9 +4576,36 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         }
     }
 
+    // ── OPTMAX Wave 2.5: IPO attribute refresh after per-function passes ──
+    // The per-function scalar+vec pipeline may have:
+    //   • simplified function bodies, making previously indirect/side-effecting
+    //     functions provably pure or readnone;
+    //   • exposed new constant return values or constant-folded arguments;
+    //   • eliminated dead parameters through ADCE+BDCE.
+    // Running a fresh Attributor+IPSCCP sweep here sharpens the attribute set
+    // before PostIPO runs, so the Round 1.5 inliner and Round 2 IPSCCP start
+    // from stronger facts.  This is a "pre-PostIPO" IPO refresh.
+    {
+        llvm::ModulePassManager Wave25;
+        Wave25.addPass(llvm::InferFunctionAttrsPass());
+        Wave25.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::PostOrderFunctionAttrsPass()));
+        Wave25.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        Wave25.addPass(llvm::AttributorPass());
+        Wave25.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::AttributorCGSCCPass()));
+        // IPSCCP with function specialization: now that attribute info is
+        // richer, a second IPSCCP pass finds more inter-procedural constants
+        // and may specialize callee clones for constant arguments seen at
+        // call sites.
+        Wave25.addPass(llvm::IPSCCPPass(llvm::IPSCCPOptions(/*AllowFuncSpec=*/true)));
+        Wave25.addPass(llvm::CalledValuePropagationPass());
+        Wave25.run(*module, MAMMax);
+    }
+
     // ── Post-OPTMAX module-level cleanup ──────────────────────────────────
     // After aggressively inlining + optimising each OPTMAX function, run a
-    // three-round IPO sweep:
+    // four-round IPO sweep:
     //   Round 1  — eliminate dead code and constant-fold globals.
     //   Round 1.5— inline callees that became small enough after Round 1.
     //   Round 2  — re-propagate constants and arguments newly exposed by Round
@@ -4616,6 +4652,14 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // unrestricted; only the OPTMAX→non-OPTMAX boundary is guarded.
         PostIPO.run(*module, MAMMax);
     }
+    // SyntheticCountsPropagation: assign synthetic hotness estimates to
+    // functions based on call graph structure (entry-point bias, call
+    // frequency from loop multipliers).  The Round 1.5 InlinerPass cost model
+    // uses these counts to scale the inlining bonus for hot callees — a callee
+    // expected to run millions of times gets a higher bonus than one expected to
+    // run once.  Running this before the inliner gives the cost model more
+    // accurate hotness data, leading to better inlining decisions.
+    llvm::SyntheticCountsPropagation().run(*module, MAMMax);
     // Collect non-OPTMAX functions and temporarily mark them noinline so the
     // Round 1.5 inliner cannot pull OPTMAX callees into them.
     llvm::SmallVector<llvm::Function*, 16> tempNoInline;
@@ -4683,7 +4727,13 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // IPSCCP round 3: Attributor may have promoted functions to readnone or
         // derived new constant return values; propagate those immediately before
         // the cleanup FPM so the cleanup sees fully folded constants.
-        PostIPO.addPass(llvm::IPSCCPPass());
+        // AllowFuncSpec=true: enable function specialization cloning for
+        // constant arguments that IPSCCP discovers at call sites.  This is
+        // especially powerful after MergeFunctions has standardized the call
+        // graph: newly-identified constant argument patterns can now specialize
+        // the merged bodies, creating copies that constant-fold entire loop
+        // bounds or switch conditions.
+        PostIPO.addPass(llvm::IPSCCPPass(llvm::IPSCCPOptions(/*AllowFuncSpec=*/true)));
         // Lightweight function-level cleanup: fold the newly-constant arguments
         // and eliminate any dead code they expose, then hoist loop-invariant
         // code that SCCP/ConstArgProp made invariant.
@@ -4727,7 +4777,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     }
 
     // OPTMAX Wave 3 barrier: after PostIPO.  Captures the net reduction from
-    // all three PostIPO rounds (DCE, inlining, re-propagation, LICM).
+    // all four PostIPO rounds (DCE, inlining, re-propagation, LICM).
     if (verbose_) {
         unsigned omWave = 102;
         auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
@@ -4735,6 +4785,76 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                   << omSnapshot.definedFunctions << " functions, "
                   << omSnapshot.totalInstructions << " instrs, "
                   << omSnapshot.pureFunctions.size() << " pure"
+                  << '\n';
+    }
+
+    // ── OPTMAX Round 2: second per-function pass after PostIPO ────────────
+    // PostIPO (IPSCCP + ConstArgProp + LICM + FunctionSpecialization +
+    // PartialInliner) may have:
+    //   • folded loop bounds or branch conditions to constants;
+    //   • specialized functions for constant arguments (new clones with
+    //     constant-folded loop trips);
+    //   • outlined cold paths, making hot paths shorter and cheaper to
+    //     vectorize;
+    //   • hoisted invariants out of loops, exposing new unrolling targets.
+    //
+    // A second per-function scalar convergence + vectorization pass capitalizes
+    // on all these changes.  Functions that exceeded kMaxOptMaxFPMInstructions
+    // during Round 1 may now be within the threshold (partial-inlining split
+    // out cold code), so they get a chance at per-function optimization too.
+    //
+    // The scalar FPM iteration budget is reduced to 4 (vs. 8 in Round 1)
+    // since most big opportunities were already captured in Round 1; the goal
+    // here is to mop up residual constant-folding and re-vectorize after loop
+    // bound changes.
+    {
+        constexpr int optMaxScalarIterations2 = 4;
+        for (auto& func : *module) {
+            if (func.isDeclaration()) continue;
+            if (!optMaxFunctions.count(func.getName())) continue;
+            if (func.getInstructionCount() > kMaxOptMaxFPMInstructions) continue;
+
+            const std::string fname2 = func.getName().str();
+            auto cfgIt3 = optMaxFunctionConfigs_.find(fname2);
+            const OptMaxConfig& cfg2 =
+                (cfgIt3 != optMaxFunctionConfigs_.end())
+                ? cfgIt3->second
+                : OptMaxConfig{};
+
+            llvm::FunctionPassManager scalarFPM2 = buildOptMaxScalarFPM(cfg2);
+            llvm::FunctionPassManager vecFPM2    = buildOptMaxVecFPM(cfg2);
+
+            unsigned prevCount2 = func.getInstructionCount();
+            for (int i = 0; i < optMaxScalarIterations2; ++i) {
+                auto PA2 = scalarFPM2.run(func, FAMMax);
+                const unsigned newCount2 = func.getInstructionCount();
+                if (PA2.areAllPreserved() || newCount2 == prevCount2) break;
+                prevCount2 = newCount2;
+            }
+            vecFPM2.run(func, FAMMax);
+        }
+        if (verbose_) {
+            std::cout << "    OPTMAX Round 2 per-function pass complete" << '\n';
+        }
+    }
+
+    // ── OPTMAX Wave 4 barrier: after Round 2 per-function pass ───────────
+    // Final DCE sweep to eliminate any helpers or cold-path clones that Round 2
+    // proved fully dead, and a final GlobalOpt to fold any remaining mutable
+    // globals that became constant.
+    {
+        llvm::ModulePassManager FinalCleanup;
+        FinalCleanup.addPass(llvm::GlobalOptPass());
+        FinalCleanup.addPass(llvm::GlobalDCEPass());
+        FinalCleanup.addPass(llvm::StripDeadPrototypesPass());
+        FinalCleanup.run(*module, MAMMax);
+    }
+    if (verbose_) {
+        unsigned omWave = 103;
+        auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
+        std::cout << "    [optmax-wave 4 / round2+final-dce] "
+                  << omSnapshot.definedFunctions << " functions, "
+                  << omSnapshot.totalInstructions << " instrs"
                   << '\n';
     }
 }
