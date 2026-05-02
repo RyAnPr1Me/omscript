@@ -2012,6 +2012,332 @@ struct ConstArgPropagationPass
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AggressiveDevirtualizationPass — multi-phase indirect-call promotion.
+//
+// Phase 1 – Single-callee: walks each indirect call's function-pointer operand
+//   through data-flow (ptrtoint/inttoptr, bitcast, GEP chains, phi/select
+//   nodes, and global-variable initializers) to collect the set of possible
+//   concrete callees.  When exactly one callee is identified, the indirect call
+//   is replaced with a direct call.  This enables the inliner to inline the
+//   formerly-opaque callee on the next pass.
+//
+// Phase 2 – Multi-callee guard dispatch (≤ MaxTargets candidates): when a
+//   small but finite set of concrete callees is found, a sequence of icmp-eq
+//   guards is emitted so the most-likely callee (by use-count heuristic) runs
+//   in the hot path while a fallback retains the original indirect call.
+//
+// Phase 3 – Global function-pointer sinking: internal global variables that
+//   hold a single constant function pointer and are never written after init
+//   are replaced with their concrete callee value, converting all downstream
+//   indirect calls to direct ones and enabling GlobalDCE to remove the global.
+// ─────────────────────────────────────────────────────────────────────────────
+struct AggressiveDevirtualizationPass
+    : public llvm::PassInfoMixin<AggressiveDevirtualizationPass> {
+
+    static constexpr unsigned MaxTargets = 4;
+    static constexpr unsigned MaxDepth   = 16;
+
+    using FnSet = llvm::SmallPtrSet<llvm::Function*, 8>;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    /// Recursively collect all Function* a Value may resolve to.
+    /// Returns false when analysis is impossible (too many targets or loops).
+    static bool collectCallees(llvm::Value* V,
+                                FnSet& Out,
+                                llvm::SmallPtrSetImpl<llvm::Value*>& Visited,
+                                unsigned Depth = 0) {
+        if (!V || Depth > MaxDepth) return false;
+        if (!Visited.insert(V).second) return true; // already processed
+
+        // Direct function reference.
+        if (auto* F = llvm::dyn_cast<llvm::Function>(V)) {
+            if (!F->isDeclaration()) Out.insert(F);
+            return true;
+        }
+
+        // Strip through pointer casts (bitcast, addrspacecast, inttoptr, ptrtoint).
+        if (auto* CE = llvm::dyn_cast<llvm::ConstantExpr>(V)) {
+            switch (CE->getOpcode()) {
+            case llvm::Instruction::BitCast:
+            case llvm::Instruction::AddrSpaceCast:
+            case llvm::Instruction::IntToPtr:
+            case llvm::Instruction::PtrToInt:
+                return collectCallees(CE->getOperand(0), Out, Visited, Depth + 1);
+            default: break;
+            }
+        }
+
+        if (auto* CI = llvm::dyn_cast<llvm::CastInst>(V)) {
+            return collectCallees(CI->getOperand(0), Out, Visited, Depth + 1);
+        }
+
+        // GEP with zero offset — just the base pointer.
+        if (auto* GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(V)) {
+            if (GEP->hasAllZeroIndices())
+                return collectCallees(GEP->getPointerOperand(), Out, Visited, Depth + 1);
+            return false; // non-trivial GEP — give up
+        }
+
+        // Load from a global variable whose initializer is a constant function ptr.
+        if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(V)) {
+            if (auto* GV = llvm::dyn_cast<llvm::GlobalVariable>(LI->getPointerOperand())) {
+                if (GV->isConstant() && GV->hasInitializer())
+                    return collectCallees(GV->getInitializer(), Out, Visited, Depth + 1);
+                // Non-constant global: scan all stores to find possible callee set.
+                FnSet stored;
+                bool allKnown = true;
+                for (auto* U : GV->users()) {
+                    if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(U)) {
+                        llvm::SmallPtrSet<llvm::Value*, 16> innerVisited;
+                        FnSet sub;
+                        if (!collectCallees(SI->getValueOperand(), sub, innerVisited, Depth + 1)) {
+                            allKnown = false;
+                            break;
+                        }
+                        stored.insert(sub.begin(), sub.end());
+                        if (stored.size() > MaxTargets) { allKnown = false; break; }
+                    }
+                }
+                if (allKnown && !stored.empty()) {
+                    Out.insert(stored.begin(), stored.end());
+                    return Out.size() <= MaxTargets;
+                }
+            }
+            return false;
+        }
+
+        // PHI node — union of all incoming values.
+        if (auto* PHI = llvm::dyn_cast<llvm::PHINode>(V)) {
+            for (unsigned i = 0; i < PHI->getNumIncomingValues(); ++i) {
+                if (!collectCallees(PHI->getIncomingValue(i), Out, Visited, Depth + 1))
+                    return false;
+                if (Out.size() > MaxTargets) return false;
+            }
+            return true;
+        }
+
+        // Select — true and false values.
+        if (auto* Sel = llvm::dyn_cast<llvm::SelectInst>(V)) {
+            return collectCallees(Sel->getTrueValue(),  Out, Visited, Depth + 1) &&
+                   collectCallees(Sel->getFalseValue(), Out, Visited, Depth + 1) &&
+                   Out.size() <= MaxTargets;
+        }
+
+        // Alloca with a single store of a known function pointer.
+        if (auto* AI = llvm::dyn_cast<llvm::AllocaInst>(V)) {
+            FnSet stored;
+            bool allKnown = true, hasStore = false;
+            for (auto* U : AI->users()) {
+                if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(U)) {
+                    hasStore = true;
+                    llvm::SmallPtrSet<llvm::Value*, 16> innerVisited;
+                    FnSet sub;
+                    if (!collectCallees(SI->getValueOperand(), sub, innerVisited, Depth + 1)) {
+                        allKnown = false; break;
+                    }
+                    stored.insert(sub.begin(), sub.end());
+                    if (stored.size() > MaxTargets) { allKnown = false; break; }
+                }
+            }
+            if (hasStore && allKnown && !stored.empty()) {
+                Out.insert(stored.begin(), stored.end());
+                return Out.size() <= MaxTargets;
+            }
+            return false;
+        }
+
+        return false; // unrecognised — give up
+    }
+
+    /// Build an optimised dispatch block for a multi-callee indirect call.
+    /// Emits: for each candidate function (sorted by use frequency desc),
+    ///   if (callee_ptr == fn_addr) direct_call(fn, args...)
+    /// with a final fallback indirect call for the remainder.
+    static bool promoteMultiCallee(llvm::CallBase* CB,
+                                   const llvm::SmallVectorImpl<llvm::Function*>& Targets) {
+        // Ensure all targets match the call signature.
+        llvm::FunctionType* FTy = CB->getFunctionType();
+        for (auto* F : Targets) {
+            if (F->getFunctionType() != FTy) return false;
+        }
+
+        llvm::IRBuilder<> B(CB);
+        llvm::BasicBlock* OrigBB = CB->getParent();
+        llvm::Function*   Parent = OrigBB->getParent();
+        llvm::LLVMContext& Ctx   = Parent->getContext();
+
+        // Split OrigBB at CB to get the "rest" continuation block.
+        llvm::BasicBlock* MergeBB = OrigBB->splitBasicBlock(CB, "devirt.merge");
+        // Remove the unconditional branch splitBasicBlock inserted.
+        OrigBB->getTerminator()->eraseFromParent();
+
+        // For non-void calls we'll need a phi in MergeBB.
+        llvm::PHINode* ResultPHI = nullptr;
+        if (!FTy->getReturnType()->isVoidTy()) {
+            B.SetInsertPoint(&MergeBB->front());
+            ResultPHI = B.CreatePHI(FTy->getReturnType(), Targets.size() + 1, "devirt.result");
+        }
+
+        llvm::Value* CalleePtr = CB->getCalledOperand();
+        llvm::SmallVector<llvm::Value*, 8> Args(CB->args().begin(), CB->args().end());
+
+        B.SetInsertPoint(OrigBB);
+        llvm::BasicBlock* FallbackBB = nullptr;
+
+        for (auto* F : Targets) {
+            // Create a "match" block and a "no-match" block.
+            llvm::BasicBlock* MatchBB =
+                llvm::BasicBlock::Create(Ctx, "devirt.match." + F->getName(), Parent, MergeBB);
+            llvm::BasicBlock* NextBB  =
+                llvm::BasicBlock::Create(Ctx, "devirt.next",                  Parent, MergeBB);
+
+            // Guard: callee ptr == address of F
+            llvm::Value* FnPtr = llvm::ConstantExpr::getBitCast(
+                F, CalleePtr->getType());
+            llvm::Value* Cmp = B.CreateICmpEQ(CalleePtr, FnPtr, "devirt.cmp");
+            // Hot path: match is more likely than not (10:1 weight).
+            llvm::MDBuilder MDB(Ctx);
+            B.CreateCondBr(Cmp, MatchBB, NextBB,
+                           MDB.createBranchWeights(10, 1));
+
+            // Direct call in MatchBB.
+            B.SetInsertPoint(MatchBB);
+            llvm::CallInst* DirectCall = B.CreateCall(FTy, F, Args, "devirt.direct");
+            DirectCall->setCallingConv(CB->getCallingConv());
+            DirectCall->setAttributes(CB->getAttributes());
+            B.CreateBr(MergeBB);
+            if (ResultPHI)
+                ResultPHI->addIncoming(DirectCall, MatchBB);
+
+            B.SetInsertPoint(NextBB);
+            FallbackBB = NextBB;
+        }
+
+        // Fallback block: keep the original indirect call.
+        B.SetInsertPoint(FallbackBB);
+        llvm::CallInst* FallbackCall = B.CreateCall(FTy, CalleePtr, Args, "devirt.fallback");
+        FallbackCall->setCallingConv(CB->getCallingConv());
+        FallbackCall->setAttributes(CB->getAttributes());
+        B.CreateBr(MergeBB);
+        if (ResultPHI)
+            ResultPHI->addIncoming(FallbackCall, FallbackBB);
+
+        // Replace uses of the original call with the PHI (or just remove it).
+        if (ResultPHI)
+            CB->replaceAllUsesWith(ResultPHI);
+        CB->eraseFromParent();
+        return true;
+    }
+
+    // ── Phase 3: sink constant global function pointers ──────────────────────
+    static bool sinkConstantFunctionPtrGlobals(llvm::Module& M) {
+        bool Changed = false;
+        llvm::SmallVector<llvm::GlobalVariable*, 16> ToErase;
+
+        for (auto& GV : M.globals()) {
+            if (!GV.hasLocalLinkage()) continue;
+            if (!GV.hasInitializer()) continue;
+            if (GV.isConstant()) continue; // already handled by load-from-const-global
+
+            // Collect all stores.
+            llvm::SmallPtrSet<llvm::Function*, 4> stored;
+            bool allFn = true, hasStore = false;
+            for (auto* U : GV.users()) {
+                if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(U)) {
+                    hasStore = true;
+                    llvm::Value* SV = SI->getValueOperand()->stripPointerCasts();
+                    if (auto* F = llvm::dyn_cast<llvm::Function>(SV))
+                        stored.insert(F);
+                    else { allFn = false; break; }
+                }
+            }
+            if (!hasStore || !allFn || stored.size() != 1) continue;
+            // Also check the initializer itself.
+            llvm::Value* InitF = GV.getInitializer()->stripPointerCasts();
+            if (auto* F = llvm::dyn_cast<llvm::Function>(InitF))
+                stored.insert(F);
+            if (stored.size() != 1) continue;
+
+            [[maybe_unused]] llvm::Function* OnlyFn = *stored.begin();
+
+            // Replace all loads from this global with the concrete function ptr.
+            llvm::SmallVector<llvm::LoadInst*, 8> Loads;
+            for (auto* U : GV.users())
+                if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(U))
+                    Loads.push_back(LI);
+
+            if (Loads.empty()) continue;
+            for (auto* LI : Loads) {
+                llvm::Value* Replacement = llvm::ConstantExpr::getBitCast(
+                    OnlyFn, LI->getType());
+                LI->replaceAllUsesWith(Replacement);
+                LI->eraseFromParent();
+                Changed = true;
+            }
+        }
+        return Changed;
+    }
+
+    // ── main run ─────────────────────────────────────────────────────────────
+    llvm::PreservedAnalyses run(llvm::Module& M,
+                                llvm::ModuleAnalysisManager& /*MAM*/) {
+        bool Changed = false;
+
+        // Phase 3: sink constant global function-pointer globals first so that
+        // the Phase 1/2 analysis can resolve loads from them.
+        Changed |= sinkConstantFunctionPtrGlobals(M);
+
+        // Collect all indirect call sites — snapshot first to avoid
+        // iterator invalidation during promotion.
+        llvm::SmallVector<llvm::CallBase*, 64> IndirectCalls;
+        for (auto& F : M) {
+            if (F.isDeclaration()) continue;
+            for (auto& BB : F)
+                for (auto& I : BB)
+                    if (auto* CB = llvm::dyn_cast<llvm::CallBase>(&I))
+                        if (!CB->getCalledFunction() && !CB->isInlineAsm())
+                            IndirectCalls.push_back(CB);
+        }
+
+        for (auto* CB : IndirectCalls) {
+            // Guard: check the instruction still exists (previous iterations may
+            // have erased it via multi-callee promotion).
+            if (!CB->getParent()) continue;
+
+            llvm::Value* Callee = CB->getCalledOperand();
+            if (!Callee) continue;
+
+            FnSet Targets;
+            llvm::SmallPtrSet<llvm::Value*, 32> Visited;
+            if (!collectCallees(Callee, Targets, Visited)) continue;
+            if (Targets.empty()) continue;
+
+            if (Targets.size() == 1) {
+                // Phase 1: single-target — direct replacement.
+                llvm::Function* F = *Targets.begin();
+                if (F->getFunctionType() != CB->getFunctionType()) continue;
+                CB->setCalledOperand(F);
+                Changed = true;
+            } else if (Targets.size() <= MaxTargets) {
+                // Phase 2: multi-target — guarded dispatch.
+                // Sort by use count so the most-called callee is in the hot path.
+                llvm::SmallVector<llvm::Function*, MaxTargets> Sorted(
+                    Targets.begin(), Targets.end());
+                std::sort(Sorted.begin(), Sorted.end(),
+                    [](llvm::Function* A, llvm::Function* B) {
+                        return A->getNumUses() > B->getNumUses();
+                    });
+                Changed |= promoteMultiCallee(CB, Sorted);
+            }
+        }
+
+        return Changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 struct InterproceduralNullabilityPass
     : public llvm::PassInfoMixin<InterproceduralNullabilityPass> {
 
@@ -2664,7 +2990,9 @@ void CodeGenerator::runOptimizationPasses() {
             MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
             // CalledValuePropagation propagates known function pointer values
             // through indirect calls, enabling devirtualization and inlining.
+            MPM.addPass(AggressiveDevirtualizationPass());
             MPM.addPass(llvm::CalledValuePropagationPass());
+            MPM.addPass(AggressiveDevirtualizationPass());
             // ConstantMerge deduplicates identical global constants across the
             MPM.addPass(llvm::ConstantMergePass());
         });
@@ -4381,10 +4709,17 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // AlwaysInlinerPass: inline callees marked alwaysinline (set above for
         // OPTMAX helper functions smaller than kAlwaysInlineThreshold).
         PreIPO.addPass(llvm::AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/false));
+        // AggressiveDevirtualization (phase 1–3): promote indirect calls to
+        // direct calls using multi-phase data-flow analysis.  Runs before CVP
+        // so CVP sees the promoted (now direct) calls and can inline them.
+        PreIPO.addPass(AggressiveDevirtualizationPass());
         // CalledValuePropagation: propagate inferred type information at indirect
         // call sites; converts virtual/indirect calls into direct calls where
         // possible, enabling the subsequent inliner to inline them.
         PreIPO.addPass(llvm::CalledValuePropagationPass());
+        // Second devirtualization round: CVP may have turned PHI values into
+        // concrete constants that our pass can now resolve.
+        PreIPO.addPass(AggressiveDevirtualizationPass());
         // IPSCCP: propagate constants across all call boundaries in the module
         // now that small helpers are inlined.
         PreIPO.addPass(llvm::IPSCCPPass());
@@ -4599,7 +4934,9 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // and may specialize callee clones for constant arguments seen at
         // call sites.
         Wave25.addPass(llvm::IPSCCPPass(llvm::IPSCCPOptions(/*AllowFuncSpec=*/true)));
+        Wave25.addPass(AggressiveDevirtualizationPass());
         Wave25.addPass(llvm::CalledValuePropagationPass());
+        Wave25.addPass(AggressiveDevirtualizationPass());
         Wave25.run(*module, MAMMax);
     }
 

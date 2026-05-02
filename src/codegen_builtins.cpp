@@ -769,7 +769,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateCall(getOrDeclarePuts(), {arg});
             return llvm::ConstantInt::get(getDefaultType(), 0);
         } else {
-            // Print integer
+            // Print integer — printf %lld requires a 64-bit argument.
+            // Widen narrow integers using the correct sign extension.
+            if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
+                const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
+                arg = isUnsigned
+                    ? builder->CreateZExt(arg, getDefaultType(), "print.zext")
+                    : builder->CreateSExt(arg, getDefaultType(), "print.sext");
+            }
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("print_fmt", true);
             if (!formatStr) {
                 formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
@@ -4811,6 +4818,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // newline automatically and avoids format-string parsing overhead.
             builder->CreateCall(getOrDeclarePuts(), {arg});
         } else {
+            // println integer — printf %lld requires a 64-bit argument.
+            if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
+                const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
+                arg = isUnsigned
+                    ? builder->CreateZExt(arg, getDefaultType(), "println.zext")
+                    : builder->CreateSExt(arg, getDefaultType(), "println.sext");
+            }
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("println_fmt", true);
             if (!formatStr) {
                 formatStr = builder->CreateGlobalString("%lld\n", "println_fmt");
@@ -4838,6 +4852,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // Use fputs(str, stdout) instead of printf("%s", str) to avoid
             builder->CreateCall(getOrDeclareFputs(), {arg, getOrDeclareStdout()});
         } else {
+            // write integer — printf %lld requires a 64-bit argument.
+            if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
+                const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
+                arg = isUnsigned
+                    ? builder->CreateZExt(arg, getDefaultType(), "write.zext")
+                    : builder->CreateSExt(arg, getDefaultType(), "write.sext");
+            }
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("write_fmt", true);
             if (!formatStr) {
                 formatStr = builder->CreateGlobalString("%lld", "write_fmt");
@@ -8928,7 +8949,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     // ── Integer / wide-integer type-cast syntax ────────────────────────────
     {
-        const std::string& cn = expr->callee;
+        // Resolve the canonical name: strip a leading "to_" prefix so that
+        // to_i32(x), to_u8(x) etc. are equivalent to i32(x), u8(x).
+        const std::string& rawCallee = expr->callee;
+        const std::string& cn = (rawCallee.size() > 3 && rawCallee.rfind("to_", 0) == 0)
+                                  ? rawCallee.substr(3) : rawCallee;
         unsigned castBits = 0;
         bool castUnsigned = false;
         // Parse "iN" / "uN" pattern
@@ -8964,49 +8989,43 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             auto* destTy = llvm::IntegerType::get(*context, castBits);
 
             if (castBits == 1) {
-                // bool(x): normalise to 0 or 1
+                // bool(x): normalise to 0 or 1; return as i64 (conventional boolean width)
                 auto* zero = llvm::ConstantInt::get(arg->getType(), 0);
                 auto* cmp  = builder->CreateICmpNE(arg, zero, "bool.cmp");
-                // Return as i64 (widen back for default-type context)
-                return builder->CreateZExt(cmp, getDefaultType(), "bool.zext");
+                auto* r = builder->CreateZExt(cmp, getDefaultType(), "bool.zext");
+                nonNegValues_.insert(r);
+                return r;
             }
 
             if (castBits == srcBits) {
-                // Same width: identity (includes i64(x), u64(x), int(x), uint(x))
+                // Same width: identity (includes i64(x), u64(x), int(x), uint(x)).
+                // Tag as unsigned when cast was unsigned.
+                if (castUnsigned) unsignedExprs_.insert(arg);
                 return arg;
             }
 
             if (castBits > srcBits) {
-                // Widen: ZExt for unsigned, SExt for signed
-                if (castUnsigned)
-                    return builder->CreateZExt(arg, destTy, cn + ".zext");
-                else
-                    return builder->CreateSExt(arg, destTy, cn + ".sext");
-            }
-
-            // Narrow: castBits < srcBits
-            if (castBits <= 64 && srcBits <= 64) {
-                // Both fit in i64 — keep result as i64 for backward compat
+                // Widen: ZExt for unsigned, SExt for signed — produce destTy directly.
+                llvm::Value* r;
                 if (castUnsigned) {
-                    // uN(x): AND off the high bits, return as i64
-                    const uint64_t mask = castBits == 64 ? UINT64_MAX
-                                        : (UINT64_C(1) << castBits) - 1u;
-                    auto* maskVal = llvm::ConstantInt::get(getDefaultType(), mask);
-                    // Ensure arg is i64 for the AND
-                    if (arg->getType() != getDefaultType())
-                        arg = builder->CreateZExt(arg, getDefaultType(), "cast.zext64");
-                    return builder->CreateAnd(arg, maskVal, cn + ".and");
+                    r = builder->CreateZExt(arg, destTy, cn + ".zext");
+                    unsignedExprs_.insert(r);
                 } else {
-                    // iN(x): trunc to iN, sext back to i64
-                    if (arg->getType() != getDefaultType())
-                        arg = builder->CreateSExt(arg, getDefaultType(), "cast.sext64");
-                    auto* trunc = builder->CreateTrunc(arg, destTy, cn + ".trunc");
-                    return builder->CreateSExt(trunc, getDefaultType(), cn + ".sext");
+                    r = builder->CreateSExt(arg, destTy, cn + ".sext");
                 }
+                return r;
             }
 
-            // Wide → narrow OR wide → wide: produce value at destTy width
-            return builder->CreateTrunc(arg, destTy, cn + ".trunc");
+            // Narrow: castBits < srcBits — truncate to the requested width.
+            // The narrow value carries its own sign semantics; downstream users
+            // (convertTo, emitStoreArrayElem, print) consult unsignedExprs_ to
+            // choose ZExt vs SExt when they need to widen back.
+            auto* r = builder->CreateTrunc(arg, destTy, cn + ".trunc");
+            if (castUnsigned) {
+                unsignedExprs_.insert(r);
+                nonNegValues_.insert(r); // all bit patterns are non-negative as unsigned
+            }
+            return r;
         }
     }
 

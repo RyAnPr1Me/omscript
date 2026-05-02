@@ -471,9 +471,21 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     {
         auto foldIt = constIntFolds_.find(expr->name);
         if (foldIt != constIntFolds_.end()) {
-            auto* ci = llvm::ConstantInt::get(getDefaultType(), foldIt->second);
+            // Use the variable's annotated type when available so that e.g.
+            // `const x: i32 = 5` produces i32(5) rather than i64(5).
+            llvm::Type* foldTy = getDefaultType();
+            auto annIt = varTypeAnnotations_.find(expr->name);
+            if (annIt != varTypeAnnotations_.end() && !annIt->second.empty()) {
+                llvm::Type* t = resolveAnnotatedType(annIt->second);
+                if (t->isIntegerTy())
+                    foldTy = t;
+            }
+            auto* ci = llvm::ConstantInt::get(foldTy, foldIt->second, /*isSigned=*/true);
             if (foldIt->second >= 0)
                 nonNegValues_.insert(ci);
+            // Track unsigned type annotation for widening decisions downstream.
+            if (annIt != varTypeAnnotations_.end() && isUnsignedAnnot(annIt->second))
+                unsignedExprs_.insert(ci);
             optStats_.constFolded++;
             return ci;
         }
@@ -565,6 +577,13 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
                 }
             }
         }
+    }
+    // Track unsigned type annotation so that convertTo / emitStoreArrayElem
+    // use ZExt when widening values loaded from uN-annotated variables.
+    {
+        auto annIt = varTypeAnnotations_.find(expr->name);
+        if (annIt != varTypeAnnotations_.end() && isUnsignedAnnot(annIt->second))
+            unsignedExprs_.insert(load);
     }
     return load;
 }
@@ -1335,13 +1354,36 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
     }
 
+    // Constant-literal narrowing: when one operand is a wider ConstantInt and
+    // the other is a narrower non-constant integer, shrink the constant to the
+    // narrower width if it fits exactly.  This preserves the annotated type of
+    // expressions like `var x: i32 = 5; x + 3` → i32 rather than promoting x
+    // to i64 to match the literal.
+    if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() &&
+        left->getType() != right->getType()) {
+        auto tryNarrowLiteral = [&](llvm::Value*& constVal, llvm::Value* otherVal) {
+            auto* ci = llvm::dyn_cast<llvm::ConstantInt>(constVal);
+            if (!ci) return;
+            const unsigned constBits = constVal->getType()->getIntegerBitWidth();
+            const unsigned otherBits = otherVal->getType()->getIntegerBitWidth();
+            if (constBits <= otherBits) return; // already narrower/same
+            // Narrow the constant only when the value round-trips exactly.
+            auto* intTy = llvm::cast<llvm::IntegerType>(otherVal->getType());
+            auto* narrowed = llvm::ConstantInt::getSigned(intTy, ci->getSExtValue());
+            if (narrowed->getSExtValue() == ci->getSExtValue())
+                constVal = narrowed;
+        };
+        tryNarrowLiteral(left,  right);
+        tryNarrowLiteral(right, left);
+    }
+
     // Normalize integer widths: when operands have different integer bit widths
     if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() &&
         left->getType() != right->getType()) {
         const unsigned leftBits = left->getType()->getIntegerBitWidth();
         const unsigned rightBits = right->getType()->getIntegerBitWidth();
-        const bool leftUnsigned  = isUnsignedValue(left);
-        const bool rightUnsigned = isUnsignedValue(right);
+        const bool leftUnsigned  = unsignedExprs_.count(left) || isUnsignedValue(left);
+        const bool rightUnsigned = unsignedExprs_.count(right) || isUnsignedValue(right);
         if (leftBits < rightBits) {
             left = leftUnsigned
                 ? builder->CreateZExt(left, right->getType(), "zext")
@@ -1359,54 +1401,84 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         auto rightConst = llvm::dyn_cast<llvm::ConstantInt>(right);
         const int64_t lval = leftConst->getSExtValue();
         const int64_t rval = rightConst->getSExtValue();
+        // Produce the result at the operand's actual bit width, not always i64.
+        llvm::Type* foldTy = left->getType();
+        const unsigned bw = foldTy->getIntegerBitWidth();
         // Use unsigned arithmetic for +, -, * to avoid signed overflow UB.
         auto ulval = static_cast<uint64_t>(lval);
         auto urval = static_cast<uint64_t>(rval);
 
+        // Comparison and logical ops always return i64 (boolean 0/1).
+        auto boolResult = [&](int64_t v) -> llvm::Value* {
+            return llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(v));
+        };
+        auto arithResult = [&](uint64_t v) -> llvm::Value* {
+            return llvm::ConstantInt::get(*context, llvm::APInt(bw, v));
+        };
+
         if (expr->op == "+") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, ulval + urval));
+            auto* r = arithResult(ulval + urval);
+            if (llvm::dyn_cast<llvm::ConstantInt>(r)->getSExtValue() >= 0)
+                nonNegValues_.insert(r);
+            return r;
         } else if (expr->op == "-") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, ulval - urval));
+            return arithResult(ulval - urval);
         } else if (expr->op == "*") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, ulval * urval));
+            return arithResult(ulval * urval);
         } else if (expr->op == "/") {
             if (rval != 0 && (lval != INT64_MIN || rval != -1)) {
-                return llvm::ConstantInt::get(*context, llvm::APInt(64, lval / rval));
+                return arithResult(static_cast<uint64_t>(lval / rval));
             }
         } else if (expr->op == "%") {
             if (rval != 0 && (lval != INT64_MIN || rval != -1)) {
-                return llvm::ConstantInt::get(*context, llvm::APInt(64, lval % rval));
+                return arithResult(static_cast<uint64_t>(lval % rval));
             }
         } else if (expr->op == "==") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval == rval ? 1 : 0));
+            auto* r = boolResult(lval == rval ? 1 : 0);
+            nonNegValues_.insert(r);
+            return r;
         } else if (expr->op == "!=") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval != rval ? 1 : 0));
+            auto* r = boolResult(lval != rval ? 1 : 0);
+            nonNegValues_.insert(r);
+            return r;
         } else if (expr->op == "<") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval < rval ? 1 : 0));
+            auto* r = boolResult(lval < rval ? 1 : 0);
+            nonNegValues_.insert(r);
+            return r;
         } else if (expr->op == "<=") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval <= rval ? 1 : 0));
+            auto* r = boolResult(lval <= rval ? 1 : 0);
+            nonNegValues_.insert(r);
+            return r;
         } else if (expr->op == ">") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval > rval ? 1 : 0));
+            auto* r = boolResult(lval > rval ? 1 : 0);
+            nonNegValues_.insert(r);
+            return r;
         } else if (expr->op == ">=") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >= rval ? 1 : 0));
+            auto* r = boolResult(lval >= rval ? 1 : 0);
+            nonNegValues_.insert(r);
+            return r;
         } else if (expr->op == "&") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval & rval));
+            return arithResult(static_cast<uint64_t>(lval & rval));
         } else if (expr->op == "|") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval | rval));
+            return arithResult(static_cast<uint64_t>(lval | rval));
         } else if (expr->op == "^") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval ^ rval));
+            return arithResult(static_cast<uint64_t>(lval ^ rval));
         } else if (expr->op == "&&") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, (lval != 0 && rval != 0) ? 1 : 0));
+            auto* r = boolResult((lval != 0 && rval != 0) ? 1 : 0);
+            nonNegValues_.insert(r);
+            return r;
         } else if (expr->op == "||") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, (lval != 0 || rval != 0) ? 1 : 0));
+            auto* r = boolResult((lval != 0 || rval != 0) ? 1 : 0);
+            nonNegValues_.insert(r);
+            return r;
         } else if (expr->op == "<<") {
-            if (rval >= 0 && rval < 64)
+            if (rval >= 0 && static_cast<unsigned>(rval) < bw)
                 // Use unsigned shift to avoid UB when lval is negative.
-                return llvm::ConstantInt::get(*context, llvm::APInt(64, ulval << static_cast<unsigned>(rval)));
+                return arithResult(ulval << static_cast<unsigned>(rval));
         } else if (expr->op == ">>") {
-            if (rval >= 0 && rval < 64)
+            if (rval >= 0 && static_cast<unsigned>(rval) < bw)
                 // Arithmetic (signed) right shift: sign-extending, matching
-                return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
+                return arithResult(static_cast<uint64_t>(lval >> rval));
         } else if (expr->op == "**") {
             if (rval >= 0) {
                 int64_t result = 1;
@@ -1425,38 +1497,40 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     result *= lval;
                 }
                 if (!overflow)
-                    return llvm::ConstantInt::get(*context, llvm::APInt(64, result));
+                    return arithResult(static_cast<uint64_t>(result));
                 // Fall through to emit runtime power operation on overflow.
             } else {
                 // Negative exponent: base**(-n) = 1 / base**n in integer math.
                 // |base| > 1 → truncates to 0; base=1 → 1; base=-1 → ±1.
                 if (lval == 1)
-                    return llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+                    return arithResult(1);
                 if (lval == -1)
-                    return llvm::ConstantInt::get(*context, llvm::APInt(64, (rval & 1) ? -1 : 1));
-                return llvm::ConstantInt::get(*context, llvm::APInt(64, 0));
+                    return arithResult(static_cast<uint64_t>((rval & 1) ? -1 : 1));
+                return arithResult(0);
             }
         }
     }
 
     // Algebraic identity optimizations — when one operand is a known constant,
     // many operations can be simplified without emitting any instruction.
+    // Use the operand's actual type to preserve narrow integer types.
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+        llvm::Type* opTy = left->getType();
         const int64_t rv = ci->getSExtValue();
         if (rv == 0) {
             if (expr->op == "+" || expr->op == "-" || expr->op == "|" || expr->op == "^" || expr->op == "<<" ||
                 expr->op == ">>")
                 return left; // x+0, x-0, x|0, x^0, x<<0, x>>0 → x
             if (expr->op == "*" || expr->op == "&")
-                return llvm::ConstantInt::get(getDefaultType(), 0); // x*0, x&0 → 0
+                return llvm::ConstantInt::get(opTy, 0); // x*0, x&0 → 0
             if (expr->op == "**")
-                return llvm::ConstantInt::get(getDefaultType(), 1); // x**0 → 1
+                return llvm::ConstantInt::get(opTy, 1); // x**0 → 1
         }
         if (rv == 1) {
             if (expr->op == "*" || expr->op == "/" || expr->op == "**")
                 return left; // x*1, x/1, x**1 → x
             if (expr->op == "%")
-                return llvm::ConstantInt::get(getDefaultType(), 0); // x%1 → 0
+                return llvm::ConstantInt::get(opTy, 0); // x%1 → 0
         }
         if (rv == -1 && expr->op == "*")
             return builder->CreateNeg(left, "negtmp"); // x*(-1) → -x
@@ -1467,13 +1541,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return left;
         // x | -1 (all ones) → -1
         if (rv == -1 && expr->op == "|")
-            return llvm::ConstantInt::get(getDefaultType(), -1);
+            return llvm::ConstantInt::get(opTy, -1);
         // x ^ -1 (all ones) → ~x  (bitwise NOT)
         if (rv == -1 && expr->op == "^")
             return builder->CreateNot(left, "nottmp");
         // x - (-1) → x + 1  (canonical increment form; picks up NSW when non-neg)
         if (rv == -1 && expr->op == "-") {
-            llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+            llvm::Value* one = llvm::ConstantInt::get(opTy, 1);
             bool lnn = nonNegValues_.count(left);
             auto* r = lnn ? builder->CreateNSWAdd(left, one, "inc")
                           : builder->CreateAdd(left, one, "inc");
@@ -1482,34 +1556,35 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
     }
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+        llvm::Type* opTy = right->getType();
         const int64_t lv = ci->getSExtValue();
         if (lv == 0) {
             if (expr->op == "+" || expr->op == "|" || expr->op == "^")
                 return right; // 0+x, 0|x, 0^x → x
             if (expr->op == "*" || expr->op == "&" || expr->op == "<<" || expr->op == ">>")
-                return llvm::ConstantInt::get(getDefaultType(), 0); // 0*x, 0&x, 0<<x, 0>>x → 0
+                return llvm::ConstantInt::get(opTy, 0); // 0*x, 0&x, 0<<x, 0>>x → 0
             if (expr->op == "-")
                 return builder->CreateNeg(right, "negtmp"); // 0-x → -x
         }
         if (lv == 1 && expr->op == "*")
             return right; // 1*x → x
         if (lv == 1 && expr->op == "**")
-            return llvm::ConstantInt::get(getDefaultType(), 1); // 1**x → 1
+            return llvm::ConstantInt::get(opTy, 1); // 1**x → 1
         if (lv == -1 && expr->op == "*")
             return builder->CreateNeg(right, "negtmp"); // (-1)*x → -x
         if (lv == -1 && expr->op == "**") {
             // (-1)**x → 1 if x is even, -1 if x is odd
-            llvm::Value* bit = builder->CreateAnd(right, llvm::ConstantInt::get(getDefaultType(), 1), "pow.bit");
-            llvm::Value* isOdd = builder->CreateICmpNE(bit, llvm::ConstantInt::get(getDefaultType(), 0), "pow.isodd");
-            return builder->CreateSelect(isOdd, llvm::ConstantInt::get(getDefaultType(), -1),
-                                         llvm::ConstantInt::get(getDefaultType(), 1), "pow.negone");
+            llvm::Value* bit = builder->CreateAnd(right, llvm::ConstantInt::get(opTy, 1), "pow.bit");
+            llvm::Value* isOdd = builder->CreateICmpNE(bit, llvm::ConstantInt::get(opTy, 0), "pow.isodd");
+            return builder->CreateSelect(isOdd, llvm::ConstantInt::get(opTy, static_cast<uint64_t>(-1)),
+                                         llvm::ConstantInt::get(opTy, 1), "pow.negone");
         }
         // -1 & x → x
         if (lv == -1 && expr->op == "&")
             return right;
         // -1 | x → -1
         if (lv == -1 && expr->op == "|")
-            return llvm::ConstantInt::get(getDefaultType(), -1);
+            return llvm::ConstantInt::get(opTy, static_cast<uint64_t>(-1));
         // -1 ^ x → ~x  (bitwise NOT)
         if (lv == -1 && expr->op == "^")
             return builder->CreateNot(right, "nottmp");
@@ -1517,20 +1592,22 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // Same-value identity optimizations — when both operands are the exact
     if (left == right) {
+        llvm::Type* opTy = left->getType();
         if (expr->op == "-" || expr->op == "^")
-            return llvm::ConstantInt::get(getDefaultType(), 0); // x-x→0, x^x→0
+            return llvm::ConstantInt::get(opTy, 0); // x-x→0, x^x→0
         if (expr->op == "&" || expr->op == "|")
             return left; // x&x→x, x|x→x
         // Comparison identities: reflexive comparisons on the same SSA value.
+        // Comparisons always return i64 (boolean 0/1).
         if (expr->op == "==" || expr->op == "<=" || expr->op == ">=")
             return llvm::ConstantInt::get(getDefaultType(), 1); // x==x→1, x<=x→1, x>=x→1
         if (expr->op == "!=" || expr->op == "<" || expr->op == ">")
             return llvm::ConstantInt::get(getDefaultType(), 0); // x!=x→0, x<x→0, x>x→0
         // Same-value division and modulo identities.
         if (expr->op == "/")
-            return llvm::ConstantInt::get(getDefaultType(), 1); // x/x→1
+            return llvm::ConstantInt::get(opTy, 1); // x/x→1
         if (expr->op == "%")
-            return llvm::ConstantInt::get(getDefaultType(), 0); // x%x→0
+            return llvm::ConstantInt::get(opTy, 0); // x%x→0
     }
 
     // Comparison-against-zero strength reduction: when one side of an

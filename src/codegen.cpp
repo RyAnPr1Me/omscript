@@ -698,12 +698,17 @@ llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
     // int → ptr
     if (v->getType()->isIntegerTy() && targetTy->isPointerTy())
         return builder->CreateIntToPtr(v, targetTy, "itop");
-    // int → int (widening)
+    // int → int (widening or narrowing)
     if (v->getType()->isIntegerTy() && targetTy->isIntegerTy()) {
         const unsigned srcBits = v->getType()->getIntegerBitWidth();
         const unsigned dstBits = targetTy->getIntegerBitWidth();
-        if (srcBits < dstBits)
+        if (srcBits < dstBits) {
+            // Use ZExt for values known to be unsigned (uN casts or uN-annotated vars).
+            const bool isUnsigned = unsignedExprs_.count(v) || isUnsignedValue(v);
+            if (isUnsigned)
+                return builder->CreateZExt(v, targetTy, "zext");
             return builder->CreateSExt(v, targetTy, "sext");
+        }
         if (srcBits > dstBits)
             return builder->CreateTrunc(v, targetTy, "trunc");
     }
@@ -1135,6 +1140,15 @@ void CodeGenerator::emitStoreArrayLen(llvm::Value* len, llvm::Value* arrPtr) {
 }
 
 llvm::StoreInst* CodeGenerator::emitStoreArrayElem(llvm::Value* val, llvm::Value* elemPtr) {
+    // Array element slots are always i64 wide; widen narrow integers before storing
+    // so that the paired emitLoadArrayElem (which always loads i64) reads back the
+    // correct sign- or zero-extended value.
+    if (val->getType()->isIntegerTy() && !val->getType()->isIntegerTy(64)) {
+        const bool isUnsigned = unsignedExprs_.count(val) || isUnsignedValue(val);
+        val = isUnsigned
+            ? builder->CreateZExt(val, getDefaultType(), "arr.elem.zext")
+            : builder->CreateSExt(val, getDefaultType(), "arr.elem.sext");
+    }
     auto* st = builder->CreateAlignedStore(val, elemPtr, llvm::MaybeAlign(8));
     st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
     return st;
@@ -4783,6 +4797,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     simdVars_.clear();
     dictVarNames_.clear();
     nonNegValues_.clear();
+    unsignedExprs_.clear();
     constIntFolds_.clear();
     constFloatFolds_.clear();
     stackAllocatedArrays_.clear();

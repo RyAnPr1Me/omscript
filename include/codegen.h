@@ -514,6 +514,10 @@ class CodeGenerator {
     /// Values known to be non-negative (enables urem/udiv instead of srem/sdiv).
     llvm::DenseSet<llvm::Value*> nonNegValues_;
 
+    /// Values produced by unsigned-typed expressions (uN casts, uN-annotated loads).
+    /// Used by convertTo() and emitStoreArrayElem() to select ZExt vs SExt when widening.
+    llvm::DenseSet<llvm::Value*> unsignedExprs_;
+
     /// Loop-scope array length cache (shared SSA length value per array; cleared on loop entry/exit).
     llvm::DenseMap<llvm::Value*, llvm::Value*> loopArrayLenCache_;
     /// Nesting depth of loopArrayLenCache_ — pushed/popped on loop entry/exit.
