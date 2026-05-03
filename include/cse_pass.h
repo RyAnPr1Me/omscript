@@ -14,7 +14,11 @@
 ///     literals (e.g. `a + b`, `x * 2`).  These are the innermost "atoms"
 ///     of larger expressions and are cheapest to hoist.
 ///   - The expression must not involve any side-effecting operation:
-///     function calls and assignments are excluded.
+///     function calls and assignments are excluded by default.
+///   - With ERSL enabled: call expressions targeting functions whose
+///     EffectSummary has canDuplicate=true are also eligible.  This covers
+///     user-defined functions that are stable and produce no observable write
+///     effects (e.g. pure math helpers).
 ///   - The expression must appear at the *statement level* (inside ExprStmt,
 ///     VarDecl initializer, ReturnStmt value, or IfStmt condition) in the
 ///     **same** block — CSE does not cross block boundaries.
@@ -28,6 +32,10 @@
 /// independently.
 
 #include "ast.h"
+#include "ersl.h"
+
+#include <string>
+#include <unordered_map>
 
 namespace omscript {
 
@@ -40,10 +48,18 @@ struct CSEStats {
 /// Run the Common Subexpression Elimination pass over every function in
 /// @p program.
 ///
-/// @param program   The AST to analyse and transform (modified in place).
-/// @param verbose   When true, print a per-function summary to stderr.
-/// @returns         Aggregate statistics across all functions.
-CSEStats runCSEPass(Program* program, bool verbose = false);
+/// @param program         The AST to analyse and transform (modified in place).
+/// @param verbose         When true, print a per-function summary to stderr.
+/// @param idempotentFuncs Optional map: function name → EffectSummary.
+///                        When provided, call expressions targeting functions
+///                        whose EffectSummary::canDuplicate is true are
+///                        treated as CSE candidates in addition to pure binary
+///                        expressions.  Pass nullptr to use the default
+///                        binary-only behaviour.
+/// @returns               Aggregate statistics across all functions.
+CSEStats runCSEPass(Program* program,
+                    bool verbose = false,
+                    const std::unordered_map<std::string, EffectSummary>* idempotentFuncs = nullptr);
 
 } // namespace omscript
 

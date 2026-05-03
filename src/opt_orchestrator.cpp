@@ -15,6 +15,7 @@
 #include "copy_prop_pass.h"
 #include "dce_pass.h"
 #include "cse_pass.h"
+#include "ersl.h"
 #include "width_legalization.h"
 #include "width_opt_pass.h"
 #include "diagnostic.h"
@@ -168,6 +169,7 @@ namespace PassId {
     uint32_t kConstantReturns   = 0;
     uint32_t kPurity            = 0;
     uint32_t kEffects           = 0;
+    uint32_t kERSL              = 0;
     uint32_t kSynthesis         = 0;
     uint32_t kCFCTRE            = 0;
     uint32_t kEGraph            = 0;
@@ -257,6 +259,20 @@ static void registerAllPasses() {
         PassKind::Analysis,
         {AnalysisFact::kPurity},
         {AnalysisFact::kEffects},
+        {},
+    });
+
+    PassId::kERSL = reg.registerPass({
+        0,
+        "ersl",
+        "Effect Refinement & Speculation Layer: derive stability, idempotence, "
+        "escape class, and max-safe-optimization-level from FunctionEffects",
+        PassPhase::EvaluationAnalysis,
+        PassKind::Analysis,
+        // ERSL requires effects to have been inferred first.
+        {AnalysisFact::kEffects},
+        {AnalysisFact::kERSL},
+        // Pure analysis — does not modify the AST, invalidates nothing.
         {},
     });
 
@@ -449,6 +465,7 @@ OptimizationOrchestrator::buildDispatch() {
         {PassId::kConstantReturns,   R([this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); })},
         {PassId::kPurity,            R([this](Program* p, OptimizationContext& c){ runPurity(p, c); })},
         {PassId::kEffects,           R([this](Program* p, OptimizationContext& c){ runEffects(p, c); })},
+        {PassId::kERSL,              R([this](Program* p, OptimizationContext& c){ runERSL(p, c); })},
         {PassId::kSynthesis,         R([this](Program* p, OptimizationContext& c){ runSynthesis(p, c); })},
         {PassId::kCFCTRE,            R([this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); })},
         {PassId::kEGraph,            R([this](Program* p, OptimizationContext& c){ runEGraph(p, c); })},
@@ -806,6 +823,19 @@ void OptimizationOrchestrator::runEffects(Program* program, OptimizationContext&
     ctx.validity().effects = true;
 }
 
+void OptimizationOrchestrator::runERSL(Program* program, OptimizationContext& ctx) {
+    // Derive EffectSummary for every function from its already-inferred FunctionEffects.
+    // This is a pure computation: no AST modification, no LLVM analysis required.
+    if (program) {
+        for (const auto& func : program->functions) {
+            if (!func) continue;
+            FunctionFacts& ff = ctx.mutableFacts(func->name);
+            ff.ersl = deriveEffectSummary(ff.effects);
+        }
+    }
+    ctx.validity().ersl = true;
+}
+
 void OptimizationOrchestrator::runSynthesis(Program* program, OptimizationContext& ctx) {
     codegen_->runSynthesisPass(program, verbose_);
     ctx.validity().synthesis = true;
@@ -1018,7 +1048,22 @@ void OptimizationOrchestrator::runDCE(Program* program, OptimizationContext& ctx
 }
 
 void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx) {
-    runCSEPass(program, verbose_);
+    // Build the idempotent-function table from ERSL facts so the CSE pass can
+    // also eliminate duplicate calls to stable, canDuplicate user functions.
+    // If ERSL hasn't run yet (ersl validity flag is false), fall back to the
+    // binary-only mode by passing nullptr.
+    if (ctx.validity().ersl && program) {
+        std::unordered_map<std::string, EffectSummary> idempotent;
+        for (const auto& func : program->functions) {
+            if (!func) continue;
+            const EffectSummary& es = ctx.effectSummary(func->name);
+            if (es.canDuplicate)
+                idempotent.emplace(func->name, es);
+        }
+        runCSEPass(program, verbose_, idempotent.empty() ? nullptr : &idempotent);
+    } else {
+        runCSEPass(program, verbose_, nullptr);
+    }
     ctx.validity().cse = true;
 }
 

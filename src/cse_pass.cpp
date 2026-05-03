@@ -4,7 +4,8 @@
 /// Algorithm overview (per function body block):
 ///   1. Walk every statement in the block's statement list.
 ///   2. For each statement, collect all "atomic" pure subexpressions —
-///      binary operations whose operands are identifiers or integer literals.
+///      binary operations whose operands are identifiers or integer literals,
+///      PLUS call expressions to ERSL-idempotent functions (canDuplicate=true).
 ///   3. Maintain a frequency map: canonical_repr → count.
 ///   4. For any expression that appears 2+ times in the same block:
 ///      a. Generate a new compiler-managed variable name (_cse_0, _cse_1, ...).
@@ -18,6 +19,10 @@
 ///   Commutative operators (+, *, &, |, ^, ==, !=) are normalised so that
 ///   the lexicographically smaller operand comes first, making `a+b` and `b+a`
 ///   the same CSE key.
+///
+///   An idempotent call `f(a, b)` is represented as "CALL:f:a:b".
+///   Arguments must each be a leaf (identifier or integer literal) for the call
+///   to be eligible; this keeps the canonicalisation simple and the key unique.
 
 #include "cse_pass.h"
 #include "opt_pass.h"   // isCommutativeOp, isPureBinaryOp
@@ -67,12 +72,28 @@ static std::string binaryKey(const std::string& op,
     return op + ":" + l + ":" + r;
 }
 
+/// Return a canonical key for an idempotent call `callee(arg0, arg1, …)`, or ""
+/// if any argument is not a leaf (same conservatism as binary expressions).
+///
+/// Format: "CALL:<callee>:<arg0>:<arg1>:…"
+/// Arguments are NOT reordered (function calls are not commutative).
+static std::string callKey(const std::string& callee,
+                            const std::vector<std::unique_ptr<Expression>>& args) {
+    std::string key = "CALL:" + callee;
+    for (const auto& arg : args) {
+        const std::string leaf = leafRepr(arg.get());
+        if (leaf.empty()) return ""; // non-leaf arg → not eligible
+        key += ":" + leaf;
+    }
+    return key;
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // Expression tree traversal — collect candidate subexpression keys
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void collectKeys(const Expression* expr,
-                        std::unordered_map<std::string, int>& freq) {
+                        std::unordered_map<std::string, int>& freq,
+                        const std::unordered_map<std::string, EffectSummary>* idempotent) {
     if (!expr) return;
 
     if (expr->type == ASTNodeType::BINARY_EXPR) {
@@ -83,35 +104,45 @@ static void collectKeys(const Expression* expr,
             if (!key.empty()) freq[key]++;
         }
         // Recurse.
-        collectKeys(bin->left.get(), freq);
-        collectKeys(bin->right.get(), freq);
+        collectKeys(bin->left.get(), freq, idempotent);
+        collectKeys(bin->right.get(), freq, idempotent);
+    } else if (expr->type == ASTNodeType::CALL_EXPR && idempotent) {
+        // ERSL extension: CSE calls to idempotent (canDuplicate) functions.
+        const auto* call = static_cast<const CallExpr*>(expr);
+        auto it = idempotent->find(call->callee);
+        if (it != idempotent->end() && it->second.canDuplicate) {
+            std::string key = callKey(call->callee, call->arguments);
+            if (!key.empty()) freq[key]++;
+        }
+        // Do not recurse into call arguments — call is treated as atomic for CSE.
     } else if (expr->type == ASTNodeType::UNARY_EXPR) {
-        collectKeys(static_cast<const UnaryExpr*>(expr)->operand.get(), freq);
+        collectKeys(static_cast<const UnaryExpr*>(expr)->operand.get(), freq, idempotent);
     } else if (expr->type == ASTNodeType::TERNARY_EXPR) {
         const auto* tern = static_cast<const TernaryExpr*>(expr);
-        collectKeys(tern->condition.get(), freq);
-        collectKeys(tern->thenExpr.get(), freq);
-        collectKeys(tern->elseExpr.get(), freq);
+        collectKeys(tern->condition.get(), freq, idempotent);
+        collectKeys(tern->thenExpr.get(), freq, idempotent);
+        collectKeys(tern->elseExpr.get(), freq, idempotent);
     }
-    // Do not descend into CallExpr (may have side effects).
+    // Do not descend into non-idempotent CallExpr (may have side effects).
 }
 
 static void collectKeysFromStmt(const Statement* stmt,
-                                std::unordered_map<std::string, int>& freq) {
+                                std::unordered_map<std::string, int>& freq,
+                                const std::unordered_map<std::string, EffectSummary>* idempotent) {
     if (!stmt) return;
     switch (stmt->type) {
     case ASTNodeType::EXPR_STMT:
-        collectKeys(static_cast<const ExprStmt*>(stmt)->expression.get(), freq);
+        collectKeys(static_cast<const ExprStmt*>(stmt)->expression.get(), freq, idempotent);
         break;
     case ASTNodeType::VAR_DECL:
-        collectKeys(static_cast<const VarDecl*>(stmt)->initializer.get(), freq);
+        collectKeys(static_cast<const VarDecl*>(stmt)->initializer.get(), freq, idempotent);
         break;
     case ASTNodeType::RETURN_STMT:
-        collectKeys(static_cast<const ReturnStmt*>(stmt)->value.get(), freq);
+        collectKeys(static_cast<const ReturnStmt*>(stmt)->value.get(), freq, idempotent);
         break;
     case ASTNodeType::IF_STMT: {
         const auto* ifS = static_cast<const IfStmt*>(stmt);
-        collectKeys(ifS->condition.get(), freq);
+        collectKeys(ifS->condition.get(), freq, idempotent);
         // Do not recurse into branches — CSE is block-local.
         break;
     }
@@ -121,14 +152,15 @@ static void collectKeysFromStmt(const Statement* stmt,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Expression rewriting — replace a matching binary expression with a var ref
+// Expression rewriting — replace a matching expression with a var ref
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// If @p expr matches @p key, replace it with an identifier reference to
 /// @p varName and return true.  Otherwise recurse and return false.
 static bool replaceInExpr(std::unique_ptr<Expression>& expr,
                           const std::string& key,
-                          const std::string& varName) {
+                          const std::string& varName,
+                          const std::unordered_map<std::string, EffectSummary>* idempotent) {
     if (!expr) return false;
 
     if (expr->type == ASTNodeType::BINARY_EXPR) {
@@ -140,35 +172,44 @@ static bool replaceInExpr(std::unique_ptr<Expression>& expr,
         }
         // Recurse into children (stop at the first replacement to avoid
         // double-counting — the next pass iteration handles deeper matches).
-        replaceInExpr(bin->left, key, varName);
-        replaceInExpr(bin->right, key, varName);
+        replaceInExpr(bin->left,  key, varName, idempotent);
+        replaceInExpr(bin->right, key, varName, idempotent);
+    } else if (expr->type == ASTNodeType::CALL_EXPR && idempotent) {
+        // ERSL extension: replace idempotent call with the CSE variable.
+        auto* call = static_cast<CallExpr*>(expr.get());
+        const std::string myKey = callKey(call->callee, call->arguments);
+        if (!myKey.empty() && myKey == key) {
+            expr = std::make_unique<IdentifierExpr>(varName);
+            return true;
+        }
     } else if (expr->type == ASTNodeType::UNARY_EXPR) {
-        replaceInExpr(static_cast<UnaryExpr*>(expr.get())->operand, key, varName);
+        replaceInExpr(static_cast<UnaryExpr*>(expr.get())->operand, key, varName, idempotent);
     } else if (expr->type == ASTNodeType::TERNARY_EXPR) {
         auto* tern = static_cast<TernaryExpr*>(expr.get());
-        replaceInExpr(tern->condition, key, varName);
-        replaceInExpr(tern->thenExpr, key, varName);
-        replaceInExpr(tern->elseExpr, key, varName);
+        replaceInExpr(tern->condition, key, varName, idempotent);
+        replaceInExpr(tern->thenExpr,  key, varName, idempotent);
+        replaceInExpr(tern->elseExpr,  key, varName, idempotent);
     }
     return false;
 }
 
 static void replaceInStmt(Statement* stmt,
                           const std::string& key,
-                          const std::string& varName) {
+                          const std::string& varName,
+                          const std::unordered_map<std::string, EffectSummary>* idempotent) {
     if (!stmt) return;
     switch (stmt->type) {
     case ASTNodeType::EXPR_STMT:
-        replaceInExpr(static_cast<ExprStmt*>(stmt)->expression, key, varName);
+        replaceInExpr(static_cast<ExprStmt*>(stmt)->expression, key, varName, idempotent);
         break;
     case ASTNodeType::VAR_DECL:
-        replaceInExpr(static_cast<VarDecl*>(stmt)->initializer, key, varName);
+        replaceInExpr(static_cast<VarDecl*>(stmt)->initializer, key, varName, idempotent);
         break;
     case ASTNodeType::RETURN_STMT:
-        replaceInExpr(static_cast<ReturnStmt*>(stmt)->value, key, varName);
+        replaceInExpr(static_cast<ReturnStmt*>(stmt)->value, key, varName, idempotent);
         break;
     case ASTNodeType::IF_STMT:
-        replaceInExpr(static_cast<IfStmt*>(stmt)->condition, key, varName);
+        replaceInExpr(static_cast<IfStmt*>(stmt)->condition, key, varName, idempotent);
         break;
     default:
         break;
@@ -191,11 +232,44 @@ static std::unique_ptr<Expression> makeLeaf(const std::string& token) {
     return std::make_unique<IdentifierExpr>(token);
 }
 
-/// Reconstruct an Expression from a binary key "OP:lhs:rhs".
+/// Reconstruct an Expression from a key string.
+///
+/// Binary key format : "OP:lhs:rhs"
+/// Call key format   : "CALL:name:arg0:arg1:…"
+///
 /// Returns nullptr if the key cannot be parsed.
 static std::unique_ptr<Expression> exprFromKey(const std::string& key) {
     const size_t first = key.find(':');
     if (first == std::string::npos) return nullptr;
+
+    // Check whether this is a call key.
+    const std::string prefix = key.substr(0, first);
+    if (prefix == "CALL") {
+        // "CALL:name:arg0:arg1:..."
+        const size_t nameEnd = key.find(':', first + 1);
+        std::string callee;
+        std::vector<std::unique_ptr<Expression>> args;
+        if (nameEnd == std::string::npos) {
+            // No arguments: "CALL:name"
+            callee = key.substr(first + 1);
+        } else {
+            callee = key.substr(first + 1, nameEnd - first - 1);
+            // Parse remaining `:arg0:arg1:…`
+            size_t pos = nameEnd + 1;
+            while (pos <= key.size()) {
+                size_t next = key.find(':', pos);
+                const std::string tok = (next == std::string::npos)
+                                            ? key.substr(pos)
+                                            : key.substr(pos, next - pos);
+                args.push_back(makeLeaf(tok));
+                if (next == std::string::npos) break;
+                pos = next + 1;
+            }
+        }
+        return std::make_unique<CallExpr>(callee, std::move(args));
+    }
+
+    // Binary key: "OP:lhs:rhs"
     const size_t second = key.find(':', first + 1);
     if (second == std::string::npos) return nullptr;
 
@@ -211,16 +285,18 @@ static std::unique_ptr<Expression> exprFromKey(const std::string& key) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Forward declaration for mutual recursion.
-static CSEStats processBlock(BlockStmt* block, unsigned& nextId);
+static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
+                             const std::unordered_map<std::string, EffectSummary>* idempotent);
 
-static CSEStats processBlock(BlockStmt* block, unsigned& nextId) {
+static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
+                             const std::unordered_map<std::string, EffectSummary>* idempotent) {
     CSEStats stats;
     if (!block || block->statements.empty()) return stats;
 
-    // ── Step 1: collect frequency of atomic binary subexpressions ──────────
+    // ── Step 1: collect frequency of CSE-eligible subexpressions ───────────
     std::unordered_map<std::string, int> freq;
     for (const auto& stmt : block->statements)
-        collectKeysFromStmt(stmt.get(), freq);
+        collectKeysFromStmt(stmt.get(), freq, idempotent);
 
     // ── Step 2: for each key with freq >= 2, hoist it ──────────────────────
     // Process candidates in deterministic order (sort by key).
@@ -241,7 +317,7 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId) {
             std::unordered_map<std::string, int> probe;
             for (size_t i = 0; i < block->statements.size(); ++i) {
                 probe.clear();
-                collectKeysFromStmt(block->statements[i].get(), probe);
+                collectKeysFromStmt(block->statements[i].get(), probe, idempotent);
                 if (probe.count(key)) { insertPos = i; break; }
             }
         }
@@ -262,9 +338,9 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId) {
         unsigned replacements = 0;
         for (size_t i = insertPos + 1; i < block->statements.size(); ++i) {
             std::unordered_map<std::string, int> probe;
-            collectKeysFromStmt(block->statements[i].get(), probe);
+            collectKeysFromStmt(block->statements[i].get(), probe, idempotent);
             if (probe.count(key)) {
-                replaceInStmt(block->statements[i].get(), key, varName);
+                replaceInStmt(block->statements[i].get(), key, varName, idempotent);
                 ++replacements;
             }
         }
@@ -275,32 +351,32 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId) {
     for (auto& stmt : block->statements) {
         if (!stmt) continue;
         if (stmt->type == ASTNodeType::BLOCK) {
-            auto sub = processBlock(static_cast<BlockStmt*>(stmt.get()), nextId);
+            auto sub = processBlock(static_cast<BlockStmt*>(stmt.get()), nextId, idempotent);
             stats.expressionsHoisted += sub.expressionsHoisted;
             stats.tempVarsIntroduced += sub.tempVarsIntroduced;
         } else if (stmt->type == ASTNodeType::IF_STMT) {
             auto* ifS = static_cast<IfStmt*>(stmt.get());
             if (ifS->thenBranch && ifS->thenBranch->type == ASTNodeType::BLOCK) {
-                auto sub = processBlock(static_cast<BlockStmt*>(ifS->thenBranch.get()), nextId);
+                auto sub = processBlock(static_cast<BlockStmt*>(ifS->thenBranch.get()), nextId, idempotent);
                 stats.expressionsHoisted += sub.expressionsHoisted;
                 stats.tempVarsIntroduced += sub.tempVarsIntroduced;
             }
             if (ifS->elseBranch && ifS->elseBranch->type == ASTNodeType::BLOCK) {
-                auto sub = processBlock(static_cast<BlockStmt*>(ifS->elseBranch.get()), nextId);
+                auto sub = processBlock(static_cast<BlockStmt*>(ifS->elseBranch.get()), nextId, idempotent);
                 stats.expressionsHoisted += sub.expressionsHoisted;
                 stats.tempVarsIntroduced += sub.tempVarsIntroduced;
             }
         } else if (stmt->type == ASTNodeType::WHILE_STMT) {
             auto* ws = static_cast<WhileStmt*>(stmt.get());
             if (ws->body && ws->body->type == ASTNodeType::BLOCK) {
-                auto sub = processBlock(static_cast<BlockStmt*>(ws->body.get()), nextId);
+                auto sub = processBlock(static_cast<BlockStmt*>(ws->body.get()), nextId, idempotent);
                 stats.expressionsHoisted += sub.expressionsHoisted;
                 stats.tempVarsIntroduced += sub.tempVarsIntroduced;
             }
         } else if (stmt->type == ASTNodeType::FOR_STMT) {
             auto* fs = static_cast<ForStmt*>(stmt.get());
             if (fs->body && fs->body->type == ASTNodeType::BLOCK) {
-                auto sub = processBlock(static_cast<BlockStmt*>(fs->body.get()), nextId);
+                auto sub = processBlock(static_cast<BlockStmt*>(fs->body.get()), nextId, idempotent);
                 stats.expressionsHoisted += sub.expressionsHoisted;
                 stats.tempVarsIntroduced += sub.tempVarsIntroduced;
             }
@@ -314,7 +390,9 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId) {
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
-CSEStats runCSEPass(Program* program, bool verbose) {
+CSEStats runCSEPass(Program* program,
+                    bool verbose,
+                    const std::unordered_map<std::string, EffectSummary>* idempotentFuncs) {
     CSEStats total;
     if (!program) return total;
 
@@ -324,7 +402,7 @@ CSEStats runCSEPass(Program* program, bool verbose) {
         if (!fn || !fn->body) continue;
 
         unsigned nextId = 0;
-        CSEStats fnStats = processBlock(fn->body.get(), nextId);
+        CSEStats fnStats = processBlock(fn->body.get(), nextId, idempotentFuncs);
 
         total.expressionsHoisted += fnStats.expressionsHoisted;
         total.tempVarsIntroduced += fnStats.tempVarsIntroduced;

@@ -6,6 +6,7 @@
 #include "ast.h"      // FunctionEffects, OptMaxConfig, etc.
 #include "cfctre.h"   // CTValue, CTEngine
 #include "egraph.h"   // EGraph, SaturationConfig, egraph::optimizeProgram, etc.
+#include "ersl.h"     // EffectSummary, Region, Stability, EscapeClass
 #include "opt_pass.h" // AnalysisKey, PassMetadata, IRInvariant
 #include <any>
 #include <limits>
@@ -163,6 +164,12 @@ struct FunctionFacts {
     bool isConstFoldable = false; ///< Can be const-evaluated when args known
     FunctionEffects effects;      ///< Detailed effect summary from inferFunctionEffects
 
+    // ── ERSL: Effect Refinement & Speculation Layer ───────────────────────
+    /// Aggregated ERSL facts (stability, idempotence, speculation safety,
+    /// escape class, max safe optimization level).  Populated by
+    /// runERSL() after the effects pass has run.
+    EffectSummary ersl;
+
     // ── Constant return values ────────────────────────────────────────────
     std::optional<int64_t>     constIntReturn;    ///< Always-constant int return
     std::optional<std::string> constStringReturn; ///< Always-constant string return
@@ -186,6 +193,7 @@ struct AnalysisValidity {
     bool constantReturns = false; ///< analyzeConstantReturnValues() has run
     bool purity          = false; ///< autoDetectConstEvalFunctions() has run
     bool effects         = false; ///< inferFunctionEffects() has run
+    bool ersl            = false; ///< ERSL deriveEffectSummary() has run
     bool synthesis       = false; ///< runSynthesisPass() has run
     bool cfctre          = false; ///< runCFCTRE() has run
     bool egraph          = false; ///< egraph::optimizeProgram() has run
@@ -208,6 +216,7 @@ struct AnalysisValidity {
             {"constant_returns",   &AnalysisValidity::constantReturns  },
             {"purity",             &AnalysisValidity::purity           },
             {"effects",            &AnalysisValidity::effects          },
+            {"ersl",               &AnalysisValidity::ersl             },
             {"synthesis",          &AnalysisValidity::synthesis        },
             {"cfctre",             &AnalysisValidity::cfctre           },
             {"egraph",             &AnalysisValidity::egraph           },
@@ -526,6 +535,15 @@ public:
         static const FunctionEffects kDefault;
         auto it = facts_.find(funcName);
         return (it != facts_.end()) ? it->second.effects : kDefault;
+    }
+
+    /// Return the ERSL EffectSummary for @p funcName.
+    /// Returns a conservative default (maxSafeOptLevel=1) when the function
+    /// is unknown or the ersl pass has not run yet.
+    const EffectSummary& effectSummary(const std::string& funcName) const noexcept {
+        static const EffectSummary kDefault;
+        auto it = facts_.find(funcName);
+        return (it != facts_.end()) ? it->second.ersl : kDefault;
     }
 
     // ── Validity tracking ─────────────────────────────────────────────────

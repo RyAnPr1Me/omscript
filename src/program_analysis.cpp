@@ -38,7 +38,6 @@
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
-
 namespace omscript {
 
 namespace {
@@ -172,6 +171,31 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
 
         // Derived purity: readnone + willreturn + nounwind
         fs.isPure = fs.doesNotAccessMemory && fs.willReturn && fs.doesNotThrow;
+
+        // ── ERSL: populate EffectSummary from LLVM IR attributes ─────────
+        // Translate LLVM function attributes into a FunctionEffects-equivalent
+        // record, then call deriveEffectSummary() to compute the full ERSL facts.
+        {
+            FunctionEffects fe;
+            fe.readsMemory  = !fs.doesNotAccessMemory;
+            // LLVM's onlyReadsMemory maps to our readonly — no writes.
+            fe.writesMemory = !fs.doesNotAccessMemory && !fs.onlyReadsMemory;
+            // Conservative: treat any function that accesses memory and might sync
+            // as potentially having I/O side effects unless nosync+nofree are set.
+            fe.hasIO         = !fs.noSync && !fs.doesNotFreeMemory && !fs.doesNotAccessMemory;
+            fe.hasMutation   = fe.writesMemory;
+            fe.mayThrow      = !fs.doesNotThrow;
+            fe.mayNotReturn  = !fs.willReturn;
+            // Allocation / deallocation cannot be inferred from basic attributes
+            // without alias analysis; leave them false (conservative: not a concern
+            // for max-safe-level computation at the IR level).
+            fe.allocates     = false;
+            fe.deallocates   = false;
+            fe.hasIndirectCall = false;
+            fe.readsGlobal   = false;
+            fe.writesGlobal  = false;
+            fs.ersl = deriveEffectSummary(fe);
+        }
 
         // ── Reachability ──────────────────────────────────────────────────
         fs.isReachable = (reachable.count(&F) != 0);

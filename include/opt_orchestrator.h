@@ -140,6 +140,7 @@ private:
     void runConstantReturns   (Program* program, OptimizationContext& ctx);
     void runPurity            (Program* program, OptimizationContext& ctx);
     void runEffects           (Program* program, OptimizationContext& ctx);
+    void runERSL              (Program* program, OptimizationContext& ctx);
     void runSynthesis         (Program* program, OptimizationContext& ctx);
     void runCFCTRE            (Program* program, OptimizationContext& ctx);
     void runEGraph            (Program* program, OptimizationContext& ctx);
