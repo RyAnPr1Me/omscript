@@ -45,8 +45,9 @@ static bool isAllocCall(const Expression* expr, std::string* regionVar = nullptr
     if (!expr || expr->type != ASTNodeType::CALL_EXPR) return false;
     const auto* c = static_cast<const CallExpr*>(expr);
     if (c->callee != "alloc" || c->arguments.empty()) return false;
-    if (regionVar && c->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
-        *regionVar = static_cast<const IdentifierExpr*>(c->arguments[0].get())->name;
+    if (regionVar) {
+        if (const auto* id = asIdentifier(c->arguments[0].get()))
+            *regionVar = id->name;
     }
     return true;
 }
@@ -562,10 +563,8 @@ static void processBlock(
     for (const auto& sp : stmts) {
         if (!sp || sp->type != ASTNodeType::RETURN_STMT) continue;
         const auto* ret = static_cast<const ReturnStmt*>(sp.get());
-        if (ret->value && ret->value->type == ASTNodeType::IDENTIFIER_EXPR) {
-            returnedVars.insert(
-                static_cast<const IdentifierExpr*>(ret->value.get())->name);
-        }
+        if (const auto* retId = asIdentifier(ret->value.get()))
+            returnedVars.insert(retId->name);
     }
 
     for (const auto& ri : regions) {

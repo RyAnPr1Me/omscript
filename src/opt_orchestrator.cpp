@@ -704,14 +704,13 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
             // Check for literal zero divisor.
             if ((bin->op == "/" || bin->op == "%") && bin->right &&
                 isIntLiteralVal(bin->right.get(), 0)) {
-                Diagnostic d;
-                d.severity = DiagnosticSeverity::Error;
-                d.code     = ErrorCode::E011_DIVISION_BY_ZERO;
-                d.location = {fnName, 0, 0};
-                d.message  = "division by zero (literal 0 as "
-                             + std::string(bin->op == "/" ? "divisor" : "modulus")
-                             + ") in function '" + fnName + "'";
-                throw DiagnosticError(d);
+                throw DiagnosticError(Diagnostic{
+                    DiagnosticSeverity::Error,
+                    {fnName, 0, 0},
+                    "division by zero (literal 0 as "
+                    + std::string(bin->op == "/" ? "divisor" : "modulus")
+                    + ") in function '" + fnName + "'",
+                    ErrorCode::E011_DIVISION_BY_ZERO});
             }
             // Recurse into both sides.
             checkExpr(bin->left.get(),  fnName);

@@ -125,9 +125,6 @@ private:
     /// True when `val` is a literal integer mask covering at least `bits` bits
     /// (i.e., all of 0..(2^bits - 1) pass through the mask unchanged).
     static bool isMaskCovering(int64_t mask, uint32_t bits) noexcept;
-
-    /// Create a literal integer expression (value v).
-    static std::unique_ptr<LiteralExpr> makeLiteral(int64_t v);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

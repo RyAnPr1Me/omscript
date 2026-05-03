@@ -91,11 +91,6 @@ bool WidthOptPass::isMaskCovering(int64_t mask, uint32_t bits) noexcept {
     return (mask & required) == required;
 }
 
-/* static */
-std::unique_ptr<LiteralExpr> WidthOptPass::makeLiteral(int64_t v) {
-    return std::make_unique<LiteralExpr>(static_cast<long long>(v));
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Sub-pass: masking elimination
 // ─────────────────────────────────────────────────────────────────────────────
@@ -152,7 +147,7 @@ WidthOptPass::tryNarrowShift(BinaryExpr* bin) {
     if (N >= W) {
         // x >> N where N >= W: result is always zero.
         ++stats_.shiftsZeroed;
-        return makeLiteral(0);
+        return makeIntLiteral(0LL);
     }
 
     // N < W but > 0: the result fits in W-N bits.
@@ -232,7 +227,7 @@ WidthOptPass::tryPruneBranch(BinaryExpr* bin) {
     if (result == -1) return nullptr; // Could not prove
 
     ++stats_.branchesPruned;
-    return makeLiteral(result);
+    return makeIntLiteral(static_cast<long long>(result));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
