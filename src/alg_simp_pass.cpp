@@ -42,11 +42,10 @@ static bool isFloatLit(const Expression* expr) {
 
 /// True when @p a and @p b are identifier expressions with the same name.
 static bool sameIdent(const Expression* a, const Expression* b) {
-    if (!a || !b) return false;
-    if (a->type != ASTNodeType::IDENTIFIER_EXPR) return false;
-    if (b->type != ASTNodeType::IDENTIFIER_EXPR) return false;
-    return static_cast<const IdentifierExpr*>(a)->name
-        == static_cast<const IdentifierExpr*>(b)->name;
+    const auto* ia = asIdentifier(a);
+    const auto* ib = asIdentifier(b);
+    if (!ia || !ib) return false;
+    return ia->name == ib->name;
 }
 
 /// True when @p expr is provably of integer type:
@@ -283,8 +282,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
             // x & x → x
             if (sameIdent(L, R)) {
-                expr = std::make_unique<IdentifierExpr>(
-                    static_cast<IdentifierExpr*>(L)->name);
+                expr = makeIdentifier(static_cast<IdentifierExpr*>(L)->name);
                 ++count;
                 return count;
             }
@@ -304,8 +302,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
             // x | x → x
             if (sameIdent(L, R)) {
-                expr = std::make_unique<IdentifierExpr>(
-                    static_cast<IdentifierExpr*>(L)->name);
+                expr = makeIdentifier(static_cast<IdentifierExpr*>(L)->name);
                 ++count;
                 return count;
             }

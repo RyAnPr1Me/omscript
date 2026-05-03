@@ -45,9 +45,7 @@ namespace omscript {
 /// Return a string representation of a simple (leaf-level) expression,
 /// or "" if the expression is not a hoistable atom.
 static std::string leafRepr(const Expression* expr) {
-    if (!expr) return "";
-    if (expr->type == ASTNodeType::IDENTIFIER_EXPR)
-        return static_cast<const IdentifierExpr*>(expr)->name;
+    if (const auto* id = asIdentifier(expr)) return id->name;
     long long v = 0;
     if (isIntLiteral(expr, &v))
         return std::to_string(v);
@@ -237,7 +235,7 @@ static std::unique_ptr<Expression> makeLeaf(const std::string& token) {
         if (pos == token.size())
             return makeIntLiteral(v);
     } catch (...) {}
-    return std::make_unique<IdentifierExpr>(token);
+    return makeIdentifier(token);
 }
 
 /// Reconstruct an Expression from a key string.
@@ -285,7 +283,7 @@ static std::unique_ptr<Expression> exprFromKey(const std::string& key) {
     std::string lhs = key.substr(first + 1, second - first - 1);
     std::string rhs = key.substr(second + 1);
 
-    return std::make_unique<BinaryExpr>(op, makeLeaf(lhs), makeLeaf(rhs));
+    return makeBinary(op, makeLeaf(lhs), makeLeaf(rhs));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
