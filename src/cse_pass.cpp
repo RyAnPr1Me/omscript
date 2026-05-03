@@ -173,7 +173,7 @@ static bool replaceInExpr(std::unique_ptr<Expression>& expr,
         auto* bin = static_cast<BinaryExpr*>(expr.get());
         const std::string myKey = binaryKey(bin->op, bin->left.get(), bin->right.get());
         if (myKey == key) {
-            expr = std::make_unique<IdentifierExpr>(varName);
+            expr = makeIdentifier(varName);
             return true;
         }
         // Recurse into children (stop at the first replacement to avoid
@@ -185,7 +185,7 @@ static bool replaceInExpr(std::unique_ptr<Expression>& expr,
         auto* call = static_cast<CallExpr*>(expr.get());
         const std::string myKey = callKey(call->callee, call->arguments);
         if (!myKey.empty() && myKey == key) {
-            expr = std::make_unique<IdentifierExpr>(varName);
+            expr = makeIdentifier(varName);
             return true;
         }
     } else if (expr->type == ASTNodeType::UNARY_EXPR) {
