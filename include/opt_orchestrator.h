@@ -134,21 +134,23 @@ private:
     // ── Helpers ───────────────────────────────────────────────────────────
 
     // Run one named pass and record timing / validity.
-    void runPreflightCheck (Program* program, OptimizationContext& ctx);
-    void runStringTypes    (Program* program, OptimizationContext& ctx);
-    void runArrayTypes     (Program* program, OptimizationContext& ctx);
-    void runConstantReturns(Program* program, OptimizationContext& ctx);
-    void runPurity         (Program* program, OptimizationContext& ctx);
-    void runEffects        (Program* program, OptimizationContext& ctx);
-    void runSynthesis      (Program* program, OptimizationContext& ctx);
-    void runCFCTRE         (Program* program, OptimizationContext& ctx);
-    void runEGraph         (Program* program, OptimizationContext& ctx);
-    void runRangeAnalysis  (Program* program, OptimizationContext& ctx);
-    void runRLC            (Program* program, OptimizationContext& ctx);
-    void runDCE            (Program* program, OptimizationContext& ctx);
-    void runCSE            (Program* program, OptimizationContext& ctx);
-    void runAlgSimp        (Program* program, OptimizationContext& ctx);
-    void runCopyProp       (Program* program, OptimizationContext& ctx);
+    void runPreflightCheck    (Program* program, OptimizationContext& ctx);
+    void runStringTypes       (Program* program, OptimizationContext& ctx);
+    void runArrayTypes        (Program* program, OptimizationContext& ctx);
+    void runConstantReturns   (Program* program, OptimizationContext& ctx);
+    void runPurity            (Program* program, OptimizationContext& ctx);
+    void runEffects           (Program* program, OptimizationContext& ctx);
+    void runSynthesis         (Program* program, OptimizationContext& ctx);
+    void runCFCTRE            (Program* program, OptimizationContext& ctx);
+    void runEGraph            (Program* program, OptimizationContext& ctx);
+    void runRangeAnalysis     (Program* program, OptimizationContext& ctx);
+    void runRLC               (Program* program, OptimizationContext& ctx);
+    void runDCE               (Program* program, OptimizationContext& ctx);
+    void runCSE               (Program* program, OptimizationContext& ctx);
+    void runAlgSimp           (Program* program, OptimizationContext& ctx);
+    void runCopyProp          (Program* program, OptimizationContext& ctx);
+    void runWidthLegalization (Program* program, OptimizationContext& ctx);
+    void runWidthOpt          (Program* program, OptimizationContext& ctx);
 
     /// Build the PassId → runner dispatch map used by runPassPipeline and
     /// runToProvide.  Defined once here so the 10-entry table never needs to

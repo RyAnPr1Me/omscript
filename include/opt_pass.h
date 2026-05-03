@@ -74,6 +74,8 @@ namespace AnalysisFact {
     inline constexpr const char* kCSE             = "cse";
     inline constexpr const char* kAlgSimp         = "alg_simp";
     inline constexpr const char* kCopyProp        = "copy_prop";
+    inline constexpr const char* kWidthLegalization = "width_legalization";
+    inline constexpr const char* kWidthOpt           = "width_opt";
 } // namespace AnalysisFact
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,6 +194,8 @@ namespace PassId {
     extern uint32_t kEGraph;
     extern uint32_t kRangeAnalysis;
     extern uint32_t kRLC;
+    extern uint32_t kWidthLegalization;
+    extern uint32_t kWidthOpt;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────

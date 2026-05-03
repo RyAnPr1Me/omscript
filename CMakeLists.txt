@@ -98,6 +98,8 @@ set(SRC
     src/cse_pass.cpp
     src/alg_simp_pass.cpp
     src/copy_prop_pass.cpp
+    src/width_legalization.cpp
+    src/width_opt_pass.cpp
     src/program_analysis.cpp
 
     # Driver

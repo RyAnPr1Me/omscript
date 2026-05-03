@@ -195,26 +195,30 @@ struct AnalysisValidity {
     bool cse             = false; ///< Common Subexpression Elimination pass has run
     bool algSimp         = false; ///< Algebraic Simplification pass has run
     bool copyProp        = false; ///< Copy Propagation pass has run
+    bool widthLegalization = false; ///< WidthLegalizationPass has run
+    bool widthOpt          = false; ///< WidthOptPass has run
 
     // ── Dispatch table ────────────────────────────────────────────────────
     bool* fieldFor(std::string_view fact) noexcept {
         struct Row { std::string_view name; bool AnalysisValidity::* field; };
         static constexpr Row kTable[] = {
-            {"preflight_check",  &AnalysisValidity::preflightCheck },
-            {"string_types",     &AnalysisValidity::stringTypes    },
-            {"array_types",      &AnalysisValidity::arrayTypes     },
-            {"constant_returns", &AnalysisValidity::constantReturns},
-            {"purity",           &AnalysisValidity::purity         },
-            {"effects",          &AnalysisValidity::effects        },
-            {"synthesis",        &AnalysisValidity::synthesis      },
-            {"cfctre",           &AnalysisValidity::cfctre         },
-            {"egraph",           &AnalysisValidity::egraph         },
-            {"range_analysis",   &AnalysisValidity::rangeAnalysis  },
-            {"rlc",              &AnalysisValidity::rlc            },
-            {"dce",              &AnalysisValidity::dce            },
-            {"cse",              &AnalysisValidity::cse            },
-            {"alg_simp",         &AnalysisValidity::algSimp        },
-            {"copy_prop",        &AnalysisValidity::copyProp       },
+            {"preflight_check",    &AnalysisValidity::preflightCheck   },
+            {"string_types",       &AnalysisValidity::stringTypes      },
+            {"array_types",        &AnalysisValidity::arrayTypes       },
+            {"constant_returns",   &AnalysisValidity::constantReturns  },
+            {"purity",             &AnalysisValidity::purity           },
+            {"effects",            &AnalysisValidity::effects          },
+            {"synthesis",          &AnalysisValidity::synthesis        },
+            {"cfctre",             &AnalysisValidity::cfctre           },
+            {"egraph",             &AnalysisValidity::egraph           },
+            {"range_analysis",     &AnalysisValidity::rangeAnalysis    },
+            {"rlc",                &AnalysisValidity::rlc              },
+            {"dce",                &AnalysisValidity::dce              },
+            {"cse",                &AnalysisValidity::cse              },
+            {"alg_simp",           &AnalysisValidity::algSimp          },
+            {"copy_prop",          &AnalysisValidity::copyProp         },
+            {"width_legalization", &AnalysisValidity::widthLegalization},
+            {"width_opt",          &AnalysisValidity::widthOpt         },
         };
         for (const auto& row : kTable) {
             if (row.name == fact)
