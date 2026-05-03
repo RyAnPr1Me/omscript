@@ -25,6 +25,7 @@
 /// pass is sufficient for chains of copies.
 
 #include "copy_prop_pass.h"
+#include "pass_utils.h"
 
 #include <iostream>
 #include <memory>
@@ -415,12 +416,8 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
 
 CopyPropStats runCopyPropPass(Program* program, bool verbose) {
     CopyPropStats total;
-    if (!program) return total;
 
-    for (auto& node : program->functions) {
-        auto* fn = static_cast<FunctionDecl*>(node.get());
-        if (!fn || !fn->body) continue;
-
+    forEachFunction(program, [&](FunctionDecl* fn) {
         const unsigned before = total.copiesEliminated;
         total.copiesEliminated +=
             propagateInBlock(fn->body.get(), CopyMap{});
@@ -430,7 +427,8 @@ CopyPropStats runCopyPropPass(Program* program, bool verbose) {
             std::cerr << "[CopyProp] " << fn->name
                       << ": " << applied << " copy(ies) propagated\n";
         }
-    }
+    });
+
     return total;
 }
 

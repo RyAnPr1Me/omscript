@@ -16,6 +16,7 @@
 #include "dce_pass.h"
 #include "cse_pass.h"
 #include "ersl.h"
+#include "pass_utils.h"
 #include "width_legalization.h"
 #include "width_opt_pass.h"
 #include "diagnostic.h"
@@ -703,22 +704,16 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
         if (e->type == ASTNodeType::BINARY_EXPR) {
             const auto* bin = static_cast<const BinaryExpr*>(e);
             // Check for literal zero divisor.
-            if ((bin->op == "/" || bin->op == "%") && bin->right) {
-                const Expression* rhs = bin->right.get();
-                if (rhs->type == ASTNodeType::LITERAL_EXPR) {
-                    const auto* lit = static_cast<const LiteralExpr*>(rhs);
-                    if (lit->literalType == LiteralExpr::LiteralType::INTEGER &&
-                        lit->intValue == 0) {
-                        Diagnostic d;
-                        d.severity = DiagnosticSeverity::Error;
-                        d.code     = ErrorCode::E011_DIVISION_BY_ZERO;
-                        d.location = {fnName, 0, 0};
-                        d.message  = "division by zero (literal 0 as "
-                                     + std::string(bin->op == "/" ? "divisor" : "modulus")
-                                     + ") in function '" + fnName + "'";
-                        throw DiagnosticError(d);
-                    }
-                }
+            if ((bin->op == "/" || bin->op == "%") && bin->right &&
+                isIntLiteralVal(bin->right.get(), 0)) {
+                Diagnostic d;
+                d.severity = DiagnosticSeverity::Error;
+                d.code     = ErrorCode::E011_DIVISION_BY_ZERO;
+                d.location = {fnName, 0, 0};
+                d.message  = "division by zero (literal 0 as "
+                             + std::string(bin->op == "/" ? "divisor" : "modulus")
+                             + ") in function '" + fnName + "'";
+                throw DiagnosticError(d);
             }
             // Recurse into both sides.
             checkExpr(bin->left.get(),  fnName);
@@ -866,12 +861,8 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
 
     // Helper: try to read a literal int from an expression.
     auto litInt = [](const Expression* e) -> std::optional<int64_t> {
-        if (!e) return {};
-        if (e->type == ASTNodeType::LITERAL_EXPR) {
-            auto* lit = static_cast<const LiteralExpr*>(e);
-            if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
-                return lit->intValue;
-        }
+        long long v = 0;
+        if (isIntLiteral(e, &v)) return static_cast<int64_t>(v);
         return {};
     };
 

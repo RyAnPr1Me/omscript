@@ -26,6 +26,7 @@
 
 #include "cse_pass.h"
 #include "opt_pass.h"   // isCommutativeOp, isPureBinaryOp
+#include "pass_utils.h"
 
 #include <algorithm>
 #include <iostream>
@@ -47,11 +48,9 @@ static std::string leafRepr(const Expression* expr) {
     if (!expr) return "";
     if (expr->type == ASTNodeType::IDENTIFIER_EXPR)
         return static_cast<const IdentifierExpr*>(expr)->name;
-    if (expr->type == ASTNodeType::LITERAL_EXPR) {
-        const auto* lit = static_cast<const LiteralExpr*>(expr);
-        if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
-            return std::to_string(lit->intValue);
-    }
+    long long v = 0;
+    if (isIntLiteral(expr, &v))
+        return std::to_string(v);
     return "";
 }
 
@@ -236,7 +235,7 @@ static std::unique_ptr<Expression> makeLeaf(const std::string& token) {
         size_t pos = 0;
         long long v = std::stoll(token, &pos);
         if (pos == token.size())
-            return std::make_unique<LiteralExpr>(v);
+            return makeIntLiteral(v);
     } catch (...) {}
     return std::make_unique<IdentifierExpr>(token);
 }
@@ -403,13 +402,9 @@ CSEStats runCSEPass(Program* program,
                     bool verbose,
                     const std::unordered_map<std::string, EffectSummary>* idempotentFuncs) {
     CSEStats total;
-    if (!program) return total;
 
     // Each function gets its own counter to keep temp-var names short.
-    for (auto& node : program->functions) {
-        auto* fn = static_cast<FunctionDecl*>(node.get());
-        if (!fn || !fn->body) continue;
-
+    forEachFunction(program, [&](FunctionDecl* fn) {
         unsigned nextId = 0;
         CSEStats fnStats = processBlock(fn->body.get(), nextId, idempotentFuncs);
 
@@ -423,7 +418,7 @@ CSEStats runCSEPass(Program* program,
                       << fnStats.expressionsHoisted
                       << " occurrence(s) replaced\n";
         }
-    }
+    });
 
     return total;
 }
