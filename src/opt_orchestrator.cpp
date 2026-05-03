@@ -159,6 +159,7 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace PassId {
+    uint32_t kPreflightCheck  = 0;
     uint32_t kStringTypes     = 0;
     uint32_t kArrayTypes      = 0;
     uint32_t kConstantReturns = 0;
@@ -187,6 +188,17 @@ static void registerAllPasses() {
     done = true;
 
     auto& reg = PassRegistry::instance();
+
+    PassId::kPreflightCheck = reg.registerPass({
+        0,
+        "preflight_check",
+        "Pre-flight error detection: scan for fatal errors (e.g. literal division by zero) before any optimisation",
+        PassPhase::Preprocessing,
+        PassKind::Analysis,
+        {},                                  // requires nothing — runs first
+        {AnalysisFact::kPreflightCheck},     // provides
+        {},                                  // invalidates nothing
+    });
 
     PassId::kStringTypes = reg.registerPass({
         0,

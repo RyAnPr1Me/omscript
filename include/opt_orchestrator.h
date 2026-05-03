@@ -134,6 +134,7 @@ private:
     // ── Helpers ───────────────────────────────────────────────────────────
 
     // Run one named pass and record timing / validity.
+    void runPreflightCheck (Program* program, OptimizationContext& ctx);
     void runStringTypes    (Program* program, OptimizationContext& ctx);
     void runArrayTypes     (Program* program, OptimizationContext& ctx);
     void runConstantReturns(Program* program, OptimizationContext& ctx);

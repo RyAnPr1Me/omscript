@@ -180,6 +180,7 @@ struct FunctionFacts {
 
 // AnalysisValidity — validity flags for each analysis pass; cleared when the AST changes
 struct AnalysisValidity {
+    bool preflightCheck  = false; ///< runPreflightCheck() has run
     bool stringTypes     = false; ///< preAnalyzeStringTypes() has run
     bool arrayTypes      = false; ///< preAnalyzeArrayTypes() has run
     bool constantReturns = false; ///< analyzeConstantReturnValues() has run
@@ -199,6 +200,7 @@ struct AnalysisValidity {
     bool* fieldFor(std::string_view fact) noexcept {
         struct Row { std::string_view name; bool AnalysisValidity::* field; };
         static constexpr Row kTable[] = {
+            {"preflight_check",  &AnalysisValidity::preflightCheck },
             {"string_types",     &AnalysisValidity::stringTypes    },
             {"array_types",      &AnalysisValidity::arrayTypes     },
             {"constant_returns", &AnalysisValidity::constantReturns},

@@ -59,6 +59,7 @@ enum class PassKind : uint8_t {
 /// and which it invalidates when it modifies the program representation.
 /// These strings are cheap to compare (short, interned by the registry).
 namespace AnalysisFact {
+    inline constexpr const char* kPreflightCheck  = "preflight_check";
     inline constexpr const char* kStringTypes     = "string_types";
     inline constexpr const char* kArrayTypes      = "array_types";
     inline constexpr const char* kConstantReturns = "constant_returns";
@@ -180,6 +181,7 @@ private:
 /// without hard-coding their numeric values.  They are populated once by
 /// the registration macros at program startup; after that they are const.
 namespace PassId {
+    extern uint32_t kPreflightCheck;
     extern uint32_t kStringTypes;
     extern uint32_t kArrayTypes;
     extern uint32_t kConstantReturns;
