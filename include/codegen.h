@@ -514,6 +514,10 @@ class CodeGenerator {
     /// Values known to be non-negative (enables urem/udiv instead of srem/sdiv).
     llvm::DenseSet<llvm::Value*> nonNegValues_;
 
+    /// Values produced by unsigned-typed expressions (uN casts, uN-annotated loads).
+    /// Used by convertTo() and emitStoreArrayElem() to select ZExt vs SExt when widening.
+    llvm::DenseSet<llvm::Value*> unsignedExprs_;
+
     /// Loop-scope array length cache (shared SSA length value per array; cleared on loop entry/exit).
     llvm::DenseMap<llvm::Value*, llvm::Value*> loopArrayLenCache_;
     /// Nesting depth of loopArrayLenCache_ — pushed/popped on loop entry/exit.
@@ -578,14 +582,16 @@ class CodeGenerator {
 
     /// Compile-time constant value (int, string, or array) for unified constant propagation.
     struct ConstValue {
-        enum class Kind { Integer, String, Array } kind = Kind::Integer;
+        enum class Kind { Integer, Float, String, Array } kind = Kind::Integer;
         int64_t intVal = 0;
+        double  floatVal = 0.0;
         std::string strVal;
         std::vector<ConstValue> arrVal;  // for Kind::Array
-        static ConstValue fromInt(int64_t v)     { return {Kind::Integer, v, {}, {}}; }
-        static ConstValue fromStr(std::string s) { return {Kind::String, 0, std::move(s), {}}; }
+        static ConstValue fromInt(int64_t v)     { ConstValue c; c.kind = Kind::Integer; c.intVal = v; return c; }
+        static ConstValue fromFloat(double v)    { ConstValue c; c.kind = Kind::Float;   c.floatVal = v; return c; }
+        static ConstValue fromStr(std::string s) { ConstValue c; c.kind = Kind::String;  c.strVal = std::move(s); return c; }
         static ConstValue fromArr(std::vector<ConstValue> a)
-                                                 { return {Kind::Array, 0, {}, std::move(a)}; }
+                                                 { ConstValue c; c.kind = Kind::Array;   c.arrVal = std::move(a); return c; }
     };
 
     /// Compile-time array values for `const` arrays (enables array index folding).
@@ -609,6 +615,7 @@ class CodeGenerator {
 
     /// Fold an expression to a compile-time integer or string (more powerful than getConstantInt).
     std::optional<int64_t>     tryFoldInt(Expression* e) const;
+    std::optional<double>      tryFoldFloat(Expression* e) const;
     std::optional<std::string> tryFoldStr(Expression* e) const;
 
     /// Emit a compile-time constant array as a private global (OmScript array layout).
@@ -1071,6 +1078,12 @@ class CodeGenerator {
     llvm::Function* getOrDeclareBigintIsNegative();
     llvm::Function* getOrDeclareBigintShl();
     llvm::Function* getOrDeclareBigintShr();
+
+    // HTTP client runtime helpers: declare C functions from http_runtime.h in the LLVM module.
+    llvm::Function* getOrDeclareHttpGet();
+    llvm::Function* getOrDeclareHttpPost();
+    llvm::Function* getOrDeclareHttpRequest();
+    llvm::Function* getOrDeclareHttpGetStatus();
 
     // Hash-table map runtime helpers: open-addressing, linear probing, power-of-2 capacity, FNV-1a.
     // Layout (all i64): [capacity, size, hash0, key0, val0, ...]; empty=0, tombstone=1, occupied≥2.

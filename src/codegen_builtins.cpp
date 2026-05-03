@@ -137,7 +137,12 @@ enum class BuiltinId : uint8_t {
     // ── Raw memory builtins ──────────────────────────────────────────────────
     MALLOC,       ///< malloc(size)       → allocate `size` bytes, return ptr
     FREE,         ///< free(ptr)          → deallocate ptr (void return)
-    SIZEOF        ///< sizeof(type_name)  → byte size of type as i64 constant
+    SIZEOF,       ///< sizeof(type_name)  → byte size of type as i64 constant
+    // ── HTTP client builtins ─────────────────────────────────────────────────
+    HTTP_GET,     ///< http_get(url)                   → response body string
+    HTTP_POST,    ///< http_post(url, body[, ct])       → response body string
+    HTTP_REQUEST, ///< http_request(method,url,body,hdr)→ response body string
+    HTTP_STATUS   ///< http_status(url)                → HTTP status code (int)
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -372,6 +377,11 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"malloc",     BuiltinId::MALLOC},
     {"free",       BuiltinId::FREE},
     {"sizeof",     BuiltinId::SIZEOF},
+    // HTTP client
+    {"http_get",     BuiltinId::HTTP_GET},
+    {"http_post",    BuiltinId::HTTP_POST},
+    {"http_request", BuiltinId::HTTP_REQUEST},
+    {"http_status",  BuiltinId::HTTP_STATUS},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -769,7 +779,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateCall(getOrDeclarePuts(), {arg});
             return llvm::ConstantInt::get(getDefaultType(), 0);
         } else {
-            // Print integer
+            // Print integer — printf %lld requires a 64-bit argument.
+            // Widen narrow integers using the correct sign extension.
+            if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
+                const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
+                arg = isUnsigned
+                    ? builder->CreateZExt(arg, getDefaultType(), "print.zext")
+                    : builder->CreateSExt(arg, getDefaultType(), "print.sext");
+            }
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("print_fmt", true);
             if (!formatStr) {
                 formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
@@ -1086,8 +1103,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::POW) {
         validateArgCount(expr, "pow", 2);
-        // Constant-fold pow(base, exp) when both are compile-time constants and exp >= 0.
-        // Eliminates the entire exponentiation loop at compile time.
+        // Constant-fold pow(base, exp) when both are compile-time constants.
+        // When either argument is a float (not an exact integer), use double arithmetic.
+        {
+            auto cvB = tryFoldExprToConst(expr->arguments[0].get());
+            auto cvE = tryFoldExprToConst(expr->arguments[1].get());
+            bool bIsFloat = cvB && cvB->kind == ConstValue::Kind::Float;
+            bool eIsFloat = cvE && cvE->kind == ConstValue::Kind::Float;
+            if (cvB && cvE && (bIsFloat || eIsFloat)) {
+                double fb = bIsFloat ? cvB->floatVal : static_cast<double>(cvB->intVal);
+                double fe = eIsFloat ? cvE->floatVal : static_cast<double>(cvE->intVal);
+                double result = std::pow(fb, fe);
+                return llvm::ConstantFP::get(getFloatType(), result);
+            }
+        }
+        // Integer constant-fold: both args must be exact integers.
         if (auto cb = tryFoldInt(expr->arguments[0].get())) {
             if (auto ce = tryFoldInt(expr->arguments[1].get())) {
                 int64_t b = *cb, e = *ce;
@@ -4798,6 +4828,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // newline automatically and avoids format-string parsing overhead.
             builder->CreateCall(getOrDeclarePuts(), {arg});
         } else {
+            // println integer — printf %lld requires a 64-bit argument.
+            if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
+                const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
+                arg = isUnsigned
+                    ? builder->CreateZExt(arg, getDefaultType(), "println.zext")
+                    : builder->CreateSExt(arg, getDefaultType(), "println.sext");
+            }
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("println_fmt", true);
             if (!formatStr) {
                 formatStr = builder->CreateGlobalString("%lld\n", "println_fmt");
@@ -4825,6 +4862,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // Use fputs(str, stdout) instead of printf("%s", str) to avoid
             builder->CreateCall(getOrDeclareFputs(), {arg, getOrDeclareStdout()});
         } else {
+            // write integer — printf %lld requires a 64-bit argument.
+            if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
+                const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
+                arg = isUnsigned
+                    ? builder->CreateZExt(arg, getDefaultType(), "write.zext")
+                    : builder->CreateSExt(arg, getDefaultType(), "write.sext");
+            }
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("write_fmt", true);
             if (!formatStr) {
                 formatStr = builder->CreateGlobalString("%lld", "write_fmt");
@@ -8796,6 +8840,83 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return llvm::ConstantInt::get(getDefaultType(), sz);
     }
 
+    // ── HTTP client builtins ─────────────────────────────────────────────────
+    // All HTTP builtins return a string (pointer encoded as i64) or an i64
+    // status code.  The returned strings are malloc'd by the runtime and must
+    // be free()'d by the caller; the string ownership model is identical to
+    // other string-returning builtins such as command() and bigint_tostring().
+
+    // http_get(url) → body string
+    if (bid == BuiltinId::HTTP_GET) {
+        validateArgCount(expr, "http_get", 1);
+        llvm::Value* urlVal = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* urlPtr = urlVal->getType()->isPointerTy()
+            ? urlVal
+            : builder->CreateIntToPtr(urlVal, ptrTy, "hget.url");
+        llvm::Value* result = builder->CreateCall(getOrDeclareHttpGet(), {urlPtr}, "hget.body");
+        return builder->CreatePtrToInt(result, getDefaultType(), "hget.i64");
+    }
+
+    // http_post(url, body[, content_type]) → body string
+    if (bid == BuiltinId::HTTP_POST) {
+        if (expr->arguments.size() < 2 || expr->arguments.size() > 3)
+            codegenError("http_post() requires 2 or 3 arguments: (url, body[, content_type])", expr);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto toPtr = [&](llvm::Value* v, const char* nm) -> llvm::Value* {
+            return v->getType()->isPointerTy() ? v
+                 : builder->CreateIntToPtr(v, ptrTy, nm);
+        };
+        llvm::Value* urlPtr  = toPtr(generateExpression(expr->arguments[0].get()), "hpost.url");
+        llvm::Value* bodyPtr = toPtr(generateExpression(expr->arguments[1].get()), "hpost.body");
+        llvm::Value* ctPtr;
+        if (expr->arguments.size() == 3) {
+            ctPtr = toPtr(generateExpression(expr->arguments[2].get()), "hpost.ct");
+        } else {
+            // Default Content-Type: pass NULL (runtime uses "application/octet-stream").
+            ctPtr = llvm::ConstantPointerNull::get(ptrTy);
+        }
+        llvm::Value* result = builder->CreateCall(
+            getOrDeclareHttpPost(), {urlPtr, bodyPtr, ctPtr}, "hpost.body");
+        return builder->CreatePtrToInt(result, getDefaultType(), "hpost.i64");
+    }
+
+    // http_request(method, url, body, headers) → body string
+    if (bid == BuiltinId::HTTP_REQUEST) {
+        if (expr->arguments.size() < 2 || expr->arguments.size() > 4)
+            codegenError("http_request() requires 2–4 arguments: (method, url[, body[, headers]])", expr);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto toPtr = [&](llvm::Value* v, const char* nm) -> llvm::Value* {
+            return v->getType()->isPointerTy() ? v
+                 : builder->CreateIntToPtr(v, ptrTy, nm);
+        };
+        auto nullPtr = [&]() -> llvm::Value* {
+            return llvm::ConstantPointerNull::get(ptrTy);
+        };
+        llvm::Value* methodPtr = toPtr(generateExpression(expr->arguments[0].get()), "hreq.method");
+        llvm::Value* urlPtr    = toPtr(generateExpression(expr->arguments[1].get()), "hreq.url");
+        llvm::Value* bodyPtr   = (expr->arguments.size() >= 3)
+            ? toPtr(generateExpression(expr->arguments[2].get()), "hreq.body")
+            : nullPtr();
+        llvm::Value* hdrsPtr   = (expr->arguments.size() >= 4)
+            ? toPtr(generateExpression(expr->arguments[3].get()), "hreq.hdrs")
+            : nullPtr();
+        llvm::Value* result = builder->CreateCall(
+            getOrDeclareHttpRequest(), {methodPtr, urlPtr, bodyPtr, hdrsPtr}, "hreq.body");
+        return builder->CreatePtrToInt(result, getDefaultType(), "hreq.i64");
+    }
+
+    // http_status(url) → HTTP status code (int)
+    if (bid == BuiltinId::HTTP_STATUS) {
+        validateArgCount(expr, "http_status", 1);
+        llvm::Value* urlVal = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* urlPtr = urlVal->getType()->isPointerTy()
+            ? urlVal
+            : builder->CreateIntToPtr(urlVal, ptrTy, "hstat.url");
+        return builder->CreateCall(getOrDeclareHttpGetStatus(), {urlPtr}, "hstat.code");
+    }
+
     if (inOptMaxFunction) {
         if (!isStdlibFunction(expr->callee) && optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
             std::string currentFunction = "<unknown>";
@@ -8915,7 +9036,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     // ── Integer / wide-integer type-cast syntax ────────────────────────────
     {
-        const std::string& cn = expr->callee;
+        // Resolve the canonical name: strip a leading "to_" prefix so that
+        // to_i32(x), to_u8(x) etc. are equivalent to i32(x), u8(x).
+        const std::string& rawCallee = expr->callee;
+        const std::string& cn = (rawCallee.size() > 3 && rawCallee.rfind("to_", 0) == 0)
+                                  ? rawCallee.substr(3) : rawCallee;
         unsigned castBits = 0;
         bool castUnsigned = false;
         // Parse "iN" / "uN" pattern
@@ -8951,49 +9076,43 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             auto* destTy = llvm::IntegerType::get(*context, castBits);
 
             if (castBits == 1) {
-                // bool(x): normalise to 0 or 1
+                // bool(x): normalise to 0 or 1; return as i64 (conventional boolean width)
                 auto* zero = llvm::ConstantInt::get(arg->getType(), 0);
                 auto* cmp  = builder->CreateICmpNE(arg, zero, "bool.cmp");
-                // Return as i64 (widen back for default-type context)
-                return builder->CreateZExt(cmp, getDefaultType(), "bool.zext");
+                auto* r = builder->CreateZExt(cmp, getDefaultType(), "bool.zext");
+                nonNegValues_.insert(r);
+                return r;
             }
 
             if (castBits == srcBits) {
-                // Same width: identity (includes i64(x), u64(x), int(x), uint(x))
+                // Same width: identity (includes i64(x), u64(x), int(x), uint(x)).
+                // Tag as unsigned when cast was unsigned.
+                if (castUnsigned) unsignedExprs_.insert(arg);
                 return arg;
             }
 
             if (castBits > srcBits) {
-                // Widen: ZExt for unsigned, SExt for signed
-                if (castUnsigned)
-                    return builder->CreateZExt(arg, destTy, cn + ".zext");
-                else
-                    return builder->CreateSExt(arg, destTy, cn + ".sext");
-            }
-
-            // Narrow: castBits < srcBits
-            if (castBits <= 64 && srcBits <= 64) {
-                // Both fit in i64 — keep result as i64 for backward compat
+                // Widen: ZExt for unsigned, SExt for signed — produce destTy directly.
+                llvm::Value* r;
                 if (castUnsigned) {
-                    // uN(x): AND off the high bits, return as i64
-                    const uint64_t mask = castBits == 64 ? UINT64_MAX
-                                        : (UINT64_C(1) << castBits) - 1u;
-                    auto* maskVal = llvm::ConstantInt::get(getDefaultType(), mask);
-                    // Ensure arg is i64 for the AND
-                    if (arg->getType() != getDefaultType())
-                        arg = builder->CreateZExt(arg, getDefaultType(), "cast.zext64");
-                    return builder->CreateAnd(arg, maskVal, cn + ".and");
+                    r = builder->CreateZExt(arg, destTy, cn + ".zext");
+                    unsignedExprs_.insert(r);
                 } else {
-                    // iN(x): trunc to iN, sext back to i64
-                    if (arg->getType() != getDefaultType())
-                        arg = builder->CreateSExt(arg, getDefaultType(), "cast.sext64");
-                    auto* trunc = builder->CreateTrunc(arg, destTy, cn + ".trunc");
-                    return builder->CreateSExt(trunc, getDefaultType(), cn + ".sext");
+                    r = builder->CreateSExt(arg, destTy, cn + ".sext");
                 }
+                return r;
             }
 
-            // Wide → narrow OR wide → wide: produce value at destTy width
-            return builder->CreateTrunc(arg, destTy, cn + ".trunc");
+            // Narrow: castBits < srcBits — truncate to the requested width.
+            // The narrow value carries its own sign semantics; downstream users
+            // (convertTo, emitStoreArrayElem, print) consult unsignedExprs_ to
+            // choose ZExt vs SExt when they need to widen back.
+            auto* r = builder->CreateTrunc(arg, destTy, cn + ".trunc");
+            if (castUnsigned) {
+                unsignedExprs_.insert(r);
+                nonNegValues_.insert(r); // all bit patterns are non-negative as unsigned
+            }
+            return r;
         }
     }
 

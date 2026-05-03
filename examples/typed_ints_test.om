@@ -1,0 +1,144 @@
+// typed_ints_test.om — Tests for arbitrary-width integer types (iN / uN).
+// Verifies correct truncation, sign/zero extension, arithmetic, and print
+// semantics for narrow integer annotations and explicit casts.
+
+// ── Explicit casts ────────────────────────────────────────────────────────────
+
+fn test_i8_roundtrip() -> int {
+    // i8(-1) sign-extends to i64(-1)
+    var v: i64 = i8(-1)
+    return v   // -1
+}
+
+fn test_u8_zero_extend() -> int {
+    // u8(255) zero-extends to i64(255)
+    var v: i64 = u8(255)
+    return v   // 255
+}
+
+fn test_i8_wrap() -> int {
+    // i8(128) wraps: 128 in i8 = -128
+    var v: i64 = i8(128)
+    return v   // -128
+}
+
+fn test_u8_mask() -> int {
+    // u8(300): 300 & 0xFF = 44
+    var v: i64 = u8(300)
+    return v   // 44
+}
+
+fn test_i16_sext() -> int {
+    var v: i64 = i16(-32768)   // min i16, sign-extends to -32768
+    return v
+}
+
+fn test_u16_zext() -> int {
+    var v: i64 = u16(32768)    // 0x8000 zero-extended = 32768
+    return v
+}
+
+fn test_u32_zext() -> int {
+    var v: i64 = u32(4294967295)   // 0xFFFFFFFF zero-extended = 4294967295
+    return v
+}
+
+fn test_i32_sext_neg() -> int {
+    var v: i64 = i32(-1)    // 0xFFFFFFFF sign-extended to -1
+    return v   // -1
+}
+
+// ── Annotated variables ───────────────────────────────────────────────────────
+
+fn test_i32_var_arith() -> int {
+    var a: i32 = 100
+    var b: i32 = 200
+    var c: i32 = a + b   // i32 arithmetic
+    return c   // 300
+}
+
+fn test_u8_var_wrap() -> int {
+    var a: u8 = u8(200)
+    var b: u8 = u8(100)
+    var c: i64 = a + b   // 300 & 0xFF = 44 (u8 overflow)
+    return c   // 44
+}
+
+fn test_i8_var_neg() -> int {
+    var x: i8 = i8(-5)
+    var y: i64 = x    // sign-extends to -5
+    return y   // -5
+}
+
+// ── to_iN / to_uN aliases ─────────────────────────────────────────────────────
+
+fn test_to_i32() -> int {
+    var v: i64 = to_i32(-1)
+    return v   // -1  (sign-extended)
+}
+
+fn test_to_u32() -> int {
+    var v: i64 = to_u32(4294967295)
+    return v   // 4294967295
+}
+
+fn test_to_u8() -> int {
+    var v: i64 = to_u8(255)
+    return v   // 255
+}
+
+// ── Narrow arithmetic ─────────────────────────────────────────────────────────
+
+fn test_i32_overflow() -> int {
+    var a: i32 = i32(2147483647)   // INT32_MAX
+    var b: i32 = a + 1             // wraps to INT32_MIN = -2147483648
+    var r: i64 = b
+    return r   // -2147483648
+}
+
+fn test_u32_wrap() -> int {
+    // u32 arithmetic: 0xFFFFFFFF + 1 = 0
+    var a: u32 = u32(4294967295)
+    var b: u32 = a + 1
+    var r: i64 = b    // 0
+    return r
+}
+
+// ── Wide types (i128/u128 as annotations) ────────────────────────────────────
+
+fn test_i128_stored() -> int {
+    var big: i128 = 42
+    var r: i64 = i64(big)
+    return r   // 42
+}
+
+// ── Constant folding with narrow types ────────────────────────────────────────
+
+fn test_const_fold_i32() -> int {
+    const k: i32 = 7
+    var r: i32 = k + 3    // constant folded: 10
+    return r   // 10
+}
+
+// ── Summary: all results should add to a known checksum ──────────────────────
+
+fn main() {
+    println(test_i8_roundtrip())       // -1
+    println(test_u8_zero_extend())     // 255
+    println(test_i8_wrap())            // -128
+    println(test_u8_mask())            // 44
+    println(test_i16_sext())           // -32768
+    println(test_u16_zext())           // 32768
+    println(test_u32_zext())           // 4294967295
+    println(test_i32_sext_neg())       // -1
+    println(test_i32_var_arith())      // 300
+    println(test_u8_var_wrap())        // 44
+    println(test_i8_var_neg())         // -5
+    println(test_to_i32())             // -1
+    println(test_to_u32())             // 4294967295
+    println(test_to_u8())              // 255
+    println(test_i32_overflow())       // -2147483648
+    println(test_u32_wrap())           // 0
+    println(test_i128_stored())        // 42
+    println(test_const_fold_i32())     // 10
+}

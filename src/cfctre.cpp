@@ -2,6 +2,7 @@
 
 #include "cfctre.h"
 #include "ast.h"
+#include "opt_context.h"
 #include "synthesize.h"
 
 #include <algorithm>
@@ -388,7 +389,17 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
 
     CTValue result;
     if (frame.hasReturned)  result = frame.returnValue;
-    else if (frame.hasLastBare) result = frame.lastBareExpr;
+    else if (frame.hasLastBare) {
+        // IMPORTANT: only fall back to lastBareExpr if the function genuinely
+        // has no return statement (i.e. the body ran to completion without a
+        // ReturnStmt).  If executeBody returned false the likely cause is that
+        // evalExpr for the return value returned uninit — meaning we could not
+        // fully evaluate the return expression.  In that case we MUST NOT use
+        // lastBareExpr (which is a side-effecting expression's old/pre value,
+        // e.g. the old value of arr[i] before arr[i]++).
+        if (!ok) return std::nullopt;   // body failed → don't use stale lastBare
+        result = frame.lastBareExpr;
+    }
     else                    return std::nullopt;
 
     // SYMBOLIC result means we couldn't fully evaluate — don't fold to constant.
@@ -777,10 +788,13 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
         if (op == "/" || op == "/=") {
             if (lSym && rInt(1))  { ++stats_.algebraicFolds; return lhs; }
         }
-        // ── Power: x ** 0 = 1, x ** 1 = x ───────────────────────────────
+        // ── Power: x ** 0 = 1, x ** 1 = x, 1 ** x = 1 ──────────────────
         if (op == "**") {
             if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(1);
             if (lSym && rInt(1))  { ++stats_.algebraicFolds; return lhs; }
+            // 1 raised to any integer power is always 1.
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 1)
+                { ++stats_.algebraicFolds; return CTValue::fromI64(1); }
         }
         // ── Bitwise AND: x & 0 = 0, x & -1 = x, x & x = x ──────────────
         if (op == "&" || op == "&=") {
@@ -808,11 +822,43 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
         if (op == ">>" || op == ">>=" || op == "<<" || op == "<<=" || op == ">>>") {
             if (lSym && rInt(0))  { ++stats_.algebraicFolds; return lhs; }
         }
-        // ── Modulo: x % ±1 = 0 ───────────────────────────────────────────
+        // ── Modulo: x % ±1 = 0, x % x = 0 ──────────────────────────────
         if (op == "%" || op == "mod" || op == "%=") {
             if (rhs.isConcrete() && rhs.isInt() &&
                 (rhs.asI64() == 1 || rhs.asI64() == -1))
                 return CTValue::fromI64(0);
+            if (sameVar) { ++stats_.algebraicFolds; return CTValue::fromI64(0); }
+        }
+        // ── Logical AND short-circuits and identities ─────────────────────
+        // x && 0 = 0, 0 && x = 0 (short-circuit regardless of x)
+        // x && 1 = x, 1 && x = x (identity when the concrete side is true)
+        if (op == "&&") {
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
+            if (lSym && rhs.isConcrete() && rhs.isInt() && rhs.asI64() != 0)
+                { ++stats_.algebraicFolds; return lhs; }
+            if (rSym && lhs.isConcrete() && lhs.isInt() && lhs.asI64() != 0)
+                { ++stats_.algebraicFolds; return rhs; }
+        }
+        // ── Logical OR short-circuits and identities ──────────────────────
+        // x || 1 = 1, 1 || x = 1 (short-circuit when concrete side is true)
+        // x || 0 = x, 0 || x = x (identity when the concrete side is false)
+        if (op == "||") {
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() != 0) return lhs;
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() != 0) return rhs;
+            if (lSym && rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0)
+                { ++stats_.algebraicFolds; return lhs; }
+            if (rSym && lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0)
+                { ++stats_.algebraicFolds; return rhs; }
+        }
+        // ── Same-variable comparisons ──────────────────────────────────────
+        // x == x → 1, x != x → 0, x < x → 0, x <= x → 1, x > x → 0, x >= x → 1.
+        // These arise naturally in induction-variable guard patterns.
+        if (sameVar) {
+            if (op == "==" || op == "<=" || op == ">=")
+                { ++stats_.algebraicFolds; return CTValue::fromI64(1); }
+            if (op == "!=" || op == "<"  || op == ">")
+                { ++stats_.algebraicFolds; return CTValue::fromI64(0); }
         }
 
         return CTValue::symbolic();
@@ -1035,63 +1081,34 @@ CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
 std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
                                                const std::vector<CTValue>& args) {
     // ── Fast reject: skip the entire if-chain for unknown names ──────────
-    static const std::unordered_set<std::string> kKnownBuiltins = {
-        "len","str_len","abs","push","pop","min","max","sign","clamp","pow",
-        "sqrt","gcd","lcm","log","log2","log10","exp2","is_even","is_odd","floor","ceil",
-        "round","to_char","is_alpha","is_digit","to_string","number_to_string",
-        "to_int","string_to_number","str_to_int","char_code","str_find",
-        "str_index_of","str_contains","str_starts_with","startswith",
-        "str_ends_with","endswith","str_substr","str_upper","str_lower",
-        "str_repeat","str_trim","str_reverse","str_count","str_replace",
-        "str_pad_left","str_pad_right","str_eq","str_concat","char_at",
-        "is_power_of_2","popcount","clz","ctz","bitreverse","bswap",
-        "rotate_left","rotate_right","saturating_add","saturating_sub",
-        "str_chars","typeof","array_fill","range","range_step","array_concat",
-        "array_slice","array_copy","sum","array_product","array_min",
-        "array_max","array_last","array_contains","index_of","array_find",
-        "is_upper","is_lower","is_space","is_alnum",
-        "fast_add","fast_sub","fast_mul","fast_div",
-        "precise_add","precise_sub","precise_mul","precise_div",
-        "sin","cos","tan","asin","acos","atan","atan2","exp","cbrt","hypot",
-        "fma","copysign","min_float","max_float",
-        "reverse","sort","array_remove","array_insert",
-        "array_any","array_every","array_count",
-        "str_split","str_join",
-        // int/uint/bool: type casts handled by evalTypeCast; iN/uN handled dynamically
-        "int","uint","bool",
-        // Program synthesis stdlib function (flat-name form of std::synthesize)
-        "std__synthesize","std_synthesize",
-        // Type-specific fast builtins
-        "mulhi","mulhi_u","absdiff","fast_sqrt","is_nan","is_inf",
-        // 2D column-major matrix builtins
-        "mat_new","mat_fill","mat_get","mat_set","mat_rows","mat_cols","mat_mul","mat_transp"
-    };
-    // Also accept iN/uN type-cast names (handled by evalTypeCast via evalCall).
-    auto isIntWidthCastName = [](const std::string& nm) -> bool {
-        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
-        int bw = 0;
-        for (size_t j = 1; j < nm.size(); ++j) {
-            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
-            bw = bw * 10 + (nm[j] - '0');
-            if (bw > 256) return false;
-        }
-        return bw >= 1 && bw <= 256;
-    };
-    if (kKnownBuiltins.find(name) == kKnownBuiltins.end() && !isIntWidthCastName(name)) {
-        // Accept __tw_* and __tf_* width/type-specific builtins for comptime eval.
-        const bool isTW = name.size()>5 && name.substr(0,5)=="__tw_";
-        const bool isTF = name.size()>5 && name.substr(0,5)=="__tf_";
-        if (!isTW && !isTF)
-            return std::nullopt;
+    // BuiltinEffectTable::contains() is the authoritative registry of all
+    // known OmScript builtins.  BuiltinEffectTable::isWidthCastName() covers
+    // the dynamically-named iN/uN and __tw_*/__tf_* cast intrinsics.
+    if (!BuiltinEffectTable::contains(name) && !BuiltinEffectTable::isWidthCastName(name)) {
+        return std::nullopt;
     }
 
     const size_t n = args.size();
 
     // Helpers.
     auto intArg = [&](size_t i) -> std::optional<int64_t> {
-        if (i < n && args[i].isInt()) return args[i].asI64();
+        if (i >= n) return std::nullopt;
+        if (args[i].isInt()) return args[i].asI64();
+        // Accept float args that are exactly representable as integers.
+        if (args[i].isFloat()) {
+            const double fv = args[i].asF64();
+            const int64_t iv = static_cast<int64_t>(fv);
+            if (static_cast<double>(iv) == fv) return iv;
+        }
         return std::nullopt;
     };
+    auto dArg = [&](size_t i) -> std::optional<double> {
+        if (i >= n) return std::nullopt;
+        if (args[i].isFloat()) return args[i].asF64();
+        if (args[i].isInt())   return static_cast<double>(args[i].asI64());
+        return std::nullopt;
+    };
+    auto fromD = [](double v) -> CTValue { return CTValue::fromF64(v); };
     // strArg returns a pointer to the arg's string, avoiding a copy.
     auto strArg = [&](size_t i) -> const std::string* {
         if (i < n && args[i].isString()) return &args[i].asStr();
@@ -1163,50 +1180,75 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "min" && n == 2) {
         auto a = intArg(0), b = intArg(1);
         if (a && b) return CTValue::fromI64(std::min(*a, *b));
+        auto da = dArg(0), db = dArg(1);
+        if (da && db) return CTValue::fromF64(std::min(*da, *db));
         return std::nullopt;
     }
     if (name == "max" && n == 2) {
         auto a = intArg(0), b = intArg(1);
         if (a && b) return CTValue::fromI64(std::max(*a, *b));
+        auto da = dArg(0), db = dArg(1);
+        if (da && db) return CTValue::fromF64(std::max(*da, *db));
         return std::nullopt;
     }
 
     // ── sign ─────────────────────────────────────────────────────────────
     if (name == "sign" && n == 1) {
-        if (auto v = intArg(0))
-            return CTValue::fromI64(*v > 0 ? 1 : (*v < 0 ? -1 : 0));
+        if (auto v = dArg(0))
+            return CTValue::fromI64(*v > 0.0 ? 1 : (*v < 0.0 ? -1 : 0));
         return std::nullopt;
     }
 
     // ── clamp ────────────────────────────────────────────────────────────
     if (name == "clamp" && n == 3) {
-        auto v = intArg(0), lo = intArg(1), hi = intArg(2);
-        if (v && lo && hi) return CTValue::fromI64(std::max(*lo, std::min(*v, *hi)));
+        // Try float first (preserves float result for float inputs).
+        auto dv = dArg(0), dlo = dArg(1), dhi = dArg(2);
+        if (dv && dlo && dhi) {
+            const double res = std::max(*dlo, std::min(*dv, *dhi));
+            auto iv = intArg(0); auto ilo = intArg(1); auto ihi = intArg(2);
+            if (iv && ilo && ihi) return CTValue::fromI64(std::max(*ilo, std::min(*iv, *ihi)));
+            return CTValue::fromF64(res);
+        }
         return std::nullopt;
     }
 
     // ── pow ──────────────────────────────────────────────────────────────
     if (name == "pow" && n == 2) {
-        auto b = intArg(0), ex = intArg(1);
-        if (b && ex) {
-            if (*ex < 0) return (*b == 1) ? std::optional<CTValue>(CTValue::fromI64(1)) : std::nullopt;
-            int64_t r = 1, base = *b;
-            int64_t e = *ex;
-            while (e > 0) { if (e & 1) r *= base; base *= base; e >>= 1; }
-            return CTValue::fromI64(r);
+        auto db = dArg(0), de = dArg(1);
+        if (db && de) {
+            // If both are exact integers, keep integer semantics.
+            auto ib = intArg(0), ie = intArg(1);
+            if (ib && ie) {
+                if (*ie < 0) return (*ib == 1) ? std::optional<CTValue>(CTValue::fromI64(1)) : std::nullopt;
+                int64_t r = 1, base = *ib, e = *ie;
+                while (e > 0) { if (e & 1) r *= base; base *= base; e >>= 1; }
+                return CTValue::fromI64(r);
+            }
+            // Float pow.
+            return CTValue::fromF64(std::pow(*db, *de));
         }
         return std::nullopt;
     }
 
     // ── sqrt / floor / ceil / round ───────────────────────────────────────
     if (name == "sqrt" && n == 1) {
-        if (auto v = intArg(0))
-            if (*v >= 0) return CTValue::fromI64(static_cast<int64_t>(std::sqrt(static_cast<double>(*v))));
+        if (auto v = dArg(0)) {
+            if (*v >= 0.0) return CTValue::fromF64(std::sqrt(*v));
+        }
         return std::nullopt;
     }
-    if (name == "floor" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(*v); return std::nullopt; }
-    if (name == "ceil"  && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(*v); return std::nullopt; }
-    if (name == "round" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(*v); return std::nullopt; }
+    if (name == "floor" && n == 1) {
+        if (auto v = dArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::floor(*v)));
+        return std::nullopt;
+    }
+    if (name == "ceil"  && n == 1) {
+        if (auto v = dArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::ceil(*v)));
+        return std::nullopt;
+    }
+    if (name == "round" && n == 1) {
+        if (auto v = dArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::round(*v)));
+        return std::nullopt;
+    }
 
     // ── log2 / log / log10 / exp2 ─────────────────────────────────────────
     if (name == "log2" && n == 1) {
@@ -3329,68 +3371,27 @@ void CTEngine::runPass(const Program* program) {
     }
 
     // ── Phase 3: auto-detect pure functions (fixed-point) ────────────────
-    static const std::unordered_set<std::string> kBuiltinPure = {
-        "abs","min","max","sign","clamp","pow","sqrt","floor","ceil","round",
-        "log","log2","log10","exp2","sin","cos","tan","asin","acos","atan",
-        "atan2","cbrt","hypot","fma","copysign","min_float","max_float",
-        "gcd","lcm","is_even","is_odd","is_power_of_2",
-        "popcount","clz","ctz","bswap","bitreverse","rotate_left","rotate_right",
-        "saturating_add","saturating_sub",
-        "to_int","to_float","to_string","number_to_string","string_to_number",
-        "str_to_int","char_code","to_char","str_len","len","typeof",
-        "char_at","str_eq","str_concat","str_find","str_index_of",
-        "str_starts_with","str_ends_with","startswith","endswith",
-        "str_upper","str_lower","str_trim","str_reverse","str_repeat",
-        "str_substr","str_count","str_replace","str_chars","str_pad_left",
-        "str_pad_right","is_alpha","is_digit",
-        "array_fill","range","range_step","array_concat","array_slice",
-        "array_copy","sum","array_product","array_min","array_max",
-        "array_last","array_contains","index_of","array_find",
-        // int/uint/bool type casts; iN/uN handled dynamically below
-        "bool","int","uint"
-    };
-    // iN/uN type-cast names (for N in [1..256]) are always pure.
-    // Also __tw_* (width-specific integer intrinsics) and __tf_* (f32 intrinsics).
-    auto isIntWidthCastNamePure = [](const std::string& nm) -> bool {
-        if (nm.size() > 5 && (nm.substr(0,5)=="__tw_" || nm.substr(0,5)=="__tf_"))
-            return true;
-        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
-        int bw = 0;
-        for (size_t j = 1; j < nm.size(); ++j) {
-            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
-            bw = bw * 10 + (nm[j] - '0');
-            if (bw > 256) return false;
-        }
-        return bw >= 1 && bw <= 256;
-    };
-
     // Detect whether a function body is pure (no I/O, no mutations of globals).
     // Uses a recursive helper with a visited set to handle mutual recursion.
+    // Builtin purity is delegated to BuiltinEffectTable (the authoritative
+    // single source of truth); we no longer maintain a local copy here.
     std::function<bool(const FunctionDecl*, std::unordered_set<std::string>&)> isPureBody;
     isPureBody = [&](const FunctionDecl* fn, std::unordered_set<std::string>& visiting) -> bool {
         if (!fn || !fn->body) return false;
-        if (kBuiltinPure.count(fn->name) || isIntWidthCastNamePure(fn->name)) return true;
+        if (BuiltinEffectTable::isPure(fn->name) || BuiltinEffectTable::isWidthCastName(fn->name)) return true;
         if (pureFunctions_.count(fn->name)) return true;
         if (visiting.count(fn->name)) return false; // conservatively not pure (recursion)
         visiting.insert(fn->name);
 
         // Walk the body; reject if any I/O or non-pure call is found.
-        static const std::unordered_set<std::string> kImpure = {
-            "print","println","write","print_char","input","input_line",
-            "file_read","file_write","file_append","file_exists",
-            "thread_create","thread_join","mutex_new","mutex_lock",
-            "mutex_unlock","mutex_destroy","time","sleep","random",
-            "exit","exit_program","assert"
-        };
-
         std::function<bool(const Statement*)>  pureS;
         std::function<bool(const Expression*)> pureE;
         pureE = [&](const Expression* ex) -> bool {
             if (!ex) return true;
             if (ex->type == ASTNodeType::CALL_EXPR) {
                 auto* call = static_cast<const CallExpr*>(ex);
-                if (kImpure.count(call->callee)) return false;
-                if (!kBuiltinPure.count(call->callee) && !isIntWidthCastNamePure(call->callee)) {
+                if (BuiltinEffectTable::isImpure(call->callee)) return false;
+                if (!BuiltinEffectTable::isPure(call->callee) && !BuiltinEffectTable::isWidthCastName(call->callee)) {
                     auto it = functions_.find(call->callee);
                     if (it != functions_.end()) {
                         if (!isPureBody(it->second, visiting)) return false;
@@ -3438,6 +3439,10 @@ void CTEngine::runPass(const Program* program) {
             if (st->type == ASTNodeType::VAR_DECL) {
                 auto* d = static_cast<const VarDecl*>(st);
                 return !d->initializer || pureE(d->initializer.get());
+            }
+            if (st->type == ASTNodeType::MOVE_DECL) {
+                auto* md = static_cast<const MoveDecl*>(st);
+                return !md->initializer || pureE(md->initializer.get());
             }
             if (st->type == ASTNodeType::EXPR_STMT) {
                 auto* es = static_cast<const ExprStmt*>(st);
@@ -3762,8 +3767,12 @@ void CTEngine::runPass(const Program* program) {
 
     // ── Phase 10: inter-call-site pre-evaluation ──────────────────────────
     {
-        // Helper: try to resolve a single expression to a CTValue using only
-        auto tryResolveLiteral = [&](const Expression* ex) -> std::optional<CTValue> {
+        // Helper: try to resolve a single expression to a concrete CTValue.
+        // Handles literals, global/enum constants, unary negation on any
+        // resolvable sub-expression, and binary arithmetic on two resolvable
+        // sub-expressions.  Recursive, so -1, 2 + 3 * 4, etc. all work.
+        std::function<std::optional<CTValue>(const Expression*)> tryResolveLiteral;
+        tryResolveLiteral = [&](const Expression* ex) -> std::optional<CTValue> {
             if (!ex) return std::nullopt;
             if (ex->type == ASTNodeType::LITERAL_EXPR) {
                 auto* lit = static_cast<const LiteralExpr*>(ex);
@@ -3787,6 +3796,27 @@ void CTEngine::runPass(const Program* program) {
                 const std::string flat = sr->scopeName + "_" + sr->memberName;
                 auto eit = enumConsts_.find(flat);
                 if (eit != enumConsts_.end()) return CTValue::fromI64(eit->second);
+            }
+            // Unary negation / logical-not on a resolvable sub-expression.
+            if (ex->type == ASTNodeType::UNARY_EXPR) {
+                auto* un = static_cast<const UnaryExpr*>(ex);
+                auto inner = tryResolveLiteral(un->operand.get());
+                if (inner) {
+                    CTValue v = evalUnaryOp(un->op, *inner);
+                    if (v.isConcrete()) return v;
+                }
+                return std::nullopt;
+            }
+            // Binary arithmetic on two resolvable sub-expressions (e.g. 2 + 3 * 4).
+            if (ex->type == ASTNodeType::BINARY_EXPR) {
+                auto* bin = static_cast<const BinaryExpr*>(ex);
+                auto l = tryResolveLiteral(bin->left.get());
+                auto r = tryResolveLiteral(bin->right.get());
+                if (l && r) {
+                    CTValue v = evalBinaryOp(bin->op, *l, *r);
+                    if (v.isConcrete()) return v;
+                }
+                return std::nullopt;
             }
             return std::nullopt;
         };
@@ -4414,11 +4444,8 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         CTInterval condRange = analyzeExpr(ifs->condition.get(), env, result);
 
         // Derive reachability from the condition's abstract value.
-        const bool condCanBeTrue  = !condRange.isBottom() &&
-                                     (condRange.isTop() || condRange.includes(0) == false ||
-                                      !condRange.isConcrete() || condRange.lo != 0);
-        const bool condCanBeFalse = !condRange.isBottom() &&
-                                     (condRange.isTop() || condRange.includes(0));
+        // condAlwaysTrue:  condition range cannot contain 0 and is a concrete range.
+        // condAlwaysFalse: condition is the single concrete value 0.
         const bool condAlwaysTrue  = condRange.isRange() &&
                                       !condRange.includesZero() && !condRange.isTop();
         const bool condAlwaysFalse = condRange.isConcrete() && condRange.lo == 0;
@@ -4433,7 +4460,6 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
             analyzeStmt(ifs->thenBranch.get(), env, result);
             return true;
         }
-        (void)condCanBeTrue; (void)condCanBeFalse; // suppress warnings
 
         // Branch is genuinely conditional — analyse both arms with narrowed envs.
         CTAbstractEnv thenEnv = env, elseEnv = env;
@@ -4484,13 +4510,22 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         CTInterval ivRange;
         if (startI.isRange() && endI.isRange() && stepI.isRange() &&
             !startI.isTop() && !endI.isTop() && !stepI.isTop()) {
-            // Positive step: i goes from start to end-1
             if (stepI.lo > 0) {
+                // Positive step: i iterates from start (inclusive) to end (exclusive).
+                // Range: [startI.lo, endI.hi - 1]
                 int64_t loIV = startI.lo;
                 int64_t hiIV;
-                safeAddI64(endI.hi, -1, hiIV);  // end is exclusive
+                safeAddI64(endI.hi, -1, hiIV);
+                ivRange = CTInterval::range(loIV, hiIV);
+            } else if (stepI.hi < 0) {
+                // Negative step: i iterates from start (inclusive) down to end (exclusive).
+                // Range: [endI.lo + 1, startI.hi]
+                int64_t loIV;
+                int64_t hiIV = startI.hi;
+                safeAddI64(endI.lo, 1, loIV);
                 ivRange = CTInterval::range(loIV, hiIV);
             } else {
+                // Step includes zero or straddles positive/negative — conservatively TOP.
                 ivRange = CTInterval::top();
             }
         } else {
@@ -4642,8 +4677,10 @@ void CTEngine::runAbstractInterpretation(const Program* program) {
             analysisSafeDiv_.insert(e);
             ++stats_.safeDivisions;
         }
-        for (auto* e : res.safeArithmetic)
+        for (auto* e : res.safeArithmetic) {
             analysisSafeArith_.insert(e);
+            ++stats_.safeArithmetic;
+        }
     }
 }
 

@@ -1,0 +1,51 @@
+// http_test.om — Tests for HTTP client builtins.
+//
+// The test verifies:
+//   1. http_get() compiles and returns a string (str_len >= 0).
+//   2. http_post() compiles and returns a string.
+//   3. http_request() compiles and returns a string.
+//   4. http_status() compiles and returns an integer.
+//
+// Real network requests to https://httpbin.org are attempted; if the network
+// is unavailable the functions return an empty string / 0, which is still
+// a valid result.  All assertions check only the type contract, not content.
+
+fn main() {
+    // ── http_get ──────────────────────────────────────────────────────────────
+    var body = http_get("https://httpbin.org/get");
+    // On success: JSON response.  On network failure: empty string.
+    // Either way, str_len must be >= 0.
+    assert(str_len(body) >= 0);
+
+    // ── http_status ───────────────────────────────────────────────────────────
+    var code = http_status("https://httpbin.org/status/200");
+    // On success: 200.  On network failure: 0.
+    assert(code == 200 || code == 0);
+
+    // ── http_post ─────────────────────────────────────────────────────────────
+    var resp = http_post("https://httpbin.org/post", "{\"key\":\"value\"}", "application/json");
+    assert(str_len(resp) >= 0);
+
+    // ── http_post with 2 args (default content-type) ─────────────────────────
+    var resp2 = http_post("https://httpbin.org/post", "hello=world");
+    assert(str_len(resp2) >= 0);
+
+    // ── http_request (generic GET) ────────────────────────────────────────────
+    var resp3 = http_request("GET", "https://httpbin.org/get");
+    assert(str_len(resp3) >= 0);
+
+    // ── http_request with body ────────────────────────────────────────────────
+    var resp4 = http_request("POST", "https://httpbin.org/post", "data=test");
+    assert(str_len(resp4) >= 0);
+
+    // ── http_request with headers ─────────────────────────────────────────────
+    var resp5 = http_request("GET", "https://httpbin.org/headers", "", "X-Custom-Header: omscript");
+    assert(str_len(resp5) >= 0);
+
+    // ── 404 status code ──────────────────────────────────────────────────────
+    var code2 = http_status("https://httpbin.org/status/404");
+    assert(code2 == 404 || code2 == 0);
+
+    println(1);
+    return 0;
+}

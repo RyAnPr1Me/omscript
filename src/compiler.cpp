@@ -307,6 +307,17 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             }
         }
 #endif
+        // Link the HTTP runtime library (http_get, http_post, etc. via libcurl).
+        // OMSC_HTTP_LIB_PATH is set at build time to the location of libomsc_http.a.
+#ifdef OMSC_HTTP_LIB_PATH
+        {
+            const std::string httpLib = OMSC_HTTP_LIB_PATH;
+            if (!httpLib.empty() && std::filesystem::exists(httpLib)) {
+                linkArgs.push_back(httpLib);
+                linkArgs.push_back("-lcurl");
+            }
+        }
+#endif
         // Also link C++ standard library (bigint runtime is C++ internally).
         linkArgs.push_back("-lstdc++");
         llvm::SmallVector<llvm::StringRef, 8> argRefs;

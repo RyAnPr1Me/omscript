@@ -59,6 +59,7 @@ enum class PassKind : uint8_t {
 /// and which it invalidates when it modifies the program representation.
 /// These strings are cheap to compare (short, interned by the registry).
 namespace AnalysisFact {
+    inline constexpr const char* kPreflightCheck  = "preflight_check";
     inline constexpr const char* kStringTypes     = "string_types";
     inline constexpr const char* kArrayTypes      = "array_types";
     inline constexpr const char* kConstantReturns = "constant_returns";
@@ -69,7 +70,45 @@ namespace AnalysisFact {
     inline constexpr const char* kEGraph          = "egraph";
     inline constexpr const char* kRangeAnalysis   = "range_analysis";
     inline constexpr const char* kRLC             = "rlc";
+    inline constexpr const char* kDCE             = "dce";
+    inline constexpr const char* kCSE             = "cse";
+    inline constexpr const char* kAlgSimp         = "alg_simp";
+    inline constexpr const char* kCopyProp        = "copy_prop";
+    inline constexpr const char* kWidthLegalization = "width_legalization";
+    inline constexpr const char* kWidthOpt           = "width_opt";
 } // namespace AnalysisFact
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Binary-operator predicates — shared utilities for analysis passes
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// Centralised here so that CSE, AlgSimp, CopyProp, e-graph canonicalisation,
+/// and any future passes can share a single definition instead of maintaining
+/// per-pass local static sets.
+
+/// True when the operator is commutative: `a OP b` ≡ `b OP a`.
+/// Used by CSE to normalise expression keys and by the e-graph's pattern
+/// matcher to try swapped operands.
+inline bool isCommutativeOp(const std::string& op) noexcept {
+    return op == "+"  || op == "*"  || op == "&"  ||
+           op == "|"  || op == "^"  || op == "==" || op == "!=";
+}
+
+/// True when applying OP to integer/bitwise operands has no observable side
+/// effect (no I/O, no heap writes).  Used by CSE to decide whether a
+/// subexpression is safe to hoist and by AlgSimp to decide what can be
+/// reordered.
+///
+/// Note: floating-point operators are NOT listed here because of IEEE-754
+/// side-effects (NaN propagation, signed-zero, rounding modes).  The CSE
+/// and AlgSimp passes conservatively refuse to hoist expressions involving
+/// float literals.
+inline bool isPureBinaryOp(const std::string& op) noexcept {
+    return op == "+"  || op == "-"  || op == "*"  || op == "/"  ||
+           op == "%"  || op == "&"  || op == "|"  || op == "^"  ||
+           op == "<<" || op == ">>" || op == "==" || op == "!=" ||
+           op == "<"  || op == "<=" || op == ">"  || op == ">=";
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PassMetadata — static descriptor for one pass
@@ -144,6 +183,7 @@ private:
 /// without hard-coding their numeric values.  They are populated once by
 /// the registration macros at program startup; after that they are const.
 namespace PassId {
+    extern uint32_t kPreflightCheck;
     extern uint32_t kStringTypes;
     extern uint32_t kArrayTypes;
     extern uint32_t kConstantReturns;
@@ -154,6 +194,8 @@ namespace PassId {
     extern uint32_t kEGraph;
     extern uint32_t kRangeAnalysis;
     extern uint32_t kRLC;
+    extern uint32_t kWidthLegalization;
+    extern uint32_t kWidthOpt;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────

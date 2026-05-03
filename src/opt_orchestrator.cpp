@@ -11,6 +11,13 @@
 #include "opt_orchestrator.h"
 #include "codegen.h"   // CodeGenerator + OptimizationLevel
 #include "optimization_manager.h" // PassScheduler
+#include "alg_simp_pass.h"
+#include "copy_prop_pass.h"
+#include "dce_pass.h"
+#include "cse_pass.h"
+#include "width_legalization.h"
+#include "width_opt_pass.h"
+#include "diagnostic.h"
 
 #include <cassert>
 #include <chrono>
@@ -155,16 +162,23 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace PassId {
-    uint32_t kStringTypes     = 0;
-    uint32_t kArrayTypes      = 0;
-    uint32_t kConstantReturns = 0;
-    uint32_t kPurity          = 0;
-    uint32_t kEffects         = 0;
-    uint32_t kSynthesis       = 0;
-    uint32_t kCFCTRE          = 0;
-    uint32_t kEGraph          = 0;
-    uint32_t kRangeAnalysis   = 0;
-    uint32_t kRLC             = 0;
+    uint32_t kPreflightCheck    = 0;
+    uint32_t kStringTypes       = 0;
+    uint32_t kArrayTypes        = 0;
+    uint32_t kConstantReturns   = 0;
+    uint32_t kPurity            = 0;
+    uint32_t kEffects           = 0;
+    uint32_t kSynthesis         = 0;
+    uint32_t kCFCTRE            = 0;
+    uint32_t kEGraph            = 0;
+    uint32_t kRangeAnalysis     = 0;
+    uint32_t kRLC               = 0;
+    uint32_t kDCE               = 0;
+    uint32_t kCSE               = 0;
+    uint32_t kAlgSimp           = 0;
+    uint32_t kCopyProp          = 0;
+    uint32_t kWidthLegalization = 0;
+    uint32_t kWidthOpt          = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -179,6 +193,17 @@ static void registerAllPasses() {
     done = true;
 
     auto& reg = PassRegistry::instance();
+
+    PassId::kPreflightCheck = reg.registerPass({
+        0,
+        "preflight_check",
+        "Pre-flight error detection: scan for fatal errors (e.g. literal division by zero) before any optimisation",
+        PassPhase::Preprocessing,
+        PassKind::Analysis,
+        {},                                  // requires nothing — runs first
+        {AnalysisFact::kPreflightCheck},     // provides
+        {},                                  // invalidates nothing
+    });
 
     PassId::kStringTypes = reg.registerPass({
         0,
@@ -293,6 +318,95 @@ static void registerAllPasses() {
         {AnalysisFact::kRLC},               // provides rlc fact
         {AnalysisFact::kPurity, AnalysisFact::kEffects, AnalysisFact::kCFCTRE}, // invalidates after AST mutation
     });
+
+    PassId::kDCE = reg.registerPass({
+        0,
+        "dce",
+        "Dead Code Elimination: remove unreachable branches from constant-condition ifs/whiles and prune post-return stmts",
+        PassPhase::ASTTransform,
+        PassKind::CostTransform,
+        // DCE benefits from CFCTRE having folded constants into the AST, but
+        // operates on literal constants alone and is safe to run earlier.
+        {AnalysisFact::kCFCTRE},
+        {AnalysisFact::kDCE},
+        // Removing branches may invalidate range analysis results.
+        {AnalysisFact::kRangeAnalysis},
+    });
+
+    PassId::kCSE = reg.registerPass({
+        0,
+        "cse",
+        "Common Subexpression Elimination: hoist repeated pure binary subexpressions to compiler-managed temps",
+        PassPhase::ASTTransform,
+        PassKind::CostTransform,
+        // CSE introduces new VarDecl nodes; run after DCE so dead code does
+        // not generate spurious CSE candidates.
+        {AnalysisFact::kDCE},
+        {AnalysisFact::kCSE},
+        // Introduces new variable declarations — invalidates any fact that
+        // tracks exact variable counts or live ranges.
+        {},
+    });
+
+    PassId::kAlgSimp = reg.registerPass({
+        0,
+        "alg_simp",
+        "Algebraic Simplification: identity-element folding (x+0→x, x*1→x, x*0→0, x&&false→0, !!x→x, etc.)",
+        PassPhase::ASTTransform,
+        PassKind::CostTransform,
+        // Run after CFCTRE so that constant folding has already simplified
+        // sub-expressions, maximising the chance of a literal operand match.
+        // DCE runs first to avoid simplifying dead branches.
+        {AnalysisFact::kCFCTRE, AnalysisFact::kDCE},
+        {AnalysisFact::kAlgSimp},
+        // AlgSimp replaces expressions; any shape-derived facts are stale.
+        {AnalysisFact::kRangeAnalysis},
+    });
+
+    PassId::kCopyProp = reg.registerPass({
+        0,
+        "copy_prop",
+        "Copy Propagation: inline trivial var-alias copies (var y = x → substitute x at uses of y)",
+        PassPhase::ASTTransform,
+        PassKind::SemanticTransform,
+        // Run after CFCTRE + DCE so that only reachable, non-folded copies
+        // are processed.  AlgSimp runs first so that identity simplifications
+        // have already been applied, potentially producing more copy candidates.
+        {AnalysisFact::kCFCTRE, AnalysisFact::kDCE, AnalysisFact::kAlgSimp},
+        {AnalysisFact::kCopyProp},
+        // Substituting identifiers changes the shape of expressions; CSE,
+        // range analysis, and any name-based facts are potentially stale.
+        {AnalysisFact::kCSE, AnalysisFact::kRangeAnalysis},
+    });
+
+    PassId::kWidthLegalization = reg.registerPass({
+        0,
+        "width_legalization",
+        "Width tracking and legalization: compute exact semantic bit-widths for all expressions, "
+        "then snap them to hardware-friendly storage sizes (8/16/32/64/multiples-of-64) before codegen",
+        PassPhase::ASTTransform,
+        PassKind::Analysis,
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCopyProp, AnalysisFact::kAlgSimp},
+        {AnalysisFact::kWidthLegalization},
+        // Pure analysis — does not modify the AST, invalidates nothing.
+        {},
+    });
+
+    PassId::kWidthOpt = reg.registerPass({
+        0,
+        "width_opt",
+        "Width-aware optimizations: masking elimination (x & M → x when M covers all bits of x), "
+        "shift narrowing/zeroing (x >> N → 0 when N >= width(x)), "
+        "and impossible-branch pruning via value-range analysis",
+        PassPhase::ASTTransform,
+        PassKind::CostTransform,
+        // Requires width legalization to have computed semantic widths.
+        {AnalysisFact::kWidthLegalization},
+        {AnalysisFact::kWidthOpt},
+        // This pass rewrites AST expressions; invalidate dependent analyses.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization,
+         AnalysisFact::kCSE},
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -329,16 +443,23 @@ std::unordered_map<uint32_t, PassScheduler::Runner>
 OptimizationOrchestrator::buildDispatch() {
     using R = PassScheduler::Runner;
     return {
-        {PassId::kStringTypes,     R([this](Program* p, OptimizationContext& c){ runStringTypes(p, c); })},
-        {PassId::kArrayTypes,      R([this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); })},
-        {PassId::kConstantReturns, R([this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); })},
-        {PassId::kPurity,          R([this](Program* p, OptimizationContext& c){ runPurity(p, c); })},
-        {PassId::kEffects,         R([this](Program* p, OptimizationContext& c){ runEffects(p, c); })},
-        {PassId::kSynthesis,       R([this](Program* p, OptimizationContext& c){ runSynthesis(p, c); })},
-        {PassId::kCFCTRE,          R([this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); })},
-        {PassId::kEGraph,          R([this](Program* p, OptimizationContext& c){ runEGraph(p, c); })},
-        {PassId::kRangeAnalysis,   R([this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); })},
-        {PassId::kRLC,             R([this](Program* p, OptimizationContext& c){ runRLC(p, c); })},
+        {PassId::kPreflightCheck,    R([this](Program* p, OptimizationContext& c){ runPreflightCheck(p, c); })},
+        {PassId::kStringTypes,       R([this](Program* p, OptimizationContext& c){ runStringTypes(p, c); })},
+        {PassId::kArrayTypes,        R([this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); })},
+        {PassId::kConstantReturns,   R([this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); })},
+        {PassId::kPurity,            R([this](Program* p, OptimizationContext& c){ runPurity(p, c); })},
+        {PassId::kEffects,           R([this](Program* p, OptimizationContext& c){ runEffects(p, c); })},
+        {PassId::kSynthesis,         R([this](Program* p, OptimizationContext& c){ runSynthesis(p, c); })},
+        {PassId::kCFCTRE,            R([this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); })},
+        {PassId::kEGraph,            R([this](Program* p, OptimizationContext& c){ runEGraph(p, c); })},
+        {PassId::kRangeAnalysis,     R([this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); })},
+        {PassId::kRLC,               R([this](Program* p, OptimizationContext& c){ runRLC(p, c); })},
+        {PassId::kDCE,               R([this](Program* p, OptimizationContext& c){ runDCE(p, c); })},
+        {PassId::kCSE,               R([this](Program* p, OptimizationContext& c){ runCSE(p, c); })},
+        {PassId::kAlgSimp,           R([this](Program* p, OptimizationContext& c){ runAlgSimp(p, c); })},
+        {PassId::kCopyProp,          R([this](Program* p, OptimizationContext& c){ runCopyProp(p, c); })},
+        {PassId::kWidthLegalization, R([this](Program* p, OptimizationContext& c){ runWidthLegalization(p, c); })},
+        {PassId::kWidthOpt,          R([this](Program* p, OptimizationContext& c){ runWidthOpt(p, c); })},
     };
 }
 
@@ -446,14 +567,24 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         // leave the produced fact invalid and silently disable downstream
         // analyses — we attempt to recompute the missing prerequisites
         // on-demand via the demand-driven scheduler.
+        //
+        // Use a fixed-point loop: satisfying one prerequisite (e.g. synthesis)
+        // may cascade-invalidate another (e.g. purity), so we repeat until
+        // all prerequisites are simultaneously valid.
         bool prereqsOk = true;
-        for (const char* req : meta->requires_) {
-            if (ctx.validity().isValid(req)) continue;
-            // Try to satisfy the missing requirement by re-running its producer.
-            if (!scheduler.runToProvide(req, program, dispatch)) {
-                prereqsOk = false;
-                break;
+        static constexpr int kMaxPrereqRounds = 8;
+        for (int round = 0; round < kMaxPrereqRounds; ++round) {
+            bool allValid = true;
+            for (const char* req : meta->requires_) {
+                if (ctx.validity().isValid(req)) continue;
+                allValid = false;
+                // Try to satisfy the missing requirement by re-running its producer.
+                if (!scheduler.runToProvide(req, program, dispatch)) {
+                    prereqsOk = false;
+                    break;
+                }
             }
+            if (!prereqsOk || allValid) break;
         }
         if (!prereqsOk || !scheduler.checkPreconditions(*meta)) {
             ++stats_.passesSkipped;
@@ -516,7 +647,158 @@ void OptimizationOrchestrator::runConstantReturns(Program* program, Optimization
 
 void OptimizationOrchestrator::runPurity(Program* program, OptimizationContext& ctx) {
     codegen_->autoDetectConstEvalFunctions(program);
+    // Immediately derive isPure from isConstFoldable so that downstream passes
+    // (CFCTRE, EGraph) can query ctx.allFacts()[name].isPure without waiting
+    // for syncFactsToContext to run at the end of the pipeline.
+    // Effects haven't been inferred yet at this point, so we only use the
+    // isConstFoldable flag here; syncFactsToContext will refine with effects later.
+    if (program) {
+        for (const auto& func : program->functions) {
+            FunctionFacts& ff = ctx.mutableFacts(func->name);
+            if (ff.isConstFoldable)
+                ff.isPure = true;
+        }
+    }
     ctx.validity().purity = true;
+}
+
+void OptimizationOrchestrator::runPreflightCheck(Program* program,
+                                                   OptimizationContext& ctx) {
+    if (!program) {
+        ctx.validity().preflightCheck = true;
+        return;
+    }
+
+    // Walk every expression in every function body looking for fatal errors.
+    // Currently detects:
+    //   • Literal integer division by zero  (x / 0)
+    //   • Literal integer modulo by zero    (x % 0)
+    //
+    // The check is intentionally simple and conservative: only literal-zero
+    // right-hand operands are flagged.  Dynamic division-by-zero is a runtime
+    // concern handled by the existing bounds-check infrastructure.
+
+    std::function<void(const Expression*, const std::string&)> checkExpr;
+    std::function<void(const Statement*,  const std::string&)> checkStmt;
+
+    checkExpr = [&](const Expression* e, const std::string& fnName) {
+        if (!e) return;
+        if (e->type == ASTNodeType::BINARY_EXPR) {
+            const auto* bin = static_cast<const BinaryExpr*>(e);
+            // Check for literal zero divisor.
+            if ((bin->op == "/" || bin->op == "%") && bin->right) {
+                const Expression* rhs = bin->right.get();
+                if (rhs->type == ASTNodeType::LITERAL_EXPR) {
+                    const auto* lit = static_cast<const LiteralExpr*>(rhs);
+                    if (lit->literalType == LiteralExpr::LiteralType::INTEGER &&
+                        lit->intValue == 0) {
+                        Diagnostic d;
+                        d.severity = DiagnosticSeverity::Error;
+                        d.code     = ErrorCode::E011_DIVISION_BY_ZERO;
+                        d.location = {fnName, 0, 0};
+                        d.message  = "division by zero (literal 0 as "
+                                     + std::string(bin->op == "/" ? "divisor" : "modulus")
+                                     + ") in function '" + fnName + "'";
+                        throw DiagnosticError(d);
+                    }
+                }
+            }
+            // Recurse into both sides.
+            checkExpr(bin->left.get(),  fnName);
+            checkExpr(bin->right.get(), fnName);
+            return;
+        }
+        // Recurse into common expression shapes.
+        switch (e->type) {
+        case ASTNodeType::UNARY_EXPR:
+            checkExpr(static_cast<const UnaryExpr*>(e)->operand.get(), fnName); break;
+        case ASTNodeType::PREFIX_EXPR:
+            checkExpr(static_cast<const PrefixExpr*>(e)->operand.get(), fnName); break;
+        case ASTNodeType::POSTFIX_EXPR:
+            checkExpr(static_cast<const PostfixExpr*>(e)->operand.get(), fnName); break;
+        case ASTNodeType::TERNARY_EXPR: {
+            const auto* t = static_cast<const TernaryExpr*>(e);
+            checkExpr(t->condition.get(), fnName);
+            checkExpr(t->thenExpr.get(),  fnName);
+            checkExpr(t->elseExpr.get(),  fnName); break;
+        }
+        case ASTNodeType::CALL_EXPR:
+            for (const auto& a : static_cast<const CallExpr*>(e)->arguments)
+                checkExpr(a.get(), fnName);
+            break;
+        case ASTNodeType::INDEX_EXPR: {
+            const auto* i = static_cast<const IndexExpr*>(e);
+            checkExpr(i->array.get(), fnName); checkExpr(i->index.get(), fnName); break;
+        }
+        case ASTNodeType::ASSIGN_EXPR:
+            checkExpr(static_cast<const AssignExpr*>(e)->value.get(), fnName); break;
+        default: break;
+        }
+    };
+
+    checkStmt = [&](const Statement* s, const std::string& fnName) {
+        if (!s) return;
+        switch (s->type) {
+        case ASTNodeType::BLOCK:
+            for (const auto& st : static_cast<const BlockStmt*>(s)->statements)
+                checkStmt(st.get(), fnName);
+            break;
+        case ASTNodeType::VAR_DECL:
+            checkExpr(static_cast<const VarDecl*>(s)->initializer.get(), fnName); break;
+        case ASTNodeType::MOVE_DECL:
+            checkExpr(static_cast<const MoveDecl*>(s)->initializer.get(), fnName); break;
+        case ASTNodeType::RETURN_STMT:
+            checkExpr(static_cast<const ReturnStmt*>(s)->value.get(), fnName); break;
+        case ASTNodeType::EXPR_STMT:
+            checkExpr(static_cast<const ExprStmt*>(s)->expression.get(), fnName); break;
+        case ASTNodeType::IF_STMT: {
+            const auto* i = static_cast<const IfStmt*>(s);
+            checkExpr(i->condition.get(), fnName);
+            checkStmt(i->thenBranch.get(), fnName);
+            checkStmt(i->elseBranch.get(), fnName); break;
+        }
+        case ASTNodeType::WHILE_STMT: {
+            const auto* w = static_cast<const WhileStmt*>(s);
+            checkExpr(w->condition.get(), fnName); checkStmt(w->body.get(), fnName); break;
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            const auto* d = static_cast<const DoWhileStmt*>(s);
+            checkStmt(d->body.get(), fnName); checkExpr(d->condition.get(), fnName); break;
+        }
+        case ASTNodeType::FOR_STMT: {
+            const auto* f = static_cast<const ForStmt*>(s);
+            checkExpr(f->start.get(), fnName); checkExpr(f->end.get(), fnName);
+            checkExpr(f->step.get(),  fnName); checkStmt(f->body.get(), fnName); break;
+        }
+        case ASTNodeType::FOR_EACH_STMT: {
+            const auto* fe = static_cast<const ForEachStmt*>(s);
+            checkExpr(fe->collection.get(), fnName); checkStmt(fe->body.get(), fnName); break;
+        }
+        case ASTNodeType::SWITCH_STMT: {
+            const auto* sw = static_cast<const SwitchStmt*>(s);
+            checkExpr(sw->condition.get(), fnName);
+            for (const auto& c : sw->cases) {
+                if (c.value) checkExpr(c.value.get(), fnName);
+                for (const auto& v : c.values) checkExpr(v.get(), fnName);
+                for (const auto& st : c.body) checkStmt(st.get(), fnName);
+            }
+            break;
+        }
+        default: break;
+        }
+    };
+
+    for (const auto& fn : program->functions) {
+        if (fn && fn->body)
+            checkStmt(fn->body.get(), fn->name);
+    }
+    // Also check global variable initializers.
+    for (const auto& g : program->globals) {
+        if (g && g->initializer)
+            checkExpr(g->initializer.get(), "<global>");
+    }
+
+    ctx.validity().preflightCheck = true;
 }
 
 void OptimizationOrchestrator::runEffects(Program* program, OptimizationContext& ctx) {
@@ -726,6 +1008,60 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
 void OptimizationOrchestrator::runRLC(Program* program, OptimizationContext& ctx) {
     codegen_->runRLCPass(program, verbose_);
     ctx.validity().rlc = true;
+}
+
+void OptimizationOrchestrator::runDCE(Program* program, OptimizationContext& ctx) {
+    runDCEPass(program, verbose_);
+    ctx.validity().dce = true;
+    // DCE removes code branches; range analysis results may be stale.
+    ctx.validity().rangeAnalysis = false;
+}
+
+void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx) {
+    runCSEPass(program, verbose_);
+    ctx.validity().cse = true;
+}
+
+void OptimizationOrchestrator::runAlgSimp(Program* program, OptimizationContext& ctx) {
+    runAlgSimpPass(program, verbose_);
+    ctx.validity().algSimp = true;
+    // AlgSimp rewrites expressions; range facts derived from expression shapes
+    // may be stale.
+    ctx.validity().rangeAnalysis = false;
+}
+
+void OptimizationOrchestrator::runCopyProp(Program* program, OptimizationContext& ctx) {
+    runCopyPropPass(program, verbose_);
+    ctx.validity().copyProp = true;
+    // CopyProp substitutes identifiers; CSE keys and range values are stale.
+    ctx.validity().cse          = false;
+    ctx.validity().rangeAnalysis = false;
+    // Width legalization depends on expression shapes — re-run after CopyProp.
+    ctx.validity().widthLegalization = false;
+}
+
+void OptimizationOrchestrator::runWidthLegalization(Program* program,
+                                                      OptimizationContext& ctx) {
+    WidthLegalizationPass pass(ctx);
+    pass.run(program);
+    ctx.validity().widthLegalization = true;
+    if (verbose_) {
+        std::cout << "  [width] Width legalization complete: "
+                  << pass.narrowedCount() << " narrowed, "
+                  << pass.wideCount()     << " wide (>64-bit) expressions\n";
+    }
+}
+
+void OptimizationOrchestrator::runWidthOpt(Program* program,
+                                            OptimizationContext& ctx) {
+    const uint32_t n = runWidthOptPass(program, ctx, verbose_);
+    ctx.validity().widthOpt = true;
+    if (n > 0) {
+        // AST was modified — width legalization and range analysis are stale.
+        ctx.validity().widthLegalization = false;
+        ctx.validity().rangeAnalysis     = false;
+        ctx.validity().cse               = false;
+    }
 }
 
 // ── syncFactsToContext ────────────────────────────────────────────────────────

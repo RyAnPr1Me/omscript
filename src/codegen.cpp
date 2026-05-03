@@ -13,6 +13,7 @@
 #include <limits>
 #include <sstream>
 #include <llvm/ADT/StringMap.h>
+#include <llvm/Support/CrashRecoveryContext.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
@@ -187,442 +188,6 @@ static bool usesConcurrencyPrimitive(const omscript::FunctionDecl* func) {
     return stmtCallsAny(func->body.get(), kConcurrencyBuiltins);
 }
 
-/// Returns true if the expression is a simple value with no side effects
-inline bool isPureExpression(const Expression* expr) {
-    return expr->type == ASTNodeType::LITERAL_EXPR || expr->type == ASTNodeType::IDENTIFIER_EXPR;
-}
-
-std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression> expr);
-
-std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::unique_ptr<Expression> operand) {
-    operand = optimizeOptMaxExpression(std::move(operand));
-
-    // Double-negation elimination: -(-x) → x, !(! x) → bool(x), ~(~x) → x
-    auto* innerUnary = dynamic_cast<UnaryExpr*>(operand.get());
-    if (innerUnary && innerUnary->op == op) {
-        if (op == "-" || op == "~")
-            return std::move(innerUnary->operand);
-    }
-
-    auto* literal = dynamic_cast<LiteralExpr*>(operand.get());
-    if (!literal) {
-        return std::make_unique<UnaryExpr>(op, std::move(operand));
-    }
-
-    if (literal->literalType == LiteralExpr::LiteralType::INTEGER) {
-        const long long value = literal->intValue;
-        if (op == "-") {
-            if (value == LLONG_MIN)
-                return std::make_unique<UnaryExpr>(op, std::move(operand));
-            return std::make_unique<LiteralExpr>(-value);
-        }
-        if (op == "!") {
-            return std::make_unique<LiteralExpr>(static_cast<long long>(value == 0));
-        }
-        if (op == "~") {
-            return std::make_unique<LiteralExpr>(~value);
-        }
-    } else if (literal->literalType == LiteralExpr::LiteralType::FLOAT) {
-        const double value = literal->floatValue;
-        if (op == "-") {
-            return std::make_unique<LiteralExpr>(-value);
-        }
-        if (op == "!") {
-            return std::make_unique<LiteralExpr>(static_cast<long long>(value == 0.0));
-        }
-    }
-
-    return std::make_unique<UnaryExpr>(op, std::move(operand));
-}
-
-std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::unique_ptr<Expression> left,
-                                                 std::unique_ptr<Expression> right) {
-    left = optimizeOptMaxExpression(std::move(left));
-    right = optimizeOptMaxExpression(std::move(right));
-    auto* leftLiteral = dynamic_cast<LiteralExpr*>(left.get());
-    auto* rightLiteral = dynamic_cast<LiteralExpr*>(right.get());
-
-    // Algebraic identity optimizations (one side is a literal)
-    if (leftLiteral && leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
-        const long long lval = leftLiteral->intValue;
-        if (lval == 0 && op == "+")
-            return right; // 0 + x → x
-        if (lval == 0 && op == "-")
-            return std::make_unique<UnaryExpr>("-", std::move(right)); // 0 - x → -x
-        if (lval == 0 && (op == "*" || op == "&") && isPureExpression(right.get()))
-            return std::make_unique<LiteralExpr>(static_cast<long long>(0)); // 0 * x, 0 & x → 0
-        if (lval == 0 && (op == "|" || op == "^"))
-            return right; // 0 | x, 0 ^ x → x
-        if (lval == 1 && op == "*")
-            return right; // 1 * x → x
-        if (lval == 1 && op == "**" && isPureExpression(right.get()))
-            return std::make_unique<LiteralExpr>(static_cast<long long>(1)); // 1 ** x → 1
-        if (lval == -1 && op == "*")
-            return std::make_unique<UnaryExpr>("-", std::move(right)); // -1 * x → -x
-    }
-    if (rightLiteral && rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
-        const long long rval = rightLiteral->intValue;
-        if (rval == 0 && op == "+")
-            return left; // x + 0 → x
-        if (rval == 0 && op == "-")
-            return left; // x - 0 → x
-        if (rval == 0 && (op == "*" || op == "&") && isPureExpression(left.get()))
-            return std::make_unique<LiteralExpr>(static_cast<long long>(0)); // x * 0, x & 0 → 0
-        if (rval == 0 && (op == "|" || op == "^" || op == "<<" || op == ">>"))
-            return left; // x | 0, x ^ 0, x << 0, x >> 0 → x
-        if (rval == 1 && op == "*")
-            return left; // x * 1 → x
-        if (rval == 1 && op == "/")
-            return left; // x / 1 → x
-        if (rval == 1 && op == "**")
-            return left; // x ** 1 → x
-        if (rval == 1 && op == "%")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(0)); // x % 1 → 0
-        if (rval == -1 && op == "*")
-            return std::make_unique<UnaryExpr>("-", std::move(left)); // x * -1 → -x
-        if (rval == -1 && op == "/")
-            return std::make_unique<UnaryExpr>("-", std::move(left)); // x / -1 → -x
-        if (rval == 0 && op == "**" && isPureExpression(left.get()))
-            return std::make_unique<LiteralExpr>(static_cast<long long>(1)); // x ** 0 → 1
-    }
-
-    // Self-identifier optimizations: when both sides are the same identifier
-    // (pure, no side effects), several operations simplify to constants.
-    {
-        auto* leftId = dynamic_cast<IdentifierExpr*>(left.get());
-        auto* rightId = dynamic_cast<IdentifierExpr*>(right.get());
-        if (leftId && rightId && leftId->name == rightId->name) {
-            // x - x → 0, x ^ x → 0
-            if (op == "-" || op == "^")
-                return std::make_unique<LiteralExpr>(static_cast<long long>(0));
-            // x & x → x, x | x → x
-            if (op == "&" || op == "|") {
-                auto result = std::make_unique<IdentifierExpr>(leftId->name);
-                return result;
-            }
-            // x == x → 1, x <= x → 1, x >= x → 1
-            if (op == "==" || op == "<=" || op == ">=")
-                return std::make_unique<LiteralExpr>(static_cast<long long>(1));
-            // x != x → 0, x < x → 0, x > x → 0
-            if (op == "!=" || op == "<" || op == ">")
-                return std::make_unique<LiteralExpr>(static_cast<long long>(0));
-            // x / x → 1 (safe: OPTMAX requires the user to guarantee no division by zero)
-            if (op == "/")
-                return std::make_unique<LiteralExpr>(static_cast<long long>(1));
-            // x % x → 0
-            if (op == "%")
-                return std::make_unique<LiteralExpr>(static_cast<long long>(0));
-        }
-    }
-
-    if (!leftLiteral || !rightLiteral) {
-        return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
-    }
-
-    if (leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER &&
-        rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
-        const long long lval = leftLiteral->intValue;
-        const long long rval = rightLiteral->intValue;
-        if (op == "+")
-            return std::make_unique<LiteralExpr>(lval + rval);
-        if (op == "-")
-            return std::make_unique<LiteralExpr>(lval - rval);
-        if (op == "*")
-            return std::make_unique<LiteralExpr>(lval * rval);
-        if (op == "/" && rval != 0 && (lval != LLONG_MIN || rval != -1))
-            return std::make_unique<LiteralExpr>(lval / rval);
-        if (op == "%" && rval != 0 && (lval != LLONG_MIN || rval != -1))
-            return std::make_unique<LiteralExpr>(lval % rval);
-        if (op == "==")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
-        if (op == "!=")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
-        if (op == "<")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
-        if (op == "<=")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval <= rval));
-        if (op == ">")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval > rval));
-        if (op == ">=")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
-        if (op == "&&")
-            return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) && (rval != 0)));
-        if (op == "||")
-            return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) || (rval != 0)));
-        if (op == "&")
-            return std::make_unique<LiteralExpr>(lval & rval);
-        if (op == "|")
-            return std::make_unique<LiteralExpr>(lval | rval);
-        if (op == "^")
-            return std::make_unique<LiteralExpr>(lval ^ rval);
-        if (op == "<<" && rval >= 0 && rval < 64)
-            return std::make_unique<LiteralExpr>(lval << rval);
-        if (op == ">>" && rval >= 0 && rval < 64)
-            return std::make_unique<LiteralExpr>(lval >> rval);
-        if (op == "**") {
-            if (rval >= 0) {
-                long long result = 1;
-                bool overflow = false;
-                for (long long i = 0; i < rval; i++) {
-                    if (lval != 0 && lval != 1 && lval != -1) {
-                        const uint64_t ab = (lval < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(lval))
-                                                 : static_cast<uint64_t>(lval);
-                        const uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
-                                                   : static_cast<uint64_t>(result);
-                        if (ar > static_cast<uint64_t>(LLONG_MAX) / ab) {
-                            overflow = true;
-                            break;
-                        }
-                    }
-                    result *= lval;
-                }
-                if (!overflow)
-                    return std::make_unique<LiteralExpr>(result);
-                // Fall through to emit a runtime BinaryExpr on overflow.
-            } else {
-                // Negative exponent: base**(-n) = 1 / base**n in integer math.
-                // |base| > 1 → truncates to 0; base=1 → 1; base=-1 → ±1.
-                if (lval == 1)
-                    return std::make_unique<LiteralExpr>(static_cast<long long>(1));
-                if (lval == -1)
-                    return std::make_unique<LiteralExpr>(static_cast<long long>((rval & 1) ? -1 : 1));
-                return std::make_unique<LiteralExpr>(static_cast<long long>(0));
-            }
-        }
-    } else if (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT &&
-               rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT) {
-        const double lval = leftLiteral->floatValue;
-        const double rval = rightLiteral->floatValue;
-        if (op == "+")
-            return std::make_unique<LiteralExpr>(lval + rval);
-        if (op == "-")
-            return std::make_unique<LiteralExpr>(lval - rval);
-        if (op == "*")
-            return std::make_unique<LiteralExpr>(lval * rval);
-        if (op == "/" && rval != 0.0)
-            return std::make_unique<LiteralExpr>(lval / rval);
-        if (op == "%" && rval != 0.0)
-            return std::make_unique<LiteralExpr>(std::fmod(lval, rval));
-        if (op == "==")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
-        if (op == "!=")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
-        if (op == "<")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
-        if (op == "<=")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval <= rval));
-        if (op == ">")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval > rval));
-        if (op == ">=")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
-        if (op == "&&")
-            return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) && (rval != 0.0)));
-        if (op == "||")
-            return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) || (rval != 0.0)));
-        if (op == "**")
-            return std::make_unique<LiteralExpr>(std::pow(lval, rval));
-    } else {
-        // Mixed int/float constant folding: promote the integer operand to double
-        const double leftDouble = (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
-                                ? leftLiteral->floatValue
-                                : static_cast<double>(leftLiteral->intValue);
-        const double rightDouble = (rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
-                                 ? rightLiteral->floatValue
-                                 : static_cast<double>(rightLiteral->intValue);
-        if (op == "+")
-            return std::make_unique<LiteralExpr>(leftDouble + rightDouble);
-        if (op == "-")
-            return std::make_unique<LiteralExpr>(leftDouble - rightDouble);
-        if (op == "*")
-            return std::make_unique<LiteralExpr>(leftDouble * rightDouble);
-        if (op == "/" && rightDouble != 0.0)
-            return std::make_unique<LiteralExpr>(leftDouble / rightDouble);
-        if (op == "%" && rightDouble != 0.0)
-            return std::make_unique<LiteralExpr>(std::fmod(leftDouble, rightDouble));
-        if (op == "==")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble == rightDouble));
-        if (op == "!=")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble != rightDouble));
-        if (op == "<")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble < rightDouble));
-        if (op == "<=")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble <= rightDouble));
-        if (op == ">")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble > rightDouble));
-        if (op == ">=")
-            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble >= rightDouble));
-        if (op == "**")
-            return std::make_unique<LiteralExpr>(std::pow(leftDouble, rightDouble));
-    }
-
-    return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
-}
-
-std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression> expr) {
-    if (!expr) {
-        return nullptr;
-    }
-
-    switch (expr->type) {
-    case ASTNodeType::LITERAL_EXPR:
-    case ASTNodeType::IDENTIFIER_EXPR:
-        return expr;
-    case ASTNodeType::UNARY_EXPR: {
-        auto* unary = static_cast<UnaryExpr*>(expr.get());
-        return optimizeOptMaxUnary(unary->op, std::move(unary->operand));
-    }
-    case ASTNodeType::BINARY_EXPR: {
-        auto* binary = static_cast<BinaryExpr*>(expr.get());
-        return optimizeOptMaxBinary(binary->op, std::move(binary->left), std::move(binary->right));
-    }
-    case ASTNodeType::ASSIGN_EXPR: {
-        auto* assign = static_cast<AssignExpr*>(expr.get());
-        assign->value = optimizeOptMaxExpression(std::move(assign->value));
-        return expr;
-    }
-    case ASTNodeType::CALL_EXPR: {
-        auto* call = static_cast<CallExpr*>(expr.get());
-        for (auto& arg : call->arguments) {
-            arg = optimizeOptMaxExpression(std::move(arg));
-        }
-        return expr;
-    }
-    case ASTNodeType::ARRAY_EXPR: {
-        auto* arrayExpr = static_cast<ArrayExpr*>(expr.get());
-        for (auto& element : arrayExpr->elements) {
-            element = optimizeOptMaxExpression(std::move(element));
-        }
-        return expr;
-    }
-    case ASTNodeType::INDEX_EXPR: {
-        auto* indexExpr = static_cast<IndexExpr*>(expr.get());
-        indexExpr->array = optimizeOptMaxExpression(std::move(indexExpr->array));
-        indexExpr->index = optimizeOptMaxExpression(std::move(indexExpr->index));
-        return expr;
-    }
-    case ASTNodeType::INDEX_ASSIGN_EXPR: {
-        auto* ia = static_cast<IndexAssignExpr*>(expr.get());
-        ia->array = optimizeOptMaxExpression(std::move(ia->array));
-        ia->index = optimizeOptMaxExpression(std::move(ia->index));
-        ia->value = optimizeOptMaxExpression(std::move(ia->value));
-        return expr;
-    }
-    case ASTNodeType::POSTFIX_EXPR: {
-        auto* postfix = static_cast<PostfixExpr*>(expr.get());
-        postfix->operand = optimizeOptMaxExpression(std::move(postfix->operand));
-        return expr;
-    }
-    case ASTNodeType::PREFIX_EXPR: {
-        auto* prefix = static_cast<PrefixExpr*>(expr.get());
-        prefix->operand = optimizeOptMaxExpression(std::move(prefix->operand));
-        return expr;
-    }
-    case ASTNodeType::TERNARY_EXPR: {
-        auto* ternary = static_cast<TernaryExpr*>(expr.get());
-        ternary->condition = optimizeOptMaxExpression(std::move(ternary->condition));
-        ternary->thenExpr = optimizeOptMaxExpression(std::move(ternary->thenExpr));
-        ternary->elseExpr = optimizeOptMaxExpression(std::move(ternary->elseExpr));
-        // Fold ternary when condition is a compile-time constant
-        auto* condLiteral = dynamic_cast<LiteralExpr*>(ternary->condition.get());
-        if (condLiteral && condLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
-            return condLiteral->intValue != 0 ? std::move(ternary->thenExpr) : std::move(ternary->elseExpr);
-        }
-        return expr;
-    }
-    default:
-        return expr;
-    }
-}
-
-void optimizeOptMaxStatement(Statement* stmt);
-
-void optimizeOptMaxBlock(BlockStmt* block) {
-    for (auto& statement : block->statements) {
-        optimizeOptMaxStatement(statement.get());
-    }
-}
-
-void optimizeOptMaxStatement(Statement* stmt) {
-    switch (stmt->type) {
-    case ASTNodeType::BLOCK:
-        optimizeOptMaxBlock(static_cast<BlockStmt*>(stmt));
-        break;
-    case ASTNodeType::VAR_DECL: {
-        auto* varDecl = static_cast<VarDecl*>(stmt);
-        if (varDecl->initializer) {
-            varDecl->initializer = optimizeOptMaxExpression(std::move(varDecl->initializer));
-        }
-        break;
-    }
-    case ASTNodeType::RETURN_STMT: {
-        auto* retStmt = static_cast<ReturnStmt*>(stmt);
-        if (retStmt->value) {
-            retStmt->value = optimizeOptMaxExpression(std::move(retStmt->value));
-        }
-        break;
-    }
-    case ASTNodeType::EXPR_STMT: {
-        auto* exprStmt = static_cast<ExprStmt*>(stmt);
-        exprStmt->expression = optimizeOptMaxExpression(std::move(exprStmt->expression));
-        break;
-    }
-    case ASTNodeType::IF_STMT: {
-        auto* ifStmt = static_cast<IfStmt*>(stmt);
-        ifStmt->condition = optimizeOptMaxExpression(std::move(ifStmt->condition));
-        optimizeOptMaxStatement(ifStmt->thenBranch.get());
-        if (ifStmt->elseBranch) {
-            optimizeOptMaxStatement(ifStmt->elseBranch.get());
-        }
-        break;
-    }
-    case ASTNodeType::WHILE_STMT: {
-        auto* whileStmt = static_cast<WhileStmt*>(stmt);
-        whileStmt->condition = optimizeOptMaxExpression(std::move(whileStmt->condition));
-        optimizeOptMaxStatement(whileStmt->body.get());
-        break;
-    }
-    case ASTNodeType::DO_WHILE_STMT: {
-        auto* doWhileStmt = static_cast<DoWhileStmt*>(stmt);
-        optimizeOptMaxStatement(doWhileStmt->body.get());
-        doWhileStmt->condition = optimizeOptMaxExpression(std::move(doWhileStmt->condition));
-        break;
-    }
-    case ASTNodeType::FOR_STMT: {
-        auto* forStmt = static_cast<ForStmt*>(stmt);
-        forStmt->start = optimizeOptMaxExpression(std::move(forStmt->start));
-        forStmt->end = optimizeOptMaxExpression(std::move(forStmt->end));
-        if (forStmt->step) {
-            forStmt->step = optimizeOptMaxExpression(std::move(forStmt->step));
-        }
-        optimizeOptMaxStatement(forStmt->body.get());
-        break;
-    }
-    case ASTNodeType::FOR_EACH_STMT: {
-        auto* forEach = static_cast<ForEachStmt*>(stmt);
-        forEach->collection = optimizeOptMaxExpression(std::move(forEach->collection));
-        optimizeOptMaxStatement(forEach->body.get());
-        break;
-    }
-    case ASTNodeType::SWITCH_STMT: {
-        auto* switchStmt = static_cast<omscript::SwitchStmt*>(stmt);
-        switchStmt->condition = optimizeOptMaxExpression(std::move(switchStmt->condition));
-        for (auto& sc : switchStmt->cases) {
-            if (sc.value) {
-                sc.value = optimizeOptMaxExpression(std::move(sc.value));
-            }
-            for (auto& v : sc.values) {
-                v = optimizeOptMaxExpression(std::move(v));
-            }
-            for (auto& s : sc.body) {
-                optimizeOptMaxStatement(s.get());
-            }
-        }
-        break;
-    }
-    default:
-        break;
-    }
-}
 
 } // namespace
 
@@ -853,7 +418,21 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "mutex_destroy",
                                                                 "typeof",
                                                                 "unreachable",
-                                                                "write"};
+                                                                "write",
+                                                                // Numeric type-cast functions: i32(x), u8(x), etc.
+                                                                // These are parsed as CallExpr nodes and handled
+                                                                // as builtins; they must be whitelisted so that
+                                                                // OPTMAX functions can call them without error.
+                                                                "i8",  "u8",
+                                                                "i16", "u16",
+                                                                "i32", "u32",
+                                                                "i64", "u64",
+                                                                "f32", "f64",
+                                                                "to_i8",  "to_u8",
+                                                                "to_i16", "to_u16",
+                                                                "to_i32", "to_u32",
+                                                                "to_i64", "to_u64",
+                                                                "to_f32", "to_f64"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
@@ -1107,29 +686,40 @@ llvm::Value* CodeGenerator::liftFieldLoad(llvm::Value* v, const std::string& ann
 llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
     if (v->getType() == targetTy)
         return v;
-    // float → int
-    if (v->getType()->isDoubleTy() && targetTy->isIntegerTy())
+    llvm::Type* srcTy = v->getType();
+    // float (f32 or f64) → int
+    if (srcTy->isFloatingPointTy() && targetTy->isIntegerTy())
         return builder->CreateFPToSI(v, targetTy, "ftoi");
-    // int → float
-    if (v->getType()->isIntegerTy() && targetTy->isDoubleTy())
+    // int → float (f32 or f64)
+    if (srcTy->isIntegerTy() && targetTy->isFloatingPointTy())
         return builder->CreateSIToFP(v, targetTy, "itof");
+    // f32 ↔ f64
+    if (srcTy->isFloatTy() && targetTy->isDoubleTy())
+        return builder->CreateFPExt(v, targetTy, "fpext");
+    if (srcTy->isDoubleTy() && targetTy->isFloatTy())
+        return builder->CreateFPTrunc(v, targetTy, "fptrunc");
     // ptr → int
-    if (v->getType()->isPointerTy() && targetTy->isIntegerTy())
+    if (srcTy->isPointerTy() && targetTy->isIntegerTy())
         return builder->CreatePtrToInt(v, targetTy, "ptoi");
     // int → ptr
-    if (v->getType()->isIntegerTy() && targetTy->isPointerTy())
+    if (srcTy->isIntegerTy() && targetTy->isPointerTy())
         return builder->CreateIntToPtr(v, targetTy, "itop");
-    // int → int (widening)
-    if (v->getType()->isIntegerTy() && targetTy->isIntegerTy()) {
-        const unsigned srcBits = v->getType()->getIntegerBitWidth();
+    // int → int (widening or narrowing)
+    if (srcTy->isIntegerTy() && targetTy->isIntegerTy()) {
+        const unsigned srcBits = srcTy->getIntegerBitWidth();
         const unsigned dstBits = targetTy->getIntegerBitWidth();
-        if (srcBits < dstBits)
+        if (srcBits < dstBits) {
+            // Use ZExt for values known to be unsigned (uN casts or uN-annotated vars).
+            const bool isUnsigned = unsignedExprs_.count(v) || isUnsignedValue(v);
+            if (isUnsigned)
+                return builder->CreateZExt(v, targetTy, "zext");
             return builder->CreateSExt(v, targetTy, "sext");
+        }
         if (srcBits > dstBits)
             return builder->CreateTrunc(v, targetTy, "trunc");
     }
     // ptr → float (via int)
-    if (v->getType()->isPointerTy() && targetTy->isDoubleTy()) {
+    if (srcTy->isPointerTy() && targetTy->isFloatingPointTy()) {
         auto* intVal = builder->CreatePtrToInt(v, getDefaultType(), "ptoi");
         return builder->CreateSIToFP(intVal, targetTy, "itof");
     }
@@ -1556,6 +1146,15 @@ void CodeGenerator::emitStoreArrayLen(llvm::Value* len, llvm::Value* arrPtr) {
 }
 
 llvm::StoreInst* CodeGenerator::emitStoreArrayElem(llvm::Value* val, llvm::Value* elemPtr) {
+    // Array element slots are always i64 wide; widen narrow integers before storing
+    // so that the paired emitLoadArrayElem (which always loads i64) reads back the
+    // correct sign- or zero-extended value.
+    if (val->getType()->isIntegerTy() && !val->getType()->isIntegerTy(64)) {
+        const bool isUnsigned = unsignedExprs_.count(val) || isUnsignedValue(val);
+        val = isUnsigned
+            ? builder->CreateZExt(val, getDefaultType(), "arr.elem.zext")
+            : builder->CreateSExt(val, getDefaultType(), "arr.elem.sext");
+    }
     auto* st = builder->CreateAlignedStore(val, elemPtr, llvm::MaybeAlign(8));
     st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
     return st;
@@ -2721,6 +2320,64 @@ llvm::Function* CodeGenerator::getOrDeclareBigintShr() {
     auto* fn = declareExternalFn("omsc_bigint_shr", ty);
     fn->removeFnAttr(llvm::Attribute::NoFree);
     fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+
+// ── HTTP client runtime helpers ──────────────────────────────────────────────
+// All HTTP functions return a malloc'd NUL-terminated string (pointer type).
+// They can allocate, may block on network I/O, and are nounwind.
+
+llvm::Function* CodeGenerator::getOrDeclareHttpGet() {
+    if (auto* fn = module->getFunction("omsc_http_get")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_http_get", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->removeFnAttr(llvm::Attribute::WillReturn); // may block
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareHttpPost() {
+    if (auto* fn = module->getFunction("omsc_http_post")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    // (url, body, content_type) → ptr
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_http_post", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->removeFnAttr(llvm::Attribute::WillReturn);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    OMSC_ADD_NOCAPTURE(fn, 2);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareHttpRequest() {
+    if (auto* fn = module->getFunction("omsc_http_request")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    // (method, url, body, headers_str) → ptr
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, ptrTy, ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_http_request", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->removeFnAttr(llvm::Attribute::WillReturn);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    OMSC_ADD_NOCAPTURE(fn, 2);
+    OMSC_ADD_NOCAPTURE(fn, 3);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareHttpGetStatus() {
+    if (auto* fn = module->getFunction("omsc_http_get_status")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+    auto* ty = llvm::FunctionType::get(i64Ty, {ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_http_get_status", ty);
+    fn->removeFnAttr(llvm::Attribute::WillReturn);
+    OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
 }
 // ---------------------------------------------------------------------------
@@ -4566,7 +4223,30 @@ void CodeGenerator::generate(Program* program) {
         if (verbose_) {
             std::cout << "  [opt] Running OPTMAX per-function optimization passes..." << '\n';
         }
-        optimizeOptMaxFunctions();
+        // Run OPTMAX in a thread with a large stack for the same reason as the
+        // standard pipeline below: the PostIPO inliner can create large function
+        // bodies inside optimizeOptMaxFunctions() that overflow LLVM's recursive
+        // passes (DominatorTree DFS, etc.) on the default 8–16 MB OS stack.
+        std::exception_ptr optMaxException;
+        llvm::CrashRecoveryContext CRCOptMax;
+        llvm::CrashRecoveryContext::Enable();
+        constexpr unsigned kOptMaxStackBytes = 256u * 1024u * 1024u; // 256 MB
+        const bool optMaxOk = CRCOptMax.RunSafelyOnThread([&]() {
+            try {
+                optimizeOptMaxFunctions();
+            } catch (...) {
+                optMaxException = std::current_exception();
+            }
+        }, kOptMaxStackBytes);
+        if (optMaxException)
+            std::rethrow_exception(optMaxException);
+        if (!optMaxOk) {
+            throw DiagnosticError(Diagnostic{
+                DiagnosticSeverity::Error, {"", 0, 0},
+                "LLVM optimizer crashed during OPTMAX optimization (likely a stack "
+                "overflow in a recursive pass on a very large inlined function). "
+                "Consider splitting the module or reducing the OPTMAX call graph depth."});
+        }
     }
 
     // Mark all constant global variables with unnamed_addr at O2+.
@@ -4616,7 +4296,86 @@ void CodeGenerator::generate(Program* program) {
         std::cout << "  [opt] Running LLVM optimization pipeline..." << '\n';
     }
     if (runIRPasses_) {
-        runOptimizationPasses();
+        // ── Inliner-overflow guard ─────────────────────────────────────────
+        // The standard LLVM O3 inliner uses a per-call cost threshold (~225).
+        // When many small OPTMAX functions (each well below that threshold) are
+        // all called from a single non-OPTMAX dispatcher (e.g. a benchmark
+        // main()), the inliner collapses every one of them into that dispatcher,
+        // creating a function with tens of thousands of instructions.  LLVM's
+        // subsequent per-function O3 passes — JumpThreading, SLPVectorizer,
+        // NewGVN — either run in O(n²) time/memory and OOM, or use recursive
+        // DFS / back-tracking that overflows the call stack, both resulting in
+        // a SIGSEGV inside the compiler process.
+        //
+        // Fix: temporarily mark OPTMAX functions that have at least one
+        // non-OPTMAX caller as `noinline` so the standard inliner's cost model
+        // refuses to inline them into the non-OPTMAX caller.  The OPTMAX
+        // functions themselves are already fully optimised by the OPTMAX
+        // pipeline above; all module-level IPO passes (IPSCCP, GlobalDCE,
+        // GlobalOpt, ConstArgProp, etc.) still see the whole module and run
+        // unmodified.  AMX / HGOE / superoptimizer optimisations are unaffected
+        // because they run before this point.
+        //
+        // The `noinline` attribute is removed after runOptimizationPasses()
+        // completes so that no permanent change is made to the function
+        // attributes seen by the linker or any downstream LTO pass.
+        llvm::SmallVector<llvm::Function*, 64> inlinerGuardFuncs;
+        if (hasOptMaxFunctions && enableOptMax_ && module) {
+            for (auto& F : *module) {
+                if (F.isDeclaration()) continue;
+                if (!optMaxFunctions.count(F.getName())) continue;
+                if (F.hasFnAttribute(llvm::Attribute::NoInline)) continue;
+                bool hasNonOptMaxCaller = false;
+                for (auto* user : F.users()) {
+                    auto* CB = llvm::dyn_cast<llvm::CallBase>(user);
+                    if (!CB) { hasNonOptMaxCaller = true; break; }
+                    llvm::Function* caller = CB->getFunction();
+                    if (!caller || !optMaxFunctions.count(caller->getName())) {
+                        hasNonOptMaxCaller = true;
+                        break;
+                    }
+                }
+                if (hasNonOptMaxCaller) {
+                    F.addFnAttr(llvm::Attribute::NoInline);
+                    inlinerGuardFuncs.push_back(&F);
+                }
+            }
+        }
+
+        // Run the optimization passes on a thread with a large stack (512 MB).
+        // LLVM's recursive passes (DominatorTree DFS, JumpThreading, NewGVN,
+        // etc.) can overflow the default OS stack (~8–16 MB) when the module
+        // contains a very large inlined call graph — e.g. a dispatch function
+        // that calls 90+ hot kernels, all of which the inliner folds into a
+        // single enormous function.  RunSafelyOnThread spawns a new thread
+        // with the requested stack size and installs a SIGSEGV handler so any
+        // remaining stack overflow is converted into a clean error rather than
+        // a silent crash.
+        std::exception_ptr pendingException;
+        llvm::CrashRecoveryContext CRC;
+        llvm::CrashRecoveryContext::Enable();
+        constexpr unsigned kOptStackBytes = 512u * 1024u * 1024u; // 512 MB
+        const bool ok = CRC.RunSafelyOnThread([&]() {
+            try {
+                runOptimizationPasses();
+            } catch (...) {
+                pendingException = std::current_exception();
+            }
+        }, kOptStackBytes);
+
+        // Restore: remove the temporary noinline markers added above.
+        for (llvm::Function* F : inlinerGuardFuncs)
+            F->removeFnAttr(llvm::Attribute::NoInline);
+
+        if (pendingException)
+            std::rethrow_exception(pendingException);
+        if (!ok) {
+            throw DiagnosticError(Diagnostic{
+                DiagnosticSeverity::Error, {"", 0, 0},
+                "LLVM optimizer crashed during code generation (likely a stack "
+                "overflow in a recursive pass on a very large inlined function). "
+                "Consider splitting the module or reducing the call graph depth."});
+        }
     }
 
     // Finalize DWARF debug info before module verification.
@@ -4669,8 +4428,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             currentOptMaxConfig_.fastMath = true;
         }
         // Store the resolved config for optimizeOptMaxFunctions() to consume later.
+        // AST-level constant folding and algebraic simplification for @optmax
+        // functions are handled by the pre-pass pipeline (CF-CTRE, AlgSimp,
+        // CopyProp, DCE, CSE) which runs before code generation begins.
         optMaxFunctionConfigs_[func->name] = currentOptMaxConfig_;
-        optimizeOptMaxBlock(func->body.get());
     }
 
     // Retrieve the forward-declared function
@@ -5100,6 +4861,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     simdVars_.clear();
     dictVarNames_.clear();
     nonNegValues_.clear();
+    unsignedExprs_.clear();
     constIntFolds_.clear();
     constFloatFolds_.clear();
     stackAllocatedArrays_.clear();
@@ -5738,11 +5500,28 @@ CodeGenerator::tryFoldExprToConst(Expression* expr, int depth) const {
     return ctValueToConstValue(result);
 }
 
-// tryFoldInt / tryFoldStr: convenience wrappers used by generateBuiltin.
+// tryFoldInt / tryFoldFloat / tryFoldStr: convenience wrappers used by generateBuiltin.
 std::optional<int64_t> CodeGenerator::tryFoldInt(Expression* e) const {
     if (!e) return std::nullopt;
-    if (auto cv = tryFoldExprToConst(e))
+    if (auto cv = tryFoldExprToConst(e)) {
         if (cv->kind == ConstValue::Kind::Integer) return cv->intVal;
+        // Float constants that are exactly representable as integers can be
+        // used where integers are expected (e.g. is_even(4.0) → is_even(4)).
+        // Only truncate if the value has no fractional part.
+        if (cv->kind == ConstValue::Kind::Float) {
+            const double fv = cv->floatVal;
+            const int64_t iv = static_cast<int64_t>(fv);
+            if (static_cast<double>(iv) == fv) return iv;
+        }
+    }
+    return std::nullopt;
+}
+std::optional<double> CodeGenerator::tryFoldFloat(Expression* e) const {
+    if (!e) return std::nullopt;
+    if (auto cv = tryFoldExprToConst(e)) {
+        if (cv->kind == ConstValue::Kind::Float)   return cv->floatVal;
+        if (cv->kind == ConstValue::Kind::Integer) return static_cast<double>(cv->intVal);
+    }
     return std::nullopt;
 }
 std::optional<std::string> CodeGenerator::tryFoldStr(Expression* e) const {
@@ -5896,6 +5675,7 @@ void CodeGenerator::runCFCTRE(Program* program) {
                   << s.deadBranchesEliminated << " dead branches, "
                   << s.safeArrayAccesses      << " safe array accesses, "
                   << s.safeDivisions          << " safe divisions, "
+                  << s.safeArithmetic         << " safe arithmetic ops, "
                   << s.cheaperRewritesFound   << " cheaper rewrites" << '\n';
     }
 
@@ -5971,6 +5751,8 @@ CodeGenerator::ConstValue CodeGenerator::ctValueToConstValue(const CTValue& v) c
     case CTValueKind::CONCRETE_U64:
     case CTValueKind::CONCRETE_BOOL:
         return ConstValue::fromInt(v.asI64());
+    case CTValueKind::CONCRETE_F64:
+        return ConstValue::fromFloat(v.asF64());
     case CTValueKind::CONCRETE_STRING:
         return ConstValue::fromStr(v.asStr());
     case CTValueKind::CONCRETE_ARRAY: {
@@ -5990,6 +5772,7 @@ CodeGenerator::ConstValue CodeGenerator::ctValueToConstValue(const CTValue& v) c
 CTValue CodeGenerator::constValueToCTValue(const ConstValue& v) const {
     switch (v.kind) {
     case ConstValue::Kind::Integer: return CTValue::fromI64(v.intVal);
+    case ConstValue::Kind::Float:   return CTValue::fromF64(v.floatVal);
     case ConstValue::Kind::String:  return CTValue::fromString(v.strVal);
     case ConstValue::Kind::Array: {
         if (!ctEngine_) return CTValue::uninit();
@@ -6736,7 +6519,9 @@ llvm::Value* CodeGenerator::emitComptimeArray(const std::vector<ConstValue>& ele
     for (const auto& elem : elems) {
         // Only integer elements are supported in comptime arrays for now;
         // non-integer elements are clamped to 0 rather than failing hard.
-        int64_t v = (elem.kind == ConstValue::Kind::Integer) ? elem.intVal : 0;
+        int64_t v = (elem.kind == ConstValue::Kind::Integer) ? elem.intVal
+                  : (elem.kind == ConstValue::Kind::Float)   ? static_cast<int64_t>(elem.floatVal)
+                  : 0;
         vals.push_back(llvm::ConstantInt::get(i64Ty, v));
     }
     auto* arrTy = llvm::ArrayType::get(i64Ty, N + 1);
@@ -7145,12 +6930,32 @@ struct ReadOnlyUseChecker {
         case ASTNodeType::UNARY_EXPR:
             visitExpr(static_cast<const UnaryExpr*>(e)->operand.get());
             return;
-        case ASTNodeType::PREFIX_EXPR:
-            visitExpr(static_cast<const PrefixExpr*>(e)->operand.get());
+        case ASTNodeType::PREFIX_EXPR: {
+            auto* pre = static_cast<const PrefixExpr*>(e);
+            // ++var[i] or --var[i] mutates the array element — violation.
+            if (pre->operand && pre->operand->type == ASTNodeType::INDEX_EXPR) {
+                auto* idx = static_cast<const IndexExpr*>(pre->operand.get());
+                if (isVarIdent(idx->array.get())) {
+                    violation = true;
+                    return;
+                }
+            }
+            visitExpr(pre->operand.get());
             return;
-        case ASTNodeType::POSTFIX_EXPR:
-            visitExpr(static_cast<const PostfixExpr*>(e)->operand.get());
+        }
+        case ASTNodeType::POSTFIX_EXPR: {
+            auto* post = static_cast<const PostfixExpr*>(e);
+            // var[i]++ or var[i]-- mutates the array element — violation.
+            if (post->operand && post->operand->type == ASTNodeType::INDEX_EXPR) {
+                auto* idx = static_cast<const IndexExpr*>(post->operand.get());
+                if (isVarIdent(idx->array.get())) {
+                    violation = true;
+                    return;
+                }
+            }
+            visitExpr(post->operand.get());
             return;
+        }
         case ASTNodeType::TERNARY_EXPR: {
             auto* t = static_cast<const TernaryExpr*>(e);
             visitExpr(t->condition.get());

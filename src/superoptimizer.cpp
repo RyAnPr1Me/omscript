@@ -7445,6 +7445,18 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     SuperoptimizerStats stats;
     if (func.isDeclaration()) return stats;
 
+    // The superoptimizer uses several recursive lambdas (rebalanceChainForILP,
+    // collect-leaf DFS, etc.) that traverse def-use chains.  Very large
+    // functions — produced when the LLVM inliner collapses a large dispatch
+    // loop and all its callees into a single function body — can exhaust the
+    // default OS thread stack (8–16 MB) before the chain terminates.
+    // std::async spawns child threads at the default stack size; if they crash
+    // the signal is not caught by the parent's CrashRecoveryContext.
+    // Silently skip huge functions: they are already well-optimised by LLVM and
+    // gain little from the pattern-matching passes the superoptimizer runs.
+    static constexpr unsigned kMaxFuncInstructions = 5000;
+    if (func.getInstructionCount() > kMaxFuncInstructions) return stats;
+
     // Install the hardware cost model for this function's optimization session.
     const auto* prevFn = g_costFn;
     std::function<double(const llvm::Instruction*)> costModelFn;

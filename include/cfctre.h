@@ -590,6 +590,7 @@ public:
         int64_t deadBranchesEliminated{0};      ///< Q2: branches proven always-dead
         int64_t safeArrayAccesses{0};           ///< Q5: array accesses proven in-bounds
         int64_t safeDivisions{0};               ///< Q5: divisions proven non-zero divisor
+        int64_t safeArithmetic{0};              ///< Q5: add/sub/mul proven no-overflow
         int64_t cheaperRewritesFound{0};        ///< Q4: range-conditioned strength reductions
         // Phase A/B/C/D/F additional stats
         int64_t algebraicFolds{0};              ///< Algebraic identity simplifications (x+0, x-x, etc.)

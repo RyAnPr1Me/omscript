@@ -3,6 +3,7 @@
 #include "hardware_graph.h"
 #include "ipof_pass.h"
 #include "optimization_manager.h" // OptimizationManager, CostModel
+#include "program_analysis.h"     // ProgramFactsSnapshot, computeProgramFacts
 #include "sdr_pass.h"
 #include "superoptimizer.h"
 #include "polyopt.h"
@@ -41,6 +42,7 @@
 #include <llvm/Transforms/AggressiveInstCombine/AggressiveInstCombine.h>
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
+#include <llvm/Transforms/IPO/Inliner.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/IPO/GlobalOpt.h>
 #include <llvm/Transforms/IPO/HotColdSplitting.h>
@@ -2010,6 +2012,332 @@ struct ConstArgPropagationPass
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AggressiveDevirtualizationPass — multi-phase indirect-call promotion.
+//
+// Phase 1 – Single-callee: walks each indirect call's function-pointer operand
+//   through data-flow (ptrtoint/inttoptr, bitcast, GEP chains, phi/select
+//   nodes, and global-variable initializers) to collect the set of possible
+//   concrete callees.  When exactly one callee is identified, the indirect call
+//   is replaced with a direct call.  This enables the inliner to inline the
+//   formerly-opaque callee on the next pass.
+//
+// Phase 2 – Multi-callee guard dispatch (≤ MaxTargets candidates): when a
+//   small but finite set of concrete callees is found, a sequence of icmp-eq
+//   guards is emitted so the most-likely callee (by use-count heuristic) runs
+//   in the hot path while a fallback retains the original indirect call.
+//
+// Phase 3 – Global function-pointer sinking: internal global variables that
+//   hold a single constant function pointer and are never written after init
+//   are replaced with their concrete callee value, converting all downstream
+//   indirect calls to direct ones and enabling GlobalDCE to remove the global.
+// ─────────────────────────────────────────────────────────────────────────────
+struct AggressiveDevirtualizationPass
+    : public llvm::PassInfoMixin<AggressiveDevirtualizationPass> {
+
+    static constexpr unsigned MaxTargets = 4;
+    static constexpr unsigned MaxDepth   = 16;
+
+    using FnSet = llvm::SmallPtrSet<llvm::Function*, 8>;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    /// Recursively collect all Function* a Value may resolve to.
+    /// Returns false when analysis is impossible (too many targets or loops).
+    static bool collectCallees(llvm::Value* V,
+                                FnSet& Out,
+                                llvm::SmallPtrSetImpl<llvm::Value*>& Visited,
+                                unsigned Depth = 0) {
+        if (!V || Depth > MaxDepth) return false;
+        if (!Visited.insert(V).second) return true; // already processed
+
+        // Direct function reference.
+        if (auto* F = llvm::dyn_cast<llvm::Function>(V)) {
+            if (!F->isDeclaration()) Out.insert(F);
+            return true;
+        }
+
+        // Strip through pointer casts (bitcast, addrspacecast, inttoptr, ptrtoint).
+        if (auto* CE = llvm::dyn_cast<llvm::ConstantExpr>(V)) {
+            switch (CE->getOpcode()) {
+            case llvm::Instruction::BitCast:
+            case llvm::Instruction::AddrSpaceCast:
+            case llvm::Instruction::IntToPtr:
+            case llvm::Instruction::PtrToInt:
+                return collectCallees(CE->getOperand(0), Out, Visited, Depth + 1);
+            default: break;
+            }
+        }
+
+        if (auto* CI = llvm::dyn_cast<llvm::CastInst>(V)) {
+            return collectCallees(CI->getOperand(0), Out, Visited, Depth + 1);
+        }
+
+        // GEP with zero offset — just the base pointer.
+        if (auto* GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(V)) {
+            if (GEP->hasAllZeroIndices())
+                return collectCallees(GEP->getPointerOperand(), Out, Visited, Depth + 1);
+            return false; // non-trivial GEP — give up
+        }
+
+        // Load from a global variable whose initializer is a constant function ptr.
+        if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(V)) {
+            if (auto* GV = llvm::dyn_cast<llvm::GlobalVariable>(LI->getPointerOperand())) {
+                if (GV->isConstant() && GV->hasInitializer())
+                    return collectCallees(GV->getInitializer(), Out, Visited, Depth + 1);
+                // Non-constant global: scan all stores to find possible callee set.
+                FnSet stored;
+                bool allKnown = true;
+                for (auto* U : GV->users()) {
+                    if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(U)) {
+                        llvm::SmallPtrSet<llvm::Value*, 16> innerVisited;
+                        FnSet sub;
+                        if (!collectCallees(SI->getValueOperand(), sub, innerVisited, Depth + 1)) {
+                            allKnown = false;
+                            break;
+                        }
+                        stored.insert(sub.begin(), sub.end());
+                        if (stored.size() > MaxTargets) { allKnown = false; break; }
+                    }
+                }
+                if (allKnown && !stored.empty()) {
+                    Out.insert(stored.begin(), stored.end());
+                    return Out.size() <= MaxTargets;
+                }
+            }
+            return false;
+        }
+
+        // PHI node — union of all incoming values.
+        if (auto* PHI = llvm::dyn_cast<llvm::PHINode>(V)) {
+            for (unsigned i = 0; i < PHI->getNumIncomingValues(); ++i) {
+                if (!collectCallees(PHI->getIncomingValue(i), Out, Visited, Depth + 1))
+                    return false;
+                if (Out.size() > MaxTargets) return false;
+            }
+            return true;
+        }
+
+        // Select — true and false values.
+        if (auto* Sel = llvm::dyn_cast<llvm::SelectInst>(V)) {
+            return collectCallees(Sel->getTrueValue(),  Out, Visited, Depth + 1) &&
+                   collectCallees(Sel->getFalseValue(), Out, Visited, Depth + 1) &&
+                   Out.size() <= MaxTargets;
+        }
+
+        // Alloca with a single store of a known function pointer.
+        if (auto* AI = llvm::dyn_cast<llvm::AllocaInst>(V)) {
+            FnSet stored;
+            bool allKnown = true, hasStore = false;
+            for (auto* U : AI->users()) {
+                if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(U)) {
+                    hasStore = true;
+                    llvm::SmallPtrSet<llvm::Value*, 16> innerVisited;
+                    FnSet sub;
+                    if (!collectCallees(SI->getValueOperand(), sub, innerVisited, Depth + 1)) {
+                        allKnown = false; break;
+                    }
+                    stored.insert(sub.begin(), sub.end());
+                    if (stored.size() > MaxTargets) { allKnown = false; break; }
+                }
+            }
+            if (hasStore && allKnown && !stored.empty()) {
+                Out.insert(stored.begin(), stored.end());
+                return Out.size() <= MaxTargets;
+            }
+            return false;
+        }
+
+        return false; // unrecognised — give up
+    }
+
+    /// Build an optimised dispatch block for a multi-callee indirect call.
+    /// Emits: for each candidate function (sorted by use frequency desc),
+    ///   if (callee_ptr == fn_addr) direct_call(fn, args...)
+    /// with a final fallback indirect call for the remainder.
+    static bool promoteMultiCallee(llvm::CallBase* CB,
+                                   const llvm::SmallVectorImpl<llvm::Function*>& Targets) {
+        // Ensure all targets match the call signature.
+        llvm::FunctionType* FTy = CB->getFunctionType();
+        for (auto* F : Targets) {
+            if (F->getFunctionType() != FTy) return false;
+        }
+
+        llvm::IRBuilder<> B(CB);
+        llvm::BasicBlock* OrigBB = CB->getParent();
+        llvm::Function*   Parent = OrigBB->getParent();
+        llvm::LLVMContext& Ctx   = Parent->getContext();
+
+        // Split OrigBB at CB to get the "rest" continuation block.
+        llvm::BasicBlock* MergeBB = OrigBB->splitBasicBlock(CB, "devirt.merge");
+        // Remove the unconditional branch splitBasicBlock inserted.
+        OrigBB->getTerminator()->eraseFromParent();
+
+        // For non-void calls we'll need a phi in MergeBB.
+        llvm::PHINode* ResultPHI = nullptr;
+        if (!FTy->getReturnType()->isVoidTy()) {
+            B.SetInsertPoint(&MergeBB->front());
+            ResultPHI = B.CreatePHI(FTy->getReturnType(), Targets.size() + 1, "devirt.result");
+        }
+
+        llvm::Value* CalleePtr = CB->getCalledOperand();
+        llvm::SmallVector<llvm::Value*, 8> Args(CB->args().begin(), CB->args().end());
+
+        B.SetInsertPoint(OrigBB);
+        llvm::BasicBlock* FallbackBB = nullptr;
+
+        for (auto* F : Targets) {
+            // Create a "match" block and a "no-match" block.
+            llvm::BasicBlock* MatchBB =
+                llvm::BasicBlock::Create(Ctx, "devirt.match." + F->getName(), Parent, MergeBB);
+            llvm::BasicBlock* NextBB  =
+                llvm::BasicBlock::Create(Ctx, "devirt.next",                  Parent, MergeBB);
+
+            // Guard: callee ptr == address of F
+            llvm::Value* FnPtr = llvm::ConstantExpr::getBitCast(
+                F, CalleePtr->getType());
+            llvm::Value* Cmp = B.CreateICmpEQ(CalleePtr, FnPtr, "devirt.cmp");
+            // Hot path: match is more likely than not (10:1 weight).
+            llvm::MDBuilder MDB(Ctx);
+            B.CreateCondBr(Cmp, MatchBB, NextBB,
+                           MDB.createBranchWeights(10, 1));
+
+            // Direct call in MatchBB.
+            B.SetInsertPoint(MatchBB);
+            llvm::CallInst* DirectCall = B.CreateCall(FTy, F, Args, "devirt.direct");
+            DirectCall->setCallingConv(CB->getCallingConv());
+            DirectCall->setAttributes(CB->getAttributes());
+            B.CreateBr(MergeBB);
+            if (ResultPHI)
+                ResultPHI->addIncoming(DirectCall, MatchBB);
+
+            B.SetInsertPoint(NextBB);
+            FallbackBB = NextBB;
+        }
+
+        // Fallback block: keep the original indirect call.
+        B.SetInsertPoint(FallbackBB);
+        llvm::CallInst* FallbackCall = B.CreateCall(FTy, CalleePtr, Args, "devirt.fallback");
+        FallbackCall->setCallingConv(CB->getCallingConv());
+        FallbackCall->setAttributes(CB->getAttributes());
+        B.CreateBr(MergeBB);
+        if (ResultPHI)
+            ResultPHI->addIncoming(FallbackCall, FallbackBB);
+
+        // Replace uses of the original call with the PHI (or just remove it).
+        if (ResultPHI)
+            CB->replaceAllUsesWith(ResultPHI);
+        CB->eraseFromParent();
+        return true;
+    }
+
+    // ── Phase 3: sink constant global function pointers ──────────────────────
+    static bool sinkConstantFunctionPtrGlobals(llvm::Module& M) {
+        bool Changed = false;
+        llvm::SmallVector<llvm::GlobalVariable*, 16> ToErase;
+
+        for (auto& GV : M.globals()) {
+            if (!GV.hasLocalLinkage()) continue;
+            if (!GV.hasInitializer()) continue;
+            if (GV.isConstant()) continue; // already handled by load-from-const-global
+
+            // Collect all stores.
+            llvm::SmallPtrSet<llvm::Function*, 4> stored;
+            bool allFn = true, hasStore = false;
+            for (auto* U : GV.users()) {
+                if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(U)) {
+                    hasStore = true;
+                    llvm::Value* SV = SI->getValueOperand()->stripPointerCasts();
+                    if (auto* F = llvm::dyn_cast<llvm::Function>(SV))
+                        stored.insert(F);
+                    else { allFn = false; break; }
+                }
+            }
+            if (!hasStore || !allFn || stored.size() != 1) continue;
+            // Also check the initializer itself.
+            llvm::Value* InitF = GV.getInitializer()->stripPointerCasts();
+            if (auto* F = llvm::dyn_cast<llvm::Function>(InitF))
+                stored.insert(F);
+            if (stored.size() != 1) continue;
+
+            [[maybe_unused]] llvm::Function* OnlyFn = *stored.begin();
+
+            // Replace all loads from this global with the concrete function ptr.
+            llvm::SmallVector<llvm::LoadInst*, 8> Loads;
+            for (auto* U : GV.users())
+                if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(U))
+                    Loads.push_back(LI);
+
+            if (Loads.empty()) continue;
+            for (auto* LI : Loads) {
+                llvm::Value* Replacement = llvm::ConstantExpr::getBitCast(
+                    OnlyFn, LI->getType());
+                LI->replaceAllUsesWith(Replacement);
+                LI->eraseFromParent();
+                Changed = true;
+            }
+        }
+        return Changed;
+    }
+
+    // ── main run ─────────────────────────────────────────────────────────────
+    llvm::PreservedAnalyses run(llvm::Module& M,
+                                llvm::ModuleAnalysisManager& /*MAM*/) {
+        bool Changed = false;
+
+        // Phase 3: sink constant global function-pointer globals first so that
+        // the Phase 1/2 analysis can resolve loads from them.
+        Changed |= sinkConstantFunctionPtrGlobals(M);
+
+        // Collect all indirect call sites — snapshot first to avoid
+        // iterator invalidation during promotion.
+        llvm::SmallVector<llvm::CallBase*, 64> IndirectCalls;
+        for (auto& F : M) {
+            if (F.isDeclaration()) continue;
+            for (auto& BB : F)
+                for (auto& I : BB)
+                    if (auto* CB = llvm::dyn_cast<llvm::CallBase>(&I))
+                        if (!CB->getCalledFunction() && !CB->isInlineAsm())
+                            IndirectCalls.push_back(CB);
+        }
+
+        for (auto* CB : IndirectCalls) {
+            // Guard: check the instruction still exists (previous iterations may
+            // have erased it via multi-callee promotion).
+            if (!CB->getParent()) continue;
+
+            llvm::Value* Callee = CB->getCalledOperand();
+            if (!Callee) continue;
+
+            FnSet Targets;
+            llvm::SmallPtrSet<llvm::Value*, 32> Visited;
+            if (!collectCallees(Callee, Targets, Visited)) continue;
+            if (Targets.empty()) continue;
+
+            if (Targets.size() == 1) {
+                // Phase 1: single-target — direct replacement.
+                llvm::Function* F = *Targets.begin();
+                if (F->getFunctionType() != CB->getFunctionType()) continue;
+                CB->setCalledOperand(F);
+                Changed = true;
+            } else if (Targets.size() <= MaxTargets) {
+                // Phase 2: multi-target — guarded dispatch.
+                // Sort by use count so the most-called callee is in the hot path.
+                llvm::SmallVector<llvm::Function*, MaxTargets> Sorted(
+                    Targets.begin(), Targets.end());
+                std::sort(Sorted.begin(), Sorted.end(),
+                    [](llvm::Function* A, llvm::Function* B) {
+                        return A->getNumUses() > B->getNumUses();
+                    });
+                Changed |= promoteMultiCallee(CB, Sorted);
+            }
+        }
+
+        return Changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 struct InterproceduralNullabilityPass
     : public llvm::PassInfoMixin<InterproceduralNullabilityPass> {
 
@@ -2192,6 +2520,52 @@ static void addCanonicalLoopBarrier(llvm::FunctionPassManager& FPM) {
     FPM.addPass(llvm::LCSSAPass());
 }
 
+// ── Canonical post-transformation cleanup helper ───────────────────────────────
+// Adds the standard redundancy-elimination + dead-code-removal + CFG-cleanup
+// sequence that follows any IR-mutating transformation (inlining, specialisation,
+// superoptimiser, constant propagation, …).
+//   withEarlyCSE : prepend EarlyCSEPass(UseMemorySSA=true) — enables memory-
+//                  SSA-based load/store redundancy elimination before GVN.
+//   withMemCpy   : include MemCpyOptPass after DSEPass — needed when the
+//                  transformation may have introduced memcpy/memmove patterns.
+static void addCanonicalCleanup(llvm::FunctionPassManager& FPM,
+                                bool withEarlyCSE = true,
+                                bool withMemCpy   = false) {
+    if (withEarlyCSE)
+        FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+    FPM.addPass(llvm::SCCPPass());
+    FPM.addPass(llvm::CorrelatedValuePropagationPass());
+    FPM.addPass(llvm::NewGVNPass());
+    FPM.addPass(llvm::DSEPass());
+    if (withMemCpy)
+        FPM.addPass(llvm::MemCpyOptPass());
+    FPM.addPass(llvm::InstCombinePass());
+    FPM.addPass(llvm::ADCEPass());
+    FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+}
+
+// ── Lightweight post-propagation cleanup ──────────────────────────────────────
+// Adds the minimal four-pass sequence that is sufficient after any constant-
+// propagation step (ConstArgPropagation, SCCP, etc.) where only folding and
+// dead-code removal are needed — no GVN or MemorySSA required.
+static void addLightCleanup(llvm::FunctionPassManager& FPM) {
+    FPM.addPass(llvm::SCCPPass());
+    FPM.addPass(llvm::InstCombinePass());
+    FPM.addPass(llvm::ADCEPass());
+    FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+}
+
+// ── Memory promotion preamble ──────────────────────────────────────────────────
+// Promotes alloca-based memory to SSA registers (SROA → mem2reg) preceded by
+// MemorySSA-backed EarlyCSE to maximise the number of scalar defs available to
+// the subsequent analysis passes.  Used at the head of every fresh function
+// pipeline (optimizeFunction and the OPTMAX per-function pipeline).
+static void addMemoryPromotion(llvm::FunctionPassManager& FPM) {
+    FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
+    FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+    FPM.addPass(llvm::PromotePass());
+}
+
 void CodeGenerator::runOptimizationPasses() {
     // Ensure the native target is initialized before we try to create a
     // TargetMachine.  These calls are idempotent and fast after the first.
@@ -2261,9 +2635,16 @@ void CodeGenerator::runOptimizationPasses() {
         // Increase inliner threshold from the LLVM default (225) to account
         PTO.InlinerThreshold = 500;
     }
-    if (optimizationLevel == OptimizationLevel::O3) {
-        PTO.InlinerThreshold = 3000; // aggressive inlining for maximum IPC (compile time not a concern)
-    }
+    // NOTE: Do NOT further increase PTO.InlinerThreshold at O3 for the standard
+    // pipeline.  A threshold of 3000 in the standard pipeline causes the LLVM
+    // inliner to pull every callee (including all OPTMAX benchmark functions)
+    // into their callers indiscriminately.  When a large switch dispatches to
+    // 90+ functions, the resulting merged function has tens of thousands of basic
+    // blocks and exhausts LLVM's recursive-DFS stack (DominatorTree, GVN,
+    // SimplifyCFG), causing a SIGSEGV.  The OPTMAX-specific pipeline keeps its
+    // own PTOMax.InlinerThreshold = 3000 which is correct: OPTMAX functions are
+    // processed one at a time so the aggressive threshold only applies within a
+    // single hot kernel, never across an unlimited call graph.
     // ForgetAllSCEVInLoopUnroll forces SCEV to recompute trip counts after
     if (optimizationLevel >= OptimizationLevel::O2) {
         PTO.ForgetAllSCEVInLoopUnroll = true;
@@ -2609,7 +2990,9 @@ void CodeGenerator::runOptimizationPasses() {
             MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
             // CalledValuePropagation propagates known function pointer values
             // through indirect calls, enabling devirtualization and inlining.
+            MPM.addPass(AggressiveDevirtualizationPass());
             MPM.addPass(llvm::CalledValuePropagationPass());
+            MPM.addPass(AggressiveDevirtualizationPass());
             // ConstantMerge deduplicates identical global constants across the
             MPM.addPass(llvm::ConstantMergePass());
         });
@@ -2911,6 +3294,32 @@ void CodeGenerator::runOptimizationPasses() {
     PostPB.registerLoopAnalyses(PostLAM);
     PostPB.crossRegisterProxies(PostLAM, PostFAM, PostCGAM, PostMAM);
 
+    // ── Post-wave barrier infrastructure ─────────────────────────────────
+    // waveIndex is incremented and a fresh ProgramFactsSnapshot is computed
+    // after each optimization wave.  The snapshot provides a globally-coherent
+    // view of the program (purity, nullability, const-arg patterns, loop
+    // structure, dead-code likelihood) so subsequent waves can operate with
+    // better information.  computeProgramFacts is pure-analysis: it never
+    // modifies the module.
+    unsigned waveIndex = 0;
+    auto advanceWave = [&](bool verbose, const char* waveName) -> omscript::ProgramFactsSnapshot {
+        ++waveIndex;
+        auto s = omscript::computeProgramFacts(*module, PostMAM, waveIndex);
+        if (verbose) {
+            std::cout << "    [wave " << waveIndex << " / " << waveName << "] "
+                      << s.definedFunctions << " functions, "
+                      << s.totalInstructions << " instrs, "
+                      << s.pureFunctions.size() << " pure, "
+                      << s.totalConstArgCallSites << " const-arg sites, "
+                      << s.unreachableFunctions.size() << " unreachable"
+                      << '\n';
+        }
+        return s;
+    };
+
+    // Wave 1: main LLVM pipeline already ran; PostMAM is ready.
+    omscript::ProgramFactsSnapshot snapshot = advanceWave(verbose_, "main-pipeline");
+
     // Helper: run an FPM on a specific subset of functions using PostMAM.
     auto runPostFPMOnFuncs = [&](llvm::FunctionPassManager FPM,
                                  std::vector<llvm::Function*> funcs) {
@@ -3008,14 +3417,7 @@ void CodeGenerator::runOptimizationPasses() {
         // Post-recursive-inlining cleanup (new-PM).
         if (!inlinedFuncs.empty()) {
             llvm::FunctionPassManager PostInlineFPM;
-            PostInlineFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
-            PostInlineFPM.addPass(llvm::SCCPPass());
-            PostInlineFPM.addPass(llvm::CorrelatedValuePropagationPass());
-            PostInlineFPM.addPass(llvm::NewGVNPass());
-            PostInlineFPM.addPass(llvm::DSEPass());
-            PostInlineFPM.addPass(llvm::InstCombinePass());
-            PostInlineFPM.addPass(llvm::ADCEPass());
-            PostInlineFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+            addCanonicalCleanup(PostInlineFPM);
             runPostFPMOnFuncs(std::move(PostInlineFPM),
                               {inlinedFuncs.begin(), inlinedFuncs.end()});
         }
@@ -3122,14 +3524,7 @@ void CodeGenerator::runOptimizationPasses() {
                 SpecFPM.addPass(llvm::InstSimplifyPass());
                 SpecFPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
                 SpecFPM.addPass(llvm::PromotePass());
-                SpecFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
-                SpecFPM.addPass(llvm::SCCPPass());
-                SpecFPM.addPass(llvm::CorrelatedValuePropagationPass());
-                SpecFPM.addPass(llvm::NewGVNPass());
-                SpecFPM.addPass(llvm::DSEPass());
-                SpecFPM.addPass(llvm::InstCombinePass());
-                SpecFPM.addPass(llvm::ADCEPass());
-                SpecFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                addCanonicalCleanup(SpecFPM);
                 runPostFPMOnFuncs(std::move(SpecFPM), std::move(specFuncList));
             }
         }
@@ -3141,13 +3536,15 @@ void CodeGenerator::runOptimizationPasses() {
         ConstPropMPM.addPass(ConstArgPropagationPass());
         // Follow up with function-level cleanup to fold the newly-constant args.
         llvm::FunctionPassManager ConstPropFPM;
-        ConstPropFPM.addPass(llvm::SCCPPass());
-        ConstPropFPM.addPass(llvm::InstCombinePass());
-        ConstPropFPM.addPass(llvm::ADCEPass());
-        ConstPropFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+        addLightCleanup(ConstPropFPM);
         ConstPropMPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(ConstPropFPM)));
         ConstPropMPM.run(*module, PostMAM);
     }
+
+    // Wave 2 barrier: after recursive inlining, function specialization, and
+    // constant-argument propagation.  The snapshot now reflects any newly-inlined
+    // or specialized functions and updated attribute information.
+    snapshot = advanceWave(verbose_, "spec+constprop");
 
     // Superoptimizer: run after the standard LLVM pipeline to catch patterns
     if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
@@ -3197,21 +3594,19 @@ void CodeGenerator::runOptimizationPasses() {
 
         // Post-superoptimizer cleanup (new-PM, functions ≤2000 instructions).
         if (totalSuperOpts > 0) {
-            std::vector<llvm::Function*> smallFuncs;
-            for (auto& func : *module) {
-                if (!func.isDeclaration() && func.getInstructionCount() <= 2000)
-                    smallFuncs.push_back(&func);
-            }
+            // Helper: collect all non-declaration functions up to a given size.
+            auto collectSmallFuncs = [&](unsigned maxInstrs) {
+                std::vector<llvm::Function*> out;
+                for (auto& func : *module)
+                    if (!func.isDeclaration() && func.getInstructionCount() <= maxInstrs)
+                        out.push_back(&func);
+                return out;
+            };
+
+            auto smallFuncs = collectSmallFuncs(2000);
             if (!smallFuncs.empty()) {
                 llvm::FunctionPassManager PSuperFPM;
-                PSuperFPM.addPass(llvm::SCCPPass());
-                PSuperFPM.addPass(llvm::CorrelatedValuePropagationPass());
-                PSuperFPM.addPass(llvm::NewGVNPass());
-                PSuperFPM.addPass(llvm::DSEPass());
-                PSuperFPM.addPass(llvm::MemCpyOptPass());
-                PSuperFPM.addPass(llvm::InstCombinePass());
-                PSuperFPM.addPass(llvm::ADCEPass());
-                PSuperFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                addCanonicalCleanup(PSuperFPM, /*withEarlyCSE=*/false, /*withMemCpy=*/true);
                 runPostFPMOnFuncs(std::move(PSuperFPM), std::move(smallFuncs));
             }
 
@@ -3229,17 +3624,10 @@ void CodeGenerator::runOptimizationPasses() {
 
                 // Lightweight cleanup after pass 2.  Without this, pass-2
                 if (total2 > 0) {
-                    std::vector<llvm::Function*> smallFuncs2;
-                    for (auto& func : *module) {
-                        if (!func.isDeclaration() && func.getInstructionCount() <= 2000)
-                            smallFuncs2.push_back(&func);
-                    }
+                    auto smallFuncs2 = collectSmallFuncs(2000);
                     if (!smallFuncs2.empty()) {
                         llvm::FunctionPassManager PSuperFPM2;
-                        PSuperFPM2.addPass(llvm::SCCPPass());
-                        PSuperFPM2.addPass(llvm::InstCombinePass());
-                        PSuperFPM2.addPass(llvm::ADCEPass());
-                        PSuperFPM2.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                        addLightCleanup(PSuperFPM2);
                         runPostFPMOnFuncs(std::move(PSuperFPM2), std::move(smallFuncs2));
                     }
                 }
@@ -3258,6 +3646,11 @@ void CodeGenerator::runOptimizationPasses() {
                       << postConvCount << " conversions" << '\n';
         }
     }
+
+    // Wave 3 barrier: after superoptimizer (idiom recognition, algebraic
+    // simplification, synthesis).  The snapshot captures which functions shrank
+    // enough to become new inlining or specialization candidates.
+    snapshot = advanceWave(verbose_, "superopt");
 
     // Hardware Graph Optimization Engine: run after the superoptimizer when
     if (enableHGOE_ && optimizationLevel >= OptimizationLevel::O2) {
@@ -3294,6 +3687,11 @@ void CodeGenerator::runOptimizationPasses() {
         }
     }
 
+    // Wave 4 barrier: after HGOE (hardware-graph scheduling and annotation).
+    // The snapshot now reflects any instruction-count changes from HGOE
+    // reordering, updated loop metadata, and new attribute deductions.
+    snapshot = advanceWave(verbose_, "hgoe");
+
     // ── Speculative Devectorization & Revectorization (SDR) ────────────────
     if (enableSDR_ && optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) std::cout << "    Running SDR pass..." << '\n';
@@ -3322,6 +3720,11 @@ void CodeGenerator::runOptimizationPasses() {
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSDR_) {
         std::cout << "    SDR disabled (-fno-sdr)" << '\n';
     }
+
+    // Wave 5 barrier: after SDR (speculative devectorization / revectorization).
+    // The snapshot captures updated vector lane counts, any functions narrowed
+    // or widened, and revised instruction counts that inform the IPOF pass.
+    snapshot = advanceWave(verbose_, "sdr");
 
     // ── Implicit Phase Ordering Fixer (IPOF) ────────────────────────────────
     if (enableIPOF_ && optimizationLevel >= OptimizationLevel::O2) {
@@ -3355,6 +3758,12 @@ void CodeGenerator::runOptimizationPasses() {
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableIPOF_) {
         std::cout << "    IPOF disabled (-fno-ipof)" << '\n';
     }
+
+    // Wave 6 barrier: after IPOF.  This is the final snapshot before the
+    // closing pipeline.  The closing pipeline uses snapshot.pureFunctions and
+    // snapshot.unreachableFunctions to skip memory-intensive passes on functions
+    // that are already known-pure or dead (GlobalDCE will remove them anyway).
+    snapshot = advanceWave(verbose_, "ipof");
 
     // -----------------------------------------------------------------------
     if (optimizationLevel >= OptimizationLevel::O2) {
@@ -3517,7 +3926,23 @@ void CodeGenerator::runOptimizationPasses() {
             // eliminating branch-mispredict flushes before the final CFG cleanup.
             CloseFPM.addPass(BranchEntropyReductionPass());
             CloseFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
-            runPostFPMOnAll(std::move(CloseFPM));
+
+            // Use the Wave 6 snapshot to skip unreachable functions: GlobalDCE
+            // will remove them anyway, so running the closing pipeline on them
+            // wastes compile time.  Reachable functions (including those with
+            // unknown reachability) always get the full closing treatment.
+            if (!snapshot.unreachableFunctions.empty()) {
+                std::vector<llvm::Function*> closingTargets;
+                closingTargets.reserve(snapshot.definedFunctions);
+                for (auto& F : *module) {
+                    if (!F.isDeclaration() &&
+                        !snapshot.isUnreachable(F.getName().str()))
+                        closingTargets.push_back(&F);
+                }
+                runPostFPMOnFuncs(std::move(CloseFPM), std::move(closingTargets));
+            } else {
+                runPostFPMOnAll(std::move(CloseFPM));
+            }
             if (verbose_) {
                 std::cout << "    Unified closing new-PM pipeline complete" << '\n';
             }
@@ -3555,9 +3980,7 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
 
     // Build the per-function pipeline.
     llvm::FunctionPassManager FPMFunc;
-    FPMFunc.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
-    FPMFunc.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
-    FPMFunc.addPass(llvm::PromotePass());
+    addMemoryPromotion(FPMFunc);
     FPMFunc.addPass(llvm::InstCombinePass());
     FPMFunc.addPass(llvm::ReassociatePass());
     FPMFunc.addPass(llvm::NewGVNPass());
@@ -3587,9 +4010,458 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
     MPMFunc.run(*module, MAMFunc);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// OptMaxLoopAnnotationPass — injects !llvm.loop metadata derived from an
+// OptMaxConfig::LoopConfig into every loop in the function.
+//
+// This pass ensures that explicit user hints such as @optmax(loop.vectorize=true)
+// or @optmax(loop.unrollCount=8) are reflected in the LLVM loop metadata before
+// the vectoriser and unroller fire, so the cost model respects the annotation.
+// ─────────────────────────────────────────────────────────────────────────────
+struct OptMaxLoopAnnotationPass
+    : public llvm::PassInfoMixin<OptMaxLoopAnnotationPass> {
+
+    LoopConfig cfg;
+    explicit OptMaxLoopAnnotationPass(LoopConfig c) : cfg(c) {}
+
+    static void annotateLoop(llvm::Loop* L, const LoopConfig& cfg) {
+        llvm::LLVMContext& Ctx = L->getHeader()->getContext();
+        llvm::SmallVector<llvm::Metadata*, 8> MDs;
+
+        // Preserve any existing loop metadata.
+        llvm::MDNode* existingMD = L->getLoopID();
+        if (existingMD) {
+            for (unsigned i = 0, e = existingMD->getNumOperands(); i != e; ++i)
+                MDs.push_back(existingMD->getOperand(i));
+        } else {
+            // First operand of a loop ID must be a self-reference placeholder;
+            // we'll fix it up below.
+            MDs.push_back(nullptr);
+        }
+
+        auto addMDFlag = [&](llvm::StringRef key) {
+            MDs.push_back(llvm::MDNode::get(
+                Ctx, {llvm::MDString::get(Ctx, key)}));
+        };
+        auto addMDInt = [&](llvm::StringRef key, unsigned val) {
+            MDs.push_back(llvm::MDNode::get(
+                Ctx, {llvm::MDString::get(Ctx, key),
+                      llvm::ConstantAsMetadata::get(
+                          llvm::ConstantInt::get(
+                              llvm::Type::getInt32Ty(Ctx), val))}));
+        };
+
+        if (cfg.vectorize)
+            addMDFlag("llvm.loop.vectorize.enable");
+        if (cfg.noVectorize)
+            addMDFlag("llvm.loop.vectorize.disable");
+        if (cfg.unrollCount > 0)
+            addMDInt("llvm.loop.unroll.count",
+                     static_cast<unsigned>(cfg.unrollCount));
+        if (cfg.independent) {
+            // Mark the loop as having no cross-iteration memory dependencies so
+            // the vectorizer and interleaver can proceed without alias checks.
+            addMDFlag("llvm.loop.parallel_accesses");
+        }
+        if (cfg.tileSize > 0) {
+            // loop.tileSize maps to llvm.loop.interleave.count: the tileSize
+            // value controls how many independent copies of the loop body the
+            // vectorizer should interleave (software pipelining for throughput).
+            // For example, tileSize=4 tells the cost model to issue 4
+            // independent iterations to fill latency slots on an out-of-order
+            // core, improving pipeline utilisation for memory-bound loops.
+            addMDInt("llvm.loop.interleave.count",
+                     static_cast<unsigned>(cfg.tileSize));
+        }
+        if (cfg.parallel) {
+            // loop.parallel=true: emit an access-group MDNode attached to the
+            // loop header so the vectorizer treats all memory accesses in this
+            // loop as belonging to a single access group — equivalent to
+            // annotating every load/store with !llvm.access.group and setting
+            // !llvm.loop.parallel_accesses to point at that group.  This allows
+            // LoopVectorize to vectorize without generating alias-check runtime
+            // guards, under the user's assertion that all accesses are safe to
+            // reorder.
+            llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(Ctx, {});
+            MDs.push_back(llvm::MDNode::get(
+                Ctx, {llvm::MDString::get(Ctx, "llvm.loop.parallel_accesses"),
+                      accessGroup}));
+            // Walk the loop blocks and attach the same access group to every
+            // load and store so the vectorizer can prove they're in the group.
+            for (llvm::BasicBlock* BB : L->blocks()) {
+                for (llvm::Instruction& I : *BB) {
+                    if (llvm::isa<llvm::LoadInst>(I) ||
+                        llvm::isa<llvm::StoreInst>(I)) {
+                        llvm::MDNode* existing =
+                            I.getMetadata(llvm::LLVMContext::MD_access_group);
+                        llvm::MDNode* updated =
+                            existing
+                            ? llvm::MDNode::get(
+                                  Ctx, {existing, accessGroup})
+                            : accessGroup;
+                        I.setMetadata(llvm::LLVMContext::MD_access_group,
+                                      updated);
+                    }
+                }
+            }
+        }
+        if (cfg.fuse) {
+            // loop.fuse=true: set llvm.loop.distribute.enable=false to prevent
+            // LoopDistributePass from splitting this loop into independent
+            // partitions.  This is the correct directive when the programmer
+            // wants adjacent loops to be fused together: LoopFusePass will
+            // merge them, but only if neither has been distributed first.
+            MDs.push_back(llvm::MDNode::get(
+                Ctx, {llvm::MDString::get(Ctx, "llvm.loop.distribute.enable"),
+                      llvm::ConstantAsMetadata::get(
+                          llvm::ConstantInt::getFalse(Ctx))}));
+        }
+
+        if (MDs.size() == 1 && !existingMD)
+            return; // Nothing to annotate
+
+        llvm::MDNode* newMD = llvm::MDNode::get(Ctx, MDs);
+        // Fix up the self-reference in slot 0.
+        newMD->replaceOperandWith(0, newMD);
+        L->setLoopID(newMD);
+
+        // Recurse into sub-loops.
+        for (llvm::Loop* sub : L->getSubLoops())
+            annotateLoop(sub, cfg);
+    }
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& FAM) {
+        if (F.isDeclaration()) return llvm::PreservedAnalyses::all();
+        auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
+        bool changed = false;
+        for (llvm::Loop* L : LI) {
+            annotateLoop(L, cfg);
+            changed = true;
+        }
+        if (!changed) return llvm::PreservedAnalyses::all();
+        llvm::PreservedAnalyses PA;
+        PA.preserveSet<llvm::CFGAnalyses>();
+        return PA;
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildOptMaxScalarFPM — Phases 1 – 3 of the OPTMAX per-function pipeline.
+//
+// Returns an FPM containing the memory-promotion, loop canonicalization,
+// unrolling, and scalar optimization phases.  This FPM is safe to iterate
+// multiple times on the same function (convergence loop) because it does NOT
+// include vectorization — vectorization is non-idempotent and expensive to
+// re-run every iteration.
+//
+// Safety gating:
+//   safety=On (default): conservative — IRCE, RangeBoundsCheckHoist, and
+//       ConstraintElimination run; speculation bonus is standard.
+//   safety=Relaxed: adds more aggressive loop unswitching and a higher
+//       speculation bonus to the SimplifyCFG options.
+//   safety=Off: additionally adds SpeculativeExecutionPass extra, applies the
+//       hyperblock-aggressive SimplifyCFG options after the unroll phase, and
+//       injects !llvm.loop.mustprogress removal to allow the optimiser to
+//       assume all loops terminate (useful for mathematical kernels with no
+//       early exits).
+// ─────────────────────────────────────────────────────────────────────────────
+static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
+    const SafetyLevel safety = cfg.safety;
+    const bool relaxed = safety != SafetyLevel::On;
+    const bool safetyOff = safety == SafetyLevel::Off;
+
+    llvm::FunctionPassManager FPM;
+
+    // ── Phase 1: Memory promotion and early canonicalization ─────────────
+    addMemoryPromotion(FPM);
+    FPM.addPass(llvm::InstCombinePass());
+    FPM.addPass(llvm::AggressiveInstCombinePass());
+    FPM.addPass(llvm::ReassociatePass());
+    // EarlyCSE (MemorySSA-backed): reassociation can expose common sub-
+    // expressions that are not yet visible to NewGVN (e.g., identical sums
+    // produced by rebalancing two separate expression trees into the same
+    // canonical form).  Running EarlyCSE here catches them cheaply before
+    // the more expensive NewGVN and SCCP analyses fire.
+    FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+    FPM.addPass(llvm::NewGVNPass());
+    FPM.addPass(llvm::SCCPPass());
+    FPM.addPass(llvm::CorrelatedValuePropagationPass());
+    FPM.addPass(llvm::BDCEPass());
+    FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+    FPM.addPass(llvm::ADCEPass());
+    // CallSiteSplitting: clone call sites at branch points to give SCCP /
+    // InstCombine a separate constant-argument context for each branch.
+    FPM.addPass(llvm::CallSiteSplittingPass());
+    // InstSimplify: fast complement to InstCombine; fires after attribute
+    // deduction from PreIPO so split-clone bodies benefit.
+    FPM.addPass(llvm::InstSimplifyPass());
+
+    // ── Phase 2: Loop canonicalization and invariant hoisting ────────────
+    addCanonicalLoopBarrier(FPM);
+    {
+        llvm::LoopPassManager LPM;
+        LPM.addPass(llvm::LoopRotatePass());
+        LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
+        LPM.addPass(llvm::LoopInterchangePass());
+        // safety=Relaxed/Off: allow non-trivial loop unswitching, which clones
+        // the loop body for each branch of a loop-invariant condition.  This is
+        // aggressive but legal and produces better vectorizable residuals.
+        LPM.addPass(llvm::SimpleLoopUnswitchPass(/*NonTrivial=*/relaxed));
+        LPM.addPass(llvm::LoopIdiomRecognizePass());
+        LPM.addPass(llvm::IndVarSimplifyPass());
+        LPM.addPass(llvm::LoopPredicationPass());
+        LPM.addPass(llvm::LoopBoundSplitPass());
+        LPM.addPass(llvm::LoopDeletionPass());
+        LPM.addPass(llvm::LoopInstSimplifyPass());
+        LPM.addPass(llvm::LoopSimplifyCFGPass());
+        LPM.addPass(llvm::CanonicalizeFreezeInLoopsPass());
+        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+            std::move(LPM), /*UseMemorySSA=*/true));
+    }
+    // Software prefetch for predictable-stride loops.
+    FPM.addPass(llvm::LoopDataPrefetchPass());
+
+    // Apply user-specified LoopConfig hints to loop metadata so the unroller
+    // and vectoriser see them before they fire.  All six LoopConfig fields are
+    // now wired up: vectorize, noVectorize, unrollCount, independent, tileSize,
+    // parallel, fuse.
+    if (cfg.loop.vectorize || cfg.loop.noVectorize ||
+        cfg.loop.unrollCount > 0 || cfg.loop.independent ||
+        cfg.loop.tileSize > 0 || cfg.loop.parallel || cfg.loop.fuse) {
+        FPM.addPass(OptMaxLoopAnnotationPass(cfg.loop));
+    }
+
+    // ── Phase 2.5: Loop unrolling ─────────────────────────────────────────
+    addCanonicalLoopBarrier(FPM);
+    {
+        llvm::LoopPassManager LPM;
+        LPM.addPass(llvm::LoopFlattenPass());
+        LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/3));
+        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(LPM)));
+    }
+    // LoopUnrollPass: safety=Off / Relaxed applies a more aggressive threshold
+    // (OnlyWhenForced=false, ForgetSCEV=true) with an unlimited unroll count;
+    // safety=On uses the standard O3 settings.
+    {
+        llvm::LoopUnrollOptions unrollOpts(/*OptLevel=*/3,
+                                           /*OnlyWhenForced=*/false,
+                                           /*ForgetSCEV=*/true);
+        if (safetyOff)
+            // safety=Off: the caller guarantees no early-exit conditions (e.g.,
+            // pure mathematical kernels).  Full-unroll up to 512 iterations
+            // eliminates induction variable overhead and enables aggressive
+            // constant folding.  The loop body should be small (≤10 instrs) for
+            // this to be beneficial — larger bodies are auto-limited by the
+            // unroller's code-size model.
+            unrollOpts.setFullUnrollMaxCount(512);
+        else if (relaxed)
+            // safety=Relaxed: moderately higher full-unroll threshold than the
+            // O3 default (which is typically 32–64).  Applied only to loops the
+            // unroller's cost model deems profitable.
+            unrollOpts.setFullUnrollMaxCount(256);
+        FPM.addPass(llvm::LoopUnrollPass(unrollOpts));
+    }
+    // Post-unroll induction variable canonicalization: unrolling can create
+    // chains of induction variable updates (e.g. i.0=i.1+4, i.1=i.2+4, …)
+    // that IndVarSimplify can collapse into a single canonical form.  This
+    // reduces the trip-count expression complexity that the vectorizer cost
+    // model sees, improving vectorization decisions for partially-unrolled
+    // loops.  UseMemorySSA=true is required for the loop adaptor because
+    // LICMPass (which IndVarSimplify may invoke as a helper) needs MemorySSA.
+    {
+        llvm::LoopPassManager LPMPostUnroll;
+        LPMPostUnroll.addPass(llvm::IndVarSimplifyPass());
+        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+            std::move(LPMPostUnroll), /*UseMemorySSA=*/true));
+    }
+    // Post-unroll redundancy elimination.
+    FPM.addPass(llvm::NewGVNPass());
+    FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+    FPM.addPass(llvm::InstCombinePass());
+    FPM.addPass(llvm::CorrelatedValuePropagationPass());
+    FPM.addPass(llvm::JumpThreadingPass());
+    FPM.addPass(llvm::DFAJumpThreadingPass());
+    FPM.addPass(llvm::SpeculativeExecutionPass());
+    // safety=Off: use hyperblock-aggressive CFG opts (higher speculation bonus,
+    // no canonical-loop requirement) for maximal if-conversion.
+    FPM.addPass(llvm::SimplifyCFGPass(safetyOff ? hyperblockCFGOpts()
+                                                 : aggressiveCFGOpts()));
+    FPM.addPass(llvm::InstCombinePass());
+    FPM.addPass(llvm::ADCEPass());
+
+    // ── Phase 3: Scalar optimizations ────────────────────────────────────
+    // FlattenCFG (safety=Off only): convert diamonds and if-ladders into
+    // straight-line code with select/shuffle before the scalar opts and
+    // vectorizer run.  This exposes data-parallel patterns to SLPVectorizer
+    // and LoopVectorize that would otherwise be guarded by branches.  Only
+    // enabled when safety=Off because it may introduce speculative execution
+    // of operands that are UB when the branch is not taken (e.g. divide-by-
+    // zero guarded by a conditional).
+    if (safetyOff)
+        FPM.addPass(llvm::FlattenCFGPass());
+    FPM.addPass(llvm::SinkingPass());
+    FPM.addPass(llvm::StraightLineStrengthReducePass());
+    FPM.addPass(llvm::NaryReassociatePass());
+    FPM.addPass(llvm::ReassociatePass());
+    FPM.addPass(llvm::TailCallElimPass());
+    FPM.addPass(llvm::ConstantHoistingPass());
+    FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
+    FPM.addPass(llvm::PartiallyInlineLibCallsPass());
+    FPM.addPass(llvm::LibCallsShrinkWrapPass());
+    FPM.addPass(llvm::DSEPass());
+    FPM.addPass(llvm::MemCpyOptPass());
+    FPM.addPass(llvm::MergedLoadStoreMotionPass());
+    FPM.addPass(StoreWideningPass());
+    FPM.addPass(MemoryAccessPhaseReorderPass());
+    FPM.addPass(llvm::Float2IntPass());
+    FPM.addPass(llvm::DivRemPairsPass());
+    FPM.addPass(llvm::InferAlignmentPass());
+    FPM.addPass(llvm::MergeICmpsPass());
+    FPM.addPass(CrossIterLoadReusePass());
+    FPM.addPass(LoopInvariantReciprocalHoistPass());
+    FPM.addPass(MACPatternPass());
+    // Post-MAC cleanup: CSE and GVN to exploit newly-created fmuladd patterns
+    // immediately, before bounds-check and constraint passes see the IR.
+    FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+    FPM.addPass(llvm::NewGVNPass());
+    // Bounds-check–aware passes: omitted for safety=Off (the caller guarantees
+    // accesses are always in bounds, so these passes provide no new information).
+    if (safety != SafetyLevel::Off) {
+        FPM.addPass(llvm::IRCEPass());
+        FPM.addPass(RangeBoundsCheckHoistPass());
+        FPM.addPass(llvm::ConstraintEliminationPass());
+    }
+    FPM.addPass(llvm::GuardWideningPass());
+    FPM.addPass(llvm::SCCPPass());
+    FPM.addPass(llvm::InstCombinePass());
+    // AggressiveInstCombine catches non-trivial multi-use and multi-instruction
+    // patterns that standard InstCombine misses (e.g., rotate idioms, select
+    // chains, bitfield extractions).  Runs before TreeHeightReduction so the
+    // tree balancer sees a clean, already-simplified expression tree.
+    FPM.addPass(llvm::AggressiveInstCombinePass());
+    FPM.addPass(TreeHeightReductionPass());
+    FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+    FPM.addPass(AdvancedBranchWeightAnnotationPass());
+    FPM.addPass(ConditionalStoreSinkPass());
+    FPM.addPass(BranchEntropyReductionPass());
+    FPM.addPass(llvm::ADCEPass());
+    // Final Phase 3 sweep: re-run SCCP + InstCombine + ADCE to fold any
+    // constant opportunities exposed by the preceding scalar passes
+    // (BranchEntropyReduction, ConditionalStoreSink, TreeHeightReduction, etc.
+    // can all expose new simplification targets).  This ensures the function is
+    // in the most reduced canonical form before entering the vectorization FPM,
+    // where a cleaner scalar representation leads to wider and more accurate
+    // cost-model decisions.
+    FPM.addPass(llvm::SCCPPass());
+    FPM.addPass(llvm::CorrelatedValuePropagationPass());
+    FPM.addPass(llvm::InstCombinePass());
+    FPM.addPass(llvm::ADCEPass());
+
+    return FPM;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildOptMaxVecFPM — Phase 4 + 5 of the OPTMAX per-function pipeline.
+//
+// Runs once per function after the scalar convergence loop.  Contains the full
+// vectorization pipeline and post-vectorization cleanup.  Separated from the
+// scalar FPM so that vectorization is not re-attempted on every scalar
+// iteration — vectorization is expensive and non-idempotent.
+// ─────────────────────────────────────────────────────────────────────────────
+static llvm::FunctionPassManager buildOptMaxVecFPM(const OptMaxConfig& cfg) {
+    llvm::FunctionPassManager FPM;
+
+    // ── Phase 4: Vectorization ────────────────────────────────────────────
+    addCanonicalLoopBarrier(FPM);
+    FPM.addPass(llvm::AlignmentFromAssumptionsPass());
+    {
+        llvm::LoopPassManager LPM;
+        // Re-canonicalize loops after scalar optimizations so the vectorizer
+        // cost model sees the most reduced loop bodies.
+        LPM.addPass(llvm::LoopRotatePass());
+        LPM.addPass(llvm::IndVarSimplifyPass());
+        // Second LoopInterchange: after unrolling + scalar opts, the inner-loop
+        // stride may have changed — re-interchange to restore unit stride for
+        // the widest possible vectorization.
+        LPM.addPass(llvm::LoopInterchangePass());
+        LPM.addPass(llvm::LoopVersioningLICMPass());
+        LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
+        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+            std::move(LPM), /*UseMemorySSA=*/true));
+    }
+    FPM.addPass(llvm::LoopDistributePass());
+    FPM.addPass(llvm::LoopFusePass());
+    // Eliminate loads that are live across iterations (stencil/window patterns).
+    FPM.addPass(llvm::LoopLoadEliminationPass());
+    // Sharpen value ranges one final time before the vectorizer cost model runs.
+    FPM.addPass(llvm::CorrelatedValuePropagationPass());
+    FPM.addPass(llvm::BDCEPass());
+    FPM.addPass(llvm::InstCombinePass());
+    FPM.addPass(llvm::IRCEPass());
+    // Loop vectorizer.
+    FPM.addPass(llvm::LoopVectorizePass(
+        llvm::LoopVectorizeOptions(/*InterleaveOnlyWhenForced=*/false,
+                                   /*VectorizeOnlyWhenForced=*/
+                                   // safety=On: respect cost model; otherwise
+                                   // force vectorization when hints say so.
+                                   false)));
+    // SLP vectorizer: pack independent scalar ops into SIMD ops.
+    FPM.addPass(llvm::SLPVectorizerPass());
+    FPM.addPass(llvm::VectorCombinePass());
+    // LoadStoreVectorizer: combine adjacent scalar loads/stores.
+    FPM.addPass(llvm::LoadStoreVectorizerPass());
+    // Software prefetch after vectorization: now that loops are widened, the
+    // prefetch distance can target the vectorized stride rather than scalar.
+    FPM.addPass(llvm::LoopDataPrefetchPass());
+
+    // ── Phase 5: Post-vectorization cleanup ──────────────────────────────
+    FPM.addPass(llvm::AggressiveInstCombinePass());
+    FPM.addPass(llvm::InstCombinePass());
+    addCanonicalLoopBarrier(FPM);
+    {
+        llvm::LoopPassManager LPM;
+        LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
+        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+            std::move(LPM), /*UseMemorySSA=*/true));
+    }
+    FPM.addPass(llvm::DSEPass());
+    FPM.addPass(llvm::MemCpyOptPass());
+    FPM.addPass(llvm::NewGVNPass());
+    FPM.addPass(llvm::InstCombinePass());
+    // Float2Int: convert float operations to integer when the values are
+    // provably representable as integers (e.g., float indices, loop counters).
+    // Runs after GVN so the integer ranges are well-known.
+    FPM.addPass(llvm::Float2IntPass());
+    // DivRemPairs: reuse quotient from div for rem to save an extra divide.
+    FPM.addPass(llvm::DivRemPairsPass());
+    // InferAlignment / AlignmentFromAssumptions: refine alignment metadata
+    // for vector loads/stores after vectorization to allow the back-end to
+    // emit aligned move instructions (vmovaps vs vmovups on x86).
+    FPM.addPass(llvm::InferAlignmentPass());
+    FPM.addPass(llvm::AlignmentFromAssumptionsPass());
+    // ConstantHoisting: materialize expensive constants (e.g. large immediates
+    // introduced by the vectorizer) once per function rather than once per use.
+    FPM.addPass(llvm::ConstantHoistingPass());
+    // SeparateConstOffsetFromGEP: factor constant byte offsets out of GEP
+    // chains so the back-end can fold them into addressing modes directly.
+    FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
+    FPM.addPass(llvm::VectorCombinePass());
+    FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+    FPM.addPass(llvm::LoopSinkPass());
+    FPM.addPass(llvm::ADCEPass());
+
+    // Warn about missed vectorization / unrolling when report=true.  The pass
+    // emits llvm::OptimizationRemarks which land in the diagnostic pipeline;
+    // this is a no-op when remarks are not requested.
+    if (cfg.report)
+        FPM.addPass(llvm::WarnMissedTransformationsPass());
+
+    return FPM;
+}
 
 void CodeGenerator::optimizeOptMaxFunctions() {
-    // Phase 0: Apply aggressive function attributes to OPTMAX functions.
+    // ── Phase 0: Apply aggressive function attributes to OPTMAX functions ─
     static constexpr unsigned kAlwaysInlineThreshold = 500; // instruction count
     llvm::SmallVector<llvm::Function*, 16> optMaxFuncs;
     for (auto& func : module->functions()) {
@@ -3608,13 +4480,55 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // NoFree: OPTMAX functions don't free heap memory, enabling the
         // optimizer to sink/hoist loads past calls to these functions.
         func.addFnAttr(llvm::Attribute::NoFree);
-        // Mark small OPTMAX helpers as always-inline candidates.
+        // Speculatable (safety=Off only): the function is a pure mathematical
+        // kernel with no side effects — the user has explicitly opted out of
+        // safety checks, so LLVM may reorder and speculate calls above branches
+        // and into select operands.  This enables aggressive if-conversion and
+        // call-hoisting out of loops that contain conditionally-executed OPTMAX
+        // calls.  Not applied when safety=On/Relaxed because those functions
+        // may still read/write through pointer parameters in ways that prevent
+        // safe speculation without alias checks.
+        {
+            const std::string nameStrSafe = name.str();
+            auto cfgSafeIt = optMaxFunctionConfigs_.find(nameStrSafe);
+            if (cfgSafeIt != optMaxFunctionConfigs_.end()
+                    && cfgSafeIt->second.safety == SafetyLevel::Off) {
+                func.addFnAttr(llvm::Attribute::Speculatable);
+            }
+        }
+        // Mark small OPTMAX helpers as always-inline candidates, but ONLY when
+        // every call site is inside another OPTMAX function.  If any caller is
+        // non-OPTMAX (e.g. main, a runtime wrapper, or an exported entry point)
+        // forcing AlwaysInline causes the inliner to expand all OPTMAX bodies
+        // into that non-OPTMAX caller, potentially creating a single enormous
+        // function whose basic-block count overflows LLVM's recursive DFS passes
+        // (DominatorTree construction, SimplifyCFG, GVN) and causes a
+        // segmentation fault.  The cost-model IPO inliner (InlinerThreshold=3000)
+        // still handles cross-boundary inlining for these functions when it is
+        // profitable — this guard only prevents unconditional forced inlining.
         if (func.getInstructionCount() < kAlwaysInlineThreshold
                 && !func.hasFnAttribute(llvm::Attribute::NoInline)) {
-            func.addFnAttr(llvm::Attribute::AlwaysInline);
+            bool onlyCalledFromOptMax = true;
+            for (auto* user : func.users()) {
+                auto* CB = llvm::dyn_cast<llvm::CallBase>(user);
+                if (!CB) {
+                    // Address-taken or other non-call use — cannot guarantee
+                    // the function is only used within OPTMAX context.
+                    onlyCalledFromOptMax = false;
+                    break;
+                }
+                llvm::Function* caller = CB->getFunction();
+                if (!caller || !optMaxFunctions.count(caller->getName())) {
+                    onlyCalledFromOptMax = false;
+                    break;
+                }
+            }
+            if (onlyCalledFromOptMax)
+                func.addFnAttr(llvm::Attribute::AlwaysInline);
         }
 
         // aggressiveVec=true: hint to the back-end to use the widest available
+        // SIMD width.  512-bit is the widest currently supported on x86 (AVX-512).
         const std::string nameStr = name.str();
         auto cfgIt = optMaxFunctionConfigs_.find(nameStr);
         if (cfgIt != optMaxFunctionConfigs_.end() && cfgIt->second.aggressiveVec) {
@@ -3624,6 +4538,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         }
 
         // fast_math=true: sweep all existing FP instructions and apply full
+        // fast-math flags (nsz, nnan, ninf, arcp, contract, afn, reassoc).
         if (cfgIt != optMaxFunctionConfigs_.end() && cfgIt->second.fastMath) {
             llvm::FastMathFlags FMF;
             FMF.setFast();
@@ -3646,6 +4561,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         }
 
         // memory.noalias=true: annotate all pointer-type parameters as noalias
+        // (restrict), allowing the vectoriser to omit alias-check preambles.
         if (cfgIt != optMaxFunctionConfigs_.end() && cfgIt->second.memory.noalias) {
             unsigned argIdx = 0;
             for (auto& arg : func.args()) {
@@ -3656,6 +4572,83 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                 }
                 ++argIdx;
             }
+            // Additionally, assert argmemonly: the function exclusively accesses
+            // memory through its (noalias/restrict) pointer arguments and does not
+            // read or write any global variables, thread-locals, or other
+            // non-parameter memory.  This is a valid programmer assertion when
+            // memory.noalias=true is used — the function operates on explicitly-
+            // passed buffers only.  With this, alias analysis can prove that a
+            // call to this function cannot clobber any memory not reachable through
+            // its arguments, enabling load/store hoisting past calls and dead-store
+            // elimination across call boundaries.
+            func.setMemoryEffects(llvm::MemoryEffects::argMemOnly());
+        } else {
+            // No explicit memory.noalias annotation — check whether the function
+            // has any pointer-type parameters at all.  If it has none, it cannot
+            // dereference argument memory, so we can exclude ArgMem from its
+            // memory-effect set regardless of the function body.
+            //
+            //   safety=Off:  the programmer asserts no UB and no global side
+            //       effects.  With no pointer params, the function is a pure
+            //       value-to-value computation → readnone (MemoryEffects::none()).
+            //       This lets LLVM freely CSE, hoist, and speculate calls to it.
+            //
+            //   safety=On/Relaxed: the function may still read global constants
+            //       or other module-level state, so we can only assert the
+            //       weaker "not ArgMem" invariant: exclude ArgMem from unknown().
+            //       The Attributor in PreIPO will tighten this further if the
+            //       function body proves to be readnone or readonly.
+            bool hasPointerParam = false;
+            for (auto& arg : func.args()) {
+                if (arg.getType()->isPointerTy()) {
+                    hasPointerParam = true;
+                    break;
+                }
+            }
+            if (!hasPointerParam) {
+                const SafetyLevel sl =
+                    (cfgIt != optMaxFunctionConfigs_.end())
+                    ? cfgIt->second.safety
+                    : SafetyLevel::On;
+                if (sl == SafetyLevel::Off) {
+                    // Pure value-to-value kernel: no pointer params, user asserts
+                    // no side effects.  Mark readnone so LLVM treats calls to this
+                    // function like arithmetic expressions — fully hoistable, CSE-
+                    // able, and dead-call-eliminable.
+                    //
+                    // Diagnostic guard: in verbose mode, warn if the function body
+                    // contains calls to intrinsics or external functions that may
+                    // have observable side effects (I/O, memory allocation, etc.).
+                    // This catches programmer errors where safety=Off is misapplied
+                    // to a function that actually has side effects.
+                    if (verbose_) {
+                        for (auto& BB : func) {
+                            for (auto& I : BB) {
+                                if (auto* call = llvm::dyn_cast<llvm::CallBase>(&I)) {
+                                    llvm::Function* callee = call->getCalledFunction();
+                                    if (callee && !callee->isIntrinsic()
+                                            && callee->isDeclaration()) {
+                                        llvm::errs()
+                                            << "omsc: note: [optmax safety=Off] '"
+                                            << func.getName()
+                                            << "' calls external function '"
+                                            << callee->getName()
+                                            << "' — readnone annotation may be "
+                                               "incorrect if it has side effects\n";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    func.setMemoryEffects(llvm::MemoryEffects::none());
+                } else {
+                    // May access globals/inaccessible mem, but definitely cannot
+                    // access ArgMem.  Subtract ArgMem from the unknown() bitset.
+                    func.setMemoryEffects(
+                        llvm::MemoryEffects::unknown()
+                            .getWithoutLoc(llvm::IRMemLocation::ArgMem));
+                }
+            }
         }
 
         optMaxFuncs.push_back(&func);
@@ -3663,7 +4656,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
 
     if (optMaxFuncs.empty()) return;
 
-    // ── Unified new-PM OPTMAX Pipeline ────────────────────────────────────────
+    // ── Unified new-PM OPTMAX infrastructure ──────────────────────────────
     auto tm = createTargetMachine();
     if (!tm) {
         if (verbose_)
@@ -3672,13 +4665,22 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     }
 
     llvm::PipelineTuningOptions PTOMax;
-    // Enable vectorization cost-model infrastructure in the PassBuilder so that
-    // LoopVectorizePass and SLPVectorizerPass inside the FPM get accurate TTI.
+    // Enable vectorization cost-model infrastructure so that LoopVectorizePass
+    // and SLPVectorizerPass inside the per-function FPMs get accurate TTI.
     PTOMax.LoopVectorization = true;
     PTOMax.SLPVectorization  = true;
     PTOMax.LoopInterleaving  = true;
-    // Unrolling is handled explicitly in Phase 2.5 to control the threshold.
+    // Unrolling is handled explicitly in buildOptMaxScalarFPM.
     PTOMax.LoopUnrolling     = false;
+    // Aggressive inlining threshold for OPTMAX: 3000 (vs the O3 default of 225).
+    // OPTMAX functions are hot kernels where larger-body inlining pays off by
+    // exposing constant arguments, enabling vectorization, and eliminating call
+    // overhead inside tight loops.
+    PTOMax.InlinerThreshold  = 3000;
+    // Enable cross-function optimizations unconditionally for OPTMAX.
+    PTOMax.MergeFunctions    = true;
+    PTOMax.CallGraphProfile  = true;
+    PTOMax.ForgetAllSCEVInLoopUnroll = true;
 
     llvm::PassBuilder PBMax(tm.get(), PTOMax);
     llvm::LoopAnalysisManager  LAMMax;
@@ -3691,179 +4693,174 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     PBMax.registerLoopAnalyses(LAMMax);
     PBMax.crossRegisterProxies(LAMMax, FAMMax, CGAMMax, MAMMax);
 
-    // ── Phase 1: Memory promotion and early canonicalization ──────────────
-    llvm::FunctionPassManager FPMMax;
-    FPMMax.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
-    FPMMax.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
-    FPMMax.addPass(llvm::PromotePass());
-    FPMMax.addPass(llvm::InstCombinePass());
-    FPMMax.addPass(llvm::AggressiveInstCombinePass());
-    FPMMax.addPass(llvm::ReassociatePass());
-    FPMMax.addPass(llvm::NewGVNPass());
-    FPMMax.addPass(llvm::SCCPPass());
-    FPMMax.addPass(llvm::CorrelatedValuePropagationPass());
-    FPMMax.addPass(llvm::BDCEPass());
-    FPMMax.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
-    FPMMax.addPass(llvm::ADCEPass());
-
-    // ── Phase 2: Loop canonicalization and invariant hoisting ─────────────
-    addCanonicalLoopBarrier(FPMMax);
+    // ── Module-level IPO pre-pass ─────────────────────────────────────────
+    // Run before the per-function pipeline to materialise alwaysinline callees,
+    // propagate constants across call boundaries, and sharpen function attributes
+    // so the per-function passes see fully inlined bodies and better value ranges.
     {
-        llvm::LoopPassManager LPM;
-        LPM.addPass(llvm::LoopRotatePass());
-        LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
-        LPM.addPass(llvm::SimpleLoopUnswitchPass(/*NonTrivial=*/true));
-        LPM.addPass(llvm::LoopIdiomRecognizePass());
-        LPM.addPass(llvm::IndVarSimplifyPass());
-        LPM.addPass(llvm::LoopPredicationPass());
-        LPM.addPass(llvm::LoopDeletionPass());
-        LPM.addPass(llvm::LoopInstSimplifyPass());
-        LPM.addPass(llvm::LoopSimplifyCFGPass());
-        LPM.addPass(llvm::CanonicalizeFreezeInLoopsPass());
-        FPMMax.addPass(llvm::createFunctionToLoopPassAdaptor(
-            std::move(LPM), /*UseMemorySSA=*/true));
+        llvm::ModulePassManager PreIPO;
+        // EliminateAvailableExternally: strip available-externally linkage from
+        // function definitions that were imported only for inlining.  After
+        // AlwaysInliner fires, callers of these helpers no longer need their
+        // bodies — converting them back to declarations allows GlobalDCE (later)
+        // to fully remove them, reducing the module size seen by all subsequent
+        // passes.
+        PreIPO.addPass(llvm::EliminateAvailableExternallyPass());
+        // AlwaysInlinerPass: inline callees marked alwaysinline (set above for
+        // OPTMAX helper functions smaller than kAlwaysInlineThreshold).
+        PreIPO.addPass(llvm::AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/false));
+        // AggressiveDevirtualization (phase 1–3): promote indirect calls to
+        // direct calls using multi-phase data-flow analysis.  Runs before CVP
+        // so CVP sees the promoted (now direct) calls and can inline them.
+        PreIPO.addPass(AggressiveDevirtualizationPass());
+        // CalledValuePropagation: propagate inferred type information at indirect
+        // call sites; converts virtual/indirect calls into direct calls where
+        // possible, enabling the subsequent inliner to inline them.
+        PreIPO.addPass(llvm::CalledValuePropagationPass());
+        // Second devirtualization round: CVP may have turned PHI values into
+        // concrete constants that our pass can now resolve.
+        PreIPO.addPass(AggressiveDevirtualizationPass());
+        // IPSCCP: propagate constants across all call boundaries in the module
+        // now that small helpers are inlined.
+        PreIPO.addPass(llvm::IPSCCPPass());
+        // InferFunctionAttrs: deduce NoUnwind/WillReturn/NoFree/NoSync for any
+        // remaining callees so the per-function pipeline sees their effects.
+        PreIPO.addPass(llvm::InferFunctionAttrsPass());
+        // Attributor (module-level): derives richer attributes than
+        // PostOrderFunctionAttrsPass alone.  Specifically deduces memory effects
+        // (readnone / readmem / argmemonly), nonnull with dereferenceable ranges,
+        // precise alignment constraints, nocapture on globals, and speculatable
+        // for effectless functions — all expressed as LLVM attributes that the
+        // per-function FPMs can exploit for alias analysis, code motion, and
+        // redundancy elimination.  Runs after InferFunctionAttrs so it starts
+        // from the basic attribute set.
+        PreIPO.addPass(llvm::AttributorPass());
+        // AttributorCGSCC: context-sensitive Attributor pass at CGSCC granularity.
+        // Works bottom-up through the call graph SCC by SCC, enabling more precise
+        // deduction for mutually-recursive function groups.
+        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::AttributorCGSCCPass()));
+        // ConstArgPropagation: for internal functions where every call site
+        // passes the same concrete constant, replace the formal argument with
+        // that constant — enabling SCCP / InstCombine to fold much deeper.
+        PreIPO.addPass(ConstArgPropagationPass());
+        // InterproceduralNullability: annotate pointer arguments as nonnull
+        // when every call site passes a provably non-null value, unlocking
+        // GetElementPtr folding and bounds-check elimination.
+        PreIPO.addPass(InterproceduralNullabilityPass());
+        // ArgumentPromotionPass: replace pointer-type parameters with scalar
+        // values where the pointer is only accessed directly (no escape, no
+        // address-taken use).  Enables register allocation and eliminates
+        // load/store overhead for small struct/array parameters.
+        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::ArgumentPromotionPass()));
+        // PostOrderFunctionAttrs: infer nounwind / readonly / writeonly / pure
+        // attributes in bottom-up CGSCC order so callers can reason about effects.
+        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::PostOrderFunctionAttrsPass()));
+        // ReversePostOrderFunctionAttrs: propagate attribute information
+        // top-down so callees inherit caller assumptions (e.g. nounwind context).
+        PreIPO.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        // AlwaysInline cleanup: after the AlwaysInlinerPass has run, any
+        // function that still has a definition (i.e., was NOT successfully
+        // inlined into all callers — e.g., it is recursive, address-taken, or
+        // referenced from a call site the inliner could not process) retains
+        // the AlwaysInline attribute.  This stale attribute is misleading:
+        //   - It signals to downstream inliners (ModuleInliner, CGSCC inliner)
+        //     that they MUST inline this function, which they cannot do either
+        //     (same reasons).  The repeated failed-inlining attempts waste
+        //     compile time.
+        //   - It interferes with PartialInliner, which skips functions marked
+        //     AlwaysInline on the assumption that the main inliner will handle
+        //     them — so they end up being neither fully nor partially inlined.
+        // Stripping the attribute from surviving definitions lets downstream
+        // passes make clean inlining decisions based on cost models.
+        {
+            struct AlwaysInlineCleanupPass
+                : public llvm::PassInfoMixin<AlwaysInlineCleanupPass> {
+                llvm::PreservedAnalyses run(llvm::Module& M,
+                                            llvm::ModuleAnalysisManager&) {
+                    bool changed = false;
+                    for (auto& F : M) {
+                        if (!F.isDeclaration()
+                                && F.hasFnAttribute(llvm::Attribute::AlwaysInline)) {
+                            F.removeFnAttr(llvm::Attribute::AlwaysInline);
+                            changed = true;
+                        }
+                    }
+                    return changed ? llvm::PreservedAnalyses::none()
+                                   : llvm::PreservedAnalyses::all();
+                }
+            };
+            PreIPO.addPass(AlwaysInlineCleanupPass());
+        }
+        PreIPO.run(*module, MAMMax);
     }
-    // Software prefetch for predictable-stride loops.
-    FPMMax.addPass(llvm::LoopDataPrefetchPass());
 
-    // ── Phase 2.5: Loop unrolling ─────────────────────────────────────────
-    addCanonicalLoopBarrier(FPMMax);
+    // OPTMAX Wave 1 barrier: after PreIPO (always-inline + CalledValueProp +
+    // IPSCCP + InferFunctionAttrs + Attributor + ConstArgProp + nullability +
+    // ArgumentPromotion + function-attr inference + AlwaysInline cleanup).
     {
-        llvm::LoopPassManager LPM;
-        LPM.addPass(llvm::LoopFlattenPass());
-        LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/3));
-        FPMMax.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(LPM)));
+        unsigned omWave = 100; // OPTMAX waves start at 100 to distinguish from main pipeline
+        auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
+        if (verbose_) {
+            std::cout << "    [optmax-wave 1 / pre-ipo] "
+                      << omSnapshot.definedFunctions << " functions, "
+                      << omSnapshot.totalInstructions << " instrs, "
+                      << omSnapshot.pureFunctions.size() << " pure"
+                      << '\n';
+        }
     }
-    // LoopUnrollPass is a function pass in LLVM 18, not a loop pass.
-    FPMMax.addPass(llvm::LoopUnrollPass(
-        llvm::LoopUnrollOptions(/*OptLevel=*/3, /*OnlyWhenForced=*/false,
-                                /*ForgetSCEV=*/true)));
-    // Post-unroll cleanup: NewGVN merges values made equal by unrolled IVs
-    FPMMax.addPass(llvm::NewGVNPass());
-    FPMMax.addPass(llvm::InstCombinePass());
-    FPMMax.addPass(llvm::CorrelatedValuePropagationPass());
-    FPMMax.addPass(llvm::JumpThreadingPass());
-    FPMMax.addPass(llvm::DFAJumpThreadingPass());
-    FPMMax.addPass(llvm::SpeculativeExecutionPass());
-    FPMMax.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
-    FPMMax.addPass(llvm::InstCombinePass());
-    FPMMax.addPass(llvm::ADCEPass());
 
-    // ── Phase 3: Scalar optimizations ────────────────────────────────────
-    FPMMax.addPass(llvm::SinkingPass());
-    FPMMax.addPass(llvm::StraightLineStrengthReducePass());
-    FPMMax.addPass(llvm::NaryReassociatePass());
-    FPMMax.addPass(llvm::ReassociatePass());
-    FPMMax.addPass(llvm::TailCallElimPass());
-    FPMMax.addPass(llvm::ConstantHoistingPass());
-    FPMMax.addPass(llvm::SeparateConstOffsetFromGEPPass());
-    FPMMax.addPass(llvm::PartiallyInlineLibCallsPass());
-    FPMMax.addPass(llvm::LibCallsShrinkWrapPass());
-    FPMMax.addPass(llvm::DSEPass());
-    FPMMax.addPass(llvm::MemCpyOptPass());
-    // Store widening: merge consecutive narrow stores into wide stores.
-    FPMMax.addPass(StoreWideningPass());
-    // MAPR: hoist independent loads above non-aliasing preceding stores to
-    FPMMax.addPass(MemoryAccessPhaseReorderPass());
-    FPMMax.addPass(llvm::Float2IntPass());
-    FPMMax.addPass(llvm::DivRemPairsPass());
-    FPMMax.addPass(llvm::InferAlignmentPass());
-    FPMMax.addPass(llvm::MergeICmpsPass());
-    // Cross-iteration load reuse in OPTMAX loops: carry stencil/window values
-    // across iterations in registers to eliminate redundant loads.
-    FPMMax.addPass(CrossIterLoadReusePass());
-    // LIRH: hoist 1.0/d outside loops where the loop-invariant divisor d is
-    FPMMax.addPass(LoopInvariantReciprocalHoistPass());
-    // MAC pattern detection: convert fadd(fmul(a,b), acc) → fmuladd for FMA.
-    FPMMax.addPass(MACPatternPass());
-    FPMMax.addPass(llvm::IRCEPass());
-    // Range bounds-check hoist: hoist repeated per-iteration bounds checks to
-    FPMMax.addPass(RangeBoundsCheckHoistPass());
-    FPMMax.addPass(llvm::ConstraintEliminationPass());
-    FPMMax.addPass(llvm::GuardWideningPass());
-    FPMMax.addPass(llvm::SCCPPass());
-    FPMMax.addPass(llvm::InstCombinePass());
-    // RPAR: rebalance linear associative chains into O(log n) depth balanced
-    FPMMax.addPass(TreeHeightReductionPass());
-    FPMMax.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
-    // Advanced branch weight annotation for OPTMAX functions: emit !prof metadata
-    // so that BER and ConditionalStoreSink see accurate probabilities.
-    FPMMax.addPass(AdvancedBranchWeightAnnotationPass());
-    // Conditional store sinking: powered by the advanced branch weights above.
-    FPMMax.addPass(ConditionalStoreSinkPass());
-    // BER: convert near-50/50 diamond CFGs to select instructions, removing
-    // mispredict flushes from unpredictable branches in hot OPTMAX loops.
-    FPMMax.addPass(BranchEntropyReductionPass());
-    FPMMax.addPass(llvm::ADCEPass());
-
-    // ── Phase 4: Vectorization ────────────────────────────────────────────
-    addCanonicalLoopBarrier(FPMMax);
-    FPMMax.addPass(llvm::AlignmentFromAssumptionsPass());
-    {
-        llvm::LoopPassManager LPM;
-        // Re-rotate loops before LICM.  Phase 2.5 (LoopUnroll/UnrollAndJam)
-        LPM.addPass(llvm::LoopRotatePass());
-        LPM.addPass(llvm::IndVarSimplifyPass());
-        LPM.addPass(llvm::LoopVersioningLICMPass());
-        LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
-        FPMMax.addPass(llvm::createFunctionToLoopPassAdaptor(
-            std::move(LPM), /*UseMemorySSA=*/true));
-    }
-    FPMMax.addPass(llvm::LoopDistributePass());
-    FPMMax.addPass(llvm::LoopFusePass());
-    // Sharpen value ranges one final time before the cost model runs.
-    FPMMax.addPass(llvm::CorrelatedValuePropagationPass());
-    FPMMax.addPass(llvm::BDCEPass());
-    FPMMax.addPass(llvm::InstCombinePass());
-    FPMMax.addPass(llvm::IRCEPass());
-    // Loop vectorizer: the central transformation of this phase.
-    FPMMax.addPass(llvm::LoopVectorizePass(
-        llvm::LoopVectorizeOptions(/*InterleaveOnlyWhenForced=*/false,
-                                   /*VectorizeOnlyWhenForced=*/false)));
-    // SLP vectorizer: pack independent scalar operations into SIMD ops.
-    FPMMax.addPass(llvm::SLPVectorizerPass());
-    // VectorCombine: merge redundant extract/insert sequences introduced by the vectorizers.
-    FPMMax.addPass(llvm::VectorCombinePass());
-    // LoadStoreVectorizer: combine adjacent scalar loads/stores into vectors.
-    FPMMax.addPass(llvm::LoadStoreVectorizerPass());
-
-    // ── Phase 5: Post-vectorization cleanup ──────────────────────────────
-    FPMMax.addPass(llvm::AggressiveInstCombinePass());
-    FPMMax.addPass(llvm::InstCombinePass());
-    addCanonicalLoopBarrier(FPMMax);
-    {
-        llvm::LoopPassManager LPM;
-        LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
-        FPMMax.addPass(llvm::createFunctionToLoopPassAdaptor(
-            std::move(LPM), /*UseMemorySSA=*/true));
-    }
-    FPMMax.addPass(llvm::DSEPass());
-    FPMMax.addPass(llvm::MemCpyOptPass());
-    FPMMax.addPass(llvm::NewGVNPass());
-    // After NewGVN merges values from across the unrolled/vectorized body,
-    FPMMax.addPass(llvm::InstCombinePass());
-    FPMMax.addPass(llvm::VectorCombinePass());
-    FPMMax.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
-    FPMMax.addPass(llvm::LoopSinkPass());
-    FPMMax.addPass(llvm::ADCEPass());
-
-    // ── Run the OPTMAX pipeline on each OPTMAX function ───────────────────
-    constexpr int optMaxIterations = 5;
+    // ── Per-function pipeline ─────────────────────────────────────────────
+    // Each OPTMAX function gets a scalar FPM (Phases 1–3) iterated until
+    // convergence, then a vectorization FPM (Phases 4–5) run exactly once.
+    // Separating the phases avoids re-running expensive vectorization every
+    // scalar iteration.
+    //
+    // The FPMs are built per-function so that safety, aggressiveVec, and
+    // LoopConfig hints can be tailored to each function's annotation without
+    // shared-pipeline contamination.
+    //
+    // Size guard: the PreIPO/PostIPO rounds above may have inlined callees into
+    // OPTMAX functions, growing some of them well beyond their original size.
+    // Running the full scalar+vector FPM on a function with thousands of
+    // instructions causes LLVM's SLPVectorizer, LoopVectorize, and NewGVN to
+    // allocate data structures in O(n²) memory and crash.  Skip the expensive
+    // FPMs for functions that grew beyond this threshold; they have already
+    // benefited from the PreIPO constant propagation and inlining.
+    static constexpr unsigned kMaxOptMaxFPMInstructions = 5000;
+    constexpr int optMaxScalarIterations = 8;
     for (llvm::Function* func : optMaxFuncs) {
+        // Re-check size here: the function may have grown during PreIPO/PostIPO.
+        if (func->getInstructionCount() > kMaxOptMaxFPMInstructions) continue;
+
+        const std::string fname = func->getName().str();
+        auto cfgIt2 = optMaxFunctionConfigs_.find(fname);
+        const OptMaxConfig& cfg =
+            (cfgIt2 != optMaxFunctionConfigs_.end())
+            ? cfgIt2->second
+            : OptMaxConfig{};
+
+        // Build per-function scalar and vectorization FPMs.
+        llvm::FunctionPassManager scalarFPM = buildOptMaxScalarFPM(cfg);
+        llvm::FunctionPassManager vecFPM    = buildOptMaxVecFPM(cfg);
+
+        // Scalar convergence loop (Phases 1–3).
         unsigned prevCount = func->getInstructionCount();
-        for (int i = 0; i < optMaxIterations; ++i) {
-            auto PA = FPMMax.run(*func, FAMMax);
+        for (int i = 0; i < optMaxScalarIterations; ++i) {
+            auto PA = scalarFPM.run(*func, FAMMax);
             const unsigned newCount = func->getInstructionCount();
             if (PA.areAllPreserved() || newCount == prevCount) break;
             prevCount = newCount;
         }
 
+        // Vectorization run (Phases 4–5), executed once.
+        vecFPM.run(*func, FAMMax);
+
         // report=true: print a compact per-function optimization summary to
         // stdout so the programmer can see the result of the OPTMAX pipeline.
-        const std::string fname = func->getName().str();
-        auto cfgIt2 = optMaxFunctionConfigs_.find(fname);
-        if (cfgIt2 != optMaxFunctionConfigs_.end() && cfgIt2->second.report) {
-            const OptMaxConfig& cfg = cfgIt2->second;
+        if (cfg.report) {
             std::cout << "[optmax report] " << fname << ": "
                       << func->getInstructionCount() << " instructions after optimization";
             if (cfg.fastMath)             std::cout << ", fast_math";
@@ -3880,11 +4877,322 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                 }
                 std::cout << "]";
             }
+            if (cfg.loop.vectorize)        std::cout << ", loop.vectorize";
+            if (cfg.loop.noVectorize)      std::cout << ", loop.noVectorize";
+            if (cfg.loop.unrollCount > 0)  std::cout << ", loop.unrollCount=" << cfg.loop.unrollCount;
+            if (cfg.loop.independent)      std::cout << ", loop.independent";
+            if (cfg.loop.tileSize > 0)     std::cout << ", loop.tileSize=" << cfg.loop.tileSize;
+            if (cfg.loop.parallel)         std::cout << ", loop.parallel";
+            if (cfg.loop.fuse)             std::cout << ", loop.fuse";
+            if (cfg.safety == SafetyLevel::Off)
+                std::cout << ", unroll.fullMax=512";
+            else if (cfg.safety == SafetyLevel::Relaxed)
+                std::cout << ", unroll.fullMax=256";
             std::cout << "\n";
         }
     }
     if (verbose_) {
-        std::cout << "    OPTMAX unified new-PM pipeline complete" << '\n';
+        std::cout << "    OPTMAX per-function pipeline complete" << '\n';
+    }
+
+    // OPTMAX Wave 2 barrier: after per-function pipeline.  The snapshot now
+    // reflects all instruction-count reductions, newly-proven pure functions,
+    // and updated attribute information.  Used to confirm that PostIPO's
+    // GlobalDCE is warranted (unreachable helpers that were fully inlined).
+    {
+        unsigned omWave = 101;
+        auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
+        if (verbose_) {
+            std::cout << "    [optmax-wave 2 / per-function] "
+                      << omSnapshot.definedFunctions << " functions, "
+                      << omSnapshot.totalInstructions << " instrs, "
+                      << omSnapshot.unreachableFunctions.size() << " unreachable (GlobalDCE targets)"
+                      << '\n';
+        }
+    }
+
+    // ── OPTMAX Wave 2.5: IPO attribute refresh after per-function passes ──
+    // The per-function scalar+vec pipeline may have:
+    //   • simplified function bodies, making previously indirect/side-effecting
+    //     functions provably pure or readnone;
+    //   • exposed new constant return values or constant-folded arguments;
+    //   • eliminated dead parameters through ADCE+BDCE.
+    // Running a fresh Attributor+IPSCCP sweep here sharpens the attribute set
+    // before PostIPO runs, so the Round 1.5 inliner and Round 2 IPSCCP start
+    // from stronger facts.  This is a "pre-PostIPO" IPO refresh.
+    {
+        llvm::ModulePassManager Wave25;
+        Wave25.addPass(llvm::InferFunctionAttrsPass());
+        Wave25.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::PostOrderFunctionAttrsPass()));
+        Wave25.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        Wave25.addPass(llvm::AttributorPass());
+        Wave25.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::AttributorCGSCCPass()));
+        // IPSCCP with function specialization: now that attribute info is
+        // richer, a second IPSCCP pass finds more inter-procedural constants
+        // and may specialize callee clones for constant arguments seen at
+        // call sites.
+        Wave25.addPass(llvm::IPSCCPPass(llvm::IPSCCPOptions(/*AllowFuncSpec=*/true)));
+        Wave25.addPass(AggressiveDevirtualizationPass());
+        Wave25.addPass(llvm::CalledValuePropagationPass());
+        Wave25.addPass(AggressiveDevirtualizationPass());
+        Wave25.run(*module, MAMMax);
+    }
+
+    // ── Post-OPTMAX module-level cleanup ──────────────────────────────────
+    // After aggressively inlining + optimising each OPTMAX function, run a
+    // four-round IPO sweep:
+    //   Round 1  — eliminate dead code and constant-fold globals.
+    //   Round 1.5— inline callees that became small enough after Round 1.
+    //   Round 2  — re-propagate constants and arguments newly exposed by Round
+    //              1/1.5, derive richer attributes, then run function-level
+    //              cleanup including loop invariant code motion.
+    //   Round 3  — final DCE sweep to remove any code made dead by Round 2.
+    // This multi-round structure is necessary because GlobalOpt / GlobalDCE can
+    // internalize globals and eliminate parameters that the per-function passes
+    // could not see, exposing new constant-folding opportunities for IPSCCP.
+    {
+        llvm::ModulePassManager PostIPO;
+
+        // ── Round 1: dead code and global elimination ─────────────────────
+        // GlobalOpt: constant-fold and internalize simple global variables that
+        // now have known initializer values after inlining and IPSCCP.
+        PostIPO.addPass(llvm::GlobalOptPass());
+        // DeadArgumentElimination: remove function arguments that are never
+        // used after specialisation / constant propagation.
+        PostIPO.addPass(llvm::DeadArgumentEliminationPass());
+        // GlobalDCE: remove dead global variables and functions (e.g., helpers
+        // that were fully inlined and have no remaining callers).
+        PostIPO.addPass(llvm::GlobalDCEPass());
+
+        // ── Round 1.5: post-DCE inlining ─────────────────────────────────
+        // After GlobalOpt folds globals and GlobalDCE removes unreachable
+        // functions, many OPTMAX helpers that were previously too large to
+        // inline (due to dead branches, unreachable callee bodies, etc.) may
+        // now be small enough for the cost-model to approve.  Running the
+        // standard CGSCC inliner here captures those opportunities and
+        // eliminates the call overhead before the IPSCCP/attribute passes run.
+        //
+        // InlinerPass is a CGSCC pass so it needs the CGSCC adaptor.  We do
+        // NOT use AlwaysInlinerPass here because the AlwaysInline stubs were
+        // already cleaned up in PreIPO; this is a cost-model-driven inlining
+        // pass for remaining, non-trivially-inlinable callees.
+        //
+        // Guard: temporarily mark all non-OPTMAX functions (e.g. main) as
+        // noinline before the inliner runs.  Without this, the CGSCC inliner
+        // with InlinerThreshold=3000 would pull every OPTMAX bench function
+        // (each well below 3000 cost units) into their non-OPTMAX callers,
+        // collapsing a large call graph into a single enormous function body
+        // whose basic-block count overwhelms LLVM's recursive DFS passes and
+        // causes a segfault.  Inlining within the OPTMAX call graph is still
+        // unrestricted; only the OPTMAX→non-OPTMAX boundary is guarded.
+        PostIPO.run(*module, MAMMax);
+    }
+    // SyntheticCountsPropagation: assign synthetic hotness estimates to
+    // functions based on call graph structure (entry-point bias, call
+    // frequency from loop multipliers).  The Round 1.5 InlinerPass cost model
+    // uses these counts to scale the inlining bonus for hot callees — a callee
+    // expected to run millions of times gets a higher bonus than one expected to
+    // run once.  Running this before the inliner gives the cost model more
+    // accurate hotness data, leading to better inlining decisions.
+    llvm::SyntheticCountsPropagation().run(*module, MAMMax);
+    // Collect non-OPTMAX functions and temporarily mark them noinline so the
+    // Round 1.5 inliner cannot pull OPTMAX callees into them.
+    llvm::SmallVector<llvm::Function*, 16> tempNoInline;
+    for (auto& F : *module) {
+        if (F.isDeclaration()) continue;
+        if (optMaxFunctions.count(F.getName())) continue; // OPTMAX: leave as-is
+        if (F.hasFnAttribute(llvm::Attribute::NoInline)) continue;
+        F.addFnAttr(llvm::Attribute::NoInline);
+        tempNoInline.push_back(&F);
+    }
+    {
+        llvm::ModulePassManager PostIPO_inline;
+        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::InlinerPass()));
+        // Post-inlining attribute refresh: after the inliner folds callees into
+        // callers, run PostOrderFunctionAttrs + Attributor at CGSCC granularity
+        // to re-derive memory-effect, nounwind, and purity attributes for the
+        // merged bodies.  This ensures Round 2 IPSCCP and ConstArgProp start
+        // from the sharpest possible attribute set.
+        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::PostOrderFunctionAttrsPass()));
+        PostIPO_inline.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::AttributorCGSCCPass()));
+        // Re-run GlobalDCE after inlining to remove callee bodies that were
+        // fully inlined (no callers remaining).
+        PostIPO_inline.addPass(llvm::GlobalDCEPass());
+        PostIPO_inline.run(*module, MAMMax);
+    }
+    // Restore: remove the temporary noinline markers added above.
+    for (llvm::Function* F : tempNoInline)
+        F->removeFnAttr(llvm::Attribute::NoInline);
+    {
+        llvm::ModulePassManager PostIPO;
+
+        // ── Round 2: re-propagation after dead-code removal and inlining ──
+        // IPSCCP round 2: GlobalOpt may have replaced globals with constants,
+        // exposing new opportunities for interprocedural constant propagation.
+        PostIPO.addPass(llvm::IPSCCPPass());
+        // ConstArgPropagation: now that some functions have fewer callers (due
+        // to GlobalDCE), new constant-argument patterns may be visible.
+        PostIPO.addPass(ConstArgPropagationPass());
+        // ConstantMerge: deduplicate identical global constants introduced by
+        // specialisation clones (e.g., two identical vtable constants from
+        // different specialisation versions of the same function).
+        PostIPO.addPass(llvm::ConstantMergePass());
+        // MergeFunctions: merge functions with identical bodies that became
+        // identical after constant propagation and specialisation (e.g., two
+        // specialised versions of a template that folded to the same code).
+        // Runs after ConstantMerge so the merged globals don't prevent body
+        // comparison from succeeding.
+        PostIPO.addPass(llvm::MergeFunctionsPass());
+        // Re-run function attrs (post-order + reverse) before the full Attributor
+        // so Attributor starts from the most up-to-date deduction state.
+        PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::PostOrderFunctionAttrsPass()));
+        PostIPO.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        // Attributor round 2: after IPSCCP, ConstArgProp, and MergeFunctions
+        // have significantly reduced the module, re-run the Attributor to
+        // derive sharper memory effects, nonnull/align/dereferenceable ranges,
+        // and speculatable attributes for the remaining functions.  The
+        // leaner module (fewer functions, more inlined bodies, more constants)
+        // enables the Attributor to reach stronger fixed points than in PreIPO.
+        PostIPO.addPass(llvm::AttributorPass());
+        // IPSCCP round 3: Attributor may have promoted functions to readnone or
+        // derived new constant return values; propagate those immediately before
+        // the cleanup FPM so the cleanup sees fully folded constants.
+        // AllowFuncSpec=true: enable function specialization cloning for
+        // constant arguments that IPSCCP discovers at call sites.  This is
+        // especially powerful after MergeFunctions has standardized the call
+        // graph: newly-identified constant argument patterns can now specialize
+        // the merged bodies, creating copies that constant-fold entire loop
+        // bounds or switch conditions.
+        PostIPO.addPass(llvm::IPSCCPPass(llvm::IPSCCPOptions(/*AllowFuncSpec=*/true)));
+        // Lightweight function-level cleanup: fold the newly-constant arguments
+        // and eliminate any dead code they expose, then hoist loop-invariant
+        // code that SCCP/ConstArgProp made invariant.
+        {
+            llvm::FunctionPassManager PostCleanFPM;
+            addLightCleanup(PostCleanFPM);
+            // Module-level LICM + IndVarSimplify: after SCCP + ConstArgProp
+            // have folded arguments into loop bounds/conditions, the resulting
+            // loop invariants can now be hoisted.  Run inside a
+            // module-to-function adaptor so every OPTMAX function benefits.
+            // UseMemorySSA=true provides more precise hoisting decisions.
+            {
+                llvm::LoopPassManager PostCleanLPM;
+                PostCleanLPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
+                PostCleanLPM.addPass(llvm::IndVarSimplifyPass());
+                PostCleanFPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+                    std::move(PostCleanLPM), /*UseMemorySSA=*/true));
+            }
+            // A second SCCP + InstCombine sweep after LICM: hoisting may
+            // expose new constant-folding targets (e.g., a hoisted load of a
+            // now-constant global, or an induction variable whose range is now
+            // provably bounded).
+            PostCleanFPM.addPass(llvm::SCCPPass());
+            PostCleanFPM.addPass(llvm::InstCombinePass());
+            PostCleanFPM.addPass(llvm::ADCEPass());
+            PostIPO.addPass(
+                llvm::createModuleToFunctionPassAdaptor(std::move(PostCleanFPM)));
+        }
+
+        // ── Round 3: final dead-code sweep ───────────────────────────────
+        // Final GlobalDCE: remove any additional dead functions/globals exposed
+        // by Round 2 constant propagation, function merging, and LICM.
+        PostIPO.addPass(llvm::GlobalDCEPass());
+        // StripDeadPrototypes: remove declaration stubs for functions that are
+        // now fully dead (i.e., have no callers and no definitions remaining in
+        // the module after GlobalDCE).  These stubs are harmless but they
+        // inflate the module symbol table and cause linker warnings.
+        PostIPO.addPass(llvm::StripDeadPrototypesPass());
+
+        PostIPO.run(*module, MAMMax);
+    }
+
+    // OPTMAX Wave 3 barrier: after PostIPO.  Captures the net reduction from
+    // all four PostIPO rounds (DCE, inlining, re-propagation, LICM).
+    if (verbose_) {
+        unsigned omWave = 102;
+        auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
+        std::cout << "    [optmax-wave 3 / post-ipo] "
+                  << omSnapshot.definedFunctions << " functions, "
+                  << omSnapshot.totalInstructions << " instrs, "
+                  << omSnapshot.pureFunctions.size() << " pure"
+                  << '\n';
+    }
+
+    // ── OPTMAX Round 2: second per-function pass after PostIPO ────────────
+    // PostIPO (IPSCCP + ConstArgProp + LICM + FunctionSpecialization +
+    // PartialInliner) may have:
+    //   • folded loop bounds or branch conditions to constants;
+    //   • specialized functions for constant arguments (new clones with
+    //     constant-folded loop trips);
+    //   • outlined cold paths, making hot paths shorter and cheaper to
+    //     vectorize;
+    //   • hoisted invariants out of loops, exposing new unrolling targets.
+    //
+    // A second per-function scalar convergence + vectorization pass capitalizes
+    // on all these changes.  Functions that exceeded kMaxOptMaxFPMInstructions
+    // during Round 1 may now be within the threshold (partial-inlining split
+    // out cold code), so they get a chance at per-function optimization too.
+    //
+    // The scalar FPM iteration budget is reduced to 4 (vs. 8 in Round 1)
+    // since most big opportunities were already captured in Round 1; the goal
+    // here is to mop up residual constant-folding and re-vectorize after loop
+    // bound changes.
+    {
+        constexpr int optMaxScalarIterations2 = 4;
+        for (auto& func : *module) {
+            if (func.isDeclaration()) continue;
+            if (!optMaxFunctions.count(func.getName())) continue;
+            if (func.getInstructionCount() > kMaxOptMaxFPMInstructions) continue;
+
+            const std::string fname2 = func.getName().str();
+            auto cfgIt3 = optMaxFunctionConfigs_.find(fname2);
+            const OptMaxConfig& cfg2 =
+                (cfgIt3 != optMaxFunctionConfigs_.end())
+                ? cfgIt3->second
+                : OptMaxConfig{};
+
+            llvm::FunctionPassManager scalarFPM2 = buildOptMaxScalarFPM(cfg2);
+            llvm::FunctionPassManager vecFPM2    = buildOptMaxVecFPM(cfg2);
+
+            unsigned prevCount2 = func.getInstructionCount();
+            for (int i = 0; i < optMaxScalarIterations2; ++i) {
+                auto PA2 = scalarFPM2.run(func, FAMMax);
+                const unsigned newCount2 = func.getInstructionCount();
+                if (PA2.areAllPreserved() || newCount2 == prevCount2) break;
+                prevCount2 = newCount2;
+            }
+            vecFPM2.run(func, FAMMax);
+        }
+        if (verbose_) {
+            std::cout << "    OPTMAX Round 2 per-function pass complete" << '\n';
+        }
+    }
+
+    // ── OPTMAX Wave 4 barrier: after Round 2 per-function pass ───────────
+    // Final DCE sweep to eliminate any helpers or cold-path clones that Round 2
+    // proved fully dead, and a final GlobalOpt to fold any remaining mutable
+    // globals that became constant.
+    {
+        llvm::ModulePassManager FinalCleanup;
+        FinalCleanup.addPass(llvm::GlobalOptPass());
+        FinalCleanup.addPass(llvm::GlobalDCEPass());
+        FinalCleanup.addPass(llvm::StripDeadPrototypesPass());
+        FinalCleanup.run(*module, MAMMax);
+    }
+    if (verbose_) {
+        unsigned omWave = 103;
+        auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
+        std::cout << "    [optmax-wave 4 / round2+final-dce] "
+                  << omSnapshot.definedFunctions << " functions, "
+                  << omSnapshot.totalInstructions << " instrs"
+                  << '\n';
     }
 }
 
