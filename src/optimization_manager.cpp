@@ -200,14 +200,24 @@ bool PassScheduler::runToProvideImpl(
         return false; // no registered producer
     }
 
-    // Recursively satisfy prerequisites.
-    for (const char* req : producer->requires_) {
-        if (!ctx_.validity().isValid(req)) {
-            if (!runToProvideImpl(req, program, dispatch, inProgress)) {
-                inProgress.erase(targetFact);
-                return false;
+    // Recursively satisfy prerequisites.  Use a fixed-point loop because
+    // satisfying one prerequisite (e.g. synthesis) may invalidate another
+    // (e.g. synthesis->applyInvalidation cascades to invalidate purity).
+    // Repeat until all prerequisites are simultaneously valid, or until we
+    // exceed a safety cap (which would indicate a real dependency cycle).
+    static constexpr int kMaxPrereqRounds = 8;
+    for (int round = 0; round < kMaxPrereqRounds; ++round) {
+        bool allValid = true;
+        for (const char* req : producer->requires_) {
+            if (!ctx_.validity().isValid(req)) {
+                allValid = false;
+                if (!runToProvideImpl(req, program, dispatch, inProgress)) {
+                    inProgress.erase(targetFact);
+                    return false;
+                }
             }
         }
+        if (allValid) break;
     }
 
     // Check the dispatch map before running.
@@ -217,7 +227,7 @@ bool PassScheduler::runToProvideImpl(
         return false; // pass has no runner in this context
     }
 
-    // Verify preconditions (should be satisfied by the recursive calls above).
+    // Verify preconditions (should be satisfied by the fixed-point loop above).
     if (!checkPreconditions(*producer)) {
         inProgress.erase(targetFact);
         return false;

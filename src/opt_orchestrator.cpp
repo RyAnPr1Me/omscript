@@ -518,14 +518,24 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         // leave the produced fact invalid and silently disable downstream
         // analyses — we attempt to recompute the missing prerequisites
         // on-demand via the demand-driven scheduler.
+        //
+        // Use a fixed-point loop: satisfying one prerequisite (e.g. synthesis)
+        // may cascade-invalidate another (e.g. purity), so we repeat until
+        // all prerequisites are simultaneously valid.
         bool prereqsOk = true;
-        for (const char* req : meta->requires_) {
-            if (ctx.validity().isValid(req)) continue;
-            // Try to satisfy the missing requirement by re-running its producer.
-            if (!scheduler.runToProvide(req, program, dispatch)) {
-                prereqsOk = false;
-                break;
+        static constexpr int kMaxPrereqRounds = 8;
+        for (int round = 0; round < kMaxPrereqRounds; ++round) {
+            bool allValid = true;
+            for (const char* req : meta->requires_) {
+                if (ctx.validity().isValid(req)) continue;
+                allValid = false;
+                // Try to satisfy the missing requirement by re-running its producer.
+                if (!scheduler.runToProvide(req, program, dispatch)) {
+                    prereqsOk = false;
+                    break;
+                }
             }
+            if (!prereqsOk || allValid) break;
         }
         if (!prereqsOk || !scheduler.checkPreconditions(*meta)) {
             ++stats_.passesSkipped;

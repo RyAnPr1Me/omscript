@@ -79,8 +79,12 @@ static bool definitelyInteger(const Expression* expr) {
     }
     case ASTNodeType::UNARY_EXPR:
         return definitelyInteger(static_cast<const UnaryExpr*>(expr)->operand.get());
-    case ASTNodeType::LITERAL_EXPR:
-        return !isFloatLit(expr);
+    case ASTNodeType::LITERAL_EXPR: {
+        // String literals are not integers — guard against str * 0 → 0.
+        const auto* lit = static_cast<const LiteralExpr*>(expr);
+        return lit->literalType != LiteralExpr::LiteralType::FLOAT &&
+               lit->literalType != LiteralExpr::LiteralType::STRING;
+    }
     case ASTNodeType::IDENTIFIER_EXPR:
         // Type information for user-declared variables is not available at this
         // pass level (the type-inference pass runs later).  Conservatively
