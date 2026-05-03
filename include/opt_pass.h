@@ -65,6 +65,7 @@ namespace AnalysisFact {
     inline constexpr const char* kConstantReturns = "constant_returns";
     inline constexpr const char* kPurity          = "purity";
     inline constexpr const char* kEffects         = "effects";
+    inline constexpr const char* kERSL            = "ersl";
     inline constexpr const char* kSynthesis       = "synthesis";
     inline constexpr const char* kCFCTRE          = "cfctre";
     inline constexpr const char* kEGraph          = "egraph";
@@ -189,6 +190,7 @@ namespace PassId {
     extern uint32_t kConstantReturns;
     extern uint32_t kPurity;
     extern uint32_t kEffects;
+    extern uint32_t kERSL;
     extern uint32_t kSynthesis;
     extern uint32_t kCFCTRE;
     extern uint32_t kEGraph;

@@ -6,6 +6,7 @@
 #include "width_legalization.h"
 #include "ast.h"
 #include "opt_context.h"
+#include "pass_utils.h"
 
 #include <algorithm>
 #include <cassert>
@@ -212,9 +213,9 @@ WidthInfo WidthAnalyzer::infoOf(const Expression* expr) const noexcept {
 }
 
 void WidthAnalyzer::analyze(const Program* program) {
-    if (!program) return;
-    for (const auto& fn : program->functions)
-        analyzeFunction(fn.get());
+    forEachFunction(program, [&](const FunctionDecl* fn) {
+        analyzeFunction(fn);
+    });
 }
 
 void WidthAnalyzer::analyzeFunction(const FunctionDecl* fn) {
@@ -368,12 +369,9 @@ SemanticWidth WidthAnalyzer::analyzeExpr(const Expression* expr) {
         else if (op == "<<") {
             // If the shift amount is a literal, we know its max value exactly.
             uint32_t shiftMax = 6; // conservative: up to 63 for 64-bit
-            if (bin->right->type == ASTNodeType::LITERAL_EXPR) {
-                const auto* rlit = static_cast<const LiteralExpr*>(bin->right.get());
-                if (rlit->literalType == LiteralExpr::LiteralType::INTEGER)
-                    shiftMax = static_cast<uint32_t>(
-                        rlit->intValue > 0 ? rlit->intValue : 0);
-            }
+            long long shiftVal = 0;
+            if (isIntLiteral(bin->right.get(), &shiftVal))
+                shiftMax = static_cast<uint32_t>(shiftVal > 0 ? shiftVal : 0);
             result = OpWidthRules::shl(lhsW, shiftMax);
         }
         else if (op == ">>" || op == ">>>")        result = OpWidthRules::shr(lhsW);
@@ -594,11 +592,9 @@ void WidthLegalizationPass::run(const Program* program) {
         }
     };
 
-    if (program) {
-        for (const auto& fn : program->functions) {
-            if (fn && fn->body) countStmt(fn->body.get());
-        }
-    }
+    forEachFunction(program, [&](const FunctionDecl* fn) {
+        countStmt(fn->body.get());
+    });
 }
 
 WidthInfo WidthLegalizationPass::infoOf(const Expression* expr) const noexcept {

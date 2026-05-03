@@ -21,6 +21,7 @@
 ///   a non-float literal.
 
 #include "alg_simp_pass.h"
+#include "pass_utils.h"
 
 #include <iostream>
 #include <memory>
@@ -32,14 +33,6 @@ namespace omscript {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// True when @p expr is an integer literal with the given value.
-static bool isIntLit(const Expression* expr, long long val) {
-    if (!expr || expr->type != ASTNodeType::LITERAL_EXPR) return false;
-    const auto* lit = static_cast<const LiteralExpr*>(expr);
-    return lit->literalType == LiteralExpr::LiteralType::INTEGER
-        && lit->intValue == val;
-}
-
 /// True when @p expr is a float literal.
 static bool isFloatLit(const Expression* expr) {
     if (!expr || expr->type != ASTNodeType::LITERAL_EXPR) return false;
@@ -47,18 +40,12 @@ static bool isFloatLit(const Expression* expr) {
                == LiteralExpr::LiteralType::FLOAT;
 }
 
-/// Make an integer literal expression.
-static std::unique_ptr<Expression> makeInt(long long v) {
-    return std::make_unique<LiteralExpr>(v);
-}
-
 /// True when @p a and @p b are identifier expressions with the same name.
 static bool sameIdent(const Expression* a, const Expression* b) {
-    if (!a || !b) return false;
-    if (a->type != ASTNodeType::IDENTIFIER_EXPR) return false;
-    if (b->type != ASTNodeType::IDENTIFIER_EXPR) return false;
-    return static_cast<const IdentifierExpr*>(a)->name
-        == static_cast<const IdentifierExpr*>(b)->name;
+    const auto* ia = asIdentifier(a);
+    const auto* ib = asIdentifier(b);
+    if (!ia || !ib) return false;
+    return ia->name == ib->name;
 }
 
 /// True when @p expr is provably of integer type:
@@ -149,13 +136,13 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 
         // ── Additive identity ──────────────────────────────────────────────
         if (op == "+") {
-            if (isIntLit(R, 0)) {
+            if (isIntLiteralVal(R, 0)) {
                 // x + 0 → x
                 expr = std::move(bin->left);
                 ++count;
                 return count;
             }
-            if (isIntLit(L, 0)) {
+            if (isIntLiteralVal(L, 0)) {
                 // 0 + x → x
                 expr = std::move(bin->right);
                 ++count;
@@ -165,13 +152,13 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 
         // ── Subtractive identity ───────────────────────────────────────────
         if (op == "-") {
-            if (isIntLit(R, 0)) {
+            if (isIntLiteralVal(R, 0)) {
                 // x - 0 → x
                 expr = std::move(bin->left);
                 ++count;
                 return count;
             }
-            if (isIntLit(L, 0)) {
+            if (isIntLiteralVal(L, 0)) {
                 // 0 - x → -x
                 expr = std::make_unique<UnaryExpr>("-", std::move(bin->right));
                 ++count;
@@ -179,7 +166,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
             // x - x → 0  (safe for integers only)
             if (sameIdent(L, R) && definitelyInteger(L)) {
-                expr = makeInt(0);
+                expr = makeIntLiteral(0);
                 ++count;
                 return count;
             }
@@ -187,36 +174,36 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 
         // ── Multiplicative identity and absorbing zero ─────────────────────
         if (op == "*") {
-            if (isIntLit(R, 1)) {
+            if (isIntLiteralVal(R, 1)) {
                 // x * 1 → x
                 expr = std::move(bin->left);
                 ++count;
                 return count;
             }
-            if (isIntLit(L, 1)) {
+            if (isIntLiteralVal(L, 1)) {
                 // 1 * x → x
                 expr = std::move(bin->right);
                 ++count;
                 return count;
             }
             // x * 0 → 0  and  0 * x → 0  (integers only — NaN*0≠0 for floats)
-            if (isIntLit(R, 0) && definitelyInteger(L)) {
-                expr = makeInt(0);
+            if (isIntLiteralVal(R, 0) && definitelyInteger(L)) {
+                expr = makeIntLiteral(0);
                 ++count;
                 return count;
             }
-            if (isIntLit(L, 0) && definitelyInteger(R)) {
-                expr = makeInt(0);
+            if (isIntLiteralVal(L, 0) && definitelyInteger(R)) {
+                expr = makeIntLiteral(0);
                 ++count;
                 return count;
             }
             // x * -1 → -x   and   -1 * x → -x
-            if (isIntLit(R, -1)) {
+            if (isIntLiteralVal(R, -1)) {
                 expr = std::make_unique<UnaryExpr>("-", std::move(bin->left));
                 ++count;
                 return count;
             }
-            if (isIntLit(L, -1)) {
+            if (isIntLiteralVal(L, -1)) {
                 expr = std::make_unique<UnaryExpr>("-", std::move(bin->right));
                 ++count;
                 return count;
@@ -225,13 +212,13 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 
         // ── Division identity ──────────────────────────────────────────────
         if (op == "/") {
-            if (isIntLit(R, 1)) {
+            if (isIntLiteralVal(R, 1)) {
                 // x / 1 → x
                 expr = std::move(bin->left);
                 ++count;
                 return count;
             }
-            if (isIntLit(R, -1)) {
+            if (isIntLiteralVal(R, -1)) {
                 // x / -1 → -x
                 expr = std::make_unique<UnaryExpr>("-", std::move(bin->left));
                 ++count;
@@ -239,7 +226,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
             // x / x → 1  (integers, non-zero assumption; conservative — only ident)
             if (sameIdent(L, R) && definitelyInteger(L)) {
-                expr = makeInt(1);
+                expr = makeIntLiteral(1);
                 ++count;
                 return count;
             }
@@ -247,15 +234,15 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 
         // ── Modulo identities ──────────────────────────────────────────────
         if (op == "%") {
-            if (isIntLit(R, 1)) {
+            if (isIntLiteralVal(R, 1)) {
                 // x % 1 → 0
-                expr = makeInt(0);
+                expr = makeIntLiteral(0);
                 ++count;
                 return count;
             }
             // x % x → 0  (non-zero assumption; conservative — only ident)
             if (sameIdent(L, R) && definitelyInteger(L)) {
-                expr = makeInt(0);
+                expr = makeIntLiteral(0);
                 ++count;
                 return count;
             }
@@ -263,23 +250,23 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 
         // ── Exponentiation identities ──────────────────────────────────────
         if (op == "**") {
-            if (isIntLit(R, 1)) {
+            if (isIntLiteralVal(R, 1)) {
                 // x ** 1 → x
                 expr = std::move(bin->left);
                 ++count;
                 return count;
             }
-            if (isIntLit(R, 0)) {
+            if (isIntLiteralVal(R, 0)) {
                 // x ** 0 → 1  (integers; 0**0 is defined as 1 in OmScript)
                 if (definitelyInteger(L)) {
-                    expr = makeInt(1);
+                    expr = makeIntLiteral(1);
                     ++count;
                     return count;
                 }
             }
             // 1 ** x → 1  (pure LHS only; side-effecting RHS must still execute)
-            if (isIntLit(L, 1)) {
-                expr = makeInt(1);
+            if (isIntLiteralVal(L, 1)) {
+                expr = makeIntLiteral(1);
                 ++count;
                 return count;
             }
@@ -287,28 +274,27 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 
         // ── Bitwise identities ─────────────────────────────────────────────
         if (op == "&") {
-            if (isIntLit(R, 0) || isIntLit(L, 0)) {
+            if (isIntLiteralVal(R, 0) || isIntLiteralVal(L, 0)) {
                 // x & 0 → 0,  0 & x → 0
-                expr = makeInt(0);
+                expr = makeIntLiteral(0);
                 ++count;
                 return count;
             }
             // x & x → x
             if (sameIdent(L, R)) {
-                expr = std::make_unique<IdentifierExpr>(
-                    static_cast<IdentifierExpr*>(L)->name);
+                expr = makeIdentifier(static_cast<IdentifierExpr*>(L)->name);
                 ++count;
                 return count;
             }
         }
         if (op == "|") {
-            if (isIntLit(R, 0)) {
+            if (isIntLiteralVal(R, 0)) {
                 // x | 0 → x
                 expr = std::move(bin->left);
                 ++count;
                 return count;
             }
-            if (isIntLit(L, 0)) {
+            if (isIntLiteralVal(L, 0)) {
                 // 0 | x → x
                 expr = std::move(bin->right);
                 ++count;
@@ -316,20 +302,19 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
             // x | x → x
             if (sameIdent(L, R)) {
-                expr = std::make_unique<IdentifierExpr>(
-                    static_cast<IdentifierExpr*>(L)->name);
+                expr = makeIdentifier(static_cast<IdentifierExpr*>(L)->name);
                 ++count;
                 return count;
             }
         }
         if (op == "^") {
-            if (isIntLit(R, 0)) {
+            if (isIntLiteralVal(R, 0)) {
                 // x ^ 0 → x
                 expr = std::move(bin->left);
                 ++count;
                 return count;
             }
-            if (isIntLit(L, 0)) {
+            if (isIntLiteralVal(L, 0)) {
                 // 0 ^ x → x
                 expr = std::move(bin->right);
                 ++count;
@@ -337,7 +322,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
             // x ^ x → 0  (integers)
             if (sameIdent(L, R)) {
-                expr = makeInt(0);
+                expr = makeIntLiteral(0);
                 ++count;
                 return count;
             }
@@ -345,7 +330,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 
         // ── Shift identities ───────────────────────────────────────────────
         if (op == "<<" || op == ">>") {
-            if (isIntLit(R, 0)) {
+            if (isIntLiteralVal(R, 0)) {
                 // x << 0 → x,  x >> 0 → x
                 expr = std::move(bin->left);
                 ++count;
@@ -359,13 +344,13 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
         if (sameIdent(L, R) && definitelyInteger(L)) {
             if (op == "==" || op == "<=" || op == ">=") {
                 // x == x → 1,  x <= x → 1,  x >= x → 1
-                expr = makeInt(1);
+                expr = makeIntLiteral(1);
                 ++count;
                 return count;
             }
             if (op == "!=" || op == "<" || op == ">") {
                 // x != x → 0,  x < x → 0,  x > x → 0
-                expr = makeInt(0);
+                expr = makeIntLiteral(0);
                 ++count;
                 return count;
             }
@@ -375,19 +360,19 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
         // Note: OmScript uses 0 = false, non-zero = true (like C).
         // We only fold when the operand is the integer literal 0 or 1.
         if (op == "&&") {
-            if (isIntLit(R, 0) || isIntLit(L, 0)) {
+            if (isIntLiteralVal(R, 0) || isIntLiteralVal(L, 0)) {
                 // x && 0 → 0,  0 && x → 0
-                expr = makeInt(0);
+                expr = makeIntLiteral(0);
                 ++count;
                 return count;
             }
-            if (isIntLit(R, 1)) {
+            if (isIntLiteralVal(R, 1)) {
                 // x && 1 → x
                 expr = std::move(bin->left);
                 ++count;
                 return count;
             }
-            if (isIntLit(L, 1)) {
+            if (isIntLiteralVal(L, 1)) {
                 // 1 && x → x
                 expr = std::move(bin->right);
                 ++count;
@@ -395,19 +380,19 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
         }
         if (op == "||") {
-            if (isIntLit(R, 1) || isIntLit(L, 1)) {
+            if (isIntLiteralVal(R, 1) || isIntLiteralVal(L, 1)) {
                 // x || 1 → 1,  1 || x → 1
-                expr = makeInt(1);
+                expr = makeIntLiteral(1);
                 ++count;
                 return count;
             }
-            if (isIntLit(R, 0)) {
+            if (isIntLiteralVal(R, 0)) {
                 // x || 0 → x
                 expr = std::move(bin->left);
                 ++count;
                 return count;
             }
-            if (isIntLit(L, 0)) {
+            if (isIntLiteralVal(L, 0)) {
                 // 0 || x → x
                 expr = std::move(bin->right);
                 ++count;
@@ -516,12 +501,8 @@ static unsigned simplifyStmt(Statement* stmt) {
 
 AlgSimpStats runAlgSimpPass(Program* program, bool verbose) {
     AlgSimpStats total;
-    if (!program) return total;
 
-    for (auto& node : program->functions) {
-        auto* fn = static_cast<FunctionDecl*>(node.get());
-        if (!fn || !fn->body) continue;
-
+    forEachFunction(program, [&](FunctionDecl* fn) {
         const unsigned before = total.rulesApplied;
         for (auto& stmt : fn->body->statements)
             total.rulesApplied += simplifyStmt(stmt.get());
@@ -531,7 +512,7 @@ AlgSimpStats runAlgSimpPass(Program* program, bool verbose) {
             std::cerr << "[AlgSimp] " << fn->name
                       << ": " << applied << " algebraic simplification(s)\n";
         }
-    }
+    });
 
     return total;
 }

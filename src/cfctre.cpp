@@ -3,6 +3,7 @@
 #include "cfctre.h"
 #include "ast.h"
 #include "opt_context.h"
+#include "pass_utils.h"
 #include "synthesize.h"
 
 #include <algorithm>
@@ -3523,8 +3524,7 @@ void CTEngine::runPass(const Program* program) {
     }
 
     // ── Phase 5: build call graph (complete pass) ─────────────────────────
-    for (auto& fn : program->functions) {
-        if (!fn->body) continue;
+    forEachFunction(program, [&](const FunctionDecl* fn) {
         graph_.nodes.push_back(fn->name);
         // Walk all expressions to collect call edges.
         std::function<void(const Expression*)> walkE = [&](const Expression* ex) {
@@ -3683,18 +3683,17 @@ void CTEngine::runPass(const Program* program) {
             }
         };
         for (auto& stmt : fn->body->statements) walkS(stmt.get());
-    }
+    });
 
     // ── Phase 6: deduplicate graph nodes ──────────────────────────────────
     std::sort(graph_.nodes.begin(), graph_.nodes.end());
     graph_.nodes.erase(std::unique(graph_.nodes.begin(), graph_.nodes.end()), graph_.nodes.end());
 
     // ── Phase 7: uniform return value detection ────────────────────────────
-    for (auto& fn : program->functions) {
-        if (!fn->body) continue;
-        if (!pureFunctions_.count(fn->name)) continue;
-        if (uniformReturnValues_.count(fn->name)) continue; // zero-arg: already in globalConsts_
-        if (fn->parameters.empty()) continue;
+    forEachFunction(program, [&](const FunctionDecl* fn) {
+        if (!pureFunctions_.count(fn->name)) return;
+        if (uniformReturnValues_.count(fn->name)) return; // zero-arg: already in globalConsts_
+        if (fn->parameters.empty()) return;
 
         // Build all-symbolic argument vector.
         std::vector<CTValue> symbolicArgs;
@@ -3702,12 +3701,12 @@ void CTEngine::runPass(const Program* program) {
         for (size_t i = 0; i < fn->parameters.size(); ++i)
             symbolicArgs.push_back(CTValue::symbolic());
 
-        auto result = executeFunction(fn.get(), symbolicArgs);
+        auto result = executeFunction(fn, symbolicArgs);
         if (result && result->isConcrete()) {
             uniformReturnValues_[fn->name] = *result;
             ++stats_.uniformReturnFunctionsFound;
         }
-    }
+    });
 
     // ── Phase 8: dead function detection ──────────────────────────────────
     {
@@ -3723,8 +3722,7 @@ void CTEngine::runPass(const Program* program) {
         std::unordered_set<std::string> alive;
         std::vector<std::string> worklist;
         bool hasSeed = false;
-        for (auto& fn : program->functions) {
-            if (!fn->body) continue;
+        forEachFunction(program, [&](const FunctionDecl* fn) {
             // "main" is always an entry point.
             const bool isMain = fn->name == "main";
             // A function with no callers in the program graph could be called
@@ -3736,7 +3734,7 @@ void CTEngine::runPass(const Program* program) {
                     hasSeed = true;
                 }
             }
-        }
+        });
 
         if (hasSeed) {
             // Forward BFS.
@@ -3752,13 +3750,12 @@ void CTEngine::runPass(const Program* program) {
             }
 
             // Mark functions that are registered but not alive.
-            for (auto& fn : program->functions) {
-                if (!fn->body) continue;
+            forEachFunction(program, [&](const FunctionDecl* fn) {
                 if (!alive.count(fn->name)) {
                     deadFunctions_.insert(fn->name);
                     ++stats_.deadFunctionsDetected;
                 }
-            }
+            });
         }
     }
 
@@ -3910,11 +3907,10 @@ void CTEngine::runPass(const Program* program) {
             }
         };
 
-        for (auto& fn : program->functions) {
-            if (!fn->body) continue;
+        forEachFunction(program, [&](const FunctionDecl* fn) {
             for (auto& stmt : fn->body->statements)
                 walkStmtCallSites(stmt.get());
-        }
+        });
     }
 }
 
@@ -4642,10 +4638,8 @@ void CTEngine::runAbstractInterpretation(const Program* program) {
 
     CTAbstractInterpreter interp(*this, globalConsts_, enumConsts_);
 
-    for (auto& fn : program->functions) {
-        if (!fn->body) continue;
-
-        CTAnalysisResult res = interp.analyzeFunction(fn.get());
+    forEachFunction(program, [&](const FunctionDecl* fn) {
+        CTAnalysisResult res = interp.analyzeFunction(fn);
 
         // Merge per-function results into the engine's global tables.
 
@@ -4681,7 +4675,7 @@ void CTEngine::runAbstractInterpretation(const Program* program) {
             analysisSafeArith_.insert(e);
             ++stats_.safeArithmetic;
         }
-    }
+    });
 }
 
 } // namespace omscript

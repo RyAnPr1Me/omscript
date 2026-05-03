@@ -314,7 +314,21 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             const std::string httpLib = OMSC_HTTP_LIB_PATH;
             if (!httpLib.empty() && std::filesystem::exists(httpLib)) {
                 linkArgs.push_back(httpLib);
+#ifdef OMSC_CURL_LIB_PATH
+                // Use the full path to the curl library that was recorded at
+                // build time; this works even when curl is not in the system
+                // linker search path (e.g. a miniconda or Homebrew install).
+                {
+                    const std::string curlLib = OMSC_CURL_LIB_PATH;
+                    if (!curlLib.empty() && std::filesystem::exists(curlLib)) {
+                        linkArgs.push_back(curlLib);
+                    } else {
+                        linkArgs.push_back("-lcurl");
+                    }
+                }
+#else
                 linkArgs.push_back("-lcurl");
+#endif
             }
         }
 #endif

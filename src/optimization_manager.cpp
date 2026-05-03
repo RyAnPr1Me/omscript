@@ -2,6 +2,7 @@
 /// @brief Implementation of OptimizationManager, PassScheduler, LegalityService.
 
 #include "optimization_manager.h"
+#include "ersl.h"              // deriveEffectSummary, EffectSummary
 #include "opt_orchestrator.h"  // PassRegistry, PassMetadata
 #include "superoptimizer.h"    // superopt::instructionCost — used by DefaultCostModel
 #include <cassert>
@@ -56,6 +57,27 @@ LegalityVerdict LegalityService::canTransformLoops(
     // beyond simple array reads/writes (e.g. modifies global variables, calls
     // impure user functions).  Conservative: block all transforms.
     if (ctx.effects->hasMutation) return LegalityVerdict::Illegal;
+
+    // ── ERSL refinement ──────────────────────────────────────────────────────
+    // Use the pre-computed EffectSummary from ctx.ersl when available
+    // (populated by the ERSL pass via OptimizationContext::effectSummary()),
+    // otherwise derive it on-the-fly from the raw FunctionEffects.
+    //
+    // getMaxSafeOptLevel() encodes a total ordering of effect severity:
+    //   Level 1  → IO/External  : already blocked above.
+    //   Level 2  → global/arg write: unknown (polyopt may still prove legality).
+    //   Level 3+ → no escaping writes, no I/O: loop transforms are safe.
+    const EffectSummary computed = !ctx.ersl ? deriveEffectSummary(*ctx.effects) : EffectSummary{};
+    const EffectSummary& es = ctx.ersl ? *ctx.ersl : computed;
+
+    if (es.maxSafeOptLevel <= 1)
+        return LegalityVerdict::Illegal;
+
+    if (es.maxSafeOptLevel == 2) {
+        // Writes escape to global/arg: polyopt may still prove legality via
+        // direction vectors, but we cannot assert Legal at this level.
+        return LegalityVerdict::Unknown;
+    }
 
     // writesMemory alone does NOT prevent loop transforms — dependence analysis
     // in polyopt handles read/write hazards precisely.  We only block here when
@@ -258,6 +280,11 @@ AnalysisDependencyGraph AnalysisDependencyGraph::createDefault() {
     //   if purity is invalidated, effect summaries (which track pure calls)
     //   must also be considered stale
     g.addDependency(F::kEffects, F::kPurity);
+
+    // ersl depends on effects:
+    //   ERSL derives stability/idempotence/speculation flags from FunctionEffects;
+    //   if effects change, all ERSL-derived flags must be recomputed
+    g.addDependency(F::kERSL, F::kEffects);
 
     // synthesis depends on purity and effects:
     //   synthesis uses purity/effect facts to decide which functions to expand

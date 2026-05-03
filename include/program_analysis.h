@@ -53,6 +53,8 @@
 ///   - After PreIPO (feeds per-function OPTMAX pipeline)
 ///   - After per-function OPTMAX pipeline (feeds PostIPO)
 
+#include "ersl.h"  // EffectSummary
+
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -139,6 +141,12 @@ struct FunctionSnapshot {
     /// True for functions reachable from a module entry point.  False for
     /// internal functions with no remaining callers (candidates for GlobalDCE).
     bool isReachable = true;
+
+    // ── ERSL: Effect Refinement & Speculation Layer ───────────────────────
+    /// Aggregated ERSL facts derived from the function's LLVM IR attributes.
+    /// Populated by computeProgramFacts(); zero-initialised (conservative)
+    /// when the function is a declaration or when ERSL computation is skipped.
+    EffectSummary ersl;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

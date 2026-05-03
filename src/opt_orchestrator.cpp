@@ -15,6 +15,8 @@
 #include "copy_prop_pass.h"
 #include "dce_pass.h"
 #include "cse_pass.h"
+#include "ersl.h"
+#include "pass_utils.h"
 #include "width_legalization.h"
 #include "width_opt_pass.h"
 #include "diagnostic.h"
@@ -168,6 +170,7 @@ namespace PassId {
     uint32_t kConstantReturns   = 0;
     uint32_t kPurity            = 0;
     uint32_t kEffects           = 0;
+    uint32_t kERSL              = 0;
     uint32_t kSynthesis         = 0;
     uint32_t kCFCTRE            = 0;
     uint32_t kEGraph            = 0;
@@ -257,6 +260,20 @@ static void registerAllPasses() {
         PassKind::Analysis,
         {AnalysisFact::kPurity},
         {AnalysisFact::kEffects},
+        {},
+    });
+
+    PassId::kERSL = reg.registerPass({
+        0,
+        "ersl",
+        "Effect Refinement & Speculation Layer: derive stability, idempotence, "
+        "escape class, and max-safe-optimization-level from FunctionEffects",
+        PassPhase::EvaluationAnalysis,
+        PassKind::Analysis,
+        // ERSL requires effects to have been inferred first.
+        {AnalysisFact::kEffects},
+        {AnalysisFact::kERSL},
+        // Pure analysis — does not modify the AST, invalidates nothing.
         {},
     });
 
@@ -449,6 +466,7 @@ OptimizationOrchestrator::buildDispatch() {
         {PassId::kConstantReturns,   R([this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); })},
         {PassId::kPurity,            R([this](Program* p, OptimizationContext& c){ runPurity(p, c); })},
         {PassId::kEffects,           R([this](Program* p, OptimizationContext& c){ runEffects(p, c); })},
+        {PassId::kERSL,              R([this](Program* p, OptimizationContext& c){ runERSL(p, c); })},
         {PassId::kSynthesis,         R([this](Program* p, OptimizationContext& c){ runSynthesis(p, c); })},
         {PassId::kCFCTRE,            R([this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); })},
         {PassId::kEGraph,            R([this](Program* p, OptimizationContext& c){ runEGraph(p, c); })},
@@ -652,13 +670,11 @@ void OptimizationOrchestrator::runPurity(Program* program, OptimizationContext& 
     // for syncFactsToContext to run at the end of the pipeline.
     // Effects haven't been inferred yet at this point, so we only use the
     // isConstFoldable flag here; syncFactsToContext will refine with effects later.
-    if (program) {
-        for (const auto& func : program->functions) {
-            FunctionFacts& ff = ctx.mutableFacts(func->name);
-            if (ff.isConstFoldable)
-                ff.isPure = true;
-        }
-    }
+    forEachFunction(program, [&](FunctionDecl* fn) {
+        FunctionFacts& ff = ctx.mutableFacts(fn->name);
+        if (ff.isConstFoldable)
+            ff.isPure = true;
+    });
     ctx.validity().purity = true;
 }
 
@@ -686,22 +702,15 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
         if (e->type == ASTNodeType::BINARY_EXPR) {
             const auto* bin = static_cast<const BinaryExpr*>(e);
             // Check for literal zero divisor.
-            if ((bin->op == "/" || bin->op == "%") && bin->right) {
-                const Expression* rhs = bin->right.get();
-                if (rhs->type == ASTNodeType::LITERAL_EXPR) {
-                    const auto* lit = static_cast<const LiteralExpr*>(rhs);
-                    if (lit->literalType == LiteralExpr::LiteralType::INTEGER &&
-                        lit->intValue == 0) {
-                        Diagnostic d;
-                        d.severity = DiagnosticSeverity::Error;
-                        d.code     = ErrorCode::E011_DIVISION_BY_ZERO;
-                        d.location = {fnName, 0, 0};
-                        d.message  = "division by zero (literal 0 as "
-                                     + std::string(bin->op == "/" ? "divisor" : "modulus")
-                                     + ") in function '" + fnName + "'";
-                        throw DiagnosticError(d);
-                    }
-                }
+            if ((bin->op == "/" || bin->op == "%") && bin->right &&
+                isIntLiteralVal(bin->right.get(), 0)) {
+                throw DiagnosticError(Diagnostic{
+                    DiagnosticSeverity::Error,
+                    {fnName, 0, 0},
+                    "division by zero (literal 0 as "
+                    + std::string(bin->op == "/" ? "divisor" : "modulus")
+                    + ") in function '" + fnName + "'",
+                    ErrorCode::E011_DIVISION_BY_ZERO});
             }
             // Recurse into both sides.
             checkExpr(bin->left.get(),  fnName);
@@ -788,10 +797,9 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
         }
     };
 
-    for (const auto& fn : program->functions) {
-        if (fn && fn->body)
-            checkStmt(fn->body.get(), fn->name);
-    }
+    forEachFunction(program, [&](const FunctionDecl* fn) {
+        checkStmt(fn->body.get(), fn->name);
+    });
     // Also check global variable initializers.
     for (const auto& g : program->globals) {
         if (g && g->initializer)
@@ -804,6 +812,19 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
 void OptimizationOrchestrator::runEffects(Program* program, OptimizationContext& ctx) {
     codegen_->inferFunctionEffects(program);
     ctx.validity().effects = true;
+}
+
+void OptimizationOrchestrator::runERSL(Program* program, OptimizationContext& ctx) {
+    // Derive EffectSummary for every function from its already-inferred FunctionEffects.
+    // This is a pure computation: no AST modification, no LLVM analysis required.
+    if (program) {
+        for (const auto& func : program->functions) {
+            if (!func) continue;
+            FunctionFacts& ff = ctx.mutableFacts(func->name);
+            ff.ersl = deriveEffectSummary(ff.effects);
+        }
+    }
+    ctx.validity().ersl = true;
 }
 
 void OptimizationOrchestrator::runSynthesis(Program* program, OptimizationContext& ctx) {
@@ -836,12 +857,8 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
 
     // Helper: try to read a literal int from an expression.
     auto litInt = [](const Expression* e) -> std::optional<int64_t> {
-        if (!e) return {};
-        if (e->type == ASTNodeType::LITERAL_EXPR) {
-            auto* lit = static_cast<const LiteralExpr*>(e);
-            if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
-                return lit->intValue;
-        }
+        long long v = 0;
+        if (isIntLiteral(e, &v)) return static_cast<int64_t>(v);
         return {};
     };
 
@@ -1018,7 +1035,22 @@ void OptimizationOrchestrator::runDCE(Program* program, OptimizationContext& ctx
 }
 
 void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx) {
-    runCSEPass(program, verbose_);
+    // Build the idempotent-function table from ERSL facts so the CSE pass can
+    // also eliminate duplicate calls to stable, canDuplicate user functions.
+    // If ERSL hasn't run yet (ersl validity flag is false), fall back to the
+    // binary-only mode by passing nullptr.
+    if (ctx.validity().ersl && program) {
+        std::unordered_map<std::string, EffectSummary> idempotent;
+        for (const auto& func : program->functions) {
+            if (!func) continue;
+            const EffectSummary& es = ctx.effectSummary(func->name);
+            if (es.canDuplicate)
+                idempotent.emplace(func->name, es);
+        }
+        runCSEPass(program, verbose_, &idempotent);
+    } else {
+        runCSEPass(program, verbose_, nullptr);
+    }
     ctx.validity().cse = true;
 }
 

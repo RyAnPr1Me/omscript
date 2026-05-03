@@ -25,6 +25,7 @@
 /// pass is sufficient for chains of copies.
 
 #include "copy_prop_pass.h"
+#include "pass_utils.h"
 
 #include <iostream>
 #include <memory>
@@ -88,7 +89,7 @@ static unsigned propagateInExpr(std::unique_ptr<Expression>& expr,
         auto it = map.find(id->name);
         if (it != map.end()) {
             // Replace this identifier with a fresh clone of the source.
-            expr = std::make_unique<IdentifierExpr>(it->second);
+            expr = makeIdentifier(it->second);
             ++count;
         }
         break;
@@ -170,8 +171,8 @@ static void collectWrittenNames(const Expression* expr,
         const Expression* operand = (expr->type == ASTNodeType::POSTFIX_EXPR)
             ? static_cast<const PostfixExpr*>(expr)->operand.get()
             : static_cast<const PrefixExpr*>(expr)->operand.get();
-        if (operand && operand->type == ASTNodeType::IDENTIFIER_EXPR)
-            out.insert(static_cast<const IdentifierExpr*>(operand)->name);
+        if (const auto* operandId = asIdentifier(operand))
+            out.insert(operandId->name);
         break;
     }
     case ASTNodeType::BINARY_EXPR: {
@@ -285,12 +286,9 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
             // Propagate into the initializer FIRST (it sees the current map).
             count += propagateInExpr(vd->initializer, map);
             // Then decide whether this creates a new copy or kills an existing one.
-            if (vd->initializer &&
-                vd->initializer->type == ASTNodeType::IDENTIFIER_EXPR) {
+            if (const auto* initId = asIdentifier(vd->initializer.get())) {
                 // var y = x  → record y → resolve(x) for transitive propagation.
-                const auto& src =
-                    resolve(map, static_cast<const IdentifierExpr*>(
-                                     vd->initializer.get())->name);
+                const auto& src = resolve(map, initId->name);
                 // Kill any prior entry for y, then record the new copy.
                 killName(map, vd->name);
                 map[vd->name] = src;
@@ -415,12 +413,8 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
 
 CopyPropStats runCopyPropPass(Program* program, bool verbose) {
     CopyPropStats total;
-    if (!program) return total;
 
-    for (auto& node : program->functions) {
-        auto* fn = static_cast<FunctionDecl*>(node.get());
-        if (!fn || !fn->body) continue;
-
+    forEachFunction(program, [&](FunctionDecl* fn) {
         const unsigned before = total.copiesEliminated;
         total.copiesEliminated +=
             propagateInBlock(fn->body.get(), CopyMap{});
@@ -430,7 +424,8 @@ CopyPropStats runCopyPropPass(Program* program, bool verbose) {
             std::cerr << "[CopyProp] " << fn->name
                       << ": " << applied << " copy(ies) propagated\n";
         }
-    }
+    });
+
     return total;
 }
 

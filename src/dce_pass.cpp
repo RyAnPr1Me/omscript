@@ -15,6 +15,7 @@
 ///     statement list, all following statements are dropped.
 
 #include "dce_pass.h"
+#include "pass_utils.h"
 
 #include <algorithm>
 #include <iostream>
@@ -22,20 +23,6 @@
 #include <vector>
 
 namespace omscript {
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Returns true when @p expr is a compile-time integer literal.
-/// Sets *value to the literal value when non-null.
-static bool isIntLiteral(const Expression* expr, long long* value = nullptr) {
-    if (!expr || expr->type != ASTNodeType::LITERAL_EXPR) return false;
-    const auto* lit = static_cast<const LiteralExpr*>(expr);
-    if (lit->literalType != LiteralExpr::LiteralType::INTEGER) return false;
-    if (value) *value = lit->intValue;
-    return true;
-}
 
 /// Returns true when @p stmt terminates control flow unconditionally in its
 /// own block (return, break, continue, throw).
@@ -255,12 +242,8 @@ static DCEStats transformBlock(BlockStmt* block) {
 
 DCEStats runDCEPass(Program* program, bool verbose) {
     DCEStats total;
-    if (!program) return total;
 
-    for (auto& node : program->functions) {
-        auto* fn = static_cast<FunctionDecl*>(node.get());
-        if (!fn || !fn->body) continue;
-
+    forEachFunction(program, [&](FunctionDecl* fn) {
         DCEStats fnStats = transformBlock(fn->body.get());
 
         total.deadIfBranches   += fnStats.deadIfBranches;
@@ -273,7 +256,7 @@ DCEStats runDCEPass(Program* program, bool verbose) {
                       << fnStats.deadLoops        << " dead loop(s), "
                       << fnStats.unreachableStmts << " unreachable stmt(s) removed\n";
         }
-    }
+    });
 
     return total;
 }

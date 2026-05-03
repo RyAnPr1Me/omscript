@@ -186,6 +186,12 @@ struct LoopLegalityContext {
     /// Function effect summary from OmScript's pre-pass analysis.
     /// If null, the service falls back to a conservative Unknown verdict.
     const FunctionEffects* effects = nullptr;
+
+    /// Pre-computed ERSL EffectSummary for the function.
+    /// When non-null, LegalityService uses this directly instead of
+    /// recomputing it from @p effects.  Populate from
+    /// OptimizationContext::effectSummary() when available.
+    const EffectSummary* ersl = nullptr;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

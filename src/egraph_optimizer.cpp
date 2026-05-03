@@ -17,6 +17,7 @@
 #include "ast.h"
 #include "egraph.h"
 #include "opt_context.h"
+#include "pass_utils.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -212,7 +213,7 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
 
     switch (node.op) {
     case Op::Const:
-        return std::make_unique<LiteralExpr>(node.value);
+        return makeIntLiteral(node.value);
 
     case Op::ConstF:
         return std::make_unique<LiteralExpr>(node.fvalue);
@@ -223,11 +224,11 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
         if (name.substr(0, 6) == "__str_") {
             return std::make_unique<LiteralExpr>(name.substr(6));
         }
-        return std::make_unique<IdentifierExpr>(name);
+        return makeIdentifier(name);
     }
 
     case Op::Nop:
-        return std::make_unique<LiteralExpr>(0LL);
+        return makeIntLiteral(0LL);
 
     default:
         break;
@@ -235,21 +236,20 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
 
     // Binary operations
     if (isBinaryOp(node.op) && node.children.size() == 2) {
-        auto left = eNodeToAST(graph, node.children[0], bestMap);
+        auto left  = eNodeToAST(graph, node.children[0], bestMap);
         auto right = eNodeToAST(graph, node.children[1], bestMap);
-        return std::make_unique<BinaryExpr>(opToString(node.op),
-                                             std::move(left), std::move(right));
+        return makeBinary(opToString(node.op), std::move(left), std::move(right));
     }
 
     // Unary operations
     if (isUnaryOp(node.op) && node.children.size() == 1) {
         auto operand = eNodeToAST(graph, node.children[0], bestMap);
-        return std::make_unique<UnaryExpr>(opToString(node.op), std::move(operand));
+        return makeUnary(opToString(node.op), std::move(operand));
     }
 
     // Ternary
     if (node.op == Op::Ternary && node.children.size() == 3) {
-        auto cond = eNodeToAST(graph, node.children[0], bestMap);
+        auto cond  = eNodeToAST(graph, node.children[0], bestMap);
         auto thenE = eNodeToAST(graph, node.children[1], bestMap);
         auto elseE = eNodeToAST(graph, node.children[2], bestMap);
         return std::make_unique<TernaryExpr>(std::move(cond), std::move(thenE),
@@ -269,7 +269,7 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
     }
 
     // Fallback
-    return std::make_unique<LiteralExpr>(0LL);
+    return makeIntLiteral(0LL);
 }
 
 /// Optimize a single AST expression using e-graph equality saturation.
@@ -510,10 +510,9 @@ void optimizeFunction(FunctionDecl* func, const EGraphOptContext& ctx) {
 }
 
 void optimizeProgram(Program* program, const EGraphOptContext& ctx) {
-    if (!program) return;
-    for (auto& func : program->functions) {
-        optimizeFunction(func.get(), ctx);
-    }
+    forEachFunction(program, [&](FunctionDecl* func) {
+        optimizeFunction(func, ctx);
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

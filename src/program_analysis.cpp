@@ -38,7 +38,6 @@
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
-
 namespace omscript {
 
 namespace {
@@ -172,6 +171,35 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
 
         // Derived purity: readnone + willreturn + nounwind
         fs.isPure = fs.doesNotAccessMemory && fs.willReturn && fs.doesNotThrow;
+
+        // ── ERSL: populate EffectSummary from LLVM IR attributes ─────────
+        // Translate LLVM function attributes into a FunctionEffects-equivalent
+        // record, then call deriveEffectSummary() to compute the full ERSL facts.
+        {
+            FunctionEffects fe;
+            fe.readsMemory  = !fs.doesNotAccessMemory;
+            // LLVM's onlyReadsMemory maps to our readonly — no writes.
+            fe.writesMemory = !fs.doesNotAccessMemory && !fs.onlyReadsMemory;
+            // I/O: a function is treated as having I/O only when it is NOT nosync
+            // AND NOT willreturn (potential blocking / external side-effects) AND
+            // accesses memory.  The combination of nosync+willreturn is a strong
+            // indicator of a pure-computation function with no external effects.
+            // We avoid flagging allocation/deallocation helpers as I/O — those are
+            // captured separately via hasMutation/allocates below.
+            fe.hasIO         = !fs.noSync && !fs.willReturn && !fs.doesNotAccessMemory;
+            fe.hasMutation   = fe.writesMemory;
+            fe.mayThrow      = !fs.doesNotThrow;
+            fe.mayNotReturn  = !fs.willReturn;
+            // Allocation / deallocation cannot be inferred from basic attributes
+            // without alias analysis; leave them false (conservative: not a concern
+            // for max-safe-level computation at the IR level).
+            fe.allocates     = false;
+            fe.deallocates   = false;
+            fe.hasIndirectCall = false;
+            fe.readsGlobal   = false;
+            fe.writesGlobal  = false;
+            fs.ersl = deriveEffectSummary(fe);
+        }
 
         // ── Reachability ──────────────────────────────────────────────────
         fs.isReachable = (reachable.count(&F) != 0);

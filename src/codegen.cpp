@@ -4319,7 +4319,13 @@ void CodeGenerator::generate(Program* program) {
         // The `noinline` attribute is removed after runOptimizationPasses()
         // completes so that no permanent change is made to the function
         // attributes seen by the linker or any downstream LTO pass.
-        llvm::SmallVector<llvm::Function*, 64> inlinerGuardFuncs;
+        // Store function *names* rather than raw pointers.  IPO passes that
+        // run inside runOptimizationPasses() (IPSCCP, GlobalOpt,
+        // DeadArgumentElimination, etc.) may delete or replace these Function
+        // objects, leaving raw pointers dangling.  Looking up by name after
+        // optimisation is safe: module->getFunction() returns nullptr for
+        // functions that were deleted, so we simply skip the attribute removal.
+        llvm::SmallVector<std::string, 64> inlinerGuardFuncNames;
         if (hasOptMaxFunctions && enableOptMax_ && module) {
             for (auto& F : *module) {
                 if (F.isDeclaration()) continue;
@@ -4337,7 +4343,7 @@ void CodeGenerator::generate(Program* program) {
                 }
                 if (hasNonOptMaxCaller) {
                     F.addFnAttr(llvm::Attribute::NoInline);
-                    inlinerGuardFuncs.push_back(&F);
+                    inlinerGuardFuncNames.push_back(F.getName().str());
                 }
             }
         }
@@ -4364,8 +4370,13 @@ void CodeGenerator::generate(Program* program) {
         }, kOptStackBytes);
 
         // Restore: remove the temporary noinline markers added above.
-        for (llvm::Function* F : inlinerGuardFuncs)
-            F->removeFnAttr(llvm::Attribute::NoInline);
+        // Use name lookup rather than raw pointers since IPO passes inside
+        // runOptimizationPasses() may have deleted or replaced those Function
+        // objects, which would make the old pointers dangling.
+        for (const auto& name : inlinerGuardFuncNames) {
+            if (auto* F = module->getFunction(name))
+                F->removeFnAttr(llvm::Attribute::NoInline);
+        }
 
         if (pendingException)
             std::rethrow_exception(pendingException);

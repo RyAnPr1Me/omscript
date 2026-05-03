@@ -89,6 +89,7 @@ set(SRC
     # Optimization architecture (orchestrator + unified context)
     src/opt_context.cpp
     src/opt_orchestrator.cpp
+    src/ersl.cpp
     src/rlc_pass.cpp
     src/optimization_manager.cpp
     src/loop_transform_framework.cpp
@@ -158,6 +159,15 @@ target_compile_definitions(omsc PRIVATE
 # Tell the compiler binary where the HTTP runtime library lives at build time.
 target_compile_definitions(omsc PRIVATE
     OMSC_HTTP_LIB_PATH=\"${CMAKE_CURRENT_BINARY_DIR}/libomsc_http.a\"
+)
+
+# Tell the compiler binary the full path to the curl library so that user
+# programs can be linked against it regardless of whether it lives in a
+# standard system directory.  CURL_LIBRARIES may be a list; we take the first
+# element (the shared/static library itself) which is all that is needed here.
+list(GET CURL_LIBRARIES 0 _curl_lib_first)
+target_compile_definitions(omsc PRIVATE
+    OMSC_CURL_LIB_PATH=\"${_curl_lib_first}\"
 )
 
 # ── Version define ────────────────────────────────────────────────────────────

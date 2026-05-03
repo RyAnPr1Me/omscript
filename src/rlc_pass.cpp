@@ -16,6 +16,7 @@
 
 #include "rlc_pass.h"
 #include "diagnostic.h"
+#include "pass_utils.h"
 
 #include <algorithm>
 #include <functional>
@@ -44,8 +45,9 @@ static bool isAllocCall(const Expression* expr, std::string* regionVar = nullptr
     if (!expr || expr->type != ASTNodeType::CALL_EXPR) return false;
     const auto* c = static_cast<const CallExpr*>(expr);
     if (c->callee != "alloc" || c->arguments.empty()) return false;
-    if (regionVar && c->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
-        *regionVar = static_cast<const IdentifierExpr*>(c->arguments[0].get())->name;
+    if (regionVar) {
+        if (const auto* id = asIdentifier(c->arguments[0].get()))
+            *regionVar = id->name;
     }
     return true;
 }
@@ -561,10 +563,8 @@ static void processBlock(
     for (const auto& sp : stmts) {
         if (!sp || sp->type != ASTNodeType::RETURN_STMT) continue;
         const auto* ret = static_cast<const ReturnStmt*>(sp.get());
-        if (ret->value && ret->value->type == ASTNodeType::IDENTIFIER_EXPR) {
-            returnedVars.insert(
-                static_cast<const IdentifierExpr*>(ret->value.get())->name);
-        }
+        if (const auto* retId = asIdentifier(ret->value.get()))
+            returnedVars.insert(retId->name);
     }
 
     for (const auto& ri : regions) {
@@ -689,17 +689,15 @@ static constexpr int kMaxCoalescingIterations = 8;
 
 RLCStats runRLCPass(Program* program, bool verbose) {
     RLCStats stats;
-    if (!program) return stats;
 
-    for (auto& func : program->functions) {
-        if (!func || !func->body) continue;
+    forEachFunction(program, [&](FunctionDecl* func) {
         // Run multiple iterations until fixpoint.
         for (int iter = 0; iter < kMaxCoalescingIterations; ++iter) {
             const unsigned before = stats.regionsCoalesced;
             processBlock(func->body->statements, func->name, stats, verbose);
             if (stats.regionsCoalesced == before) break;
         }
-    }
+    });
 
     if (verbose && stats.regionsCoalesced > 0) {
         std::cout << "[rlc] Total: " << stats.regionsCoalesced
