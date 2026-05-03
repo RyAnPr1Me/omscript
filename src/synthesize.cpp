@@ -23,6 +23,7 @@
 
 #include "synthesize.h"
 #include "ast.h"
+#include "pass_utils.h"
 
 #include <algorithm>
 #include <cassert>
@@ -485,21 +486,21 @@ std::unique_ptr<Expression> SynthesisEngine::lowerToAST(
     const std::vector<std::string>& paramNames) {
 
     if (!node) {
-        return std::make_unique<LiteralExpr>(static_cast<long long>(0));
+        return makeIntLiteral(0LL);
     }
 
     switch (node->op) {
     case SynthOp::PARAM: {
         const int idx = node->value;
         if (!paramNames.empty() && idx >= 0 && static_cast<size_t>(idx) < paramNames.size())
-            return std::make_unique<IdentifierExpr>(paramNames[static_cast<size_t>(idx)]);
-        return std::make_unique<IdentifierExpr>("p" + std::to_string(idx));
+            return makeIdentifier(paramNames[static_cast<size_t>(idx)]);
+        return makeIdentifier("p" + std::to_string(idx));
     }
     case SynthOp::CONST:
-        return std::make_unique<LiteralExpr>(static_cast<long long>(node->value));
+        return makeIntLiteral(static_cast<long long>(node->value));
 
     case SynthOp::NEG:
-        return std::make_unique<UnaryExpr>("-", lowerToAST(node->left.get(), paramNames));
+        return makeUnary("-", lowerToAST(node->left.get(), paramNames));
     case SynthOp::ABS: {
         std::vector<std::unique_ptr<Expression>> args;
         args.push_back(lowerToAST(node->left.get(), paramNames));
@@ -508,50 +509,50 @@ std::unique_ptr<Expression> SynthesisEngine::lowerToAST(
         return e;
     }
     case SynthOp::NOT:
-        return std::make_unique<UnaryExpr>("~", lowerToAST(node->left.get(), paramNames));
+        return makeUnary("~", lowerToAST(node->left.get(), paramNames));
 
     case SynthOp::ADD:
-        return std::make_unique<BinaryExpr>("+",
+        return makeBinary("+",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::SUB:
-        return std::make_unique<BinaryExpr>("-",
+        return makeBinary("-",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::MUL:
-        return std::make_unique<BinaryExpr>("*",
+        return makeBinary("*",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::DIV:
-        return std::make_unique<BinaryExpr>("/",
+        return makeBinary("/",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::MOD:
-        return std::make_unique<BinaryExpr>("%",
+        return makeBinary("%",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::AND:
-        return std::make_unique<BinaryExpr>("&",
+        return makeBinary("&",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::OR:
-        return std::make_unique<BinaryExpr>("|",
+        return makeBinary("|",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::XOR:
-        return std::make_unique<BinaryExpr>("^",
+        return makeBinary("^",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::SHL:
-        return std::make_unique<BinaryExpr>("<<",
+        return makeBinary("<<",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::SHR:
-        return std::make_unique<BinaryExpr>(">>",
+        return makeBinary(">>",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::POW:
-        return std::make_unique<BinaryExpr>("**",
+        return makeBinary("**",
             lowerToAST(node->left.get(),  paramNames),
             lowerToAST(node->right.get(), paramNames));
     case SynthOp::MIN2: {
@@ -571,7 +572,7 @@ std::unique_ptr<Expression> SynthesisEngine::lowerToAST(
         return e;
     }
     }
-    return std::make_unique<LiteralExpr>(static_cast<long long>(0));
+    return makeIntLiteral(0LL);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

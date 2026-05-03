@@ -21,6 +21,7 @@
 
 #include "ast.h"
 
+#include <algorithm>
 #include <memory>
 
 namespace omscript {
@@ -55,6 +56,68 @@ inline bool isIntLiteralVal(const Expression* expr, long long val) noexcept {
 /// Create a new integer literal expression with value @p v.
 inline std::unique_ptr<Expression> makeIntLiteral(long long v) {
     return std::make_unique<LiteralExpr>(v);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AST node factories
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Create a new identifier expression with name @p name.
+inline std::unique_ptr<Expression> makeIdentifier(const std::string& name) {
+    return std::make_unique<IdentifierExpr>(name);
+}
+
+/// Create a new binary expression @p lhs @p op @p rhs.
+inline std::unique_ptr<Expression> makeBinary(const std::string& op,
+                                               std::unique_ptr<Expression> lhs,
+                                               std::unique_ptr<Expression> rhs) {
+    return std::make_unique<BinaryExpr>(op, std::move(lhs), std::move(rhs));
+}
+
+/// Create a new unary expression @p op @p operand.
+inline std::unique_ptr<Expression> makeUnary(const std::string& op,
+                                              std::unique_ptr<Expression> operand) {
+    return std::make_unique<UnaryExpr>(op, std::move(operand));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Typed-cast helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// If @p expr is an IdentifierExpr, return the cast pointer; otherwise nullptr.
+inline IdentifierExpr* asIdentifier(Expression* expr) noexcept {
+    if (!expr || expr->type != ASTNodeType::IDENTIFIER_EXPR) return nullptr;
+    return static_cast<IdentifierExpr*>(expr);
+}
+
+/// Const overload.
+inline const IdentifierExpr* asIdentifier(const Expression* expr) noexcept {
+    if (!expr || expr->type != ASTNodeType::IDENTIFIER_EXPR) return nullptr;
+    return static_cast<const IdentifierExpr*>(expr);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compiler-generated VarDecl insertion
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Insert a compiler-generated `var @p name = <init>` declaration at position
+/// @p insertPos in @p block's statement list.  The declaration is marked
+/// `isCompilerGenerated = true` and is `const` by default.
+///
+/// Safe to call when @p block is null or @p insertPos is out of range
+/// (clamped to block->statements.size()).
+inline void insertCompilerVarDecl(BlockStmt* block,
+                                   size_t insertPos,
+                                   const std::string& name,
+                                   std::unique_ptr<Expression> init,
+                                   bool isConst = true) {
+    if (!block) return;
+    auto decl = std::make_unique<VarDecl>(name, std::move(init), isConst, /*type=*/"");
+    decl->isCompilerGenerated = true;
+    const size_t clampedPos = std::min(insertPos, block->statements.size());
+    block->statements.insert(
+        block->statements.begin() + static_cast<ptrdiff_t>(clampedPos),
+        std::move(decl));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

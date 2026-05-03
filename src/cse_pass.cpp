@@ -332,13 +332,7 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
         if (insertPos == block->statements.size()) continue;
 
         // Insert `var _cse_N = <expr>` before insertPos.
-        auto decl = std::make_unique<VarDecl>(varName, std::move(initExpr),
-                                              /*isConst=*/true,
-                                              /*type=*/"");
-        decl->isCompilerGenerated = true;
-        block->statements.insert(block->statements.begin() +
-                                     static_cast<ptrdiff_t>(insertPos),
-                                 std::move(decl));
+        insertCompilerVarDecl(block, insertPos, varName, std::move(initExpr), /*isConst=*/true);
         ++stats.tempVarsIntroduced;
 
         // Replace all occurrences of key in statements AFTER the declaration
