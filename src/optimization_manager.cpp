@@ -67,7 +67,7 @@ LegalityVerdict LegalityService::canTransformLoops(
     //   Level 1  → IO/External  : already blocked above.
     //   Level 2  → global/arg write: unknown (polyopt may still prove legality).
     //   Level 3+ → no escaping writes, no I/O: loop transforms are safe.
-    const EffectSummary computed = ctx.ersl ? EffectSummary{} : deriveEffectSummary(*ctx.effects);
+    const EffectSummary computed = !ctx.ersl ? deriveEffectSummary(*ctx.effects) : EffectSummary{};
     const EffectSummary& es = ctx.ersl ? *ctx.ersl : computed;
 
     if (es.maxSafeOptLevel <= 1)

@@ -1048,7 +1048,7 @@ void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx
             if (es.canDuplicate)
                 idempotent.emplace(func->name, es);
         }
-        runCSEPass(program, verbose_, idempotent.empty() ? nullptr : &idempotent);
+        runCSEPass(program, verbose_, &idempotent);
     } else {
         runCSEPass(program, verbose_, nullptr);
     }
