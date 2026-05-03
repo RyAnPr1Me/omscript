@@ -670,13 +670,11 @@ void OptimizationOrchestrator::runPurity(Program* program, OptimizationContext& 
     // for syncFactsToContext to run at the end of the pipeline.
     // Effects haven't been inferred yet at this point, so we only use the
     // isConstFoldable flag here; syncFactsToContext will refine with effects later.
-    if (program) {
-        for (const auto& func : program->functions) {
-            FunctionFacts& ff = ctx.mutableFacts(func->name);
-            if (ff.isConstFoldable)
-                ff.isPure = true;
-        }
-    }
+    forEachFunction(program, [&](FunctionDecl* fn) {
+        FunctionFacts& ff = ctx.mutableFacts(fn->name);
+        if (ff.isConstFoldable)
+            ff.isPure = true;
+    });
     ctx.validity().purity = true;
 }
 
@@ -800,10 +798,9 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
         }
     };
 
-    for (const auto& fn : program->functions) {
-        if (fn && fn->body)
-            checkStmt(fn->body.get(), fn->name);
-    }
+    forEachFunction(program, [&](const FunctionDecl* fn) {
+        checkStmt(fn->body.get(), fn->name);
+    });
     // Also check global variable initializers.
     for (const auto& g : program->globals) {
         if (g && g->initializer)

@@ -74,6 +74,16 @@ void forEachFunction(Program* program, Fn&& callback) {
     }
 }
 
+/// Const overload — @p callback receives a `const FunctionDecl*`.
+template<typename Fn>
+void forEachFunction(const Program* program, Fn&& callback) {
+    if (!program) return;
+    for (const auto& fn : program->functions) {
+        if (!fn || !fn->body) continue;
+        callback(fn.get());
+    }
+}
+
 } // namespace omscript
 
 #endif // PASS_UTILS_H

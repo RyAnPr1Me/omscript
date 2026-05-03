@@ -1,3 +1,4 @@
+#pragma once
 #ifndef SDR_PASS_H
 #define SDR_PASS_H
 

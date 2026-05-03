@@ -1,3 +1,4 @@
+#pragma once
 #ifndef IPOF_PASS_H
 #define IPOF_PASS_H
 

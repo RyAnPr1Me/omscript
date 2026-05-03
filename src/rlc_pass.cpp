@@ -16,6 +16,7 @@
 
 #include "rlc_pass.h"
 #include "diagnostic.h"
+#include "pass_utils.h"
 
 #include <algorithm>
 #include <functional>
@@ -689,17 +690,15 @@ static constexpr int kMaxCoalescingIterations = 8;
 
 RLCStats runRLCPass(Program* program, bool verbose) {
     RLCStats stats;
-    if (!program) return stats;
 
-    for (auto& func : program->functions) {
-        if (!func || !func->body) continue;
+    forEachFunction(program, [&](FunctionDecl* func) {
         // Run multiple iterations until fixpoint.
         for (int iter = 0; iter < kMaxCoalescingIterations; ++iter) {
             const unsigned before = stats.regionsCoalesced;
             processBlock(func->body->statements, func->name, stats, verbose);
             if (stats.regionsCoalesced == before) break;
         }
-    }
+    });
 
     if (verbose && stats.regionsCoalesced > 0) {
         std::cout << "[rlc] Total: " << stats.regionsCoalesced

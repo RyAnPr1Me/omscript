@@ -6,6 +6,7 @@
 
 #include "width_opt_pass.h"
 #include "opt_context.h"
+#include "pass_utils.h"
 
 #include <algorithm>
 #include <cassert>
@@ -71,10 +72,9 @@ WidthOptPass::Range WidthOptPass::rangeOf(const Expression* expr) const noexcept
 
 /* static */
 bool WidthOptPass::isLiteralInt(const Expression* e, int64_t& out) noexcept {
-    if (!e || e->type != ASTNodeType::LITERAL_EXPR) return false;
-    const auto* lit = static_cast<const LiteralExpr*>(e);
-    if (lit->literalType != LiteralExpr::LiteralType::INTEGER) return false;
-    out = lit->intValue;
+    long long v = 0;
+    if (!isIntLiteral(e, &v)) return false;
+    out = static_cast<int64_t>(v);
     return true;
 }
 
@@ -384,11 +384,10 @@ uint32_t WidthOptPass::run(Program* program) {
     wa.analyze(program);
     analyzer_ = &wa;
 
-    for (auto& fn : program->functions) {
-        if (!fn || !fn->body) continue;
+    forEachFunction(program, [&](FunctionDecl* fn) {
         for (auto& s : fn->body->statements)
             transformStmtInPlace(s);
-    }
+    });
     // Also transform global variable initializers.
     for (auto& g : program->globals) {
         if (g && g->initializer)
