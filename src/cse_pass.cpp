@@ -114,7 +114,16 @@ static void collectKeys(const Expression* expr,
             std::string key = callKey(call->callee, call->arguments);
             if (!key.empty()) freq[key]++;
         }
-        // Do not recurse into call arguments — call is treated as atomic for CSE.
+        // Recurse into arguments to catch inner binary CSE candidates
+        // (e.g. `f(a+b, a+b)` — the `a+b` subexpressions are still pure).
+        for (const auto& arg : call->arguments)
+            collectKeys(arg.get(), freq, idempotent);
+    } else if (expr->type == ASTNodeType::CALL_EXPR) {
+        // Non-idempotent call: don't CSE the call itself, but still
+        // recurse into arguments for inner binary CSE candidates.
+        const auto* call = static_cast<const CallExpr*>(expr);
+        for (const auto& arg : call->arguments)
+            collectKeys(arg.get(), freq, idempotent);
     } else if (expr->type == ASTNodeType::UNARY_EXPR) {
         collectKeys(static_cast<const UnaryExpr*>(expr)->operand.get(), freq, idempotent);
     } else if (expr->type == ASTNodeType::TERNARY_EXPR) {
@@ -256,7 +265,7 @@ static std::unique_ptr<Expression> exprFromKey(const std::string& key) {
             callee = key.substr(first + 1, nameEnd - first - 1);
             // Parse remaining `:arg0:arg1:…`
             size_t pos = nameEnd + 1;
-            while (pos <= key.size()) {
+            while (pos < key.size()) {
                 size_t next = key.find(':', pos);
                 const std::string tok = (next == std::string::npos)
                                             ? key.substr(pos)

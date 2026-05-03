@@ -59,18 +59,17 @@ LegalityVerdict LegalityService::canTransformLoops(
     if (ctx.effects->hasMutation) return LegalityVerdict::Illegal;
 
     // ── ERSL refinement ──────────────────────────────────────────────────────
-    // Derive an EffectSummary from the FunctionEffects and use it to tighten
-    // or relax the verdict beyond the coarser flag checks above.
+    // Use the pre-computed EffectSummary from ctx.ersl when available
+    // (populated by the ERSL pass via OptimizationContext::effectSummary()),
+    // otherwise derive it on-the-fly from the raw FunctionEffects.
     //
-    // Key insight: getMaxSafeOptLevel() encodes a total ordering of effect
-    // severity.  Anything at level 3+ means no escaping writes and no I/O,
-    // so loop transforms are safe (subject to fine-grained dependence analysis
-    // in polyopt).
-    //
-    // Level 2 (global/arg write) → Unknown: we cannot rule out that reordering
-    //   the writes would be observable to callers; defer to polyopt.
-    // Level 1 (IO/External) → already blocked above.
-    const EffectSummary es = deriveEffectSummary(*ctx.effects);
+    // getMaxSafeOptLevel() encodes a total ordering of effect severity:
+    //   Level 1  → IO/External  : already blocked above.
+    //   Level 2  → global/arg write: unknown (polyopt may still prove legality).
+    //   Level 3+ → no escaping writes, no I/O: loop transforms are safe.
+    const EffectSummary computed = ctx.ersl ? EffectSummary{} : deriveEffectSummary(*ctx.effects);
+    const EffectSummary& es = ctx.ersl ? *ctx.ersl : computed;
+
     if (es.maxSafeOptLevel <= 1)
         return LegalityVerdict::Illegal;
 

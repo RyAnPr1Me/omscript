@@ -180,9 +180,13 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
             fe.readsMemory  = !fs.doesNotAccessMemory;
             // LLVM's onlyReadsMemory maps to our readonly — no writes.
             fe.writesMemory = !fs.doesNotAccessMemory && !fs.onlyReadsMemory;
-            // Conservative: treat any function that accesses memory and might sync
-            // as potentially having I/O side effects unless nosync+nofree are set.
-            fe.hasIO         = !fs.noSync && !fs.doesNotFreeMemory && !fs.doesNotAccessMemory;
+            // I/O: a function is treated as having I/O only when it is NOT nosync
+            // AND NOT willreturn (potential blocking / external side-effects) AND
+            // accesses memory.  The combination of nosync+willreturn is a strong
+            // indicator of a pure-computation function with no external effects.
+            // We avoid flagging allocation/deallocation helpers as I/O — those are
+            // captured separately via hasMutation/allocates below.
+            fe.hasIO         = !fs.noSync && !fs.willReturn && !fs.doesNotAccessMemory;
             fe.hasMutation   = fe.writesMemory;
             fe.mayThrow      = !fs.doesNotThrow;
             fe.mayNotReturn  = !fs.willReturn;
