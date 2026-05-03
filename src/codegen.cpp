@@ -686,21 +686,27 @@ llvm::Value* CodeGenerator::liftFieldLoad(llvm::Value* v, const std::string& ann
 llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
     if (v->getType() == targetTy)
         return v;
-    // float → int
-    if (v->getType()->isDoubleTy() && targetTy->isIntegerTy())
+    llvm::Type* srcTy = v->getType();
+    // float (f32 or f64) → int
+    if (srcTy->isFloatingPointTy() && targetTy->isIntegerTy())
         return builder->CreateFPToSI(v, targetTy, "ftoi");
-    // int → float
-    if (v->getType()->isIntegerTy() && targetTy->isDoubleTy())
+    // int → float (f32 or f64)
+    if (srcTy->isIntegerTy() && targetTy->isFloatingPointTy())
         return builder->CreateSIToFP(v, targetTy, "itof");
+    // f32 ↔ f64
+    if (srcTy->isFloatTy() && targetTy->isDoubleTy())
+        return builder->CreateFPExt(v, targetTy, "fpext");
+    if (srcTy->isDoubleTy() && targetTy->isFloatTy())
+        return builder->CreateFPTrunc(v, targetTy, "fptrunc");
     // ptr → int
-    if (v->getType()->isPointerTy() && targetTy->isIntegerTy())
+    if (srcTy->isPointerTy() && targetTy->isIntegerTy())
         return builder->CreatePtrToInt(v, targetTy, "ptoi");
     // int → ptr
-    if (v->getType()->isIntegerTy() && targetTy->isPointerTy())
+    if (srcTy->isIntegerTy() && targetTy->isPointerTy())
         return builder->CreateIntToPtr(v, targetTy, "itop");
     // int → int (widening or narrowing)
-    if (v->getType()->isIntegerTy() && targetTy->isIntegerTy()) {
-        const unsigned srcBits = v->getType()->getIntegerBitWidth();
+    if (srcTy->isIntegerTy() && targetTy->isIntegerTy()) {
+        const unsigned srcBits = srcTy->getIntegerBitWidth();
         const unsigned dstBits = targetTy->getIntegerBitWidth();
         if (srcBits < dstBits) {
             // Use ZExt for values known to be unsigned (uN casts or uN-annotated vars).
@@ -713,7 +719,7 @@ llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
             return builder->CreateTrunc(v, targetTy, "trunc");
     }
     // ptr → float (via int)
-    if (v->getType()->isPointerTy() && targetTy->isDoubleTy()) {
+    if (srcTy->isPointerTy() && targetTy->isFloatingPointTy()) {
         auto* intVal = builder->CreatePtrToInt(v, getDefaultType(), "ptoi");
         return builder->CreateSIToFP(intVal, targetTy, "itof");
     }

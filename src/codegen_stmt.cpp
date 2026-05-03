@@ -60,7 +60,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         if (stmt->initializer) {
             llvm::Value* initVal = generateExpression(stmt->initializer.get());
             if (initVal->getType() != ty)
-                initVal = builder->CreateIntCast(initVal, ty, true, "gvinit");
+                initVal = convertTo(initVal, ty);
             builder->CreateStore(initVal, gv);
         }
         return;
@@ -723,10 +723,10 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 
         llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
         llvm::Type* retTy = currentFn->getReturnType();
-        if (retTy->isDoubleTy())
-            builder->CreateRet(llvm::ConstantFP::get(retTy, 0.0));
+        if (retTy->isVoidTy())
+            builder->CreateRetVoid();
         else
-            builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
+            builder->CreateRet(llvm::Constant::getNullValue(retTy));
     }
 }
 
