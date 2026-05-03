@@ -137,7 +137,12 @@ enum class BuiltinId : uint8_t {
     // ── Raw memory builtins ──────────────────────────────────────────────────
     MALLOC,       ///< malloc(size)       → allocate `size` bytes, return ptr
     FREE,         ///< free(ptr)          → deallocate ptr (void return)
-    SIZEOF        ///< sizeof(type_name)  → byte size of type as i64 constant
+    SIZEOF,       ///< sizeof(type_name)  → byte size of type as i64 constant
+    // ── HTTP client builtins ─────────────────────────────────────────────────
+    HTTP_GET,     ///< http_get(url)                   → response body string
+    HTTP_POST,    ///< http_post(url, body[, ct])       → response body string
+    HTTP_REQUEST, ///< http_request(method,url,body,hdr)→ response body string
+    HTTP_STATUS   ///< http_status(url)                → HTTP status code (int)
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -372,6 +377,11 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"malloc",     BuiltinId::MALLOC},
     {"free",       BuiltinId::FREE},
     {"sizeof",     BuiltinId::SIZEOF},
+    // HTTP client
+    {"http_get",     BuiltinId::HTTP_GET},
+    {"http_post",    BuiltinId::HTTP_POST},
+    {"http_request", BuiltinId::HTTP_REQUEST},
+    {"http_status",  BuiltinId::HTTP_STATUS},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -8828,6 +8838,83 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         const llvm::DataLayout& DL = module->getDataLayout();
         uint64_t sz = DL.getTypeAllocSize(ty);
         return llvm::ConstantInt::get(getDefaultType(), sz);
+    }
+
+    // ── HTTP client builtins ─────────────────────────────────────────────────
+    // All HTTP builtins return a string (pointer encoded as i64) or an i64
+    // status code.  The returned strings are malloc'd by the runtime and must
+    // be free()'d by the caller; the string ownership model is identical to
+    // other string-returning builtins such as command() and bigint_tostring().
+
+    // http_get(url) → body string
+    if (bid == BuiltinId::HTTP_GET) {
+        validateArgCount(expr, "http_get", 1);
+        llvm::Value* urlVal = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* urlPtr = urlVal->getType()->isPointerTy()
+            ? urlVal
+            : builder->CreateIntToPtr(urlVal, ptrTy, "hget.url");
+        llvm::Value* result = builder->CreateCall(getOrDeclareHttpGet(), {urlPtr}, "hget.body");
+        return builder->CreatePtrToInt(result, getDefaultType(), "hget.i64");
+    }
+
+    // http_post(url, body[, content_type]) → body string
+    if (bid == BuiltinId::HTTP_POST) {
+        if (expr->arguments.size() < 2 || expr->arguments.size() > 3)
+            codegenError("http_post() requires 2 or 3 arguments: (url, body[, content_type])", expr);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto toPtr = [&](llvm::Value* v, const char* nm) -> llvm::Value* {
+            return v->getType()->isPointerTy() ? v
+                 : builder->CreateIntToPtr(v, ptrTy, nm);
+        };
+        llvm::Value* urlPtr  = toPtr(generateExpression(expr->arguments[0].get()), "hpost.url");
+        llvm::Value* bodyPtr = toPtr(generateExpression(expr->arguments[1].get()), "hpost.body");
+        llvm::Value* ctPtr;
+        if (expr->arguments.size() == 3) {
+            ctPtr = toPtr(generateExpression(expr->arguments[2].get()), "hpost.ct");
+        } else {
+            // Default Content-Type: pass NULL (runtime uses "application/octet-stream").
+            ctPtr = llvm::ConstantPointerNull::get(ptrTy);
+        }
+        llvm::Value* result = builder->CreateCall(
+            getOrDeclareHttpPost(), {urlPtr, bodyPtr, ctPtr}, "hpost.body");
+        return builder->CreatePtrToInt(result, getDefaultType(), "hpost.i64");
+    }
+
+    // http_request(method, url, body, headers) → body string
+    if (bid == BuiltinId::HTTP_REQUEST) {
+        if (expr->arguments.size() < 2 || expr->arguments.size() > 4)
+            codegenError("http_request() requires 2–4 arguments: (method, url[, body[, headers]])", expr);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto toPtr = [&](llvm::Value* v, const char* nm) -> llvm::Value* {
+            return v->getType()->isPointerTy() ? v
+                 : builder->CreateIntToPtr(v, ptrTy, nm);
+        };
+        auto nullPtr = [&]() -> llvm::Value* {
+            return llvm::ConstantPointerNull::get(ptrTy);
+        };
+        llvm::Value* methodPtr = toPtr(generateExpression(expr->arguments[0].get()), "hreq.method");
+        llvm::Value* urlPtr    = toPtr(generateExpression(expr->arguments[1].get()), "hreq.url");
+        llvm::Value* bodyPtr   = (expr->arguments.size() >= 3)
+            ? toPtr(generateExpression(expr->arguments[2].get()), "hreq.body")
+            : nullPtr();
+        llvm::Value* hdrsPtr   = (expr->arguments.size() >= 4)
+            ? toPtr(generateExpression(expr->arguments[3].get()), "hreq.hdrs")
+            : nullPtr();
+        llvm::Value* result = builder->CreateCall(
+            getOrDeclareHttpRequest(), {methodPtr, urlPtr, bodyPtr, hdrsPtr}, "hreq.body");
+        return builder->CreatePtrToInt(result, getDefaultType(), "hreq.i64");
+    }
+
+    // http_status(url) → HTTP status code (int)
+    if (bid == BuiltinId::HTTP_STATUS) {
+        validateArgCount(expr, "http_status", 1);
+        llvm::Value* urlVal = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* urlPtr = urlVal->getType()->isPointerTy()
+            ? urlVal
+            : builder->CreateIntToPtr(urlVal, ptrTy, "hstat.url");
+        return builder->CreateCall(getOrDeclareHttpGetStatus(), {urlPtr}, "hstat.code");
     }
 
     if (inOptMaxFunction) {

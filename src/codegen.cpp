@@ -2322,6 +2322,64 @@ llvm::Function* CodeGenerator::getOrDeclareBigintShr() {
     fn->addRetAttr(llvm::Attribute::NonNull);
     return fn;
 }
+
+// ── HTTP client runtime helpers ──────────────────────────────────────────────
+// All HTTP functions return a malloc'd NUL-terminated string (pointer type).
+// They can allocate, may block on network I/O, and are nounwind.
+
+llvm::Function* CodeGenerator::getOrDeclareHttpGet() {
+    if (auto* fn = module->getFunction("omsc_http_get")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_http_get", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->removeFnAttr(llvm::Attribute::WillReturn); // may block
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareHttpPost() {
+    if (auto* fn = module->getFunction("omsc_http_post")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    // (url, body, content_type) → ptr
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_http_post", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->removeFnAttr(llvm::Attribute::WillReturn);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    OMSC_ADD_NOCAPTURE(fn, 2);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareHttpRequest() {
+    if (auto* fn = module->getFunction("omsc_http_request")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    // (method, url, body, headers_str) → ptr
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, ptrTy, ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_http_request", ty);
+    fn->removeFnAttr(llvm::Attribute::NoFree);
+    fn->removeFnAttr(llvm::Attribute::WillReturn);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    OMSC_ADD_NOCAPTURE(fn, 2);
+    OMSC_ADD_NOCAPTURE(fn, 3);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareHttpGetStatus() {
+    if (auto* fn = module->getFunction("omsc_http_get_status")) return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+    auto* ty = llvm::FunctionType::get(i64Ty, {ptrTy}, false);
+    auto* fn = declareExternalFn("omsc_http_get_status", ty);
+    fn->removeFnAttr(llvm::Attribute::WillReturn);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
+}
 // ---------------------------------------------------------------------------
 
 /// Emit the Rotate-Accumulate hash for a 64-bit integer key.
@@ -6872,12 +6930,32 @@ struct ReadOnlyUseChecker {
         case ASTNodeType::UNARY_EXPR:
             visitExpr(static_cast<const UnaryExpr*>(e)->operand.get());
             return;
-        case ASTNodeType::PREFIX_EXPR:
-            visitExpr(static_cast<const PrefixExpr*>(e)->operand.get());
+        case ASTNodeType::PREFIX_EXPR: {
+            auto* pre = static_cast<const PrefixExpr*>(e);
+            // ++var[i] or --var[i] mutates the array element — violation.
+            if (pre->operand && pre->operand->type == ASTNodeType::INDEX_EXPR) {
+                auto* idx = static_cast<const IndexExpr*>(pre->operand.get());
+                if (isVarIdent(idx->array.get())) {
+                    violation = true;
+                    return;
+                }
+            }
+            visitExpr(pre->operand.get());
             return;
-        case ASTNodeType::POSTFIX_EXPR:
-            visitExpr(static_cast<const PostfixExpr*>(e)->operand.get());
+        }
+        case ASTNodeType::POSTFIX_EXPR: {
+            auto* post = static_cast<const PostfixExpr*>(e);
+            // var[i]++ or var[i]-- mutates the array element — violation.
+            if (post->operand && post->operand->type == ASTNodeType::INDEX_EXPR) {
+                auto* idx = static_cast<const IndexExpr*>(post->operand.get());
+                if (isVarIdent(idx->array.get())) {
+                    violation = true;
+                    return;
+                }
+            }
+            visitExpr(post->operand.get());
             return;
+        }
         case ASTNodeType::TERNARY_EXPR: {
             auto* t = static_cast<const TernaryExpr*>(e);
             visitExpr(t->condition.get());

@@ -1079,6 +1079,12 @@ class CodeGenerator {
     llvm::Function* getOrDeclareBigintShl();
     llvm::Function* getOrDeclareBigintShr();
 
+    // HTTP client runtime helpers: declare C functions from http_runtime.h in the LLVM module.
+    llvm::Function* getOrDeclareHttpGet();
+    llvm::Function* getOrDeclareHttpPost();
+    llvm::Function* getOrDeclareHttpRequest();
+    llvm::Function* getOrDeclareHttpGetStatus();
+
     // Hash-table map runtime helpers: open-addressing, linear probing, power-of-2 capacity, FNV-1a.
     // Layout (all i64): [capacity, size, hash0, key0, val0, ...]; empty=0, tombstone=1, occupied≥2.
     llvm::Function* getOrEmitHashMapNew();

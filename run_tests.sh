@@ -852,6 +852,8 @@ ptest_program "examples/string_edge_cases_test.om" 11
 ptest_program "examples/float_identity_test.om" 12
 ptest_program "examples/ternary_positions_test.om" 150
 ptest_program "examples/function_call_patterns_test.om" 10
+# ── HTTP client builtins ──────────────────────────────────────────────────
+ptest_program "examples/http_test.om" 0
 flush_ptests
 
 echo ""

@@ -132,14 +132,32 @@ target_include_directories(omsc_bigint PRIVATE
 )
 target_compile_options(omsc_bigint PRIVATE -O2 -fPIC)
 
+# ── HTTP runtime static library (linked into user programs) ──────────────────
+# http_runtime.c wraps libcurl and exposes a secure C API for OmScript's
+# HTTP client builtins (http_get, http_post, http_request, http_status).
+find_package(CURL REQUIRED)
+add_library(omsc_http STATIC
+    src/http_runtime.c
+)
+target_include_directories(omsc_http PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CURL_INCLUDE_DIRS}
+)
+target_compile_options(omsc_http PRIVATE -O2 -fPIC)
+
 add_executable(omsc ${SRC})
-# Ensure omsc_bigint is built before omsc so the .a path is valid.
-add_dependencies(omsc omsc_bigint)
+# Ensure omsc_bigint and omsc_http are built before omsc so the .a paths are valid.
+add_dependencies(omsc omsc_bigint omsc_http)
 
 # Tell the compiler binary where the bigint runtime library lives at build time.
 # At install time the path is overridden via OMSC_BIGINT_LIB_PATH.
 target_compile_definitions(omsc PRIVATE
     OMSC_BIGINT_LIB_PATH=\"${CMAKE_CURRENT_BINARY_DIR}/libomsc_bigint.a\"
+)
+
+# Tell the compiler binary where the HTTP runtime library lives at build time.
+target_compile_definitions(omsc PRIVATE
+    OMSC_HTTP_LIB_PATH=\"${CMAKE_CURRENT_BINARY_DIR}/libomsc_http.a\"
 )
 
 # ── Version define ────────────────────────────────────────────────────────────
