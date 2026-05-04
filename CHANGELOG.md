@@ -5,6 +5,61 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0] - 2026-05-04
+
+### Added
+
+- **`atomic` variable qualifier** — `atomic var name: type = value;` declares a variable whose every load, store, and read-modify-write operation is emitted as a sequentially-consistent (seq-cst) atomic instruction at the LLVM IR level.
+  - All loads compile to `load atomic i64 … seq_cst`.
+  - All stores (plain assignment and initializer) compile to `store atomic i64 … seq_cst`.
+  - Increment/decrement (`++`/`--`) compile to `atomicrmw add/sub … seq_cst` — the operation is indivisible with respect to all threads.
+  - Compound assignments (`+=`, `-=`, `&=`, `|=`, `^=`) detect the `x = x OP rhs` pattern and also emit a single `atomicrmw add/sub/and/or/xor … seq_cst` instruction.
+  - Atomic variables receive natural ABI alignment on their `alloca` so the LLVM backend can satisfy hardware alignment requirements for lock-free atomic instructions.
+  - Atomic variables are excluded from the CopyProp and CSE AST passes — their values can change between any two reads, so forwarding or hoisting their loads is unsound.
+  - `!invariant.load` and `!noundef` metadata are suppressed on atomic loads.
+  ```omscript
+  global atomic var counter: i64 = 0;
+
+  fn worker() {
+      counter++;              // atomicrmw add … seq_cst
+      return 0;
+  }
+
+  fn main() {
+      var t1 = thread_create("worker");
+      var t2 = thread_create("worker");
+      thread_join(t1);
+      thread_join(t2);
+      println(counter);       // always 2 — no mutex needed
+      return 0;
+  }
+  ```
+
+- **`volatile` variable qualifier** — `volatile var name: type = value;` declares a variable whose every load and store is marked volatile in the LLVM IR, preventing the compiler from eliding, caching, reordering, or CSE-ing memory operations on it.
+  - All loads compile to `load volatile i64 …`.
+  - All stores compile to `store volatile i64 …`.
+  - Increment/decrement loads and stores are both marked volatile.
+  - Volatile variables are excluded from the CopyProp and CSE AST passes.
+  - `!invariant.load` and `!noundef` metadata are suppressed on volatile loads.
+  - Intended for memory-mapped I/O registers, signal handlers, and other variables whose value may change externally without any visible write in the program.
+  ```omscript
+  volatile var status: i64 = 0;
+
+  fn poll() -> i64 {
+      while (status == 0) {}  // status re-read every iteration
+      return status;
+  }
+  ```
+
+- **`atomic volatile var`** — both qualifiers may be combined in either order (`atomic volatile var` or `volatile atomic var`). The resulting variable has both atomic ordering (seq-cst) and volatile semantics on every access.
+  ```omscript
+  atomic volatile var hw_reg: i64 = 0;
+  ```
+
+  See §5.5 and §5.6 of the Language Reference for the full specification, and §20.3 for the concurrency context.
+
+---
+
 ## [4.1.1] - 2026-04-15
 
 ### Added

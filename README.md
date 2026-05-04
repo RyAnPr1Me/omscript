@@ -2,7 +2,7 @@
 
 A low-level, C-like programming language with dynamic typing and **automatic reference counting memory management**. Features a **heavily optimized AOT compiler** using LLVM, a **lightweight adaptive JIT runtime** that recompiles hot functions with aggressive optimizations, and a **three-layer optimization engine** (equality-saturation E-graph, superoptimizer, and hardware-graph-driven instruction scheduler) that produces near-optimal native machine code for each target CPU.
 
-**Current version: 4.1.1**
+**Current version: 4.2.0**
 
 ## Key Features
 
@@ -22,6 +22,8 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
 - **Error Handling**: `throw N;` and per-function `catch(N) { ... }` handler blocks (zero-cost integer-keyed dispatch — no stack unwinding)
 - **Ownership System**: `move`, `invalidate`, `borrow`, `borrow mut`, `freeze`, and `reborrow` keywords for compile-time lifetime tracking and LLVM optimization hints
+- **`atomic var`**: Variable qualifier that makes every load, store, and RMW (including `++`/`--` and `+=`/`-=`/`&=`/`|=`/`^=`) a sequentially-consistent LLVM atomic instruction — lock-free shared state with no mutex overhead
+- **`volatile var`**: Variable qualifier that marks every load and store as LLVM-volatile — prevents the optimizer from eliding, caching, or reordering accesses; essential for memory-mapped I/O and signal-handler variables
 - **`comptime {}` Blocks**: Expressions evaluated entirely at compile time — result folded into a constant at the call site
 - **Array-Returning `comptime` Blocks**: `comptime` can call user functions that return arrays; the result is emitted as a `private unnamed_addr constant` global — zero runtime allocation, zero function call
 - **CF-CTRE (Cross-Function Compile-Time Reasoning Engine)**: new compiler phase (v4.1.1+) that executes pure functions across function-call boundaries at compile time with memoisation, pipeline SIMD tile semantics (8-lane tiles), and fixed-point purity analysis — see §28 of the Language Reference
@@ -110,6 +112,17 @@ var b = 0b1010;       // binary literal (10)
 var n = null;         // null value
 var t = true;         // boolean true (1)
 var f = false;        // boolean false (0)
+
+// Atomic variable — every load/store/RMW is seq-cst atomic (lock-free)
+global atomic var counter: i64 = 0;
+counter++;            // atomicrmw add … seq_cst — safe from multiple threads
+
+// Volatile variable — every load/store is LLVM-volatile (never cached/elided)
+volatile var status: i64 = 0;
+while (status == 0) {} // re-reads status every iteration
+
+// Combined
+atomic volatile var hw_reg: i64 = 0;
 ```
 Type annotations are optional in general but **required** inside `OPTMAX` blocks.
 

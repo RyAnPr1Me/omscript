@@ -7,7 +7,7 @@
 2. [Lexical Structure](#2-lexical-structure)
 3. [Preprocessor](#3-preprocessor)
 4. [Type System Overview](#4-type-system-overview)
-5. [Variables, Constants, and Comptime](#5-variables-constants-and-comptime)
+5. [Variables, Constants, and Comptime](#5-variables-constants-and-comptime) — `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`
 6. [Functions](#6-functions)
 7. [Control Flow](#7-control-flow)
 8. [Loops](#8-loops)
@@ -77,7 +77,7 @@ OmScript source code undergoes the following compilation stages:
 - **Lexical structure**: Keywords, identifiers, literals (integer, float, string, bytes, interpolated), operators, comments (§2)
 - **Preprocessor**: Macros, conditional compilation, predefined macros (§3)
 - **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), mandatory type annotations (§4)
-- **Variables and constants**: `var`, `const`, `register var`, `global`, `comptime`, compound assignment, destructuring (§5)
+- **Variables and constants**: `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, compound assignment, destructuring (§5)
 - **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, generics, annotations (`@inline`, `@hot`, `@pure`, `@vectorize`, etc.), tail calls, lambdas (§6)
 - **Control flow**: `if`/`elif`/`else`, `unless`, `guard`, `switch`, `when`, `defer`, `with`, branch hints (§7)
 - **Loops**: `while`, `do`/`while`, `until`, `for` (ranges, downto, step), `foreach`, `loop`, `repeat`, `forever`, `times`, `parallel`, `pipeline`, loop annotations (`@loop(unroll=N)`, `@loop(vectorize)`) (§8)
@@ -173,6 +173,8 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `var` | Mutable variable |
 | `const` | Immutable constant |
 | `register` | Register-allocation hint |
+| `atomic` | Atomic load/store/RMW qualifier |
+| `volatile` | Volatile (non-optimizable) load/store qualifier |
 | `global` | Global variable scope |
 | `struct` | Structure type |
 | `enum` | Enumeration type |
@@ -1360,7 +1362,7 @@ var s: string = "hello";
 var arr: int[] = [1, 2, 3];
 ```
 
-**Scope**: Variables are block-scoped. See §5.10 for scope rules.
+**Scope**: Variables are block-scoped. See §5.12 for scope rules.
 
 ### 5.2 `const` Declaration
 
@@ -1379,7 +1381,7 @@ const max_size: int = 1024;
 const greeting: string = "Hello, world!";
 ```
 
-**Compile-time constants**: `const` variables may be evaluated at compile time if the initializer is a constant expression (see §5.7 for `comptime`).
+**Compile-time constants**: `const` variables may be evaluated at compile time if the initializer is a constant expression (see §5.9 for `comptime`).
 
 ### 5.3 Multi-Variable Declarations
 
@@ -1424,7 +1426,90 @@ fn tight_loop(n: int) -> int {
 - Applies only to local variables in function scope
 - Ignored if the variable is not promotable (e.g., address-taken or escaped)
 
-### 5.5 `global var` / `global const`
+### 5.5 `atomic var` — Atomic Variable Qualifier
+
+**Syntax**: `atomic var name: type = initializer;`
+
+**Semantics**:
+- Every **load** of `name` compiles to an LLVM `load atomic … seq_cst` instruction.
+- Every **store** to `name` (including the initializer) compiles to an LLVM `store atomic … seq_cst` instruction.
+- `++` / `--` compile to a single `atomicrmw add/sub … seq_cst` (indivisible read-modify-write).
+- Compound assignments `+=`, `-=`, `&=`, `|=`, `^=` compile to `atomicrmw add/sub/and/or/xor … seq_cst` when the pattern `x = x OP rhs` is recognised; otherwise a seq-cst load → compute → seq-cst store sequence is emitted.
+- The variable's `alloca` is given natural ABI alignment so the hardware can perform the atomic operation without a fallback lock.
+- The AST-level **CopyProp** and **CSE** passes treat atomic variables as *opaque* — their values are never forwarded or hoisted, because any read may return a value written by another thread.
+- `!invariant.load` and `!noundef` metadata are suppressed on atomic loads.
+
+**Use cases**:
+- Shared counters incremented by multiple threads without a mutex.
+- Lock-free flags checked by multiple threads.
+- Any integer variable that is written by one thread and read by another.
+
+**Example**:
+```omscript
+global atomic var counter: i64 = 0;
+
+fn worker() {
+    counter++;         // atomicrmw add i64*, i64 1, seq_cst
+    return 0;
+}
+
+fn main() {
+    var t1 = thread_create("worker");
+    var t2 = thread_create("worker");
+    thread_join(t1);
+    thread_join(t2);
+    println(counter);  // always 2 — no data race, no mutex required
+    return 0;
+}
+```
+
+**Combining with `volatile`**: `atomic volatile var` (or `volatile atomic var`) applies both qualifiers; every access is simultaneously atomic (seq-cst) and volatile (prevents compiler elision/reordering at the IR level).
+
+**Supported types**: `int` / `i64`, `i32`, `i16`, `i8`, `u64`, `u32`, `u16`, `u8`, `float`, `f64`, and pointer types. Non-scalar types (arrays, strings, structs) fall back to a plain seq-cst store; use a mutex for complex aggregate operations.
+
+**Limitations**:
+- Does **not** compose with `const` (a constant has no storage to protect).
+- Does **not** compose with `register var` (register variables have no address).
+
+### 5.6 `volatile var` — Volatile Load/Store Qualifier
+
+**Syntax**: `volatile var name: type = initializer;`
+
+**Semantics**:
+- Every **load** of `name` compiles to an LLVM `load volatile i64 …` instruction.
+- Every **store** to `name` (including the initializer) compiles to an LLVM `store volatile i64 …` instruction.
+- Increment/decrement loads and stores are both marked volatile.
+- The compiler is forbidden from eliding, caching, reordering, or merging volatile accesses — each source-level read and write produces a distinct memory instruction in the output binary.
+- The AST-level **CopyProp** and **CSE** passes treat volatile variables as *opaque* — no read is ever forwarded to a prior value, and no expression involving a volatile load is hoisted.
+- `!invariant.load` and `!noundef` metadata are suppressed on volatile loads.
+
+**Use cases**:
+- Memory-mapped I/O registers whose value changes without any visible write in the program.
+- Variables written by a signal handler or hardware interrupt.
+- Spin-wait loops where the condition must be re-read every iteration.
+- Debugging: prevent the optimizer from removing a variable load so it remains observable in debuggers and profilers.
+
+**Example**:
+```omscript
+// Spin-wait for hardware status register
+volatile var hw_status: i64 = 0;
+
+fn wait_ready() -> i64 {
+    while (hw_status == 0) {}  // hw_status re-loaded every iteration
+    return hw_status;
+}
+```
+
+**Note**: `volatile` alone does **not** provide atomicity. If `hw_status` can be written by another thread, combine with `atomic`:
+```omscript
+atomic volatile var hw_status: i64 = 0;
+```
+
+**Limitations**:
+- Does **not** compose with `const`.
+- Does **not** provide ordering guarantees between different volatile variables; use `atomic` for sequentially consistent cross-thread communication.
+
+### 5.7 `global var` / `global const`
 
 **Syntax**:
 - `global var name: type = initializer;`
@@ -1454,7 +1539,7 @@ fn main() {
 
 **Imported globals**: Globals from imported files are namespaced under the import alias (e.g., `math::PI` if imported as `import "math.om" as math`).
 
-### 5.6 `frozen` / `freeze` — Read-Only After Initialization
+### 5.8 `frozen` / `freeze` — Read-Only After Initialization
 
 **Syntax**:
 - `freeze variable;` — Mark variable as read-only after this point
@@ -1477,7 +1562,7 @@ fn setup() {
 
 **Scope**: `freeze` applies from the point of the statement to the end of the variable's scope.
 
-### 5.7 `comptime { ... }` Blocks — Compile-Time Evaluation
+### 5.9 `comptime { ... }` Blocks — Compile-Time Evaluation
 
 **Syntax**: `comptime { statements return expr; }`
 
@@ -1510,7 +1595,7 @@ var factorial_5: int = comptime {
 - Generate repetitive code patterns
 - Compile-time configuration checks
 
-### 5.8 Assignment and Compound Assignment
+### 5.10 Assignment and Compound Assignment
 
 **Simple assignment**: `variable = expression;`
 
@@ -1545,7 +1630,7 @@ x = 20;
 
 **Field assignment**: `struct.field = value;`
 
-### 5.9 Destructuring Assignment
+### 5.11 Destructuring Assignment
 
 **Syntax**: `var [a, b, c] = array_expr;` or `const [a, b, c] = array_expr;`
 
@@ -1570,7 +1655,7 @@ const [first, _, third] = [100, 200, 300];
 - Array length must match the number of variables (no partial destructuring or rest syntax)
 - Only single-level destructuring supported (no nested destructuring of nested arrays)
 
-### 5.10 Scope Rules
+### 5.12 Scope Rules
 
 **Block scope**: Variables declared in a block `{ ... }` are visible only within that block and nested blocks.
 
@@ -6389,17 +6474,94 @@ mutex_unlock(m);
 
 ### 20.3 Atomics
 
-**Status:** Not implemented in the current code generator. There are no atomic load / store / RMW built-ins or atomic types. Use `mutex_lock` / `mutex_unlock` to protect shared state.
+OmScript provides first-class **atomic variables** via the `atomic` variable qualifier. An atomic variable's every load, store, and read-modify-write operation is emitted as a sequentially-consistent (seq-cst) LLVM atomic instruction — no mutex required.
+
+#### 20.3.1 `atomic var` Declaration
+
+**Syntax**: `atomic var name: type = initializer;`
+
+**IR mapping**:
+
+| OmScript source | LLVM IR |
+|----------------|---------|
+| `atomic var x: i64 = 0;` | `store atomic i64 0, ptr %x seq_cst` (initializer) |
+| `x` (load) | `load atomic i64, ptr %x seq_cst` |
+| `x = v` | `store atomic i64 %v, ptr %x seq_cst` |
+| `x++` / `x--` | `atomicrmw add/sub ptr %x, i64 1 seq_cst` |
+| `x += v` | `atomicrmw add ptr %x, i64 %v seq_cst` |
+| `x -= v` | `atomicrmw sub ptr %x, i64 %v seq_cst` |
+| `x &= v` | `atomicrmw and ptr %x, i64 %v seq_cst` |
+| `x \|= v` | `atomicrmw or ptr %x, i64 %v seq_cst` |
+| `x ^= v` | `atomicrmw xor ptr %x, i64 %v seq_cst` |
+
+**Memory ordering**: All operations use `seq_cst` (sequentially consistent), the strongest LLVM ordering. This ensures a single total order of all seq-cst atomic operations across all threads — the same guarantee as `std::memory_order_seq_cst` in C++.
+
+**Example — shared counter without a mutex**:
+```omscript
+global atomic var hits: i64 = 0;
+
+fn worker() {
+    hits++;   // atomicrmw add seq_cst — safe from multiple threads
+    return 0;
+}
+
+fn main() {
+    var t1 = thread_create("worker");
+    var t2 = thread_create("worker");
+    thread_join(t1);
+    thread_join(t2);
+    println(hits);   // always 2
+    return 0;
+}
+```
+
+**Example — lock-free flag**:
+```omscript
+global atomic var ready: i64 = 0;
+
+fn producer() {
+    // … do work …
+    ready = 1;    // store atomic seq_cst — visible to all threads
+    return 0;
+}
+
+fn consumer() {
+    while (ready == 0) {}   // load atomic seq_cst every iteration
+    // … safe to proceed …
+    return 0;
+}
+```
+
+#### 20.3.2 `volatile var` and `atomic volatile var`
+
+`volatile var` (see §5.6) prevents the compiler from eliding, hoisting, or CSE-ing loads and stores, but does **not** provide multi-thread atomicity. It is intended for memory-mapped I/O, signal handlers, and debugger-visible variables.
+
+`atomic volatile var` (or `volatile atomic var`) applies both qualifiers simultaneously: operations are seq-cst atomic *and* volatile. This is the right choice for hardware registers that are also shared between an interrupt handler and main code.
 
 ---
 
 ### 20.4 Memory model
 
-OmScript does **not** expose explicit memory ordering controls (no equivalent of C++ `memory_order_*`). The effective guarantees come from the LLVM defaults plus the pthread primitives:
+OmScript offers three tiers of shared-memory semantics:
 
-- Plain loads and stores compile to LLVM unordered memory operations — they are **not** sequentially consistent across threads, and the compiler is permitted to reorder them.
-- `mutex_lock` and `mutex_unlock` provide acquire / release semantics respectively (inherited from `pthread_mutex_*`), which is sufficient to publish writes made inside a critical section to the next thread that locks the same mutex.
-- All shared mutable state must be protected by a mutex; relying on plain reads/writes from multiple threads is a data race and is undefined behaviour.
+| Mechanism | IR semantics | Ordering guarantee | Use case |
+|-----------|-------------|-------------------|---------|
+| Plain `var` | Unordered load / store | None — data race is UB | Single-threaded, or reads protected by a mutex |
+| `atomic var` | `seq_cst` atomic load / store / RMW | Sequentially consistent — total order of all atomic ops | Lock-free counters, flags, producer/consumer handshakes |
+| `mutex_lock` / `mutex_unlock` | Acquire / release barrier | Acquire-release — publishes all prior writes to the next lock holder | Critical sections protecting complex invariants (structs, arrays, etc.) |
+
+**Plain variables and data races**:
+Plain loads and stores compile to LLVM unordered memory operations. The compiler is permitted to reorder, cache, or eliminate them. Accessing a plain variable from multiple threads without synchronization is a **data race** and is undefined behaviour. Protect plain shared state with a mutex.
+
+**`atomic var` and seq-cst ordering**:
+`atomic var` operations use `seq_cst` (sequentially consistent) ordering — the strongest LLVM memory ordering. All seq-cst operations across all threads occur in a single total order visible to every thread. This is sufficient for most lock-free patterns. It is **not** necessary to use a mutex to protect a plain integer if it is declared `atomic`.
+
+**`mutex_lock` / `mutex_unlock` and acquire/release**:
+`mutex_lock` has acquire semantics (all writes by the previous lock-holder become visible before the lock is acquired). `mutex_unlock` has release semantics (all writes made inside the critical section are visible to the next lock-holder). This is inherited from the underlying `pthread_mutex_*` implementation and is sufficient to publish writes made inside a critical section.
+
+**Choosing between `atomic var` and a mutex**:
+- Use `atomic var` for a single integer or pointer that is updated by one or more threads (counters, flags, indices, generation numbers).
+- Use a mutex for multi-field invariants or any aggregate state where several fields must be updated atomically together.
 
 ---
 
