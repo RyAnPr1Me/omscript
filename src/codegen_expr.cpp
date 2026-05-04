@@ -438,6 +438,15 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     checkVariableReadable(expr->name, expr);
 
     auto it = namedValues.find(expr->name);
+    if (const char* dbg = std::getenv("OMSC_DEBUG_IDENT")) {
+        llvm::errs() << "[generateIdentifier] name=" << expr->name
+                     << " found=" << (it != namedValues.end() && it->second ? "yes" : "no");
+        if (it != namedValues.end() && it->second) {
+            llvm::errs() << " val=";
+            it->second->print(llvm::errs());
+        }
+        llvm::errs() << "\n";
+    }
     if (it == namedValues.end() || !it->second) {
         // Check if this is an enum constant
         auto enumIt = enumConstants_.find(expr->name);
@@ -471,6 +480,8 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     {
         auto foldIt = constIntFolds_.find(expr->name);
         if (foldIt != constIntFolds_.end()) {
+            if (const char* dbg = std::getenv("OMSC_DEBUG_FOLD"))
+                llvm::errs() << "[constIntFolds] " << expr->name << " = " << foldIt->second << "\n";
             // Use the variable's annotated type when available so that e.g.
             // `const x: i32 = 5` produces i32(5) rather than i64(5).
             llvm::Type* foldTy = getDefaultType();
@@ -670,6 +681,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (isComparisonOp) inComparisonContext_ = true;
 
     llvm::Value* left = generateExpression(expr->left.get());
+    if (const char* dbg = std::getenv("OMSC_DEBUG_BINARY")) {
+        llvm::errs() << "[generateBinary] op=" << expr->op << " left=";
+        left->print(llvm::errs());
+        llvm::errs() << " line=" << expr->line << " col=" << expr->column << "\n";
+    }
     if (expr->op == "&&" || expr->op == "||") {
         // Constant folding: when the left side is a known constant, we can
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
