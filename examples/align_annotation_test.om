@@ -1,5 +1,6 @@
-// Test @align(N) annotation: aligns function entry to N bytes.
-// The annotation is valid at all optimization levels.
+// Test @align(N) and @align() annotations.
+// @align(N)  — aligns function entry to exactly N bytes.
+// @align()   — auto-optimal: aligns to cache-line boundary (64 bytes).
 @align(64)
 fn aligned_fn(x: int) {
     return x + 1;
@@ -10,8 +11,14 @@ fn small_aligned(x: int) {
     return x * 2;
 }
 
+@align()
+fn auto_aligned(x: int) {
+    return x + 3;
+}
+
 fn main() {
     var a = aligned_fn(3);
     var b = small_aligned(4);
-    return a + b;
+    var c = auto_aligned(2);
+    return a + b + c;
 }

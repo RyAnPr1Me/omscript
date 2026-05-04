@@ -427,8 +427,13 @@ std::unique_ptr<Program> Parser::parse() {
                     hintConstEval = true;
                 } else if (ann.lexeme == "align") {
                     consume(TokenType::LPAREN, "Expected '(' after @align");
-                    const Token alignVal = consume(TokenType::INTEGER, "Expected integer alignment value");
-                    hintAlign = static_cast<int>(alignVal.intValue);
+                    if (check(TokenType::RPAREN)) {
+                        // @align() with no argument → auto-optimal (cache-line alignment)
+                        hintAlign = -1;
+                    } else {
+                        const Token alignVal = consume(TokenType::INTEGER, "Expected integer alignment value");
+                        hintAlign = static_cast<int>(alignVal.intValue);
+                    }
                     consume(TokenType::RPAREN, "Expected ')' after @align value");
                 } else if (ann.lexeme == "allocator") {
                     // @allocator(size=N) or @allocator(size=N, count=M)

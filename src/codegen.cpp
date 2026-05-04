@@ -4717,9 +4717,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // At O2+, align function entry to 16 bytes for better I-cache locality
+    // kAlignAuto (-1): @align() with no args → 64-byte cache-line optimal.
+    static constexpr int kAlignAuto = -1;
     if (optimizationLevel >= OptimizationLevel::O2) {
-        // @align(N) overrides the default; @hot bumps to 32 unless overridden.
-        if (func->hintAlign > 0) {
+        // @align(N)/-1 overrides the default; @hot bumps to 32 unless overridden.
+        if (func->hintAlign == kAlignAuto) {
+            function->setAlignment(llvm::Align(64)); // cache-line optimal
+        } else if (func->hintAlign > 0) {
             function->setAlignment(llvm::Align(func->hintAlign));
         } else {
             function->setAlignment(func->hintHot ? llvm::Align(32) : llvm::Align(16));
@@ -4738,9 +4742,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
     }
 
-    // Apply @align(N) at any optimization level when explicitly specified.
-    if (func->hintAlign > 0 && optimizationLevel < OptimizationLevel::O2) {
-        function->setAlignment(llvm::Align(func->hintAlign));
+    // Apply @align at any optimization level when explicitly specified.
+    if (func->hintAlign != 0 && optimizationLevel < OptimizationLevel::O2) {
+        if (func->hintAlign == kAlignAuto) {
+            function->setAlignment(llvm::Align(64));
+        } else {
+            function->setAlignment(llvm::Align(func->hintAlign));
+        }
     }
 
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.
