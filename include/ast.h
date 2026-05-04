@@ -268,6 +268,8 @@ class VarDecl : public Statement {
     std::string typeName;
     bool isRegister = false; ///< `register var` — force variable into CPU register via mem2reg
     bool isGlobal = false;          ///< Declared with the `global` keyword
+    bool isAtomic   = false; ///< `atomic var`   — all loads/stores use atomic seq-cst ordering
+    bool isVolatile = false; ///< `volatile var`  — all loads/stores are volatile; suppress opts
     std::string globalNamespace;    ///< Non-empty when imported: the alias under which this global lives (e.g. "foo")
     /// True for VarDecl nodes synthesised by the compiler (for-loop desugaring,
     /// foreach item variables, etc.).  These are exempt from the mandatory-type

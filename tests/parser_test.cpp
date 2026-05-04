@@ -1695,6 +1695,47 @@ TEST(ParserTest, RegisterVarDecl) {
     EXPECT_TRUE(varDecl->isRegister);
 }
 
+TEST(ParserTest, AtomicVarDecl) {
+    auto program = parse("fn main() { atomic var x:i64 = 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(varDecl, nullptr);
+    EXPECT_EQ(varDecl->name, "x");
+    EXPECT_TRUE(varDecl->isAtomic);
+    EXPECT_FALSE(varDecl->isVolatile);
+}
+
+TEST(ParserTest, VolatileVarDecl) {
+    auto program = parse("fn main() { volatile var y:i64 = 1; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(varDecl, nullptr);
+    EXPECT_EQ(varDecl->name, "y");
+    EXPECT_FALSE(varDecl->isAtomic);
+    EXPECT_TRUE(varDecl->isVolatile);
+}
+
+TEST(ParserTest, AtomicVolatileVarDecl) {
+    auto program = parse("fn main() { atomic volatile var z:i64 = 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(varDecl, nullptr);
+    EXPECT_EQ(varDecl->name, "z");
+    EXPECT_TRUE(varDecl->isAtomic);
+    EXPECT_TRUE(varDecl->isVolatile);
+}
+
+TEST(ParserTest, VolatileAtomicVarDeclReversed) {
+    // volatile atomic is the same as atomic volatile
+    auto program = parse("fn main() { volatile atomic var w:i64 = 5; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(varDecl, nullptr);
+    EXPECT_EQ(varDecl->name, "w");
+    EXPECT_TRUE(varDecl->isAtomic);
+    EXPECT_TRUE(varDecl->isVolatile);
+}
+
 // ---------------------------------------------------------------------------
 // SIMD type annotation parsing
 // ---------------------------------------------------------------------------

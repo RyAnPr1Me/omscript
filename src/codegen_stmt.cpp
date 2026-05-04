@@ -295,6 +295,28 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             alloca->setAlignment(llvm::Align(32));
     }
 
+    // volatile keyword: record so every subsequent load/store is volatile.
+    if (stmt->isVolatile) {
+        volatileVars_.insert(stmt->name);
+    }
+
+    // atomic keyword: record so every subsequent load/store uses seq-cst
+    // atomic ordering.  Atomic accesses require natural alignment.  Snap to at
+    // least the ABI alignment of the underlying type so that LLVM accepts the
+    // atomic IR without error.
+    if (stmt->isAtomic) {
+        atomicVars_.insert(stmt->name);
+        // Non-pointer integer/float scalars need alignment == their storage size.
+        // Pointers on LP64 need 8-byte alignment (already the default).
+        if (allocaType->isIntegerTy() || allocaType->isFloatTy() ||
+            allocaType->isDoubleTy()) {
+            const llvm::Align naturalAlign =
+                module->getDataLayout().getABITypeAlign(allocaType);
+            if (alloca->getAlign() < naturalAlign)
+                alloca->setAlignment(naturalAlign);
+        }
+    }
+
     // Track SIMD variables for operator dispatch.
     if (isSimdType)
         simdVars_.insert(stmt->name);
@@ -449,7 +471,22 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     }
 
     if (initValue) {
-        builder->CreateStore(initValue, alloca);
+        {
+            llvm::StoreInst* initStore = builder->CreateStore(initValue, alloca);
+            if (stmt->isVolatile) {
+                initStore->setVolatile(true);
+            }
+            if (stmt->isAtomic && (allocaType->isIntegerTy() ||
+                                   allocaType->isFloatTy()   ||
+                                   allocaType->isDoubleTy()  ||
+                                   allocaType->isPointerTy())) {
+                const llvm::Align atomAlign =
+                    module->getDataLayout().getABITypeAlign(allocaType);
+                initStore->setAtomic(llvm::AtomicOrdering::SequentiallyConsistent,
+                                     llvm::SyncScope::System);
+                initStore->setAlignment(atomAlign);
+            }
+        }
         // Track non-negativity: if a variable is initialized with a
         if (allocaType->isIntegerTy()) {
             bool initNonNeg = nonNegValues_.count(initValue) > 0;

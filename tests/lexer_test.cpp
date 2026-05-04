@@ -733,6 +733,30 @@ TEST(LexerTest, RegisterKeyword) {
     EXPECT_EQ(tokens[1].type, TokenType::VAR);
 }
 
+TEST(LexerTest, AtomicKeyword) {
+    auto tokens = lex("atomic var x:i64 = 0;");
+    ASSERT_GE(tokens.size(), 6u);
+    EXPECT_EQ(tokens[0].type, TokenType::ATOMIC);
+    EXPECT_EQ(tokens[0].lexeme, "atomic");
+    EXPECT_EQ(tokens[1].type, TokenType::VAR);
+}
+
+TEST(LexerTest, VolatileKeyword) {
+    auto tokens = lex("volatile var y:i64 = 1;");
+    ASSERT_GE(tokens.size(), 6u);
+    EXPECT_EQ(tokens[0].type, TokenType::VOLATILE);
+    EXPECT_EQ(tokens[0].lexeme, "volatile");
+    EXPECT_EQ(tokens[1].type, TokenType::VAR);
+}
+
+TEST(LexerTest, AtomicVolatileCombined) {
+    auto tokens = lex("atomic volatile var z:i64 = 0;");
+    ASSERT_GE(tokens.size(), 7u);
+    EXPECT_EQ(tokens[0].type, TokenType::ATOMIC);
+    EXPECT_EQ(tokens[1].type, TokenType::VOLATILE);
+    EXPECT_EQ(tokens[2].type, TokenType::VAR);
+}
+
 // ---------------------------------------------------------------------------
 // String interpolation: $"..."
 // ---------------------------------------------------------------------------

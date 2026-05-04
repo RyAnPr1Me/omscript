@@ -567,6 +567,14 @@ class CodeGenerator {
     /// by running mem2reg on the function after codegen.
     llvm::StringSet<> registerVars_;
 
+    /// Variables declared with `atomic` keyword — all loads/stores use
+    /// seq-cst atomic ordering, and inc/dec/compound-assign map to atomicrmw.
+    llvm::StringSet<> atomicVars_;
+
+    /// Variables declared with `volatile` keyword — all loads/stores are
+    /// marked volatile in the IR to prevent optimization/elision.
+    llvm::StringSet<> volatileVars_;
+
     /// Compile-time integer values for `const` variables (enables urem/udiv fast path).
     llvm::StringMap<int64_t> constIntFolds_;
 

@@ -1209,6 +1209,65 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         decl->column = kw.column;
         return decl;
     }
+    // atomic var / volatile var / atomic volatile var / volatile atomic var
+    // ──────────────────────────────────────────────────────────────────────
+    // Syntax: [atomic] [volatile] var name[:type] = expr;
+    //         [volatile] [atomic] var name[:type] = expr;
+    //
+    // atomic  — all loads and stores to this variable use seq-cst atomic ordering,
+    //           making them indivisible with respect to other threads.
+    // volatile — all loads and stores are marked volatile in the emitted IR,
+    //            preventing the compiler from eliding, reordering, or CSE-ing them.
+    //
+    // The two qualifiers may be combined in either order.  `const` is not
+    // supported with these qualifiers (a const is already a compile-time
+    // constant and can have no externally-visible storage to guard).
+    if (check(TokenType::ATOMIC) || check(TokenType::VOLATILE)) {
+        bool isAtom = false;
+        bool isVol  = false;
+
+        // Consume one or two qualifiers.
+        if (match(TokenType::ATOMIC)) {
+            isAtom = true;
+            if (match(TokenType::VOLATILE)) isVol = true;
+        } else if (match(TokenType::VOLATILE)) {
+            isVol = true;
+            if (match(TokenType::ATOMIC)) isAtom = true;
+        }
+
+        const Token kw = tokens[current - 1]; // last qualifier consumed
+
+        if (!match(TokenType::VAR)) {
+            error(std::string("Expected 'var' after '") +
+                  (isAtom && isVol ? "atomic volatile" :
+                   isAtom          ? "atomic"          : "volatile") + "'");
+        }
+
+        const Token name = consume(TokenType::IDENTIFIER,
+            "Expected variable name after qualifier");
+        std::string typeName;
+        if (match(TokenType::COLON)) {
+            typeName = parseTypeAnnotation();
+        }
+        std::unique_ptr<Expression> init = nullptr;
+        if (match(TokenType::ASSIGN)) {
+            init = parseExpression();
+        }
+        consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
+
+        if (typeName.empty() && !init) {
+            error("Variable '" + name.lexeme +
+                  "' requires an explicit type annotation or initializer.");
+        }
+
+        auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init),
+                                              /*isConst=*/false, typeName);
+        decl->isAtomic   = isAtom;
+        decl->isVolatile = isVol;
+        decl->line   = kw.line;
+        decl->column = kw.column;
+        return decl;
+    }
     if (match(TokenType::PREFETCH)) {
         const Token kw = tokens[current - 1];
 
