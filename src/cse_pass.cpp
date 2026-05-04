@@ -185,8 +185,8 @@ static bool replaceInExpr(std::unique_ptr<Expression>& expr,
         auto* bin = static_cast<BinaryExpr*>(expr.get());
         // During replacement, use an empty opaque set — any key involving an
         // opaque var was already excluded during the collection phase.
-        static const OpaqueSet kEmpty;
-        const std::string myKey = binaryKey(bin->op, bin->left.get(), bin->right.get(), kEmpty);
+        static const OpaqueSet emptyOpaqueSet;
+        const std::string myKey = binaryKey(bin->op, bin->left.get(), bin->right.get(), emptyOpaqueSet);
         if (myKey == key) {
             expr = makeIdentifier(varName);
             return true;
@@ -198,8 +198,8 @@ static bool replaceInExpr(std::unique_ptr<Expression>& expr,
     } else if (expr->type == ASTNodeType::CALL_EXPR && idempotent) {
         // ERSL extension: replace idempotent call with the CSE variable.
         auto* call = static_cast<CallExpr*>(expr.get());
-        static const OpaqueSet kEmpty2;
-        const std::string myKey = callKey(call->callee, call->arguments, kEmpty2);
+        static const OpaqueSet emptyOpaqueSetForCalls;
+        const std::string myKey = callKey(call->callee, call->arguments, emptyOpaqueSetForCalls);
         if (!myKey.empty() && myKey == key) {
             expr = makeIdentifier(varName);
             return true;

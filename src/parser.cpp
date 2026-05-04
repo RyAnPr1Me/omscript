@@ -1226,6 +1226,9 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         bool isAtom = false;
         bool isVol  = false;
 
+        // Capture the first qualifier token for accurate source location.
+        const Token firstKw = tokens[current];
+
         // Consume one or two qualifiers.
         if (match(TokenType::ATOMIC)) {
             isAtom = true;
@@ -1234,8 +1237,6 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             isVol = true;
             if (match(TokenType::ATOMIC)) isAtom = true;
         }
-
-        const Token kw = tokens[current - 1]; // last qualifier consumed
 
         if (!match(TokenType::VAR)) {
             error(std::string("Expected 'var' after '") +
@@ -1264,8 +1265,8 @@ std::unique_ptr<Statement> Parser::parseStatement() {
                                               /*isConst=*/false, typeName);
         decl->isAtomic   = isAtom;
         decl->isVolatile = isVol;
-        decl->line   = kw.line;
-        decl->column = kw.column;
+        decl->line   = firstKw.line;
+        decl->column = firstKw.column;
         return decl;
     }
     if (match(TokenType::PREFETCH)) {
