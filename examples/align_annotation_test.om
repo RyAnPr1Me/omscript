@@ -1,0 +1,17 @@
+// Test @align(N) annotation: aligns function entry to N bytes.
+// The annotation is valid at all optimization levels.
+@align(64)
+fn aligned_fn(x: int) {
+    return x + 1;
+}
+
+@align(16) @inline
+fn small_aligned(x: int) {
+    return x * 2;
+}
+
+fn main() {
+    var a = aligned_fn(3);
+    var b = small_aligned(4);
+    return a + b;
+}

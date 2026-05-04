@@ -612,6 +612,7 @@ class FunctionDecl : public ASTNode {
     bool hintOptNone = false;     ///< @optnone — disable all optimizations (useful for debugging)
     bool hintNoUnwind = false;    ///< @nounwind — function never throws C++ exceptions
     bool hintConstEval = false;   ///< @const_eval — evaluate at compile time when all args are constants
+    int  hintAlign = 0;           ///< @align(N) — align function entry to N bytes (0 = default)
     OptMaxConfig optMaxConfig;    ///< OPTMAX v2 configuration (enabled when @optmax(...) annotation is used)
 
     /// @allocator(size=N) or @allocator(size=N, count=M) annotation.

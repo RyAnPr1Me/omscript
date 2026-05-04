@@ -4718,7 +4718,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // At O2+, align function entry to 16 bytes for better I-cache locality
     if (optimizationLevel >= OptimizationLevel::O2) {
-        function->setAlignment(func->hintHot ? llvm::Align(32) : llvm::Align(16));
+        // @align(N) overrides the default; @hot bumps to 32 unless overridden.
+        if (func->hintAlign > 0) {
+            function->setAlignment(llvm::Align(func->hintAlign));
+        } else {
+            function->setAlignment(func->hintHot ? llvm::Align(32) : llvm::Align(16));
+        }
 
         // mustprogress: tells LLVM that every loop in this function will
         if (!function->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
@@ -4731,6 +4736,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
             }
         }
+    }
+
+    // Apply @align(N) at any optimization level when explicitly specified.
+    if (func->hintAlign > 0 && optimizationLevel < OptimizationLevel::O2) {
+        function->setAlignment(llvm::Align(func->hintAlign));
     }
 
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.

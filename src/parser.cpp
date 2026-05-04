@@ -377,6 +377,7 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintParallelize = false, hintNoParallelize = false;
             bool hintMinSize = false, hintOptNone = false, hintNoUnwind = false;
             bool hintConstEval = false;
+            int  hintAlign = 0;
             bool isOptMaxFromAnnotation = false;
             OptMaxConfig optMaxCfgFromAnnotation;
             int allocatorSizeParam = -1;
@@ -424,6 +425,11 @@ std::unique_ptr<Program> Parser::parse() {
                     hintNoUnwind = true;
                 } else if (ann.lexeme == "const_eval") {
                     hintConstEval = true;
+                } else if (ann.lexeme == "align") {
+                    consume(TokenType::LPAREN, "Expected '(' after @align");
+                    const Token alignVal = consume(TokenType::INTEGER, "Expected integer alignment value");
+                    hintAlign = static_cast<int>(alignVal.intValue);
+                    consume(TokenType::RPAREN, "Expected ')' after @align value");
                 } else if (ann.lexeme == "allocator") {
                     // @allocator(size=N) or @allocator(size=N, count=M)
                     consume(TokenType::LPAREN, "Expected '(' after @allocator");
@@ -448,7 +454,7 @@ std::unique_ptr<Program> Parser::parse() {
                     }
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @allocator (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @align, @allocator (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
@@ -471,6 +477,7 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintOptNone = hintOptNone;
             func->hintNoUnwind = hintNoUnwind;
             func->hintConstEval = hintConstEval;
+            func->hintAlign = hintAlign;
             func->allocatorSizeParam = allocatorSizeParam;
             func->allocatorCountParam = allocatorCountParam;
             if (isOptMaxFromAnnotation) {
