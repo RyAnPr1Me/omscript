@@ -4583,6 +4583,52 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
             }
         }
     }
+    // ── In-place string append optimisation (O₁+, requires uniqueness) ────
+    // Pattern:  x = x + rhs   where:
+    //   • x is a string variable with no live aliases (uniqueStringVars_)
+    //   • rhs is a string expression (pointer) that does not reference x
+    //   • x is not atomic or volatile
+    // Instead of  malloc(len(x)+len(rhs)+1) + memcpy(x) + memcpy(rhs),
+    // emit       realloc(x, len(x)+len(rhs)+1) + memcpy(rhs only).
+    // This saves the O(n) copy of x's existing content every iteration,
+    // turning a string-building loop from O(n²) to O(n).
+    if (optimizationLevel >= OptimizationLevel::O1 &&
+        !atomicVars_.count(expr->name) &&
+        !volatileVars_.count(expr->name) &&
+        uniqueStringVars_.count(expr->name) &&
+        stringVars_.count(expr->name) &&
+        expr->value && expr->value->type == ASTNodeType::BINARY_EXPR) {
+        auto* bin = static_cast<BinaryExpr*>(expr->value.get());
+        // Must be   x + rhs   where LHS is the same variable and both are strings.
+        if (bin->op == "+" &&
+            isStringExpr(expr->value.get()) &&
+            isStringExpr(bin->right.get()) &&
+            bin->left->type == ASTNodeType::IDENTIFIER_EXPR &&
+            static_cast<IdentifierExpr*>(bin->left.get())->name == expr->name) {
+            // Safety: RHS must not reference x (no overlapping realloc read).
+            bool rhsRefersToX = false;
+            std::function<bool(const Expression*)> refsX;
+            refsX = [&](const Expression* e) -> bool {
+                if (!e) return false;
+                if (e->type == ASTNodeType::IDENTIFIER_EXPR)
+                    return static_cast<const IdentifierExpr*>(e)->name == expr->name;
+                if (e->type == ASTNodeType::BINARY_EXPR) {
+                    const auto* b = static_cast<const BinaryExpr*>(e);
+                    return refsX(b->left.get()) || refsX(b->right.get());
+                }
+                if (e->type == ASTNodeType::UNARY_EXPR)
+                    return refsX(static_cast<const UnaryExpr*>(e)->operand.get());
+                if (e->type == ASTNodeType::CALL_EXPR) {
+                    for (const auto& arg : static_cast<const CallExpr*>(e)->arguments)
+                        if (refsX(arg.get())) return true;
+                }
+                return false;
+            };
+            rhsRefersToX = refsX(bin->right.get());
+            if (!rhsRefersToX)
+                return generateInplaceStringAppend(expr, bin->right.get());
+        }
+    }
     // ── Normal assignment path ──────────────────────────────────────────────
     llvm::Value* value = generateExpression(expr->value.get());
     auto it = namedValues.find(expr->name);
@@ -6144,6 +6190,102 @@ llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
     }
 
     return builder->CreatePtrToInt(mapPtr, getDefaultType(), "dict.i");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// generateInplaceStringAppend
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Emit:   x = realloc(x, strlen(x) + strlen(rhs) + 1)
+//         memcpy(x + old_len, rhs, strlen(rhs) + 1)
+//         store x
+//
+// This saves the full memcpy(x's content) present in the regular malloc path,
+// turning the inner loop of a string-building pattern from O(n²) to O(n).
+// The caller has already verified:
+//   • x is unique (uniqueStringVars_.count(expr->name) > 0)
+//   • rhs is a string expression and does not reference x
+//   • x is not atomic or volatile
+
+llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
+                                                         Expression* rhsExpr) {
+    const std::string& varName = assignExpr->name;
+
+    // ── 1. Load current string pointer ───────────────────────────────────
+    auto it = namedValues.find(varName);
+    if (it == namedValues.end() || !it->second)
+        codegenError("Unknown variable in in-place append: " + varName, assignExpr);
+
+    auto* ptrTy  = llvm::PointerType::getUnqual(*context);
+    auto* xPtr   = builder->CreateAlignedLoad(ptrTy, it->second, llvm::Align(8),
+                                               (varName + ".iap.x").c_str());
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        // x is always initialised before use (ownership guarantee).
+        llvm::cast<llvm::LoadInst>(xPtr)->setMetadata(
+            llvm::LLVMContext::MD_nonnull, llvm::MDNode::get(*context, {}));
+    }
+
+    // ── 2. Generate rhs string pointer ───────────────────────────────────
+    llvm::Value* rhsPtr = generateExpression(rhsExpr);
+    // generateExpression may return an integer (pointer stored as i64) — convert.
+    if (!rhsPtr->getType()->isPointerTy()) {
+        rhsPtr = builder->CreateIntToPtr(rhsPtr, ptrTy, "iap.rhs.ptr");
+    }
+
+    // ── 3. Compute lengths ────────────────────────────────────────────────
+    llvm::Function* strlenFn = getOrDeclareStrlen();
+    auto* len1 = builder->CreateCall(strlenFn, {xPtr},   "iap.len1");
+    auto* len2 = builder->CreateCall(strlenFn, {rhsPtr}, "iap.len2");
+
+    // ── 4. Compute new allocation size: len1 + len2 + 1 (null term) ──────
+    auto* totalLen = builder->CreateAdd(len1, len2, "iap.totlen",
+                                        /*NUW=*/true, /*NSW=*/true);
+    auto* newSize  = builder->CreateAdd(totalLen,
+                                        llvm::ConstantInt::get(getDefaultType(), 1),
+                                        "iap.newsz", /*NUW=*/true, /*NSW=*/true);
+
+    // ── 5. realloc(x, newSize) ────────────────────────────────────────────
+    // realloc either extends the buffer in-place (no copy at all) or moves it
+    // to a new location.  Either way the result points to a buffer containing
+    // the original x content at the beginning.
+    auto* newPtr = builder->CreateCall(getOrDeclareRealloc(), {xPtr, newSize},
+                                       "iap.newptr");
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        // realloc never returns null in OmScript (OOM = abort convention).
+        auto* ci = llvm::cast<llvm::CallInst>(newPtr);
+        ci->addRetAttr(llvm::Attribute::get(*context, llvm::Attribute::NonNull));
+        ci->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(*context, 1));
+    }
+
+    // ── 6. Copy rhs to position len1 ─────────────────────────────────────
+    auto* appendPos = builder->CreateInBoundsGEP(
+        llvm::Type::getInt8Ty(*context), newPtr, len1, "iap.dst");
+    // Copy len2+1 bytes (include null terminator from rhs so the buffer is
+    // always null-terminated after the operation).
+    auto* len2p1 = builder->CreateAdd(len2,
+                                       llvm::ConstantInt::get(getDefaultType(), 1),
+                                       "iap.len2p1", /*NUW=*/true, /*NSW=*/true);
+    builder->CreateCall(getOrDeclareMemcpy(), {appendPos, rhsPtr, len2p1});
+
+    // ── 7. Store updated pointer back ────────────────────────────────────
+    builder->CreateAlignedStore(newPtr, it->second, llvm::Align(8));
+
+    // ── 8. Maintain the uniqueness invariant ─────────────────────────────
+    // After this realloc the variable still holds the unique reference —
+    // uniqueStringVars_ does not need updating.
+    // Invalidate any compile-time cached values for this variable.
+    scopeComptimeInts_.erase(varName);
+    constIntFolds_.erase(varName);
+    constStringFolds_.erase(varName);
+    stringVars_.insert(varName);
+
+    // ── 9. Revive the variable (standard assign semantics) ────────────────
+    deadVars_.erase(varName);
+    deadVarReason_.erase(varName);
+
+    // Return the new pointer (matches what generateAssign normally returns for
+    // string assignments: the result is the pointer value as an i64 integer).
+    return builder->CreatePtrToInt(newPtr, getDefaultType(), "iap.result");
 }
 
 } // namespace omscript

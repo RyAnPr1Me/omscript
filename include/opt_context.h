@@ -203,6 +203,8 @@ struct AnalysisValidity {
     bool copyProp        = false; ///< Copy Propagation pass has run
     bool widthLegalization = false; ///< WidthLegalizationPass has run
     bool widthOpt          = false; ///< WidthOptPass has run
+    bool uniqueness        = false; ///< Uniqueness analysis has run (codegen uses results)
+    bool borrowCheck       = false; ///< Standalone borrow checker has run
 
     // ── Dispatch table ────────────────────────────────────────────────────
     bool* fieldFor(std::string_view fact) noexcept {
@@ -226,6 +228,8 @@ struct AnalysisValidity {
             {"copy_prop",          &AnalysisValidity::copyProp         },
             {"width_legalization", &AnalysisValidity::widthLegalization},
             {"width_opt",          &AnalysisValidity::widthOpt         },
+            {"uniqueness",         &AnalysisValidity::uniqueness       },
+            {"borrow_check",       &AnalysisValidity::borrowCheck      },
         };
         for (const auto& row : kTable) {
             if (row.name == fact)

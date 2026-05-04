@@ -20,6 +20,8 @@
 #include "width_legalization.h"
 #include "width_opt_pass.h"
 #include "diagnostic.h"
+#include "uniqueness_analysis.h"
+#include "borrow_checker.h"
 
 #include <cassert>
 #include <chrono>
@@ -182,6 +184,8 @@ namespace PassId {
     uint32_t kCopyProp          = 0;
     uint32_t kWidthLegalization = 0;
     uint32_t kWidthOpt          = 0;
+    uint32_t kUniqueness        = 0;
+    uint32_t kBorrowCheck       = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -424,6 +428,42 @@ static void registerAllPasses() {
         {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization,
          AnalysisFact::kCSE},
     });
+
+    // ── Uniqueness Analysis ───────────────────────────────────────────────
+    // Pure analysis pass: computes per-function uniqueness sets used by the
+    // code generator to emit in-place string-append operations.  Does not
+    // transform the AST; results are consumed by generateFunction().
+    PassId::kUniqueness = reg.registerPass({
+        0,
+        "uniqueness",
+        "Ownership-aware uniqueness analysis: identifies string/array variables "
+        "with no live aliases, enabling in-place realloc+append instead of "
+        "malloc+copy+copy for string concatenation (O(n) vs O(n²) for loops)",
+        PassPhase::EvaluationAnalysis,
+        PassKind::Analysis,
+        // Must run after string and array type propagation so hints are available.
+        {AnalysisFact::kStringTypes, AnalysisFact::kArrayTypes},
+        {AnalysisFact::kUniqueness},
+        // Does not modify the AST — invalidates nothing.
+        {},
+    });
+
+    // ── Standalone Borrow Checker ─────────────────────────────────────────
+    // Checks borrow/move/invalidate rules at the AST level before codegen,
+    // reporting E015–E018 diagnostics with precise source locations.
+    PassId::kBorrowCheck = reg.registerPass({
+        0,
+        "borrow_check",
+        "Standalone borrow checker: validates ownership/borrow rules "
+        "(use-after-move E015, borrow-write conflict E016, double mutable borrow "
+        "E017, move-while-borrowed E018) before code generation",
+        PassPhase::EvaluationAnalysis,
+        PassKind::Analysis,
+        // Run early — only needs the parsed AST.
+        {},
+        {AnalysisFact::kBorrowCheck},
+        {},
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -478,6 +518,8 @@ OptimizationOrchestrator::buildDispatch() {
         {PassId::kCopyProp,          R([this](Program* p, OptimizationContext& c){ runCopyProp(p, c); })},
         {PassId::kWidthLegalization, R([this](Program* p, OptimizationContext& c){ runWidthLegalization(p, c); })},
         {PassId::kWidthOpt,          R([this](Program* p, OptimizationContext& c){ runWidthOpt(p, c); })},
+        {PassId::kUniqueness,        R([this](Program* p, OptimizationContext& c){ runUniqueness(p, c); })},
+        {PassId::kBorrowCheck,       R([this](Program* p, OptimizationContext& c){ runBorrowCheck(p, c); })},
     };
 }
 
@@ -1136,6 +1178,44 @@ void OptimizationOrchestrator::syncFactsToContext(Program* program,
             if (it != uniform.end()) ff.uniformCTReturn = it->second;
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runUniqueness — ownership-aware uniqueness analysis
+// ─────────────────────────────────────────────────────────────────────────────
+
+void OptimizationOrchestrator::runUniqueness(Program* program,
+                                              OptimizationContext& ctx) {
+    // The uniqueness analysis is a pure analysis pass: it does not transform
+    // the AST.  The actual per-function `computeUniqueness()` calls happen
+    // lazily inside `CodeGenerator::generateFunction()`, which reads the
+    // string/array type hints already computed by kStringTypes / kArrayTypes.
+    //
+    // This pass just marks the analysis as having run so that downstream
+    // passes (e.g. the scheduler) can record the fact.
+    if (!program) {
+        ctx.validity().uniqueness = true;
+        return;
+    }
+    if (verbose_) {
+        std::cerr << "[uniqueness] uniqueness analysis registered "
+                  << "(results computed per-function during codegen)\n";
+    }
+    ctx.validity().uniqueness = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runBorrowCheck — standalone AST-level borrow checker
+// ─────────────────────────────────────────────────────────────────────────────
+
+void OptimizationOrchestrator::runBorrowCheck(Program* program,
+                                               OptimizationContext& ctx) {
+    if (!program) {
+        ctx.validity().borrowCheck = true;
+        return;
+    }
+    omscript::runBorrowCheck(*program, verbose_);
+    ctx.validity().borrowCheck = true;
 }
 
 } // namespace omscript

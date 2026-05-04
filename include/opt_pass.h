@@ -77,6 +77,8 @@ namespace AnalysisFact {
     inline constexpr const char* kCopyProp        = "copy_prop";
     inline constexpr const char* kWidthLegalization = "width_legalization";
     inline constexpr const char* kWidthOpt           = "width_opt";
+    inline constexpr const char* kUniqueness         = "uniqueness";
+    inline constexpr const char* kBorrowCheck        = "borrow_check";
 } // namespace AnalysisFact
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -198,6 +200,8 @@ namespace PassId {
     extern uint32_t kRLC;
     extern uint32_t kWidthLegalization;
     extern uint32_t kWidthOpt;
+    extern uint32_t kUniqueness;
+    extern uint32_t kBorrowCheck;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────

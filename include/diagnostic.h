@@ -36,6 +36,13 @@ enum class ErrorCode {
     E012_INDEX_OUT_OF_BOUNDS,
     E013_REGION_NOT_INVALIDATED, ///< Region variable created with newRegion() not invalidated before function end
     E014_REGION_USE_AFTER_INVALIDATE, ///< Region variable referenced after it was invalidated
+
+    // ── Borrow checker errors (E015–E018) ─────────────────────────────────
+    E015_USE_AFTER_MOVE,      ///< Variable read/written after ownership was moved out
+    E016_BORROW_WRITE_CONFLICT, ///< Write to variable with active immutable borrow(s)
+    E017_DOUBLE_MUT_BORROW,   ///< Mutable borrow of already mutably-borrowed variable
+    E018_MOVE_WHILE_BORROWED, ///< Move of variable with active borrow(s)
+
     NONE  ///< No specific error code (legacy/fallback).
 };
 
@@ -54,9 +61,13 @@ inline const char* errorCodeString(ErrorCode code) {
     case ErrorCode::E010_UNKNOWN_FIELD:       return "E010";
     case ErrorCode::E011_DIVISION_BY_ZERO:    return "E011";
     case ErrorCode::E012_INDEX_OUT_OF_BOUNDS: return "E012";
-    case ErrorCode::E013_REGION_NOT_INVALIDATED:     return "E013";
-    case ErrorCode::E014_REGION_USE_AFTER_INVALIDATE: return "E014";
-    case ErrorCode::NONE:                     return "";
+    case ErrorCode::E013_REGION_NOT_INVALIDATED:      return "E013";
+    case ErrorCode::E014_REGION_USE_AFTER_INVALIDATE:  return "E014";
+    case ErrorCode::E015_USE_AFTER_MOVE:               return "E015";
+    case ErrorCode::E016_BORROW_WRITE_CONFLICT:        return "E016";
+    case ErrorCode::E017_DOUBLE_MUT_BORROW:            return "E017";
+    case ErrorCode::E018_MOVE_WHILE_BORROWED:          return "E018";
+    case ErrorCode::NONE:                              return "";
     }
     return "";
 }

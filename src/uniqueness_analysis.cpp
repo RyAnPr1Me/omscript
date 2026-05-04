@@ -29,10 +29,10 @@ static bool isKnownFreshStringBuiltin(const std::string& callee) noexcept {
     };
     static constexpr size_t kN = sizeof(kNames) / sizeof(kNames[0]);
     // The array is sorted — binary search.
-    const char** lo = kNames;
-    const char** hi = kNames + kN;
+    const char* const* lo = kNames;
+    const char* const* hi = kNames + kN;
     while (lo < hi) {
-        const char** mid = lo + (hi - lo) / 2;
+        const char* const* mid = lo + (hi - lo) / 2;
         const int cmp = callee.compare(*mid);
         if (cmp == 0) return true;
         if (cmp < 0) hi = mid;
@@ -49,10 +49,10 @@ static bool isKnownFreshArrayBuiltin(const std::string& callee) noexcept {
         "push", "reverse", "sort", "str_chars", "str_split", "unshift",
     };
     static constexpr size_t kN = sizeof(kNames) / sizeof(kNames[0]);
-    const char** lo = kNames;
-    const char** hi = kNames + kN;
+    const char* const* lo = kNames;
+    const char* const* hi = kNames + kN;
     while (lo < hi) {
-        const char** mid = lo + (hi - lo) / 2;
+        const char* const* mid = lo + (hi - lo) / 2;
         const int cmp = callee.compare(*mid);
         if (cmp == 0) return true;
         if (cmp < 0) hi = mid;
@@ -72,10 +72,10 @@ static bool isKnownNonCapturingBuiltin(const std::string& callee) noexcept {
         "str_find", "str_index_of", "str_starts_with", "type_of",
     };
     static constexpr size_t kN = sizeof(kNames) / sizeof(kNames[0]);
-    const char** lo = kNames;
-    const char** hi = kNames + kN;
+    const char* const* lo = kNames;
+    const char* const* hi = kNames + kN;
     while (lo < hi) {
-        const char** mid = lo + (hi - lo) / 2;
+        const char* const* mid = lo + (hi - lo) / 2;
         const int cmp = callee.compare(*mid);
         if (cmp == 0) return true;
         if (cmp < 0) hi = mid;
@@ -418,7 +418,7 @@ static void markSharedVars(
         return;
     }
     if (const auto* fes = dynamic_cast<const ForEachStmt*>(stmt)) {
-        scanExprForAliases(fes->iterable.get());
+        scanExprForAliases(fes->collection.get());
         markSharedVars(fes->body.get(), strVars, arrVars, sharedVars);
         return;
     }

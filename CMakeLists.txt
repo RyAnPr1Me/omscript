@@ -13,7 +13,7 @@ elseif(SCCACHE_PROGRAM)
     set(CMAKE_CXX_COMPILER_LAUNCHER ${SCCACHE_PROGRAM})
 endif()
 
-project(OmScript VERSION 4.3.0)
+project(OmScript VERSION 4.5.0)
 
 # Version define
 if(NOT DEFINED OMSC_VERSION)
@@ -102,6 +102,8 @@ set(SRC
     src/width_legalization.cpp
     src/width_opt_pass.cpp
     src/program_analysis.cpp
+    src/uniqueness_analysis.cpp
+    src/borrow_checker.cpp
 
     # Driver
     src/preprocessor.cpp

@@ -8,6 +8,7 @@
 #include "diagnostic.h"
 #include "opt_context.h"
 #include "optimization_manager.h"
+#include "uniqueness_analysis.h"
 #include <functional>
 #include <iostream>
 #include <llvm/ADT/DenseSet.h>
@@ -575,6 +576,11 @@ class CodeGenerator {
     /// marked volatile in the IR to prevent optimization/elision.
     llvm::StringSet<> volatileVars_;
 
+    /// String/array variables proven temporally unique (no live aliases) for
+    /// the current function, populated by computeUniqueness() at function start.
+    /// Enables in-place realloc+append for `x = x + rhs` patterns (O(n) vs O(n²)).
+    std::unordered_set<std::string> uniqueStringVars_;
+
     /// Compile-time integer values for `const` variables (enables urem/udiv fast path).
     llvm::StringMap<int64_t> constIntFolds_;
 
@@ -796,6 +802,11 @@ class CodeGenerator {
     void generatePipeline(PipelineStmt* stmt);
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
+    /// Emit an in-place string-append for `x = x + rhs` when x is unique.
+    /// Uses realloc(x, len(x)+len(rhs)+1) + memcpy(rhs only), saving the full
+    /// memcpy of x's existing content present in the regular malloc path.
+    llvm::Value* generateInplaceStringAppend(AssignExpr* assignExpr,
+                                              Expression* rhs);
     llvm::Value* generateReborrowExpr(ReborrowExpr* expr);
 
     /// Lower `@range[lo, hi] expr`: emits llvm.assume + !range metadata (pure optimization hint).

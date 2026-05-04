@@ -4882,6 +4882,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     scopeComptimeInts_.clear();
     catchTable_.clear();
     catchDefaultBB_ = nullptr;
+    uniqueStringVars_.clear();
 
     // Expose all global variables inside this function so that reads,
     // writes, and assignments resolve through the normal namedValues path.
@@ -5002,6 +5003,36 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // Pre-pass: collect all catch(code) blocks in this function body,
     buildCatchTable(func->body->statements, function);
+
+    // ── Uniqueness Analysis ───────────────────────────────────────────────
+    // Compute which string/array variables have no live aliases in this
+    // function, enabling in-place realloc+append for `x = x + rhs` patterns.
+    // Uses the string/array var hints already populated above.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        // Build hint sets from the llvm::StringSet<> trackers populated above.
+        std::unordered_set<std::string> strHints, arrHints;
+        for (const auto& kv : stringVars_)
+            strHints.insert(kv.getKey().str());
+        for (const auto& kv : arrayVars_)
+            arrHints.insert(kv.getKey().str());
+        // Also add parameter-level hints.
+        auto pstrIt = funcParamStringTypes_.find(func->name);
+        if (pstrIt != funcParamStringTypes_.end()) {
+            for (size_t i = 0; i < func->parameters.size(); ++i)
+                if (pstrIt->second.count(i))
+                    strHints.insert(func->parameters[i].name);
+        }
+        auto parrIt = funcParamArrayTypes_.find(func->name);
+        if (parrIt != funcParamArrayTypes_.end()) {
+            for (size_t i = 0; i < func->parameters.size(); ++i)
+                if (parrIt->second.count(i))
+                    arrHints.insert(func->parameters[i].name);
+        }
+        auto ua = omscript::computeUniqueness(*func, strHints, arrHints);
+        uniqueStringVars_ = std::move(ua.uniqueVars);
+    } else {
+        uniqueStringVars_.clear();
+    }
 
     // Generate function body
     generateBlock(func->body.get());
