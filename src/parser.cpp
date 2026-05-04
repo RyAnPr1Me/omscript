@@ -345,6 +345,45 @@ std::unique_ptr<Program> Parser::parse() {
             }
             continue;
         }
+        // @repr(...) struct annotation — must appear immediately before 'struct'
+        if (check(TokenType::AT) && current + 1 < tokens.size() &&
+            tokens[current + 1].type == TokenType::IDENTIFIER &&
+            tokens[current + 1].lexeme == "repr") {
+            try {
+                advance(); // consume '@'
+                advance(); // consume 'repr'
+                consume(TokenType::LPAREN, "Expected '(' after @repr");
+                StructRepr repr = StructRepr::Auto;
+                int reprAlignN = 0;
+                if (!check(TokenType::RPAREN)) {
+                    const Token reprTok = consume(TokenType::IDENTIFIER, "Expected repr kind: C, packed, auto, soa, or align");
+                    if (reprTok.lexeme == "C") {
+                        repr = StructRepr::C;
+                    } else if (reprTok.lexeme == "packed") {
+                        repr = StructRepr::Packed;
+                    } else if (reprTok.lexeme == "auto") {
+                        repr = StructRepr::Auto;
+                    } else if (reprTok.lexeme == "soa") {
+                        repr = StructRepr::SoA;
+                    } else if (reprTok.lexeme == "align") {
+                        repr = StructRepr::AlignN;
+                        consume(TokenType::LPAREN, "Expected '(' after repr align");
+                        const Token nTok = consume(TokenType::INTEGER, "Expected integer alignment in @repr(align(N))");
+                        reprAlignN = static_cast<int>(nTok.intValue);
+                        consume(TokenType::RPAREN, "Expected ')' after repr align value");
+                    } else {
+                        error("Unknown @repr kind '" + reprTok.lexeme + "'; supported: C, packed, auto, soa, align(N)");
+                    }
+                }
+                consume(TokenType::RPAREN, "Expected ')' after @repr");
+                consume(TokenType::STRUCT, "Expected 'struct' after @repr(...)");
+                structs.push_back(parseStructDecl(repr, reprAlignN));
+            } catch (const std::exception& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
         try {
             // Check for file-level @noalias directive (appears before any function
             // keyword and is not followed by 'fn').
@@ -377,6 +416,7 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintParallelize = false, hintNoParallelize = false;
             bool hintMinSize = false, hintOptNone = false, hintNoUnwind = false;
             bool hintConstEval = false;
+            bool hintSpeculatable = false;
             int  hintAlign = 0;
             bool isOptMaxFromAnnotation = false;
             OptMaxConfig optMaxCfgFromAnnotation;
@@ -425,6 +465,8 @@ std::unique_ptr<Program> Parser::parse() {
                     hintNoUnwind = true;
                 } else if (ann.lexeme == "const_eval") {
                     hintConstEval = true;
+                } else if (ann.lexeme == "speculatable") {
+                    hintSpeculatable = true;
                 } else if (ann.lexeme == "align") {
                     consume(TokenType::LPAREN, "Expected '(' after @align");
                     if (check(TokenType::RPAREN)) {
@@ -459,7 +501,7 @@ std::unique_ptr<Program> Parser::parse() {
                     }
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @align, @allocator (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @speculatable, @align, @allocator (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
@@ -482,6 +524,7 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintOptNone = hintOptNone;
             func->hintNoUnwind = hintNoUnwind;
             func->hintConstEval = hintConstEval;
+            func->hintSpeculatable = hintSpeculatable;
             func->hintAlign = hintAlign;
             func->allocatorSizeParam = allocatorSizeParam;
             func->allocatorCountParam = allocatorCountParam;
@@ -2470,7 +2513,7 @@ std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
     return std::make_unique<EnumDecl>(nameToken.lexeme, std::move(members));
 }
 
-std::unique_ptr<StructDecl> Parser::parseStructDecl() {
+std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAlignN) {
     const Token nameToken = consume(TokenType::IDENTIFIER, "Expected struct name");
     consume(TokenType::LBRACE, "Expected '{' after struct name");
 
@@ -2633,6 +2676,8 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
     // (structNames_ was already populated before the body was parsed)
     auto decl = std::make_unique<StructDecl>(nameToken.lexeme, std::move(fields), std::move(fieldDecls));
     decl->operators = std::move(operators);
+    decl->repr = repr;
+    decl->reprAlignN = reprAlignN;
     return decl;
 }
 

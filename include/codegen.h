@@ -446,6 +446,9 @@ class CodeGenerator {
     std::unordered_map<std::string, std::vector<std::string>> structDefs_;
     // Rich struct field metadata: struct name → ordered list of StructField with attributes.
     std::unordered_map<std::string, std::vector<StructField>> structFieldDecls_;
+    // @repr layout hint per struct.
+    std::unordered_map<std::string, StructRepr> structReprs_;
+    std::unordered_map<std::string, int>         structReprAlignN_;
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
     // Per-struct LLVM StructType (built lazily; enables SROA/mem2reg for small structs).

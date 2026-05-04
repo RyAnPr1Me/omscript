@@ -266,6 +266,22 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
 
+    // Apply @repr(align(N)) and @repr(C) struct alignment to the alloca.
+    if (allocaType->isStructTy() && !stmt->typeName.empty()) {
+        auto reprIt = structReprs_.find(stmt->typeName);
+        if (reprIt != structReprs_.end()) {
+            if (reprIt->second == StructRepr::AlignN) {
+                auto nIt = structReprAlignN_.find(stmt->typeName);
+                if (nIt != structReprAlignN_.end() && nIt->second > 0)
+                    alloca->setAlignment(llvm::Align(nIt->second));
+            } else if (reprIt->second == StructRepr::C) {
+                // ABI-compatible: use target ABI alignment for the struct type.
+                const llvm::Align abiAlign = module->getDataLayout().getABITypeAlign(allocaType);
+                alloca->setAlignment(abiAlign);
+            }
+        }
+    }
+
     // Register keyword: force the variable into a CPU register.
     if (stmt->isRegister) {
         // Warn at compile time if the type can't be promoted to a register

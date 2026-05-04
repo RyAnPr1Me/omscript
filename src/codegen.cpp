@@ -658,9 +658,20 @@ llvm::StructType* CodeGenerator::getOrCreateStructLLVMType(const std::string& na
         return nullptr; // Unknown struct
     }
 
-    // Use a non-packed, named struct so LLVM applies the target DataLayout's
+    // Use a non-packed, named struct by default; @repr overrides packing.
+    const StructRepr repr = [&]() -> StructRepr {
+        auto it = structReprs_.find(name);
+        return it != structReprs_.end() ? it->second : StructRepr::Auto;
+    }();
+    const bool isPacked = (repr == StructRepr::Packed);
     llvm::StructType* sty =
-        llvm::StructType::create(*context, elemTypes, "omsc.struct." + name, /*isPacked=*/false);
+        llvm::StructType::create(*context, elemTypes, "omsc.struct." + name, isPacked);
+
+    // @repr(C) / @repr(align(N)) / @repr(soa): apply struct-level alignment.
+    // Note: LLVM StructType doesn't carry alignment directly — we set it on
+    // every alloca/GV that holds this type via structReprAlignN_.
+    (void)repr; // SoA is a hint recorded for future layout passes.
+
     structLLVMTypes_[name] = sty;
     return sty;
 }
@@ -1010,7 +1021,13 @@ llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function
     auto* alloca = entryBuilder.CreateAlloca(type ? type : getDefaultType(), nullptr, name);
     // Set explicit alignment for i64 allocas — the default type in OmScript.
     llvm::Type* allocaType = type ? type : getDefaultType();
-    if (allocaType->isIntegerTy(64) || allocaType->isDoubleTy() || allocaType->isPointerTy()) {
+
+    // @align() auto-optimal: apply maximum natural alignment to every alloca.
+    static constexpr int kAlignAuto = -1;
+    if (currentFuncDecl_ && currentFuncDecl_->hintAlign == kAlignAuto) {
+        // Use 64-byte (cache-line) alignment for ALL allocas in the function.
+        alloca->setAlignment(llvm::Align(64));
+    } else if (allocaType->isIntegerTy(64) || allocaType->isDoubleTy() || allocaType->isPointerTy()) {
         alloca->setAlignment(llvm::Align(8));
     }
     return alloca;
@@ -3982,6 +3999,9 @@ void CodeGenerator::generate(Program* program) {
         } else {
             structDefs_[structDecl->name] = structDecl->fields;
         }
+        // Store @repr metadata.
+        structReprs_[structDecl->name]    = structDecl->repr;
+        structReprAlignN_[structDecl->name] = structDecl->reprAlignN;
         // Eagerly build the LLVM StructType so that the field offsets/sizes
         getOrCreateStructLLVMType(structDecl->name);
     }
@@ -4749,6 +4769,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         } else {
             function->setAlignment(llvm::Align(func->hintAlign));
         }
+    }
+
+    // @speculatable: function has no observable side effects; LLVM may hoist or
+    // speculate calls across branches and into loop preheaders.
+    if (func->hintSpeculatable) {
+        function->addFnAttr(llvm::Attribute::Speculatable);
     }
 
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.

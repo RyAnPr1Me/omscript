@@ -831,6 +831,8 @@ ptest_program "examples/freeze_correctness_test.om" 42
 ptest_program "examples/reborrow_test.om" 100
 ptest_program "examples/allocator_annotation_test.om" 40
 ptest_program "examples/align_annotation_test.om" 17
+ptest_program "examples/speculatable_annotation_test.om" 17
+ptest_program "examples/repr_annotation_test.om" 37
 ptest_program "examples/borrow_mut_syntax_test.om" 42
 ptest_program "examples/ref_borrow_test.om" 42
 ptest_program "examples/comptime_chain_test.om" 45
