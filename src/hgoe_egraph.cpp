@@ -277,6 +277,16 @@ bool HGOEGuidedOptimizer::scoreClass(ClassId id) {
     bool improved = false;
     for (const ENode& node : cls.nodes) {
         if (cls.hgoePruned) break;
+        // Skip self-referential nodes: rules like `x * 1 → x` merge the Mul
+        // class into the Var class, creating nodes whose canonicalized children
+        // point back to the containing class.  Such nodes have infinite cost
+        // regardless, but skipping them early prevents them from being
+        // selected as bestNode via the nodes.front() fallback in extractBest.
+        bool selfRef = false;
+        for (ClassId child : node.children) {
+            if (graph_.find(child) == canonical) { selfRef = true; break; }
+        }
+        if (selfRef) continue;
         MultiCost cost = computeNodeCost(node, canonical);
         if (scalar(cost) < scalar(cls.bestCost)) {
             cls.bestCost = cost;
@@ -687,14 +697,25 @@ static std::unique_ptr<Expression> eNodeToAST(
         std::unordered_map<ClassId, ENode>& visited) {
 
     ClassId canonical = opt.graph().find(cls);
-    // Cycle guard (shouldn't happen in well-formed e-graphs)
+    // Cycle guard / DAG-sharing: if we have already started extracting this
+    // class (visited), reconstruct a leaf expression from the cached node to
+    // avoid infinite recursion.  With the self-referential node fix in
+    // scoreClass this should be rare, but guard defensively.
     auto it = visited.find(canonical);
     if (it != visited.end()) {
-        // Use the visited node (may be incomplete for cycles — conservatively
-        // bail out to a placeholder var).
-        if (it->second.op == Op::Var)
-            return std::make_unique<IdentifierExpr>(it->second.name);
-        return std::make_unique<LiteralExpr>(0LL);
+        const ENode& cached = it->second;
+        switch (cached.op) {
+        case Op::Var:
+            return std::make_unique<IdentifierExpr>(cached.name);
+        case Op::Const:
+            return std::make_unique<LiteralExpr>(cached.value);
+        case Op::ConstF:
+            return std::make_unique<LiteralExpr>(cached.fvalue);
+        default:
+            // True structural cycle — should not happen after self-ref fix;
+            // return a safe placeholder to avoid UB.
+            return std::make_unique<LiteralExpr>(0LL);
+        }
     }
 
     ENode best = opt.extractBest(canonical);
