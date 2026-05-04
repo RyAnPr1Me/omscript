@@ -22,6 +22,7 @@
 #include "diagnostic.h"
 #include "uniqueness_analysis.h"
 #include "borrow_checker.h"
+#include "hgoe_egraph.h"
 
 #include <cassert>
 #include <chrono>
@@ -186,6 +187,7 @@ namespace PassId {
     uint32_t kWidthOpt          = 0;
     uint32_t kUniqueness        = 0;
     uint32_t kBorrowCheck       = 0;
+    uint32_t kHGOEEGraph        = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -464,6 +466,30 @@ static void registerAllPasses() {
         {AnalysisFact::kBorrowCheck},
         {},
     });
+
+    // ── HGOE-Guided E-Graph Superoptimizer ───────────────────────────────────
+    // Fused equality-saturation + HGOE-scoring pass.  Replaces the two-phase
+    // "saturate then extract" pipeline with a single loop that interleaves
+    // rewrite discovery, HGOE cost scoring, and branch pruning.
+    // Runs after the standard e-graph pass (which handles the common algebraic
+    // simplifications quickly) so the HGOE-guided pass focuses its budget on
+    // the residual expressions that benefit from hardware-aware cost ranking.
+    PassId::kHGOEEGraph = reg.registerPass({
+        0,
+        "hgoe_egraph",
+        "HGOE-Guided E-Graph Superoptimizer: fused equality-saturation + hardware-"
+        "aware HGOE cost scoring; continuously prunes dominated equivalence classes "
+        "so the search focuses budget on the most profitable candidates",
+        PassPhase::ASTTransform,
+        PassKind::CostTransform,
+        // Requires the standard e-graph pass (algebraic normalisation) to have
+        // run so the initial expressions are in a canonical form, and CFCTRE
+        // to have resolved constant-foldable sub-expressions.
+        {AnalysisFact::kEGraph, AnalysisFact::kCFCTRE},
+        {AnalysisFact::kHGOEEGraph},
+        // Rewrites expressions — invalidates shape-derived facts.
+        {AnalysisFact::kRangeAnalysis},
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -520,6 +546,7 @@ OptimizationOrchestrator::buildDispatch() {
         {PassId::kWidthOpt,          R([this](Program* p, OptimizationContext& c){ runWidthOpt(p, c); })},
         {PassId::kUniqueness,        R([this](Program* p, OptimizationContext& c){ runUniqueness(p, c); })},
         {PassId::kBorrowCheck,       R([this](Program* p, OptimizationContext& c){ runBorrowCheck(p, c); })},
+        {PassId::kHGOEEGraph,        R([this](Program* p, OptimizationContext& c){ runHGOEEGraph(p, c); })},
     };
 }
 
@@ -1216,6 +1243,41 @@ void OptimizationOrchestrator::runBorrowCheck(Program* program,
     }
     omscript::runBorrowCheck(*program, verbose_);
     ctx.validity().borrowCheck = true;
+}
+
+// runHGOEEGraph — HGOE-Guided E-Graph Superoptimizer
+//
+// Runs the fused equality-saturation + HGOE-scoring pass on the program AST.
+// Only activates at O2+ (opt level where superoptimizer-class work is worth it).
+void OptimizationOrchestrator::runHGOEEGraph(Program* program,
+                                              OptimizationContext& ctx) {
+    if (!program) {
+        ctx.validity().hgoeEGraph = true;
+        return;
+    }
+
+    // Only run at O2+ — at O0/O1 the budget is too tight for guided search.
+    const int optLevel = static_cast<int>(optLevel_);
+    if (optLevel < 2) {
+        ctx.validity().hgoeEGraph = true;
+        return;
+    }
+
+    hgoe_egraph::HGOEGuidedConfig cfg;
+    // Scale budget with optimisation level: O2=modest, O3=full
+    if (optLevel >= 3) {
+        cfg.nodeLimit    = 50'000;
+        cfg.iterLimit    = 40;
+        cfg.nodesPerIter = 5'000;
+    } else {
+        cfg.nodeLimit    = 20'000;
+        cfg.iterLimit    = 25;
+        cfg.nodesPerIter = 2'000;
+    }
+    cfg.deterministicMode = true;
+
+    hgoe_egraph::runHGOEGuidedPass(*program, cfg, verbose_);
+    ctx.validity().hgoeEGraph = true;
 }
 
 } // namespace omscript

@@ -205,6 +205,7 @@ struct AnalysisValidity {
     bool widthOpt          = false; ///< WidthOptPass has run
     bool uniqueness        = false; ///< Uniqueness analysis has run (codegen uses results)
     bool borrowCheck       = false; ///< Standalone borrow checker has run
+    bool hgoeEGraph        = false; ///< HGOE-Guided E-Graph Superoptimizer has run
 
     // ── Dispatch table ────────────────────────────────────────────────────
     bool* fieldFor(std::string_view fact) noexcept {
@@ -230,6 +231,7 @@ struct AnalysisValidity {
             {"width_opt",          &AnalysisValidity::widthOpt         },
             {"uniqueness",         &AnalysisValidity::uniqueness       },
             {"borrow_check",       &AnalysisValidity::borrowCheck      },
+            {"hgoe_egraph",        &AnalysisValidity::hgoeEGraph       },
         };
         for (const auto& row : kTable) {
             if (row.name == fact)

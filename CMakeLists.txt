@@ -104,6 +104,7 @@ set(SRC
     src/program_analysis.cpp
     src/uniqueness_analysis.cpp
     src/borrow_checker.cpp
+    src/hgoe_egraph.cpp
 
     # Driver
     src/preprocessor.cpp

@@ -154,6 +154,7 @@ private:
     void runWidthOpt          (Program* program, OptimizationContext& ctx);
     void runUniqueness        (Program* program, OptimizationContext& ctx);
     void runBorrowCheck       (Program* program, OptimizationContext& ctx);
+    void runHGOEEGraph        (Program* program, OptimizationContext& ctx);
 
     /// Build the PassId → runner dispatch map used by runPassPipeline and
     /// runToProvide.  Defined once here so the 10-entry table never needs to
