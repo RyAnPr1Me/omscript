@@ -494,7 +494,7 @@ private:
             checkExpr(fs->end.get());
             if (fs->step) checkExpr(fs->step.get());
             // Loop variable is a fresh integer — always Owned.
-            stateOf(fs->varName) = BorrowState{};
+            stateOf(fs->iteratorVar) = BorrowState{};
             auto preLoop = saveState();
             pushScope();
             checkStmt(fs->body.get());
@@ -504,8 +504,8 @@ private:
         }
         case ASTNodeType::FOR_EACH_STMT: {
             const auto* fes = static_cast<const ForEachStmt*>(stmt);
-            checkExpr(fes->iterable.get());
-            stateOf(fes->varName) = BorrowState{};
+            checkExpr(fes->collection.get());
+            stateOf(fes->iteratorVar) = BorrowState{};
             auto preLoop = saveState();
             pushScope();
             checkStmt(fes->body.get());
