@@ -472,7 +472,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     if (initValue) {
         {
-            llvm::StoreInst* initStore = builder->CreateStore(initValue, alloca);
+            llvm::StoreInst* initStore = builder->CreateAlignedStore(initValue, alloca, alloca->getAlign());
             if (stmt->isVolatile) {
                 initStore->setVolatile(true);
             }
@@ -631,12 +631,12 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     } else {
         // Default-initialize based on type annotation.
         if (isSimdType) {
-            builder->CreateStore(llvm::Constant::getNullValue(allocaType), alloca);
+            builder->CreateAlignedStore(llvm::Constant::getNullValue(allocaType), alloca, alloca->getAlign());
         } else if (allocaType->isDoubleTy())
-            builder->CreateStore(llvm::ConstantFP::get(allocaType, 0.0), alloca);
+            builder->CreateAlignedStore(llvm::ConstantFP::get(allocaType, 0.0), alloca, alloca->getAlign());
         else {
             const unsigned bits = allocaType->isIntegerTy() ? allocaType->getIntegerBitWidth() : 64;
-            builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(bits, 0)), alloca);
+            builder->CreateAlignedStore(llvm::ConstantInt::get(*context, llvm::APInt(bits, 0)), alloca, alloca->getAlign());
         }
     }
 }
@@ -873,7 +873,7 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
                 // Store to the target variable.
                 auto it = namedValues.find(thenAssign->name);
                 if (it != namedValues.end()) {
-                    builder->CreateStore(sel, it->second);
+                    builder->CreateAlignedStore(sel, it->second, llvm::MaybeAlign(8));
                     // Track non-negativity of the result.
                     bool tNonNeg = nonNegValues_.count(thenVal) > 0;
                     bool eNonNeg = nonNegValues_.count(elseVal) > 0;
@@ -1343,7 +1343,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Initialize iterator
     llvm::Value* startVal = generateExpression(stmt->start.get());
     startVal = convertTo(startVal, iterType);
-    builder->CreateStore(startVal, iterAlloca);
+    builder->CreateAlignedStore(startVal, iterAlloca, iterAlloca->getAlign());
 
     // Early non-negativity tracking: mark the iterator alloca as non-negative
     {
@@ -1804,7 +1804,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     } else {
         incVal = builder->CreateNSWAdd(nextVal, stepVal, "nextvar");
     }
-    builder->CreateStore(incVal, iterAlloca);
+    builder->CreateAlignedStore(incVal, iterAlloca, iterAlloca->getAlign());
     auto* backBr = builder->CreateBr(condBB);
 
     // Attach SIMD interleave hint to the for-loop back-edge at O2+.
@@ -2155,7 +2155,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
             // Hidden index alloca + iterator alloca, mirroring the array path.
             llvm::AllocaInst* idxAllocaR = createEntryBlockAlloca(function, "_foreach_idx");
-            builder->CreateStore(zeroC, idxAllocaR);
+            builder->CreateAlignedStore(zeroC, idxAllocaR, idxAllocaR->getAlign());
             nonNegValues_.insert(idxAllocaR);
 
             llvm::AllocaInst* iterAllocaR = createEntryBlockAlloca(function, stmt->iteratorVar);
@@ -2199,7 +2199,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
             llvm::Value* iterVal = builder->CreateAdd(
                 startV, offset, "frng.val",
                 /*HasNUW=*/false, /*HasNSW=*/stepV == nullptr);
-            builder->CreateStore(iterVal, iterAllocaR);
+            builder->CreateAlignedStore(iterVal, iterAllocaR, iterAllocaR->getAlign());
 
             loopStack.push_back({endBBR, incBBR});
             auto savedLenCacheR = std::move(loopArrayLenCache_);
@@ -2215,7 +2215,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
             builder->SetInsertPoint(incBBR);
             llvm::Value* nextIdxR = builder->CreateAdd(
                 curIdxR, oneC, "frng.next", /*HasNUW=*/true, /*HasNSW=*/true);
-            builder->CreateStore(nextIdxR, idxAllocaR);
+            builder->CreateAlignedStore(nextIdxR, idxAllocaR, idxAllocaR->getAlign());
             auto* backBrR = builder->CreateBr(condBBR);
 
             // Loop metadata: same hints as the array foreach path so the
@@ -2281,7 +2281,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     // Allocate hidden index variable and the user's iterator variable
     llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "_foreach_idx");
-    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca);
+    builder->CreateAlignedStore(llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca, idxAlloca->getAlign());
     // The foreach hidden index starts at 0 and only increments, so it is
     nonNegValues_.insert(idxAlloca);
 
@@ -2357,7 +2357,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                 elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
         }
     }
-    builder->CreateStore(elemVal, iterAlloca);
+    builder->CreateAlignedStore(elemVal, iterAlloca, iterAlloca->getAlign());
 
     loopStack.push_back({endBB, incBB});
     auto savedLenCacheFE = std::move(loopArrayLenCache_);
@@ -2374,7 +2374,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Reuse curIdx from condBB — the hidden index alloca is only modified in
     llvm::Value* incIdx = builder->CreateAdd(curIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next",
                                              /*HasNUW=*/true, /*HasNSW=*/true);
-    builder->CreateStore(incIdx, idxAlloca);
+    builder->CreateAlignedStore(incIdx, idxAlloca, idxAlloca->getAlign());
     auto* backBr = builder->CreateBr(condBB);
 
     // Attach loop metadata to the back-edge branch so LLVM's loop optimizer,
@@ -3000,7 +3000,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
 
     // Store an undef/poison value to enable dead-store elimination.
     auto* allocaType = llvm::cast<llvm::AllocaInst>(alloca)->getAllocatedType();
-    builder->CreateStore(llvm::UndefValue::get(allocaType), alloca);
+    builder->CreateAlignedStore(llvm::UndefValue::get(allocaType), alloca, llvm::cast<llvm::AllocaInst>(alloca)->getAlign());
 
     // ── Tracking-set cleanup ───────────────────────────────────────────────
     constIntFolds_.erase(name);
@@ -3049,18 +3049,16 @@ void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
     bindVariableAnnotated(stmt->name, alloca, stmt->typeName);
 
     if (initValue) {
-        builder->CreateStore(initValue, alloca);
-
-        // If the source is an identifier, mark the source as dead (emit
+        builder->CreateAlignedStore(initValue, alloca, alloca->getAlign());
         if (stmt->initializer->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto* srcId = static_cast<IdentifierExpr*>(stmt->initializer.get());
             markVariableMoved(srcId->name);
         }
     } else {
         if (allocaType->isDoubleTy())
-            builder->CreateStore(llvm::ConstantFP::get(allocaType, 0.0), alloca);
+            builder->CreateAlignedStore(llvm::ConstantFP::get(allocaType, 0.0), alloca, alloca->getAlign());
         else
-            builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
+            builder->CreateAlignedStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca, alloca->getAlign());
     }
 }
 
@@ -3768,7 +3766,7 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
         createEntryBlockAlloca(function, kPipelineIter, iterTy);
     bindVariable(kPipelineIter, iterAlloca);
     loopIterVars_.insert(kPipelineIter);
-    builder->CreateStore(llvm::ConstantInt::get(iterTy, 0), iterAlloca);
+    builder->CreateAlignedStore(llvm::ConstantInt::get(iterTy, 0), iterAlloca, iterAlloca->getAlign());
 
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "pipeline.cond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "pipeline.body", function);
@@ -3852,7 +3850,7 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
     llvm::Value* iNext = builder->CreateAdd(
         iStep, llvm::ConstantInt::get(iterTy, 1),
         "__pipeline_i.next", /*HasNUW=*/true, /*HasNSW=*/true);
-    builder->CreateStore(iNext, iterAlloca);
+    builder->CreateAlignedStore(iNext, iterAlloca, iterAlloca->getAlign());
 
     // ④ Back-edge with pipeline loop metadata.
     {

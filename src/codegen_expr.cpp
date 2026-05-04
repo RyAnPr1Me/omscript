@@ -4972,7 +4972,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     }
 
     {
-        llvm::StoreInst* storeInst = builder->CreateStore(updated, it->second);
+        llvm::StoreInst* storeInst = builder->CreateAlignedStore(updated, it->second, llvm::MaybeAlign(8));
         if (volatileVars_.count(identifier->name)) storeInst->setVolatile(true);
     }
 
