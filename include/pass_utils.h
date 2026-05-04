@@ -20,9 +20,12 @@
 /// width_opt_pass.cpp, and opt_orchestrator.cpp.
 
 #include "ast.h"
+#include "ast_arena.h"  // StringHash, StringEqual, BumpAllocator
 
 #include <algorithm>
+#include <cctype>
 #include <memory>
+#include <string_view>
 
 namespace omscript {
 
@@ -118,6 +121,42 @@ inline void insertCompilerVarDecl(BlockStmt* block,
     block->statements.insert(
         block->statements.begin() + static_cast<ptrdiff_t>(clampedPos),
         std::move(decl));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Type-name predicates (shared between Parser, Codegen, and analysis passes)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Return true when @p name is an integer width-cast intrinsic of the form
+/// `iN` or `uN` (N in [1..256]) — e.g. `i8`, `u32`, `i128`.
+///
+/// This is the canonical implementation used by both the Parser (to
+/// disambiguate type annotations) and the BuiltinEffectTable (for purity
+/// classification of width-cast calls).  Replaces the previously scattered
+/// local copies in parser.cpp and opt_context.h.
+inline bool isIntWidthTypeName(std::string_view name) noexcept {
+    if (name.size() < 2) return false;
+    if (name[0] != 'i' && name[0] != 'u') return false;
+    int bw = 0;
+    for (size_t j = 1; j < name.size(); ++j) {
+        if (name[j] < '0' || name[j] > '9') return false;
+        bw = bw * 10 + (name[j] - '0');
+        if (bw > 256) return false;
+    }
+    return bw >= 1 && bw <= 256;
+}
+
+/// Return true when @p name is one of the built-in OmScript scalar / aggregate
+/// type keywords, OR is an integer width-cast type name.
+///
+/// Used by the Parser to decide whether `identifier:name` is a type annotation
+/// (colon is part of the annotation) vs. a ternary colon (expression context).
+inline bool isKnownScalarTypeName(std::string_view name) noexcept {
+    if (name == "int"    || name == "float"  || name == "double" ||
+        name == "bool"   || name == "string" || name == "dict"   ||
+        name == "bigint" || name == "ptr")
+        return true;
+    return isIntWidthTypeName(name);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

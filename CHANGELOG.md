@@ -5,6 +5,33 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0] - 2026-05-04
+
+### Added
+
+- **`include/ast_arena.h`** — new arena-allocation infrastructure for the compiler:
+  - **`BumpAllocator`** — a slab-based bump-pointer arena allocator.  Memory is carved from fixed-size slabs (default 64 KiB, doubling up to 4 MiB cap).  Provides:
+    - `alloc(n, align)` — O(1) raw byte allocation.
+    - `make<T>(args…)` — typed placement-new with automatic destructor registration for non-trivially-destructible types.
+    - `copyString(string_view)` — copy a string into the arena and return a NUL-terminated `const char*` valid for the arena's lifetime.
+    - `reset()` — call all registered destructors and reset the bump pointer (retains slab memory for reuse).
+    - `bytesAllocated()` / `bytesUsed()` / `slabCount()` — allocation statistics for profiling.
+  - **`StringHash` / `StringEqual`** — transparent hash and equality functors with `using is_transparent = void`.  Enable `std::unordered_map<std::string_view, V>` to be queried directly with `std::string`, `std::string_view`, or `const char*` keys without constructing a temporary `std::string`.
+
+- **`pass_utils.h`** — added two shared type-name predicate helpers, centralising logic that was previously duplicated across `parser.cpp` and `opt_context.h`:
+  - `isIntWidthTypeName(std::string_view)` — returns true for `iN`/`uN` integer-width cast names (N in [1, 256]), e.g. `i8`, `u32`, `i128`.
+  - `isKnownScalarTypeName(std::string_view)` — returns true for any of the built-in OmScript scalar/aggregate type keywords (`int`, `float`, `double`, `bool`, `string`, `dict`, `bigint`, `ptr`) or any integer-width type.
+
+### Changed
+
+- **`BuiltinEffectTable` public API** (`include/opt_context.h`) — all `static bool` predicate methods and `get()` now accept `std::string_view` instead of `const std::string&`.  Callers with `std::string` values pass without allocation (implicit conversion); callers with string literals or `string_view` values no longer construct a temporary `std::string`.
+
+- **`BuiltinEffectTable` internal table** (`src/opt_context.cpp`) — changed from `std::unordered_map<std::string, BuiltinEffects>` (heap-allocated keys) to `std::unordered_map<std::string_view, BuiltinEffects>` (zero-allocation keys; all entries point to string literals with static storage duration).  Lookup is O(1) and allocation-free for all callers.
+
+- **`BuiltinEffectTable::isWidthCastName`** — replaced two `nm.substr(0, 5)` calls (each allocating a temporary `std::string`) with `nm.compare(0, 5, …)` (zero-allocation prefix comparison).  The per-entry `iN`/`uN` check now delegates to the canonical `isIntWidthTypeName` helper from `pass_utils.h`, eliminating the second copy of that logic.
+
+- **`src/parser.cpp`** — removed the local-file-scope `isIntWidthTypeName` and `isKnownTypeName` static functions (which duplicated logic from `opt_context.h` and `pass_utils.h`).  Both call sites now use the shared `isIntWidthTypeName` and `isKnownScalarTypeName` from `pass_utils.h`.
+
 ## [4.2.0] - 2026-05-04
 
 ### Added

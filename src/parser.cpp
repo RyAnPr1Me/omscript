@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "diagnostic.h"
+#include "pass_utils.h"   // isIntWidthTypeName, isKnownScalarTypeName
 #include "preprocessor.h"
 #include <filesystem>
 #include <fstream>
@@ -7,29 +8,6 @@
 #include <stdexcept>
 
 namespace omscript {
-
-/// Returns true for iN/uN where N is in [1..256].
-static bool isIntWidthTypeName(const std::string& name) {
-    if (name.size() < 2) return false;
-    if (name[0] != 'i' && name[0] != 'u') return false;
-    int n = 0;
-    for (size_t j = 1; j < name.size(); ++j) {
-        if (!std::isdigit(static_cast<unsigned char>(name[j]))) return false;
-        n = n * 10 + (name[j] - '0');
-        if (n > 256) return false;
-    }
-    return n >= 1 && n <= 256;
-}
-
-/// Check if a string is a known type annotation name.
-/// Used to disambiguate `x:u32` (type annotation on identifier) from other
-/// uses of colon in expression context.
-static bool isKnownTypeName(const std::string& name) {
-    if (name == "int" || name == "float" || name == "double" || name == "bool" ||
-        name == "string" || name == "dict" || name == "bigint" || name == "ptr")
-        return true;
-    return isIntWidthTypeName(name);
-}
 
 Parser::Parser(const std::vector<Token>& tokens)
     : tokens(tokens), current(0), inOptMaxFunction(false),
@@ -4106,7 +4084,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         // with ternary operator colons and other colon uses.
         if (check(TokenType::COLON) && current + 1 < tokens.size() &&
             tokens[current + 1].type == TokenType::IDENTIFIER &&
-            isKnownTypeName(tokens[current + 1].lexeme)) {
+            isKnownScalarTypeName(tokens[current + 1].lexeme)) {
             advance(); // consume ':'
             advance(); // consume type name
         }

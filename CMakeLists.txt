@@ -13,7 +13,7 @@ elseif(SCCACHE_PROGRAM)
     set(CMAKE_CXX_COMPILER_LAUNCHER ${SCCACHE_PROGRAM})
 endif()
 
-project(OmScript VERSION 4.2.0)
+project(OmScript VERSION 4.3.0)
 
 # Version define
 if(NOT DEFINED OMSC_VERSION)
