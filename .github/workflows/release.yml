@@ -39,6 +39,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Extract version from tag
         id: version
@@ -88,6 +90,8 @@ jobs:
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
+          # cmake is pre-installed on macOS runners but install via brew
+          # to ensure we have a consistent, recent version.
           brew install cmake llvm ccache
           echo "LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm" >> "$GITHUB_ENV"
           ccache --set-config=max_size=600M
@@ -173,41 +177,10 @@ jobs:
             timeout 60 "$OMSC" emit-ir "$f" > /dev/null 2>&1 || true
           done
 
-          # ── Phase C: Compile feature-rich programs that stress specific
-          # subsystems: OPTMAX, struct field attributes, lambdas, string
-          # builtins, array higher-order functions, enum, try/catch, etc.
-          echo "=== PGO Phase C: Feature-specific workloads ==="
-          FEATURE_FILES=(
-            examples/optmax.om
-            examples/optimization_stress_test.om
-            examples/inlining_test.om
-            examples/array_higher_order_test.om
-            examples/enum_test.om
-            examples/lambda_test.om
-            examples/struct_test.om
-            examples/try_catch.om
-            examples/string_builtins_test.om
-            examples/float_test.om
-            examples/foreach_test.om
-            examples/switch_test.om
-            examples/type_annotation_test.om
-            examples/hint_cold_hot.om
-            examples/hint_flatten.om
-            examples/hint_prefetch.om
-            examples/hint_pure_static.om
-            examples/optmax_div_zero.om
-            examples/prefetch_use_site.om
-            examples/bitwise.om
-            examples/benchmark.om
-            examples/arithmetic.om
-            examples/advanced.om
-          )
-          for f in "${FEATURE_FILES[@]}"; do
-            [ -f "$f" ] || continue
-            timeout 120 "$OMSC" "$f" -O3 -o /tmp/pgo_out 2>/dev/null || true
-          done
+          # Phase C is intentionally omitted: all example files are already
+          # compiled at every optimization level in Phase A above.
 
-          # ── Phase D: Compile benchmark programs at -O3 multiple times to
+          # ── Phase C: Compile benchmark programs at -O3 multiple times to
           # build up hot counters for the most expensive optimization paths
           # (LLVM pass pipeline, e-graph saturation, superoptimizer).
           echo "=== PGO Phase D: Benchmark workloads (repeated) ==="
@@ -450,8 +423,9 @@ jobs:
             -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
             ${LLVM_DIR:+-DLLVM_DIR="$LLVM_DIR"} \
             "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
-          cmake --build build --config Release --parallel 4
+          cmake --build build --config Release --parallel "$(sysctl -n hw.logicalcpu)"
 
+      # Step 2: Run the instrumented compiler on representative workloads.
       - name: "PGO Step 2: Generate profile data (macOS)"
         if: runner.os == 'macOS'
         shell: bash
@@ -468,13 +442,10 @@ jobs:
             done
           done
 
-          # Run integration tests
-          OMSC_SKIP_BUILD=1 bash run_tests.sh > /dev/null 2>&1 || true
-
           # Repeat benchmarks for hot path coverage
           for f in examples/bench_suite.om examples/benchmark_loops_math.om; do
             [ -f "$f" ] || continue
-            for i in 1 2 3; do
+            for i in 1 2; do
               timeout 120 "$OMSC" "$f" -O3 -o /tmp/pgo_out 2>/dev/null || true
             done
           done
@@ -527,7 +498,12 @@ jobs:
             ${LLVM_DIR:+-DLLVM_DIR="$LLVM_DIR"} \
             "${pgo_args[@]}" \
             "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
-          cmake --build build --config Release --parallel 4
+          cmake --build build --config Release --parallel "$(sysctl -n hw.logicalcpu)"
+
+      - name: Strip binary (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: strip build/omsc 2>/dev/null || true
 
       # ── Standard build (Windows) ────────────────────────────────────
       - name: Configure CMake (Windows)
