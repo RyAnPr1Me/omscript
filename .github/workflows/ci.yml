@@ -45,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential llvm-18-dev libgtest-dev clang-tidy gcc
+          sudo apt-get install -y cmake build-essential llvm-18-dev libgtest-dev clang-tidy gcc libcurl4-openssl-dev
 
       - name: Configure CMake
         run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLLVM_DIR=/usr/lib/llvm-18/cmake
@@ -86,7 +86,8 @@ jobs:
             build-essential \
             llvm-18-dev \
             libgtest-dev \
-            gcc
+            gcc \
+            libcurl4-openssl-dev
 
       - name: Configure CMake (Release)
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake
@@ -115,7 +116,8 @@ jobs:
             build-essential \
             llvm-18-dev \
             libgtest-dev \
-            gcc
+            gcc \
+            libcurl4-openssl-dev
 
       - name: Configure CMake (Debug + ASan/UBSan)
         run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSANITIZE=address,undefined -DLLVM_DIR=/usr/lib/llvm-18/cmake
