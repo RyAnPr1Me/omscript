@@ -4845,8 +4845,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 rng->hi < std::numeric_limits<int64_t>::max()) {
                 llvm::APInt apLo(64, static_cast<uint64_t>(rng->lo), /*isSigned=*/true);
                 llvm::APInt apHi(64, static_cast<uint64_t>(rng->hi + 1), /*isSigned=*/true);
-                function->addRetAttr(llvm::Attribute::getWithRange(
-                    *context, llvm::ConstantRange(apLo, apHi)));
+                function->addRetAttr(llvm::Attribute::get(
+                    *context, llvm::Attribute::Range,
+                    llvm::ConstantRange(apLo, apHi)));
             }
         }
     }
