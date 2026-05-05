@@ -36,7 +36,16 @@ jobs:
             build-essential \
             llvm-18-dev \
             libgtest-dev \
-            gcc
+            gcc \
+            ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-Linux-build-release-${{ github.sha }}
+          restore-keys: |
+            ccache-Linux-build-release-
 
       - name: Determine version and build
         id: version

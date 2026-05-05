@@ -58,6 +58,15 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Restore ccache (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -70,14 +79,19 @@ jobs:
             libgtest-dev \
             gcc \
             mold \
+            ccache \
             libcurl4-openssl-dev
           echo "LLVM_DIR=/usr/lib/llvm-18/cmake" >> "$GITHUB_ENV"
+          ccache --set-config=max_size=600M
+          ccache --set-config=compress=true
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install cmake llvm
+          brew install cmake llvm ccache
           echo "LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm" >> "$GITHUB_ENV"
+          ccache --set-config=max_size=600M
+          ccache --set-config=compress=true
 
       - name: Setup MSYS2 (Windows)
         if: runner.os == 'Windows'
@@ -193,29 +207,10 @@ jobs:
             timeout 120 "$OMSC" "$f" -O3 -o /tmp/pgo_out 2>/dev/null || true
           done
 
-          # ── Phase D: Exercise e-graph / superoptimizer paths by compiling
-          # ALL example files at -O2 (which enables the e-graph equality
-          # saturation engine and superoptimizer).  This profiles the hundreds
-          # of lambda-based rewrite rules in egraph.cpp.
-          echo "=== PGO Phase D: E-graph & superoptimizer profiling ==="
-          EGRAPH_COUNT=0
-          for f in examples/*.om; do
-            [ -f "$f" ] || continue
-            timeout 120 "$OMSC" "$f" -O2 -o /tmp/pgo_out 2>/dev/null && EGRAPH_COUNT=$((EGRAPH_COUNT + 1)) || true
-          done
-          echo "  E-graph profiled $EGRAPH_COUNT files at -O2"
-
-          # ── Phase E: Run the full integration test suite to profile the
-          # compiler on its own test harness.  This covers error paths,
-          # diagnostics, edge cases, and runtime execution that the example
-          # compilations above may miss.
-          echo "=== PGO Phase E: Integration test suite ==="
-          OMSC_SKIP_BUILD=1 bash run_tests.sh > /dev/null 2>&1 || true
-
-          # ── Phase F: Compile benchmark programs at -O3 multiple times to
+          # ── Phase D: Compile benchmark programs at -O3 multiple times to
           # build up hot counters for the most expensive optimization paths
           # (LLVM pass pipeline, e-graph saturation, superoptimizer).
-          echo "=== PGO Phase F: Benchmark workloads (repeated) ==="
+          echo "=== PGO Phase D: Benchmark workloads (repeated) ==="
           BENCH_FILES=(
             examples/bench_suite.om
             examples/benchmark_loops_math.om
@@ -228,8 +223,8 @@ jobs:
             done
           done
 
-          # ── Phase G: Exercise CLI paths (help, version, errors).
-          echo "=== PGO Phase G: CLI and error paths ==="
+          # ── Phase E: Exercise CLI paths (help, version, errors).
+          echo "=== PGO Phase E: CLI and error paths ==="
           "$OMSC" --help > /dev/null 2>&1 || true
           "$OMSC" --version > /dev/null 2>&1 || true
           "$OMSC" /dev/null 2>/dev/null || true  # error: empty file
@@ -546,7 +541,7 @@ jobs:
       - name: Build compiler (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
-        run: cmake --build build --parallel 4
+        run: cmake --build build --parallel "$(nproc)"
 
       - name: Run unit tests (Linux)
         if: runner.os == 'Linux'

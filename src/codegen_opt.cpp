@@ -1720,11 +1720,8 @@ struct RangeBoundsCheckHoistPass
             if (!endSCEV || llvm::isa<llvm::SCEVCouldNotCompute>(endSCEV)) continue;
 
             // Materialise `end` in the preheader.
-#if LLVM_VERSION_MAJOR >= 20
-            llvm::SCEVExpander expander(SE, "rbch");
-#else
+            // SCEVExpander requires DataLayout through at least LLVM 20.
             llvm::SCEVExpander expander(SE, F.getParent()->getDataLayout(), "rbch");
-#endif
             llvm::Value* endVal = expander.expandCodeFor(
                 endSCEV, sharedLen->getType(),
                 preheader->getTerminator());
