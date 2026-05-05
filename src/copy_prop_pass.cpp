@@ -411,6 +411,12 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
                 static_cast<BlockStmt*>(stmt.get()), map, opaque);
             break;
 
+        case ASTNodeType::INVALIDATE_STMT:
+            // `invalidate v` kills any copy whose source or destination is v,
+            // preventing propagation of a stale alias across the invalidation.
+            killName(map, static_cast<InvalidateStmt*>(stmt.get())->varName);
+            break;
+
         case ASTNodeType::ASSUME_STMT:
             count += propagateInExpr(
                 static_cast<AssumeStmt*>(stmt.get())->condition, map, opaque);

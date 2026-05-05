@@ -4487,7 +4487,12 @@ static llvm::FunctionPassManager buildOptMaxVecFPM(const OptMaxConfig& cfg) {
 void CodeGenerator::optimizeOptMaxFunctions() {
     // ── Phase 0: Apply aggressive function attributes to OPTMAX functions ─
     static constexpr unsigned kAlwaysInlineThreshold = 500; // instruction count
-    llvm::SmallVector<llvm::Function*, 16> optMaxFuncs;
+    // Store function *names* rather than raw Function pointers.  IPO passes in
+    // PreIPO (e.g. IPSCCPPass with AllowFuncSpec=true, the LLVM 18 default)
+    // may specialize or delete the original Function objects, leaving raw
+    // pointers dangling.  After PreIPO we re-look up each function by name via
+    // module->getFunction(); missing entries are simply skipped.
+    llvm::SmallVector<std::string, 16> optMaxFuncNames;
     for (auto& func : module->functions()) {
         if (func.isDeclaration())
             continue;
@@ -4677,18 +4682,34 @@ void CodeGenerator::optimizeOptMaxFunctions() {
             }
         }
 
-        optMaxFuncs.push_back(&func);
+        optMaxFuncNames.push_back(name.str());
     }
 
-    if (optMaxFuncs.empty()) return;
+    if (optMaxFuncNames.empty()) return;
 
     // ── Unified new-PM OPTMAX infrastructure ──────────────────────────────
+    // Ensure the native target is initialized before creating a TargetMachine.
+    // These calls are idempotent.  optimizeOptMaxFunctions() runs before
+    // runOptimizationPasses(), so it must initialize the target itself.
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
+
     auto tm = createTargetMachine();
     if (!tm) {
         if (verbose_)
             llvm::errs() << "omsc: warning: could not create TargetMachine for OPTMAX pipeline\n";
         return;
     }
+
+    // Set target triple and DataLayout on the module before running any passes.
+    // Passes like SimplifyCFGPass (convertSwitchToLookupTable) require an
+    // initialized DataLayout; without it they may crash on switch statements.
+    // Only set if not already configured by the caller.
+    if (module->getTargetTriple().empty())
+        module->setTargetTriple(llvm::sys::getDefaultTargetTriple());
+    if (module->getDataLayout().isDefault())
+        module->setDataLayout(tm->createDataLayout());
 
     llvm::PipelineTuningOptions PTOMax;
     // Enable vectorization cost-model infrastructure so that LoopVectorizePass
@@ -4857,11 +4878,15 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // benefited from the PreIPO constant propagation and inlining.
     static constexpr unsigned kMaxOptMaxFPMInstructions = 5000;
     constexpr int optMaxScalarIterations = 8;
-    for (llvm::Function* func : optMaxFuncs) {
-        // Re-check size here: the function may have grown during PreIPO/PostIPO.
+    for (const std::string& fname : optMaxFuncNames) {
+        // Re-lookup the function by name: PreIPO passes (e.g. IPSCCPPass with
+        // AllowFuncSpec=true) may have specialized or deleted the original
+        // Function object, invalidating any pointer saved before PreIPO ran.
+        llvm::Function* func = module->getFunction(fname);
+        if (!func || func->isDeclaration()) continue;
+        // Re-check size here: the function may have grown during PreIPO.
         if (func->getInstructionCount() > kMaxOptMaxFPMInstructions) continue;
 
-        const std::string fname = func->getName().str();
         auto cfgIt2 = optMaxFunctionConfigs_.find(fname);
         const OptMaxConfig& cfg =
             (cfgIt2 != optMaxFunctionConfigs_.end())
