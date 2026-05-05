@@ -4706,8 +4706,13 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Passes like SimplifyCFGPass (convertSwitchToLookupTable) require an
     // initialized DataLayout; without it they may crash on switch statements.
     // Only set if not already configured by the caller.
-    if (module->getTargetTriple().empty())
+    if (module->getTargetTriple().empty()) {
+#if LLVM_VERSION_MAJOR >= 19
+        module->setTargetTriple(llvm::Triple(llvm::sys::getDefaultTargetTriple()));
+#else
         module->setTargetTriple(llvm::sys::getDefaultTargetTriple());
+#endif
+    }
     if (module->getDataLayout().isDefault())
         module->setDataLayout(tm->createDataLayout());
 
