@@ -70,22 +70,30 @@ static void killName(CopyMap& map, const std::string& name) {
 // Forward declarations
 // ─────────────────────────────────────────────────────────────────────────────
 
+using OpaqueSet = std::unordered_set<std::string>;
+
 static unsigned propagateInExpr(std::unique_ptr<Expression>& expr,
-                                 const CopyMap& map);
-static unsigned propagateInBlock(BlockStmt* block, CopyMap map);
+                                 const CopyMap& map,
+                                 const OpaqueSet& opaque);
+static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
+                                  const OpaqueSet& opaque);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // propagateInExpr — substitute identifier uses according to the copy map
 // ─────────────────────────────────────────────────────────────────────────────
 
 static unsigned propagateInExpr(std::unique_ptr<Expression>& expr,
-                                 const CopyMap& map) {
+                                 const CopyMap& map,
+                                 const OpaqueSet& opaque) {
     if (!expr) return 0;
     unsigned count = 0;
 
     switch (expr->type) {
     case ASTNodeType::IDENTIFIER_EXPR: {
         auto* id = static_cast<const IdentifierExpr*>(expr.get());
+        // Never substitute references to volatile/atomic variables — their
+        // values can change between reads and must be re-loaded every time.
+        if (opaque.count(id->name)) break;
         auto it = map.find(id->name);
         if (it != map.end()) {
             // Replace this identifier with a fresh clone of the source.
@@ -96,24 +104,24 @@ static unsigned propagateInExpr(std::unique_ptr<Expression>& expr,
     }
     case ASTNodeType::BINARY_EXPR: {
         auto* bin = static_cast<BinaryExpr*>(expr.get());
-        count += propagateInExpr(bin->left,  map);
-        count += propagateInExpr(bin->right, map);
+        count += propagateInExpr(bin->left,  map, opaque);
+        count += propagateInExpr(bin->right, map, opaque);
         break;
     }
     case ASTNodeType::UNARY_EXPR:
-        count += propagateInExpr(static_cast<UnaryExpr*>(expr.get())->operand, map);
+        count += propagateInExpr(static_cast<UnaryExpr*>(expr.get())->operand, map, opaque);
         break;
     case ASTNodeType::TERNARY_EXPR: {
         auto* tern = static_cast<TernaryExpr*>(expr.get());
-        count += propagateInExpr(tern->condition, map);
-        count += propagateInExpr(tern->thenExpr,  map);
-        count += propagateInExpr(tern->elseExpr,  map);
+        count += propagateInExpr(tern->condition, map, opaque);
+        count += propagateInExpr(tern->thenExpr,  map, opaque);
+        count += propagateInExpr(tern->elseExpr,  map, opaque);
         break;
     }
     case ASTNodeType::CALL_EXPR: {
         auto* call = static_cast<CallExpr*>(expr.get());
         for (auto& arg : call->arguments)
-            count += propagateInExpr(arg, map);
+            count += propagateInExpr(arg, map, opaque);
         break;
     }
     case ASTNodeType::ASSIGN_EXPR: {
@@ -121,27 +129,27 @@ static unsigned propagateInExpr(std::unique_ptr<Expression>& expr,
         // Note: we only propagate into the RHS here; the LHS kill is handled
         // by propagateInBlock when it sees this as an ExprStmt.
         auto* asgn = static_cast<AssignExpr*>(expr.get());
-        count += propagateInExpr(asgn->value, map);
+        count += propagateInExpr(asgn->value, map, opaque);
         break;
     }
     case ASTNodeType::INDEX_EXPR: {
         auto* idx = static_cast<IndexExpr*>(expr.get());
-        count += propagateInExpr(idx->array, map);
-        count += propagateInExpr(idx->index, map);
+        count += propagateInExpr(idx->array, map, opaque);
+        count += propagateInExpr(idx->index, map, opaque);
         break;
     }
     case ASTNodeType::INDEX_ASSIGN_EXPR: {
         auto* ia = static_cast<IndexAssignExpr*>(expr.get());
-        count += propagateInExpr(ia->array, map);
-        count += propagateInExpr(ia->index, map);
-        count += propagateInExpr(ia->value, map);
+        count += propagateInExpr(ia->array, map, opaque);
+        count += propagateInExpr(ia->index, map, opaque);
+        count += propagateInExpr(ia->value, map, opaque);
         break;
     }
     case ASTNodeType::POSTFIX_EXPR:
-        count += propagateInExpr(static_cast<PostfixExpr*>(expr.get())->operand, map);
+        count += propagateInExpr(static_cast<PostfixExpr*>(expr.get())->operand, map, opaque);
         break;
     case ASTNodeType::PREFIX_EXPR:
-        count += propagateInExpr(static_cast<PrefixExpr*>(expr.get())->operand, map);
+        count += propagateInExpr(static_cast<PrefixExpr*>(expr.get())->operand, map, opaque);
         break;
     default:
         break;
@@ -262,17 +270,19 @@ static void collectWrittenDeep(const Statement* stmt,
 /// Used by while/do-while/for/foreach handlers so the identical
 /// "collect-writes, kill, recurse" pattern is not duplicated across
 /// every loop statement kind.
-static unsigned killAndRecurseBody(Statement* body, CopyMap& map) {
+static unsigned killAndRecurseBody(Statement* body, CopyMap& map,
+                                    const OpaqueSet& opaque) {
     if (!body) return 0;
     std::unordered_set<std::string> writes;
     collectWrittenInStmt(body, writes);
     for (const auto& w : writes) killName(map, w);
     if (body->type == ASTNodeType::BLOCK)
-        return propagateInBlock(static_cast<BlockStmt*>(body), map);
+        return propagateInBlock(static_cast<BlockStmt*>(body), map, opaque);
     return 0;
 }
 
-static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
+static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
+                                  const OpaqueSet& opaque) {
     if (!block) return 0;
     unsigned count = 0;
 
@@ -284,9 +294,20 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
         case ASTNodeType::VAR_DECL: {
             auto* vd = static_cast<VarDecl*>(stmt.get());
             // Propagate into the initializer FIRST (it sees the current map).
-            count += propagateInExpr(vd->initializer, map);
+            count += propagateInExpr(vd->initializer, map, opaque);
+            // Never record a copy for volatile or atomic variables — their
+            // values can change externally and must not be forwarded.
+            if (vd->isVolatile || vd->isAtomic) {
+                killName(map, vd->name);
+                break;
+            }
             // Then decide whether this creates a new copy or kills an existing one.
             if (const auto* initId = asIdentifier(vd->initializer.get())) {
+                // Don't forward a copy from a volatile/atomic source.
+                if (opaque.count(initId->name)) {
+                    killName(map, vd->name);
+                    break;
+                }
                 // var y = x  → record y → resolve(x) for transitive propagation.
                 const auto& src = resolve(map, initId->name);
                 // Kill any prior entry for y, then record the new copy.
@@ -305,19 +326,19 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
             // the kill happens after expression evaluation.
             std::unordered_set<std::string> written;
             collectWrittenNames(es->expression.get(), written);
-            count += propagateInExpr(es->expression, map);
+            count += propagateInExpr(es->expression, map, opaque);
             for (const auto& w : written) killName(map, w);
             break;
         }
 
         case ASTNodeType::RETURN_STMT:
             count += propagateInExpr(
-                static_cast<ReturnStmt*>(stmt.get())->value, map);
+                static_cast<ReturnStmt*>(stmt.get())->value, map, opaque);
             break;
 
         case ASTNodeType::IF_STMT: {
             auto* ifS = static_cast<IfStmt*>(stmt.get());
-            count += propagateInExpr(ifS->condition, map);
+            count += propagateInExpr(ifS->condition, map, opaque);
             // Compute a conservative set of names written in either branch,
             // then invalidate those copies so the post-if map is safe.
             std::unordered_set<std::string> branchWrites;
@@ -328,10 +349,10 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
             // Recurse into branches with a *copy* of the current map.
             if (ifS->thenBranch && ifS->thenBranch->type == ASTNodeType::BLOCK)
                 count += propagateInBlock(
-                    static_cast<BlockStmt*>(ifS->thenBranch.get()), map);
+                    static_cast<BlockStmt*>(ifS->thenBranch.get()), map, opaque);
             if (ifS->elseBranch && ifS->elseBranch->type == ASTNodeType::BLOCK)
                 count += propagateInBlock(
-                    static_cast<BlockStmt*>(ifS->elseBranch.get()), map);
+                    static_cast<BlockStmt*>(ifS->elseBranch.get()), map, opaque);
             // Kill everything that either branch might have written.
             for (const auto& w : branchWrites) killName(map, w);
             break;
@@ -349,26 +370,26 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
                 collectWrittenDeep(ws->body.get(), bodyWrites);
                 for (const auto& w : bodyWrites) killName(map, w);
             }
-            count += propagateInExpr(ws->condition, map);
-            count += killAndRecurseBody(ws->body.get(), map);
+            count += propagateInExpr(ws->condition, map, opaque);
+            count += killAndRecurseBody(ws->body.get(), map, opaque);
             break;
         }
 
         case ASTNodeType::DO_WHILE_STMT: {
             auto* dw = static_cast<DoWhileStmt*>(stmt.get());
-            count += killAndRecurseBody(dw->body.get(), map);
-            count += propagateInExpr(dw->condition, map);
+            count += killAndRecurseBody(dw->body.get(), map, opaque);
+            count += propagateInExpr(dw->condition, map, opaque);
             break;
         }
 
         case ASTNodeType::FOR_STMT: {
             auto* fs = static_cast<ForStmt*>(stmt.get());
-            count += propagateInExpr(fs->start, map);
-            count += propagateInExpr(fs->end,   map);
-            count += propagateInExpr(fs->step,  map);
+            count += propagateInExpr(fs->start, map, opaque);
+            count += propagateInExpr(fs->end,   map, opaque);
+            count += propagateInExpr(fs->step,  map, opaque);
             // Kill the loop variable before recursing into the body.
             killName(map, fs->iteratorVar);
-            count += killAndRecurseBody(fs->body.get(), map);
+            count += killAndRecurseBody(fs->body.get(), map, opaque);
             break;
         }
 
@@ -376,28 +397,28 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
             auto* fe = static_cast<ForEachStmt*>(stmt.get());
             // Propagate into the collection expression (e.g. `for x in arr` →
             // substitute arr if it is a copy alias).
-            count += propagateInExpr(fe->collection, map);
+            count += propagateInExpr(fe->collection, map, opaque);
             // The iterator variable is bound fresh each iteration; kill any
             // prior copy entry for it before recursing into the body.
             killName(map, fe->iteratorVar);
-            count += killAndRecurseBody(fe->body.get(), map);
+            count += killAndRecurseBody(fe->body.get(), map, opaque);
             break;
         }
 
         case ASTNodeType::BLOCK:
             // Nested bare block: recurse with the current map (same scope).
             count += propagateInBlock(
-                static_cast<BlockStmt*>(stmt.get()), map);
+                static_cast<BlockStmt*>(stmt.get()), map, opaque);
             break;
 
         case ASTNodeType::ASSUME_STMT:
             count += propagateInExpr(
-                static_cast<AssumeStmt*>(stmt.get())->condition, map);
+                static_cast<AssumeStmt*>(stmt.get())->condition, map, opaque);
             break;
 
         case ASTNodeType::THROW_STMT:
             count += propagateInExpr(
-                static_cast<ThrowStmt*>(stmt.get())->value, map);
+                static_cast<ThrowStmt*>(stmt.get())->value, map, opaque);
             break;
 
         default:
@@ -408,6 +429,53 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// collectOpaqueVars — find all volatile/atomic variable names in a function
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void collectOpaqueVarsInBlock(const BlockStmt* block, OpaqueSet& out);
+
+static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case ASTNodeType::VAR_DECL: {
+        const auto* vd = static_cast<const VarDecl*>(stmt);
+        if (vd->isVolatile || vd->isAtomic)
+            out.insert(vd->name);
+        break;
+    }
+    case ASTNodeType::BLOCK:
+        collectOpaqueVarsInBlock(static_cast<const BlockStmt*>(stmt), out);
+        break;
+    case ASTNodeType::IF_STMT: {
+        const auto* ifS = static_cast<const IfStmt*>(stmt);
+        collectOpaqueVarsInStmt(ifS->thenBranch.get(), out);
+        collectOpaqueVarsInStmt(ifS->elseBranch.get(), out);
+        break;
+    }
+    case ASTNodeType::WHILE_STMT:
+        collectOpaqueVarsInStmt(static_cast<const WhileStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::DO_WHILE_STMT:
+        collectOpaqueVarsInStmt(static_cast<const DoWhileStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::FOR_STMT:
+        collectOpaqueVarsInStmt(static_cast<const ForStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::FOR_EACH_STMT:
+        collectOpaqueVarsInStmt(static_cast<const ForEachStmt*>(stmt)->body.get(), out);
+        break;
+    default:
+        break;
+    }
+}
+
+static void collectOpaqueVarsInBlock(const BlockStmt* block, OpaqueSet& out) {
+    if (!block) return;
+    for (const auto& s : block->statements)
+        collectOpaqueVarsInStmt(s.get(), out);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -415,9 +483,14 @@ CopyPropStats runCopyPropPass(Program* program, bool verbose) {
     CopyPropStats total;
 
     forEachFunction(program, [&](FunctionDecl* fn) {
+        // Pre-scan the function for volatile/atomic variable names.
+        // These are "opaque" — their loads cannot be forwarded.
+        OpaqueSet opaque;
+        collectOpaqueVarsInBlock(fn->body.get(), opaque);
+
         const unsigned before = total.copiesEliminated;
         total.copiesEliminated +=
-            propagateInBlock(fn->body.get(), CopyMap{});
+            propagateInBlock(fn->body.get(), CopyMap{}, opaque);
 
         const unsigned applied = total.copiesEliminated - before;
         if (verbose && applied > 0) {

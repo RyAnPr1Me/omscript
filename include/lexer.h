@@ -78,6 +78,8 @@ enum class TokenType {
     PIPELINE,  // pipeline — staged execution pipeline construct
     STAGE,     // stage    — named stage inside a pipeline block
     GLOBAL,    // global   — declare a program-wide variable
+    ATOMIC,    // atomic   — all accesses to the variable are indivisible
+    VOLATILE,  // volatile — suppress all optimizations on the annotated storage
 
     // Operators
     PLUS,

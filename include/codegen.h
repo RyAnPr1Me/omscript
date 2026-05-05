@@ -8,6 +8,7 @@
 #include "diagnostic.h"
 #include "opt_context.h"
 #include "optimization_manager.h"
+#include "uniqueness_analysis.h"
 #include <functional>
 #include <iostream>
 #include <llvm/ADT/DenseSet.h>
@@ -445,6 +446,9 @@ class CodeGenerator {
     std::unordered_map<std::string, std::vector<std::string>> structDefs_;
     // Rich struct field metadata: struct name → ordered list of StructField with attributes.
     std::unordered_map<std::string, std::vector<StructField>> structFieldDecls_;
+    // @repr layout hint per struct.
+    std::unordered_map<std::string, StructRepr> structReprs_;
+    std::unordered_map<std::string, int>         structReprAlignN_;
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
     // Per-struct LLVM StructType (built lazily; enables SROA/mem2reg for small structs).
@@ -566,6 +570,19 @@ class CodeGenerator {
     /// Variables declared with `register` keyword — forces register allocation
     /// by running mem2reg on the function after codegen.
     llvm::StringSet<> registerVars_;
+
+    /// Variables declared with `atomic` keyword — all loads/stores use
+    /// seq-cst atomic ordering, and inc/dec/compound-assign map to atomicrmw.
+    llvm::StringSet<> atomicVars_;
+
+    /// Variables declared with `volatile` keyword — all loads/stores are
+    /// marked volatile in the IR to prevent optimization/elision.
+    llvm::StringSet<> volatileVars_;
+
+    /// String/array variables proven temporally unique (no live aliases) for
+    /// the current function, populated by computeUniqueness() at function start.
+    /// Enables in-place realloc+append for `x = x + rhs` patterns (O(n) vs O(n²)).
+    std::unordered_set<std::string> uniqueStringVars_;
 
     /// Compile-time integer values for `const` variables (enables urem/udiv fast path).
     llvm::StringMap<int64_t> constIntFolds_;
@@ -788,6 +805,11 @@ class CodeGenerator {
     void generatePipeline(PipelineStmt* stmt);
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
+    /// Emit an in-place string-append for `x = x + rhs` when x is unique.
+    /// Uses realloc(x, len(x)+len(rhs)+1) + memcpy(rhs only), saving the full
+    /// memcpy of x's existing content present in the regular malloc path.
+    llvm::Value* generateInplaceStringAppend(AssignExpr* assignExpr,
+                                              Expression* rhs);
     llvm::Value* generateReborrowExpr(ReborrowExpr* expr);
 
     /// Lower `@range[lo, hi] expr`: emits llvm.assume + !range metadata (pure optimization hint).

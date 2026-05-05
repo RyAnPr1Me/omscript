@@ -34,6 +34,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace omscript {
@@ -42,10 +43,17 @@ namespace omscript {
 // Expression canonicalisation helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+using OpaqueSet = std::unordered_set<std::string>;
+
 /// Return a string representation of a simple (leaf-level) expression,
 /// or "" if the expression is not a hoistable atom.
-static std::string leafRepr(const Expression* expr) {
-    if (const auto* id = asIdentifier(expr)) return id->name;
+/// Volatile / atomic variable identifiers always return "" — they must be
+/// re-loaded every time and cannot participate in CSE.
+static std::string leafRepr(const Expression* expr, const OpaqueSet& opaque) {
+    if (const auto* id = asIdentifier(expr)) {
+        if (opaque.count(id->name)) return ""; // volatile/atomic — not a CSE leaf
+        return id->name;
+    }
     long long v = 0;
     if (isIntLiteral(expr, &v))
         return std::to_string(v);
@@ -58,9 +66,10 @@ static std::string leafRepr(const Expression* expr) {
 /// e-graph).
 static std::string binaryKey(const std::string& op,
                               const Expression* left,
-                              const Expression* right) {
-    std::string l = leafRepr(left);
-    std::string r = leafRepr(right);
+                              const Expression* right,
+                              const OpaqueSet& opaque) {
+    std::string l = leafRepr(left,  opaque);
+    std::string r = leafRepr(right, opaque);
     if (l.empty() || r.empty()) return "";
 
     // Normalise commutative operators so a+b and b+a share the same key.
@@ -75,10 +84,11 @@ static std::string binaryKey(const std::string& op,
 /// Format: "CALL:<callee>:<arg0>:<arg1>:…"
 /// Arguments are NOT reordered (function calls are not commutative).
 static std::string callKey(const std::string& callee,
-                            const std::vector<std::unique_ptr<Expression>>& args) {
+                            const std::vector<std::unique_ptr<Expression>>& args,
+                            const OpaqueSet& opaque) {
     std::string key = "CALL:" + callee;
     for (const auto& arg : args) {
-        const std::string leaf = leafRepr(arg.get());
+        const std::string leaf = leafRepr(arg.get(), opaque);
         if (leaf.empty()) return ""; // non-leaf arg → not eligible
         key += ":" + leaf;
     }
@@ -90,65 +100,67 @@ static std::string callKey(const std::string& callee,
 
 static void collectKeys(const Expression* expr,
                         std::unordered_map<std::string, int>& freq,
-                        const std::unordered_map<std::string, EffectSummary>* idempotent) {
+                        const std::unordered_map<std::string, EffectSummary>* idempotent,
+                        const OpaqueSet& opaque) {
     if (!expr) return;
 
     if (expr->type == ASTNodeType::BINARY_EXPR) {
         const auto* bin = static_cast<const BinaryExpr*>(expr);
         // Only consider operators that are pure integer/bitwise ops.
         if (isPureBinaryOp(bin->op)) {
-            std::string key = binaryKey(bin->op, bin->left.get(), bin->right.get());
+            std::string key = binaryKey(bin->op, bin->left.get(), bin->right.get(), opaque);
             if (!key.empty()) freq[key]++;
         }
         // Recurse.
-        collectKeys(bin->left.get(), freq, idempotent);
-        collectKeys(bin->right.get(), freq, idempotent);
+        collectKeys(bin->left.get(), freq, idempotent, opaque);
+        collectKeys(bin->right.get(), freq, idempotent, opaque);
     } else if (expr->type == ASTNodeType::CALL_EXPR && idempotent) {
         // ERSL extension: CSE calls to idempotent (canDuplicate) functions.
         const auto* call = static_cast<const CallExpr*>(expr);
         auto it = idempotent->find(call->callee);
         if (it != idempotent->end() && it->second.canDuplicate) {
-            std::string key = callKey(call->callee, call->arguments);
+            std::string key = callKey(call->callee, call->arguments, opaque);
             if (!key.empty()) freq[key]++;
         }
         // Recurse into arguments to catch inner binary CSE candidates
         // (e.g. `f(a+b, a+b)` — the `a+b` subexpressions are still pure).
         for (const auto& arg : call->arguments)
-            collectKeys(arg.get(), freq, idempotent);
+            collectKeys(arg.get(), freq, idempotent, opaque);
     } else if (expr->type == ASTNodeType::CALL_EXPR) {
         // Non-idempotent call: don't CSE the call itself, but still
         // recurse into arguments for inner binary CSE candidates.
         const auto* call = static_cast<const CallExpr*>(expr);
         for (const auto& arg : call->arguments)
-            collectKeys(arg.get(), freq, idempotent);
+            collectKeys(arg.get(), freq, idempotent, opaque);
     } else if (expr->type == ASTNodeType::UNARY_EXPR) {
-        collectKeys(static_cast<const UnaryExpr*>(expr)->operand.get(), freq, idempotent);
+        collectKeys(static_cast<const UnaryExpr*>(expr)->operand.get(), freq, idempotent, opaque);
     } else if (expr->type == ASTNodeType::TERNARY_EXPR) {
         const auto* tern = static_cast<const TernaryExpr*>(expr);
-        collectKeys(tern->condition.get(), freq, idempotent);
-        collectKeys(tern->thenExpr.get(), freq, idempotent);
-        collectKeys(tern->elseExpr.get(), freq, idempotent);
+        collectKeys(tern->condition.get(), freq, idempotent, opaque);
+        collectKeys(tern->thenExpr.get(), freq, idempotent, opaque);
+        collectKeys(tern->elseExpr.get(), freq, idempotent, opaque);
     }
     // Do not descend into non-idempotent CallExpr (may have side effects).
 }
 
 static void collectKeysFromStmt(const Statement* stmt,
                                 std::unordered_map<std::string, int>& freq,
-                                const std::unordered_map<std::string, EffectSummary>* idempotent) {
+                                const std::unordered_map<std::string, EffectSummary>* idempotent,
+                                const OpaqueSet& opaque) {
     if (!stmt) return;
     switch (stmt->type) {
     case ASTNodeType::EXPR_STMT:
-        collectKeys(static_cast<const ExprStmt*>(stmt)->expression.get(), freq, idempotent);
+        collectKeys(static_cast<const ExprStmt*>(stmt)->expression.get(), freq, idempotent, opaque);
         break;
     case ASTNodeType::VAR_DECL:
-        collectKeys(static_cast<const VarDecl*>(stmt)->initializer.get(), freq, idempotent);
+        collectKeys(static_cast<const VarDecl*>(stmt)->initializer.get(), freq, idempotent, opaque);
         break;
     case ASTNodeType::RETURN_STMT:
-        collectKeys(static_cast<const ReturnStmt*>(stmt)->value.get(), freq, idempotent);
+        collectKeys(static_cast<const ReturnStmt*>(stmt)->value.get(), freq, idempotent, opaque);
         break;
     case ASTNodeType::IF_STMT: {
         const auto* ifS = static_cast<const IfStmt*>(stmt);
-        collectKeys(ifS->condition.get(), freq, idempotent);
+        collectKeys(ifS->condition.get(), freq, idempotent, opaque);
         // Do not recurse into branches — CSE is block-local.
         break;
     }
@@ -171,7 +183,10 @@ static bool replaceInExpr(std::unique_ptr<Expression>& expr,
 
     if (expr->type == ASTNodeType::BINARY_EXPR) {
         auto* bin = static_cast<BinaryExpr*>(expr.get());
-        const std::string myKey = binaryKey(bin->op, bin->left.get(), bin->right.get());
+        // During replacement, use an empty opaque set — any key involving an
+        // opaque var was already excluded during the collection phase.
+        static const OpaqueSet emptyOpaqueSet;
+        const std::string myKey = binaryKey(bin->op, bin->left.get(), bin->right.get(), emptyOpaqueSet);
         if (myKey == key) {
             expr = makeIdentifier(varName);
             return true;
@@ -183,7 +198,8 @@ static bool replaceInExpr(std::unique_ptr<Expression>& expr,
     } else if (expr->type == ASTNodeType::CALL_EXPR && idempotent) {
         // ERSL extension: replace idempotent call with the CSE variable.
         auto* call = static_cast<CallExpr*>(expr.get());
-        const std::string myKey = callKey(call->callee, call->arguments);
+        static const OpaqueSet emptyOpaqueSetForCalls;
+        const std::string myKey = callKey(call->callee, call->arguments, emptyOpaqueSetForCalls);
         if (!myKey.empty() && myKey == key) {
             expr = makeIdentifier(varName);
             return true;
@@ -292,17 +308,19 @@ static std::unique_ptr<Expression> exprFromKey(const std::string& key) {
 
 // Forward declaration for mutual recursion.
 static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
-                             const std::unordered_map<std::string, EffectSummary>* idempotent);
+                             const std::unordered_map<std::string, EffectSummary>* idempotent,
+                             const OpaqueSet& opaque);
 
 static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
-                             const std::unordered_map<std::string, EffectSummary>* idempotent) {
+                             const std::unordered_map<std::string, EffectSummary>* idempotent,
+                             const OpaqueSet& opaque) {
     CSEStats stats;
     if (!block || block->statements.empty()) return stats;
 
     // ── Step 1: collect frequency of CSE-eligible subexpressions ───────────
     std::unordered_map<std::string, int> freq;
     for (const auto& stmt : block->statements)
-        collectKeysFromStmt(stmt.get(), freq, idempotent);
+        collectKeysFromStmt(stmt.get(), freq, idempotent, opaque);
 
     // ── Step 2: for each key with freq >= 2, hoist it ──────────────────────
     // Process candidates in deterministic order (sort by key).
@@ -323,7 +341,7 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
             std::unordered_map<std::string, int> probe;
             for (size_t i = 0; i < block->statements.size(); ++i) {
                 probe.clear();
-                collectKeysFromStmt(block->statements[i].get(), probe, idempotent);
+                collectKeysFromStmt(block->statements[i].get(), probe, idempotent, opaque);
                 if (probe.count(key)) { insertPos = i; break; }
             }
         }
@@ -338,7 +356,7 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
         unsigned replacements = 0;
         for (size_t i = insertPos + 1; i < block->statements.size(); ++i) {
             std::unordered_map<std::string, int> probe;
-            collectKeysFromStmt(block->statements[i].get(), probe, idempotent);
+            collectKeysFromStmt(block->statements[i].get(), probe, idempotent, opaque);
             if (probe.count(key)) {
                 replaceInStmt(block->statements[i].get(), key, varName, idempotent);
                 ++replacements;
@@ -351,32 +369,32 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
     for (auto& stmt : block->statements) {
         if (!stmt) continue;
         if (stmt->type == ASTNodeType::BLOCK) {
-            auto sub = processBlock(static_cast<BlockStmt*>(stmt.get()), nextId, idempotent);
+            auto sub = processBlock(static_cast<BlockStmt*>(stmt.get()), nextId, idempotent, opaque);
             stats.expressionsHoisted += sub.expressionsHoisted;
             stats.tempVarsIntroduced += sub.tempVarsIntroduced;
         } else if (stmt->type == ASTNodeType::IF_STMT) {
             auto* ifS = static_cast<IfStmt*>(stmt.get());
             if (ifS->thenBranch && ifS->thenBranch->type == ASTNodeType::BLOCK) {
-                auto sub = processBlock(static_cast<BlockStmt*>(ifS->thenBranch.get()), nextId, idempotent);
+                auto sub = processBlock(static_cast<BlockStmt*>(ifS->thenBranch.get()), nextId, idempotent, opaque);
                 stats.expressionsHoisted += sub.expressionsHoisted;
                 stats.tempVarsIntroduced += sub.tempVarsIntroduced;
             }
             if (ifS->elseBranch && ifS->elseBranch->type == ASTNodeType::BLOCK) {
-                auto sub = processBlock(static_cast<BlockStmt*>(ifS->elseBranch.get()), nextId, idempotent);
+                auto sub = processBlock(static_cast<BlockStmt*>(ifS->elseBranch.get()), nextId, idempotent, opaque);
                 stats.expressionsHoisted += sub.expressionsHoisted;
                 stats.tempVarsIntroduced += sub.tempVarsIntroduced;
             }
         } else if (stmt->type == ASTNodeType::WHILE_STMT) {
             auto* ws = static_cast<WhileStmt*>(stmt.get());
             if (ws->body && ws->body->type == ASTNodeType::BLOCK) {
-                auto sub = processBlock(static_cast<BlockStmt*>(ws->body.get()), nextId, idempotent);
+                auto sub = processBlock(static_cast<BlockStmt*>(ws->body.get()), nextId, idempotent, opaque);
                 stats.expressionsHoisted += sub.expressionsHoisted;
                 stats.tempVarsIntroduced += sub.tempVarsIntroduced;
             }
         } else if (stmt->type == ASTNodeType::FOR_STMT) {
             auto* fs = static_cast<ForStmt*>(stmt.get());
             if (fs->body && fs->body->type == ASTNodeType::BLOCK) {
-                auto sub = processBlock(static_cast<BlockStmt*>(fs->body.get()), nextId, idempotent);
+                auto sub = processBlock(static_cast<BlockStmt*>(fs->body.get()), nextId, idempotent, opaque);
                 stats.expressionsHoisted += sub.expressionsHoisted;
                 stats.tempVarsIntroduced += sub.tempVarsIntroduced;
             }
@@ -390,6 +408,34 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Collect all volatile/atomic variable names in a block (recursive).
+static void collectOpaqueVars(const BlockStmt* block, OpaqueSet& out) {
+    if (!block) return;
+    for (const auto& s : block->statements) {
+        if (!s) continue;
+        if (s->type == ASTNodeType::VAR_DECL) {
+            const auto* vd = static_cast<const VarDecl*>(s.get());
+            if (vd->isVolatile || vd->isAtomic) out.insert(vd->name);
+        } else if (s->type == ASTNodeType::BLOCK) {
+            collectOpaqueVars(static_cast<const BlockStmt*>(s.get()), out);
+        } else if (s->type == ASTNodeType::IF_STMT) {
+            const auto* ifS = static_cast<const IfStmt*>(s.get());
+            if (ifS->thenBranch && ifS->thenBranch->type == ASTNodeType::BLOCK)
+                collectOpaqueVars(static_cast<const BlockStmt*>(ifS->thenBranch.get()), out);
+            if (ifS->elseBranch && ifS->elseBranch->type == ASTNodeType::BLOCK)
+                collectOpaqueVars(static_cast<const BlockStmt*>(ifS->elseBranch.get()), out);
+        } else if (s->type == ASTNodeType::WHILE_STMT) {
+            const auto* ws = static_cast<const WhileStmt*>(s.get());
+            if (ws->body && ws->body->type == ASTNodeType::BLOCK)
+                collectOpaqueVars(static_cast<const BlockStmt*>(ws->body.get()), out);
+        } else if (s->type == ASTNodeType::FOR_STMT) {
+            const auto* fs = static_cast<const ForStmt*>(s.get());
+            if (fs->body && fs->body->type == ASTNodeType::BLOCK)
+                collectOpaqueVars(static_cast<const BlockStmt*>(fs->body.get()), out);
+        }
+    }
+}
+
 CSEStats runCSEPass(Program* program,
                     bool verbose,
                     const std::unordered_map<std::string, EffectSummary>* idempotentFuncs) {
@@ -397,8 +443,13 @@ CSEStats runCSEPass(Program* program,
 
     // Each function gets its own counter to keep temp-var names short.
     forEachFunction(program, [&](FunctionDecl* fn) {
+        // Collect volatile/atomic variable names — these must not participate
+        // in CSE because their values can change between reads.
+        OpaqueSet opaque;
+        collectOpaqueVars(fn->body.get(), opaque);
+
         unsigned nextId = 0;
-        CSEStats fnStats = processBlock(fn->body.get(), nextId, idempotentFuncs);
+        CSEStats fnStats = processBlock(fn->body.get(), nextId, idempotentFuncs, opaque);
 
         total.expressionsHoisted += fnStats.expressionsHoisted;
         total.tempVarsIntroduced += fnStats.tempVarsIntroduced;

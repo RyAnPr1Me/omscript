@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "diagnostic.h"
+#include "pass_utils.h"   // isIntWidthTypeName, isKnownScalarTypeName
 #include "preprocessor.h"
 #include <filesystem>
 #include <fstream>
@@ -7,29 +8,6 @@
 #include <stdexcept>
 
 namespace omscript {
-
-/// Returns true for iN/uN where N is in [1..256].
-static bool isIntWidthTypeName(const std::string& name) {
-    if (name.size() < 2) return false;
-    if (name[0] != 'i' && name[0] != 'u') return false;
-    int n = 0;
-    for (size_t j = 1; j < name.size(); ++j) {
-        if (!std::isdigit(static_cast<unsigned char>(name[j]))) return false;
-        n = n * 10 + (name[j] - '0');
-        if (n > 256) return false;
-    }
-    return n >= 1 && n <= 256;
-}
-
-/// Check if a string is a known type annotation name.
-/// Used to disambiguate `x:u32` (type annotation on identifier) from other
-/// uses of colon in expression context.
-static bool isKnownTypeName(const std::string& name) {
-    if (name == "int" || name == "float" || name == "double" || name == "bool" ||
-        name == "string" || name == "dict" || name == "bigint" || name == "ptr")
-        return true;
-    return isIntWidthTypeName(name);
-}
 
 Parser::Parser(const std::vector<Token>& tokens)
     : tokens(tokens), current(0), inOptMaxFunction(false),
@@ -367,6 +345,45 @@ std::unique_ptr<Program> Parser::parse() {
             }
             continue;
         }
+        // @repr(...) struct annotation — must appear immediately before 'struct'
+        if (check(TokenType::AT) && current + 1 < tokens.size() &&
+            tokens[current + 1].type == TokenType::IDENTIFIER &&
+            tokens[current + 1].lexeme == "repr") {
+            try {
+                advance(); // consume '@'
+                advance(); // consume 'repr'
+                consume(TokenType::LPAREN, "Expected '(' after @repr");
+                StructRepr repr = StructRepr::Auto;
+                int reprAlignN = 0;
+                if (!check(TokenType::RPAREN)) {
+                    const Token reprTok = consume(TokenType::IDENTIFIER, "Expected repr kind: C, packed, auto, soa, or align");
+                    if (reprTok.lexeme == "C") {
+                        repr = StructRepr::C;
+                    } else if (reprTok.lexeme == "packed") {
+                        repr = StructRepr::Packed;
+                    } else if (reprTok.lexeme == "auto") {
+                        repr = StructRepr::Auto;
+                    } else if (reprTok.lexeme == "soa") {
+                        repr = StructRepr::SoA;
+                    } else if (reprTok.lexeme == "align") {
+                        repr = StructRepr::AlignN;
+                        consume(TokenType::LPAREN, "Expected '(' after repr align");
+                        const Token nTok = consume(TokenType::INTEGER, "Expected integer alignment in @repr(align(N))");
+                        reprAlignN = static_cast<int>(nTok.intValue);
+                        consume(TokenType::RPAREN, "Expected ')' after repr align value");
+                    } else {
+                        error("Unknown @repr kind '" + reprTok.lexeme + "'; supported: C, packed, auto, soa, align(N)");
+                    }
+                }
+                consume(TokenType::RPAREN, "Expected ')' after @repr");
+                consume(TokenType::STRUCT, "Expected 'struct' after @repr(...)");
+                structs.push_back(parseStructDecl(repr, reprAlignN));
+            } catch (const std::exception& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
         try {
             // Check for file-level @noalias directive (appears before any function
             // keyword and is not followed by 'fn').
@@ -399,6 +416,8 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintParallelize = false, hintNoParallelize = false;
             bool hintMinSize = false, hintOptNone = false, hintNoUnwind = false;
             bool hintConstEval = false;
+            bool hintSpeculatable = false;
+            int  hintAlign = 0;
             bool isOptMaxFromAnnotation = false;
             OptMaxConfig optMaxCfgFromAnnotation;
             int allocatorSizeParam = -1;
@@ -446,6 +465,18 @@ std::unique_ptr<Program> Parser::parse() {
                     hintNoUnwind = true;
                 } else if (ann.lexeme == "const_eval") {
                     hintConstEval = true;
+                } else if (ann.lexeme == "speculatable") {
+                    hintSpeculatable = true;
+                } else if (ann.lexeme == "align") {
+                    consume(TokenType::LPAREN, "Expected '(' after @align");
+                    if (check(TokenType::RPAREN)) {
+                        // @align() with no argument → auto-optimal (cache-line alignment)
+                        hintAlign = -1;
+                    } else {
+                        const Token alignVal = consume(TokenType::INTEGER, "Expected integer alignment value");
+                        hintAlign = static_cast<int>(alignVal.intValue);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' after @align value");
                 } else if (ann.lexeme == "allocator") {
                     // @allocator(size=N) or @allocator(size=N, count=M)
                     consume(TokenType::LPAREN, "Expected '(' after @allocator");
@@ -470,7 +501,7 @@ std::unique_ptr<Program> Parser::parse() {
                     }
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @allocator (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @speculatable, @align, @allocator (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
@@ -493,6 +524,8 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintOptNone = hintOptNone;
             func->hintNoUnwind = hintNoUnwind;
             func->hintConstEval = hintConstEval;
+            func->hintSpeculatable = hintSpeculatable;
+            func->hintAlign = hintAlign;
             func->allocatorSizeParam = allocatorSizeParam;
             func->allocatorCountParam = allocatorCountParam;
             if (isOptMaxFromAnnotation) {
@@ -1207,6 +1240,66 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         decl->isGlobal = true;
         decl->line = kw.line;
         decl->column = kw.column;
+        return decl;
+    }
+    // atomic var / volatile var / atomic volatile var / volatile atomic var
+    // ──────────────────────────────────────────────────────────────────────
+    // Syntax: [atomic] [volatile] var name[:type] = expr;
+    //         [volatile] [atomic] var name[:type] = expr;
+    //
+    // atomic  — all loads and stores to this variable use seq-cst atomic ordering,
+    //           making them indivisible with respect to other threads.
+    // volatile — all loads and stores are marked volatile in the emitted IR,
+    //            preventing the compiler from eliding, reordering, or CSE-ing them.
+    //
+    // The two qualifiers may be combined in either order.  `const` is not
+    // supported with these qualifiers (a const is already a compile-time
+    // constant and can have no externally-visible storage to guard).
+    if (check(TokenType::ATOMIC) || check(TokenType::VOLATILE)) {
+        bool isAtom = false;
+        bool isVol  = false;
+
+        // Capture the first qualifier token for accurate source location.
+        const Token firstKw = tokens[current];
+
+        // Consume one or two qualifiers.
+        if (match(TokenType::ATOMIC)) {
+            isAtom = true;
+            if (match(TokenType::VOLATILE)) isVol = true;
+        } else if (match(TokenType::VOLATILE)) {
+            isVol = true;
+            if (match(TokenType::ATOMIC)) isAtom = true;
+        }
+
+        if (!match(TokenType::VAR)) {
+            error(std::string("Expected 'var' after '") +
+                  (isAtom && isVol ? "atomic volatile" :
+                   isAtom          ? "atomic"          : "volatile") + "'");
+        }
+
+        const Token name = consume(TokenType::IDENTIFIER,
+            "Expected variable name after qualifier");
+        std::string typeName;
+        if (match(TokenType::COLON)) {
+            typeName = parseTypeAnnotation();
+        }
+        std::unique_ptr<Expression> init = nullptr;
+        if (match(TokenType::ASSIGN)) {
+            init = parseExpression();
+        }
+        consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
+
+        if (typeName.empty() && !init) {
+            error("Variable '" + name.lexeme +
+                  "' requires an explicit type annotation or initializer.");
+        }
+
+        auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init),
+                                              /*isConst=*/false, typeName);
+        decl->isAtomic   = isAtom;
+        decl->isVolatile = isVol;
+        decl->line   = firstKw.line;
+        decl->column = firstKw.column;
         return decl;
     }
     if (match(TokenType::PREFETCH)) {
@@ -2420,7 +2513,7 @@ std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
     return std::make_unique<EnumDecl>(nameToken.lexeme, std::move(members));
 }
 
-std::unique_ptr<StructDecl> Parser::parseStructDecl() {
+std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAlignN) {
     const Token nameToken = consume(TokenType::IDENTIFIER, "Expected struct name");
     consume(TokenType::LBRACE, "Expected '{' after struct name");
 
@@ -2583,6 +2676,8 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
     // (structNames_ was already populated before the body was parsed)
     auto decl = std::make_unique<StructDecl>(nameToken.lexeme, std::move(fields), std::move(fieldDecls));
     decl->operators = std::move(operators);
+    decl->repr = repr;
+    decl->reprAlignN = reprAlignN;
     return decl;
 }
 
@@ -4046,7 +4141,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         // with ternary operator colons and other colon uses.
         if (check(TokenType::COLON) && current + 1 < tokens.size() &&
             tokens[current + 1].type == TokenType::IDENTIFIER &&
-            isKnownTypeName(tokens[current + 1].lexeme)) {
+            isKnownScalarTypeName(tokens[current + 1].lexeme)) {
             advance(); // consume ':'
             advance(); // consume type name
         }

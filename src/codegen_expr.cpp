@@ -438,6 +438,15 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     checkVariableReadable(expr->name, expr);
 
     auto it = namedValues.find(expr->name);
+    if (const char* dbg = std::getenv("OMSC_DEBUG_IDENT")) {
+        llvm::errs() << "[generateIdentifier] name=" << expr->name
+                     << " found=" << (it != namedValues.end() && it->second ? "yes" : "no");
+        if (it != namedValues.end() && it->second) {
+            llvm::errs() << " val=";
+            it->second->print(llvm::errs());
+        }
+        llvm::errs() << "\n";
+    }
     if (it == namedValues.end() || !it->second) {
         // Check if this is an enum constant
         auto enumIt = enumConstants_.find(expr->name);
@@ -471,6 +480,8 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     {
         auto foldIt = constIntFolds_.find(expr->name);
         if (foldIt != constIntFolds_.end()) {
+            if (const char* dbg = std::getenv("OMSC_DEBUG_FOLD"))
+                llvm::errs() << "[constIntFolds] " << expr->name << " = " << foldIt->second << "\n";
             // Use the variable's annotated type when available so that e.g.
             // `const x: i32 = 5` produces i32(5) rather than i64(5).
             llvm::Type* foldTy = getDefaultType();
@@ -521,8 +532,27 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
 
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
-    auto* load = builder->CreateAlignedLoad(loadType, it->second,
-        llvm::MaybeAlign(8), expr->name.c_str());
+
+    const bool isVol  = volatileVars_.count(expr->name) != 0;
+    const bool isAtom = atomicVars_.count(expr->name) != 0;
+
+    llvm::LoadInst* load;
+    if (isAtom && (loadType->isIntegerTy() || loadType->isFloatTy() ||
+                   loadType->isDoubleTy()  || loadType->isPointerTy())) {
+        // Atomic load — emit with seq-cst ordering at natural alignment.
+        const llvm::Align atomAlign =
+            module->getDataLayout().getABITypeAlign(loadType);
+        load = builder->CreateAlignedLoad(loadType, it->second,
+                                          llvm::MaybeAlign(atomAlign),
+                                          expr->name.c_str());
+        load->setAtomic(llvm::AtomicOrdering::SequentiallyConsistent,
+                        llvm::SyncScope::System);
+        if (isVol) load->setVolatile(true);
+    } else {
+        load = builder->CreateAlignedLoad(loadType, it->second,
+                                          llvm::MaybeAlign(8), expr->name.c_str());
+        if (isVol) load->setVolatile(true);
+    }
 
     // If this is a const variable, a prefetch-immut variable, or a frozen
     bool isInvariant = false;
@@ -536,24 +566,24 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     if (frozenVars_.count(expr->name)) {
         isInvariant = true;
     }
+    // volatile/atomic variables must never be treated as invariant.
+    if (isVol || isAtom) isInvariant = false;
     // Register variables are mutable; do not mark loads as invariant.
     if (isInvariant) {
-        if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
-            loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                                  llvm::MDNode::get(*context, {}));
-        }
+        load->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                          llvm::MDNode::get(*context, {}));
     }
     // OmScript variables are always initialized before use (the ownership
-    if (optimizationLevel >= OptimizationLevel::O1) {
-        if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
-            loadInst->setMetadata(llvm::LLVMContext::MD_noundef,
+    // system prevents use-before-init).  volatile/atomic loads may return
+    // any value written by another thread; skip !noundef for them.
+    if (optimizationLevel >= OptimizationLevel::O1 && !isVol && !isAtom) {
+        load->setMetadata(llvm::LLVMContext::MD_noundef,
+                          llvm::MDNode::get(*context, {}));
+        // !nonnull on pointer-typed loads: when the loaded value is a
+        if (load->getType()->isPointerTy()) {
+            if (stringVars_.count(expr->name) || arrayVars_.count(expr->name)) {
+                load->setMetadata(llvm::LLVMContext::MD_nonnull,
                                   llvm::MDNode::get(*context, {}));
-            // !nonnull on pointer-typed loads: when the loaded value is a
-            if (loadInst->getType()->isPointerTy()) {
-                if (stringVars_.count(expr->name) || arrayVars_.count(expr->name)) {
-                    loadInst->setMetadata(llvm::LLVMContext::MD_nonnull,
-                                          llvm::MDNode::get(*context, {}));
-                }
             }
         }
     }
@@ -651,6 +681,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (isComparisonOp) inComparisonContext_ = true;
 
     llvm::Value* left = generateExpression(expr->left.get());
+    if (const char* dbg = std::getenv("OMSC_DEBUG_BINARY")) {
+        llvm::errs() << "[generateBinary] op=" << expr->op << " left=";
+        left->print(llvm::errs());
+        llvm::errs() << " line=" << expr->line << " col=" << expr->column << "\n";
+    }
     if (expr->op == "&&" || expr->op == "||") {
         // Constant folding: when the left side is a known constant, we can
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
@@ -4490,6 +4525,127 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
+    // ── Atomic read-modify-write fast path ─────────────────────────────────
+    // Detect   x = x OP rhs   (desugared from x OP= rhs)  where x is atomic.
+    // Supported ops: + - & | ^  (map directly to LLVM AtomicRMW).
+    // For these patterns, skip the normal load-compute-store sequence and emit
+    // a single atomicrmw instruction which is truly atomic.
+    if (atomicVars_.count(expr->name)) {
+        auto it0 = namedValues.find(expr->name);
+        if (it0 != namedValues.end() && it0->second) {
+            llvm::AllocaInst* rmwAlloca = llvm::dyn_cast<llvm::AllocaInst>(it0->second);
+            if (rmwAlloca) {
+                llvm::Type* rmwTy = rmwAlloca->getAllocatedType();
+                if (rmwTy->isIntegerTy() && expr->value &&
+                    expr->value->type == ASTNodeType::BINARY_EXPR) {
+                    auto* bin = static_cast<BinaryExpr*>(expr->value.get());
+                    // Confirm LHS of the binary expr is the same identifier.
+                    bool lhsMatch = (bin->left->type == ASTNodeType::IDENTIFIER_EXPR &&
+                        static_cast<IdentifierExpr*>(bin->left.get())->name == expr->name);
+                    static constexpr struct {
+                        const char* op;
+                        llvm::AtomicRMWInst::BinOp rmwOp;
+                    } kRMWOps[] = {
+                        {"+",  llvm::AtomicRMWInst::Add},
+                        {"-",  llvm::AtomicRMWInst::Sub},
+                        {"&",  llvm::AtomicRMWInst::And},
+                        {"|",  llvm::AtomicRMWInst::Or},
+                        {"^",  llvm::AtomicRMWInst::Xor},
+                    };
+                    llvm::AtomicRMWInst::BinOp rmwOp = llvm::AtomicRMWInst::Add;
+                    bool opFound = false;
+                    for (const auto& kv : kRMWOps) {
+                        if (bin->op == kv.op) { rmwOp = kv.rmwOp; opFound = true; break; }
+                    }
+                    if (lhsMatch && opFound) {
+                        llvm::Value* rhs = generateExpression(bin->right.get());
+                        rhs = convertTo(rhs, rmwTy);
+                        const llvm::Align rmwAlign =
+                            module->getDataLayout().getABITypeAlign(rmwTy);
+                        auto* rmwInst = builder->CreateAtomicRMW(
+                            rmwOp, it0->second, rhs, llvm::MaybeAlign(rmwAlign),
+                            llvm::AtomicOrdering::SequentiallyConsistent,
+                            llvm::SyncScope::System);
+                        if (volatileVars_.count(expr->name))
+                            rmwInst->setVolatile(true);
+                        // The expression value of the assignment is the NEW value
+                        // (matching the non-atomic compound-assign convention).
+                        llvm::Value* newVal = nullptr;
+                        switch (rmwOp) {
+                        case llvm::AtomicRMWInst::Add:
+                            newVal = builder->CreateAdd(rmwInst, rhs, "rmw.new");
+                            break;
+                        case llvm::AtomicRMWInst::Sub:
+                            newVal = builder->CreateSub(rmwInst, rhs, "rmw.new");
+                            break;
+                        case llvm::AtomicRMWInst::And:
+                            newVal = builder->CreateAnd(rmwInst, rhs, "rmw.new");
+                            break;
+                        case llvm::AtomicRMWInst::Or:
+                            newVal = builder->CreateOr(rmwInst, rhs, "rmw.new");
+                            break;
+                        case llvm::AtomicRMWInst::Xor:
+                            newVal = builder->CreateXor(rmwInst, rhs, "rmw.new");
+                            break;
+                        default:
+                            newVal = rmwInst;
+                            break;
+                        }
+                        scopeComptimeInts_.erase(expr->name);
+                        constIntFolds_.erase(expr->name);
+                        return newVal;
+                    }
+                }
+            }
+        }
+    }
+    // ── In-place string append optimisation (O₁+, requires uniqueness) ────
+    // Pattern:  x = x + rhs   where:
+    //   • x is a string variable with no live aliases (uniqueStringVars_)
+    //   • rhs is a string expression (pointer) that does not reference x
+    //   • x is not atomic or volatile
+    // Instead of  malloc(len(x)+len(rhs)+1) + memcpy(x) + memcpy(rhs),
+    // emit       realloc(x, len(x)+len(rhs)+1) + memcpy(rhs only).
+    // This saves the O(n) copy of x's existing content every iteration,
+    // turning a string-building loop from O(n²) to O(n).
+    if (optimizationLevel >= OptimizationLevel::O1 &&
+        !atomicVars_.count(expr->name) &&
+        !volatileVars_.count(expr->name) &&
+        uniqueStringVars_.count(expr->name) &&
+        stringVars_.count(expr->name) &&
+        expr->value && expr->value->type == ASTNodeType::BINARY_EXPR) {
+        auto* bin = static_cast<BinaryExpr*>(expr->value.get());
+        // Must be   x + rhs   where LHS is the same variable and both are strings.
+        if (bin->op == "+" &&
+            isStringExpr(expr->value.get()) &&
+            isStringExpr(bin->right.get()) &&
+            bin->left->type == ASTNodeType::IDENTIFIER_EXPR &&
+            static_cast<IdentifierExpr*>(bin->left.get())->name == expr->name) {
+            // Safety: RHS must not reference x (no overlapping realloc read).
+            bool rhsRefersToX = false;
+            std::function<bool(const Expression*)> refsX;
+            refsX = [&](const Expression* e) -> bool {
+                if (!e) return false;
+                if (e->type == ASTNodeType::IDENTIFIER_EXPR)
+                    return static_cast<const IdentifierExpr*>(e)->name == expr->name;
+                if (e->type == ASTNodeType::BINARY_EXPR) {
+                    const auto* b = static_cast<const BinaryExpr*>(e);
+                    return refsX(b->left.get()) || refsX(b->right.get());
+                }
+                if (e->type == ASTNodeType::UNARY_EXPR)
+                    return refsX(static_cast<const UnaryExpr*>(e)->operand.get());
+                if (e->type == ASTNodeType::CALL_EXPR) {
+                    for (const auto& arg : static_cast<const CallExpr*>(e)->arguments)
+                        if (refsX(arg.get())) return true;
+                }
+                return false;
+            };
+            rhsRefersToX = refsX(bin->right.get());
+            if (!rhsRefersToX)
+                return generateInplaceStringAppend(expr, bin->right.get());
+        }
+    }
+    // ── Normal assignment path ──────────────────────────────────────────────
     llvm::Value* value = generateExpression(expr->value.get());
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
@@ -4573,6 +4729,26 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     }
 
     builder->CreateAlignedStore(value, it->second, llvm::MaybeAlign(8));
+    // Apply volatile / atomic ordering to the store if needed.
+    {
+        // Retrieve the just-created store (the most recently inserted instruction).
+        auto* storeInst = llvm::dyn_cast<llvm::StoreInst>(
+            &builder->GetInsertBlock()->back());
+        if (storeInst) {
+            const bool storeVol  = volatileVars_.count(expr->name) != 0;
+            const bool storeAtom = atomicVars_.count(expr->name) != 0;
+            if (storeVol)  storeInst->setVolatile(true);
+            if (storeAtom && storeInst->getValueOperand()->getType()->isSingleValueType() &&
+                !storeInst->getValueOperand()->getType()->isVectorTy()) {
+                const llvm::Align atomAlign =
+                    module->getDataLayout().getABITypeAlign(
+                        storeInst->getValueOperand()->getType());
+                storeInst->setAtomic(llvm::AtomicOrdering::SequentiallyConsistent,
+                                     llvm::SyncScope::System);
+                storeInst->setAlignment(atomAlign);
+            }
+        }
+    }
     // Any assignment to a mutable variable invalidates its compile-time scope
     scopeComptimeInts_.erase(expr->name);
     // Also clear any stale constIntFolds_ entry — this can be set for
@@ -4745,12 +4921,37 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
     auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
+
+    // ── Atomic inc/dec: use atomicrmw add/sub ──────────────────────────────
+    if (atomicVars_.count(identifier->name) && loadType->isIntegerTy()) {
+        const llvm::Align rmwAlign =
+            module->getDataLayout().getABITypeAlign(loadType);
+        llvm::Value* one = llvm::ConstantInt::get(loadType, 1, true);
+        const llvm::AtomicRMWInst::BinOp rmwOp =
+            (op == "++") ? llvm::AtomicRMWInst::Add : llvm::AtomicRMWInst::Sub;
+        auto* rmwInst = builder->CreateAtomicRMW(
+            rmwOp, it->second, one, llvm::MaybeAlign(rmwAlign),
+            llvm::AtomicOrdering::SequentiallyConsistent,
+            llvm::SyncScope::System);
+        if (volatileVars_.count(identifier->name)) rmwInst->setVolatile(true);
+        // Pre-increment/decrement: add/sub 1 to the returned *old* value.
+        if (!isPostfix) {
+            return (op == "++")
+                ? builder->CreateAdd(rmwInst, one, "ainc.new")
+                : builder->CreateSub(rmwInst, one, "adec.new");
+        }
+        return rmwInst; // postfix: return the old value
+    }
+
+    // ── Normal (non-atomic) inc/dec ─────────────────────────────────────────
     // Use aligned load (all variable allocas are 8-byte aligned) so the
     // load instruction matches what generateIdentifier emits.
     auto* loadInst = builder->CreateAlignedLoad(loadType, it->second,
         llvm::MaybeAlign(8), identifier->name.c_str());
+    if (volatileVars_.count(identifier->name)) loadInst->setVolatile(true);
     // OmScript guarantees variables are initialized before use → !noundef.
-    if (optimizationLevel >= OptimizationLevel::O1) {
+    if (optimizationLevel >= OptimizationLevel::O1 &&
+        !volatileVars_.count(identifier->name)) {
         loadInst->setMetadata(llvm::LLVMContext::MD_noundef,
                               llvm::MDNode::get(*context, {}));
     }
@@ -4786,7 +4987,10 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         }
     }
 
-    builder->CreateStore(updated, it->second);
+    {
+        llvm::StoreInst* storeInst = builder->CreateAlignedStore(updated, it->second, llvm::MaybeAlign(8));
+        if (volatileVars_.count(identifier->name)) storeInst->setVolatile(true);
+    }
 
     // Update non-negativity state for the alloca after the mutation.
     if (allocaInst) {
@@ -6002,6 +6206,102 @@ llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
     }
 
     return builder->CreatePtrToInt(mapPtr, getDefaultType(), "dict.i");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// generateInplaceStringAppend
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Emit:   x = realloc(x, strlen(x) + strlen(rhs) + 1)
+//         memcpy(x + old_len, rhs, strlen(rhs) + 1)
+//         store x
+//
+// This saves the full memcpy(x's content) present in the regular malloc path,
+// turning the inner loop of a string-building pattern from O(n²) to O(n).
+// The caller has already verified:
+//   • x is unique (uniqueStringVars_.count(expr->name) > 0)
+//   • rhs is a string expression and does not reference x
+//   • x is not atomic or volatile
+
+llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
+                                                         Expression* rhsExpr) {
+    const std::string& varName = assignExpr->name;
+
+    // ── 1. Load current string pointer ───────────────────────────────────
+    auto it = namedValues.find(varName);
+    if (it == namedValues.end() || !it->second)
+        codegenError("Unknown variable in in-place append: " + varName, assignExpr);
+
+    auto* ptrTy  = llvm::PointerType::getUnqual(*context);
+    auto* xPtr   = builder->CreateAlignedLoad(ptrTy, it->second, llvm::Align(8),
+                                               (varName + ".iap.x").c_str());
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        // x is always initialised before use (ownership guarantee).
+        llvm::cast<llvm::LoadInst>(xPtr)->setMetadata(
+            llvm::LLVMContext::MD_nonnull, llvm::MDNode::get(*context, {}));
+    }
+
+    // ── 2. Generate rhs string pointer ───────────────────────────────────
+    llvm::Value* rhsPtr = generateExpression(rhsExpr);
+    // generateExpression may return an integer (pointer stored as i64) — convert.
+    if (!rhsPtr->getType()->isPointerTy()) {
+        rhsPtr = builder->CreateIntToPtr(rhsPtr, ptrTy, "iap.rhs.ptr");
+    }
+
+    // ── 3. Compute lengths ────────────────────────────────────────────────
+    llvm::Function* strlenFn = getOrDeclareStrlen();
+    auto* len1 = builder->CreateCall(strlenFn, {xPtr},   "iap.len1");
+    auto* len2 = builder->CreateCall(strlenFn, {rhsPtr}, "iap.len2");
+
+    // ── 4. Compute new allocation size: len1 + len2 + 1 (null term) ──────
+    auto* totalLen = builder->CreateAdd(len1, len2, "iap.totlen",
+                                        /*NUW=*/true, /*NSW=*/true);
+    auto* newSize  = builder->CreateAdd(totalLen,
+                                        llvm::ConstantInt::get(getDefaultType(), 1),
+                                        "iap.newsz", /*NUW=*/true, /*NSW=*/true);
+
+    // ── 5. realloc(x, newSize) ────────────────────────────────────────────
+    // realloc either extends the buffer in-place (no copy at all) or moves it
+    // to a new location.  Either way the result points to a buffer containing
+    // the original x content at the beginning.
+    auto* newPtr = builder->CreateCall(getOrDeclareRealloc(), {xPtr, newSize},
+                                       "iap.newptr");
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        // realloc never returns null in OmScript (OOM = abort convention).
+        auto* ci = llvm::cast<llvm::CallInst>(newPtr);
+        ci->addRetAttr(llvm::Attribute::get(*context, llvm::Attribute::NonNull));
+        ci->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(*context, 1));
+    }
+
+    // ── 6. Copy rhs to position len1 ─────────────────────────────────────
+    auto* appendPos = builder->CreateInBoundsGEP(
+        llvm::Type::getInt8Ty(*context), newPtr, len1, "iap.dst");
+    // Copy len2+1 bytes (include null terminator from rhs so the buffer is
+    // always null-terminated after the operation).
+    auto* len2p1 = builder->CreateAdd(len2,
+                                       llvm::ConstantInt::get(getDefaultType(), 1),
+                                       "iap.len2p1", /*NUW=*/true, /*NSW=*/true);
+    builder->CreateCall(getOrDeclareMemcpy(), {appendPos, rhsPtr, len2p1});
+
+    // ── 7. Store updated pointer back ────────────────────────────────────
+    builder->CreateAlignedStore(newPtr, it->second, llvm::Align(8));
+
+    // ── 8. Maintain the uniqueness invariant ─────────────────────────────
+    // After this realloc the variable still holds the unique reference —
+    // uniqueStringVars_ does not need updating.
+    // Invalidate any compile-time cached values for this variable.
+    scopeComptimeInts_.erase(varName);
+    constIntFolds_.erase(varName);
+    constStringFolds_.erase(varName);
+    stringVars_.insert(varName);
+
+    // ── 9. Revive the variable (standard assign semantics) ────────────────
+    deadVars_.erase(varName);
+    deadVarReason_.erase(varName);
+
+    // Return the new pointer (matches what generateAssign normally returns for
+    // string assignments: the result is the pointer value as an i64 integer).
+    return builder->CreatePtrToInt(newPtr, getDefaultType(), "iap.result");
 }
 
 } // namespace omscript

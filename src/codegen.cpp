@@ -658,9 +658,20 @@ llvm::StructType* CodeGenerator::getOrCreateStructLLVMType(const std::string& na
         return nullptr; // Unknown struct
     }
 
-    // Use a non-packed, named struct so LLVM applies the target DataLayout's
+    // Use a non-packed, named struct by default; @repr overrides packing.
+    const StructRepr repr = [&]() -> StructRepr {
+        auto it = structReprs_.find(name);
+        return it != structReprs_.end() ? it->second : StructRepr::Auto;
+    }();
+    const bool isPacked = (repr == StructRepr::Packed);
     llvm::StructType* sty =
-        llvm::StructType::create(*context, elemTypes, "omsc.struct." + name, /*isPacked=*/false);
+        llvm::StructType::create(*context, elemTypes, "omsc.struct." + name, isPacked);
+
+    // @repr(C) / @repr(align(N)) / @repr(soa): apply struct-level alignment.
+    // Note: LLVM StructType doesn't carry alignment directly — we set it on
+    // every alloca/GV that holds this type via structReprAlignN_.
+    (void)repr; // SoA is a hint recorded for future layout passes.
+
     structLLVMTypes_[name] = sty;
     return sty;
 }
@@ -1010,7 +1021,13 @@ llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function
     auto* alloca = entryBuilder.CreateAlloca(type ? type : getDefaultType(), nullptr, name);
     // Set explicit alignment for i64 allocas — the default type in OmScript.
     llvm::Type* allocaType = type ? type : getDefaultType();
-    if (allocaType->isIntegerTy(64) || allocaType->isDoubleTy() || allocaType->isPointerTy()) {
+
+    // @align() auto-optimal: apply maximum natural alignment to every alloca.
+    static constexpr int kAlignAuto = -1;
+    if (currentFuncDecl_ && currentFuncDecl_->hintAlign == kAlignAuto) {
+        // Use 64-byte (cache-line) alignment for ALL allocas in the function.
+        alloca->setAlignment(llvm::Align(64));
+    } else if (allocaType->isIntegerTy(64) || allocaType->isDoubleTy() || allocaType->isPointerTy()) {
         alloca->setAlignment(llvm::Align(8));
     }
     return alloca;
@@ -3982,6 +3999,9 @@ void CodeGenerator::generate(Program* program) {
         } else {
             structDefs_[structDecl->name] = structDecl->fields;
         }
+        // Store @repr metadata.
+        structReprs_[structDecl->name]    = structDecl->repr;
+        structReprAlignN_[structDecl->name] = structDecl->reprAlignN;
         // Eagerly build the LLVM StructType so that the field offsets/sizes
         getOrCreateStructLLVMType(structDecl->name);
     }
@@ -4717,8 +4737,17 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // At O2+, align function entry to 16 bytes for better I-cache locality
+    // kAlignAuto (-1): @align() with no args → 64-byte cache-line optimal.
+    static constexpr int kAlignAuto = -1;
     if (optimizationLevel >= OptimizationLevel::O2) {
-        function->setAlignment(func->hintHot ? llvm::Align(32) : llvm::Align(16));
+        // @align(N)/-1 overrides the default; @hot bumps to 32 unless overridden.
+        if (func->hintAlign == kAlignAuto) {
+            function->setAlignment(llvm::Align(64)); // cache-line optimal
+        } else if (func->hintAlign > 0) {
+            function->setAlignment(llvm::Align(func->hintAlign));
+        } else {
+            function->setAlignment(func->hintHot ? llvm::Align(32) : llvm::Align(16));
+        }
 
         // mustprogress: tells LLVM that every loop in this function will
         if (!function->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
@@ -4731,6 +4760,21 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
             }
         }
+    }
+
+    // Apply @align at any optimization level when explicitly specified.
+    if (func->hintAlign != 0 && optimizationLevel < OptimizationLevel::O2) {
+        if (func->hintAlign == kAlignAuto) {
+            function->setAlignment(llvm::Align(64));
+        } else {
+            function->setAlignment(llvm::Align(func->hintAlign));
+        }
+    }
+
+    // @speculatable: function has no observable side effects; LLVM may hoist or
+    // speculate calls across branches and into loop preheaders.
+    if (func->hintSpeculatable) {
+        function->addFnAttr(llvm::Attribute::Speculatable);
     }
 
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.
@@ -4882,6 +4926,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     scopeComptimeInts_.clear();
     catchTable_.clear();
     catchDefaultBB_ = nullptr;
+    uniqueStringVars_.clear();
 
     // Expose all global variables inside this function so that reads,
     // writes, and assignments resolve through the normal namedValues path.
@@ -5002,6 +5047,36 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // Pre-pass: collect all catch(code) blocks in this function body,
     buildCatchTable(func->body->statements, function);
+
+    // ── Uniqueness Analysis ───────────────────────────────────────────────
+    // Compute which string/array variables have no live aliases in this
+    // function, enabling in-place realloc+append for `x = x + rhs` patterns.
+    // Uses the string/array var hints already populated above.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        // Build hint sets from the llvm::StringSet<> trackers populated above.
+        std::unordered_set<std::string> strHints, arrHints;
+        for (const auto& kv : stringVars_)
+            strHints.insert(kv.getKey().str());
+        for (const auto& kv : arrayVars_)
+            arrHints.insert(kv.getKey().str());
+        // Also add parameter-level hints.
+        auto pstrIt = funcParamStringTypes_.find(func->name);
+        if (pstrIt != funcParamStringTypes_.end()) {
+            for (size_t i = 0; i < func->parameters.size(); ++i)
+                if (pstrIt->second.count(i))
+                    strHints.insert(func->parameters[i].name);
+        }
+        auto parrIt = funcParamArrayTypes_.find(func->name);
+        if (parrIt != funcParamArrayTypes_.end()) {
+            for (size_t i = 0; i < func->parameters.size(); ++i)
+                if (parrIt->second.count(i))
+                    arrHints.insert(func->parameters[i].name);
+        }
+        auto ua = omscript::computeUniqueness(*func, strHints, arrHints);
+        uniqueStringVars_ = std::move(ua.uniqueVars);
+    } else {
+        uniqueStringVars_.clear();
+    }
 
     // Generate function body
     generateBlock(func->body.get());

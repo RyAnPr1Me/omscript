@@ -150,6 +150,104 @@ struct ENodeHash {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// NodeMeta — compact metadata attached to each ENode for HGOE scoring
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lightweight per-node metadata that drives HGOE cost evaluation.
+/// Kept small: no heavy analysis objects here.
+struct NodeMeta {
+    /// Broad instruction class (maps to OpClass from hardware_graph.h).
+    /// Encoded as a small integer to avoid pulling in hardware_graph.h:
+    ///   0 = IntArith,  1 = IntMul,  2 = IntDiv,  3 = FPArith, 4 = FPMul,
+    ///   5 = FPDiv,     6 = VectorOp, 7 = Load,   8 = Store,   9 = Branch,
+    ///  10 = Shift,    11 = Comparison, 12 = Other
+    uint8_t instrClass = 12;    ///< Instruction class (OpClass as uint8_t)
+
+    bool readsMemory  = false;  ///< Node may read from memory (Load-like)
+    bool writesMemory = false;  ///< Node may write to memory (Store-like)
+    bool hasBranch    = false;  ///< Node introduces control flow (Ternary)
+    bool vectorizable = false;  ///< Node is a candidate for SIMD vectorization
+    bool ownershipDep = false;  ///< Node depends on ownership/uniqueness facts
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MultiCost — structured cost vector for HGOE scalarization
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Structured cost model for one e-class candidate (lower is better for all
+/// dimensions).  The HGOE scorer linearises this into a single scalar via a
+/// weighted dot-product tuned to the target microarchitecture.
+struct MultiCost {
+    double cycles             = 0.0; ///< Estimated execution cycles
+    double uops               = 0.0; ///< Micro-op count (issue pressure)
+    double latency            = 0.0; ///< Critical-path latency in cycles
+    double throughputPressure = 0.0; ///< Port-contention throughput pressure
+    double registerPressure   = 0.0; ///< Simultaneous live-value estimate
+    double memoryPressure     = 0.0; ///< Memory-subsystem pressure (loads/stores)
+    double branchPenalty      = 0.0; ///< Expected misprediction penalty
+
+    /// Scalar total using a generic equal-weight model (used when no HGOE
+    /// profile is available).
+    [[nodiscard]] double total() const noexcept {
+        return cycles + uops + latency + throughputPressure +
+               registerPressure + memoryPressure + branchPenalty;
+    }
+
+    static MultiCost infinite() noexcept {
+        static constexpr double kInf = 1e18;
+        return {kInf, kInf, kInf, kInf, kInf, kInf, kInf};
+    }
+
+    bool operator<(const MultiCost& o) const noexcept {
+        return total() < o.total();
+    }
+    bool operator<=(const MultiCost& o) const noexcept {
+        return total() <= o.total();
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FeatureVec — compact summary passed to the HGOE scorer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-equivalence-class feature summary consumed by the HGOE scoring model.
+/// Kept compact: one counter per instruction class plus a few aggregate flags.
+struct FeatureVec {
+    /// Count of nodes per instruction class (indexed by NodeMeta::instrClass).
+    static constexpr size_t kNumClasses = 13;
+    uint16_t opCounts[kNumClasses] = {};
+
+    uint16_t totalNodes     = 0; ///< Total ENodes in the class
+    uint16_t depth          = 0; ///< Critical-path depth of best node
+    uint16_t regPressure    = 0; ///< Register-pressure estimate (Sethi-Ullman)
+    bool     hasMemory      = false; ///< Any node reads/writes memory
+    bool     hasBranch      = false; ///< Any node introduces control flow
+    bool     hasOwnership   = false; ///< Any node depends on ownership facts
+    bool     isConstant     = false; ///< Class contains a constant node
+
+    void addNode(const NodeMeta& m) noexcept {
+        if (m.instrClass < kNumClasses)
+            ++opCounts[m.instrClass];
+        ++totalNodes;
+        hasMemory    |= (m.readsMemory | m.writesMemory);
+        hasBranch    |= m.hasBranch;
+        hasOwnership |= m.ownershipDep;
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HGOEState — cached HGOE input/output for one e-class
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Cached HGOE scoring result for one equivalence class.
+/// Invalidated whenever the class receives new nodes or its best-node changes.
+struct HGOEState {
+    FeatureVec features;      ///< Last features submitted to the scorer
+    MultiCost  scoredCost;    ///< Returned multi-dimensional cost
+    bool       valid = false; ///< Whether the cache is still fresh
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // EClass — an equivalence class of ENodes
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -173,6 +271,14 @@ struct EClass {
                                         ///< Shl/Shr/BitOp output, or derives from int
                                         ///< operands).  Used by integer-only rules to
                                         ///< avoid firing on float-typed operands.
+
+    // ── HGOE-guided superoptimizer fields ─────────────────────────────────
+    std::optional<ENode> bestNode;      ///< Current cheapest representative
+    MultiCost            bestCost = MultiCost::infinite(); ///< Cost of bestNode
+    MultiCost            lowerBound;    ///< Optimistic lower bound on achievable cost
+    MultiCost            upperBound = MultiCost::infinite(); ///< Cost of best complete candidate
+    HGOEState            hgoeState;     ///< Cached HGOE scoring input/output
+    bool                 hgoePruned = false; ///< Class has been pruned from exploration
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -268,6 +268,8 @@ class VarDecl : public Statement {
     std::string typeName;
     bool isRegister = false; ///< `register var` — force variable into CPU register via mem2reg
     bool isGlobal = false;          ///< Declared with the `global` keyword
+    bool isAtomic   = false; ///< `atomic var`   — all loads/stores use atomic seq-cst ordering
+    bool isVolatile = false; ///< `volatile var`  — all loads/stores are volatile; suppress opts
     std::string globalNamespace;    ///< Non-empty when imported: the alias under which this global lives (e.g. "foo")
     /// True for VarDecl nodes synthesised by the compiler (for-loop desugaring,
     /// foreach item variables, etc.).  These are exempt from the mandatory-type
@@ -525,12 +527,24 @@ struct OperatorOverload {
     std::unique_ptr<FunctionDecl> impl; ///< Implementation function
 };
 
+/// Layout representation hint for structs.
+enum class StructRepr {
+    Auto,        ///< @repr(auto) — compiler optimizes layout freely (default)
+    C,           ///< @repr(C)    — stable, ABI-compatible C-style layout (fields in order, natural alignment)
+    Packed,      ///< @repr(packed) — minimal memory, no padding between fields
+    AlignN,      ///< @repr(align(N)) — force struct-level alignment to N bytes
+    SoA,         ///< @repr(soa) — hint: prefer structure-of-arrays layout
+};
+
 class StructDecl : public Statement {
   public:
     std::string name;
     std::vector<std::string> fields;       ///< Field names (for backwards compat)
     std::vector<StructField> fieldDecls;   ///< Rich field info with attributes
     std::vector<OperatorOverload> operators; ///< Operator overload definitions
+
+    StructRepr repr = StructRepr::Auto;    ///< @repr(...) layout hint
+    int reprAlignN  = 0;                   ///< @repr(align(N)) value; 0 when repr != AlignN
 
     StructDecl(const std::string& n, std::vector<std::string> f)
         : Statement(ASTNodeType::STRUCT_DECL), name(n), fields(std::move(f)) {}
@@ -610,6 +624,8 @@ class FunctionDecl : public ASTNode {
     bool hintOptNone = false;     ///< @optnone — disable all optimizations (useful for debugging)
     bool hintNoUnwind = false;    ///< @nounwind — function never throws C++ exceptions
     bool hintConstEval = false;   ///< @const_eval — evaluate at compile time when all args are constants
+    int  hintAlign = 0;           ///< @align(N) — align function entry to N bytes (0 = default, -1 = auto-optimal)
+    bool hintSpeculatable = false; ///< @speculatable — function has no observable side effects; LLVM may hoist/speculate calls
     OptMaxConfig optMaxConfig;    ///< OPTMAX v2 configuration (enabled when @optmax(...) annotation is used)
 
     /// @allocator(size=N) or @allocator(size=N, count=M) annotation.

@@ -1,0 +1,27 @@
+// Test @align(N) and @align() annotations.
+// @align(N)  — aligns function entry to exactly N bytes.
+// @align()   — auto-optimal: aligns to cache-line boundary (64 bytes) for
+//              the function entry AND all alloca instructions in the body.
+@align(64)
+fn aligned_fn(x: int) {
+    return x + 1;
+}
+
+@align(16) @inline
+fn small_aligned(x: int) {
+    return x * 2;
+}
+
+@align()
+fn auto_aligned(x: int) {
+    // All allocas in this body get 64-byte (cache-line) alignment.
+    var tmp = x + 3;
+    return tmp;
+}
+
+fn main() {
+    var a = aligned_fn(3);
+    var b = small_aligned(4);
+    var c = auto_aligned(2);
+    return a + b + c;
+}

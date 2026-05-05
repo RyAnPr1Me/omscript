@@ -20,6 +20,9 @@
 #include "width_legalization.h"
 #include "width_opt_pass.h"
 #include "diagnostic.h"
+#include "uniqueness_analysis.h"
+#include "borrow_checker.h"
+#include "hgoe_egraph.h"
 
 #include <cassert>
 #include <chrono>
@@ -182,6 +185,9 @@ namespace PassId {
     uint32_t kCopyProp          = 0;
     uint32_t kWidthLegalization = 0;
     uint32_t kWidthOpt          = 0;
+    uint32_t kUniqueness        = 0;
+    uint32_t kBorrowCheck       = 0;
+    uint32_t kHGOEEGraph        = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -424,6 +430,66 @@ static void registerAllPasses() {
         {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization,
          AnalysisFact::kCSE},
     });
+
+    // ── Uniqueness Analysis ───────────────────────────────────────────────
+    // Pure analysis pass: computes per-function uniqueness sets used by the
+    // code generator to emit in-place string-append operations.  Does not
+    // transform the AST; results are consumed by generateFunction().
+    PassId::kUniqueness = reg.registerPass({
+        0,
+        "uniqueness",
+        "Ownership-aware uniqueness analysis: identifies string/array variables "
+        "with no live aliases, enabling in-place realloc+append instead of "
+        "malloc+copy+copy for string concatenation (O(n) vs O(n²) for loops)",
+        PassPhase::EvaluationAnalysis,
+        PassKind::Analysis,
+        // Must run after string and array type propagation so hints are available.
+        {AnalysisFact::kStringTypes, AnalysisFact::kArrayTypes},
+        {AnalysisFact::kUniqueness},
+        // Does not modify the AST — invalidates nothing.
+        {},
+    });
+
+    // ── Standalone Borrow Checker ─────────────────────────────────────────
+    // Checks borrow/move/invalidate rules at the AST level before codegen,
+    // reporting E015–E018 diagnostics with precise source locations.
+    PassId::kBorrowCheck = reg.registerPass({
+        0,
+        "borrow_check",
+        "Standalone borrow checker: validates ownership/borrow rules "
+        "(use-after-move E015, borrow-write conflict E016, double mutable borrow "
+        "E017, move-while-borrowed E018) before code generation",
+        PassPhase::EvaluationAnalysis,
+        PassKind::Analysis,
+        // Run early — only needs the parsed AST.
+        {},
+        {AnalysisFact::kBorrowCheck},
+        {},
+    });
+
+    // ── HGOE-Guided E-Graph Superoptimizer ───────────────────────────────────
+    // Fused equality-saturation + HGOE-scoring pass.  Replaces the two-phase
+    // "saturate then extract" pipeline with a single loop that interleaves
+    // rewrite discovery, HGOE cost scoring, and branch pruning.
+    // Runs after the standard e-graph pass (which handles the common algebraic
+    // simplifications quickly) so the HGOE-guided pass focuses its budget on
+    // the residual expressions that benefit from hardware-aware cost ranking.
+    PassId::kHGOEEGraph = reg.registerPass({
+        0,
+        "hgoe_egraph",
+        "HGOE-Guided E-Graph Superoptimizer: fused equality-saturation + hardware-"
+        "aware HGOE cost scoring; continuously prunes dominated equivalence classes "
+        "so the search focuses budget on the most profitable candidates",
+        PassPhase::ASTTransform,
+        PassKind::CostTransform,
+        // Requires the standard e-graph pass (algebraic normalisation) to have
+        // run so the initial expressions are in a canonical form, and CFCTRE
+        // to have resolved constant-foldable sub-expressions.
+        {AnalysisFact::kEGraph, AnalysisFact::kCFCTRE},
+        {AnalysisFact::kHGOEEGraph},
+        // Rewrites expressions — invalidates shape-derived facts.
+        {AnalysisFact::kRangeAnalysis},
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -478,6 +544,9 @@ OptimizationOrchestrator::buildDispatch() {
         {PassId::kCopyProp,          R([this](Program* p, OptimizationContext& c){ runCopyProp(p, c); })},
         {PassId::kWidthLegalization, R([this](Program* p, OptimizationContext& c){ runWidthLegalization(p, c); })},
         {PassId::kWidthOpt,          R([this](Program* p, OptimizationContext& c){ runWidthOpt(p, c); })},
+        {PassId::kUniqueness,        R([this](Program* p, OptimizationContext& c){ runUniqueness(p, c); })},
+        {PassId::kBorrowCheck,       R([this](Program* p, OptimizationContext& c){ runBorrowCheck(p, c); })},
+        {PassId::kHGOEEGraph,        R([this](Program* p, OptimizationContext& c){ runHGOEEGraph(p, c); })},
     };
 }
 
@@ -1136,6 +1205,79 @@ void OptimizationOrchestrator::syncFactsToContext(Program* program,
             if (it != uniform.end()) ff.uniformCTReturn = it->second;
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runUniqueness — ownership-aware uniqueness analysis
+// ─────────────────────────────────────────────────────────────────────────────
+
+void OptimizationOrchestrator::runUniqueness(Program* program,
+                                              OptimizationContext& ctx) {
+    // The uniqueness analysis is a pure analysis pass: it does not transform
+    // the AST.  The actual per-function `computeUniqueness()` calls happen
+    // lazily inside `CodeGenerator::generateFunction()`, which reads the
+    // string/array type hints already computed by kStringTypes / kArrayTypes.
+    //
+    // This pass just marks the analysis as having run so that downstream
+    // passes (e.g. the scheduler) can record the fact.
+    if (!program) {
+        ctx.validity().uniqueness = true;
+        return;
+    }
+    if (verbose_) {
+        std::cerr << "[uniqueness] uniqueness analysis registered "
+                  << "(results computed per-function during codegen)\n";
+    }
+    ctx.validity().uniqueness = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runBorrowCheck — standalone AST-level borrow checker
+// ─────────────────────────────────────────────────────────────────────────────
+
+void OptimizationOrchestrator::runBorrowCheck(Program* program,
+                                               OptimizationContext& ctx) {
+    if (!program) {
+        ctx.validity().borrowCheck = true;
+        return;
+    }
+    omscript::runBorrowCheck(*program, verbose_);
+    ctx.validity().borrowCheck = true;
+}
+
+// runHGOEEGraph — HGOE-Guided E-Graph Superoptimizer
+//
+// Runs the fused equality-saturation + HGOE-scoring pass on the program AST.
+// Only activates at O2+ (opt level where superoptimizer-class work is worth it).
+void OptimizationOrchestrator::runHGOEEGraph(Program* program,
+                                              OptimizationContext& ctx) {
+    if (!program) {
+        ctx.validity().hgoeEGraph = true;
+        return;
+    }
+
+    // Only run at O2+ — at O0/O1 the budget is too tight for guided search.
+    const int optLevel = static_cast<int>(optLevel_);
+    if (optLevel < 2) {
+        ctx.validity().hgoeEGraph = true;
+        return;
+    }
+
+    hgoe_egraph::HGOEGuidedConfig cfg;
+    // Scale budget with optimisation level: O2=modest, O3=full
+    if (optLevel >= 3) {
+        cfg.nodeLimit    = 50'000;
+        cfg.iterLimit    = 40;
+        cfg.nodesPerIter = 5'000;
+    } else {
+        cfg.nodeLimit    = 20'000;
+        cfg.iterLimit    = 25;
+        cfg.nodesPerIter = 2'000;
+    }
+    cfg.deterministicMode = true;
+
+    hgoe_egraph::runHGOEGuidedPass(*program, cfg, verbose_);
+    ctx.validity().hgoeEGraph = true;
 }
 
 } // namespace omscript

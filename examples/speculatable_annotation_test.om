@@ -1,0 +1,18 @@
+// Test @speculatable annotation.
+// Marks the function as having no observable side effects so LLVM may
+// hoist or speculate calls across branches and into loop preheaders.
+@speculatable @pure
+fn square(x: int) {
+    return x * x;
+}
+
+@speculatable
+fn cube(x: int) {
+    return x * x * x;
+}
+
+fn main() {
+    var a = square(3);  // 9
+    var b = cube(2);    // 8
+    return a + b;       // 17
+}

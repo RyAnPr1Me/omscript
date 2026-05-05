@@ -3232,7 +3232,22 @@ void CodeGenerator::runOptimizationPasses() {
         }
     }
     // Pre-pipeline HGOE loop annotation: set target-optimal unroll count,
+    // DEBUG: dump pre-pipeline IR when OMSC_DEBUG_IR=1
+    if (const char* dbgEnv = std::getenv("OMSC_DEBUG_IR")) {
+        if (std::string(dbgEnv) == "pre") {
+            llvm::errs() << "=== PRE-PIPELINE IR ===\n";
+            module->print(llvm::errs(), nullptr);
+            llvm::errs() << "=== END PRE-PIPELINE IR ===\n";
+        }
+    }
     MPM.run(*module, MAM);
+    if (const char* dbgEnv = std::getenv("OMSC_DEBUG_IR")) {
+        if (std::string(dbgEnv) == "post") {
+            llvm::errs() << "=== POST-PIPELINE IR ===\n";
+            module->print(llvm::errs(), nullptr);
+            llvm::errs() << "=== END POST-PIPELINE IR ===\n";
+        }
+    }
     if (verbose_) {
         std::cout << "    LLVM pass pipeline complete" << '\n';
     }

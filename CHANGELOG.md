@@ -5,6 +5,118 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.1] - 2026-05-04
+
+### Added
+
+- **`@align(N)` / `@align()` — full-body alignment** (`include/ast.h`, `src/parser.cpp`, `src/codegen.cpp`):
+  - `@align(N)` aligns the function entry point to exactly N bytes (power-of-two required).
+  - `@align()` (no argument, sentinel `hintAlign = -1`) selects **cache-line-optimal alignment (64 bytes)** for the function entry point AND every local variable `alloca` emitted in the function body. This maximises cache locality for hot functions.
+  - Default (no annotation): 16-byte entry alignment at O2+; 32-byte for `@hot` functions.
+
+- **`@speculatable` function annotation** (`include/ast.h`, `src/parser.cpp`, `src/codegen.cpp`):
+  - Adds LLVM `Speculatable` attribute to the generated function.
+  - Allows the optimizer to hoist or speculate calls across branches and into loop preheaders.
+  - Safe only when the function has no observable side effects, does not trap, and does not read/write memory visible to callers.
+  - Strongest when combined with `@pure`: `@speculatable @pure fn ...`
+
+- **`@repr(...)` struct layout annotation** (`include/ast.h`, `include/parser.h`, `src/parser.cpp`, `include/codegen.h`, `src/codegen.cpp`, `src/codegen_stmt.cpp`):
+  - `@repr(C)` — stable, ABI-compatible C layout (fields in declaration order, natural alignment on the struct's `alloca`).
+  - `@repr(packed)` — minimal memory, no padding (`isPacked = true` LLVM StructType).
+  - `@repr(align(N))` — force the struct's `alloca` alignment to N bytes.
+  - `@repr(auto)` — compiler optimizes layout freely (default, equivalent to no annotation).
+  - `@repr(soa)` — structure-of-arrays hint (recorded for future layout passes).
+  - Parsed immediately before the `struct` keyword at the top level.
+  - Stored in `StructDecl::repr` (new `StructRepr` enum in `ast.h`) and `StructDecl::reprAlignN`.
+
+- **Documentation** (`LANGUAGE_REFERENCE.md`):
+  - Added `@align(N)` / `@align()` section (§6.6).
+  - Added `@speculatable` section (§6.6).
+  - Added `@repr(...)` section (§4.4.6 and §10.5).
+  - Added all previously undocumented annotations to Additional Annotations (§6.6): `@noreturn`, `@restrict`, `@noalias`, `@nounwind`, `@const_eval`, `@minsize`, `@optnone`, `@parallel`, `@noparallel`, `@nounroll`.
+
+## [4.3.0] - 2026-05-04
+
+### Added
+
+- **`include/ast_arena.h`** — new arena-allocation infrastructure for the compiler:
+  - **`BumpAllocator`** — a slab-based bump-pointer arena allocator.  Memory is carved from fixed-size slabs (default 64 KiB, doubling up to 4 MiB cap).  Provides:
+    - `alloc(n, align)` — O(1) raw byte allocation.
+    - `make<T>(args…)` — typed placement-new with automatic destructor registration for non-trivially-destructible types.
+    - `copyString(string_view)` — copy a string into the arena and return a NUL-terminated `const char*` valid for the arena's lifetime.
+    - `reset()` — call all registered destructors and reset the bump pointer (retains slab memory for reuse).
+    - `bytesAllocated()` / `bytesUsed()` / `slabCount()` — allocation statistics for profiling.
+  - **`StringHash` / `StringEqual`** — transparent hash and equality functors with `using is_transparent = void`.  Enable `std::unordered_map<std::string_view, V>` to be queried directly with `std::string`, `std::string_view`, or `const char*` keys without constructing a temporary `std::string`.
+
+- **`pass_utils.h`** — added two shared type-name predicate helpers, centralising logic that was previously duplicated across `parser.cpp` and `opt_context.h`:
+  - `isIntWidthTypeName(std::string_view)` — returns true for `iN`/`uN` integer-width cast names (N in [1, 256]), e.g. `i8`, `u32`, `i128`.
+  - `isKnownScalarTypeName(std::string_view)` — returns true for any of the built-in OmScript scalar/aggregate type keywords (`int`, `float`, `double`, `bool`, `string`, `dict`, `bigint`, `ptr`) or any integer-width type.
+
+### Changed
+
+- **`BuiltinEffectTable` public API** (`include/opt_context.h`) — all `static bool` predicate methods and `get()` now accept `std::string_view` instead of `const std::string&`.  Callers with `std::string` values pass without allocation (implicit conversion); callers with string literals or `string_view` values no longer construct a temporary `std::string`.
+
+- **`BuiltinEffectTable` internal table** (`src/opt_context.cpp`) — changed from `std::unordered_map<std::string, BuiltinEffects>` (heap-allocated keys) to `std::unordered_map<std::string_view, BuiltinEffects>` (zero-allocation keys; all entries point to string literals with static storage duration).  Lookup is O(1) and allocation-free for all callers.
+
+- **`BuiltinEffectTable::isWidthCastName`** — replaced two `nm.substr(0, 5)` calls (each allocating a temporary `std::string`) with `nm.compare(0, 5, …)` (zero-allocation prefix comparison).  The per-entry `iN`/`uN` check now delegates to the canonical `isIntWidthTypeName` helper from `pass_utils.h`, eliminating the second copy of that logic.
+
+- **`src/parser.cpp`** — removed the local-file-scope `isIntWidthTypeName` and `isKnownTypeName` static functions (which duplicated logic from `opt_context.h` and `pass_utils.h`).  Both call sites now use the shared `isIntWidthTypeName` and `isKnownScalarTypeName` from `pass_utils.h`.
+
+## [4.2.0] - 2026-05-04
+
+### Added
+
+- **`atomic` variable qualifier** — `atomic var name: type = value;` declares a variable whose every load, store, and read-modify-write operation is emitted as a sequentially-consistent (seq-cst) atomic instruction at the LLVM IR level.
+  - All loads compile to `load atomic i64 … seq_cst`.
+  - All stores (plain assignment and initializer) compile to `store atomic i64 … seq_cst`.
+  - Increment/decrement (`++`/`--`) compile to `atomicrmw add/sub … seq_cst` — the operation is indivisible with respect to all threads.
+  - Compound assignments (`+=`, `-=`, `&=`, `|=`, `^=`) detect the `x = x OP rhs` pattern and also emit a single `atomicrmw add/sub/and/or/xor … seq_cst` instruction.
+  - Atomic variables receive natural ABI alignment on their `alloca` so the LLVM backend can satisfy hardware alignment requirements for lock-free atomic instructions.
+  - Atomic variables are excluded from the CopyProp and CSE AST passes — their values can change between any two reads, so forwarding or hoisting their loads is unsound.
+  - `!invariant.load` and `!noundef` metadata are suppressed on atomic loads.
+  ```omscript
+  global atomic var counter: i64 = 0;
+
+  fn worker() {
+      counter++;              // atomicrmw add … seq_cst
+      return 0;
+  }
+
+  fn main() {
+      var t1 = thread_create("worker");
+      var t2 = thread_create("worker");
+      thread_join(t1);
+      thread_join(t2);
+      println(counter);       // always 2 — no mutex needed
+      return 0;
+  }
+  ```
+
+- **`volatile` variable qualifier** — `volatile var name: type = value;` declares a variable whose every load and store is marked volatile in the LLVM IR, preventing the compiler from eliding, caching, reordering, or CSE-ing memory operations on it.
+  - All loads compile to `load volatile i64 …`.
+  - All stores compile to `store volatile i64 …`.
+  - Increment/decrement loads and stores are both marked volatile.
+  - Volatile variables are excluded from the CopyProp and CSE AST passes.
+  - `!invariant.load` and `!noundef` metadata are suppressed on volatile loads.
+  - Intended for memory-mapped I/O registers, signal handlers, and other variables whose value may change externally without any visible write in the program.
+  ```omscript
+  volatile var status: i64 = 0;
+
+  fn poll() -> i64 {
+      while (status == 0) {}  // status re-read every iteration
+      return status;
+  }
+  ```
+
+- **`atomic volatile var`** — both qualifiers may be combined in either order (`atomic volatile var` or `volatile atomic var`). The resulting variable has both atomic ordering (seq-cst) and volatile semantics on every access.
+  ```omscript
+  atomic volatile var hw_reg: i64 = 0;
+  ```
+
+  See §5.5 and §5.6 of the Language Reference for the full specification, and §20.3 for the concurrency context.
+
+---
+
 ## [4.1.1] - 2026-04-15
 
 ### Added

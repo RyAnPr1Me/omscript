@@ -32,9 +32,9 @@ namespace omscript {
 //   WM — writes heap memory
 //   IO — performs observable I/O
 
-const std::unordered_map<std::string, BuiltinEffects>& BuiltinEffectTable::table() noexcept {
+const std::unordered_map<std::string_view, BuiltinEffects>& BuiltinEffectTable::table() noexcept {
     // clang-format off
-    static const std::unordered_map<std::string, BuiltinEffects> kTable = {
+    static const std::unordered_map<std::string_view, BuiltinEffects> kTable = {
         //                               CF     RM     WM     IO
 
         // ── Pure arithmetic / math ────────────────────────────────────────
@@ -269,7 +269,7 @@ const std::unordered_map<std::string, BuiltinEffects>& BuiltinEffectTable::table
     return kTable;
 }
 
-const BuiltinEffects& BuiltinEffectTable::get(const std::string& name) noexcept {
+const BuiltinEffects& BuiltinEffectTable::get(std::string_view name) noexcept {
     static const BuiltinEffects kUnknown; // all-false: conservatively impure
     const auto& t = table();
     auto it = t.find(name);

@@ -1,0 +1,45 @@
+// Test @repr(...) struct layout annotations.
+// @repr(C)        — stable ABI-compatible layout
+// @repr(packed)   — minimal memory, no padding
+// @repr(align(N)) — force struct-level alignment to N bytes
+// @repr(auto)     — compiler optimizes freely (default)
+// @repr(soa)      — structure-of-arrays hint
+
+@repr(C)
+struct Point {
+    x: int,
+    y: int,
+}
+
+@repr(packed)
+struct PackedPair {
+    a: int,
+    b: int,
+}
+
+@repr(align(64))
+struct CacheAligned {
+    value: int,
+}
+
+@repr(auto)
+struct AutoLayout {
+    x: int,
+    y: int,
+}
+
+@repr(soa)
+struct Particle {
+    px: int,
+    py: int,
+    pz: int,
+}
+
+fn main() {
+    var p = Point { x: 3, y: 4 };
+    var q = PackedPair { a: 1, b: 2 };
+    var c = CacheAligned { value: 10 };
+    var a = AutoLayout { x: 5, y: 6 };
+    var part = Particle { px: 1, py: 2, pz: 3 };
+    return p.x + p.y + q.a + q.b + c.value + a.x + a.y + part.px + part.py + part.pz;
+}
