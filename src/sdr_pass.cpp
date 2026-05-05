@@ -12,6 +12,7 @@
 #include <llvm/IR/Value.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <algorithm>
@@ -67,7 +68,13 @@ static double vecArithCost(llvm::TargetTransformInfo& TTI,
     auto cost = TTI.getArithmeticInstrCost(
         opcode, vt->getElementType(),
         llvm::TargetTransformInfo::TCK_RecipThroughput);
-    return static_cast<double>(cost.getValue().value_or(1));
+    return static_cast<double>(
+#if LLVM_VERSION_MAJOR >= 20
+        cost.getValue()
+#else
+        cost.getValue().value_or(1)
+#endif
+    );
 }
 
 /// True when @p inst is an extractelement with a constant index.
@@ -324,7 +331,11 @@ static llvm::Value* emitReductionIntrinsic(llvm::Instruction* insertBefore,
     llvm::IRBuilder<> b(insertBefore);
     llvm::Module* M = insertBefore->getModule();
     llvm::Function* intrinsicFn =
+#if LLVM_VERSION_MAJOR >= 19
+        llvm::Intrinsic::getOrInsertDeclaration(M, iid, {vec->getType()});
+#else
         llvm::Intrinsic::getDeclaration(M, iid, {vec->getType()});
+#endif
     return b.CreateCall(intrinsicFn, {vec}, "sdr.reduce");
 }
 
@@ -356,7 +367,12 @@ static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
                 auto redCost = TTI.getArithmeticReductionCost(
                     reg.root->getOpcode(), fvt, /*FMF=*/std::nullopt);
                 const double newCost = static_cast<double>(
-                    redCost.getValue().value_or(1));
+#if LLVM_VERSION_MAJOR >= 20
+                    redCost.getValue()
+#else
+                    redCost.getValue().value_or(1)
+#endif
+                );
                 const double saving = reg.origCost - newCost;
                 if (saving >= cfg.minAbsoluteSaving &&
                     newCost <= reg.origCost * cfg.costThreshold) {

@@ -236,7 +236,11 @@ static unsigned instructionUopCost(const llvm::Instruction& I,
     const llvm::InstructionCost c =
         TTI.getInstructionCost(&I, llvm::TargetTransformInfo::TCK_RecipThroughput);
     if (!c.isValid()) return 1u;
+#if LLVM_VERSION_MAJOR >= 20
+    const int64_t v = c.getValue();
+#else
     const int64_t v = c.getValue().value_or(1);
+#endif
     return v <= 0 ? 1u : static_cast<unsigned>(v);
 }
 
@@ -1716,7 +1720,11 @@ struct RangeBoundsCheckHoistPass
             if (!endSCEV || llvm::isa<llvm::SCEVCouldNotCompute>(endSCEV)) continue;
 
             // Materialise `end` in the preheader.
+#if LLVM_VERSION_MAJOR >= 20
+            llvm::SCEVExpander expander(SE, "rbch");
+#else
             llvm::SCEVExpander expander(SE, F.getParent()->getDataLayout(), "rbch");
+#endif
             llvm::Value* endVal = expander.expandCodeFor(
                 endSCEV, sharedLen->getType(),
                 preheader->getTerminator());
@@ -1828,7 +1836,11 @@ private:
             // Convert fadd(phi, fmul(a, b)) → fmuladd(a, b, phi).
             // This generates a single FMA instruction on CPUs that support it.
             llvm::Module* M = addInst->getModule();
+#if LLVM_VERSION_MAJOR >= 19
+            llvm::Function* fmuladd = llvm::Intrinsic::getOrInsertDeclaration(
+#else
             llvm::Function* fmuladd = llvm::Intrinsic::getDeclaration(
+#endif
                 M, llvm::Intrinsic::fmuladd, {phi.getType()});
 
             llvm::IRBuilder<> builder(addInst);
