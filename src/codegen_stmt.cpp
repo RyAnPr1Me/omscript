@@ -411,7 +411,16 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     // Stack allocation: record the backing alloca for lifetime.end.
                     stackPtrBackingAlloca_[stmt->name] = lastStackAllocBacking_;
                     heapPtrVarNames_.erase(stmt->name);
+                    arenaPtrVarNames_.erase(stmt->name);
                     lastStackAllocBacking_ = nullptr;
+                } else if (lastAllocWasArena_) {
+                    // Arena allocation: sub-allocated from the per-function slab.
+                    // invalidate() must NOT call free() on these; the slab is
+                    // freed once at every function return.
+                    arenaPtrVarNames_.insert(stmt->name);
+                    heapPtrVarNames_.erase(stmt->name);
+                    stackPtrBackingAlloca_.erase(stmt->name);
+                    lastAllocWasArena_ = false;
                 } else if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
                     auto* call = static_cast<CallExpr*>(stmt->initializer.get());
                     const bool isHeapAlloc =
@@ -420,13 +429,16 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         (call->callee.rfind("alloc<", 0) == 0 && call->callee.back() == '>');
                     if (isHeapAlloc) {
                         heapPtrVarNames_.insert(stmt->name);
+                        arenaPtrVarNames_.erase(stmt->name);
                         stackPtrBackingAlloca_.erase(stmt->name);
                     } else {
                         heapPtrVarNames_.erase(stmt->name);
+                        arenaPtrVarNames_.erase(stmt->name);
                         stackPtrBackingAlloca_.erase(stmt->name);
                     }
                 } else {
                     heapPtrVarNames_.erase(stmt->name);
+                    arenaPtrVarNames_.erase(stmt->name);
                     stackPtrBackingAlloca_.erase(stmt->name);
                 }
             }
@@ -671,6 +683,17 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 }
 
 void CodeGenerator::generateReturn(ReturnStmt* stmt) {
+    // Helper: free the per-function arena slab if one was allocated.
+    // Must be called immediately before every return instruction so that
+    // the slab is reclaimed on every exit path.
+    auto emitArenaFreeIfNeeded = [&]() {
+        if (!funcArenaBaseAlloca_)
+            return;
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* slabPtr = builder->CreateLoad(
+            ptrTy, funcArenaBaseAlloca_, "arena.base.ret");
+        builder->CreateCall(getOrDeclareFree(), {slabPtr});
+    };
     // Prefetch invalidation enforcement: check that all prefetched variables
     if (!prefetchedVars_.empty()) {
         std::string returnedVar;
@@ -763,6 +786,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
             }
         }
 
+        emitArenaFreeIfNeeded();
         builder->CreateRet(retValue);
     } else {
         // @prefetch enforcement: no return value, so ALL prefetched params
@@ -789,6 +813,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 
         llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
         llvm::Type* retTy = currentFn->getReturnType();
+        emitArenaFreeIfNeeded();
         if (retTy->isVoidTy())
             builder->CreateRetVoid();
         else
@@ -2966,6 +2991,8 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     const bool isHeapDict   = dictVarNames_.count(name) > 0;
     // ptr variables whose value was heap-allocated (malloc / heap alloc<T>).
     const bool isHeapPtr    = heapPtrVarNames_.count(name) > 0;
+    // ptr variables backed by the per-function arena slab — no per-object free.
+    const bool isArenaPtr   = arenaPtrVarNames_.count(name) > 0;
     // struct variables are heap-allocated opaque pointers.
     const bool isHeapStruct = structVars_.count(name) > 0;
     // bigint variables are heap-allocated arbitrary-precision integers.
@@ -2977,19 +3004,23 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
 
     if (isHeapString || isHeapArray || isHeapDict || isHeapPtr ||
         isHeapStruct || isHeapBigint) {
-        // Load the heap pointer from the alloca (i64 stored as int, ptr cast needed).
-        auto* allocaInst2 = llvm::dyn_cast<llvm::AllocaInst>(alloca);
-        if (allocaInst2) {
-            auto* ptrTy = llvm::PointerType::getUnqual(*context);
-            llvm::Value* heapPtr = builder->CreateLoad(
-                allocaInst2->getAllocatedType(), allocaInst2, name + ".ptr");
-            // Cast i64 → ptr if necessary (OmScript stores heap pointers as i64)
-            if (!heapPtr->getType()->isPointerTy()) {
-                heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy, name + ".heapptr");
+        // Arena-backed pointers must NOT be individually freed; the entire
+        // slab is freed once at every function return.
+        if (!isArenaPtr) {
+            // Load the heap pointer from the alloca (i64 stored as int, ptr cast needed).
+            auto* allocaInst2 = llvm::dyn_cast<llvm::AllocaInst>(alloca);
+            if (allocaInst2) {
+                auto* ptrTy = llvm::PointerType::getUnqual(*context);
+                llvm::Value* heapPtr = builder->CreateLoad(
+                    allocaInst2->getAllocatedType(), allocaInst2, name + ".ptr");
+                // Cast i64 → ptr if necessary (OmScript stores heap pointers as i64)
+                if (!heapPtr->getType()->isPointerTy()) {
+                    heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy, name + ".heapptr");
+                }
+                // Emit free().  The compiler already knows free() is
+                // InaccessibleOrArgMemOnly so this is safe to CSE/hoist.
+                builder->CreateCall(getOrDeclareFree(), {heapPtr});
             }
-            // Emit free().  The compiler already knows free() is
-            // InaccessibleOrArgMemOnly so this is safe to CSE/hoist.
-            builder->CreateCall(getOrDeclareFree(), {heapPtr});
         }
     }
 
@@ -3042,6 +3073,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     ptrVarNames_.erase(name);
     ptrElemTypes_.erase(name);
     heapPtrVarNames_.erase(name);
+    arenaPtrVarNames_.erase(name);
     structVars_.erase(name);
     simdVars_.erase(name);
     registerVars_.erase(name);

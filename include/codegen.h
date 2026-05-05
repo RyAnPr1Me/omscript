@@ -666,6 +666,41 @@ class CodeGenerator {
     /// Scratch: backing alloca passed from generateCall to VarDecl for alloc<T> registration.
     llvm::AllocaInst* lastStackAllocBacking_ = nullptr;
 
+    // ── Per-function arena scratch buffer ─────────────────────────────────
+    // alloc<T>(N) heap allocations within a single function are sub-allocated
+    // from a shared entry-block arena slab when the compile-time total fits
+    // within kFuncArenaSlabSize bytes.  All tier decisions are made entirely
+    // at compile time — no runtime branches are emitted.
+    //
+    // Tier 1 (stack alloca): compile-time constant count AND
+    //         count*sizeof(T) <= kStackAllocThreshold  → entry-block alloca.
+    // Tier 2 (arena):        compile-time constant count AND
+    //         count*sizeof(T) > kStackAllocThreshold AND
+    //         remaining arena capacity >= count*sizeof(T)
+    //                                                  → GEP into arena slab.
+    // Tier 3 (malloc):       dynamic count OR size exceeds arena capacity
+    //                                                  → malloc / aligned_alloc.
+    //
+    // Individual invalidate() calls on arena-backed pointers are no-ops for
+    // memory; the single arena slab is freed at every function return.
+
+    /// Raised stack-alloca threshold (8 KiB). Entry-block allocas never
+    /// grow with loops, so a larger threshold is safe.
+    static constexpr uint64_t kStackAllocThreshold = 8192u;
+    /// Per-function arena slab capacity (64 KiB).
+    static constexpr uint64_t kFuncArenaSlabSize = 65536u;
+
+    /// Entry-block alloca holding the arena base pointer (ptr type, null = unused).
+    llvm::AllocaInst* funcArenaBaseAlloca_  = nullptr;
+    /// Compile-time bytes consumed in the arena so far for the current function.
+    uint64_t          funcArenaUsedBytes_   = 0u;
+    /// Variable names whose alloc<T> memory is backed by the function arena.
+    /// invalidate() emits no free() for these; the slab is freed at function exit.
+    llvm::StringSet<> arenaPtrVarNames_;
+    /// Side-channel: set by the arena path in generateCall so that the
+    /// immediately-following VarDecl codegen can register the variable.
+    bool lastAllocWasArena_ = false;
+
     /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
     bool currentFuncHintUnroll_ = false;
     bool currentFuncHintNoUnroll_ = false;

@@ -406,6 +406,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // foo() to preserve compatibility with existing programs and tests.
 
     // ── alloc<T>(x) — compile-time smart allocator ───────────────────────────
+    // Three compile-time tiers; no runtime branches are emitted:
+    //
+    //  T1 (stack alloca):  count is a ConstantInt AND
+    //                      count*sizeof(T) <= kStackAllocThreshold (8 KiB).
+    //                      Alloca is placed in the function entry block so
+    //                      mem2reg / SROA can reason about it universally.
+    //
+    //  T2 (arena):         count is a ConstantInt AND
+    //                      count*sizeof(T) > kStackAllocThreshold AND
+    //                      remaining arena capacity >= count*sizeof(T).
+    //                      All T2 allocations in a function share a single
+    //                      malloc'd slab (emitted once in the entry block).
+    //                      Sub-allocation is a compile-time-constant GEP.
+    //                      The slab is freed at every function return.
+    //
+    //  T3 (heap malloc):   dynamic count OR compile-time count whose size
+    //                      exceeds the remaining arena capacity.
+    //                      Falls back to malloc / aligned_alloc.
     if (expr->callee.size() > 6 &&
         expr->callee.rfind("alloc<", 0) == 0 && expr->callee.back() == '>') {
         const std::string elemTypeName = expr->callee.substr(6, expr->callee.size() - 7);
@@ -417,18 +435,31 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (expr->arguments.size() != 1)
             codegenError("alloc<T> expects exactly one argument (element count)", expr);
 
+        // Reset side-channels for the upcoming VarDecl registration.
+        lastStackAllocBacking_ = nullptr;
+        lastAllocWasArena_     = false;
+
         llvm::Value* countVal = generateExpression(expr->arguments[0].get());
         countVal = builder->CreateIntCast(countVal, getDefaultType(),
                                           /*isSigned=*/true, "alloc.cnt");
 
-        // ── Compile-time stack allocation ────────────────────────────────────
-        // Only when count is a compile-time ConstantInt AND total bytes ≤ 4096.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(countVal)) {
             const uint64_t count = ci->getZExtValue();
+            if (count == 0) {
+                // Zero-element allocation: return a null pointer without
+                // emitting any heap or stack allocation.
+                return llvm::ConstantPointerNull::get(
+                    llvm::PointerType::getUnqual(*context));
+            }
             const uint64_t totalBytes = count * elemSize;
-            constexpr uint64_t kStackThreshold = 4096;
+            // Align up to the element's ABI alignment so arena sub-allocations
+            // satisfy alignment requirements.
+            const uint64_t alignVal = elemAlign.value();
+            const uint64_t alignedBytes =
+                (totalBytes + alignVal - 1u) & ~(alignVal - 1u);
 
-            if (count > 0 && totalBytes <= kStackThreshold) {
+            // ── Tier 1: stack alloca ──────────────────────────────────────────
+            if (totalBytes <= kStackAllocThreshold) {
                 // Place the alloca in the function entry block so mem2reg /
                 // SROA can reason about it across all basic blocks.
                 llvm::Function* fn = builder->GetInsertBlock()->getParent();
@@ -457,9 +488,56 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 lastStackAllocBacking_ = stackAlloc;
                 return ptr;
             }
+
+            // ── Tier 2: per-function arena sub-allocation ─────────────────────
+            // Use when the compile-time allocation fits in the remaining arena
+            // capacity.  The arena slab is a single malloc in the entry block
+            // shared by all T2 allocations; no per-alloc malloc overhead.
+            if (alignedBytes <= kFuncArenaSlabSize &&
+                funcArenaUsedBytes_ + alignedBytes <= kFuncArenaSlabSize) {
+                llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                llvm::IRBuilder<> entryB(&fn->getEntryBlock(),
+                                         fn->getEntryBlock().begin());
+                auto* ptrTy  = llvm::PointerType::getUnqual(*context);
+                auto* i64Ty  = llvm::Type::getInt64Ty(*context);
+
+                // Lazily emit the arena slab malloc in the entry block.
+                if (!funcArenaBaseAlloca_) {
+                    funcArenaBaseAlloca_ = entryB.CreateAlloca(
+                        ptrTy, nullptr, "arena.base");
+                    funcArenaBaseAlloca_->setAlignment(llvm::Align(8));
+                    // malloc(kFuncArenaSlabSize) — one allocation for the whole
+                    // slab, shared by all T2 alloc<T> calls in this function.
+                    llvm::Value* slabSz = llvm::ConstantInt::get(
+                        i64Ty, static_cast<int64_t>(kFuncArenaSlabSize));
+                    llvm::Value* slabPtr = entryB.CreateCall(
+                        getOrDeclareMalloc(), {slabSz}, "arena.slab");
+                    entryB.CreateStore(slabPtr, funcArenaBaseAlloca_);
+                }
+
+                // Sub-allocate at a compile-time-constant byte offset.
+                const uint64_t offset = funcArenaUsedBytes_;
+                funcArenaUsedBytes_ += alignedBytes;
+
+                // Load the arena base and GEP to the sub-allocation slot.
+                llvm::Value* arenaBase = builder->CreateLoad(
+                    ptrTy, funcArenaBaseAlloca_, "arena.base.ld");
+                llvm::Value* slotPtr = builder->CreateInBoundsGEP(
+                    llvm::Type::getInt8Ty(*context),
+                    arenaBase,
+                    llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(offset)),
+                    "arena.slot." + elemTypeName);
+                // Cast to the element pointer type for type safety.
+                llvm::Value* typedPtr = (elemTy != llvm::Type::getInt8Ty(*context))
+                    ? builder->CreatePointerCast(slotPtr, ptrTy, "arena.ptr")
+                    : slotPtr;
+                lastAllocWasArena_ = true;
+                return typedPtr;
+            }
         }
 
-        // ── Compile-time heap allocation ─────────────────────────────────────
+        // ── Tier 3: heap malloc ───────────────────────────────────────────────
+        // Dynamic count or size exceeded arena capacity.
         llvm::Value* totalSize = builder->CreateMul(
             countVal,
             llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(elemSize)),
@@ -470,8 +548,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // Round totalSize up to the next multiple of alignment so that
             // aligned_alloc's precondition (size % align == 0) is satisfied.
             const uint64_t alignBytes = elemAlign.value();
-            llvm::Value* alignVal = llvm::ConstantInt::get(getDefaultType(),
-                                                           static_cast<int64_t>(alignBytes));
+            llvm::Value* alignV = llvm::ConstantInt::get(getDefaultType(),
+                                                         static_cast<int64_t>(alignBytes));
             // roundUp(sz, a) = (sz + a - 1) & ~(a - 1)  — valid since a is pow2.
             llvm::Value* alignMinus1 = llvm::ConstantInt::get(getDefaultType(),
                                                                static_cast<int64_t>(alignBytes - 1));
@@ -481,12 +559,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 builder->CreateAdd(totalSize, alignMinus1, "halloc.roundup"),
                 mask, "halloc.rounded");
             heapPtr = builder->CreateCall(getOrDeclareAlignedAlloc(),
-                                          {alignVal, roundedSize}, "halloc.ptr");
+                                          {alignV, roundedSize}, "halloc.ptr");
         } else {
             heapPtr = builder->CreateCall(getOrDeclareMalloc(),
                                           {totalSize}, "halloc.ptr");
         }
-        lastStackAllocBacking_ = nullptr; // heap allocation has no backing alloca
         return heapPtr;
     }
 
