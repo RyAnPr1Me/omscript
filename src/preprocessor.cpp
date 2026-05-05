@@ -1180,6 +1180,10 @@ std::string Preprocessor::process(const std::string& source) {
                     {filename_, lineNo, 0},
                     "#endif without #if"});
             condStack.pop_back();
+            // Preserve any trailing content after #endif (e.g. `#endif;` in
+            // statements like `const X = #if ... value #endif;`).
+            if (!arg.empty())
+                output += arg;
             output += '\n'; continue;
         }
 

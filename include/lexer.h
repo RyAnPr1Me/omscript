@@ -80,6 +80,7 @@ enum class TokenType {
     GLOBAL,    // global   — declare a program-wide variable
     ATOMIC,    // atomic   — all accesses to the variable are indivisible
     VOLATILE,  // volatile — suppress all optimizations on the annotated storage
+    TYPE,      // type     — top-level type alias declaration
 
     // Operators
     PLUS,

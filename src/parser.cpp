@@ -322,14 +322,113 @@ std::unique_ptr<Program> Parser::parse() {
         }
         if (match(TokenType::OPTMAX_END)) {
             if (!optMaxTagActive) {
-                error("OPTMAX end tag without matching start tag");
+                // Standalone OPTMAX!: at end-of-file (no matching OPTMAX=:):
+                // retroactively mark all functions defined so far as OPTMAX.
+                for (auto& fn : functions) {
+                    fn->isOptMax = true;
+                    fn->optMaxConfig.enabled = true;
+                }
+            } else {
+                optMaxTagActive = false;
             }
-            optMaxTagActive = false;
             continue;
         }
         if (match(TokenType::ENUM)) {
             try {
                 enums.push_back(parseEnumDecl());
+            } catch (const std::exception& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
+        // Top-level `comptime { const X: T = val; ... }` — extracts compile-time constants
+        // into comptimeConstants_ for use in type aliases and loop annotations.
+        // Also emits a global const VarDecl so the constant is accessible inside functions.
+        if (check(TokenType::COMPTIME)) {
+            try {
+                advance(); // consume 'comptime'
+                consume(TokenType::LBRACE, "Expected '{' after 'comptime'");
+                while (!check(TokenType::RBRACE) && !isAtEnd()) {
+                    // Only handle `const NAME: TYPE = LITERAL;` declarations
+                    if (match(TokenType::CONST)) {
+                        const Token cname = consume(TokenType::IDENTIFIER, "Expected constant name");
+                        std::string typeName;
+                        if (match(TokenType::COLON)) {
+                            typeName = parseTypeAnnotation(); // consume type annotation
+                        }
+                        consume(TokenType::ASSIGN, "Expected '=' in comptime const");
+                        // Accept integer literal or a negative literal
+                        long long val = 0;
+                        bool neg = false;
+                        if (match(TokenType::MINUS)) neg = true;
+                        if (check(TokenType::INTEGER)) {
+                            val = static_cast<long long>(advance().intValue);
+                            if (neg) val = -val;
+                        }
+                        consume(TokenType::SEMICOLON, "Expected ';' after comptime const");
+                        comptimeConstants_[cname.lexeme] = val;
+                        // Inject as a global const so the constant is visible inside functions
+                        auto initExpr = std::make_unique<LiteralExpr>(val);
+                        auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
+                                                            /*isConst=*/true, typeName.empty() ? "int" : typeName);
+                        gv->isCompilerGenerated = true;
+                        gv->line = cname.line;
+                        gv->column = cname.column;
+                        globals.push_back(std::move(gv));
+                    } else {
+                        // Skip non-const statements inside comptime
+                        while (!check(TokenType::SEMICOLON) && !check(TokenType::RBRACE) && !isAtEnd())
+                            advance();
+                        if (check(TokenType::SEMICOLON)) advance();
+                    }
+                }
+                consume(TokenType::RBRACE, "Expected '}' to close comptime block");
+            } catch (const std::exception& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
+        // Top-level `type Alias = TypeExpr` — defines a type alias.
+        // Supports `u64x{N}` where N is a comptime constant.
+        if (check(TokenType::TYPE)) {
+            try {
+                advance(); // consume 'type'
+                const Token aliasName = consume(TokenType::IDENTIFIER, "Expected alias name after 'type'");
+                consume(TokenType::ASSIGN, "Expected '=' after type alias name");
+                // Parse the right-hand side type (possibly u64x{N} or other SIMD type)
+                std::string typeName;
+                if (check(TokenType::IDENTIFIER)) {
+                    typeName = advance().lexeme;
+                    // Handle parameterised SIMD types: u64x{IDENT} or u64x{INTEGER}
+                    if (check(TokenType::LBRACE)) {
+                        advance(); // consume '{'
+                        std::string sizeStr;
+                        if (check(TokenType::IDENTIFIER)) {
+                            const std::string ident = advance().lexeme;
+                            auto it = comptimeConstants_.find(ident);
+                            if (it != comptimeConstants_.end())
+                                sizeStr = std::to_string(it->second);
+                            else
+                                sizeStr = ident; // keep as-is; may resolve later
+                        } else if (check(TokenType::INTEGER)) {
+                            sizeStr = std::to_string(advance().intValue);
+                        }
+                        consume(TokenType::RBRACE, "Expected '}' after SIMD lane count");
+                        typeName = typeName + sizeStr;
+                    }
+                    // Handle array suffix: type[]
+                    while (check(TokenType::LBRACKET) && current + 1 < tokens.size() &&
+                           tokens[current + 1].type == TokenType::RBRACKET) {
+                        advance(); advance();
+                        typeName += "[]";
+                    }
+                } else {
+                    error("Expected type name after '=' in type alias");
+                }
+                consume(TokenType::SEMICOLON, "Expected ';' after type alias");
+                typeAliases_[aliasName.lexeme] = typeName;
             } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -753,6 +852,26 @@ std::string Parser::parseTypeAnnotation() {
     } else {
         typeName = consume(TokenType::IDENTIFIER, "Expected type name").lexeme;
     }
+    // Handle parameterised SIMD types: u64x{N}, u32x{N}, i32x{N}, f32x{N}, etc.
+    // u64x{LANES} where LANES is a comptime constant resolves to u64x2/4/8, etc.
+    if (check(TokenType::LBRACE) && typeName.size() >= 3 &&
+        (typeName[0] == 'u' || typeName[0] == 'i' || typeName[0] == 'f') &&
+        typeName.find('x') != std::string::npos) {
+        advance(); // consume '{'
+        std::string sizeStr;
+        if (check(TokenType::IDENTIFIER)) {
+            const std::string ident = advance().lexeme;
+            auto it = comptimeConstants_.find(ident);
+            if (it != comptimeConstants_.end())
+                sizeStr = std::to_string(it->second);
+            else
+                sizeStr = ident;
+        } else if (check(TokenType::INTEGER)) {
+            sizeStr = std::to_string(advance().intValue);
+        }
+        consume(TokenType::RBRACE, "Expected '}' after SIMD lane count");
+        typeName = typeName + sizeStr;
+    }
     // Support array type annotations: type[], type[][], etc.
     while (check(TokenType::LBRACKET) && (current + 1 < tokens.size()) &&
            tokens[current + 1].type == TokenType::RBRACKET) {
@@ -783,6 +902,12 @@ std::string Parser::parseTypeAnnotation() {
             if (depth > 0) typeParams += t.lexeme;
         }
         typeName += "[" + typeParams + "]";
+    }
+    // Resolve type aliases (e.g. VEC → u64x2 from a prior `type VEC = u64x{LANES}`)
+    {
+        auto it = typeAliases_.find(typeName);
+        if (it != typeAliases_.end())
+            typeName = it->second;
     }
     return prefix + typeName;
 }
@@ -932,6 +1057,30 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 std::unique_ptr<Statement> Parser::parseStatement() {
     const RecursionGuard guard(*this);
     // Capture the keyword token position for source location tracking.
+
+    // @loop(...) placed before a for/while/foreach loop as a pre-loop annotation.
+    // This is equivalent to placing it after the loop header.
+    if (check(TokenType::AT) && current + 1 < tokens.size() &&
+        (tokens[current + 1].type == TokenType::LOOP ||
+         (tokens[current + 1].type == TokenType::IDENTIFIER && tokens[current + 1].lexeme == "loop"))) {
+        const Token kw = tokens[current];
+        advance(); // consume '@'
+        advance(); // consume 'loop'
+        LoopConfig loopHints = parseLoopAnnotation();
+        // Parse the loop statement that follows
+        auto loopStmt = parseStatement();
+        // Apply loop hints to the following for/while/foreach statement
+        if (auto* fs = dynamic_cast<ForStmt*>(loopStmt.get())) {
+            fs->loopHints = loopHints;
+        } else if (auto* ws = dynamic_cast<WhileStmt*>(loopStmt.get())) {
+            ws->loopHints = loopHints;
+        } else if (auto* fe = dynamic_cast<ForEachStmt*>(loopStmt.get())) {
+            fe->loopHints = loopHints;
+        }
+        loopStmt->line = kw.line;
+        loopStmt->column = kw.column;
+        return loopStmt;
+    }
     if (match(TokenType::LIKELY) || match(TokenType::UNLIKELY)) {
         const Token hintKw = tokens[current - 1];
         const bool isLikely = (hintKw.type == TokenType::LIKELY);
@@ -1389,6 +1538,19 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             stmt->line = kw.line;
             stmt->column = kw.column;
             return stmt;
+        }
+        // Function-call style: prefetch(expr) — prefetch the address of expr.
+        if (check(TokenType::LPAREN)) {
+            advance(); // consume '('
+            auto addrExpr = parseExpression();
+            consume(TokenType::RPAREN, "Expected ')' after prefetch expression");
+            consume(TokenType::SEMICOLON, "Expected ';' after prefetch(expr) statement");
+            auto prefetchStmt = std::make_unique<PrefetchStmt>(std::move(addrExpr), offsetBytes);
+            prefetchStmt->hintHot = hintHot;
+            prefetchStmt->hintImmut = hintImmut;
+            prefetchStmt->line = kw.line;
+            prefetchStmt->column = kw.column;
+            return prefetchStmt;
         }
         error("Expected variable name or declaration after 'prefetch'");
     }
@@ -3429,6 +3591,20 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
     auto expr = parseCall();
 
     while (true) {
+        // `expr as TypeName` — type cast / reinterpret expression.
+        // Desugared to a BinaryExpr with op "as" and an IdentifierExpr(TypeName) on the right.
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "as") {
+            const Token asTok = advance(); // consume 'as'
+            const std::string targetType = parseTypeAnnotation();
+            auto typeExpr = std::make_unique<IdentifierExpr>(targetType);
+            typeExpr->line = asTok.line;
+            typeExpr->column = asTok.column;
+            auto castExpr = std::make_unique<BinaryExpr>("as", std::move(expr), std::move(typeExpr));
+            castExpr->line = asTok.line;
+            castExpr->column = asTok.column;
+            expr = std::move(castExpr);
+            continue;
+        }
         // Handle postfix operators
         if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
             const Token opToken = tokens[current - 1];
@@ -3553,6 +3729,20 @@ std::unique_ptr<Expression> Parser::parseCall() {
 }
 
 std::unique_ptr<Expression> Parser::parsePrimary() {
+    // likely(expr) / unlikely(expr) — branch-weight expression hint.
+    // Strip the hint and return the inner expression.  The compiler retains
+    // correctness; LLVM branch-weight metadata is not added in this path.
+    if (check(TokenType::LIKELY) || check(TokenType::UNLIKELY)) {
+        // Only treat as expression if followed by '(' (function-call style).
+        // Otherwise fall through to the statement-level likely/unlikely handler.
+        if (current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LPAREN) {
+            advance(); // consume 'likely'/'unlikely'
+            advance(); // consume '('
+            auto inner = parseExpression();
+            consume(TokenType::RPAREN, "Expected ')' after likely()/unlikely() expression");
+            return inner;
+        }
+    }
     // comptime { ... } — compile-time evaluated block expression.
     // Evaluates the block at compile time and returns its result as a constant.
     if (match(TokenType::COMPTIME)) {
@@ -4430,7 +4620,14 @@ LoopConfig Parser::parseLoopAnnotation() {
             consume(TokenType::ASSIGN, "Expected '=' after key in @loop");
             if (key.lexeme == "unroll") {
                 const Token v = advance();
-                if (v.type == TokenType::INTEGER) cfg.unrollCount = static_cast<int>(v.intValue);
+                if (v.type == TokenType::INTEGER) {
+                    cfg.unrollCount = static_cast<int>(v.intValue);
+                } else if (v.type == TokenType::IDENTIFIER) {
+                    // Allow comptime constant identifiers as unroll count
+                    auto it = comptimeConstants_.find(v.lexeme);
+                    if (it != comptimeConstants_.end())
+                        cfg.unrollCount = static_cast<int>(it->second);
+                }
             } else if (key.lexeme == "vectorize") {
                 const Token v = advance(); // true/false may be keywords
                 cfg.vectorize = (v.lexeme == "true" || v.type == TokenType::TRUE);
