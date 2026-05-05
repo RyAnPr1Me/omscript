@@ -322,15 +322,9 @@ std::unique_ptr<Program> Parser::parse() {
         }
         if (match(TokenType::OPTMAX_END)) {
             if (!optMaxTagActive) {
-                // Standalone OPTMAX!: at end-of-file (no matching OPTMAX=:):
-                // retroactively mark all functions defined so far as OPTMAX.
-                for (auto& fn : functions) {
-                    fn->isOptMax = true;
-                    fn->optMaxConfig.enabled = true;
-                }
-            } else {
-                optMaxTagActive = false;
+                error("OPTMAX!: without a matching OPTMAX=:");
             }
+            optMaxTagActive = false;
             continue;
         }
         if (match(TokenType::ENUM)) {
