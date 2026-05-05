@@ -1131,8 +1131,12 @@ static bool applyLoopTiling(SCoP& scop,
     const llvm::SCEV* innerUBSCEV = scop.ubs[innerLvl];
 
     // Expand upper bound values in the outer preheader.
-    // SCEVExpander requires DataLayout through at least LLVM 20.
+    // SCEVExpander dropped the DataLayout parameter in LLVM 22.
+#if LLVM_VERSION_MAJOR >= 22
+    llvm::SCEVExpander expander(SE, "polyopt");
+#else
     llvm::SCEVExpander expander(SE, F->getParent()->getDataLayout(), "polyopt");
+#endif
     expander.setInsertPoint(outerPreheader->getTerminator());
 
     // Expand the upper bounds (they may reference function parameters)
