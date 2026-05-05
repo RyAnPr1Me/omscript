@@ -4705,8 +4705,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Set target triple and DataLayout on the module before running any passes.
     // Passes like SimplifyCFGPass (convertSwitchToLookupTable) require an
     // initialized DataLayout; without it they may crash on switch statements.
-    module->setTargetTriple(llvm::sys::getDefaultTargetTriple());
-    module->setDataLayout(tm->createDataLayout());
+    // Only set if not already configured by the caller.
+    if (module->getTargetTriple().empty())
+        module->setTargetTriple(llvm::sys::getDefaultTargetTriple());
+    if (module->getDataLayout().isDefault())
+        module->setDataLayout(tm->createDataLayout());
 
     llvm::PipelineTuningOptions PTOMax;
     // Enable vectorization cost-model infrastructure so that LoopVectorizePass
