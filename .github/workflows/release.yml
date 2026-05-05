@@ -84,6 +84,8 @@ jobs:
             ccache \
             libcurl4-openssl-dev
           echo "LLVM_DIR=/usr/lib/llvm-18/cmake" >> "$GITHUB_ENV"
+          # Remove stale ccache config (ccache 3.x used 'compress', ccache 4.x uses 'compression')
+          rm -f ~/.ccache/ccache.conf ~/.config/ccache/ccache.conf
           ccache --set-config=max_size=600M
 
       - name: Install dependencies (macOS)
@@ -93,6 +95,8 @@ jobs:
           # to ensure we have a consistent, recent version.
           brew install cmake llvm ccache
           echo "LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm" >> "$GITHUB_ENV"
+          # Remove stale ccache config (ccache 3.x used 'compress', ccache 4.x uses 'compression')
+          rm -f ~/.ccache/ccache.conf ~/.config/ccache/ccache.conf
           ccache --set-config=max_size=600M
 
       - name: Setup MSYS2 (Windows)

@@ -24,6 +24,7 @@ jobs:
             gcc \
             libgtest-dev \
             mold \
+            libcurl4-openssl-dev \
 
       - name: Build omsc from source
         run: |

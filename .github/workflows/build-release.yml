@@ -37,7 +37,8 @@ jobs:
             llvm-18-dev \
             libgtest-dev \
             gcc \
-            ccache
+            ccache \
+            libcurl4-openssl-dev
 
       - name: Restore ccache
         uses: actions/cache@v4
