@@ -656,6 +656,49 @@ bool CodeGenerator::tryFoldStringConcat(Expression* expr, std::string& out) cons
 }
 
 llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
+    // `expr as TypeName` — type cast.
+    // The right operand is a synthetic IdentifierExpr holding the target type name.
+    if (expr->op == "as") {
+        auto* typeExpr = static_cast<IdentifierExpr*>(expr->right.get());
+        const std::string& targetType = typeExpr->name;
+        llvm::Value* val = generateExpression(expr->left.get());
+        llvm::Type* dstTy = resolveAnnotatedType(targetType);
+        if (!dstTy) dstTy = getDefaultType();
+        llvm::Type* srcTy = val->getType();
+        if (srcTy == dstTy) return val;
+        // Integer widening / narrowing
+        if (srcTy->isIntegerTy() && dstTy->isIntegerTy()) {
+            unsigned srcBits = srcTy->getIntegerBitWidth();
+            unsigned dstBits = dstTy->getIntegerBitWidth();
+            if (dstBits > srcBits) {
+                // unsigned types get zero-extension; signed types get sign-extension.
+                // Treat u-prefixed types as unsigned, others as signed.
+                bool isUnsignedSrc = (targetType.size() > 0 && targetType[0] == 'u');
+                return isUnsignedSrc
+                    ? builder->CreateZExt(val, dstTy, "as.zext")
+                    : builder->CreateSExt(val, dstTy, "as.sext");
+            } else if (dstBits < srcBits) {
+                return builder->CreateTrunc(val, dstTy, "as.trunc");
+            } else {
+                return builder->CreateBitCast(val, dstTy, "as.bitcast");
+            }
+        }
+        // Float → integer
+        if (srcTy->isFloatingPointTy() && dstTy->isIntegerTy()) {
+            return builder->CreateFPToSI(val, dstTy, "as.fptosi");
+        }
+        // Integer → float
+        if (srcTy->isIntegerTy() && dstTy->isFloatingPointTy()) {
+            return builder->CreateSIToFP(val, dstTy, "as.sitofp");
+        }
+        // Pointer ↔ integer
+        if (srcTy->isPointerTy() && dstTy->isIntegerTy())
+            return builder->CreatePtrToInt(val, dstTy, "as.ptrtoint");
+        if (srcTy->isIntegerTy() && dstTy->isPointerTy())
+            return builder->CreateIntToPtr(val, dstTy, "as.inttoptr");
+        // Fallback: bitcast
+        return builder->CreateBitCast(val, dstTy, "as.bitcast");
+    }
     // --- Compile-time string constant folding (recursive) ---
     if (expr->op == "+") {
         std::string folded;

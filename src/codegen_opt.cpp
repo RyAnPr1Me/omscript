@@ -4582,7 +4582,9 @@ void CodeGenerator::optimizeOptMaxFunctions() {
             for (auto& arg : func.args()) {
                 if (arg.getType()->isPointerTy()) {
                     func.addParamAttr(argIdx, llvm::Attribute::NoAlias);
+#if LLVM_VERSION_MAJOR < 20
                     func.addParamAttr(argIdx, llvm::Attribute::NoCapture);
+#endif
                     func.addParamAttr(argIdx, llvm::Attribute::NonNull);
                 }
                 ++argIdx;
@@ -5011,7 +5013,9 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // expected to run millions of times gets a higher bonus than one expected to
     // run once.  Running this before the inliner gives the cost model more
     // accurate hotness data, leading to better inlining decisions.
+#if LLVM_VERSION_MAJOR < 20
     llvm::SyntheticCountsPropagation().run(*module, MAMMax);
+#endif
     // Collect non-OPTMAX functions and temporarily mark them noinline so the
     // Round 1.5 inliner cannot pull OPTMAX callees into them.
     llvm::SmallVector<llvm::Function*, 16> tempNoInline;

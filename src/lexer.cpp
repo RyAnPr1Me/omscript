@@ -65,7 +65,8 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"stage",    TokenType::STAGE},
     {"global",   TokenType::GLOBAL},
     {"atomic",   TokenType::ATOMIC},
-    {"volatile", TokenType::VOLATILE}};
+    {"volatile", TokenType::VOLATILE},
+    {"type",     TokenType::TYPE}};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] [[gnu::cold]] static void lexError(const std::string& msg, int ln, int col) {

@@ -125,13 +125,25 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             const unsigned numElems = vecTy->getNumElements();
             llvm::Type* elemTy = vecTy->getElementType();
 
-            if (arrExpr->elements.size() != numElems) {
+            if (arrExpr->elements.size() == 1) {
+                // Single element: broadcast to all lanes
+                llvm::Value* elem = generateExpression(arrExpr->elements[0].get());
+                elem = convertToVectorElement(elem, elemTy);
+                llvm::Value* vec = llvm::UndefValue::get(vecTy);
+                vec = builder->CreateInsertElement(vec, elem,
+                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "simd.broadcast");
+                vec = builder->CreateShuffleVector(vec, llvm::UndefValue::get(vecTy),
+                    llvm::ConstantAggregateZero::get(
+                        llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*context), numElems)),
+                    "simd.splat");
+                initValue = vec;
+            } else if (arrExpr->elements.size() != numElems) {
                 codegenError("SIMD vector type requires exactly " + std::to_string(numElems) +
-                                 " elements, but " + std::to_string(arrExpr->elements.size()) +
+                                 " elements (or 1 to broadcast), but " +
+                                 std::to_string(arrExpr->elements.size()) +
                                  " provided",
                              stmt);
-            }
-
+            } else {
             // Start with an undef vector and insert each element.
             llvm::Value* vec = llvm::UndefValue::get(vecTy);
             for (unsigned i = 0; i < numElems; ++i) {
@@ -141,6 +153,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), i), "simd.ins");
             }
             initValue = vec;
+            }
         } else {
             // Check if this array literal is eligible for stack allocation.
             bool useStackAlloc = false;
@@ -3329,6 +3342,35 @@ llvm::Value* CodeGenerator::generateReborrowExpr(ReborrowExpr* expr) {
 void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
     llvm::Value* alloca = nullptr;
     std::string varName;
+
+    if (stmt->addrExpr) {
+        // Expression-style prefetch: prefetch(expr) — evaluate the expression
+        // and emit llvm.prefetch on the resulting value (treated as a pointer
+        // or array base).  No variable is created, no lifetime tracking needed.
+        llvm::Value* addrVal = generateExpression(stmt->addrExpr.get());
+        if (!addrVal) return;
+        // Convert to pointer if needed (e.g. array base is an i64 holding a ptr)
+        llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* ptr;
+        if (addrVal->getType()->isPointerTy()) {
+            ptr = addrVal;
+        } else {
+            ptr = builder->CreateIntToPtr(addrVal, ptrTy, "pf.ptr");
+        }
+        const int32_t locality = stmt->hintHot ? 3 : 2;
+        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
+            module.get(), llvm::Intrinsic::prefetch,
+            {ptrTy});
+        auto* pfCall = builder->CreateCall(prefetchFn, {
+            ptr,
+            builder->getInt32(0),          // read prefetch
+            builder->getInt32(locality),   // temporal locality
+            builder->getInt32(1)           // data cache
+        });
+        pfCall->setMetadata("omscript.memory_prefetch",
+            llvm::MDNode::get(*context, {}));
+        return;
+    }
 
     if (stmt->varDecl) {
         // Prefetch with variable declaration: generate the VarDecl first.

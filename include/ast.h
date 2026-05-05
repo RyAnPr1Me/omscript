@@ -793,6 +793,11 @@ class PrefetchStmt : public Statement {
     /// For prefetch with variable declaration.
     std::unique_ptr<VarDecl> varDecl;
 
+    /// For expression-style prefetch: `prefetch(expr)` — evaluates the
+    /// expression and prefetches the resulting address.  When set, varName
+    /// and varDecl are empty/null.
+    std::unique_ptr<Expression> addrExpr;
+
     /// Attribute hints.
     bool hintHot = false;
     bool hintImmut = false;
@@ -810,6 +815,10 @@ class PrefetchStmt : public Statement {
     PrefetchStmt(std::unique_ptr<VarDecl> decl, bool hot, bool immut, int64_t offset = 0)
         : Statement(ASTNodeType::PREFETCH_STMT), varDecl(std::move(decl)),
           hintHot(hot), hintImmut(immut), offsetBytes(offset) {}
+
+    /// Constructor for expression-style prefetch(expr).
+    explicit PrefetchStmt(std::unique_ptr<Expression> addr, int64_t offset = 0)
+        : Statement(ASTNodeType::PREFETCH_STMT), addrExpr(std::move(addr)), offsetBytes(offset) {}
 };
 
 /// `freeze x;` — marks variable `x` immutable for the rest of its lifetime.

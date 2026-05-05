@@ -1750,6 +1750,14 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "PARALLEL";
     case omscript::TokenType::REBORROW:
         return "REBORROW";
+    case omscript::TokenType::GLOBAL:
+        return "GLOBAL";
+    case omscript::TokenType::ATOMIC:
+        return "ATOMIC";
+    case omscript::TokenType::VOLATILE:
+        return "VOLATILE";
+    case omscript::TokenType::TYPE:
+        return "TYPE";
     }
     return "UNKNOWN";
 }

@@ -47,6 +47,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 
 namespace omscript {
 
@@ -202,8 +203,6 @@ class Program;              // forward (AST)
 struct Expression;          // forward
 struct Statement;           // forward
 struct FunctionDecl;        // forward
-
-#include <unordered_map>
 
 class WidthAnalyzer {
 public:

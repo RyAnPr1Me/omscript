@@ -146,6 +146,14 @@ class Parser {
     /// Known struct names for parsing struct literals.
     std::unordered_set<std::string> structNames_;
 
+    /// Compile-time constants defined by top-level `comptime { const X: T = val; }` blocks.
+    /// Used to resolve constant references in type annotations (@loop(unroll=N), u64x{N}, etc.)
+    std::unordered_map<std::string, long long> comptimeConstants_;
+
+    /// Type aliases defined by top-level `type X = Y` declarations.
+    /// Used to resolve type names in variable declarations and function signatures.
+    std::unordered_map<std::string, std::string> typeAliases_;
+
     /// Custom operator symbols registered from struct operator definitions.
     /// Used by tryMatchCustomOperator() to recognize multi-token operators
     /// (e.g. "<=>" defined as fn operator<=>(other: T)) at expression-parse time.
