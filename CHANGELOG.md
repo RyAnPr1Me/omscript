@@ -5,6 +5,36 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.1] - 2026-05-04
+
+### Added
+
+- **`@align(N)` / `@align()` — full-body alignment** (`include/ast.h`, `src/parser.cpp`, `src/codegen.cpp`):
+  - `@align(N)` aligns the function entry point to exactly N bytes (power-of-two required).
+  - `@align()` (no argument, sentinel `hintAlign = -1`) selects **cache-line-optimal alignment (64 bytes)** for the function entry point AND every local variable `alloca` emitted in the function body. This maximises cache locality for hot functions.
+  - Default (no annotation): 16-byte entry alignment at O2+; 32-byte for `@hot` functions.
+
+- **`@speculatable` function annotation** (`include/ast.h`, `src/parser.cpp`, `src/codegen.cpp`):
+  - Adds LLVM `Speculatable` attribute to the generated function.
+  - Allows the optimizer to hoist or speculate calls across branches and into loop preheaders.
+  - Safe only when the function has no observable side effects, does not trap, and does not read/write memory visible to callers.
+  - Strongest when combined with `@pure`: `@speculatable @pure fn ...`
+
+- **`@repr(...)` struct layout annotation** (`include/ast.h`, `include/parser.h`, `src/parser.cpp`, `include/codegen.h`, `src/codegen.cpp`, `src/codegen_stmt.cpp`):
+  - `@repr(C)` — stable, ABI-compatible C layout (fields in declaration order, natural alignment on the struct's `alloca`).
+  - `@repr(packed)` — minimal memory, no padding (`isPacked = true` LLVM StructType).
+  - `@repr(align(N))` — force the struct's `alloca` alignment to N bytes.
+  - `@repr(auto)` — compiler optimizes layout freely (default, equivalent to no annotation).
+  - `@repr(soa)` — structure-of-arrays hint (recorded for future layout passes).
+  - Parsed immediately before the `struct` keyword at the top level.
+  - Stored in `StructDecl::repr` (new `StructRepr` enum in `ast.h`) and `StructDecl::reprAlignN`.
+
+- **Documentation** (`LANGUAGE_REFERENCE.md`):
+  - Added `@align(N)` / `@align()` section (§6.6).
+  - Added `@speculatable` section (§6.6).
+  - Added `@repr(...)` section (§4.4.6 and §10.5).
+  - Added all previously undocumented annotations to Additional Annotations (§6.6): `@noreturn`, `@restrict`, `@noalias`, `@nounwind`, `@const_eval`, `@minsize`, `@optnone`, `@parallel`, `@noparallel`, `@nounroll`.
+
 ## [4.3.0] - 2026-05-04
 
 ### Added

@@ -1268,6 +1268,57 @@ fn main() {
 }
 ```
 
+#### `@repr(...)` — Struct Layout Control
+
+Placed immediately before `struct`, `@repr(...)` controls the memory layout of the struct's fields:
+
+| Annotation | Effect |
+|---|---|
+| `@repr(C)` | Stable, ABI-compatible C layout — fields in declaration order with natural alignment. Use for FFI interoperability. |
+| `@repr(packed)` | Minimal memory — no padding bytes inserted between fields. |
+| `@repr(align(N))` | Force the struct's alloca to be at least `N`-byte aligned (N must be a power of two). |
+| `@repr(auto)` | Compiler optimizes layout freely (default). |
+| `@repr(soa)` | Structure-of-arrays layout hint — recorded for future layout passes. |
+
+```omscript
+@repr(C)
+struct FFIPoint {
+    x: i32,
+    y: i32,
+}
+
+@repr(packed)
+struct Wire {
+    header: i8,
+    payload: i32,
+}
+
+@repr(align(64))
+struct CacheLine {
+    value: int,
+}
+
+@repr(auto)
+struct AutoLayout {
+    a: int,
+    b: int,
+}
+
+@repr(soa)
+struct Particle {
+    px: float,
+    py: float,
+    pz: float,
+}
+```
+
+**Codegen details**:
+- `@repr(packed)` → `isPacked = true` on the LLVM StructType (no inter-field padding)
+- `@repr(C)` → fields in declaration order; `alloca` aligned to the target ABI alignment of the struct type
+- `@repr(align(N))` → `alloca` alignment set to `N` bytes
+- `@repr(auto)` → same as the default (compiler may reorder cold fields for locality at O2+)
+- `@repr(soa)` → hint recorded; actual SoA transformation is applied by future layout passes
+
 #### 4.4.7 Enum Type
 
 **Syntax**: `enum Name { VARIANT1, VARIANT2 = value, ... }`
@@ -1992,7 +2043,72 @@ fn factorial_tail(n: int, acc: int) -> int {
 
 **`@novectorize`**: Opposite of `@vectorize` — disables auto-vectorization for this function.
 
+**`@nounroll`**: Disables loop unrolling inside this function.
+
 **`@unroll`**: Requests loop unrolling (may combine with `@vectorize`). Also available as a per-loop annotation (see §8.16).
+
+**`@noreturn`**: Declares that the function never returns (e.g., it calls `exit()` or throws unconditionally). Emits LLVM `noreturn` attribute. Enables dead-code elimination after call sites.
+
+**`@restrict`**: Asserts that pointer parameters do not alias each other (LLVM `noalias` on all pointer arguments). Equivalent to C `restrict` on every pointer parameter.
+
+**`@noalias`**: Same as `@restrict` — annotates all pointer parameters as non-aliasing.
+
+**`@nounwind`**: Declares that the function never throws an exception or calls `unwind`. Enables more aggressive inlining and frame-omission.
+
+**`@const_eval`**: Marks the function as a compile-time-evaluable constant function. The optimizer attempts to fold calls at compile time when all arguments are constants.
+
+**`@minsize`**: Requests minimum code-size optimization (LLVM `minsize` + `optsize` attributes). Trades runtime speed for smaller binary footprint.
+
+**`@optnone`**: Completely disables all optimizations for this function. Useful for debugging generated code.
+
+**`@parallel`**: Hints that loops in this function may be parallelized across threads.
+
+**`@noparallel`**: Prevents loop parallelization in this function.
+
+#### `@align` — Function and Body Alignment
+
+`@align(N)` aligns the function entry point to exactly `N` bytes (must be a power of two).
+
+`@align()` (no argument) selects **cache-line-optimal alignment** (64 bytes) for the function entry point AND aligns every local variable alloca in the function body to 64 bytes, maximising cache locality.
+
+```omscript
+@align(16)
+fn hot_loop(x: int) -> int {
+    return x * 2;
+}
+
+@align()
+fn cache_friendly(arr: int[], n: int) -> int {
+    // All local variables are 64-byte cache-line aligned.
+    var sum: int = 0;
+    for (i: int in 0...n) {
+        sum = sum + arr[i];
+    }
+    return sum;
+}
+```
+
+**Sentinels**:
+- `hintAlign = 0` — not set (uses optimization-level default: 16 bytes at O2+, 32 for `@hot`)
+- `hintAlign = N` (N > 0) — exact alignment: function entry only
+- `hintAlign = -1` — auto/cache-line: aligns function entry and ALL allocas to 64 bytes
+
+**Effect**: Improves I-cache density for hot functions; 64-byte alignment prevents false-sharing between cache lines. At O2+ the default is 16 bytes; `@hot` uses 32 bytes.
+
+#### `@speculatable` — Speculatable Function
+
+Marks the function as having no observable side effects, allowing LLVM to **hoist or speculate calls** across branches and into loop preheaders.
+
+```omscript
+@speculatable @pure
+fn square(x: int) -> int {
+    return x * x;
+}
+```
+
+**Effect**: Adds LLVM `Speculatable` attribute. The optimizer may execute the call even on paths that are not reached, provided it cannot cause undefined behaviour. Only safe when the function is truly free of side effects (no I/O, no global mutation, no trapping operations).
+
+**Combine with `@pure`** for the strongest optimization signal: `@pure` proves read-only semantics; `@speculatable` additionally enables speculative execution.
 
 ### 6.7 Method-Call Syntax — Universal Function Call Syntax (UFCS)
 
@@ -3324,6 +3440,15 @@ var x_val: int = p.x;  // 10
 
 ```omscript
 p.y = 25;  // p.y is now 25
+```
+
+**Layout control**: Prefix the struct declaration with `@repr(...)` to control memory layout (see §4.4.6).
+
+```omscript
+@repr(packed)
+struct Header { tag: i8, len: i32 }
+
+var h: Header = Header { tag: 1, len: 42 };
 ```
 
 ### 10.6 Enum Literals and Variant Access
