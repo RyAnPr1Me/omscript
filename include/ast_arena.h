@@ -109,7 +109,8 @@ public:
 
     // Movable.
     BumpAllocator(BumpAllocator&& o) noexcept
-        : slabs_(std::move(o.slabs_)), dtors_(std::move(o.dtors_)),
+        : slabs_(std::move(o.slabs_)), slabSizes_(std::move(o.slabSizes_)),
+          dtors_(std::move(o.dtors_)),
           cur_(o.cur_), end_(o.end_),
           bytesAllocated_(o.bytesAllocated_), bytesUsed_(o.bytesUsed_),
           nextSlabSize_(o.nextSlabSize_) {
@@ -122,7 +123,9 @@ public:
             reset();
             for (char* s : slabs_) ::free(s);
             slabs_.clear();
+            slabSizes_.clear();
             slabs_ = std::move(o.slabs_);
+            slabSizes_ = std::move(o.slabSizes_);
             dtors_ = std::move(o.dtors_);
             cur_ = o.cur_; end_ = o.end_;
             bytesAllocated_ = o.bytesAllocated_;
@@ -164,6 +167,38 @@ public:
         return reinterpret_cast<void*>(aligned);
     }
 
+    /// Try to recycle the last allocation if it was made with the same pointer
+    /// and size (LIFO discipline).  Returns true and reclaims the memory if
+    /// @p ptr was the most-recently-returned allocation from this arena and the
+    /// current slab still holds it; returns false and does nothing otherwise.
+    ///
+    /// This is an O(1) operation and enables stack-like reuse patterns:
+    ///   void* a = arena.alloc(n, align);
+    ///   // ... use a, then decide to discard ...
+    ///   arena.tryDealloc(a, n, align);  // bump pointer back: zero overhead
+    bool tryDealloc(void* ptr, size_t n, size_t align = alignof(std::max_align_t)) noexcept {
+        if (!ptr || n == 0 || slabs_.empty())
+            return false;
+        // The last allocation ended at cur_.  Back-compute where it started:
+        // cur_ = aligned_start + n, so aligned_start = cur_ - n.
+        const auto expectedStart = reinterpret_cast<uintptr_t>(cur_) - n;
+        if (reinterpret_cast<uintptr_t>(ptr) != expectedStart)
+            return false;
+        // Verify ptr is within the current slab for safety.
+        const auto slabBase = reinterpret_cast<uintptr_t>(slabs_.back());
+        if (expectedStart < slabBase || expectedStart >= reinterpret_cast<uintptr_t>(end_))
+            return false;
+        // Reclaim: roll the bump pointer back to where ptr was allocated from
+        // (before alignment padding).  We recompute the pre-aligned position by
+        // scanning backwards for the aligned position that preceded ptr within
+        // the slab.  Because alignment is always a power of two, the pre-aligned
+        // position is at most (align - 1) bytes before ptr.
+        (void)align; // alignment padding was already consumed; just roll back to ptr start.
+        cur_ = reinterpret_cast<char*>(expectedStart);
+        bytesUsed_ -= n;
+        return true;
+    }
+
     // ── Typed allocation ──────────────────────────────────────────────────
 
     /// Allocate and placement-new an object of type T.
@@ -203,13 +238,11 @@ public:
         for (auto it = dtors_.rbegin(); it != dtors_.rend(); ++it)
             (*it)();
         dtors_.clear();
-        // Reset bump pointer to the start of the first slab (if any).
+        // Reset bump pointer to the start of the first slab (if any), using
+        // the actual recorded size of that slab.
         if (!slabs_.empty()) {
             cur_ = slabs_[0];
-            // Keep all slabs; consolidate into first slab on next alloc if possible.
-            // Simple policy: point cur_/end_ to the start/end of the last slab.
-            // (Simpler to just point into the first one and let overflow re-use others.)
-            end_ = slabs_[0] + kInitialSlabSize;
+            end_ = slabs_[0] + slabSizes_[0];
         }
         bytesUsed_ = 0;
     }
@@ -227,6 +260,7 @@ public:
 
 private:
     std::vector<char*>              slabs_;
+    std::vector<size_t>             slabSizes_;  // actual allocated size of each slab
     std::vector<void(*)() noexcept> dtors_;  // registered object destructors (type-erased)
     char*  cur_              = nullptr;
     char*  end_              = nullptr;
@@ -241,6 +275,7 @@ private:
         if (!slab)
             throw std::bad_alloc{};
         slabs_.push_back(slab);
+        slabSizes_.push_back(sz);
         cur_ = slab;
         end_ = slab + sz;
         bytesAllocated_ += sz;

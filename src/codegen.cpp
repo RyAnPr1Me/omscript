@@ -4928,6 +4928,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     catchTable_.clear();
     catchDefaultBB_ = nullptr;
     uniqueStringVars_.clear();
+    // Reset per-function arena state.
+    funcArenaBaseAlloca_ = nullptr;
+    funcArenaUsedBytes_  = 0u;
+    arenaPtrVarNames_.clear();
+    lastAllocWasArena_   = false;
 
     // Expose all global variables inside this function so that reads,
     // writes, and assignments resolve through the normal namedValues path.
