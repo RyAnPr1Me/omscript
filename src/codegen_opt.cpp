@@ -237,9 +237,9 @@ static unsigned instructionUopCost(const llvm::Instruction& I,
         TTI.getInstructionCost(&I, llvm::TargetTransformInfo::TCK_RecipThroughput);
     if (!c.isValid()) return 1u;
 #if LLVM_VERSION_MAJOR >= 20
-    const int64_t v = static_cast<int64_t>(c.getValue());
+    const int64_t v = c.getValue();
 #else
-    const int64_t v = static_cast<int64_t>(c.getValue().value_or(1));
+    const int64_t v = c.getValue().value_or(1);
 #endif
     return v <= 0 ? 1u : static_cast<unsigned>(v);
 }
