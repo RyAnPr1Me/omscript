@@ -334,7 +334,7 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
 
     // ── Incremental-rebuild bookkeeping ──────────────────────────────────
     // Invariant: parents_.size() == classes_.size() (both grow together in
-    // add()), so every canonical ClassId is a valid index into parents_.
+    // EGraph::add()), so every canonical ClassId is a valid index into parents_.
     ++mergeCount_;
     markDirty(a);
     for (ClassId user : parents_[b]) {
