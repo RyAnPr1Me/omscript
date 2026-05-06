@@ -560,6 +560,8 @@ public:
     uint64_t arrayLength(CTArrayHandle h) const;
     /// Direct heap access (read-only).
     const CTHeap& heap() const noexcept { return heap_; }
+    /// Direct heap access (mutable).
+    CTHeap& heap() noexcept { return heap_; }
 
     // ── Specialisation key ────────────────────────────────────────────────
     std::string specializationKey(

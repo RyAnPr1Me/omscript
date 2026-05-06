@@ -67,7 +67,7 @@ class Preprocessor {
     /// methods (substituteMacros, validateMacroCall) can append soft
     /// diagnostics without giving up their const-correctness contract.
     mutable std::vector<std::string> warnings_;
-    int globalCounter_ = 0; ///< backing store for __COUNTER__
+    mutable int globalCounter_ = 0; ///< backing store for __COUNTER__
     /// Set of macros currently being expanded — used by substituteMacros
     /// to detect cycles like `#define A B` / `#define B A` and surface a
     /// proper diagnostic instead of silently truncating at the depth

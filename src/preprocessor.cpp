@@ -520,7 +520,7 @@ std::string Preprocessor::expandSimple(const std::string& name, int lineNo,
     if (name == "__LINE__")
         return std::to_string(lineNo);
     if (name == "__COUNTER__") {
-        return std::to_string(const_cast<Preprocessor*>(this)->globalCounter_++);
+        return std::to_string(globalCounter_++);
     }
 
     auto it = macros_.find(name);

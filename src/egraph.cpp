@@ -280,7 +280,7 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-[[gnu::hot]] ClassId EGraph::find(ClassId id) {
+[[gnu::hot]] ClassId EGraph::find(ClassId id) const {
     if (id >= parent_.size())
         llvm::report_fatal_error("EGraph::find: ClassId out of range");
     // Path compression
@@ -363,7 +363,7 @@ void EGraph::markDirty(ClassId id) {
 [[gnu::hot]] ENode EGraph::canonicalize(ENode node) const {
     for (auto& child : node.children) {
         // find() uses mutable path compression via mutable parent_
-        child = const_cast<EGraph*>(this)->find(child);
+        child = find(child);
     }
     return node;
 }
@@ -446,13 +446,13 @@ void EGraph::rebuild() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 [[gnu::hot]] bool EGraph::matchClass(const Pattern& pat, ClassId cls, Subst& subst) const {
-    cls = const_cast<EGraph*>(this)->find(cls);
+    cls = find(cls);
 
     if (pat.kind == Pattern::Kind::Wildcard) {
         auto it = subst.find(pat.wildcard);
         if (it != subst.end()) {
             // Wildcard already bound — check it matches the same class
-            return const_cast<EGraph*>(this)->find(it->second) == cls;
+            return find(it->second) == cls;
         }
         subst[pat.wildcard] = cls;
         return true;
@@ -539,7 +539,7 @@ std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
 
         for (ClassId raw : bucket) {
             if (raw >= classes_.size()) continue;
-            ClassId canonical = const_cast<EGraph*>(this)->find(raw);
+            ClassId canonical = find(raw);
             if (canonical >= matchSeen_.size()) continue;
             if (matchSeen_[canonical] == gen) continue;
             matchSeen_[canonical] = gen;
@@ -554,7 +554,7 @@ std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
 
     // ── Slow path: wildcard at root (degenerate; matches every class) ──
     for (ClassId i = 0; i < classes_.size(); ++i) {
-        ClassId canonical = const_cast<EGraph*>(this)->find(i);
+        ClassId canonical = find(i);
         if (canonical != i) continue; // Skip non-canonical
 
         Subst subst;
@@ -626,8 +626,8 @@ void EGraph::foldConstants(ClassId cls) {
                 }
 
                 if (valid) {
-                    ClassId constCls = const_cast<EGraph*>(this)->addConst(result);
-                    const_cast<EGraph*>(this)->merge(cls, constCls);
+                    ClassId constCls = addConst(result);
+                    merge(cls, constCls);
                     return;
                 }
             }
@@ -660,8 +660,8 @@ void EGraph::foldConstants(ClassId cls) {
                 }
 
                 if (valid) {
-                    ClassId constCls = const_cast<EGraph*>(this)->addConstF(result);
-                    const_cast<EGraph*>(this)->merge(cls, constCls);
+                    ClassId constCls = addConstF(result);
+                    merge(cls, constCls);
                     return;
                 }
             }
@@ -685,8 +685,8 @@ void EGraph::foldConstants(ClassId cls) {
                 default: valid = false; break;
                 }
                 if (valid) {
-                    ClassId constCls = const_cast<EGraph*>(this)->addConst(result);
-                    const_cast<EGraph*>(this)->merge(cls, constCls);
+                    ClassId constCls = addConst(result);
+                    merge(cls, constCls);
                     return;
                 }
             }
@@ -1173,7 +1173,14 @@ ENode EGraph::extract(ClassId root, const CostModel& model) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const EClass& EGraph::getClass(ClassId id) const {
-    id = const_cast<EGraph*>(this)->find(id);
+    id = find(id);
+    if (id >= classes_.size())
+        llvm::report_fatal_error("EGraph::getClass: ClassId out of range after find");
+    return classes_[id];
+}
+
+EClass& EGraph::getClass(ClassId id) {
+    id = find(id);
     if (id >= classes_.size())
         llvm::report_fatal_error("EGraph::getClass: ClassId out of range after find");
     return classes_[id];
@@ -1182,7 +1189,7 @@ const EClass& EGraph::getClass(ClassId id) const {
 size_t EGraph::numClasses() const {
     size_t count = 0;
     for (ClassId i = 0; i < classes_.size(); ++i) {
-        if (const_cast<EGraph*>(this)->find(i) == i) {
+        if (find(i) == i) {
             count++;
         }
     }
@@ -1198,7 +1205,7 @@ bool EGraph::atNodeLimit() const noexcept {
 }
 
 std::optional<long long> EGraph::getConstValue(ClassId cls) const {
-    cls = const_cast<EGraph*>(this)->find(cls);
+    cls = find(cls);
     if (cls >= classes_.size()) return std::nullopt;
     for (const auto& node : classes_[cls].nodes) {
         if (node.op == Op::Const) return node.value;
@@ -1207,7 +1214,7 @@ std::optional<long long> EGraph::getConstValue(ClassId cls) const {
 }
 
 std::optional<double> EGraph::getConstFValue(ClassId cls) const {
-    cls = const_cast<EGraph*>(this)->find(cls);
+    cls = find(cls);
     if (cls >= classes_.size()) return std::nullopt;
     for (const auto& node : classes_[cls].nodes) {
         if (node.op == Op::ConstF) return node.fvalue;
@@ -1220,25 +1227,25 @@ bool EGraph::areEquivalent(ClassId a, ClassId b) {
 }
 
 bool EGraph::isClassPowerOfTwo(ClassId cls) const {
-    cls = const_cast<EGraph*>(this)->find(cls);
+    cls = find(cls);
     if (cls >= classes_.size()) return false;
     return classes_[cls].isPowerOfTwo;
 }
 
 bool EGraph::isClassBoolean(ClassId cls) const {
-    cls = const_cast<EGraph*>(this)->find(cls);
+    cls = find(cls);
     if (cls >= classes_.size()) return false;
     return classes_[cls].isBoolean;
 }
 
 bool EGraph::isClassNonNeg(ClassId cls) const {
-    cls = const_cast<EGraph*>(this)->find(cls);
+    cls = find(cls);
     if (cls >= classes_.size()) return false;
     return classes_[cls].isNonNeg;
 }
 
 bool EGraph::hasVariable(ClassId cls, const std::string& name) const {
-    cls = const_cast<EGraph*>(this)->find(cls);
+    cls = find(cls);
     if (cls >= classes_.size()) return false;
     for (const auto& node : classes_[cls].nodes) {
         if (node.op == Op::Var && node.name == name) return true;
@@ -1247,7 +1254,7 @@ bool EGraph::hasVariable(ClassId cls, const std::string& name) const {
 }
 
 std::optional<Op> EGraph::getClassOp(ClassId cls) const {
-    cls = const_cast<EGraph*>(this)->find(cls);
+    cls = find(cls);
     if (cls >= classes_.size()) return std::nullopt;
     for (const auto& node : classes_[cls].nodes) {
         if (node.op != Op::Nop) return node.op;
@@ -12063,7 +12070,7 @@ std::vector<RewriteRule> getAllRules() {
         rule.guard = [prev](const EGraph& g, const Subst& s) -> bool {
             bool anyFloat = false;
             for (const auto& [name, cls] : s) {
-                ClassId c = const_cast<EGraph&>(g).find(cls);
+                ClassId c = g.find(cls);
                 if (c < g.numClasses() && g.getClass(c).isFloat) {
                     anyFloat = true;
                     break;
