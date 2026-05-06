@@ -133,7 +133,8 @@ inline const OptContract& getOptContract(AnnotationId id) {
         { "semantics(nounwind)",      false, false, false, false, false, false, false, false, false }, // SEM_NOUNWIND
         { "semantics(restrict)",      false, true,  false, false, false, false, false, false, false }, // SEM_RESTRICT
         { "semantics(const_eval)",    false, true,  false, false, false, true,  false, false, false }, // SEM_CONST_EVAL
-        // OPTMAX: WillReturn / NoSync / NoFree are *claimed* but require body proof before emitting.
+        // OPTMAX: WillReturn / NoSync / NoFree require body verification (proof)
+        // before the attribute is emitted — see requiresXxxProof fields.
         { "optmax",           false, true,  false, false, false, false, true,  true,  true  }, // OPTMAX
         { "<unknown>",        false, false, false, false, false, false, false, false, false }, // UNKNOWN
     };

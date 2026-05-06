@@ -4909,7 +4909,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
             // Scan for instructions that would invalidate each claimed attribute.
             bool hasSyncOp = false;
             bool hasFreeOp = false;
-            bool hasInfiniteLoopRisk = false; // conservative: any backedge w/o exit
+            bool hasInfiniteLoopRisk = false; // conservative: any self-backedge (block branching to itself)
             for (const llvm::BasicBlock& BB : func) {
                 for (const llvm::Instruction& I : BB) {
                     // NoSync: any atomic or fence instruction invalidates the claim.
@@ -4947,14 +4947,12 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                     const llvm::Instruction* term = BB.getTerminator();
                     if (term && !llvm::isa<llvm::ReturnInst>(term) &&
                         !llvm::isa<llvm::UnreachableInst>(term)) {
-                        // Check whether this is a backward branch (backedge) by
-                        // seeing if any successor dominates (or equals) this block.
-                        // We use a simple name-ordering heuristic: if a successor
-                        // has a lower BB number it is likely a backedge.
+                        // Conservative check: a block that branches unconditionally
+                        // to itself is an infinite self-loop.  We only check
+                        // succ == &BB here (not general back-edges) because a full
+                        // dominator-tree query would be too expensive at this point.
                         for (const llvm::BasicBlock* succ :
                              llvm::successors(&BB)) {
-                            // A block branching to itself is an unconditional
-                            // infinite loop.
                             if (succ == &BB) {
                                 hasInfiniteLoopRisk = true;
                                 break;

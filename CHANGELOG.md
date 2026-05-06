@@ -80,21 +80,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Codegen emits `llvm.loop.interleave.count = M` (width) and `llvm.loop.unroll.count = N` (depth) when both are set, giving a full 2-D register tile.
   - Verbose OPTMAX report (`--optmax-report`) now logs `loop.tileSizeN` alongside `loop.tileSize`.
 
-### Documentation (continued)
-
-- `LANGUAGE_REFERENCE.md` §4.4.6 — `@repr` table updated: SoA entry now documents access-group codegen; new `@repr(aos_to_soa)` row added.
-- `LANGUAGE_REFERENCE.md` §8 — New `@loop(tile=M)` / `@loop(tile=M, N)` section with 2-D tile explanation and matrix-multiply example.
-- `LANGUAGE_REFERENCE.md` §25.6 — New **Semantic layering model** section documenting the 4-layer compiler architecture (Syntax / Semantics / Optimization / Lowering), file assignments, and the known `nonNegValues_` layer-3/4 boundary violation to fix.
-- `tests/codegen_test.cpp`, `tests/parser_test.cpp` — All untyped struct syntax strings updated to typed fields (`x: i64`, `y: i64`, …) as part of the `--warn-untyped-fields` migration.
-
 ### Documentation
 
 - `LANGUAGE_REFERENCE.md` §3.1.1 — Added `#define` comptime migration note and table row for function-like macro note severity.
+- `LANGUAGE_REFERENCE.md` §4.4.6 — `@repr` table updated: SoA entry now documents access-group codegen; new `@repr(aos_to_soa)` row added.
 - `LANGUAGE_REFERENCE.md` §6.6 — Rewrote to include `@opt(...)` / `@semantics(...)` namespace tables and the inhibitor-wins conflict resolution rule.
+- `LANGUAGE_REFERENCE.md` §8 — New `@loop(tile=M)` / `@loop(tile=M, N)` section with 2-D tile explanation and matrix-multiply example.
 - `LANGUAGE_REFERENCE.md` §14.1–14.2 — Updated struct syntax to show typed fields; added W019 warning reference and migration guide.
 - `LANGUAGE_REFERENCE.md` §17 — Added §17.0 "Ownership philosophy and enforcement modes" documenting advisory vs strict, borrow error codes E015–E018, and CLI flags.
 - `LANGUAGE_REFERENCE.md` §24.3 — Added `--ownership=advisory/strict` and `--warn-untyped-fields` to CLI flag tables.
 - `LANGUAGE_REFERENCE.md` §25.2.3 — Added new `OptContract` internal documentation section.
+- `LANGUAGE_REFERENCE.md` §25.6 — New **Semantic layering model** section documenting the 4-layer compiler architecture (Syntax / Semantics / Optimization / Lowering), file assignments, and the known `nonNegValues_` layer-3/4 boundary violation to fix.
+- `tests/codegen_test.cpp`, `tests/parser_test.cpp` — All untyped struct syntax strings updated to typed fields (`x: i64`, `y: i64`, …) as part of the `--warn-untyped-fields` migration.
 
 
 
