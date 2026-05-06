@@ -1627,10 +1627,32 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                     builder->CreateCall(assumeFn, {isGeStart});
                 }
             }
-            // Upper bound: assume iter < end.  OmScript's for-loop semantics
-            llvm::Value* isLtEnd = builder->CreateICmpSLT(
-                iterVal, endVal, "iter.lt.end");
-            builder->CreateCall(assumeFn, {isLtEnd});
+            // Upper bound: do NOT emit assume(iter < end) here.
+            // The conditional branch at the loop header already guarantees
+            // iter < end when execution reaches the body.  Emitting an explicit
+            // assume(iter < end) inside the body would let LLVM use the backedge
+            // to infer iter < end holds at the loop header for *all* iterations,
+            // causing it to eliminate the loop-exit edge → infinite loop.
+            // Instead, attach !range metadata directly to the iterator load so
+            // LLVM understands the value range without touching loop structure.
+            if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(iterVal)) {
+                if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+                    int64_t lo = 0;
+                    if (auto* startCI2 = llvm::dyn_cast<llvm::ConstantInt>(startVal))
+                        lo = startCI2->getSExtValue();
+                    int64_t hi = endCI->getSExtValue(); // exclusive upper bound
+                    if (lo < hi) {
+                        llvm::Metadata* rangeMDs[] = {
+                            llvm::ConstantAsMetadata::get(
+                                llvm::ConstantInt::get(iterType, lo)),
+                            llvm::ConstantAsMetadata::get(
+                                llvm::ConstantInt::get(iterType, hi))
+                        };
+                        loadInst->setMetadata(llvm::LLVMContext::MD_range,
+                            llvm::MDNode::get(*context, rangeMDs));
+                    }
+                }
+            }
             // Track the alloca as producing non-negative values so that
             nonNegValues_.insert(iterAlloca);
 
@@ -1655,16 +1677,31 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                             llvm::Value* cond = builder->CreateICmpSGE(iv2, c, "iter.absi.lo");
                             builder->CreateCall(assumeFn, {cond});
                         }
+                        // Upper-bound CF-CTRE refinement: same risk as the plain
+                        // assume(iter < end) — do NOT emit assume(iter < hi+1)
+                        // inside the loop body.  Attach !range to the load instead.
                         if (!knowHi) {
-                            llvm::Value* c = llvm::ConstantInt::get(iterType, ivRange.hi + 1);
-                            llvm::Value* cond = builder->CreateICmpSLT(iv2, c, "iter.absi.hi");
-                            builder->CreateCall(assumeFn, {cond});
+                            if (auto* loadInst2 = llvm::dyn_cast<llvm::LoadInst>(iv2)) {
+                                int64_t lo2 = ivRange.lo;
+                                int64_t hi2 = ivRange.hi + 1; // exclusive
+                                if (lo2 < hi2) {
+                                    llvm::Metadata* rMDs[] = {
+                                        llvm::ConstantAsMetadata::get(
+                                            llvm::ConstantInt::get(iterType, lo2)),
+                                        llvm::ConstantAsMetadata::get(
+                                            llvm::ConstantInt::get(iterType, hi2))
+                                    };
+                                    loadInst2->setMetadata(llvm::LLVMContext::MD_range,
+                                        llvm::MDNode::get(*context, rMDs));
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     }
+
 
     // Compile-time bounds check elimination: for ascending for-loops starting
     if (stepKnownPositive && optimizationLevel >= OptimizationLevel::O1) {
@@ -3376,19 +3413,65 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
     std::string varName;
 
     if (stmt->addrExpr) {
-        // Expression-style prefetch: prefetch(expr) — evaluate the expression
-        // and emit llvm.prefetch on the resulting value (treated as a pointer
-        // or array base).  No variable is created, no lifetime tracking needed.
-        llvm::Value* addrVal = generateExpression(stmt->addrExpr.get());
-        if (!addrVal) return;
-        // Convert to pointer if needed (e.g. array base is an i64 holding a ptr)
+        // Expression-style prefetch: prefetch(expr)
+        //
+        // When expr is an array or string index (arr[i]), we must prefetch the
+        // MEMORY ADDRESS of that element — NOT load the element value and treat
+        // it as a pointer.  Hardware prefetch is a hint that never faults, so
+        // we also skip all bounds checking.  Computing the element address for
+        // an out-of-range index is harmless: the resulting GEP resolves to a
+        // virtual address that the CPU silently ignores.
+        //
+        // For any other expression form, fall back to evaluating it as a value
+        // (which is converted to a pointer via inttoptr if it's not already one).
         llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* ptr;
-        if (addrVal->getType()->isPointerTy()) {
-            ptr = addrVal;
-        } else {
-            ptr = builder->CreateIntToPtr(addrVal, ptrTy, "pf.ptr");
+        llvm::Value* ptr = nullptr;
+
+        if (stmt->addrExpr->type == ASTNodeType::INDEX_EXPR) {
+            auto* idxExpr = static_cast<IndexExpr*>(stmt->addrExpr.get());
+            llvm::Value* baseVal = generateExpression(idxExpr->array.get());
+            llvm::Value* idxVal  = generateExpression(idxExpr->index.get());
+            idxVal = toDefaultType(idxVal);
+
+            if (baseVal && baseVal->getType()->isVectorTy()) {
+                // SIMD vector indexing: there is no address to prefetch —
+                // the vector lives in a register.  Do nothing.
+                return;
+            }
+
+            if (baseVal) {
+                llvm::Value* basePtr = baseVal->getType()->isPointerTy()
+                    ? baseVal
+                    : builder->CreateIntToPtr(baseVal, ptrTy, "pf.base");
+
+                if (isStringExpr(idxExpr->array.get())) {
+                    // String: elements are raw bytes at basePtr[idx].
+                    // Use non-inbounds GEP so an OOB index does not trigger UB.
+                    ptr = builder->CreateGEP(llvm::Type::getInt8Ty(*context),
+                                             basePtr, idxVal, "pf.str.addr");
+                } else {
+                    // Array: layout is [length, elem0, elem1, ...] (all i64).
+                    // Element idx lives at basePtr[idx + 1].  Use non-inbounds
+                    // GEP: the hardware prefetch handles any OOB address safely.
+                    llvm::Value* dataPtr = builder->CreateGEP(
+                        getDefaultType(), basePtr,
+                        llvm::ConstantInt::get(getDefaultType(), 1), "pf.data");
+                    ptr = builder->CreateGEP(getDefaultType(), dataPtr,
+                                             idxVal, "pf.elem.addr");
+                }
+            }
         }
+
+        if (!ptr) {
+            // Non-index expression: evaluate normally and interpret the result
+            // as a pointer (matches the original semantics for non-array exprs).
+            llvm::Value* addrVal = generateExpression(stmt->addrExpr.get());
+            if (!addrVal) return;
+            ptr = addrVal->getType()->isPointerTy()
+                ? addrVal
+                : builder->CreateIntToPtr(addrVal, ptrTy, "pf.ptr");
+        }
+
         const int32_t locality = stmt->hintHot ? 3 : 2;
         llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
             module.get(), llvm::Intrinsic::prefetch,

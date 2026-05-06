@@ -2463,8 +2463,7 @@ llvm::Function* CodeGenerator::getOrEmitArrayGrowHelper() {
     // arg0 = old array ptr (transferred to realloc — not retained by caller)
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
-    // arg1 = new length (pure integer — not a pointer)
-    fn->addParamAttr(1, llvm::Attribute::NoCapture);
+    // arg1 = new length (pure integer — NoCapture does not apply to non-pointers)
     // Mark arg0 as the reallocated pointer so AA can track it across the call.
     fn->addParamAttr(0, llvm::Attribute::get(*context, llvm::Attribute::AllocatedPointer));
 
