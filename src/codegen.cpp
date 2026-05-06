@@ -2420,6 +2420,99 @@ llvm::Value* CodeGenerator::emitKeyHash(llvm::Value* key) {
     return builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// __omsc_array_grow(ptr %arr, i64 %newLen) -> ptr
+//
+// Cold, noinline outlined helper that performs the array growth path for push.
+// Moving this logic out of the inline push body ensures:
+//   1.  The push hot-path emits only a single cold branch + PHI + two stores —
+//       the ctlz/multiply/realloc chain no longer pollutes the loop body.
+//   2.  LLVM alias analysis is not confused by an inlined realloc whose
+//       inaccessibleOrArgMemOnly effect invalidates the full memory model.
+//   3.  The loop containing push becomes eligible for auto-vectorisation and
+//       other loop transformations that would otherwise be blocked by the
+//       dynamic-pointer PHI merged from a realloc result.
+//
+// The function computes the next power-of-2 capacity >= newLen + 1, enforces a
+// 16-slot minimum, then calls realloc and returns the new buffer pointer.
+// ─────────────────────────────────────────────────────────────────────────────
+llvm::Function* CodeGenerator::getOrEmitArrayGrowHelper() {
+    static constexpr const char* kName = "__omsc_array_grow";
+    if (auto* fn = module->getFunction(kName))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy  = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false);
+    auto* fn    = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage,
+                                         kName, module.get());
+
+    // Cold + noinline: LLVM will not re-inline this into the hot loop body.
+    fn->addFnAttr(llvm::Attribute::Cold);
+    fn->addFnAttr(llvm::Attribute::NoInline);
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    // The helper only reads/writes the array buffer and allocator state.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
+    // The returned pointer is the freshly (re)allocated buffer — it never
+    // aliases any other pointer visible to the caller.
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
+    // arg0 = old array ptr (transferred to realloc — not retained by caller)
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    // arg1 = new length (pure integer — not a pointer)
+    fn->addParamAttr(1, llvm::Attribute::NoCapture);
+    // Mark arg0 as the reallocated pointer so AA can track it across the call.
+    fn->addParamAttr(0, llvm::Attribute::get(*context, llvm::Attribute::AllocatedPointer));
+
+    auto savedIP = builder->saveIP();
+    auto* entryBB = llvm::BasicBlock::Create(*context, "entry", fn);
+    builder->SetInsertPoint(entryBB);
+
+    llvm::Value* arrArg    = fn->getArg(0);
+    llvm::Value* newLenArg = fn->getArg(1);
+    arrArg->setName("arr");
+    newLenArg->setName("newLen");
+
+    llvm::Value* one     = llvm::ConstantInt::get(i64Ty, 1);
+    llvm::Value* eight   = llvm::ConstantInt::get(i64Ty, 8);
+    llvm::Value* minSlot = llvm::ConstantInt::get(i64Ty, 16);
+
+    // slots = newLen + 1  (one slot for the length header)
+    llvm::Value* slots   = builder->CreateAdd(newLenArg, one, "slots",
+                                              /*HasNUW=*/true, /*HasNSW=*/true);
+    // nextPow2 via ctlz: cap = 1 << (64 - ctlz(slots - 1))
+    llvm::Value* slotsM1 = builder->CreateSub(slots, one, "pm1",
+                                              /*HasNUW=*/true, /*HasNSW=*/true);
+    llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(),
+        llvm::Intrinsic::ctlz, {i64Ty});
+    // is_zero_poison=true: newLen >= 1 here, so slots >= 2, slotsM1 >= 1.
+    llvm::Value* lz  = builder->CreateCall(ctlzFn,
+        {slotsM1, llvm::ConstantInt::getTrue(*context)}, "lz");
+    llvm::Value* shift = builder->CreateSub(
+        llvm::ConstantInt::get(i64Ty, 64), lz, "shift");
+    llvm::Value* cap = builder->CreateShl(one, shift, "cap",
+                                          /*HasNUW=*/true, /*HasNSW=*/true);
+    // Enforce minimum capacity of 16 slots.
+    llvm::Value* useMin   = builder->CreateICmpSLT(cap, minSlot, "usemin");
+    llvm::Value* finalCap = builder->CreateSelect(useMin, minSlot, cap, "finalcap");
+    llvm::Value* newBytes = builder->CreateMul(finalCap, eight, "bytes",
+                                               /*HasNUW=*/true, /*HasNSW=*/true);
+
+    llvm::CallInst* newBuf = builder->CreateCall(
+        getOrDeclareRealloc(), {arrArg, newBytes}, "newbuf");
+    // Propagate the noalias + nonnull guarantees on the call site too.
+    newBuf->addRetAttr(llvm::Attribute::NoAlias);
+    newBuf->addRetAttr(llvm::Attribute::NonNull);
+
+    builder->CreateRet(newBuf);
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
 /// Helper: set common attributes on emitted map functions.
 static void setHashMapFnAttrs(llvm::Function* fn) {
     fn->setLinkage(llvm::Function::InternalLinkage);

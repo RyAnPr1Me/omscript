@@ -1142,6 +1142,12 @@ class CodeGenerator {
     llvm::Function* getOrDeclareHttpRequest();
     llvm::Function* getOrDeclareHttpGetStatus();
 
+    // Array grow helper: cold, noinline outlined function for the push growth path.
+    // Signature: ptr @__omsc_array_grow(ptr %arr, i64 %newLen)
+    // Moves all ctlz/realloc code out of the inlined push hot-path so LLVM sees a
+    // clean loop body that it can vectorize.
+    llvm::Function* getOrEmitArrayGrowHelper();
+
     // Hash-table map runtime helpers: open-addressing, linear probing, power-of-2 capacity, FNV-1a.
     // Layout (all i64): [capacity, size, hash0, key0, val0, ...]; empty=0, tombstone=1, occupied≥2.
     llvm::Function* getOrEmitHashMapNew();
