@@ -3962,7 +3962,10 @@ void CodeGenerator::runOptimizationPasses() {
             superConfig.synthesis.costThreshold = 0.9;
         }
         // Unified cost model: when a hardware profile is available, install a
-        if (hgoe::shouldActivate(hgoe::HGOEConfig{marchCpu_, mtuneCpu_})) {
+        hgoe::HGOEConfig hgoeProbeConfig;
+        hgoeProbeConfig.marchCpu = marchCpu_;
+        hgoeProbeConfig.mtuneCpu = mtuneCpu_;
+        if (hgoe::shouldActivate(hgoeProbeConfig)) {
             std::string resolvedCpu = marchCpu_.empty() ? mtuneCpu_ : marchCpu_;
             if (resolvedCpu == "native")
                 resolvedCpu = llvm::sys::getHostCPUName().str();
