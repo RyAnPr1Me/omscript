@@ -1627,75 +1627,42 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                     builder->CreateCall(assumeFn, {isGeStart});
                 }
             }
-            // Upper bound: do NOT emit assume(iter < end) here.
-            // The conditional branch at the loop header already guarantees
-            // iter < end when execution reaches the body.  Emitting an explicit
-            // assume(iter < end) inside the body would let LLVM use the backedge
-            // to infer iter < end holds at the loop header for *all* iterations,
-            // causing it to eliminate the loop-exit edge → infinite loop.
-            // Instead, attach !range metadata directly to the iterator load so
-            // LLVM understands the value range without touching loop structure.
-            if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(iterVal)) {
-                if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
-                    int64_t lo = 0;
-                    if (auto* startCI2 = llvm::dyn_cast<llvm::ConstantInt>(startVal))
-                        lo = startCI2->getSExtValue();
-                    int64_t hi = endCI->getSExtValue(); // exclusive upper bound
-                    if (lo < hi) {
-                        llvm::Metadata* rangeMDs[] = {
-                            llvm::ConstantAsMetadata::get(
-                                llvm::ConstantInt::get(iterType, lo)),
-                            llvm::ConstantAsMetadata::get(
-                                llvm::ConstantInt::get(iterType, hi))
-                        };
-                        loadInst->setMetadata(llvm::LLVMContext::MD_range,
-                            llvm::MDNode::get(*context, rangeMDs));
-                    }
-                }
-            }
+            // Upper bound: do NOT emit any upper-bound hint (assume OR !range) here.
+            //
+            // Both `assume(iter < end)` and `!range [0, end)` on a loop-body load
+            // of the induction variable cause LLVM 18's IndVarSimplify to conclude
+            // the exit condition is unreachable and eliminate the loop-exit edge,
+            // producing an infinite loop.  The mechanism:
+            //   - `!range [0, N)` on the IV body load tells IndVarSimplify that
+            //     the IV is ALWAYS < N while the body executes.
+            //   - IndVarSimplify interprets this as the loop invariant `iv < N`.
+            //   - It then generates `assume(iv ult N)` / `assume(exitcond.not)`
+            //     at the header, then removes the exit branch as dead.
+            //
+            // The conditional branch at the loop header already gives LLVM
+            // all the range information it needs structurally; no extra hint
+            // is required or safe here.
+
             // Track the alloca as producing non-negative values so that
             nonNegValues_.insert(iterAlloca);
 
             // ── CF-CTRE Phase 9 IV range refinement ────────────────────
+            // Only emit lower-bound refinements.  Upper-bound hints carry
+            // the same infinite-loop risk as described above.
             if (optCtx_) {
                 CTInterval ivRange = optCtx_->getExitRange(
                     builder->GetInsertBlock()->getParent()->getName().str(),
                     stmt->iteratorVar);
-                // Only inject if the abstract range is tighter than what we
-                // already know from the start/end IR values.
                 if (ivRange.isRange() && !ivRange.isTop() && ivRange.lo >= 0) {
                     llvm::ConstantInt* cLo = llvm::dyn_cast<llvm::ConstantInt>(startVal);
-                    llvm::ConstantInt* cHi = llvm::dyn_cast<llvm::ConstantInt>(endVal);
                     const bool knowLo = cLo && cLo->getSExtValue() == ivRange.lo;
-                    const bool knowHi = cHi && cHi->getSExtValue() == ivRange.hi + 1;
-                    if (!knowLo || !knowHi) {
+                    if (!knowLo) {
                         // Reload the IV (same block — GVN will dedup the load).
                         llvm::Value* iv2 = builder->CreateAlignedLoad(
                             iterType, iterAlloca, llvm::MaybeAlign(8), "iter.absi");
-                        if (!knowLo) {
-                            llvm::Value* c = llvm::ConstantInt::get(iterType, ivRange.lo);
-                            llvm::Value* cond = builder->CreateICmpSGE(iv2, c, "iter.absi.lo");
-                            builder->CreateCall(assumeFn, {cond});
-                        }
-                        // Upper-bound CF-CTRE refinement: same risk as the plain
-                        // assume(iter < end) — do NOT emit assume(iter < hi+1)
-                        // inside the loop body.  Attach !range to the load instead.
-                        if (!knowHi) {
-                            if (auto* loadInst2 = llvm::dyn_cast<llvm::LoadInst>(iv2)) {
-                                int64_t lo2 = ivRange.lo;
-                                int64_t hi2 = ivRange.hi + 1; // exclusive
-                                if (lo2 < hi2) {
-                                    llvm::Metadata* rMDs[] = {
-                                        llvm::ConstantAsMetadata::get(
-                                            llvm::ConstantInt::get(iterType, lo2)),
-                                        llvm::ConstantAsMetadata::get(
-                                            llvm::ConstantInt::get(iterType, hi2))
-                                    };
-                                    loadInst2->setMetadata(llvm::LLVMContext::MD_range,
-                                        llvm::MDNode::get(*context, rMDs));
-                                }
-                            }
-                        }
+                        llvm::Value* c = llvm::ConstantInt::get(iterType, ivRange.lo);
+                        llvm::Value* cond = builder->CreateICmpSGE(iv2, c, "iter.absi.lo");
+                        builder->CreateCall(assumeFn, {cond});
                     }
                 }
             }
@@ -1762,6 +1729,23 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // Must be an alloca (local variable), not a parameter forwarded
             // as an integer (those come via function arguments).
             if (!llvm::isa<llvm::AllocaInst>(it->second)) continue;
+            // Skip SIMD vector allocas (e.g. `var v: u64x2`).  SIMD vectors
+            // are stack-allocated VALUE TYPES with no length header; treating
+            // their storage as a heap-array pointer (and loading a "length"
+            // through the first element as a pointer) produces a bogus
+            // `assume(end <= vec[0])` that IPO/IndVarSimplify can exploit to
+            // eliminate the caller's loop-exit edge.
+            {
+                auto* AI = llvm::cast<llvm::AllocaInst>(it->second);
+                llvm::Type* allocTy = AI->getAllocatedType();
+                if (allocTy->isVectorTy() || allocTy->isArrayTy()) continue;
+                // Also skip non-pointer-width integers: OmScript heap arrays are
+                // stored as i64 (pointer-sized) allocas; allocas of other scalar
+                // widths are primitive value variables, not arrays.
+                if (allocTy->isIntegerTy() &&
+                    allocTy->getIntegerBitWidth() !=
+                        module->getDataLayout().getPointerSizeInBits()) continue;
+            }
 
             // Load the array pointer from the alloca (once, before the loop).
             llvm::Value* arrRaw = builder->CreateAlignedLoad(
