@@ -706,7 +706,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 // 2. Constant integer: pre-populate constIntFolds_ for variables
                 //    whose value was proven constant by the SIR range analysis.
                 //    IMPORTANT: only propagate for immutable (const) variables.
-                //    The SIR constIntVal is also set for mutable vars initialised
+                //    The SIR constIntVal is also set for mutable vars initialized
                 //    with a literal (so the builder can reason about init-time
                 //    ranges), but seeding constIntFolds_ for mutable vars would
                 //    prevent later stores from being seen by identifier loads.
