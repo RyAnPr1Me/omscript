@@ -5,7 +5,74 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.3.1] - 2026-05-04
+## [4.5.0] - 2026-05-06
+
+### Added
+
+- **`include/opt_contracts.h`** — Formalized optimization annotation contracts. Single source of truth for every annotation's asserted properties and LLVM attribute eligibility (`include/opt_contracts.h`):
+  - `AnnotationId` enum covering all recognized annotations (`OPT_INLINE`, `OPT_NOINLINE`, `OPT_HOT`, `OPT_COLD`, `OPT_VECTORIZE`, `OPT_NOVECTORIZE`, `SEM_PURE`, `SEM_SPECULATABLE`, `OPTMAX`, …).
+  - `OptContract` struct with `assertsWillReturn`, `assertsNoSync`, `assertsNoFree`, `assertsReadOnly`, and `requiresXxxProof` flags.
+  - `getOptContract(AnnotationId)` — zero-allocation static lookup table.
+  - `annotationDominates(a, b)` / `annotationsConflict(a, b)` / `resolveConflict(a, b)` — inhibitor-wins precedence predicates used by the parser and codegen.
+
+- **`@opt(...)` unified annotation namespace** (`src/parser.cpp`). New compound form `@opt(key, key=value, ...)` is accepted alongside all existing single-word annotations. Accepted keys: `inline`, `noinline`, `hot`, `cold`, `vectorize`, `novectorize`, `unroll`, `nounroll`, `parallel`, `noparallel`, `flatten`, `minsize`, `align=N`. Existing flat forms remain valid.
+
+  ```omscript
+  // New — preferred for new code
+  @opt(inline, hot, align=64)
+  fn fast_fn(x: i64) -> i64 { return x * 2; }
+
+  // Old — still valid
+  @inline @hot @align(64)
+  fn fast_fn(x: i64) -> i64 { return x * 2; }
+  ```
+
+- **`@semantics(...)` annotation namespace** (`src/parser.cpp`). New compound form `@semantics(key, ...)` for behavioral contracts. Accepted keys: `pure`, `speculatable`, `noreturn`, `nounwind`, `restrict`, `noalias`, `const_eval`.
+
+  ```omscript
+  @semantics(pure, nounwind)
+  fn clamp(x: i64, lo: i64, hi: i64) -> i64 { ... }
+  ```
+
+- **Annotation conflict detection** (`src/parser.cpp`). The parser now warns and enforces the inhibitor-wins rule for all conflicting annotation pairs:
+  - `@inline` + `@noinline` → `@noinline` wins
+  - `@hot` + `@cold` → `@cold` wins
+  - `@vectorize` + `@novectorize` → `@novectorize` wins
+  - `@unroll` + `@nounroll` → `@nounroll` wins
+  - `@parallel` + `@noparallel` → `@noparallel` wins
+  - `@optnone` + any accelerator → `@optnone` wins
+
+- **`--warn-untyped-fields`** CLI flag and `W019` diagnostic (`include/diagnostic.h`, `include/parser.h`, `src/parser.cpp`, `include/compiler.h`, `src/compiler.cpp`, `src/main.cpp`):
+  - Emits `warning [W019]` for every struct field declared without a type annotation (e.g. `struct Foo { x, y }` instead of `struct Foo { x: i64, y: i64 }`).
+  - Migration aid: untyped fields default to `i64` at codegen. Typed fields have deterministic ABI.
+  - Disabled by default; enable with `--warn-untyped-fields`.
+
+- **`--ownership=strict` / `--ownership=advisory`** CLI flags (`include/compiler.h`, `include/codegen.h`, `include/opt_orchestrator.h`, `src/opt_orchestrator.cpp`, `src/main.cpp`):
+  - **Advisory mode** (new default): borrow-checker violations E015–E018 are emitted as warnings. Compilation continues. Ownership annotations are treated primarily as alias-analysis and optimizer hints.
+  - **Strict mode** (`--ownership=strict`): restores original behavior — borrow-checker violations are fatal errors.
+
+- **Preprocessor comptime nudge** (`src/preprocessor.cpp`):
+  - When a function-like macro (`#define FOO(x) ...`) is defined, the preprocessor emits a `note:` pointing to `comptime fn FOO(...) { ... }` as a typed, optimizer-transparent alternative.
+  - Object-like macros are not affected.
+  - This is a note (not a warning or error); existing code is unaffected.
+
+### Changed
+
+- **OPTMAX attribute injection is now body-scan-guarded** (`src/codegen_opt.cpp`). Previously `WillReturn`, `NoSync`, and `NoFree` were added to every OPTMAX function unconditionally. Now each attribute is guarded by a lightweight body scan using the `requiresXxxProof` fields from `opt_contracts.h`:
+  - `NoSync` is withheld if any atomic instruction or fence is found.
+  - `NoFree` is withheld if any call to `free()`, `delete`, or an indirect callee is found.
+  - `WillReturn` is withheld if any basic block has a self-backedge (unconditional infinite loop).
+
+### Documentation
+
+- `LANGUAGE_REFERENCE.md` §3.1.1 — Added `#define` comptime migration note and table row for function-like macro note severity.
+- `LANGUAGE_REFERENCE.md` §6.6 — Rewrote to include `@opt(...)` / `@semantics(...)` namespace tables and the inhibitor-wins conflict resolution rule.
+- `LANGUAGE_REFERENCE.md` §14.1–14.2 — Updated struct syntax to show typed fields; added W019 warning reference and migration guide.
+- `LANGUAGE_REFERENCE.md` §17 — Added §17.0 "Ownership philosophy and enforcement modes" documenting advisory vs strict, borrow error codes E015–E018, and CLI flags.
+- `LANGUAGE_REFERENCE.md` §24.3 — Added `--ownership=advisory/strict` and `--warn-untyped-fields` to CLI flag tables.
+- `LANGUAGE_REFERENCE.md` §25.2.3 — Added new `OptContract` internal documentation section.
+
+
 
 ### Added
 
