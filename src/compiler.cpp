@@ -120,6 +120,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     const auto parseStart = Clock::now();
     Parser parser(std::move(tokens));
     parser.setBaseDir(std::filesystem::path(sourceFile).parent_path().string());
+    parser.setWarnUntypedFields(warnUntypedFields_);
     std::unique_ptr<Program> program;
     try {
         program = parser.parse();
@@ -163,6 +164,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     codegen.setHardwareGraphOpt(hgoe_);
     codegen.setSDR(sdr_);
     codegen.setIPOF(ipof_);
+    codegen.setOwnershipStrict(ownershipStrict_);
     codegen.setSourceFilename(sourceFile);
     if (!pgoGenPath_.empty()) {
         codegen.setPGOGen(pgoGenPath_);

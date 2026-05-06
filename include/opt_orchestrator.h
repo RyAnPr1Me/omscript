@@ -75,6 +75,11 @@ public:
 
     // ── Primary entry point ───────────────────────────────────────────────
 
+    /// When false (the default), borrow-checker violations (E015–E018) are
+    /// emitted as warnings; when true they are fatal errors.
+    void setOwnershipStrict(bool v) noexcept { ownershipStrict_ = v; }
+    [[nodiscard]] bool isOwnershipStrict() const noexcept { return ownershipStrict_; }
+
     /// Run all pre-pass analyses and AST transforms for @p program.
     ///
     /// On return:
@@ -180,6 +185,7 @@ private:
     // ── State ─────────────────────────────────────────────────────────────
     OptimizationLevel   optLevel_;
     bool                verbose_;
+    bool                ownershipStrict_ = false; ///< advisory (default) vs strict ownership
     CodeGenerator*      codegen_;   // non-owning
     OptimizationManager* manager_;  // non-owning; may be nullptr
     RunStats            stats_;

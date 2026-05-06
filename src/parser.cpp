@@ -592,9 +592,95 @@ std::unique_ptr<Program> Parser::parse() {
                     if (check(TokenType::LPAREN)) {
                         optMaxCfgFromAnnotation = parseOptMaxConfig();
                     }
+                } else if (ann.lexeme == "opt") {
+                    // Unified optimizer-hint namespace: @opt(key, key=value, ...)
+                    // Accepted keys (case-sensitive):
+                    //   inline, noinline, hot, cold, vectorize, novectorize,
+                    //   unroll, nounroll, parallel, noparallel, flatten, minsize,
+                    //   align=N
+                    consume(TokenType::LPAREN, "Expected '(' after @opt");
+                    while (!check(TokenType::RPAREN) && !isAtEnd()) {
+                        const Token key = consume(TokenType::IDENTIFIER, "Expected option key in @opt(...)");
+                        if (key.lexeme == "inline") {
+                            hintInline = true;
+                        } else if (key.lexeme == "noinline") {
+                            hintNoInline = true;
+                        } else if (key.lexeme == "hot") {
+                            hintHot = true;
+                        } else if (key.lexeme == "cold") {
+                            hintCold = true;
+                        } else if (key.lexeme == "vectorize") {
+                            hintVectorize = true;
+                        } else if (key.lexeme == "novectorize") {
+                            hintNoVectorize = true;
+                        } else if (key.lexeme == "unroll") {
+                            hintUnroll = true;
+                        } else if (key.lexeme == "nounroll") {
+                            hintNoUnroll = true;
+                        } else if (key.lexeme == "parallel") {
+                            hintParallelize = true;
+                        } else if (key.lexeme == "noparallel") {
+                            hintNoParallelize = true;
+                        } else if (key.lexeme == "flatten") {
+                            hintFlatten = true;
+                        } else if (key.lexeme == "minsize") {
+                            hintMinSize = true;
+                        } else if (key.lexeme == "align") {
+                            // @opt(align=N)
+                            consume(TokenType::ASSIGN, "Expected '=' after 'align' in @opt");
+                            if (check(TokenType::RPAREN)) {
+                                hintAlign = -1; // @opt(align=) with no value → auto
+                            } else {
+                                const Token alignVal = consume(TokenType::INTEGER,
+                                    "Expected integer value after 'align=' in @opt");
+                                hintAlign = static_cast<int>(alignVal.intValue);
+                            }
+                        } else {
+                            warnings_.push_back("warning: unknown key '" + key.lexeme +
+                                "' in @opt(...) — ignored; supported: inline, noinline, hot, cold, "
+                                "vectorize, novectorize, unroll, nounroll, parallel, noparallel, "
+                                "flatten, minsize, align=N");
+                        }
+                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' to close @opt(...)");
+                } else if (ann.lexeme == "semantics") {
+                    // Behavioral-contract namespace: @semantics(key, key, ...)
+                    // Accepted keys:
+                    //   pure, speculatable, noreturn, nounwind, restrict,
+                    //   noalias, const_eval
+                    consume(TokenType::LPAREN, "Expected '(' after @semantics");
+                    while (!check(TokenType::RPAREN) && !isAtEnd()) {
+                        const Token key = consume(TokenType::IDENTIFIER,
+                            "Expected contract key in @semantics(...)");
+                        if (key.lexeme == "pure") {
+                            hintPure = true;
+                        } else if (key.lexeme == "speculatable") {
+                            hintSpeculatable = true;
+                        } else if (key.lexeme == "noreturn") {
+                            hintNoReturn = true;
+                        } else if (key.lexeme == "nounwind") {
+                            hintNoUnwind = true;
+                        } else if (key.lexeme == "restrict" || key.lexeme == "noalias") {
+                            hintRestrict = true;
+                        } else if (key.lexeme == "const_eval") {
+                            hintConstEval = true;
+                        } else {
+                            warnings_.push_back("warning: unknown key '" + key.lexeme +
+                                "' in @semantics(...) — ignored; supported: pure, speculatable, "
+                                "noreturn, nounwind, restrict, noalias, const_eval");
+                        }
+                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' to close @semantics(...)");
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @speculatable, @align, @allocator (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, "
+                          "@static, @flatten, @unroll, @nounroll, @restrict, @noalias, "
+                          "@vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, "
+                          "@nounwind, @const_eval, @speculatable, @align, @allocator, "
+                          "@opt(...), @semantics(...) "
+                          "(use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
@@ -627,6 +713,7 @@ std::unique_ptr<Program> Parser::parse() {
                 func->optMaxConfig.enabled = true;
             }
             // Warn about conflicting annotations at parse time.
+            // Uses the inhibitor-wins rule from opt_contracts.h.
             if (hintOptNone && hintInline) {
                 warnings_.push_back("warning: '@optnone' and '@inline' are mutually exclusive on function '"
                     + func->name + "' — '@inline' will be ignored (optnone requires noinline)");
@@ -634,6 +721,44 @@ std::unique_ptr<Program> Parser::parse() {
             if (hintOptNone && hintHot) {
                 warnings_.push_back("warning: '@optnone' disables all optimizations on function '"
                     + func->name + "' — '@hot' annotation will have no effect");
+            }
+            if (hintOptNone && hintVectorize) {
+                warnings_.push_back("warning: '@optnone' disables vectorization on function '"
+                    + func->name + "' — '@vectorize' / '@opt(vectorize)' will have no effect");
+            }
+            if (hintOptNone && hintFlatten) {
+                warnings_.push_back("warning: '@optnone' disables inlining on function '"
+                    + func->name + "' — '@flatten' will have no effect");
+            }
+            if (hintInline && hintNoInline) {
+                warnings_.push_back("warning: '@inline' and '@noinline' are mutually exclusive on function '"
+                    + func->name + "' — '@noinline' wins (inhibitor-wins rule)");
+                hintInline = false; // inhibitor wins
+                func->hintInline = false;
+            }
+            if (hintHot && hintCold) {
+                warnings_.push_back("warning: '@hot' and '@cold' are mutually exclusive on function '"
+                    + func->name + "' — '@cold' wins (inhibitor-wins rule)");
+                hintHot = false; // inhibitor wins
+                func->hintHot = false;
+            }
+            if (hintVectorize && hintNoVectorize) {
+                warnings_.push_back("warning: '@vectorize' and '@novectorize' are mutually exclusive on function '"
+                    + func->name + "' — '@novectorize' wins (inhibitor-wins rule)");
+                hintVectorize = false; // inhibitor wins
+                func->hintVectorize = false;
+            }
+            if (hintUnroll && hintNoUnroll) {
+                warnings_.push_back("warning: '@unroll' and '@nounroll' are mutually exclusive on function '"
+                    + func->name + "' — '@nounroll' wins (inhibitor-wins rule)");
+                hintUnroll = false; // inhibitor wins
+                func->hintUnroll = false;
+            }
+            if (hintParallelize && hintNoParallelize) {
+                warnings_.push_back("warning: '@parallel' and '@noparallel' are mutually exclusive on function '"
+                    + func->name + "' — '@noparallel' wins (inhibitor-wins rule)");
+                hintParallelize = false; // inhibitor wins
+                func->hintParallelize = false;
             }
             functions.push_back(std::move(func));
         } catch (const std::exception& e) {
@@ -2823,6 +2948,15 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAli
         // Skip optional type annotation (e.g. x:int) — alternative syntax
         if (match(TokenType::COLON)) {
             typeName = parseTypeAnnotation();
+        }
+        // Warn when --warn-untyped-fields is active and this field has no type.
+        if (warnUntypedFields_ && typeName.empty()) {
+            warnings_.push_back(
+                "warning [W019]: struct '" + nameToken.lexeme + "' field '" +
+                fieldToken.lexeme + "' declared without a type annotation "
+                "(e.g. '" + fieldToken.lexeme + ": i64'). "
+                "Untyped fields default to i64 and produce non-deterministic "
+                "ABI across compilation units.");
         }
         fieldDecls.push_back(StructField(fieldToken.lexeme, typeName, attrs));
         match(TokenType::COMMA);

@@ -4106,6 +4106,7 @@ void CodeGenerator::generate(Program* program) {
 
     {
         OptimizationOrchestrator orch(optimizationLevel, verbose_, this, optMgr_.get());
+        orch.setOwnershipStrict(ownershipStrict_);
         orch.runPrepasses(program, *optCtx_);
     }
 

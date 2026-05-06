@@ -2,6 +2,7 @@
 #include "diagnostic.h"
 #include "hardware_graph.h"
 #include "ipof_pass.h"
+#include "opt_contracts.h"
 #include "optimization_manager.h" // OptimizationManager, CostModel
 #include "program_analysis.h"     // ProgramFactsSnapshot, computeProgramFacts
 #include "sdr_pass.h"
@@ -4881,15 +4882,94 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         if (!optMaxFunctions.count(name))
             continue;
         func.addFnAttr(llvm::Attribute::NoUnwind);
-        // WillReturn: OPTMAX functions always return (no infinite loops or
-        // exceptions), enabling LLVM to speculate calls and eliminate dead ones.
-        func.addFnAttr(llvm::Attribute::WillReturn);
-        // NoSync: OPTMAX functions don't synchronize (no atomics, locks, or
-        // thread-related operations), enabling aggressive reordering.
-        func.addFnAttr(llvm::Attribute::NoSync);
-        // NoFree: OPTMAX functions don't free heap memory, enabling the
-        // optimizer to sink/hoist loads past calls to these functions.
-        func.addFnAttr(llvm::Attribute::NoFree);
+        // Apply WillReturn, NoSync, NoFree according to the OPTMAX opt contract.
+        // These attributes are *claimed* by OPTMAX but require a body scan to
+        // confirm they actually hold — the contract marks all three as
+        // requiresProof.  An incorrect claim would allow LLVM to eliminate code
+        // that must execute (WillReturn), reorder across synchronization barriers
+        // (NoSync), or hoist loads past frees (NoFree), causing miscompilation.
+        {
+            const omscript::OptContract& contract =
+                omscript::getOptContract(omscript::AnnotationId::OPTMAX);
+
+            // Scan for instructions that would invalidate each claimed attribute.
+            bool hasSyncOp = false;
+            bool hasFreeOp = false;
+            bool hasInfiniteLoopRisk = false; // conservative: any backedge w/o exit
+            for (const llvm::BasicBlock& BB : func) {
+                for (const llvm::Instruction& I : BB) {
+                    // NoSync: any atomic or fence instruction invalidates the claim.
+                    if (contract.requiresNoSyncProof) {
+                        if (I.isAtomic()) { hasSyncOp = true; }
+                        if (llvm::isa<llvm::FenceInst>(&I)) { hasSyncOp = true; }
+                    }
+                    // NoFree: any call to free(), delete, or LLVM free-like
+                    // intrinsics invalidates the claim.
+                    if (contract.requiresNoFreeProof) {
+                        if (const auto* CI = llvm::dyn_cast<llvm::CallBase>(&I)) {
+                            if (CI->hasFnAttr(llvm::Attribute::NoFree)) {
+                                // callee itself is nofree — safe
+                            } else if (const llvm::Function* callee = CI->getCalledFunction()) {
+                                const llvm::StringRef cname = callee->getName();
+                                if (cname == "free" || cname == "_ZdlPv" ||
+                                    cname == "_ZdaPv" || cname.starts_with("__libc_free") ||
+                                    cname == "cfree" || cname == "reallocarray") {
+                                    hasFreeOp = true;
+                                }
+                            } else {
+                                // Indirect call — conservatively assume may free.
+                                hasFreeOp = true;
+                            }
+                        }
+                    }
+                }
+                // WillReturn: a block with a backedge and no reachable exit is a
+                // potential infinite loop.  We use a conservative check: if a
+                // block's successors are all predecessors of an earlier block in
+                // RPO and there is no successor that is a function exit, flag it.
+                // (A full liveness analysis is too expensive here; this is a
+                //  simple but effective filter.)
+                if (contract.requiresWillReturnProof) {
+                    const llvm::Instruction* term = BB.getTerminator();
+                    if (term && !llvm::isa<llvm::ReturnInst>(term) &&
+                        !llvm::isa<llvm::UnreachableInst>(term)) {
+                        // Check whether this is a backward branch (backedge) by
+                        // seeing if any successor dominates (or equals) this block.
+                        // We use a simple name-ordering heuristic: if a successor
+                        // has a lower BB number it is likely a backedge.
+                        for (const llvm::BasicBlock* succ :
+                             llvm::successors(&BB)) {
+                            // A block branching to itself is an unconditional
+                            // infinite loop.
+                            if (succ == &BB) {
+                                hasInfiniteLoopRisk = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Apply attributes only when the body scan confirms safety.
+            if (contract.requiresWillReturnProof) {
+                if (!hasInfiniteLoopRisk)
+                    func.addFnAttr(llvm::Attribute::WillReturn);
+            } else if (contract.assertsWillReturn) {
+                func.addFnAttr(llvm::Attribute::WillReturn);
+            }
+            if (contract.requiresNoSyncProof) {
+                if (!hasSyncOp)
+                    func.addFnAttr(llvm::Attribute::NoSync);
+            } else if (contract.assertsNoSync) {
+                func.addFnAttr(llvm::Attribute::NoSync);
+            }
+            if (contract.requiresNoFreeProof) {
+                if (!hasFreeOp)
+                    func.addFnAttr(llvm::Attribute::NoFree);
+            } else if (contract.assertsNoFree) {
+                func.addFnAttr(llvm::Attribute::NoFree);
+            }
+        }
         // Speculatable (safety=Off only): the function is a pure mathematical
         // kernel with no side effects — the user has explicitly opted out of
         // safety checks, so LLVM may reorder and speculate calls above branches

@@ -305,6 +305,11 @@ class CodeGenerator {
         return verbose_;
     }
 
+    /// When false (the default), borrow-checker violations are advisory warnings.
+    /// When true (--ownership=strict), they are fatal errors.
+    void setOwnershipStrict(bool v) { ownershipStrict_ = v; }
+    [[nodiscard]] bool isOwnershipStrict() const noexcept { return ownershipStrict_; }
+
     /// Set the source filename for debug info metadata.
     void setSourceFilename(const std::string& filename) {
         sourceFilename_ = filename;
@@ -1018,6 +1023,7 @@ class CodeGenerator {
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file
     bool lto_ = false;                // LTO mode: use pre-link pipeline
     bool verbose_ = false;            // -V: print optimization pass messages
+    bool ownershipStrict_ = false;    // --ownership=strict: borrow violations are errors
 
     // DWARF debug info infrastructure
     bool debugMode_ = false;                       // -g: emit debug metadata

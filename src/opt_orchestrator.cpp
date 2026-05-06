@@ -1241,7 +1241,31 @@ void OptimizationOrchestrator::runBorrowCheck(Program* program,
         ctx.validity().borrowCheck = true;
         return;
     }
-    omscript::runBorrowCheck(*program, verbose_);
+    if (ownershipStrict_) {
+        // Strict mode: violations are fatal errors (original behavior).
+        omscript::runBorrowCheck(*program, verbose_);
+    } else {
+        // Advisory mode (default): downgrade E015–E018 violations to warnings.
+        // Ownership annotations are treated as alias-analysis hints for the
+        // optimizer rather than hard safety barriers.  This reflects the
+        // language's optimization-first identity.
+        try {
+            omscript::runBorrowCheck(*program, verbose_);
+        } catch (const DiagnosticError& e) {
+            // Only downgrade borrow-checker error codes (E015–E018).
+            const ErrorCode code = e.diagnostic().code;
+            if (code == ErrorCode::E015_USE_AFTER_MOVE ||
+                code == ErrorCode::E016_BORROW_WRITE_CONFLICT ||
+                code == ErrorCode::E017_DOUBLE_MUT_BORROW ||
+                code == ErrorCode::E018_MOVE_WHILE_BORROWED) {
+                std::cerr << "warning [" << errorCodeString(code) << " advisory]: "
+                          << e.diagnostic().message
+                          << " (use --ownership=strict to treat as an error)\n";
+            } else {
+                throw; // re-throw non-borrow-checker errors unchanged
+            }
+        }
+    }
     ctx.validity().borrowCheck = true;
 }
 
