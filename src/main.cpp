@@ -1461,6 +1461,9 @@ void printUsage(const char* progName) {
                  "  --emit-obj       Emit object file only\n"
                  "  --dry-run        Validate without writing files\n"
                  "  --time           Show timing breakdown\n"
+                 "  --ownership=strict    Borrow-check violations are fatal errors\n"
+                 "  --ownership=advisory  Borrow-check violations are warnings (default)\n"
+                 "  --warn-untyped-fields Warn (W019) when struct fields lack type annotations\n"
                  "\n"
                  "Codegen (override profile defaults):\n"
                  "  -march=<cpu>     Target CPU (default: native)\n"
@@ -1485,7 +1488,13 @@ void printUsage(const char* progName) {
                  "\n"
                  "Use -fno-<flag> to disable any -f flag (e.g. -fno-lto, -fno-vectorize).\n"
                  "\n"
-                 "All codegen flags override the profile default when passed explicitly.\n";
+                 "All codegen flags override the profile default when passed explicitly.\n"
+                 "\n"
+                 "Annotation namespaces (new unified syntax, old forms still accepted):\n"
+                 "  @opt(inline|noinline|hot|cold|vectorize|novectorize|unroll|nounroll|\n"
+                 "       parallel|noparallel|flatten|minsize|align=N)\n"
+                 "  @semantics(pure|speculatable|noreturn|nounwind|restrict|const_eval)\n"
+                 "  @repr(C|packed|soa|align(N))  — struct layout (unchanged)\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -2207,6 +2216,8 @@ int main(int argc, char* argv[]) {
     bool flagSDR  = true;
     bool flagIPOF = true;
     bool flagDebug = false;
+    bool ownershipStrict = false;    // --ownership=strict
+    bool warnUntypedFields = false;  // --warn-untyped-fields
 
     // Profile selection for project-mode commands.
     std::string profileName;  // empty = use default ("debug")
@@ -2380,6 +2391,21 @@ int main(int argc, char* argv[]) {
         }
         if (arg.rfind("--profile=", 0) == 0) {
             profileName = arg.substr(10);
+            argIndex++;
+            continue;
+        }
+        if (arg == "--ownership=strict") {
+            ownershipStrict = true;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--ownership=advisory") {
+            ownershipStrict = false;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--warn-untyped-fields") {
+            warnUntypedFields = true;
             argIndex++;
             continue;
         }
@@ -2600,6 +2626,18 @@ int main(int argc, char* argv[]) {
         }
         if (!parsingRunArgs && arg.rfind("--profile=", 0) == 0) {
             profileName = arg.substr(10);
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--ownership=strict") {
+            ownershipStrict = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--ownership=advisory") {
+            ownershipStrict = false;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--warn-untyped-fields") {
+            warnUntypedFields = true;
             continue;
         }
         if (!parsingRunArgs) {
@@ -2994,6 +3032,8 @@ int main(int argc, char* argv[]) {
         compiler.setSDR(flagSDR);
         compiler.setIPOF(flagIPOF);
         compiler.setDebugMode(flagDebug);
+        compiler.setOwnershipStrict(ownershipStrict);
+        compiler.setWarnUntypedFields(warnUntypedFields);
         if (quiet) {
             compiler.setVerbose(false);
             compiler.setQuiet(true);

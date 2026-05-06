@@ -1,3 +1,7 @@
+// === COMPILER LAYER 1 (SYNTAX): Parser ===
+// This file is the parser/lexer boundary. It consumes tokens and produces the
+// AST. It must not import or reference optimizer facts (Layer 3) or lowering
+// details (Layer 4). All semantic analysis starts in Layer 2 passes.
 #include "parser.h"
 #include "diagnostic.h"
 #include "pass_utils.h"   // isIntWidthTypeName, isKnownScalarTypeName
@@ -449,7 +453,7 @@ std::unique_ptr<Program> Parser::parse() {
                 StructRepr repr = StructRepr::Auto;
                 int reprAlignN = 0;
                 if (!check(TokenType::RPAREN)) {
-                    const Token reprTok = consume(TokenType::IDENTIFIER, "Expected repr kind: C, packed, auto, soa, or align");
+                    const Token reprTok = consume(TokenType::IDENTIFIER, "Expected repr kind: C, packed, auto, soa, aos_to_soa, or align");
                     if (reprTok.lexeme == "C") {
                         repr = StructRepr::C;
                     } else if (reprTok.lexeme == "packed") {
@@ -458,6 +462,8 @@ std::unique_ptr<Program> Parser::parse() {
                         repr = StructRepr::Auto;
                     } else if (reprTok.lexeme == "soa") {
                         repr = StructRepr::SoA;
+                    } else if (reprTok.lexeme == "aos_to_soa") {
+                        repr = StructRepr::AosToSoa;
                     } else if (reprTok.lexeme == "align") {
                         repr = StructRepr::AlignN;
                         consume(TokenType::LPAREN, "Expected '(' after repr align");
@@ -465,7 +471,7 @@ std::unique_ptr<Program> Parser::parse() {
                         reprAlignN = static_cast<int>(nTok.intValue);
                         consume(TokenType::RPAREN, "Expected ')' after repr align value");
                     } else {
-                        error("Unknown @repr kind '" + reprTok.lexeme + "'; supported: C, packed, auto, soa, align(N)");
+                        error("Unknown @repr kind '" + reprTok.lexeme + "'; supported: C, packed, auto, soa, aos_to_soa, align(N)");
                     }
                 }
                 consume(TokenType::RPAREN, "Expected ')' after @repr");
@@ -592,9 +598,95 @@ std::unique_ptr<Program> Parser::parse() {
                     if (check(TokenType::LPAREN)) {
                         optMaxCfgFromAnnotation = parseOptMaxConfig();
                     }
+                } else if (ann.lexeme == "opt") {
+                    // Unified optimizer-hint namespace: @opt(key, key=value, ...)
+                    // Accepted keys (case-sensitive):
+                    //   inline, noinline, hot, cold, vectorize, novectorize,
+                    //   unroll, nounroll, parallel, noparallel, flatten, minsize,
+                    //   align=N
+                    consume(TokenType::LPAREN, "Expected '(' after @opt");
+                    while (!check(TokenType::RPAREN) && !isAtEnd()) {
+                        const Token key = consume(TokenType::IDENTIFIER, "Expected option key in @opt(...)");
+                        if (key.lexeme == "inline") {
+                            hintInline = true;
+                        } else if (key.lexeme == "noinline") {
+                            hintNoInline = true;
+                        } else if (key.lexeme == "hot") {
+                            hintHot = true;
+                        } else if (key.lexeme == "cold") {
+                            hintCold = true;
+                        } else if (key.lexeme == "vectorize") {
+                            hintVectorize = true;
+                        } else if (key.lexeme == "novectorize") {
+                            hintNoVectorize = true;
+                        } else if (key.lexeme == "unroll") {
+                            hintUnroll = true;
+                        } else if (key.lexeme == "nounroll") {
+                            hintNoUnroll = true;
+                        } else if (key.lexeme == "parallel") {
+                            hintParallelize = true;
+                        } else if (key.lexeme == "noparallel") {
+                            hintNoParallelize = true;
+                        } else if (key.lexeme == "flatten") {
+                            hintFlatten = true;
+                        } else if (key.lexeme == "minsize") {
+                            hintMinSize = true;
+                        } else if (key.lexeme == "align") {
+                            // @opt(align=N)
+                            consume(TokenType::ASSIGN, "Expected '=' after 'align' in @opt");
+                            if (check(TokenType::RPAREN)) {
+                                hintAlign = -1; // @opt(align=) with no value → auto
+                            } else {
+                                const Token alignVal = consume(TokenType::INTEGER,
+                                    "Expected integer value after 'align=' in @opt");
+                                hintAlign = static_cast<int>(alignVal.intValue);
+                            }
+                        } else {
+                            warnings_.push_back("warning: unknown key '" + key.lexeme +
+                                "' in @opt(...) — ignored; supported: inline, noinline, hot, cold, "
+                                "vectorize, novectorize, unroll, nounroll, parallel, noparallel, "
+                                "flatten, minsize, align=N");
+                        }
+                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' to close @opt(...)");
+                } else if (ann.lexeme == "semantics") {
+                    // Behavioral-contract namespace: @semantics(key, key, ...)
+                    // Accepted keys:
+                    //   pure, speculatable, noreturn, nounwind, restrict,
+                    //   noalias, const_eval
+                    consume(TokenType::LPAREN, "Expected '(' after @semantics");
+                    while (!check(TokenType::RPAREN) && !isAtEnd()) {
+                        const Token key = consume(TokenType::IDENTIFIER,
+                            "Expected contract key in @semantics(...)");
+                        if (key.lexeme == "pure") {
+                            hintPure = true;
+                        } else if (key.lexeme == "speculatable") {
+                            hintSpeculatable = true;
+                        } else if (key.lexeme == "noreturn") {
+                            hintNoReturn = true;
+                        } else if (key.lexeme == "nounwind") {
+                            hintNoUnwind = true;
+                        } else if (key.lexeme == "restrict" || key.lexeme == "noalias") {
+                            hintRestrict = true;
+                        } else if (key.lexeme == "const_eval") {
+                            hintConstEval = true;
+                        } else {
+                            warnings_.push_back("warning: unknown key '" + key.lexeme +
+                                "' in @semantics(...) — ignored; supported: pure, speculatable, "
+                                "noreturn, nounwind, restrict, noalias, const_eval");
+                        }
+                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' to close @semantics(...)");
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @speculatable, @align, @allocator (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, "
+                          "@static, @flatten, @unroll, @nounroll, @restrict, @noalias, "
+                          "@vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, "
+                          "@nounwind, @const_eval, @speculatable, @align, @allocator, "
+                          "@opt(...), @semantics(...) "
+                          "(use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
@@ -627,6 +719,7 @@ std::unique_ptr<Program> Parser::parse() {
                 func->optMaxConfig.enabled = true;
             }
             // Warn about conflicting annotations at parse time.
+            // Uses the inhibitor-wins rule from opt_contracts.h.
             if (hintOptNone && hintInline) {
                 warnings_.push_back("warning: '@optnone' and '@inline' are mutually exclusive on function '"
                     + func->name + "' — '@inline' will be ignored (optnone requires noinline)");
@@ -634,6 +727,44 @@ std::unique_ptr<Program> Parser::parse() {
             if (hintOptNone && hintHot) {
                 warnings_.push_back("warning: '@optnone' disables all optimizations on function '"
                     + func->name + "' — '@hot' annotation will have no effect");
+            }
+            if (hintOptNone && hintVectorize) {
+                warnings_.push_back("warning: '@optnone' disables vectorization on function '"
+                    + func->name + "' — '@vectorize' / '@opt(vectorize)' will have no effect");
+            }
+            if (hintOptNone && hintFlatten) {
+                warnings_.push_back("warning: '@optnone' disables inlining on function '"
+                    + func->name + "' — '@flatten' will have no effect");
+            }
+            if (hintInline && hintNoInline) {
+                warnings_.push_back("warning: '@inline' and '@noinline' are mutually exclusive on function '"
+                    + func->name + "' — '@noinline' wins (inhibitor-wins rule)");
+                hintInline = false; // inhibitor wins
+                func->hintInline = false;
+            }
+            if (hintHot && hintCold) {
+                warnings_.push_back("warning: '@hot' and '@cold' are mutually exclusive on function '"
+                    + func->name + "' — '@cold' wins (inhibitor-wins rule)");
+                hintHot = false; // inhibitor wins
+                func->hintHot = false;
+            }
+            if (hintVectorize && hintNoVectorize) {
+                warnings_.push_back("warning: '@vectorize' and '@novectorize' are mutually exclusive on function '"
+                    + func->name + "' — '@novectorize' wins (inhibitor-wins rule)");
+                hintVectorize = false; // inhibitor wins
+                func->hintVectorize = false;
+            }
+            if (hintUnroll && hintNoUnroll) {
+                warnings_.push_back("warning: '@unroll' and '@nounroll' are mutually exclusive on function '"
+                    + func->name + "' — '@nounroll' wins (inhibitor-wins rule)");
+                hintUnroll = false; // inhibitor wins
+                func->hintUnroll = false;
+            }
+            if (hintParallelize && hintNoParallelize) {
+                warnings_.push_back("warning: '@parallel' and '@noparallel' are mutually exclusive on function '"
+                    + func->name + "' — '@noparallel' wins (inhibitor-wins rule)");
+                hintParallelize = false; // inhibitor wins
+                func->hintParallelize = false;
             }
             functions.push_back(std::move(func));
         } catch (const std::exception& e) {
@@ -2824,6 +2955,15 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAli
         if (match(TokenType::COLON)) {
             typeName = parseTypeAnnotation();
         }
+        // Warn when --warn-untyped-fields is active and this field has no type.
+        if (warnUntypedFields_ && typeName.empty()) {
+            warnings_.push_back(
+                "warning [W019]: struct '" + nameToken.lexeme + "' field '" +
+                fieldToken.lexeme + "' declared without a type annotation "
+                "(e.g. '" + fieldToken.lexeme + ": i64'). "
+                "Untyped fields default to i64 and produce non-deterministic "
+                "ABI across compilation units.");
+        }
         fieldDecls.push_back(StructField(fieldToken.lexeme, typeName, attrs));
         match(TokenType::COMMA);
     }
@@ -4561,7 +4701,16 @@ OptMaxConfig Parser::parseOptMaxConfig() {
                         cfg.loop.vectorize = (v.lexeme == "true" || v.type == TokenType::TRUE);
                     } else if (lk.lexeme == "tile") {
                         const Token v = advance();
-                        if (v.type == TokenType::INTEGER) cfg.loop.tileSize = static_cast<int>(v.intValue);
+                        if (v.type == TokenType::INTEGER) {
+                            cfg.loop.tileSize = static_cast<int>(v.intValue);
+                            // Support @tile(M, N) — optional second dimension for 2D cache-blocking.
+                            if (check(TokenType::COMMA)) {
+                                advance(); // consume ','
+                                const Token v2 = advance();
+                                if (v2.type == TokenType::INTEGER)
+                                    cfg.loop.tileSizeN = static_cast<int>(v2.intValue);
+                            }
+                        }
                     } else if (lk.lexeme == "parallel") {
                         const Token v = advance();
                         cfg.loop.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);
@@ -4628,7 +4777,16 @@ LoopConfig Parser::parseLoopAnnotation() {
                 cfg.noVectorize = (v.lexeme == "false" || v.type == TokenType::FALSE);
             } else if (key.lexeme == "tile") {
                 const Token v = advance();
-                if (v.type == TokenType::INTEGER) cfg.tileSize = static_cast<int>(v.intValue);
+                if (v.type == TokenType::INTEGER) {
+                    cfg.tileSize = static_cast<int>(v.intValue);
+                    // Support @tile(M, N) — optional second dimension for 2D cache-blocking.
+                    if (check(TokenType::COMMA)) {
+                        advance(); // consume ','
+                        const Token v2 = advance();
+                        if (v2.type == TokenType::INTEGER)
+                            cfg.tileSizeN = static_cast<int>(v2.intValue);
+                    }
+                }
             } else if (key.lexeme == "parallel") {
                 const Token v = advance();
                 cfg.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);

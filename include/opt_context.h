@@ -12,6 +12,7 @@
 #include "pass_utils.h" // isIntWidthTypeName (used by isWidthCastName)
 #include <any>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -206,6 +207,7 @@ struct AnalysisValidity {
     bool uniqueness        = false; ///< Uniqueness analysis has run (codegen uses results)
     bool borrowCheck       = false; ///< Standalone borrow checker has run
     bool hgoeEGraph        = false; ///< HGOE-Guided E-Graph Superoptimizer has run
+    bool sir               = false; ///< Semantic IR has been built (final pre-pass)
 
     // ── Dispatch table ────────────────────────────────────────────────────
     bool* fieldFor(std::string_view fact) noexcept {
@@ -232,6 +234,7 @@ struct AnalysisValidity {
             {"uniqueness",         &AnalysisValidity::uniqueness       },
             {"borrow_check",       &AnalysisValidity::borrowCheck      },
             {"hgoe_egraph",        &AnalysisValidity::hgoeEGraph       },
+            {"sir",                &AnalysisValidity::sir              },
         };
         for (const auto& row : kTable) {
             if (row.name == fact)
@@ -627,12 +630,36 @@ public:
         return cache_.dependencyGraph();
     }
 
+    // ── Semantic IR (SIR) ─────────────────────────────────────────────────
+    // The SIR module is stored as a type-erased shared_ptr<void> to avoid a
+    // circular include between opt_context.h ↔ sir.h.  Callers that need
+    // typed access must include sir.h themselves and cast via sirTyped<SIRModule>().
+    //
+    /// Set the SIR module (called by the kSIR pass).
+    /// @p sir must be a heap-allocated SIRModule.
+    template<typename T>
+    void setSIR(std::unique_ptr<T> sir) noexcept {
+        sir_ = std::shared_ptr<void>(sir.release(),
+            [](void* p) { delete static_cast<T*>(p); });
+    }
+
+    /// Return a non-owning typed pointer to the SIR module, or null.
+    /// Callers must include sir.h before calling this.
+    template<typename T>
+    const T* sirTyped() const noexcept {
+        return static_cast<const T*>(sir_.get());
+    }
+
+    /// True iff the SIR has been built.
+    bool hasSIR() const noexcept { return static_cast<bool>(sir_); }
+
 private:
     std::unordered_map<std::string, FunctionFacts> facts_;
     AnalysisValidity validity_;
     CTEngine*        ctEngine_ = nullptr;
     EGraphSubsystem  egraph_;
     AnalysisCache    cache_;
+    std::shared_ptr<void> sir_; ///< Type-erased SIRModule (cast via sirTyped<SIRModule>())
 };
 
 } // namespace omscript

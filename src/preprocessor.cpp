@@ -302,6 +302,23 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
     }
 
     macros_[name] = std::move(def);
+
+    // Nudge users toward typed `comptime` blocks for function-like macros.
+    // Function-like macros (`#define FOO(x) ...`) perform purely textual
+    // substitution without type information, which makes them semantically
+    // opaque to the optimizer and prone to surprising interactions with
+    // the ownership and effects systems.  `comptime` functions are the
+    // preferred compile-time abstraction because they are fully typed.
+    //
+    // We emit a note (not an error, not a warning) so that existing code
+    // is unaffected and new code is gently guided toward the better path.
+    if (macros_.at(name).isFunctionLike) {
+        warnings_.push_back(filename_ + ":" + std::to_string(lineNo) +
+            ": note: function-like macro '" + name + "(...)' uses untyped textual "
+            "substitution. Consider replacing it with a typed comptime function: "
+            "`comptime fn " + name + "(...) { ... }` for better "
+            "optimizer transparency and ownership-system integration.");
+    }
 }
 
 // ============================================================

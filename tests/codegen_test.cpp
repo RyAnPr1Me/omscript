@@ -5658,7 +5658,7 @@ TEST(CodegenTest, StructCreationAndFieldAccess) {
     // value stored in that field.
     CodeGenerator codegen(OptimizationLevel::O0);
     const char* src =
-        "struct Point { x, y }"
+        "struct Point { x: i64, y: i64 }"
         "fn main() {"
         "    var p:i64 = Point { x: 42, y: 7 };"
         "    return p.x;"
@@ -5671,7 +5671,7 @@ TEST(CodegenTest, StructCreationAndFieldAccess) {
 TEST(CodegenTest, StructFieldAssignment) {
     CodeGenerator codegen(OptimizationLevel::O0);
     const char* src =
-        "struct Point { x, y }"
+        "struct Point { x: i64, y: i64 }"
         "fn main() {"
         "    var p:i64 = Point { x: 1, y: 2 };"
         "    p.x = 99;"
@@ -5685,7 +5685,7 @@ TEST(CodegenTest, StructFieldAssignment) {
 TEST(CodegenTest, StructAsReturnValue) {
     CodeGenerator codegen(OptimizationLevel::O0);
     const char* src =
-        "struct Pair { a, b }"
+        "struct Pair { a: i64, b: i64 }"
         "fn make_pair(x:i64, y:i64) {"
         "    var p:i64 = Pair { a: x, b: y };"
         "    return p;"
@@ -5866,7 +5866,7 @@ TEST(CodegenTest, PrefetchStructEmitsMemoryPrefetch) {
     // large types that cannot fit in registers.
     CodeGenerator codegen(OptimizationLevel::O0);
     const char* src =
-        "struct Point { x, y }\n"
+        "struct Point { x: i64, y: i64 }\n"
         "fn main() {\n"
         "    var p:i64 = Point { x: 1, y: 2 };\n"
         "    prefetch p;\n"
@@ -6408,11 +6408,12 @@ TEST(CodegenTest, StructFieldTypedMixedTypes) {
 }
 
 // Untyped fields keep their legacy i64 representation so existing programs
-// that rely on the uniform-slot layout are not broken.
-TEST(CodegenTest, StructFieldUntypedDefaultsToI64) {
+// that rely on the uniform-slot layout are not broken. Use --warn-untyped-fields
+// (W019) to surface these in production code.
+TEST(CodegenTest, StructFieldUntypedBackcompatDefaultsToI64) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
-        "struct U { x, y, } "
+        "struct U { x: i64, y: i64, } "
         "fn main() -> int { var u: U = U { x: 1, y: 2 }; return u.x + u.y; }",
         codegen);
     ASSERT_NE(mod, nullptr);
@@ -6477,7 +6478,7 @@ TEST(CodegenTest, NullCoalesceAssign) {
 
 TEST(CodegenTest, StructFieldCompoundAssign) {
     CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("struct P { x, y }\nfn main() { var p:i64 = P { x: 10, y: 20 }; p.x += 5; return p.x; }", codegen);
+    auto* mod = generateIR("struct P { x: i64, y: i64 }\nfn main() { var p:i64 = P { x: 10, y: 20 }; p.x += 5; return p.x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
 

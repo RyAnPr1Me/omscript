@@ -1,6 +1,7 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
+#include "sir.h"
 #include <climits>
 #include <cmath>
 #include <cstdlib>
@@ -3434,8 +3435,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Array layout: [length, elem0, elem1, ...]
         llvm::Value* arrPtr =
             arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "push.arrptr");
-                llvm::Value* pushLenLoad = emitLoadArrayLen(arrPtr, "push.oldlen");
-        llvm::Value* oldLen = pushLenLoad;
+        llvm::Value* oldLen = emitLoadArrayLen(arrPtr, "push.oldlen");
         llvm::Value* newLen = builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
         // Only call realloc when the new slot count crosses a power-of-2
         llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
@@ -3453,34 +3453,22 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* needsGrow = builder->CreateOr(belowMin, atBoundary, "push.needsgrow");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* growBB = llvm::BasicBlock::Create(*context, "push.grow", function);
+        llvm::BasicBlock* growBB   = llvm::BasicBlock::Create(*context, "push.grow",   function);
         llvm::BasicBlock* nogrowBB = llvm::BasicBlock::Create(*context, "push.nogrow", function);
-        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "push.merge", function);
+        llvm::BasicBlock* mergeBB  = llvm::BasicBlock::Create(*context, "push.merge",  function);
 
         // Growth is rare (only at power-of-2 boundaries + first push to min 16).
         // Weight the no-grow path heavily for branch prediction and code layout.
         llvm::MDNode* pushGrowW = llvm::MDBuilder(*context).createBranchWeights(1, 99);
         builder->CreateCondBr(needsGrow, growBB, nogrowBB, pushGrowW);
 
-        // Grow path: compute new capacity and realloc
+        // Grow path: call the cold outlined helper — all ctlz/realloc logic
+        // lives inside __omsc_array_grow so it cannot pollute the hot loop body.
         builder->SetInsertPoint(growBB);
-        llvm::Value* slots = builder->CreateAdd(newLen, one64, "push.slots", /*HasNUW=*/true, /*HasNSW=*/true);
-        // nextPow2 via ctlz intrinsic: 1 << (64 - ctlz(slots - 1))
-        llvm::Value* slotsM1 = builder->CreateSub(slots, one64, "push.pm1", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(),
-            llvm::Intrinsic::ctlz, {getDefaultType()});
-        // is_zero_poison=true: slots is always >= 2 here (newLen >= 1), so
-        // slotsM1 is always >= 1, never zero.
-        llvm::Value* lz = builder->CreateCall(ctlzFn,
-            {slotsM1, llvm::ConstantInt::getTrue(*context)}, "push.lz");
-        llvm::Value* shift = builder->CreateSub(
-            llvm::ConstantInt::get(getDefaultType(), 64), lz, "push.shift");
-        llvm::Value* cap = builder->CreateShl(one64, shift, "push.cap", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* useMin = builder->CreateICmpSLT(cap, minSlots, "push.usemin");
-        cap = builder->CreateSelect(useMin, minSlots, cap, "push.finalcap");
-        llvm::Value* newSize = builder->CreateMul(cap,
-            llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* grownBuf = builder->CreateCall(getOrDeclareRealloc(), {arrPtr, newSize}, "push.newbuf");
+        llvm::CallInst* grownBufCall = builder->CreateCall(
+            getOrEmitArrayGrowHelper(), {arrPtr, newLen}, "push.grown");
+        // cold + noinline are already on the callee; mark call-site cold too.
+        grownBufCall->addFnAttr(llvm::Attribute::Cold);
         builder->CreateBr(mergeBB);
 
         // No-grow path: reuse existing buffer
@@ -3489,9 +3477,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Merge: select the buffer pointer
         builder->SetInsertPoint(mergeBB);
-        llvm::PHINode* newBuf = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "push.buf");
-        newBuf->addIncoming(grownBuf, growBB);
+        llvm::PHINode* newBuf = builder->CreatePHI(
+            llvm::PointerType::getUnqual(*context), 2, "push.buf");
+        newBuf->addIncoming(grownBufCall, growBB);
         newBuf->addIncoming(arrPtr, nogrowBB);
+        // Nonnull is communicated via the nonnull return attribute on
+        // __omsc_array_grow, and arrPtr is guaranteed non-null at the call
+        // site (it was allocated by malloc/realloc and never freed here).
+        // Do NOT add llvm.assume(ptr != null) — assumes inside loop bodies
+        // propagate through back-edges and can cause IndVarSimplify to
+        // eliminate the loop-exit branch.
 
         // Update length
         emitStoreArrayLen(newLen, newBuf);
@@ -9283,6 +9278,44 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // has !range [0, INT64_MAX) metadata, mark the result as non-negative.
     if (callee->hasRetAttribute(llvm::Attribute::ZExt))
         nonNegValues_.insert(callResult);
+
+    // ── SIR-driven call-site attributes ────────────────────────────────────
+    // Query the SIR for per-callee semantic facts that are not yet encoded in
+    // the LLVM function attributes (e.g. because the callee has not been
+    // lowered yet or because the SIR has richer information than LLVM knows).
+    if (optCtx_ && optCtx_->hasSIR()) {
+        const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+        if (sirMod) {
+            const SIRFunction* sirFn = sirMod->getFunction(expr->callee);
+            if (sirFn) {
+                // Pure callee: mark this call as readonly so LLVM's alias
+                // analysis / CSE can hoist/deduplicate it.  Only apply when
+                // the LLVM function attribute was not already set (avoids
+                // duplicate annotations that can confuse the verifier).
+                if (sirFn->facts.isPure &&
+                        !callResult->hasFnAttr(llvm::Attribute::Memory)) {
+                    callResult->addFnAttr(
+                        llvm::Attribute::getWithMemoryEffects(
+                            *context, llvm::MemoryEffects::readOnly()));
+                }
+                // Dead callee (proven unreachable from entry points): bias the
+                // call site as cold so the back-end assigns a low-probability
+                // branch weight and can move the call to a cold section.
+                if (sirFn->facts.isDead &&
+                        !callResult->hasFnAttr(llvm::Attribute::Hot)) {
+                    callResult->addFnAttr(llvm::Attribute::Cold);
+                }
+                // WillReturn: if the SIR knows the callee always terminates
+                // (isLeaf + isCountable or explicit annotation) and we have not
+                // yet set willreturn on the call, add it now.
+                if (sirFn->isLeaf && !sirFn->isRecursive &&
+                        !sirFn->neverReturns &&
+                        !callResult->hasFnAttr(llvm::Attribute::WillReturn)) {
+                    callResult->addFnAttr(llvm::Attribute::WillReturn);
+                }
+            }
+        }
+    }
     return callResult;
 }
 

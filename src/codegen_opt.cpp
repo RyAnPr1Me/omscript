@@ -1,10 +1,16 @@
+// === COMPILER LAYER 3 (OPTIMIZATION): codegen_opt.cpp ===
+// LLVM IR optimization passes and pass-registration infrastructure. All
+// optimization decisions live here. Must not produce or modify AST nodes
+// (Layer 1) and must not consume unproven Layer 3 facts via Layer 4 paths.
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
 #include "ipof_pass.h"
+#include "opt_contracts.h"
 #include "optimization_manager.h" // OptimizationManager, CostModel
 #include "program_analysis.h"     // ProgramFactsSnapshot, computeProgramFacts
 #include "sdr_pass.h"
+#include "sir.h"                  // SIRModule, SIRFunction — pre-pipeline annotation
 #include "superoptimizer.h"
 #include "polyopt.h"
 #include <iostream>
@@ -3618,6 +3624,86 @@ void CodeGenerator::runOptimizationPasses() {
             }
         }
     }
+    // ── Pre-pipeline SIR memory-effects annotation ────────────────────────
+    // For functions that the SIR has proven are pure (no memory reads or
+    // writes, no I/O, no mutation) and have no pointer parameters — or have
+    // only pointer parameters that provably do not access memory — set
+    // memory(none) before the main LLVM pipeline fires.  This front-runs
+    // PostOrderFunctionAttrsPass so that every pass in the main pipeline
+    // (inliner, LICM, GVN, SCCP, SpeculativeExecution, alias analysis) sees
+    // correct memory effects from the very start, enabling more aggressive
+    // code-motion, CSE, and call speculation.
+    //
+    // Also promotes leaf+no-IO functions to memory(none) when they carry only
+    // scalar (non-pointer) parameters, and sets memory(read) for SIR-readonly
+    // functions to allow load-hoisting across their call sites.
+    if (optCtx_ && optCtx_->hasSIR() && optimizationLevel >= OptimizationLevel::O2) {
+        const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+        if (sirMod) {
+            unsigned annotatedNone = 0, annotatedRead = 0;
+            for (auto& F : *module) {
+                if (F.isDeclaration()) continue;
+                // If memory effects are already set precisely, skip.
+                if (F.doesNotAccessMemory()) continue;
+
+                const std::string fname = F.getName().str();
+                const SIRFunction* sirFn = sirMod->getFunction(fname);
+                if (!sirFn) continue;
+
+                // Skip self-recursive functions — the SIR purity may be
+                // inferred without fully accounting for the recursive path.
+                if (sirFn->isRecursive) continue;
+                // Skip entry points — they may have implicit I/O through the
+                // runtime that the effect analysis doesn't see.
+                if (sirFn->isEntry) continue;
+                // Skip functions that carry volatile or atomic state — those
+                // semantics must not be elided by readnone assumptions.
+                if (sirFn->facts.effects.hasMutation) continue;
+
+                const bool isReadNone = sirFn->facts.isPure &&
+                                        sirFn->facts.effects.isReadNone();
+                const bool isReadOnly = !sirFn->facts.effects.writesMemory &&
+                                        !sirFn->facts.effects.hasIO &&
+                                        !sirFn->facts.effects.hasMutation;
+
+                if (!isReadNone && !isReadOnly) continue;
+
+                // Determine whether the function has any pointer-type params.
+                // For memory(none) we require no pointer params (or all
+                // pointer params must be proven noalias + nocapture, meaning
+                // they are not dereferenced).  For memory(read) we only
+                // require no writes-to-pointer-params.
+                bool hasPointerParam = false;
+                bool allPointerParamsNoCapture = true;
+                for (auto& arg : F.args()) {
+                    if (arg.getType()->isPointerTy()) {
+                        hasPointerParam = true;
+                        if (!arg.hasAttribute(llvm::Attribute::NoCapture)) {
+                            allPointerParamsNoCapture = false;
+                        }
+                    }
+                }
+
+                if (isReadNone && (!hasPointerParam || allPointerParamsNoCapture)) {
+                    F.setMemoryEffects(llvm::MemoryEffects::none());
+                    if (!F.hasFnAttribute(llvm::Attribute::WillReturn) &&
+                            !sirFn->neverReturns)
+                        F.addFnAttr(llvm::Attribute::WillReturn);
+                    ++annotatedNone;
+                } else if (isReadOnly && !F.onlyReadsMemory()) {
+                    // Readonly: can read but not write memory.  Allows LICM
+                    // to hoist the call out of loops and GVN to CSE calls.
+                    F.setMemoryEffects(llvm::MemoryEffects::readOnly());
+                    ++annotatedRead;
+                }
+            }
+            if (verbose_ && (annotatedNone + annotatedRead) > 0) {
+                std::cout << "    [sir-attr] Pre-pipeline annotation: "
+                          << annotatedNone << " memory(none), "
+                          << annotatedRead << " memory(read)" << '\n';
+            }
+        }
+    }
     // Pre-pipeline HGOE loop annotation: set target-optimal unroll count,
     // DEBUG: dump pre-pipeline IR when OMSC_DEBUG_IR=1
     if (const char* dbgEnv = std::getenv("OMSC_DEBUG_IR")) {
@@ -3759,6 +3845,24 @@ void CodeGenerator::runOptimizationPasses() {
         MPMPost.addPass(
             llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
         MPMPost.run(*module, PostMAM);
+    };
+
+    // ── Inter-wave attribute propagation helper ───────────────────────────
+    // Re-runs bidirectional function-attribute inference (PostOrderFunctionAttrs
+    // bottom-up + ReversePostOrderFunctionAttrs top-down) so that functions
+    // simplified in the previous wave have their memory/purity/nofree/willreturn
+    // attributes updated before the next wave fires.  This ensures waves like
+    // HGOE and IPOF see accurate purity facts discovered by earlier waves
+    // (e.g., the superoptimizer may have eliminated all memory accesses from a
+    // function, making it readnone — IPOF can then CSE its call sites).
+    auto propagateAttributes = [&]() {
+        if (optimizationLevel < OptimizationLevel::O2) return;
+        llvm::ModulePassManager AttrMPM;
+        AttrMPM.addPass(llvm::InferFunctionAttrsPass());
+        AttrMPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::PostOrderFunctionAttrsPass()));
+        AttrMPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        AttrMPM.run(*module, PostMAM);
     };
 
     // Bounded recursive inlining: replicate GCC's deep recursive inlining
@@ -4057,6 +4161,11 @@ void CodeGenerator::runOptimizationPasses() {
     // enough to become new inlining or specialization candidates.
     snapshot = advanceWave(verbose_, "superopt");
 
+    // Re-derive function attributes after the superoptimizer: functions that
+    // were simplified to no-memory-access by the superoptimizer now correctly
+    // carry readnone/willreturn/nofree, so HGOE sees accurate purity facts.
+    propagateAttributes();
+
     // Hardware Graph Optimization Engine: run after the superoptimizer when
     if (enableHGOE_ && optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) {
@@ -4131,6 +4240,11 @@ void CodeGenerator::runOptimizationPasses() {
     // or widened, and revised instruction counts that inform the IPOF pass.
     snapshot = advanceWave(verbose_, "sdr");
 
+    // Re-derive function attributes after SDR: vector-lane changes may have
+    // removed all memory accesses from a function, or introduced new noalias
+    // hints that enable IPOF to make better phase-ordering decisions.
+    propagateAttributes();
+
     // ── Implicit Phase Ordering Fixer (IPOF) ────────────────────────────────
     if (enableIPOF_ && optimizationLevel >= OptimizationLevel::O2) {
         // Derive aggression level from optimization level unless explicitly set.
@@ -4145,6 +4259,12 @@ void CodeGenerator::runOptimizationPasses() {
         ipofCfg.maxIterations   = (level >= 3) ? 3u : (level == 2 ? 2u : 1u);
         ipofCfg.enableNearVectorizable = (level >= 3);
         ipofCfg.enableCallWithConst    = (level >= 2);
+        // At O3, allow IPOF to analyze larger functions: the inter-wave
+        // attribute propagation above has already given IPOF accurate
+        // memory-effect facts, so the per-function cost of analysis is
+        // lower and the opportunity density in larger functions is higher.
+        if (optimizationLevel >= OptimizationLevel::O3)
+            ipofCfg.maxFunctionSize = 6000;
 
         auto ipofStats = ipof::runIPOF(*module, ipofCfg);
 
@@ -4365,6 +4485,75 @@ void CodeGenerator::runOptimizationPasses() {
                           << moduloExpanded << " urem instructions expanded" << '\n';
             }
         }
+
+        // ── Final IPO cleanup wave ─────────────────────────────────────────
+        // After all optimization waves (recursive inlining, specialization,
+        // superoptimizer, HGOE, SDR, IPOF) and the closing pipeline, run a
+        // final interprocedural cleanup pass.  The closing pipeline may have:
+        //   • constant-folded branches that made whole functions unreachable,
+        //   • simplified call sequences that now pass only constant arguments,
+        //   • eliminated loops that were the last side effects of a function
+        //     (making it newly dead or newly pure).
+        // A final IPO pass captures all of these at the module level, shrinking
+        // the binary and improving the quality of the emitted object code.
+        {
+            if (verbose_) {
+                std::cout << "    Running final IPO cleanup wave..." << '\n';
+            }
+            llvm::ModulePassManager FinalIPOMPM;
+
+            // IPSCCP: inter-procedural sparse conditional constant propagation.
+            // Propagates constants across all call boundaries; eliminates branches
+            // proven unreachable at the module level.
+            FinalIPOMPM.addPass(llvm::IPSCCPPass());
+
+            // DeadArgumentElimination: remove parameters that every call site
+            // passes an identical constant to (exposed by the IPSCCP fold above).
+            FinalIPOMPM.addPass(llvm::DeadArgumentEliminationPass());
+
+            // GlobalDCE: remove functions, globals, and aliases that are now
+            // dead after constant-folding and dead-argument removal.
+            FinalIPOMPM.addPass(llvm::GlobalDCEPass());
+
+            // InferFunctionAttrs: re-annotate library function declarations whose
+            // attributes may have changed after specialization and inlining.
+            FinalIPOMPM.addPass(llvm::InferFunctionAttrsPass());
+
+            // Bidirectional attribute propagation: re-derive memory effects,
+            // nounwind, nofree, willreturn from the simplified function bodies.
+            FinalIPOMPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+                llvm::PostOrderFunctionAttrsPass()));
+            FinalIPOMPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+
+            // At O3, run an additional Attributor pass to derive richer
+            // per-argument attributes (nonnull, dereferenceable, noalias) that
+            // the above bottom-up propagation doesn't capture.
+            if (optimizationLevel >= OptimizationLevel::O3) {
+                FinalIPOMPM.addPass(llvm::AttributorPass());
+            }
+
+            // Per-function cleanup: fold the newly-derived attribute facts
+            // (e.g., calls to newly-readnone functions can be CSE'd; newly-dead
+            // branches exposed by IPSCCP can be pruned).
+            {
+                llvm::FunctionPassManager FinalFPM;
+                FinalFPM.addPass(llvm::SCCPPass());
+                FinalFPM.addPass(llvm::InstCombinePass());
+                FinalFPM.addPass(llvm::ADCEPass());
+                FinalFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                FinalIPOMPM.addPass(
+                    llvm::createModuleToFunctionPassAdaptor(std::move(FinalFPM)));
+            }
+
+            // Strip any function declarations left orphaned by GlobalDCE.
+            FinalIPOMPM.addPass(llvm::StripDeadPrototypesPass());
+
+            FinalIPOMPM.run(*module, PostMAM);
+
+            if (verbose_) {
+                std::cout << "    Final IPO cleanup wave complete" << '\n';
+            }
+        }
     }
 }
 
@@ -4469,14 +4658,23 @@ struct OptMaxLoopAnnotationPass
             addMDFlag("llvm.loop.parallel_accesses");
         }
         if (cfg.tileSize > 0) {
-            // loop.tileSize maps to llvm.loop.interleave.count: the tileSize
-            // value controls how many independent copies of the loop body the
-            // vectorizer should interleave (software pipelining for throughput).
-            // For example, tileSize=4 tells the cost model to issue 4
-            // independent iterations to fill latency slots on an out-of-order
-            // core, improving pipeline utilisation for memory-bound loops.
+            // loop.tileSize (M in @tile(M) / @tile(M, N)):
+            // Maps to llvm.loop.interleave.count — controls how many independent
+            // copies of the loop body the vectorizer should interleave (software
+            // pipelining for throughput).  For example, tileSize=4 issues 4
+            // independent iterations to fill latency slots on an OOO core.
             addMDInt("llvm.loop.interleave.count",
                      static_cast<unsigned>(cfg.tileSize));
+        }
+        if (cfg.tileSizeN > 0) {
+            // loop.tileSizeN (N in @tile(M, N)): second-dimension cache-blocking
+            // depth.  Emitted as llvm.loop.unroll.count so the inner tile depth
+            // is unrolled by the requested factor, enabling the compiler to keep
+            // N iterations of the tile in registers across the inner loop.
+            // Together with tileSize (interleave), this gives a full 2D tile:
+            //   outer loop tiled M-wide (interleave) × N-deep (unroll).
+            addMDInt("llvm.loop.unroll.count",
+                     static_cast<unsigned>(cfg.tileSizeN));
         }
         if (cfg.parallel) {
             // loop.parallel=true: emit an access-group MDNode attached to the
@@ -4628,12 +4826,13 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     FPM.addPass(llvm::LoopDataPrefetchPass());
 
     // Apply user-specified LoopConfig hints to loop metadata so the unroller
-    // and vectoriser see them before they fire.  All six LoopConfig fields are
+    // and vectoriser see them before they fire.  All LoopConfig fields are
     // now wired up: vectorize, noVectorize, unrollCount, independent, tileSize,
-    // parallel, fuse.
+    // tileSizeN, parallel, fuse.
     if (cfg.loop.vectorize || cfg.loop.noVectorize ||
         cfg.loop.unrollCount > 0 || cfg.loop.independent ||
-        cfg.loop.tileSize > 0 || cfg.loop.parallel || cfg.loop.fuse) {
+        cfg.loop.tileSize > 0 || cfg.loop.tileSizeN > 0 ||
+        cfg.loop.parallel || cfg.loop.fuse) {
         FPM.addPass(OptMaxLoopAnnotationPass(cfg.loop));
     }
 
@@ -4881,15 +5080,92 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         if (!optMaxFunctions.count(name))
             continue;
         func.addFnAttr(llvm::Attribute::NoUnwind);
-        // WillReturn: OPTMAX functions always return (no infinite loops or
-        // exceptions), enabling LLVM to speculate calls and eliminate dead ones.
-        func.addFnAttr(llvm::Attribute::WillReturn);
-        // NoSync: OPTMAX functions don't synchronize (no atomics, locks, or
-        // thread-related operations), enabling aggressive reordering.
-        func.addFnAttr(llvm::Attribute::NoSync);
-        // NoFree: OPTMAX functions don't free heap memory, enabling the
-        // optimizer to sink/hoist loads past calls to these functions.
-        func.addFnAttr(llvm::Attribute::NoFree);
+        // Apply WillReturn, NoSync, NoFree according to the OPTMAX opt contract.
+        // These attributes are *claimed* by OPTMAX but require a body scan to
+        // confirm they actually hold — the contract marks all three as
+        // requiresProof.  An incorrect claim would allow LLVM to eliminate code
+        // that must execute (WillReturn), reorder across synchronization barriers
+        // (NoSync), or hoist loads past frees (NoFree), causing miscompilation.
+        {
+            const omscript::OptContract& contract =
+                omscript::getOptContract(omscript::AnnotationId::OPTMAX);
+
+            // Scan for instructions that would invalidate each claimed attribute.
+            bool hasSyncOp = false;
+            bool hasFreeOp = false;
+            bool hasInfiniteLoopRisk = false; // conservative: any self-backedge (block branching to itself)
+            for (const llvm::BasicBlock& BB : func) {
+                for (const llvm::Instruction& I : BB) {
+                    // NoSync: any atomic or fence instruction invalidates the claim.
+                    if (contract.requiresNoSyncProof) {
+                        if (I.isAtomic()) { hasSyncOp = true; }
+                        if (llvm::isa<llvm::FenceInst>(&I)) { hasSyncOp = true; }
+                    }
+                    // NoFree: any call to free(), delete, or LLVM free-like
+                    // intrinsics invalidates the claim.
+                    if (contract.requiresNoFreeProof) {
+                        if (const auto* CI = llvm::dyn_cast<llvm::CallBase>(&I)) {
+                            if (CI->hasFnAttr(llvm::Attribute::NoFree)) {
+                                // callee itself is nofree — safe
+                            } else if (const llvm::Function* callee = CI->getCalledFunction()) {
+                                const llvm::StringRef cname = callee->getName();
+                                if (cname == "free" || cname == "_ZdlPv" ||
+                                    cname == "_ZdaPv" || cname.starts_with("__libc_free") ||
+                                    cname == "cfree" || cname == "reallocarray") {
+                                    hasFreeOp = true;
+                                }
+                            } else {
+                                // Indirect call — conservatively assume may free.
+                                hasFreeOp = true;
+                            }
+                        }
+                    }
+                }
+                // WillReturn: a block with a backedge and no reachable exit is a
+                // potential infinite loop.  We use a conservative check: if a
+                // block's successors are all predecessors of an earlier block in
+                // RPO and there is no successor that is a function exit, flag it.
+                // (A full liveness analysis is too expensive here; this is a
+                //  simple but effective filter.)
+                if (contract.requiresWillReturnProof) {
+                    const llvm::Instruction* term = BB.getTerminator();
+                    if (term && !llvm::isa<llvm::ReturnInst>(term) &&
+                        !llvm::isa<llvm::UnreachableInst>(term)) {
+                        // Conservative check: a block that branches unconditionally
+                        // to itself is an infinite self-loop.  We only check
+                        // succ == &BB here (not general back-edges) because a full
+                        // dominator-tree query would be too expensive at this point.
+                        for (const llvm::BasicBlock* succ :
+                             llvm::successors(&BB)) {
+                            if (succ == &BB) {
+                                hasInfiniteLoopRisk = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Apply attributes only when the body scan confirms safety.
+            if (contract.requiresWillReturnProof) {
+                if (!hasInfiniteLoopRisk)
+                    func.addFnAttr(llvm::Attribute::WillReturn);
+            } else if (contract.assertsWillReturn) {
+                func.addFnAttr(llvm::Attribute::WillReturn);
+            }
+            if (contract.requiresNoSyncProof) {
+                if (!hasSyncOp)
+                    func.addFnAttr(llvm::Attribute::NoSync);
+            } else if (contract.assertsNoSync) {
+                func.addFnAttr(llvm::Attribute::NoSync);
+            }
+            if (contract.requiresNoFreeProof) {
+                if (!hasFreeOp)
+                    func.addFnAttr(llvm::Attribute::NoFree);
+            } else if (contract.assertsNoFree) {
+                func.addFnAttr(llvm::Attribute::NoFree);
+            }
+        }
         // Speculatable (safety=Off only): the function is a pure mathematical
         // kernel with no side effects — the user has explicitly opted out of
         // safety checks, so LLVM may reorder and speculate calls above branches
@@ -5319,6 +5595,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
             if (cfg.loop.unrollCount > 0)  std::cout << ", loop.unrollCount=" << cfg.loop.unrollCount;
             if (cfg.loop.independent)      std::cout << ", loop.independent";
             if (cfg.loop.tileSize > 0)     std::cout << ", loop.tileSize=" << cfg.loop.tileSize;
+            if (cfg.loop.tileSizeN > 0)    std::cout << ", loop.tileSizeN=" << cfg.loop.tileSizeN;
             if (cfg.loop.parallel)         std::cout << ", loop.parallel";
             if (cfg.loop.fuse)             std::cout << ", loop.fuse";
             if (cfg.safety == SafetyLevel::Off)

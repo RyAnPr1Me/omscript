@@ -1,3 +1,7 @@
+// === COMPILER LAYER 4 (LOWERING): Code Generator — expressions ===
+// Expression-level LLVM IR emission. Same layer constraints as codegen.cpp:
+// no semantic analysis, no optimization decisions. Reads Layer 2 facts only
+// through the CodeGenerator context object.
 #include "codegen.h"
 #include "diagnostic.h"
 #include <climits>
@@ -6099,6 +6103,20 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
     load->setMetadata(llvm::LLVMContext::MD_tbaa,
                       getOrCreateFieldTBAA(rf.structName, rf.index));
 
+    // @repr(soa) / @repr(aos_to_soa): tag this field load with the struct's
+    // access-group MDNode.  LoopVectorize reads !llvm.access.group to determine
+    // that loads from different fields belong to independent streams and can be
+    // vectorized without alias-check guards.
+    {
+        auto agIt = soaAccessGroups_.find(rf.structName);
+        if (agIt != soaAccessGroups_.end()) {
+            llvm::MDNode* existing = load->getMetadata(llvm::LLVMContext::MD_access_group);
+            load->setMetadata(llvm::LLVMContext::MD_access_group,
+                existing ? llvm::MDNode::get(*context, {existing, agIt->second})
+                         : agIt->second);
+        }
+    }
+
     // Apply LLVM metadata from struct field attributes.
     if (attrs) {
         if (attrs->immut) {
@@ -6190,6 +6208,18 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     // TBAA: per-field type node (matches generateFieldAccess).
     store->setMetadata(llvm::LLVMContext::MD_tbaa,
                        getOrCreateFieldTBAA(rf.structName, rf.index));
+
+    // @repr(soa) / @repr(aos_to_soa): tag this field store with the struct's
+    // access-group MDNode (mirrors the load tagging in generateFieldAccess).
+    {
+        auto agIt = soaAccessGroups_.find(rf.structName);
+        if (agIt != soaAccessGroups_.end()) {
+            llvm::MDNode* existing = store->getMetadata(llvm::LLVMContext::MD_access_group);
+            store->setMetadata(llvm::LLVMContext::MD_access_group,
+                existing ? llvm::MDNode::get(*context, {existing, agIt->second})
+                         : agIt->second);
+        }
+    }
 
     // !nontemporal hint for cold fields — bypass cache on write
     if (attrs && attrs->cold) {

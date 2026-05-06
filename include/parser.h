@@ -30,6 +30,12 @@ class Parser {
     /// Set the base directory for resolving import paths.
     void setBaseDir(const std::string& dir) { baseDir_ = dir; }
 
+    /// When true, emit a W019 warning for every struct field that lacks a
+    /// type annotation (e.g. `struct Foo { x, y }` instead of `struct Foo
+    /// { x: i64, y: i64 }`).  Enable with `--warn-untyped-fields`.
+    void setWarnUntypedFields(bool v) { warnUntypedFields_ = v; }
+    [[nodiscard]] bool warnUntypedFields() const noexcept { return warnUntypedFields_; }
+
     /// Returns collected parse errors (populated when multi-error mode is active).
     [[nodiscard]] const std::vector<std::string>& errors() const noexcept {
         return errors_;
@@ -49,6 +55,7 @@ class Parser {
     std::vector<std::string> warnings_;
     int lambdaCounter_ = 0;
     int recursionDepth_ = 0;
+    bool warnUntypedFields_ = false; ///< --warn-untyped-fields flag
 
     /// Set to true by parsePrimary() when it resolves a namespace-qualified
     /// call (e.g. std::abs).  Read and immediately cleared by parseCall() to

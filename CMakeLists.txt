@@ -105,6 +105,8 @@ set(SRC
     src/uniqueness_analysis.cpp
     src/borrow_checker.cpp
     src/hgoe_egraph.cpp
+    src/sir_builder.cpp
+    src/var_range_analysis.cpp
 
     # Driver
     src/preprocessor.cpp

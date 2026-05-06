@@ -624,6 +624,42 @@ supported in function-like macro bodies — see §3.2.
 | Macro redefined with a body that differs from the previous definition | warning |
 | `#undef` of a macro that was never defined | warning |
 | Function-like macro uses a parameter more than once and the matching argument looks like a function call (multi-evaluation footgun) | warning |
+| **Function-like macro defined (any `#define FOO(...)`)** | **note** — suggests `comptime fn` as a typed alternative |
+
+#### Migrating from function-like macros to `comptime`
+
+The preprocessor emits a `note:` whenever a function-like macro is defined:
+
+```
+note: function-like macro 'SQUARE(...)' uses untyped textual substitution. Consider
+replacing it with a typed comptime function: `comptime fn SQUARE(...) { ... }`
+```
+
+This is informational only — function-like macros continue to work. The note is not emitted for object-like macros.
+
+**Why prefer `comptime` over function-like macros?**
+
+| Feature | `#define FOO(x) ...` | `comptime fn foo(x: T) ...` |
+|---------|---------------------|---------------------------|
+| Type safety | None — textual substitution | Full type checking |
+| Optimizer visibility | Opaque — optimizer sees expansion, not intent | Transparent — ownership, effects, and alias facts propagate |
+| Debugging | Line numbers may point to expansion site | Source maps to `comptime` definition |
+| Recursion | Limited (256-level depth limit) | Native language recursion |
+| Ownership interaction | None | Full `move`/`borrow`/`freeze` awareness |
+
+**Migration pattern:**
+
+```omscript
+// Before (function-like macro)
+#define CLAMP(x, lo, hi) ((x) < (lo) ? (lo) : ((x) > (hi) ? (hi) : (x)))
+
+// After (comptime function — fully typed, optimizer-transparent)
+comptime fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+```
 
 #### 3.1.2 `#undef` — Undefine Macro
 
@@ -1278,7 +1314,8 @@ Placed immediately before `struct`, `@repr(...)` controls the memory layout of t
 | `@repr(packed)` | Minimal memory — no padding bytes inserted between fields. |
 | `@repr(align(N))` | Force the struct's alloca to be at least `N`-byte aligned (N must be a power of two). |
 | `@repr(auto)` | Compiler optimizes layout freely (default). |
-| `@repr(soa)` | Structure-of-arrays layout hint — recorded for future layout passes. |
+| `@repr(soa)` | Structure-of-arrays: field loads/stores inside loops are tagged with an LLVM `!llvm.access.group` MDNode, letting LoopVectorize prove field streams are independent. |
+| `@repr(aos_to_soa)` | Array-of-structures → structure-of-arrays transformation at call boundaries. Field loads/stores receive the same access-group tagging as `@repr(soa)`. |
 
 ```omscript
 @repr(C)
@@ -1306,9 +1343,15 @@ struct AutoLayout {
 
 @repr(soa)
 struct Particle {
-    px: float,
-    py: float,
-    pz: float,
+    px: f32,
+    py: f32,
+    pz: f32,
+}
+
+@repr(aos_to_soa)
+struct Transform {
+    mat: f32,
+    scale: f32,
 }
 ```
 
@@ -1317,7 +1360,8 @@ struct Particle {
 - `@repr(C)` → fields in declaration order; `alloca` aligned to the target ABI alignment of the struct type
 - `@repr(align(N))` → `alloca` alignment set to `N` bytes
 - `@repr(auto)` → same as the default (compiler may reorder cold fields for locality at O2+)
-- `@repr(soa)` → hint recorded; actual SoA transformation is applied by future layout passes
+- `@repr(soa)` → every field load/store tagged with `!llvm.access.group <struct-ag>`. The loop header must also carry `!llvm.loop.parallel_accesses` (set by `@loop(parallel=true)` or `@optmax`) for LoopVectorize to exploit the group tag.
+- `@repr(aos_to_soa)` → same access-group tagging as SoA; signals to the caller that the callee expects SoA layout so call-boundary layout adapters can be inserted in a future pass.
 
 #### 4.4.7 Enum Type
 
@@ -1863,14 +1907,77 @@ fn fast_add(a: int, b: int) -> int {
 }
 ```
 
-**Multiple annotations**: Stack annotations on separate lines:
+**Multiple annotations**: Stack annotations on separate lines, or use the unified `@opt(...)` / `@semantics(...)` form:
 ```omscript
+// Legacy form (still accepted)
 @vectorize
 @inline
 fn compute(x: int) -> int {
     return x * 2;
 }
+
+// Unified form (preferred for new code)
+@opt(vectorize, inline)
+fn compute(x: int) -> int {
+    return x * 2;
+}
 ```
+
+#### Annotation namespaces
+
+OmScript organises function annotations into three namespaces that reflect their purpose:
+
+| Namespace | Syntax | Purpose |
+|-----------|--------|---------|
+| `@opt(...)` | `@opt(inline, hot, align=64, ...)` | Optimizer hints — tell the backend *how* to compile this function |
+| `@semantics(...)` | `@semantics(pure, speculatable, ...)` | Behavioral contracts — assert *what* the function does or doesn't do |
+| `@repr(...)` | `@repr(C)`, `@repr(packed)`, … | Layout / ABI constraints on structs (see §14) |
+
+The flat single-word forms (`@inline`, `@hot`, `@pure`, etc.) remain fully supported and are not deprecated. The namespace forms are preferred for new code because they document intent more clearly.
+
+**`@opt(...)` accepted keys:**
+
+| Key | Equivalent | Description |
+|-----|-----------|-------------|
+| `inline` | `@inline` | Force inlining |
+| `noinline` | `@noinline` | Prevent inlining |
+| `hot` | `@hot` | Frequently-executed hint |
+| `cold` | `@cold` | Rarely-executed hint |
+| `vectorize` | `@vectorize` | Request SIMD vectorization |
+| `novectorize` | `@novectorize` | Disable vectorization |
+| `unroll` | `@unroll` | Request loop unrolling |
+| `nounroll` | `@nounroll` | Disable loop unrolling |
+| `parallel` | `@parallel` | Enable auto-parallelization |
+| `noparallel` | `@noparallel` | Disable auto-parallelization |
+| `flatten` | `@flatten` | Flatten all control flow |
+| `minsize` | `@minsize` | Optimize for code size |
+| `align=N` | `@align(N)` | Align function entry to N bytes |
+
+**`@semantics(...)` accepted keys:**
+
+| Key | Equivalent | Description |
+|-----|-----------|-------------|
+| `pure` | `@pure` | No side effects, same inputs → same output |
+| `speculatable` | `@speculatable` | Safe to speculate across branches |
+| `noreturn` | `@noreturn` | Function never returns |
+| `nounwind` | `@nounwind` | Function never throws |
+| `restrict` / `noalias` | `@restrict` | All pointer parameters are non-aliasing |
+| `const_eval` | `@const_eval` | Evaluate at compile time when possible |
+
+#### Annotation conflict resolution — inhibitor-wins rule
+
+When conflicting annotations appear on the same function, the **inhibitor always wins**:
+
+| Conflict | Winner |
+|----------|--------|
+| `@inline` vs `@noinline` | `@noinline` |
+| `@hot` vs `@cold` | `@cold` |
+| `@vectorize` vs `@novectorize` | `@novectorize` |
+| `@unroll` vs `@nounroll` | `@nounroll` |
+| `@parallel` vs `@noparallel` | `@noparallel` |
+| `@optnone` vs any accelerator | `@optnone` |
+
+The compiler emits a warning for each conflict and applies the inhibitor silently. The precedence rules are machine-readable in `include/opt_contracts.h`.
 
 **Recognized function annotations**:
 
@@ -2977,6 +3084,24 @@ for (i: int in 0...100) @loop(vectorize) {
 ```
 
 **Effect**: Compiler attempts to generate SIMD instructions (e.g., AVX, NEON).
+
+#### `@loop(tile=M)` / `@loop(tile=M, N)` — Cache-Blocking Tile
+
+Controls the loop tile width (M) and depth (N) for cache-blocking and software-pipeline throughput.
+
+| Argument | LLVM metadata emitted | Effect |
+|----------|-----------------------|--------|
+| `@loop(tile=M)` | `llvm.loop.interleave.count = M` | Interleave M independent iterations to fill out-of-order execution slots (1-D software pipeline). |
+| `@loop(tile=M, N)` | `llvm.loop.interleave.count = M` + `llvm.loop.unroll.count = N` | Full 2-D tile: M-wide interleave × N-deep unroll for cache-blocking. |
+
+**Example** (2-D tile for matrix multiply inner loop):
+```omscript
+for (k: int in 0...K) @loop(tile=4, 8) {
+    c[i][j] = c[i][j] + a[i][k] * b[k][j];
+}
+```
+
+**Effect**: The loop body is interleaved 4-wide (filling pipeline slots) and unrolled 8-deep (keeping the 8-iteration register tile in registers, reducing cache miss rate for the A and B sub-matrices).
 
 #### Additional Loop Annotations
 
@@ -4856,28 +4981,61 @@ map_set(map_set(m, 10, 100), 20, 200);
 
 **Syntax:**
 ```omscript
-struct Name { field1, field2, field3 }
+struct Name { field1: Type1, field2: Type2 }
 ```
 
-**Fields:** Comma-separated identifiers (no type annotations in the current syntax).
+**Fields:** Comma-separated `name: Type` pairs. Type annotations are strongly recommended (see warning below).
 
-**Example:**
+**Examples:**
 ```omscript
+// Recommended — fully typed fields
+struct Point { x: f64, y: f64 }
+struct Person { name: string, age: i64 }
+
+// Accepted — but see W019 below
 struct Point { x, y }
-struct Person { name, age }
 ```
 
 **Global scope:** Struct declarations must appear at the top level (not inside functions).
+
+#### W019 — Untyped struct fields
+
+When fields lack type annotations (e.g. `struct Foo { x, y }`), the compiler defaults them to `i64` at codegen time. This creates two problems:
+
+1. **Non-deterministic ABI**: if a field stores an `f64` value, the `i64` layout is technically correct on little-endian platforms but the semantics are wrong (floats are reinterpreted as integers).
+2. **Cross-module instability**: the inferred type is resolved at first-use, so two compilation units may generate different struct layouts.
+
+Enable `--warn-untyped-fields` to surface all violations:
+
+```sh
+omsc build --warn-untyped-fields myfile.om
+```
+
+The compiler emits a `W019` warning for each untyped field:
+
+```
+warning [W019]: struct 'Point' field 'x' declared without a type annotation (e.g. 'x: i64'). ...
+```
+
+A future release will require typed fields. Migration guide:
+
+```omscript
+// Before
+struct Vec3 { x, y, z }
+
+// After
+struct Vec3 { x: f64, y: f64, z: f64 }
+```
 
 ---
 
 ### 14.2 Field types, attributes
 
-**Field types:** All fields are i64 (integers, floats-as-bits, or pointers).
+**Field types:** Explicit type annotations are strongly recommended on all fields. When a type annotation is present it is resolved at struct-declaration time, giving stable ABI. When absent the field defaults to `i64` at codegen (triggers W019 with `--warn-untyped-fields`).
 
-**Attributes:** `@packed` is parsed but not yet implemented. Future feature for controlling memory layout.
+**Supported field types:** All scalar types (`i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64`, `bool`) and pointer types (`ptr`). Struct-of-struct nesting uses the struct name as the type.
 
-**Alignment:** Fields are 8-byte aligned (standard i64 alignment).
+**Alignment:** Fields are 8-byte aligned (standard i64 alignment) unless `@repr(packed)` is in effect.
 
 ---
 
@@ -5235,7 +5393,41 @@ Errors are reported in two tiers:
 
 ## 17. Memory and Ownership System
 
-### 17.0 Ownership states
+### 17.0 Ownership philosophy and enforcement modes
+
+OmScript's ownership system serves a dual purpose:
+
+1. **Alias disambiguation input** — `move`, `borrow`, `freeze`, and `reborrow` annotations give the optimizer alias-analysis facts (no-escape, read-only borrow, exclusive write) that enable more aggressive optimizations such as load hoisting, CSE across calls, and loop-invariant code motion.
+
+2. **Safety barrier** (optional) — the same annotations can be enforced as hard compile-time errors when `--ownership=strict` is passed.
+
+#### Enforcement modes
+
+| Mode | CLI flag | Violations E015–E018 |
+|------|----------|----------------------|
+| **Advisory** (default) | `--ownership=advisory` | Warnings — compilation continues |
+| **Strict** | `--ownership=strict` | Fatal errors — compilation stops |
+
+Advisory mode is the default because OmScript is **optimization-first**: ownership annotations are most valuable as optimizer hints. When migrating a codebase or auditing for correctness, add `--ownership=strict` to promote all borrow-checker violations to errors.
+
+```sh
+# Check a file strictly
+omsc build --ownership=strict myfile.om
+
+# Explicitly advisory (same as the default)
+omsc build --ownership=advisory myfile.om
+```
+
+#### Borrow-checker error codes
+
+| Code | Meaning |
+|------|---------|
+| E015 | Use after move — variable used after its ownership was transferred |
+| E016 | Borrow–write conflict — write to variable with active immutable borrow(s) |
+| E017 | Double mutable borrow — second `borrow mut` while one is active |
+| E018 | Move while borrowed — move of variable with active borrow(s) |
+
+### 17.0a Ownership states
 
 **Enum definition** (from `codegen.h`):
 ```cpp
@@ -7146,6 +7338,23 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 
 The compiler emits structured diagnostics to stderr. Errors use exit code 1; warnings do not halt compilation.
 
+#### Ownership enforcement
+
+| Flag                        | Default | Description                                              |
+|-----------------------------|---------|----------------------------------------------------------|
+| `--ownership=advisory`      | ✓       | Borrow-checker violations (E015–E018) are warnings       |
+| `--ownership=strict`        | —       | Borrow-checker violations are fatal errors               |
+
+See §17 for details on the advisory vs strict enforcement model.
+
+#### Struct typing warnings
+
+| Flag                        | Default | Description                                              |
+|-----------------------------|---------|----------------------------------------------------------|
+| `--warn-untyped-fields`     | —       | Warn (W019) when struct fields lack type annotations     |
+
+See §14.1 for details on untyped struct fields and migration guidance.
+
 #### PGO (Profile-Guided Optimization)
 
 | Flag              | Short | Default    | Description                                          |
@@ -7445,6 +7654,47 @@ The four currently defined `IRInvariant` values (`opt_pass.h:203-208`):
 
 `PassContract` is currently an adjunct to `PassMetadata`; the source comment at `opt_pass.h:223-225` notes that future work will migrate to `PassContract` as the sole pass descriptor.
 
+### 25.2.3 OptContract — Annotation legality table (`include/opt_contracts.h`)
+
+`OptContract` (`include/opt_contracts.h`) is the **single source of truth** for what each optimization annotation asserts about a function and what compiler behaviours it permits.
+
+```cpp
+struct OptContract {
+    const char* name;           // canonical display name for diagnostics
+    bool isInhibitor;           // inhibits optimization (e.g. @noinline, @cold)
+    bool isAccelerator;         // enables optimization (e.g. @inline, @hot)
+
+    // Asserted LLVM attributes — added unconditionally when annotation present
+    bool assertsWillReturn;     // function always returns (no infinite loops)
+    bool assertsNoSync;         // no atomics, fences, or thread synchronization
+    bool assertsNoFree;         // no heap deallocation
+    bool assertsReadOnly;       // no observable side effects on memory
+
+    // Conditional attributes — only safe after body scan confirms them
+    bool requiresWillReturnProof;
+    bool requiresNoSyncProof;
+    bool requiresNoFreeProof;
+};
+```
+
+**OPTMAX attribute safety** — Before this table was introduced, the compiler unconditionally added `WillReturn`, `NoSync`, and `NoFree` to every OPTMAX function. The `OPTMAX` entry in the table has all three `requiresXxxProof` flags set to `true`. The codegen now scans the function body before adding each attribute:
+
+- `requiresNoSyncProof` — skipped if any `llvm::Instruction::isAtomic()` or `FenceInst` is found.
+- `requiresNoFreeProof` — skipped if any call to `free`, `delete`, or an indirect callee is found.
+- `requiresWillReturnProof` — skipped if any basic block has a self-loop (unconditional infinite loop).
+
+**Inhibitor-wins precedence** — `annotationDominates(a, b)` returns true when `a` is an inhibitor and `b` is an accelerator. All annotation conflict warnings in the parser use this function to determine the winner.
+
+**Key exported functions:**
+
+| Function | Description |
+|----------|-------------|
+| `getOptContract(AnnotationId)` | Return the contract for a given annotation (static table, zero-allocation) |
+| `annotationDominates(a, b)` | True when inhibitor `a` wins over accelerator `b` |
+| `annotationsConflict(a, b)` | True when `a` and `b` cannot coexist (either order) |
+| `resolveConflict(a, b)` | Return the winner when `a` and `b` conflict |
+| `annotationName(id)` | Canonical display name for diagnostics |
+
 ### 25.2.3 AnalysisDependencyGraph (cascading invalidation)
 
 `AnalysisDependencyGraph` (`opt_pass.h:283-343`) records "fact A depends on fact B" edges. When a transform invalidates fact B, every fact that transitively depends on B is also invalidated. Callers therefore only need to invalidate the *directly* affected fact; the cascade is computed automatically.
@@ -7539,6 +7789,78 @@ Diagnostic(level, code, message, location) → DiagnosticManager → stderr
 **Current status**: Not implemented. Every invocation recompiles from source.
 
 **Planned**: Timestamp-based invalidation of `oms.toml` → build cache mapping.
+
+### 25.6 Semantic layering model
+
+The compiler is divided into four conceptual layers. Layer boundaries prevent optimization facts from leaking into semantic analysis and vice versa. Each source file belongs to exactly one layer; cross-layer facts are passed only through well-defined interfaces (e.g., `OptimizationContext`, `FunctionFacts`).
+
+| Layer | Name | Source files | Allowed dependencies |
+|-------|------|-------------|----------------------|
+| **1** | Syntax | `src/parser.cpp`, `src/lexer.cpp`, `include/ast.h` | None (no LLVM, no optimizer) |
+| **2** | Semantics | `src/type_checker.cpp`, `src/borrow_check.cpp`, `src/effects.cpp`, `src/ersl.cpp`, `include/ersl.h` | Layer 1 |
+| **3** | Optimization | `src/opt_orchestrator.cpp`, `src/codegen_opt.cpp`, `src/egraph.cpp`, `src/cfctre.cpp`, all pass `.cpp` files | Layers 1 + 2 |
+| **4** | Lowering | `src/codegen.cpp`, `src/codegen_expr.cpp`, `src/codegen_stmt.cpp` | Layers 1 + 2 + 3 (read-only facts) |
+
+**Known violation to fix**: `nonNegValues_` (a Layer 3 fact set in `CodeGenerator`) is consumed inside `generateWhile` (a Layer 4 function) to emit `assume()` calls without a corresponding Layer 2 proof. This is the canonical example of a layer-3/4 boundary violation; it should be guarded with a Layer 2 proof predicate before use.
+
+### 25.7 Semantic IR (SIR)
+
+The **Semantic IR** (`include/sir.h`, `src/sir_builder.cpp`) is a rich, queryable intermediate representation built between the AST and LLVM IR. It consolidates *all* semantic analysis results into a single queryable object so that codegen and optimization passes have maximum information without having to re-derive it.
+
+#### When it is built
+
+The SIR is constructed by the **`kSIR` pre-pass** (registered in `src/opt_orchestrator.cpp`). This pass runs *last*, after every other pre-pass has finished:
+
+```
+kEffects → kERSL → kRangeAnalysis → kUniqueness → kBorrowCheck → kHGOEEGraph → kSIR
+```
+
+The result is stored in `OptimizationContext::sir_` and accessed via `ctx.sirTyped<SIRModule>()`.
+
+#### Key types
+
+| Type | Description |
+|------|-------------|
+| `SIRType` | Fully resolved scalar / aggregate type (kind, bitWidth, signedness, isConst, isAtomic, isVolatile) |
+| `SIRVarFacts` | Per-variable semantic facts: type, constancy, known integer/string value, `ValueRange`, non-negativity, aliasing, atomic/volatile flags |
+| `SIRParam` | Per-parameter version of `SIRVarFacts` plus the declared name and optional range annotation |
+| `SIRCallSite` | Per-call-site info: callee name, effect kind, stability, constant-argument values, tail-position flag, escape analysis result |
+| `SIRLoopInfo` | Loop analysis: iterator variable, nesting depth, static start/end/step bounds, exact or max trip count, countability, array read/write sets |
+| `SIRFunction` | Per-function aggregate: signature, all `SIRVarFacts`, all `SIRCallSite`s, all `SIRLoopInfo`s, `FunctionFacts`, annotation hints, estimated body size, leaf/recursive flags, entry flag |
+| `SIRStructType` | Per-struct aggregate: field list (name + type + `FieldAttrs`), layout repr, SoA/packed/extern-C flags |
+| `SIRModule` | Whole-program view: all `SIRFunction`s, `SIRStructType`s, call graph, caller graph, entry-point set, estimated total size |
+
+#### Information captured
+
+- **Types**: fully resolved from annotation strings (`int`, `i32`, `f64`, `string`, `Point[]`, …).
+- **Variable ranges**: populated from `computeVarRanges()` (via `var_range_analysis.h`), including tightly bounded parameters.
+- **Uniqueness / aliasing**: populated from `computeUniqueness()` per function.
+- **Constant propagation**: integer and string literal initialisers are recorded in `constIntVal` / `constStrVal`.
+- **Loop bounds**: static start, end, step; exact trip count (when computable); nesting depth; read/written array names.
+- **Call graph**: direct-callee sets + inverted caller-of map across all functions.
+- **Effect classification**: IO / Read / Write / None per call site; stability (stable vs input-dependent).
+- **Annotation hints**: `forceInline`, `neverInline`, `isHot`, `isCold`, `neverReturns`, `alwaysReturns`.
+- **Struct layout**: field attributes (`hot`, `cold`, `noalias`, `immut`, `align`, `range`), SoA / packed flags.
+
+#### Codegen integration
+
+`CodeGenerator::generateFunction()` reads the SIR (via `optCtx_->sirTyped<SIRModule>()`) after parameters are allocated and:
+
+1. Seeds `nonNegValues_` for integer parameters whose SIR range is non-negative.
+2. Emits `llvm.assume(param >= lo && param <= hi)` for parameters with tightly bounded ranges.
+3. Pre-populates `constIntFolds_` for parameters known to be compile-time constants.
+
+This eliminates redundant re-derivation of these facts during function body lowering.
+
+#### Query API
+
+```cpp
+const SIRModule* sir = ctx.sirTyped<SIRModule>();
+const SIRFunction* fn  = sir->getFunction("myFunc");
+const SIRVarFacts*  vf = sir->getVarFacts("myFunc", "x");
+bool isPure            = sir->isFunctionPure("myFunc");
+bool hasCallee         = sir->calls("myFunc", "helper");
+```
 
 ---
 

@@ -305,6 +305,11 @@ class CodeGenerator {
         return verbose_;
     }
 
+    /// When false (the default), borrow-checker violations are advisory warnings.
+    /// When true (--ownership=strict), they are fatal errors.
+    void setOwnershipStrict(bool v) { ownershipStrict_ = v; }
+    [[nodiscard]] bool isOwnershipStrict() const noexcept { return ownershipStrict_; }
+
     /// Set the source filename for debug info metadata.
     void setSourceFilename(const std::string& filename) {
         sourceFilename_ = filename;
@@ -449,6 +454,10 @@ class CodeGenerator {
     // @repr layout hint per struct.
     std::unordered_map<std::string, StructRepr> structReprs_;
     std::unordered_map<std::string, int>         structReprAlignN_;
+    // Struct names with @repr(soa) or @repr(aos_to_soa): field loads/stores inside
+    // loops are tagged with a per-struct LLVM access-group MDNode so LoopVectorize
+    // can prove field streams are independent and vectorize across them.
+    std::unordered_map<std::string, llvm::MDNode*> soaAccessGroups_;
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
     // Per-struct LLVM StructType (built lazily; enables SROA/mem2reg for small structs).
@@ -1018,6 +1027,7 @@ class CodeGenerator {
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file
     bool lto_ = false;                // LTO mode: use pre-link pipeline
     bool verbose_ = false;            // -V: print optimization pass messages
+    bool ownershipStrict_ = false;    // --ownership=strict: borrow violations are errors
 
     // DWARF debug info infrastructure
     bool debugMode_ = false;                       // -g: emit debug metadata
@@ -1141,6 +1151,12 @@ class CodeGenerator {
     llvm::Function* getOrDeclareHttpPost();
     llvm::Function* getOrDeclareHttpRequest();
     llvm::Function* getOrDeclareHttpGetStatus();
+
+    // Array grow helper: cold, noinline outlined function for the push growth path.
+    // Signature: ptr @__omsc_array_grow(ptr %arr, i64 %newLen)
+    // Moves all ctlz/realloc code out of the inlined push hot-path so LLVM sees a
+    // clean loop body that it can vectorize.
+    llvm::Function* getOrEmitArrayGrowHelper();
 
     // Hash-table map runtime helpers: open-addressing, linear probing, power-of-2 capacity, FNV-1a.
     // Layout (all i64): [capacity, size, hash0, key0, val0, ...]; empty=0, tombstone=1, occupied≥2.

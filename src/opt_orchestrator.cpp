@@ -1,3 +1,7 @@
+// === COMPILER LAYER 3 (OPTIMIZATION): Optimization Orchestrator ===
+// Owns the pass schedule, fact propagation, and optimization coordinator.
+// Reads Layer 2 semantic facts (types, ownership, effects, ERSL) and drives
+// Layer 3 transforms. Must not emit LLVM IR directly — that is Layer 4.
 /// @file opt_orchestrator.cpp
 /// @brief PassRegistry, pass metadata catalog, and OptimizationOrchestrator.
 ///
@@ -23,6 +27,8 @@
 #include "uniqueness_analysis.h"
 #include "borrow_checker.h"
 #include "hgoe_egraph.h"
+#include "sir.h"              // SIR (Semantic IR) builder
+#include "var_range_analysis.h" // computeVarRanges (for SIR pass)
 
 #include <cassert>
 #include <chrono>
@@ -188,6 +194,7 @@ namespace PassId {
     uint32_t kUniqueness        = 0;
     uint32_t kBorrowCheck       = 0;
     uint32_t kHGOEEGraph        = 0;
+    uint32_t kSIR               = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -490,6 +497,29 @@ static void registerAllPasses() {
         // Rewrites expressions — invalidates shape-derived facts.
         {AnalysisFact::kRangeAnalysis},
     });
+
+    // ── Semantic IR (SIR) ─────────────────────────────────────────────────
+    // Runs last — consumes the outputs of ALL prior passes and consolidates
+    // them into a SIRModule stored on the OptimizationContext.  This pass is
+    // read-only (does not transform the AST) and does not invalidate anything.
+    PassId::kSIR = reg.registerPass({
+        0,
+        "sir",
+        "Semantic IR builder: consolidates all pre-pass analysis results "
+        "(types, ranges, effects, ERSL, uniqueness, borrow facts, loop info, "
+        "call graph) into a single queryable SIRModule for maximum codegen "
+        "optimization potential",
+        PassPhase::EvaluationAnalysis,
+        PassKind::Analysis,
+        // Depends on everything — must run after all other passes.
+        {AnalysisFact::kERSL, AnalysisFact::kRangeAnalysis,
+         AnalysisFact::kUniqueness, AnalysisFact::kBorrowCheck,
+         AnalysisFact::kHGOEEGraph, AnalysisFact::kWidthOpt,
+         AnalysisFact::kEffects, AnalysisFact::kCFCTRE},
+        {AnalysisFact::kSIR},
+        // Pure analysis — does not modify the AST.
+        {},
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -547,6 +577,7 @@ OptimizationOrchestrator::buildDispatch() {
         {PassId::kUniqueness,        R([this](Program* p, OptimizationContext& c){ runUniqueness(p, c); })},
         {PassId::kBorrowCheck,       R([this](Program* p, OptimizationContext& c){ runBorrowCheck(p, c); })},
         {PassId::kHGOEEGraph,        R([this](Program* p, OptimizationContext& c){ runHGOEEGraph(p, c); })},
+        {PassId::kSIR,               R([this](Program* p, OptimizationContext& c){ runSIR(p, c); })},
     };
 }
 
@@ -1241,7 +1272,31 @@ void OptimizationOrchestrator::runBorrowCheck(Program* program,
         ctx.validity().borrowCheck = true;
         return;
     }
-    omscript::runBorrowCheck(*program, verbose_);
+    if (ownershipStrict_) {
+        // Strict mode: violations are fatal errors (original behavior).
+        omscript::runBorrowCheck(*program, verbose_);
+    } else {
+        // Advisory mode (default): downgrade E015–E018 violations to warnings.
+        // Ownership annotations are treated as alias-analysis hints for the
+        // optimizer rather than hard safety barriers.  This reflects the
+        // language's optimization-first identity.
+        try {
+            omscript::runBorrowCheck(*program, verbose_);
+        } catch (const DiagnosticError& e) {
+            // Only downgrade borrow-checker error codes (E015–E018).
+            const ErrorCode code = e.diagnostic().code;
+            if (code == ErrorCode::E015_USE_AFTER_MOVE ||
+                code == ErrorCode::E016_BORROW_WRITE_CONFLICT ||
+                code == ErrorCode::E017_DOUBLE_MUT_BORROW ||
+                code == ErrorCode::E018_MOVE_WHILE_BORROWED) {
+                std::cerr << "warning [" << errorCodeString(code) << " advisory]: "
+                          << e.diagnostic().message
+                          << " (use --ownership=strict to treat as an error)\n";
+            } else {
+                throw; // re-throw non-borrow-checker errors unchanged
+            }
+        }
+    }
     ctx.validity().borrowCheck = true;
 }
 
@@ -1278,6 +1333,69 @@ void OptimizationOrchestrator::runHGOEEGraph(Program* program,
 
     hgoe_egraph::runHGOEGuidedPass(*program, cfg, verbose_);
     ctx.validity().hgoeEGraph = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runSIR — Semantic IR builder (final pre-pass)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void OptimizationOrchestrator::runSIR(Program* program, OptimizationContext& ctx) {
+    if (!program) {
+        ctx.validity().sir = true;
+        return;
+    }
+
+    // ── 1. Build per-function range maps (run computeVarRanges eagerly) ───
+    std::unordered_map<std::string, std::unordered_map<std::string, ValueRange>> rangeMap;
+    for (const auto& decl : program->functions) {
+        if (!decl) continue;
+        VarRangeMap vr = computeVarRanges(*decl);
+        if (!vr.empty())
+            rangeMap[decl->name] = std::move(vr);
+    }
+
+    // ── 2. Build per-function uniqueness sets (run computeUniqueness eagerly) ──
+    // We use empty hint sets since type-propagation info lives in the codegen.
+    // The analysis is still useful: it will detect directly-observable aliasing
+    // patterns from AST initializers (string literals, fresh allocations, etc.).
+    std::unordered_map<std::string, std::unordered_set<std::string>> uniqueSets;
+    for (const auto& decl : program->functions) {
+        if (!decl) continue;
+        const static std::unordered_set<std::string> emptySet;
+        UniquenessAnalysis ua = computeUniqueness(*decl, emptySet, emptySet);
+        if (!ua.uniqueVars.empty())
+            uniqueSets[decl->name] = std::move(ua.uniqueVars);
+    }
+
+    // ── 3. Gather struct type info from the codegen (if available) ────────
+    // The orchestrator can access this via codegen_ which owns the struct maps.
+    // We pass empty maps if codegen_ is null (standalone analysis context).
+    std::unordered_map<std::string, std::vector<StructField>> structFieldDecls;
+    std::unordered_map<std::string, StructRepr>                structReprs;
+    std::unordered_map<std::string, int>                       structReprAlignN;
+
+    // Populate from program AST struct declarations (always available)
+    for (const auto& sdecl : program->structs) {
+        if (!sdecl) continue;
+        structFieldDecls[sdecl->name] = sdecl->fieldDecls;
+        structReprs[sdecl->name]      = sdecl->repr;
+        structReprAlignN[sdecl->name] = sdecl->reprAlignN;
+    }
+
+    // ── 4. Build the SIR module ───────────────────────────────────────────
+    auto sir = std::make_unique<SIRModule>(
+        buildSIR(*program, ctx, rangeMap, uniqueSets,
+                  structFieldDecls, structReprs, structReprAlignN));
+
+    if (verbose_) {
+        std::cerr << "[sir] SIR built: "
+                  << sir->totalFunctions << " functions, "
+                  << sir->structTypes.size() << " struct types, "
+                  << sir->estimatedTotalSize << " estimated instructions\n";
+    }
+
+    ctx.setSIR<SIRModule>(std::move(sir));
+    ctx.validity().sir = true;
 }
 
 } // namespace omscript

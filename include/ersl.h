@@ -2,6 +2,11 @@
 #ifndef ERSL_H
 #define ERSL_H
 
+// === COMPILER LAYER 2 (SEMANTICS): Effect Refinement & Speculation Layer ===
+// ERSL classifies effects, stability, and escape for each function. Its
+// outputs feed Layer 3 (optimization decisions). It must not reference LLVM
+// IR types directly — those live in Layer 4.
+
 /// @file ersl.h
 /// @brief Effect Refinement & Speculation Layer (ERSL) for the OmScript optimizer.
 ///

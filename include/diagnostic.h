@@ -43,6 +43,9 @@ enum class ErrorCode {
     E017_DOUBLE_MUT_BORROW,   ///< Mutable borrow of already mutably-borrowed variable
     E018_MOVE_WHILE_BORROWED, ///< Move of variable with active borrow(s)
 
+    // ── Struct / type-system warnings (E019) ──────────────────────────────
+    E019_UNTYPED_STRUCT_FIELD, ///< Struct field declared without a type annotation (warn with --warn-untyped-fields)
+
     NONE  ///< No specific error code (legacy/fallback).
 };
 
@@ -67,6 +70,7 @@ inline const char* errorCodeString(ErrorCode code) {
     case ErrorCode::E016_BORROW_WRITE_CONFLICT:        return "E016";
     case ErrorCode::E017_DOUBLE_MUT_BORROW:            return "E017";
     case ErrorCode::E018_MOVE_WHILE_BORROWED:          return "E018";
+    case ErrorCode::E019_UNTYPED_STRUCT_FIELD:         return "W019"; // advisory warning, not a hard error
     case ErrorCode::NONE:                              return "";
     }
     return "";

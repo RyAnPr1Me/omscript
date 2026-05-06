@@ -1,9 +1,14 @@
+// === COMPILER LAYER 4 (LOWERING): Code Generator — main file ===
+// Translates the typed AST into LLVM IR. Depends on Layer 2 facts (types,
+// ownership, effects) forwarded from the orchestrator. Must not perform
+// semantic analysis or optimization decisions; those belong in Layer 2/3.
 #include "codegen.h"
 #include "diagnostic.h"
 #include "egraph.h"
 #include "opt_context.h"
 #include "opt_orchestrator.h"
 #include "rlc_pass.h"
+#include "sir.h"
 #include "synthesize.h"
 #include <climits>
 #include <cmath>
@@ -667,10 +672,17 @@ llvm::StructType* CodeGenerator::getOrCreateStructLLVMType(const std::string& na
     llvm::StructType* sty =
         llvm::StructType::create(*context, elemTypes, "omsc.struct." + name, isPacked);
 
-    // @repr(C) / @repr(align(N)) / @repr(soa): apply struct-level alignment.
-    // Note: LLVM StructType doesn't carry alignment directly — we set it on
-    // every alloca/GV that holds this type via structReprAlignN_.
-    (void)repr; // SoA is a hint recorded for future layout passes.
+    // @repr(soa) / @repr(aos_to_soa): create a per-struct LLVM access-group
+    // MDNode.  All field GEP loads/stores inside loops will be tagged with this
+    // group, letting LoopVectorize prove that field streams do not alias each
+    // other.  This replaces the former (void)repr no-op stub.
+    if (repr == StructRepr::SoA || repr == StructRepr::AosToSoa) {
+        if (soaAccessGroups_.find(name) == soaAccessGroups_.end()) {
+            // getDistinct produces a uniqued-but-never-merged MDNode that LLVM
+            // uses as an access-group identifier.
+            soaAccessGroups_[name] = llvm::MDNode::getDistinct(*context, {});
+        }
+    }
 
     structLLVMTypes_[name] = sty;
     return sty;
@@ -2420,6 +2432,98 @@ llvm::Value* CodeGenerator::emitKeyHash(llvm::Value* key) {
     return builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// __omsc_array_grow(ptr %arr, i64 %newLen) -> ptr
+//
+// Cold, noinline outlined helper that performs the array growth path for push.
+// Moving this logic out of the inline push body ensures:
+//   1.  The push hot-path emits only a single cold branch + PHI + two stores —
+//       the ctlz/multiply/realloc chain no longer pollutes the loop body.
+//   2.  LLVM alias analysis is not confused by an inlined realloc whose
+//       inaccessibleOrArgMemOnly effect invalidates the full memory model.
+//   3.  The loop containing push becomes eligible for auto-vectorisation and
+//       other loop transformations that would otherwise be blocked by the
+//       dynamic-pointer PHI merged from a realloc result.
+//
+// The function computes the next power-of-2 capacity >= newLen + 1, enforces a
+// 16-slot minimum, then calls realloc and returns the new buffer pointer.
+// ─────────────────────────────────────────────────────────────────────────────
+llvm::Function* CodeGenerator::getOrEmitArrayGrowHelper() {
+    static constexpr const char* kName = "__omsc_array_grow";
+    if (auto* fn = module->getFunction(kName))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy  = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false);
+    auto* fn    = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage,
+                                         kName, module.get());
+
+    // Cold + noinline: LLVM will not re-inline this into the hot loop body.
+    fn->addFnAttr(llvm::Attribute::Cold);
+    fn->addFnAttr(llvm::Attribute::NoInline);
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    // The helper only reads/writes the array buffer and allocator state.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
+    // The returned pointer is the freshly (re)allocated buffer — it never
+    // aliases any other pointer visible to the caller.
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    fn->addRetAttr(llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
+    // arg0 = old array ptr (transferred to realloc — not retained by caller)
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    // arg1 = new length (pure integer — NoCapture does not apply to non-pointers)
+    // Mark arg0 as the reallocated pointer so AA can track it across the call.
+    fn->addParamAttr(0, llvm::Attribute::get(*context, llvm::Attribute::AllocatedPointer));
+
+    auto savedIP = builder->saveIP();
+    auto* entryBB = llvm::BasicBlock::Create(*context, "entry", fn);
+    builder->SetInsertPoint(entryBB);
+
+    llvm::Value* arrArg    = fn->getArg(0);
+    llvm::Value* newLenArg = fn->getArg(1);
+    arrArg->setName("arr");
+    newLenArg->setName("newLen");
+
+    llvm::Value* one     = llvm::ConstantInt::get(i64Ty, 1);
+    llvm::Value* eight   = llvm::ConstantInt::get(i64Ty, 8);
+    llvm::Value* minSlot = llvm::ConstantInt::get(i64Ty, 16);
+
+    // slots = newLen + 1  (one slot for the length header)
+    llvm::Value* slots   = builder->CreateAdd(newLenArg, one, "slots",
+                                              /*HasNUW=*/true, /*HasNSW=*/true);
+    // nextPow2 via ctlz: cap = 1 << (64 - ctlz(slots - 1))
+    llvm::Value* slotsM1 = builder->CreateSub(slots, one, "pm1",
+                                              /*HasNUW=*/true, /*HasNSW=*/true);
+    llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(),
+        llvm::Intrinsic::ctlz, {i64Ty});
+    // is_zero_poison=true: newLen >= 1 here, so slots >= 2, slotsM1 >= 1.
+    llvm::Value* lz  = builder->CreateCall(ctlzFn,
+        {slotsM1, llvm::ConstantInt::getTrue(*context)}, "lz");
+    llvm::Value* shift = builder->CreateSub(
+        llvm::ConstantInt::get(i64Ty, 64), lz, "shift");
+    llvm::Value* cap = builder->CreateShl(one, shift, "cap",
+                                          /*HasNUW=*/true, /*HasNSW=*/true);
+    // Enforce minimum capacity of 16 slots.
+    llvm::Value* useMin   = builder->CreateICmpSLT(cap, minSlot, "usemin");
+    llvm::Value* finalCap = builder->CreateSelect(useMin, minSlot, cap, "finalcap");
+    llvm::Value* newBytes = builder->CreateMul(finalCap, eight, "bytes",
+                                               /*HasNUW=*/true, /*HasNSW=*/true);
+
+    llvm::CallInst* newBuf = builder->CreateCall(
+        getOrDeclareRealloc(), {arrArg, newBytes}, "newbuf");
+    // Propagate the noalias + nonnull guarantees on the call site too.
+    newBuf->addRetAttr(llvm::Attribute::NoAlias);
+    newBuf->addRetAttr(llvm::Attribute::NonNull);
+
+    builder->CreateRet(newBuf);
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
 /// Helper: set common attributes on emitted map functions.
 static void setHashMapFnAttrs(llvm::Function* fn) {
     fn->setLinkage(llvm::Function::InternalLinkage);
@@ -4014,6 +4118,7 @@ void CodeGenerator::generate(Program* program) {
 
     {
         OptimizationOrchestrator orch(optimizationLevel, verbose_, this, optMgr_.get());
+        orch.setOwnershipStrict(ownershipStrict_);
         orch.runPrepasses(program, *optCtx_);
     }
 
@@ -4712,6 +4817,46 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoUnwind);
     }
 
+    // ── SIR-driven function attributes ────────────────────────────────────
+    // Consume per-function semantic facts from the Semantic IR (built by the
+    // kSIR pre-pass) to inject LLVM attributes that are not derivable from
+    // the annotation alone.
+    if (optCtx_ && optCtx_->hasSIR()) {
+        const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+        if (sirMod) {
+            const SIRFunction* sirFn = sirMod->getFunction(func->name);
+            if (sirFn) {
+                // Leaf functions (no calls at all) with no side effects are
+                // guaranteed nounwind + nofree + nosync + willreturn.
+                if (sirFn->isLeaf && !sirFn->facts.effects.hasIO
+                        && !sirFn->facts.effects.writesMemory) {
+                    if (!function->hasFnAttribute(llvm::Attribute::NoUnwind))
+                        function->addFnAttr(llvm::Attribute::NoUnwind);
+                    if (!function->hasFnAttribute(llvm::Attribute::NoFree))
+                        function->addFnAttr(llvm::Attribute::NoFree);
+                    if (!function->hasFnAttribute(llvm::Attribute::NoSync))
+                        function->addFnAttr(llvm::Attribute::NoSync);
+                    if (!isSelfRecursive &&
+                            !function->hasFnAttribute(llvm::Attribute::WillReturn))
+                        function->addFnAttr(llvm::Attribute::WillReturn);
+                }
+                // Dead functions (unreachable from any entry point): mark cold
+                // so the back-end spills them to cold section and doesn't waste
+                // I-cache on them.
+                if (sirFn->facts.isDead &&
+                        !function->hasFnAttribute(llvm::Attribute::Hot)) {
+                    if (!function->hasFnAttribute(llvm::Attribute::Cold))
+                        function->addFnAttr(llvm::Attribute::Cold);
+                }
+                // Inferred noreturn (annotated @semantics(noreturn) or detected
+                // by SIR body scan) that was not already applied via hintNoReturn.
+                if (sirFn->neverReturns && !func->hintNoReturn) {
+                    function->addFnAttr(llvm::Attribute::NoReturn);
+                }
+            }
+        }
+    }
+
     // @allocator(size=N) / @allocator(size=N, count=M): mark as allocator wrapper.
     if (func->allocatorSizeParam >= 0) {
         const unsigned sizeIdx  = static_cast<unsigned>(func->allocatorSizeParam);
@@ -4983,7 +5128,50 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         ++argIt;
     }
 
-    // @optmax assumes=[...]: emit llvm.assume intrinsics for each assertion
+    // ── SIR-driven parameter facts ────────────────────────────────────────
+    // If the Semantic IR has been built, seed non-negativity and tight value
+    // ranges for integer parameters *before* the function body is lowered.
+    // This eliminates redundant re-derivation inside the body.
+    if (optCtx_ && optCtx_->hasSIR()) {
+        const auto* sir = optCtx_->sirTyped<SIRModule>();
+        if (sir) {
+            llvm::Function* assumeIntr = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume);
+            for (const auto& param : func->parameters) {
+                const SIRVarFacts* vf = sir->getVarFacts(func->name, param.name);
+                if (!vf) continue;
+                auto nvIt = namedValues.find(param.name);
+                if (nvIt == namedValues.end()) continue;
+                auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(nvIt->second);
+                if (!alloca || !alloca->getAllocatedType()->isIntegerTy()) continue;
+                // Seed nonNegValues_ for non-negative parameters
+                if (vf->isNonNeg) {
+                    nonNegValues_.insert(alloca);
+                }
+                // Emit llvm.assume for tight integer ranges (not just non-neg)
+                if (vf->range && vf->range->isNarrowed()) {
+                    llvm::Value* loaded = builder->CreateLoad(
+                        alloca->getAllocatedType(), alloca, param.name + ".sir.load");
+                    llvm::Value* loadedI64 = loaded->getType() == getDefaultType()
+                        ? loaded
+                        : builder->CreateSExtOrBitCast(loaded, getDefaultType(),
+                                                        param.name + ".sir.cast");
+                    // Emit: assume(param >= lo && param <= hi)
+                    llvm::Value* loC = llvm::ConstantInt::get(getDefaultType(), vf->range->lo, true);
+                    llvm::Value* hiC = llvm::ConstantInt::get(getDefaultType(), vf->range->hi, true);
+                    llvm::Value* geLo = builder->CreateICmpSGE(loadedI64, loC, param.name + ".sir.ge");
+                    llvm::Value* leHi = builder->CreateICmpSLE(loadedI64, hiC, param.name + ".sir.le");
+                    llvm::Value* inRange = builder->CreateAnd(geLo, leHi, param.name + ".sir.range");
+                    builder->CreateCall(assumeIntr, {inRange});
+                    if (vf->range->lo >= 0) nonNegValues_.insert(loaded);
+                }
+                // Fold constant parameters directly into constIntFolds_
+                if (vf->constIntVal) {
+                    constIntFolds_[param.name] = *vf->constIntVal;
+                }
+            }
+        }
+    }
+
     if (inOptMaxFunction && !currentOptMaxConfig_.assumes.empty()) {
         llvm::Function* assumeIntr = OMSC_GET_INTRINSIC(
             module.get(), llvm::Intrinsic::assume);

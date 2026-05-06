@@ -1,5 +1,10 @@
+// === COMPILER LAYER 4 (LOWERING): Code Generator — statements ===
+// Statement-level LLVM IR emission. No semantic analysis; no optimizer
+// decisions. Layer 3 facts (e.g. nonNegValues_) may only be consumed here
+// if they have been proven at Layer 2 first — see §6 of the architecture doc.
 #include "codegen.h"
 #include "diagnostic.h"
+#include "sir.h"
 #include <algorithm>
 #include <functional>
 #include <iostream>
@@ -678,6 +683,59 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         else {
             const unsigned bits = allocaType->isIntegerTy() ? allocaType->getIntegerBitWidth() : 64;
             builder->CreateAlignedStore(llvm::ConstantInt::get(*context, llvm::APInt(bits, 0)), alloca, alloca->getAlign());
+        }
+    }
+
+    // ── SIR-driven local variable facts ───────────────────────────────────────
+    // After the alloca and its initial store have been emitted, query the SIR
+    // for additional facts that the pre-pass pipeline derived.  These fill gaps
+    // that the existing tracking code might miss (e.g. facts inferred across
+    // function-level analysis that only the SIR builder can see holistically).
+    if (optCtx_ && optCtx_->hasSIR() && currentFuncDecl_) {
+        const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+        if (sirMod) {
+            const SIRVarFacts* vf = sirMod->getVarFacts(currentFuncDecl_->name, stmt->name);
+            if (vf) {
+                // 1. Non-negativity: pre-seed nonNegValues_ so that the body's
+                //    bounds-check elimination and ULT-comparison optimizations
+                //    can fire even when the init expression is opaque.
+                if (vf->isNonNeg && allocaType->isIntegerTy() &&
+                        !nonNegValues_.count(alloca))
+                    nonNegValues_.insert(alloca);
+
+                // 2. Constant integer: pre-populate constIntFolds_ for variables
+                //    whose value was proven constant by the SIR range analysis.
+                //    IMPORTANT: only propagate for immutable (const) variables.
+                //    The SIR constIntVal is also set for mutable vars initialized
+                //    with a literal (so the builder can reason about init-time
+                //    ranges), but seeding constIntFolds_ for mutable vars would
+                //    prevent later stores from being seen by identifier loads.
+                if (vf->isImmutable && vf->constIntVal && allocaType->isIntegerTy() &&
+                        !constIntFolds_.count(stmt->name))
+                    constIntFolds_[stmt->name] = *vf->constIntVal;
+
+                // 3. Immutable scalar locals → @llvm.invariant.start.p0
+                //    This intrinsic tells LLVM's alias analysis that the memory
+                //    pointed to by the alloca will never change after this point,
+                //    enabling LICM, load CSE, and mem2reg to be more aggressive.
+                //    Only valid for scalar (non-struct, non-array) allocas because
+                //    the invariant.start size argument must cover the exact type.
+                if (vf->isImmutable && !stmt->isGlobal &&
+                        !allocaType->isArrayTy() && !allocaType->isStructTy() &&
+                        !allocaType->isPointerTy()) {
+                    const uint64_t allocSz =
+                        module->getDataLayout().getTypeAllocSize(allocaType);
+                    auto* szVal = llvm::ConstantInt::get(
+                        llvm::Type::getInt64Ty(*context),
+                        static_cast<int64_t>(allocSz),
+                        /*isSigned=*/true);
+                    auto* invStartFn = OMSC_GET_INTRINSIC_STMT(
+                        module.get(),
+                        llvm::Intrinsic::invariant_start,
+                        {llvm::PointerType::getUnqual(*context)});
+                    builder->CreateCall(invStartFn, {szVal, alloca});
+                }
+            }
         }
     }
 }
@@ -1410,6 +1468,26 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             nonNegValues_.insert(iterAlloca);
     }
 
+    // ── SIR-driven iterator non-negativity ──────────────────────────────────
+    // The SIR loop analysis may have proven isIterVarNonNeg even for loops
+    // whose start expression is not a compile-time constant (e.g. the start
+    // comes from a function call that returns a non-negative value).
+    if (!nonNegValues_.count(iterAlloca) &&
+            optCtx_ && optCtx_->hasSIR() && currentFuncDecl_) {
+        const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+        if (sirMod) {
+            const SIRFunction* sirFn = sirMod->getFunction(currentFuncDecl_->name);
+            if (sirFn) {
+                for (const auto& li : sirFn->loops) {
+                    if (li.iterVar == stmt->iteratorVar && li.isIterVarNonNeg) {
+                        nonNegValues_.insert(iterAlloca);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // Get end value
     llvm::Value* endVal = generateExpression(stmt->end.get());
     endVal = convertTo(endVal, iterType);
@@ -1627,44 +1705,48 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                     builder->CreateCall(assumeFn, {isGeStart});
                 }
             }
-            // Upper bound: assume iter < end.  OmScript's for-loop semantics
-            llvm::Value* isLtEnd = builder->CreateICmpSLT(
-                iterVal, endVal, "iter.lt.end");
-            builder->CreateCall(assumeFn, {isLtEnd});
+            // Upper bound: do NOT emit any upper-bound hint (assume OR !range) here.
+            //
+            // Both `assume(iter < end)` and `!range [0, end)` on a loop-body load
+            // of the induction variable cause LLVM 18's IndVarSimplify to conclude
+            // the exit condition is unreachable and eliminate the loop-exit edge,
+            // producing an infinite loop.  The mechanism:
+            //   - `!range [0, N)` on the IV body load tells IndVarSimplify that
+            //     the IV is ALWAYS < N while the body executes.
+            //   - IndVarSimplify interprets this as the loop invariant `iv < N`.
+            //   - It then generates `assume(iv ult N)` / `assume(exitcond.not)`
+            //     at the header, then removes the exit branch as dead.
+            //
+            // The conditional branch at the loop header already gives LLVM
+            // all the range information it needs structurally; no extra hint
+            // is required or safe here.
+
             // Track the alloca as producing non-negative values so that
             nonNegValues_.insert(iterAlloca);
 
             // ── CF-CTRE Phase 9 IV range refinement ────────────────────
+            // Only emit lower-bound refinements.  Upper-bound hints carry
+            // the same infinite-loop risk as described above.
             if (optCtx_) {
                 CTInterval ivRange = optCtx_->getExitRange(
                     builder->GetInsertBlock()->getParent()->getName().str(),
                     stmt->iteratorVar);
-                // Only inject if the abstract range is tighter than what we
-                // already know from the start/end IR values.
                 if (ivRange.isRange() && !ivRange.isTop() && ivRange.lo >= 0) {
                     llvm::ConstantInt* cLo = llvm::dyn_cast<llvm::ConstantInt>(startVal);
-                    llvm::ConstantInt* cHi = llvm::dyn_cast<llvm::ConstantInt>(endVal);
                     const bool knowLo = cLo && cLo->getSExtValue() == ivRange.lo;
-                    const bool knowHi = cHi && cHi->getSExtValue() == ivRange.hi + 1;
-                    if (!knowLo || !knowHi) {
+                    if (!knowLo) {
                         // Reload the IV (same block — GVN will dedup the load).
                         llvm::Value* iv2 = builder->CreateAlignedLoad(
                             iterType, iterAlloca, llvm::MaybeAlign(8), "iter.absi");
-                        if (!knowLo) {
-                            llvm::Value* c = llvm::ConstantInt::get(iterType, ivRange.lo);
-                            llvm::Value* cond = builder->CreateICmpSGE(iv2, c, "iter.absi.lo");
-                            builder->CreateCall(assumeFn, {cond});
-                        }
-                        if (!knowHi) {
-                            llvm::Value* c = llvm::ConstantInt::get(iterType, ivRange.hi + 1);
-                            llvm::Value* cond = builder->CreateICmpSLT(iv2, c, "iter.absi.hi");
-                            builder->CreateCall(assumeFn, {cond});
-                        }
+                        llvm::Value* c = llvm::ConstantInt::get(iterType, ivRange.lo);
+                        llvm::Value* cond = builder->CreateICmpSGE(iv2, c, "iter.absi.lo");
+                        builder->CreateCall(assumeFn, {cond});
                     }
                 }
             }
         }
     }
+
 
     // Compile-time bounds check elimination: for ascending for-loops starting
     if (stepKnownPositive && optimizationLevel >= OptimizationLevel::O1) {
@@ -1725,6 +1807,23 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // Must be an alloca (local variable), not a parameter forwarded
             // as an integer (those come via function arguments).
             if (!llvm::isa<llvm::AllocaInst>(it->second)) continue;
+            // Skip SIMD vector allocas (e.g. `var v: u64x2`).  SIMD vectors
+            // are stack-allocated VALUE TYPES with no length header; treating
+            // their storage as a heap-array pointer (and loading a "length"
+            // through the first element as a pointer) produces a bogus
+            // `assume(end <= vec[0])` that IPO/IndVarSimplify can exploit to
+            // eliminate the caller's loop-exit edge.
+            {
+                auto* AI = llvm::cast<llvm::AllocaInst>(it->second);
+                llvm::Type* allocTy = AI->getAllocatedType();
+                if (allocTy->isVectorTy() || allocTy->isArrayTy()) continue;
+                // Also skip non-pointer-width integers: OmScript heap arrays are
+                // stored as i64 (pointer-sized) allocas; allocas of other scalar
+                // widths are primitive value variables, not arrays.
+                if (allocTy->isIntegerTy() &&
+                    allocTy->getIntegerBitWidth() !=
+                        module->getDataLayout().getPointerSizeInBits()) continue;
+            }
 
             // Load the array pointer from the alloca (once, before the loop).
             llvm::Value* arrRaw = builder->CreateAlignedLoad(
@@ -1913,6 +2012,57 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                                      llvm::Type::getInt32Ty(*context),
                                      static_cast<uint32_t>(multiple)))}));
                         }
+                    }
+                }
+            }
+        }
+        // ── SIR-driven trip-count hint ────────────────────────────────────────
+        // When the SIR loop analysis has resolved a precise trip count for this
+        // loop (via range analysis of a non-literal start/end expression), emit
+        // the same unroll / trip.count.multiple hints as the constant-bounds
+        // path above.  Only applies when the compile-time constant path did NOT
+        // already fire (addedUnrollHint == false).
+        if (!addedUnrollHint && optimizationLevel >= OptimizationLevel::O3
+                && enableUnrollLoops_
+                && optCtx_ && optCtx_->hasSIR() && currentFuncDecl_) {
+            const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+            if (sirMod) {
+                const SIRFunction* sirFn = sirMod->getFunction(currentFuncDecl_->name);
+                if (sirFn) {
+                    for (const auto& li : sirFn->loops) {
+                        if (li.iterVar != stmt->iteratorVar) continue;
+                        if (!li.tripCount) break;
+                        const uint64_t tc = static_cast<uint64_t>(*li.tripCount);
+                        if (tc > 0 && tc <= 64) {
+                            if (tc <= 8) {
+                                loopMDs.push_back(llvm::MDNode::get(
+                                    *context,
+                                    {llvm::MDString::get(*context, "llvm.loop.unroll.full")}));
+                            } else {
+                                loopMDs.push_back(llvm::MDNode::get(
+                                    *context,
+                                    {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                         llvm::Type::getInt32Ty(*context),
+                                         static_cast<uint32_t>(tc)))}));
+                            }
+                            addedUnrollHint = true;
+                        }
+                        if (enableVectorize_ && tc > 8) {
+                            uint64_t multiple = 1;
+                            for (uint64_t p = 64; p > 1; p >>= 1) {
+                                if (tc % p == 0) { multiple = p; break; }
+                            }
+                            if (multiple >= 2) {
+                                loopMDs.push_back(llvm::MDNode::get(
+                                    *context,
+                                    {llvm::MDString::get(*context, "llvm.loop.trip.count.multiple"),
+                                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                         llvm::Type::getInt32Ty(*context),
+                                         static_cast<uint32_t>(multiple)))}));
+                            }
+                        }
+                        break;
                     }
                 }
             }
@@ -3376,19 +3526,65 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
     std::string varName;
 
     if (stmt->addrExpr) {
-        // Expression-style prefetch: prefetch(expr) — evaluate the expression
-        // and emit llvm.prefetch on the resulting value (treated as a pointer
-        // or array base).  No variable is created, no lifetime tracking needed.
-        llvm::Value* addrVal = generateExpression(stmt->addrExpr.get());
-        if (!addrVal) return;
-        // Convert to pointer if needed (e.g. array base is an i64 holding a ptr)
+        // Expression-style prefetch: prefetch(expr)
+        //
+        // When expr is an array or string index (arr[i]), we must prefetch the
+        // MEMORY ADDRESS of that element — NOT load the element value and treat
+        // it as a pointer.  Hardware prefetch is a hint that never faults, so
+        // we also skip all bounds checking.  Computing the element address for
+        // an out-of-range index is harmless: the resulting GEP resolves to a
+        // virtual address that the CPU silently ignores.
+        //
+        // For any other expression form, fall back to evaluating it as a value
+        // (which is converted to a pointer via inttoptr if it's not already one).
         llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* ptr;
-        if (addrVal->getType()->isPointerTy()) {
-            ptr = addrVal;
-        } else {
-            ptr = builder->CreateIntToPtr(addrVal, ptrTy, "pf.ptr");
+        llvm::Value* ptr = nullptr;
+
+        if (stmt->addrExpr->type == ASTNodeType::INDEX_EXPR) {
+            auto* idxExpr = static_cast<IndexExpr*>(stmt->addrExpr.get());
+            llvm::Value* baseVal = generateExpression(idxExpr->array.get());
+            llvm::Value* idxVal  = generateExpression(idxExpr->index.get());
+            idxVal = toDefaultType(idxVal);
+
+            if (baseVal && baseVal->getType()->isVectorTy()) {
+                // SIMD vector indexing: there is no address to prefetch —
+                // the vector lives in a register.  Do nothing.
+                return;
+            }
+
+            if (baseVal) {
+                llvm::Value* basePtr = baseVal->getType()->isPointerTy()
+                    ? baseVal
+                    : builder->CreateIntToPtr(baseVal, ptrTy, "pf.base");
+
+                if (isStringExpr(idxExpr->array.get())) {
+                    // String: elements are raw bytes at basePtr[idx].
+                    // Use non-inbounds GEP so an OOB index does not trigger UB.
+                    ptr = builder->CreateGEP(llvm::Type::getInt8Ty(*context),
+                                             basePtr, idxVal, "pf.str.addr");
+                } else {
+                    // Array: layout is [length, elem0, elem1, ...] (all i64).
+                    // Element idx lives at basePtr[idx + 1].  Use non-inbounds
+                    // GEP: the hardware prefetch handles any OOB address safely.
+                    llvm::Value* dataPtr = builder->CreateGEP(
+                        getDefaultType(), basePtr,
+                        llvm::ConstantInt::get(getDefaultType(), 1), "pf.data");
+                    ptr = builder->CreateGEP(getDefaultType(), dataPtr,
+                                             idxVal, "pf.elem.addr");
+                }
+            }
         }
+
+        if (!ptr) {
+            // Non-index expression: evaluate normally and interpret the result
+            // as a pointer (matches the original semantics for non-array exprs).
+            llvm::Value* addrVal = generateExpression(stmt->addrExpr.get());
+            if (!addrVal) return;
+            ptr = addrVal->getType()->isPointerTy()
+                ? addrVal
+                : builder->CreateIntToPtr(addrVal, ptrTy, "pf.ptr");
+        }
+
         const int32_t locality = stmt->hintHot ? 3 : 2;
         llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
             module.get(), llvm::Intrinsic::prefetch,

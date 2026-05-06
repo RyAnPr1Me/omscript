@@ -139,6 +139,28 @@ class Compiler {
     /// Enable or disable the Implicit Phase Ordering Fixer (default: true).
     void setIPOF(bool enable) { ipof_ = enable; }
 
+    /// Enable or disable strict ownership checking (default: false = advisory mode).
+    ///
+    /// When false (advisory mode, the default), borrow-checker violations
+    /// (E015–E018) are emitted as warnings rather than fatal errors.  This
+    /// reflects the language's optimization-first identity: ownership
+    /// annotations are primarily alias-disambiguation hints for the optimizer,
+    /// not a hard safety barrier.
+    ///
+    /// When true (strict mode, `--ownership=strict`), violations are fatal
+    /// errors exactly as before.  Useful for auditing or when Rust-like safety
+    /// guarantees are desired.
+    void setOwnershipStrict(bool v) { ownershipStrict_ = v; }
+    [[nodiscard]] bool isOwnershipStrict() const noexcept { return ownershipStrict_; }
+
+    /// Enable or disable `--warn-untyped-fields` (default: false).
+    ///
+    /// When true, the parser emits W019 for every struct field that lacks an
+    /// explicit type annotation.  Prepares codebases for a future release where
+    /// typed fields will be required.
+    void setWarnUntypedFields(bool v) { warnUntypedFields_ = v; }
+    [[nodiscard]] bool warnUntypedFields() const noexcept { return warnUntypedFields_; }
+
   private:
     std::string readFile(const std::string& filename);
     bool verbose_ = false;
@@ -164,6 +186,8 @@ class Compiler {
     bool hgoe_ = true;
     bool sdr_  = true;
     bool ipof_ = true;
+    bool ownershipStrict_ = false;   ///< --ownership=strict; default is advisory
+    bool warnUntypedFields_ = false; ///< --warn-untyped-fields
     std::string pgoGenPath_;
     std::string pgoUsePath_;
 };

@@ -80,6 +80,7 @@ namespace AnalysisFact {
     inline constexpr const char* kUniqueness         = "uniqueness";
     inline constexpr const char* kBorrowCheck        = "borrow_check";
     inline constexpr const char* kHGOEEGraph         = "hgoe_egraph";
+    inline constexpr const char* kSIR                = "sir"; ///< Semantic IR (built last)
 } // namespace AnalysisFact
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -204,6 +205,7 @@ namespace PassId {
     extern uint32_t kUniqueness;
     extern uint32_t kBorrowCheck;
     extern uint32_t kHGOEEGraph;
+    extern uint32_t kSIR;         ///< Semantic IR (built after all other pre-passes)
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────

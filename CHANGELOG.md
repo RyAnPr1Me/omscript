@@ -5,7 +5,122 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.3.1] - 2026-05-04
+## [4.6.0] - 2026-05-06
+
+### Added
+
+- **Semantic IR (SIR)** (`include/sir.h`, `src/sir_builder.cpp`) — a rich, queryable intermediate representation built between the AST and LLVM IR that consolidates *all* semantic analysis results for maximum optimization potential:
+  - `SIRType` — fully resolved scalar / aggregate types with bitwidth, signedness, `isConst`, `isAtomic`, `isVolatile`.
+  - `SIRVarFacts` — per-variable semantic facts: type, constancy, known integer/string constant value, `ValueRange`, non-negativity, aliasing, atomic/volatile flags.
+  - `SIRParam` — per-parameter version of `SIRVarFacts` with name and optional range annotation.
+  - `SIRCallSite` — per-call-site facts: callee, effect kind (IO/Read/Write/None), stability, per-argument constant values (integer and string), tail-position flag, escape class.
+  - `SIRLoopInfo` — loop analysis facts: iterator variable, nesting depth, static start/end/step bounds, exact trip count (when computable), maximum trip count, countability flag, read/written array names.
+  - `SIRFunction` — per-function aggregate: full signature, all `SIRVarFacts`, all `SIRCallSite`s, all `SIRLoopInfo`s, `FunctionFacts` (purity/effects/ERSL), annotation hints (`forceInline`, `neverInline`, `isHot`, `isCold`), estimated body size, leaf/recursive/entry flags.
+  - `SIRStructType` — per-struct aggregate: field list with `FieldAttrs`, layout repr, SoA/packed/extern-C flags.
+  - `SIRModule` — whole-program view: all functions, struct types, call graph, inverted caller graph, entry-point set, estimated total instruction count.
+  - `buildSIR()` — builder function (`src/sir_builder.cpp`) that walks the AST and consolidates range maps, uniqueness sets, effect summaries, struct type tables, and FunctionFacts into a `SIRModule` in a single pass.
+
+- **`kSIR` pre-pass** (`src/opt_orchestrator.cpp`) — the SIR builder is registered as the final pre-pass in the optimization pipeline, running after all analysis passes (`kEffects`, `kERSL`, `kRangeAnalysis`, `kUniqueness`, `kBorrowCheck`, `kHGOEEGraph`). It eagerly runs `computeVarRanges()` and `computeUniqueness()` per function before building the SIR module.
+
+- **`OptimizationContext::setSIR<T>()` / `sirTyped<T>()` / `hasSIR()`** (`include/opt_context.h`) — type-erased SIR storage on the optimization context. Uses `shared_ptr<void>` with a typed deleter to avoid a circular include between `opt_context.h` ↔ `sir.h`. `AnalysisValidity::sir` flag tracks whether the SIR has been built.
+
+- **SIR-driven codegen integration** (`src/codegen.cpp`) — `CodeGenerator::generateFunction()` now seeds `nonNegValues_` and emits `llvm.assume(lo ≤ param ≤ hi)` for parameters with SIR-known ranges, and pre-populates `constIntFolds_` for compile-time-constant parameters. This eliminates redundant re-derivation during function body lowering.
+
+- **`var_range_analysis.cpp` added to build** (`CMakeLists.txt`) — previously compiled only as part of the test binary; now included in the main compiler build so the SIR pass can call `computeVarRanges()` directly.
+
+- **Tests**: `examples/sir_test.om` — integration test exercising SIR-driven annotation hints, loop trip counts, inline/noinline, and pure function semantics. `run_tests.sh` extended with `sir_test` (program exit-code test) and `sir-verbose` (verify `[sir] SIR built` diagnostic output at `-V -O2`). Total tests: 421.
+
+- **Documentation**: `LANGUAGE_REFERENCE.md §25.7` — comprehensive section describing the SIR design, information captured, key types, codegen integration, and query API.
+
+
+
+### Added
+
+- **`include/opt_contracts.h`** — Formalized optimization annotation contracts. Single source of truth for every annotation's asserted properties and LLVM attribute eligibility (`include/opt_contracts.h`):
+  - `AnnotationId` enum covering all recognized annotations (`OPT_INLINE`, `OPT_NOINLINE`, `OPT_HOT`, `OPT_COLD`, `OPT_VECTORIZE`, `OPT_NOVECTORIZE`, `SEM_PURE`, `SEM_SPECULATABLE`, `OPTMAX`, …).
+  - `OptContract` struct with `assertsWillReturn`, `assertsNoSync`, `assertsNoFree`, `assertsReadOnly`, and `requiresXxxProof` flags.
+  - `getOptContract(AnnotationId)` — zero-allocation static lookup table.
+  - `annotationDominates(a, b)` / `annotationsConflict(a, b)` / `resolveConflict(a, b)` — inhibitor-wins precedence predicates used by the parser and codegen.
+
+- **`@opt(...)` unified annotation namespace** (`src/parser.cpp`). New compound form `@opt(key, key=value, ...)` is accepted alongside all existing single-word annotations. Accepted keys: `inline`, `noinline`, `hot`, `cold`, `vectorize`, `novectorize`, `unroll`, `nounroll`, `parallel`, `noparallel`, `flatten`, `minsize`, `align=N`. Existing flat forms remain valid.
+
+  ```omscript
+  // New — preferred for new code
+  @opt(inline, hot, align=64)
+  fn fast_fn(x: i64) -> i64 { return x * 2; }
+
+  // Old — still valid
+  @inline @hot @align(64)
+  fn fast_fn(x: i64) -> i64 { return x * 2; }
+  ```
+
+- **`@semantics(...)` annotation namespace** (`src/parser.cpp`). New compound form `@semantics(key, ...)` for behavioral contracts. Accepted keys: `pure`, `speculatable`, `noreturn`, `nounwind`, `restrict`, `noalias`, `const_eval`.
+
+  ```omscript
+  @semantics(pure, nounwind)
+  fn clamp(x: i64, lo: i64, hi: i64) -> i64 { ... }
+  ```
+
+- **Annotation conflict detection** (`src/parser.cpp`). The parser now warns and enforces the inhibitor-wins rule for all conflicting annotation pairs:
+  - `@inline` + `@noinline` → `@noinline` wins
+  - `@hot` + `@cold` → `@cold` wins
+  - `@vectorize` + `@novectorize` → `@novectorize` wins
+  - `@unroll` + `@nounroll` → `@nounroll` wins
+  - `@parallel` + `@noparallel` → `@noparallel` wins
+  - `@optnone` + any accelerator → `@optnone` wins
+
+- **`--warn-untyped-fields`** CLI flag and `W019` diagnostic (`include/diagnostic.h`, `include/parser.h`, `src/parser.cpp`, `include/compiler.h`, `src/compiler.cpp`, `src/main.cpp`):
+  - Emits `warning [W019]` for every struct field declared without a type annotation (e.g. `struct Foo { x, y }` instead of `struct Foo { x: i64, y: i64 }`).
+  - Migration aid: untyped fields default to `i64` at codegen. Typed fields have deterministic ABI.
+  - Disabled by default; enable with `--warn-untyped-fields`.
+
+- **`--ownership=strict` / `--ownership=advisory`** CLI flags (`include/compiler.h`, `include/codegen.h`, `include/opt_orchestrator.h`, `src/opt_orchestrator.cpp`, `src/main.cpp`):
+  - **Advisory mode** (new default): borrow-checker violations E015–E018 are emitted as warnings. Compilation continues. Ownership annotations are treated primarily as alias-analysis and optimizer hints.
+  - **Strict mode** (`--ownership=strict`): restores original behavior — borrow-checker violations are fatal errors.
+
+- **Preprocessor comptime nudge** (`src/preprocessor.cpp`):
+  - When a function-like macro (`#define FOO(x) ...`) is defined, the preprocessor emits a `note:` pointing to `comptime fn FOO(...) { ... }` as a typed, optimizer-transparent alternative.
+  - Object-like macros are not affected.
+  - This is a note (not a warning or error); existing code is unaffected.
+
+### Changed
+
+- **OPTMAX attribute injection is now body-scan-guarded** (`src/codegen_opt.cpp`). Previously `WillReturn`, `NoSync`, and `NoFree` were added to every OPTMAX function unconditionally. Now each attribute is guarded by a lightweight body scan using the `requiresXxxProof` fields from `opt_contracts.h`:
+  - `NoSync` is withheld if any atomic instruction or fence is found.
+  - `NoFree` is withheld if any call to `free()`, `delete`, or an indirect callee is found.
+  - `WillReturn` is withheld if any basic block has a self-backedge (unconditional infinite loop).
+
+- **`@repr(soa)` — LLVM access-group codegen** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `include/codegen.h`):
+  - Replaced the former `(void)repr;` no-op stub with real IR metadata emission.
+  - On struct registration, a per-struct `!llvm.access.group` MDNode is created for any `@repr(soa)` or `@repr(aos_to_soa)` struct.
+  - Every field load (`generateFieldAccess`) and field store (`generateFieldAssign`) on a SoA struct is tagged with `!llvm.access.group <struct-ag>`.
+  - When the enclosing loop also carries `!llvm.loop.parallel_accesses` (via `@loop(parallel=true)` or `@optmax`), LoopVectorize can prove field streams are independent and vectorize across them without alias-check guards.
+
+- **`@repr(aos_to_soa)` — new struct annotation** (`include/ast.h`, `src/parser.cpp`, `include/codegen.h`, `src/codegen.cpp`):
+  - New `StructRepr::AosToSoa` enum value signals that an AoS→SoA layout transformation is expected at call boundaries.
+  - Field loads/stores receive the same access-group tagging as `@repr(soa)`.
+  - Parser accepts `@repr(aos_to_soa)` immediately before `struct`.
+
+- **`@loop(tile=M, N)` — 2D cache-blocking tile annotation** (`include/ast.h`, `src/parser.cpp`, `src/codegen_opt.cpp`):
+  - New `LoopConfig::tileSizeN` field (second tile dimension). Complements the existing `tileSize` (first dimension / interleave count).
+  - Parser now accepts both `@loop(tile=M)` (1-D) and `@loop(tile=M, N)` (2-D).
+  - Codegen emits `llvm.loop.interleave.count = M` (width) and `llvm.loop.unroll.count = N` (depth) when both are set, giving a full 2-D register tile.
+  - Verbose OPTMAX report (`--optmax-report`) now logs `loop.tileSizeN` alongside `loop.tileSize`.
+
+### Documentation
+
+- `LANGUAGE_REFERENCE.md` §3.1.1 — Added `#define` comptime migration note and table row for function-like macro note severity.
+- `LANGUAGE_REFERENCE.md` §4.4.6 — `@repr` table updated: SoA entry now documents access-group codegen; new `@repr(aos_to_soa)` row added.
+- `LANGUAGE_REFERENCE.md` §6.6 — Rewrote to include `@opt(...)` / `@semantics(...)` namespace tables and the inhibitor-wins conflict resolution rule.
+- `LANGUAGE_REFERENCE.md` §8 — New `@loop(tile=M)` / `@loop(tile=M, N)` section with 2-D tile explanation and matrix-multiply example.
+- `LANGUAGE_REFERENCE.md` §14.1–14.2 — Updated struct syntax to show typed fields; added W019 warning reference and migration guide.
+- `LANGUAGE_REFERENCE.md` §17 — Added §17.0 "Ownership philosophy and enforcement modes" documenting advisory vs strict, borrow error codes E015–E018, and CLI flags.
+- `LANGUAGE_REFERENCE.md` §24.3 — Added `--ownership=advisory/strict` and `--warn-untyped-fields` to CLI flag tables.
+- `LANGUAGE_REFERENCE.md` §25.2.3 — Added new `OptContract` internal documentation section.
+- `LANGUAGE_REFERENCE.md` §25.6 — New **Semantic layering model** section documenting the 4-layer compiler architecture (Syntax / Semantics / Optimization / Lowering), file assignments, and the known `nonNegValues_` layer-3/4 boundary violation to fix.
+- `tests/codegen_test.cpp`, `tests/parser_test.cpp` — All untyped struct syntax strings updated to typed fields (`x: i64`, `y: i64`, …) as part of the `--warn-untyped-fields` migration.
+
+
 
 ### Added
 

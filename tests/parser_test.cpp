@@ -1202,7 +1202,7 @@ TEST(ParserTest, MultipleSpreadInArray) {
 // ===========================================================================
 
 TEST(ParserTest, StructDeclaration) {
-    auto program = parse("struct Point { x, y } fn main() { return 0; }");
+    auto program = parse("struct Point { x: i64, y: i64 } fn main() { return 0; }");
     ASSERT_EQ(program->structs.size(), 1u);
     EXPECT_EQ(program->structs[0]->name, "Point");
     ASSERT_EQ(program->structs[0]->fields.size(), 2u);
@@ -1211,7 +1211,7 @@ TEST(ParserTest, StructDeclaration) {
 }
 
 TEST(ParserTest, StructDeclarationSingleField) {
-    auto program = parse("struct Wrapper { value } fn main() { return 0; }");
+    auto program = parse("struct Wrapper { value: i64 } fn main() { return 0; }");
     ASSERT_EQ(program->structs.size(), 1u);
     EXPECT_EQ(program->structs[0]->name, "Wrapper");
     ASSERT_EQ(program->structs[0]->fields.size(), 1u);
@@ -1220,8 +1220,8 @@ TEST(ParserTest, StructDeclarationSingleField) {
 
 TEST(ParserTest, MultipleStructDeclarations) {
     auto program = parse(
-        "struct Point { x, y }"
-        "struct Color { r, g, b }"
+        "struct Point { x: i64, y: i64 }"
+        "struct Color { r: i64, g: i64, b: i64 }"
         "fn main() { return 0; }");
     ASSERT_EQ(program->structs.size(), 2u);
     EXPECT_EQ(program->structs[0]->name, "Point");
@@ -1230,7 +1230,7 @@ TEST(ParserTest, MultipleStructDeclarations) {
 
 TEST(ParserTest, StructLiteralExpr) {
     auto program = parse(
-        "struct Point { x, y }"
+        "struct Point { x: i64, y: i64 }"
         "fn main() { var p:i64 = Point { x: 10, y: 20 }; return 0; }");
     ASSERT_EQ(program->structs.size(), 1u);
     auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
@@ -1245,7 +1245,7 @@ TEST(ParserTest, StructLiteralExpr) {
 
 TEST(ParserTest, StructFieldAccess) {
     auto program = parse(
-        "struct Point { x, y }"
+        "struct Point { x: i64, y: i64 }"
         "fn main() { var p:i64 = Point { x: 1, y: 2 }; return p.x; }");
     auto* retStmt = dynamic_cast<ReturnStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(retStmt, nullptr);
@@ -1387,7 +1387,7 @@ TEST(ParserTest, VarDeclNestedArrayType) {
 
 TEST(ParserTest, ReturnTypeStruct) {
     auto program = parse(
-        "struct Point { x, y }"
+        "struct Point { x: i64, y: i64 }"
         "fn makePoint() -> Point { return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->returnType, "Point");
@@ -1395,7 +1395,7 @@ TEST(ParserTest, ReturnTypeStruct) {
 
 TEST(ParserTest, ParamTypeStruct) {
     auto program = parse(
-        "struct Point { x, y }"
+        "struct Point { x: i64, y: i64 }"
         "fn distance(p: Point) { return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->parameters[0].typeName, "Point");
@@ -1403,7 +1403,7 @@ TEST(ParserTest, ParamTypeStruct) {
 
 TEST(ParserTest, ReturnTypeStructArray) {
     auto program = parse(
-        "struct Point { x, y }"
+        "struct Point { x: i64, y: i64 }"
         "fn getPoints() -> Point[] { return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->returnType, "Point[]");
@@ -1411,7 +1411,7 @@ TEST(ParserTest, ReturnTypeStructArray) {
 
 TEST(ParserTest, ParamTypeStructArray) {
     auto program = parse(
-        "struct Point { x, y }"
+        "struct Point { x: i64, y: i64 }"
         "fn sumPoints(pts: Point[]) { return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->parameters[0].typeName, "Point[]");
@@ -1672,7 +1672,7 @@ TEST(ParserTest, NullCoalesceAssignOperator) {
 // ---------------------------------------------------------------------------
 
 TEST(ParserTest, StructFieldCompoundAssignment) {
-    auto program = parse("struct S { x, y }\nfn main() { var s:i64 = S { x: 1, y: 2 }; s.x += 5; }");
+    auto program = parse("struct S { x: i64, y: i64 }\nfn main() { var s:i64 = S { x: 1, y: 2 }; s.x += 5; }");
     ASSERT_EQ(program->functions.size(), 1u);
     auto* exprStmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
     ASSERT_NE(exprStmt, nullptr);
