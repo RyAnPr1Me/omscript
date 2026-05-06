@@ -70,7 +70,7 @@ inline const char* errorCodeString(ErrorCode code) {
     case ErrorCode::E016_BORROW_WRITE_CONFLICT:        return "E016";
     case ErrorCode::E017_DOUBLE_MUT_BORROW:            return "E017";
     case ErrorCode::E018_MOVE_WHILE_BORROWED:          return "E018";
-    case ErrorCode::E019_UNTYPED_STRUCT_FIELD:         return "E019";
+    case ErrorCode::E019_UNTYPED_STRUCT_FIELD:         return "W019"; // advisory warning, not a hard error
     case ErrorCode::NONE:                              return "";
     }
     return "";
