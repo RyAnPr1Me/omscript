@@ -10,6 +10,7 @@
 #include "optimization_manager.h" // OptimizationManager, CostModel
 #include "program_analysis.h"     // ProgramFactsSnapshot, computeProgramFacts
 #include "sdr_pass.h"
+#include "sir.h"                  // SIRModule, SIRFunction — pre-pipeline annotation
 #include "superoptimizer.h"
 #include "polyopt.h"
 #include <iostream>
@@ -3623,6 +3624,86 @@ void CodeGenerator::runOptimizationPasses() {
             }
         }
     }
+    // ── Pre-pipeline SIR memory-effects annotation ────────────────────────
+    // For functions that the SIR has proven are pure (no memory reads or
+    // writes, no I/O, no mutation) and have no pointer parameters — or have
+    // only pointer parameters that provably do not access memory — set
+    // memory(none) before the main LLVM pipeline fires.  This front-runs
+    // PostOrderFunctionAttrsPass so that every pass in the main pipeline
+    // (inliner, LICM, GVN, SCCP, SpeculativeExecution, alias analysis) sees
+    // correct memory effects from the very start, enabling more aggressive
+    // code-motion, CSE, and call speculation.
+    //
+    // Also promotes leaf+no-IO functions to memory(none) when they carry only
+    // scalar (non-pointer) parameters, and sets memory(read) for SIR-readonly
+    // functions to allow load-hoisting across their call sites.
+    if (optCtx_ && optCtx_->hasSIR() && optimizationLevel >= OptimizationLevel::O2) {
+        const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+        if (sirMod) {
+            unsigned annotatedNone = 0, annotatedRead = 0;
+            for (auto& F : *module) {
+                if (F.isDeclaration()) continue;
+                // If memory effects are already set precisely, skip.
+                if (F.doesNotAccessMemory()) continue;
+
+                const std::string fname = F.getName().str();
+                const SIRFunction* sirFn = sirMod->getFunction(fname);
+                if (!sirFn) continue;
+
+                // Skip self-recursive functions — the SIR purity may be
+                // inferred without fully accounting for the recursive path.
+                if (sirFn->isRecursive) continue;
+                // Skip entry points — they may have implicit I/O through the
+                // runtime that the effect analysis doesn't see.
+                if (sirFn->isEntry) continue;
+                // Skip functions that carry volatile or atomic state — those
+                // semantics must not be elided by readnone assumptions.
+                if (sirFn->facts.effects.hasMutation) continue;
+
+                const bool isReadNone = sirFn->facts.isPure &&
+                                        sirFn->facts.effects.isReadNone();
+                const bool isReadOnly = !sirFn->facts.effects.writesMemory &&
+                                        !sirFn->facts.effects.hasIO &&
+                                        !sirFn->facts.effects.hasMutation;
+
+                if (!isReadNone && !isReadOnly) continue;
+
+                // Determine whether the function has any pointer-type params.
+                // For memory(none) we require no pointer params (or all
+                // pointer params must be proven noalias + nocapture, meaning
+                // they are not dereferenced).  For memory(read) we only
+                // require no writes-to-pointer-params.
+                bool hasPointerParam = false;
+                bool allPointerParamsNoCapture = true;
+                for (auto& arg : F.args()) {
+                    if (arg.getType()->isPointerTy()) {
+                        hasPointerParam = true;
+                        if (!arg.hasAttribute(llvm::Attribute::NoCapture)) {
+                            allPointerParamsNoCapture = false;
+                        }
+                    }
+                }
+
+                if (isReadNone && (!hasPointerParam || allPointerParamsNoCapture)) {
+                    F.setMemoryEffects(llvm::MemoryEffects::none());
+                    if (!F.hasFnAttribute(llvm::Attribute::WillReturn) &&
+                            !sirFn->neverReturns)
+                        F.addFnAttr(llvm::Attribute::WillReturn);
+                    ++annotatedNone;
+                } else if (isReadOnly && !F.onlyReadsMemory()) {
+                    // Readonly: can read but not write memory.  Allows LICM
+                    // to hoist the call out of loops and GVN to CSE calls.
+                    F.setMemoryEffects(llvm::MemoryEffects::readOnly());
+                    ++annotatedRead;
+                }
+            }
+            if (verbose_ && (annotatedNone + annotatedRead) > 0) {
+                std::cout << "    [sir-attr] Pre-pipeline annotation: "
+                          << annotatedNone << " memory(none), "
+                          << annotatedRead << " memory(read)" << '\n';
+            }
+        }
+    }
     // Pre-pipeline HGOE loop annotation: set target-optimal unroll count,
     // DEBUG: dump pre-pipeline IR when OMSC_DEBUG_IR=1
     if (const char* dbgEnv = std::getenv("OMSC_DEBUG_IR")) {
@@ -3764,6 +3845,24 @@ void CodeGenerator::runOptimizationPasses() {
         MPMPost.addPass(
             llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
         MPMPost.run(*module, PostMAM);
+    };
+
+    // ── Inter-wave attribute propagation helper ───────────────────────────
+    // Re-runs bidirectional function-attribute inference (PostOrderFunctionAttrs
+    // bottom-up + ReversePostOrderFunctionAttrs top-down) so that functions
+    // simplified in the previous wave have their memory/purity/nofree/willreturn
+    // attributes updated before the next wave fires.  This ensures waves like
+    // HGOE and IPOF see accurate purity facts discovered by earlier waves
+    // (e.g., the superoptimizer may have eliminated all memory accesses from a
+    // function, making it readnone — IPOF can then CSE its call sites).
+    auto propagateAttributes = [&]() {
+        if (optimizationLevel < OptimizationLevel::O2) return;
+        llvm::ModulePassManager AttrMPM;
+        AttrMPM.addPass(llvm::InferFunctionAttrsPass());
+        AttrMPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+            llvm::PostOrderFunctionAttrsPass()));
+        AttrMPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        AttrMPM.run(*module, PostMAM);
     };
 
     // Bounded recursive inlining: replicate GCC's deep recursive inlining
@@ -4062,6 +4161,11 @@ void CodeGenerator::runOptimizationPasses() {
     // enough to become new inlining or specialization candidates.
     snapshot = advanceWave(verbose_, "superopt");
 
+    // Re-derive function attributes after the superoptimizer: functions that
+    // were simplified to no-memory-access by the superoptimizer now correctly
+    // carry readnone/willreturn/nofree, so HGOE sees accurate purity facts.
+    propagateAttributes();
+
     // Hardware Graph Optimization Engine: run after the superoptimizer when
     if (enableHGOE_ && optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) {
@@ -4136,6 +4240,11 @@ void CodeGenerator::runOptimizationPasses() {
     // or widened, and revised instruction counts that inform the IPOF pass.
     snapshot = advanceWave(verbose_, "sdr");
 
+    // Re-derive function attributes after SDR: vector-lane changes may have
+    // removed all memory accesses from a function, or introduced new noalias
+    // hints that enable IPOF to make better phase-ordering decisions.
+    propagateAttributes();
+
     // ── Implicit Phase Ordering Fixer (IPOF) ────────────────────────────────
     if (enableIPOF_ && optimizationLevel >= OptimizationLevel::O2) {
         // Derive aggression level from optimization level unless explicitly set.
@@ -4150,6 +4259,12 @@ void CodeGenerator::runOptimizationPasses() {
         ipofCfg.maxIterations   = (level >= 3) ? 3u : (level == 2 ? 2u : 1u);
         ipofCfg.enableNearVectorizable = (level >= 3);
         ipofCfg.enableCallWithConst    = (level >= 2);
+        // At O3, allow IPOF to analyze larger functions: the inter-wave
+        // attribute propagation above has already given IPOF accurate
+        // memory-effect facts, so the per-function cost of analysis is
+        // lower and the opportunity density in larger functions is higher.
+        if (optimizationLevel >= OptimizationLevel::O3)
+            ipofCfg.maxFunctionSize = 6000;
 
         auto ipofStats = ipof::runIPOF(*module, ipofCfg);
 
@@ -4368,6 +4483,75 @@ void CodeGenerator::runOptimizationPasses() {
             if (verbose_ && moduloExpanded > 0) {
                 std::cout << "    Post-pipeline modulo strength reduction: "
                           << moduloExpanded << " urem instructions expanded" << '\n';
+            }
+        }
+
+        // ── Final IPO cleanup wave ─────────────────────────────────────────
+        // After all optimization waves (recursive inlining, specialization,
+        // superoptimizer, HGOE, SDR, IPOF) and the closing pipeline, run a
+        // final interprocedural cleanup pass.  The closing pipeline may have:
+        //   • constant-folded branches that made whole functions unreachable,
+        //   • simplified call sequences that now pass only constant arguments,
+        //   • eliminated loops that were the last side effects of a function
+        //     (making it newly dead or newly pure).
+        // A final IPO pass captures all of these at the module level, shrinking
+        // the binary and improving the quality of the emitted object code.
+        {
+            if (verbose_) {
+                std::cout << "    Running final IPO cleanup wave..." << '\n';
+            }
+            llvm::ModulePassManager FinalIPOMPM;
+
+            // IPSCCP: inter-procedural sparse conditional constant propagation.
+            // Propagates constants across all call boundaries; eliminates branches
+            // proven unreachable at the module level.
+            FinalIPOMPM.addPass(llvm::IPSCCPPass());
+
+            // DeadArgumentElimination: remove parameters that every call site
+            // passes an identical constant to (exposed by the IPSCCP fold above).
+            FinalIPOMPM.addPass(llvm::DeadArgumentEliminationPass());
+
+            // GlobalDCE: remove functions, globals, and aliases that are now
+            // dead after constant-folding and dead-argument removal.
+            FinalIPOMPM.addPass(llvm::GlobalDCEPass());
+
+            // InferFunctionAttrs: re-annotate library function declarations whose
+            // attributes may have changed after specialization and inlining.
+            FinalIPOMPM.addPass(llvm::InferFunctionAttrsPass());
+
+            // Bidirectional attribute propagation: re-derive memory effects,
+            // nounwind, nofree, willreturn from the simplified function bodies.
+            FinalIPOMPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+                llvm::PostOrderFunctionAttrsPass()));
+            FinalIPOMPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+
+            // At O3, run an additional Attributor pass to derive richer
+            // per-argument attributes (nonnull, dereferenceable, noalias) that
+            // the above bottom-up propagation doesn't capture.
+            if (optimizationLevel >= OptimizationLevel::O3) {
+                FinalIPOMPM.addPass(llvm::AttributorPass());
+            }
+
+            // Per-function cleanup: fold the newly-derived attribute facts
+            // (e.g., calls to newly-readnone functions can be CSE'd; newly-dead
+            // branches exposed by IPSCCP can be pruned).
+            {
+                llvm::FunctionPassManager FinalFPM;
+                FinalFPM.addPass(llvm::SCCPPass());
+                FinalFPM.addPass(llvm::InstCombinePass());
+                FinalFPM.addPass(llvm::ADCEPass());
+                FinalFPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+                FinalIPOMPM.addPass(
+                    llvm::createModuleToFunctionPassAdaptor(std::move(FinalFPM)));
+            }
+
+            // Strip any function declarations left orphaned by GlobalDCE.
+            FinalIPOMPM.addPass(llvm::StripDeadPrototypesPass());
+
+            FinalIPOMPM.run(*module, PostMAM);
+
+            if (verbose_) {
+                std::cout << "    Final IPO cleanup wave complete" << '\n';
             }
         }
     }
