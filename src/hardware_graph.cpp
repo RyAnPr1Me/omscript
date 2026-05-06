@@ -4460,10 +4460,12 @@ static unsigned foldPowBySmallInt(llvm::Function& func) {
                 };
                 llvm::Value* x2 = nullptr, *x4 = nullptr;
                 auto getX2 = [&]() -> llvm::Value* {
-                    if (!x2) x2 = mul(base, base); return x2;
+                    if (!x2) x2 = mul(base, base);
+                    return x2;
                 };
                 auto getX4 = [&]() -> llvm::Value* {
-                    if (!x4) x4 = mul(getX2(), getX2()); return x4;
+                    if (!x4) x4 = mul(getX2(), getX2());
+                    return x4;
                 };
 
                 if (expVal == 0.0) {
@@ -5694,7 +5696,7 @@ static unsigned foldDoubleNot(llvm::Function& func) {
     for (auto it = toErase.rbegin(); it != toErase.rend(); ++it) {
         auto* inst = *it;
         llvm::Value* innerVal = inst->getOperand(0);
-        if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(innerVal))
+        if (llvm::isa<llvm::ConstantInt>(innerVal))
             innerVal = inst->getOperand(1);
         inst->eraseFromParent();
         if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
@@ -7982,9 +7984,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         std::vector<unsigned> buAvail(n, 0);
         std::vector<unsigned> buIssued(n, 0);
         std::vector<bool> buDone(n, false);
-        unsigned buCycle = 0;
         unsigned buMax = 0;
-        unsigned buScheduled = 0;
 
         // Build reverse in-degree (out-degree of successors).
         std::vector<unsigned> outDeg(n, 0);

@@ -1109,7 +1109,6 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (args[i].isInt())   return static_cast<double>(args[i].asI64());
         return std::nullopt;
     };
-    auto fromD = [](double v) -> CTValue { return CTValue::fromF64(v); };
     // strArg returns a pointer to the arg's string, avoiding a copy.
     auto strArg = [&](size_t i) -> const std::string* {
         if (i < n && args[i].isString()) return &args[i].asStr();
@@ -2092,7 +2091,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
                 using I128=__int128;
                 I128 res=static_cast<I128>(*a)+static_cast<I128>(*b);
                 int64_t lo=-(int64_t(1)<<(bw-1)), hi=(int64_t(1)<<(bw-1))-1;
-                if(res<lo) res=lo; if(res>hi) res=hi;
+                if (res < lo) res = lo;
+                if (res > hi) res = hi;
                 return CTValue::fromI64(static_cast<int64_t>(res));
             }
         }
@@ -2101,7 +2101,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
                 using I128=__int128;
                 I128 res=static_cast<I128>(*a)-static_cast<I128>(*b);
                 int64_t lo=-(int64_t(1)<<(bw-1)), hi=(int64_t(1)<<(bw-1))-1;
-                if(res<lo) res=lo; if(res>hi) res=hi;
+                if (res < lo) res = lo;
+                if (res > hi) res = hi;
                 return CTValue::fromI64(static_cast<int64_t>(res));
             }
         }
@@ -3858,7 +3859,8 @@ void CTEngine::runPass(const Program* program) {
                 walkCallSites(i->array.get()); walkCallSites(i->index.get()); break; }
             case ASTNodeType::ARRAY_EXPR: {
                 auto* a = static_cast<const ArrayExpr*>(ex);
-                for (auto& el : a->elements) walkCallSites(el.get()); break; }
+                for (auto& el : a->elements) walkCallSites(el.get());
+                break; }
             case ASTNodeType::ASSIGN_EXPR: {
                 auto* a = static_cast<const AssignExpr*>(ex);
                 walkCallSites(a->value.get()); break; }
@@ -3877,7 +3879,8 @@ void CTEngine::runPass(const Program* program) {
                 walkCallSites(static_cast<const VarDecl*>(st)->initializer.get()); break;
             case ASTNodeType::BLOCK:
                 for (auto& s2 : static_cast<const BlockStmt*>(st)->statements)
-                    walkStmtCallSites(s2.get()); break;
+                    walkStmtCallSites(s2.get());
+                break;
             case ASTNodeType::IF_STMT: {
                 auto* ifs = static_cast<const IfStmt*>(st);
                 walkCallSites(ifs->condition.get());

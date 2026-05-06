@@ -642,7 +642,6 @@ static std::vector<PolyDep> computeDependences(const SCoP& scop) {
     std::vector<PolyDep> deps;
     unsigned depth = scop.depth();
     unsigned nparams = static_cast<unsigned>(scop.params.size());
-    unsigned totalVars = depth + nparams;
 
     // For each pair of statements (src, dst)
     for (unsigned s = 0; s < scop.stmts.size(); ++s) {
@@ -1594,7 +1593,7 @@ static PolyOptStats processLoop(llvm::Loop* outerLoop,
 // ─────────────────────────────────────────────────────────────────────────────
 
 static PolyOptStats processFunctionWithAnalyses(
-    llvm::Function& F,
+    llvm::Function& /*F*/,
     llvm::ScalarEvolution& SE,
     llvm::DominatorTree& DT,
     llvm::LoopInfo& LI,
@@ -1748,7 +1747,7 @@ OmPolyOptFunctionPass::run(llvm::Function& F,
 
 LoopLegalityResult checkLoopLegality(llvm::Loop* outerLoop,
                                       llvm::ScalarEvolution& SE,
-                                      llvm::DominatorTree& DT,
+                                      llvm::DominatorTree& /*DT*/,
                                       llvm::LoopInfo& LI,
                                       const PolyOptConfig& config) {
     LoopLegalityResult result;

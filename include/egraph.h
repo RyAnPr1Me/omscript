@@ -470,7 +470,7 @@ public:
     // ── Union-find ───────────────────────────────────────────────────────
 
     /// Find the canonical representative of an e-class.
-    [[nodiscard]] ClassId find(ClassId id);
+    [[nodiscard]] ClassId find(ClassId id) const;
 
     /// Merge two e-classes, returning the new canonical ID.
     ClassId merge(ClassId a, ClassId b);
@@ -497,8 +497,11 @@ public:
 
     // ── Accessors ────────────────────────────────────────────────────────
 
-    /// Get the e-class for a given canonical ID.
+    /// Get the e-class for a given canonical ID (const overload).
     [[nodiscard]] const EClass& getClass(ClassId id) const;
+
+    /// Get the e-class for a given canonical ID (mutable overload).
+    [[nodiscard]] EClass& getClass(ClassId id);
 
     /// Number of e-classes (after canonicalization).
     [[nodiscard]] size_t numClasses() const;

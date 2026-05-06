@@ -24,21 +24,6 @@
 
 namespace omscript {
 
-/// Returns true when @p stmt terminates control flow unconditionally in its
-/// own block (return, break, continue, throw).
-static bool isUnconditionalExit(const Statement* stmt) {
-    if (!stmt) return false;
-    switch (stmt->type) {
-        case ASTNodeType::RETURN_STMT:
-        case ASTNodeType::BREAK_STMT:
-        case ASTNodeType::CONTINUE_STMT:
-        case ASTNodeType::THROW_STMT:
-            return true;
-        default:
-            return false;
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Forward declarations
 // ─────────────────────────────────────────────────────────────────────────────

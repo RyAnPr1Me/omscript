@@ -5868,10 +5868,8 @@ CTValue CodeGenerator::constValueToCTValue(const ConstValue& v) const {
     case ConstValue::Kind::String:  return CTValue::fromString(v.strVal);
     case ConstValue::Kind::Array: {
         if (!ctEngine_) return CTValue::uninit();
-        CTArrayHandle h = ctEngine_->heap().nextHandle();
-        // Use the non-const heap via ctEngine_ (cast is safe — evaluation already done).
-        CTHeap& hp = const_cast<CTHeap&>(ctEngine_->heap());
-        h = hp.alloc(static_cast<uint64_t>(v.arrVal.size()));
+        CTHeap& hp = ctEngine_->heap();
+        CTArrayHandle h = hp.alloc(static_cast<uint64_t>(v.arrVal.size()));
         for (size_t i = 0; i < v.arrVal.size(); ++i)
             hp.store(h, static_cast<int64_t>(i),
                      constValueToCTValue(v.arrVal[i]));

@@ -273,7 +273,7 @@ MultiCost HGOEGuidedOptimizer::computeNodeCost(const ENode& node,
 
 bool HGOEGuidedOptimizer::scoreClass(ClassId id) {
     ClassId canonical = graph_.find(id);
-    EClass& cls = const_cast<EClass&>(graph_.getClass(canonical));
+    EClass& cls = graph_.getClass(canonical);
 
     bool improved = false;
     for (const ENode& node : cls.nodes) {
@@ -331,7 +331,7 @@ FeatureVec HGOEGuidedOptimizer::buildFeatureVec(ClassId id) {
 
 void HGOEGuidedOptimizer::updateLowerBound(ClassId id) {
     ClassId canonical = graph_.find(id);
-    EClass& cls = const_cast<EClass&>(graph_.getClass(canonical));
+    EClass& cls = graph_.getClass(canonical);
 
     // Lower bound: node's own baseline cost (children's lower bounds summed)
     MultiCost lb;
@@ -411,7 +411,7 @@ size_t HGOEGuidedOptimizer::pruneBelow(double threshold) {
         ClassId cid = static_cast<ClassId>(i);
         ClassId canonical = graph_.find(cid);
         if (canonical != cid) continue;
-        EClass& cls = const_cast<EClass&>(graph_.getClass(canonical));
+        EClass& cls = graph_.getClass(canonical);
         if (cls.hgoePruned) continue;
         if (scalar(cls.lowerBound) > threshold) {
             cls.hgoePruned = true;

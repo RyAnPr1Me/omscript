@@ -119,8 +119,7 @@ static std::vector<MissedOp> step1Detect(llvm::Function& F, const IpofConfig& cf
     // Skip oversized functions to bound compile time.
     if (instrCount(F) > cfg.maxFunctionSize) return ops;
 
-    // CSE detection: map (opcode, type, operands) → first occurrence.
-    using ExprKey = std::pair<unsigned, llvm::Value*>; // (opcode, op0) as cheap key
+    // CSE detection: map (opcode, num-operands, op0) → first occurrence.
     std::unordered_map<size_t, llvm::Instruction*> exprSeen;
 
     for (auto& BB : F) {
@@ -183,18 +182,16 @@ enum class PassSeq {
 /// Determine the pass sequence for a group of missed ops in one function.
 /// Multiple kinds may be present; the sequence covers all of them.
 static PassSeq selectPassSeq(const std::vector<MissedOp>& ops) {
-    bool hasConst  = false, hasCSE   = false;
-    bool hasDead   = false, hasLoad  = false;
+    bool hasCSE    = false;
+    bool hasLoad   = false;
     bool hasInline = false;
 
     for (const auto& op : ops) {
         switch (op.kind) {
-            case MissedOpKind::ConstantFolding:  hasConst  = true; break;
             case MissedOpKind::CommonSubexpr:    hasCSE    = true; break;
-            case MissedOpKind::DeadCode:         hasDead   = true; break;
             case MissedOpKind::RedundantLoad:    hasLoad   = true; break;
             case MissedOpKind::CallWithConst:    hasInline = true; break;
-            default: break;
+            default: break; // ConstantFolding + DeadCode fall through to FoldThenDCE
         }
     }
 
