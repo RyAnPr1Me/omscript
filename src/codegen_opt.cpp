@@ -1,3 +1,7 @@
+// === COMPILER LAYER 3 (OPTIMIZATION): codegen_opt.cpp ===
+// LLVM IR optimization passes and pass-registration infrastructure. All
+// optimization decisions live here. Must not produce or modify AST nodes
+// (Layer 1) and must not consume unproven Layer 3 facts via Layer 4 paths.
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
@@ -4470,14 +4474,23 @@ struct OptMaxLoopAnnotationPass
             addMDFlag("llvm.loop.parallel_accesses");
         }
         if (cfg.tileSize > 0) {
-            // loop.tileSize maps to llvm.loop.interleave.count: the tileSize
-            // value controls how many independent copies of the loop body the
-            // vectorizer should interleave (software pipelining for throughput).
-            // For example, tileSize=4 tells the cost model to issue 4
-            // independent iterations to fill latency slots on an out-of-order
-            // core, improving pipeline utilisation for memory-bound loops.
+            // loop.tileSize (M in @tile(M) / @tile(M, N)):
+            // Maps to llvm.loop.interleave.count — controls how many independent
+            // copies of the loop body the vectorizer should interleave (software
+            // pipelining for throughput).  For example, tileSize=4 issues 4
+            // independent iterations to fill latency slots on an OOO core.
             addMDInt("llvm.loop.interleave.count",
                      static_cast<unsigned>(cfg.tileSize));
+        }
+        if (cfg.tileSizeN > 0) {
+            // loop.tileSizeN (N in @tile(M, N)): second-dimension cache-blocking
+            // depth.  Emitted as llvm.loop.unroll.count so the inner tile depth
+            // is unrolled by the requested factor, enabling the compiler to keep
+            // N iterations of the tile in registers across the inner loop.
+            // Together with tileSize (interleave), this gives a full 2D tile:
+            //   outer loop tiled M-wide (interleave) × N-deep (unroll).
+            addMDInt("llvm.loop.unroll.count",
+                     static_cast<unsigned>(cfg.tileSizeN));
         }
         if (cfg.parallel) {
             // loop.parallel=true: emit an access-group MDNode attached to the
@@ -4629,12 +4642,13 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     FPM.addPass(llvm::LoopDataPrefetchPass());
 
     // Apply user-specified LoopConfig hints to loop metadata so the unroller
-    // and vectoriser see them before they fire.  All six LoopConfig fields are
+    // and vectoriser see them before they fire.  All LoopConfig fields are
     // now wired up: vectorize, noVectorize, unrollCount, independent, tileSize,
-    // parallel, fuse.
+    // tileSizeN, parallel, fuse.
     if (cfg.loop.vectorize || cfg.loop.noVectorize ||
         cfg.loop.unrollCount > 0 || cfg.loop.independent ||
-        cfg.loop.tileSize > 0 || cfg.loop.parallel || cfg.loop.fuse) {
+        cfg.loop.tileSize > 0 || cfg.loop.tileSizeN > 0 ||
+        cfg.loop.parallel || cfg.loop.fuse) {
         FPM.addPass(OptMaxLoopAnnotationPass(cfg.loop));
     }
 
@@ -5399,6 +5413,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
             if (cfg.loop.unrollCount > 0)  std::cout << ", loop.unrollCount=" << cfg.loop.unrollCount;
             if (cfg.loop.independent)      std::cout << ", loop.independent";
             if (cfg.loop.tileSize > 0)     std::cout << ", loop.tileSize=" << cfg.loop.tileSize;
+            if (cfg.loop.tileSizeN > 0)    std::cout << ", loop.tileSizeN=" << cfg.loop.tileSizeN;
             if (cfg.loop.parallel)         std::cout << ", loop.parallel";
             if (cfg.loop.fuse)             std::cout << ", loop.fuse";
             if (cfg.safety == SafetyLevel::Off)

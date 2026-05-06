@@ -454,6 +454,10 @@ class CodeGenerator {
     // @repr layout hint per struct.
     std::unordered_map<std::string, StructRepr> structReprs_;
     std::unordered_map<std::string, int>         structReprAlignN_;
+    // Struct names with @repr(soa) or @repr(aos_to_soa): field loads/stores inside
+    // loops are tagged with a per-struct LLVM access-group MDNode so LoopVectorize
+    // can prove field streams are independent and vectorize across them.
+    std::unordered_map<std::string, llvm::MDNode*> soaAccessGroups_;
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
     // Per-struct LLVM StructType (built lazily; enables SROA/mem2reg for small structs).

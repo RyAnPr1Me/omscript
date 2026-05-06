@@ -1314,7 +1314,8 @@ Placed immediately before `struct`, `@repr(...)` controls the memory layout of t
 | `@repr(packed)` | Minimal memory — no padding bytes inserted between fields. |
 | `@repr(align(N))` | Force the struct's alloca to be at least `N`-byte aligned (N must be a power of two). |
 | `@repr(auto)` | Compiler optimizes layout freely (default). |
-| `@repr(soa)` | Structure-of-arrays layout hint — recorded for future layout passes. |
+| `@repr(soa)` | Structure-of-arrays: field loads/stores inside loops are tagged with an LLVM `!llvm.access.group` MDNode, letting LoopVectorize prove field streams are independent. |
+| `@repr(aos_to_soa)` | Array-of-structures → structure-of-arrays transformation at call boundaries. Field loads/stores receive the same access-group tagging as `@repr(soa)`. |
 
 ```omscript
 @repr(C)
@@ -1342,9 +1343,15 @@ struct AutoLayout {
 
 @repr(soa)
 struct Particle {
-    px: float,
-    py: float,
-    pz: float,
+    px: f32,
+    py: f32,
+    pz: f32,
+}
+
+@repr(aos_to_soa)
+struct Transform {
+    mat: f32,
+    scale: f32,
 }
 ```
 
@@ -1353,7 +1360,8 @@ struct Particle {
 - `@repr(C)` → fields in declaration order; `alloca` aligned to the target ABI alignment of the struct type
 - `@repr(align(N))` → `alloca` alignment set to `N` bytes
 - `@repr(auto)` → same as the default (compiler may reorder cold fields for locality at O2+)
-- `@repr(soa)` → hint recorded; actual SoA transformation is applied by future layout passes
+- `@repr(soa)` → every field load/store tagged with `!llvm.access.group <struct-ag>`. The loop header must also carry `!llvm.loop.parallel_accesses` (set by `@loop(parallel=true)` or `@optmax`) for LoopVectorize to exploit the group tag.
+- `@repr(aos_to_soa)` → same access-group tagging as SoA; signals to the caller that the callee expects SoA layout so call-boundary layout adapters can be inserted in a future pass.
 
 #### 4.4.7 Enum Type
 
@@ -3076,6 +3084,24 @@ for (i: int in 0...100) @loop(vectorize) {
 ```
 
 **Effect**: Compiler attempts to generate SIMD instructions (e.g., AVX, NEON).
+
+#### `@loop(tile=M)` / `@loop(tile=M, N)` — Cache-Blocking Tile
+
+Controls the loop tile width (M) and depth (N) for cache-blocking and software-pipeline throughput.
+
+| Argument | LLVM metadata emitted | Effect |
+|----------|-----------------------|--------|
+| `@loop(tile=M)` | `llvm.loop.interleave.count = M` | Interleave M independent iterations to fill out-of-order execution slots (1-D software pipeline). |
+| `@loop(tile=M, N)` | `llvm.loop.interleave.count = M` + `llvm.loop.unroll.count = N` | Full 2-D tile: M-wide interleave × N-deep unroll for cache-blocking. |
+
+**Example** (2-D tile for matrix multiply inner loop):
+```omscript
+for (k: int in 0...K) @loop(tile=4, 8) {
+    c[i][j] = c[i][j] + a[i][k] * b[k][j];
+}
+```
+
+**Effect**: The loop body is interleaved 4-wide (filling pipeline slots) and unrolled 8-deep (keeping the 8-iteration register tile in registers, reducing cache miss rate for the A and B sub-matrices).
 
 #### Additional Loop Annotations
 
@@ -7763,6 +7789,19 @@ Diagnostic(level, code, message, location) → DiagnosticManager → stderr
 **Current status**: Not implemented. Every invocation recompiles from source.
 
 **Planned**: Timestamp-based invalidation of `oms.toml` → build cache mapping.
+
+### 25.6 Semantic layering model
+
+The compiler is divided into four conceptual layers. Layer boundaries prevent optimization facts from leaking into semantic analysis and vice versa. Each source file belongs to exactly one layer; cross-layer facts are passed only through well-defined interfaces (e.g., `OptimizationContext`, `FunctionFacts`).
+
+| Layer | Name | Source files | Allowed dependencies |
+|-------|------|-------------|----------------------|
+| **1** | Syntax | `src/parser.cpp`, `src/lexer.cpp`, `include/ast.h` | None (no LLVM, no optimizer) |
+| **2** | Semantics | `src/type_checker.cpp`, `src/borrow_check.cpp`, `src/effects.cpp`, `src/ersl.cpp`, `include/ersl.h` | Layer 1 |
+| **3** | Optimization | `src/opt_orchestrator.cpp`, `src/codegen_opt.cpp`, `src/egraph.cpp`, `src/cfctre.cpp`, all pass `.cpp` files | Layers 1 + 2 |
+| **4** | Lowering | `src/codegen.cpp`, `src/codegen_expr.cpp`, `src/codegen_stmt.cpp` | Layers 1 + 2 + 3 (read-only facts) |
+
+**Known violation to fix**: `nonNegValues_` (a Layer 3 fact set in `CodeGenerator`) is consumed inside `generateWhile` (a Layer 4 function) to emit `assume()` calls without a corresponding Layer 2 proof. This is the canonical example of a layer-3/4 boundary violation; it should be guarded with a Layer 2 proof predicate before use.
 
 ---
 

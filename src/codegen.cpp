@@ -1,3 +1,7 @@
+// === COMPILER LAYER 4 (LOWERING): Code Generator — main file ===
+// Translates the typed AST into LLVM IR. Depends on Layer 2 facts (types,
+// ownership, effects) forwarded from the orchestrator. Must not perform
+// semantic analysis or optimization decisions; those belong in Layer 2/3.
 #include "codegen.h"
 #include "diagnostic.h"
 #include "egraph.h"
@@ -667,10 +671,17 @@ llvm::StructType* CodeGenerator::getOrCreateStructLLVMType(const std::string& na
     llvm::StructType* sty =
         llvm::StructType::create(*context, elemTypes, "omsc.struct." + name, isPacked);
 
-    // @repr(C) / @repr(align(N)) / @repr(soa): apply struct-level alignment.
-    // Note: LLVM StructType doesn't carry alignment directly — we set it on
-    // every alloca/GV that holds this type via structReprAlignN_.
-    (void)repr; // SoA is a hint recorded for future layout passes.
+    // @repr(soa) / @repr(aos_to_soa): create a per-struct LLVM access-group
+    // MDNode.  All field GEP loads/stores inside loops will be tagged with this
+    // group, letting LoopVectorize prove that field streams do not alias each
+    // other.  This replaces the former (void)repr no-op stub.
+    if (repr == StructRepr::SoA || repr == StructRepr::AosToSoa) {
+        if (soaAccessGroups_.find(name) == soaAccessGroups_.end()) {
+            // getDistinct produces a uniqued-but-never-merged MDNode that LLVM
+            // uses as an access-group identifier.
+            soaAccessGroups_[name] = llvm::MDNode::getDistinct(*context, {});
+        }
+    }
 
     structLLVMTypes_[name] = sty;
     return sty;

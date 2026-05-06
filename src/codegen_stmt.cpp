@@ -1,3 +1,7 @@
+// === COMPILER LAYER 4 (LOWERING): Code Generator — statements ===
+// Statement-level LLVM IR emission. No semantic analysis; no optimizer
+// decisions. Layer 3 facts (e.g. nonNegValues_) may only be consumed here
+// if they have been proven at Layer 2 first — see §6 of the architecture doc.
 #include "codegen.h"
 #include "diagnostic.h"
 #include <algorithm>

@@ -3,6 +3,11 @@
 #ifndef AST_H
 #define AST_H
 
+// === COMPILER LAYER 1 (SYNTAX): AST node definitions ===
+// Pure data: no LLVM types, no optimizer facts. Consumed by Layer 2
+// (type-checker, borrow checker, effects), Layer 3 (opt passes), and
+// Layer 4 (codegen lowering).
+
 /// @file ast.h
 /// @brief Abstract syntax tree (AST) node definitions for OmScript.
 ///
@@ -291,7 +296,8 @@ struct LoopConfig {
     int  unrollCount  = 0;    // 0 = auto
     bool vectorize    = false;
     bool noVectorize  = false;
-    int  tileSize     = 0;    // 0 = no tiling
+    int  tileSize     = 0;    // 0 = no tiling (1-D interleave factor)
+    int  tileSizeN    = 0;    // 0 = no 2-D depth tiling; pairs with tileSize for @tile(M, N)
     bool parallel     = false;
     bool independent  = false; ///< @independent — no cross-iteration dependencies (alias-free)
     bool fuse         = false; ///< @fuse — merge with adjacent compatible loop
@@ -533,7 +539,8 @@ enum class StructRepr {
     C,           ///< @repr(C)    — stable, ABI-compatible C-style layout (fields in order, natural alignment)
     Packed,      ///< @repr(packed) — minimal memory, no padding between fields
     AlignN,      ///< @repr(align(N)) — force struct-level alignment to N bytes
-    SoA,         ///< @repr(soa) — hint: prefer structure-of-arrays layout
+    SoA,         ///< @repr(soa) — structure-of-arrays: field streams are independent; enables auto-vectorization
+    AosToSoa,    ///< @repr(aos_to_soa) — automatic AoS→SoA layout transformation at call boundaries
 };
 
 class StructDecl : public Statement {

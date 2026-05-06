@@ -63,6 +63,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `NoFree` is withheld if any call to `free()`, `delete`, or an indirect callee is found.
   - `WillReturn` is withheld if any basic block has a self-backedge (unconditional infinite loop).
 
+- **`@repr(soa)` — LLVM access-group codegen** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `include/codegen.h`):
+  - Replaced the former `(void)repr;` no-op stub with real IR metadata emission.
+  - On struct registration, a per-struct `!llvm.access.group` MDNode is created for any `@repr(soa)` or `@repr(aos_to_soa)` struct.
+  - Every field load (`generateFieldAccess`) and field store (`generateFieldAssign`) on a SoA struct is tagged with `!llvm.access.group <struct-ag>`.
+  - When the enclosing loop also carries `!llvm.loop.parallel_accesses` (via `@loop(parallel=true)` or `@optmax`), LoopVectorize can prove field streams are independent and vectorize across them without alias-check guards.
+
+- **`@repr(aos_to_soa)` — new struct annotation** (`include/ast.h`, `src/parser.cpp`, `include/codegen.h`, `src/codegen.cpp`):
+  - New `StructRepr::AosToSoa` enum value signals that an AoS→SoA layout transformation is expected at call boundaries.
+  - Field loads/stores receive the same access-group tagging as `@repr(soa)`.
+  - Parser accepts `@repr(aos_to_soa)` immediately before `struct`.
+
+- **`@loop(tile=M, N)` — 2D cache-blocking tile annotation** (`include/ast.h`, `src/parser.cpp`, `src/codegen_opt.cpp`):
+  - New `LoopConfig::tileSizeN` field (second tile dimension). Complements the existing `tileSize` (first dimension / interleave count).
+  - Parser now accepts both `@loop(tile=M)` (1-D) and `@loop(tile=M, N)` (2-D).
+  - Codegen emits `llvm.loop.interleave.count = M` (width) and `llvm.loop.unroll.count = N` (depth) when both are set, giving a full 2-D register tile.
+  - Verbose OPTMAX report (`--optmax-report`) now logs `loop.tileSizeN` alongside `loop.tileSize`.
+
+### Documentation (continued)
+
+- `LANGUAGE_REFERENCE.md` §4.4.6 — `@repr` table updated: SoA entry now documents access-group codegen; new `@repr(aos_to_soa)` row added.
+- `LANGUAGE_REFERENCE.md` §8 — New `@loop(tile=M)` / `@loop(tile=M, N)` section with 2-D tile explanation and matrix-multiply example.
+- `LANGUAGE_REFERENCE.md` §25.6 — New **Semantic layering model** section documenting the 4-layer compiler architecture (Syntax / Semantics / Optimization / Lowering), file assignments, and the known `nonNegValues_` layer-3/4 boundary violation to fix.
+- `tests/codegen_test.cpp`, `tests/parser_test.cpp` — All untyped struct syntax strings updated to typed fields (`x: i64`, `y: i64`, …) as part of the `--warn-untyped-fields` migration.
+
 ### Documentation
 
 - `LANGUAGE_REFERENCE.md` §3.1.1 — Added `#define` comptime migration note and table row for function-like macro note severity.

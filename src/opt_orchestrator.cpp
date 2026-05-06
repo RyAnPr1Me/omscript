@@ -1,3 +1,7 @@
+// === COMPILER LAYER 3 (OPTIMIZATION): Optimization Orchestrator ===
+// Owns the pass schedule, fact propagation, and optimization coordinator.
+// Reads Layer 2 semantic facts (types, ownership, effects, ERSL) and drives
+// Layer 3 transforms. Must not emit LLVM IR directly — that is Layer 4.
 /// @file opt_orchestrator.cpp
 /// @brief PassRegistry, pass metadata catalog, and OptimizationOrchestrator.
 ///

@@ -1,3 +1,7 @@
+// === COMPILER LAYER 1 (SYNTAX): Parser ===
+// This file is the parser/lexer boundary. It consumes tokens and produces the
+// AST. It must not import or reference optimizer facts (Layer 3) or lowering
+// details (Layer 4). All semantic analysis starts in Layer 2 passes.
 #include "parser.h"
 #include "diagnostic.h"
 #include "pass_utils.h"   // isIntWidthTypeName, isKnownScalarTypeName
@@ -449,7 +453,7 @@ std::unique_ptr<Program> Parser::parse() {
                 StructRepr repr = StructRepr::Auto;
                 int reprAlignN = 0;
                 if (!check(TokenType::RPAREN)) {
-                    const Token reprTok = consume(TokenType::IDENTIFIER, "Expected repr kind: C, packed, auto, soa, or align");
+                    const Token reprTok = consume(TokenType::IDENTIFIER, "Expected repr kind: C, packed, auto, soa, aos_to_soa, or align");
                     if (reprTok.lexeme == "C") {
                         repr = StructRepr::C;
                     } else if (reprTok.lexeme == "packed") {
@@ -458,6 +462,8 @@ std::unique_ptr<Program> Parser::parse() {
                         repr = StructRepr::Auto;
                     } else if (reprTok.lexeme == "soa") {
                         repr = StructRepr::SoA;
+                    } else if (reprTok.lexeme == "aos_to_soa") {
+                        repr = StructRepr::AosToSoa;
                     } else if (reprTok.lexeme == "align") {
                         repr = StructRepr::AlignN;
                         consume(TokenType::LPAREN, "Expected '(' after repr align");
@@ -465,7 +471,7 @@ std::unique_ptr<Program> Parser::parse() {
                         reprAlignN = static_cast<int>(nTok.intValue);
                         consume(TokenType::RPAREN, "Expected ')' after repr align value");
                     } else {
-                        error("Unknown @repr kind '" + reprTok.lexeme + "'; supported: C, packed, auto, soa, align(N)");
+                        error("Unknown @repr kind '" + reprTok.lexeme + "'; supported: C, packed, auto, soa, aos_to_soa, align(N)");
                     }
                 }
                 consume(TokenType::RPAREN, "Expected ')' after @repr");
@@ -4695,7 +4701,16 @@ OptMaxConfig Parser::parseOptMaxConfig() {
                         cfg.loop.vectorize = (v.lexeme == "true" || v.type == TokenType::TRUE);
                     } else if (lk.lexeme == "tile") {
                         const Token v = advance();
-                        if (v.type == TokenType::INTEGER) cfg.loop.tileSize = static_cast<int>(v.intValue);
+                        if (v.type == TokenType::INTEGER) {
+                            cfg.loop.tileSize = static_cast<int>(v.intValue);
+                            // Support @tile(M, N) — optional second dimension for 2D cache-blocking.
+                            if (check(TokenType::COMMA)) {
+                                advance(); // consume ','
+                                const Token v2 = advance();
+                                if (v2.type == TokenType::INTEGER)
+                                    cfg.loop.tileSizeN = static_cast<int>(v2.intValue);
+                            }
+                        }
                     } else if (lk.lexeme == "parallel") {
                         const Token v = advance();
                         cfg.loop.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);
@@ -4762,7 +4777,16 @@ LoopConfig Parser::parseLoopAnnotation() {
                 cfg.noVectorize = (v.lexeme == "false" || v.type == TokenType::FALSE);
             } else if (key.lexeme == "tile") {
                 const Token v = advance();
-                if (v.type == TokenType::INTEGER) cfg.tileSize = static_cast<int>(v.intValue);
+                if (v.type == TokenType::INTEGER) {
+                    cfg.tileSize = static_cast<int>(v.intValue);
+                    // Support @tile(M, N) — optional second dimension for 2D cache-blocking.
+                    if (check(TokenType::COMMA)) {
+                        advance(); // consume ','
+                        const Token v2 = advance();
+                        if (v2.type == TokenType::INTEGER)
+                            cfg.tileSizeN = static_cast<int>(v2.intValue);
+                    }
+                }
             } else if (key.lexeme == "parallel") {
                 const Token v = advance();
                 cfg.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);
