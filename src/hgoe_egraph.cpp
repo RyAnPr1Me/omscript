@@ -18,6 +18,7 @@
 #include "hgoe_egraph.h"
 #include "ast.h"
 #include "egraph.h"
+#include <iostream>
 #include "opt_context.h"
 #include "pass_utils.h"
 
@@ -691,16 +692,19 @@ static bool isUnaryOp(Op op) {
 
 /// Recursively convert the best ENode in `cls` back to an AST Expression.
 /// Uses a flat bestNode map built from each class's bestNode field.
+/// Returns nullptr if extraction fails (e.g. due to a structural cycle in the
+/// E-graph caused by incorrect merges), signalling to the caller that the
+/// optimisation should be abandoned.
 static std::unique_ptr<Expression> eNodeToAST(
         HGOEGuidedOptimizer& opt,
         ClassId cls,
         std::unordered_map<ClassId, ENode>& visited) {
 
     ClassId canonical = opt.graph().find(cls);
-    // Cycle guard / DAG-sharing: if we have already started extracting this
-    // class (visited), reconstruct a leaf expression from the cached node to
-    // avoid infinite recursion.  With the self-referential node fix in
-    // scoreClass this should be rare, but guard defensively.
+    // Cycle guard: if we are currently building this class (it's in-progress),
+    // return a safe result for leaf nodes or nullptr for non-leaves.  Returning
+    // nullptr propagates failure all the way up so optimiseExpr can skip the
+    // whole optimisation rather than emit garbled code.
     auto it = visited.find(canonical);
     if (it != visited.end()) {
         const ENode& cached = it->second;
@@ -712,9 +716,9 @@ static std::unique_ptr<Expression> eNodeToAST(
         case Op::ConstF:
             return std::make_unique<LiteralExpr>(cached.fvalue);
         default:
-            // True structural cycle — should not happen after self-ref fix;
-            // return a safe placeholder to avoid UB.
-            return std::make_unique<LiteralExpr>(0LL);
+            // Non-leaf cycle detected — the E-graph has a structural cycle
+            // (likely from an incorrect rule merge).  Return nullptr to abort.
+            return nullptr;
         }
     }
 
@@ -743,13 +747,13 @@ static std::unique_ptr<Expression> eNodeToAST(
         if (isBinaryOp(best.op) && best.children.size() == 2) {
             auto lhs = eNodeToAST(opt, best.children[0], visited);
             auto rhs = eNodeToAST(opt, best.children[1], visited);
-            if (!lhs || !rhs) return std::make_unique<LiteralExpr>(0LL);
+            if (!lhs || !rhs) return nullptr;
             return std::make_unique<BinaryExpr>(
                     opToString(best.op), std::move(lhs), std::move(rhs));
         }
         if (isUnaryOp(best.op) && best.children.size() == 1) {
             auto operand = eNodeToAST(opt, best.children[0], visited);
-            if (!operand) return std::make_unique<LiteralExpr>(0LL);
+            if (!operand) return nullptr;
             std::string uop = (best.op == Op::Neg ? "-" :
                                best.op == Op::BitNot ? "~" : "!");
             return std::make_unique<UnaryExpr>(uop, std::move(operand));
@@ -759,7 +763,7 @@ static std::unique_ptr<Expression> eNodeToAST(
             auto thenE = eNodeToAST(opt, best.children[1], visited);
             auto elseE = eNodeToAST(opt, best.children[2], visited);
             if (!cond || !thenE || !elseE)
-                return std::make_unique<LiteralExpr>(0LL);
+                return nullptr;
             return std::make_unique<TernaryExpr>(
                     std::move(cond), std::move(thenE), std::move(elseE));
         }
@@ -768,13 +772,13 @@ static std::unique_ptr<Expression> eNodeToAST(
             args.reserve(best.children.size());
             for (ClassId child : best.children) {
                 auto arg = eNodeToAST(opt, child, visited);
-                if (!arg) arg = std::make_unique<LiteralExpr>(0LL);
+                if (!arg) return nullptr;
                 args.push_back(std::move(arg));
             }
             return std::make_unique<CallExpr>(best.name, std::move(args));
         }
         // Fallback: return an identifier named after the op
-        return std::make_unique<LiteralExpr>(0LL);
+        return nullptr;
     }
 }
 

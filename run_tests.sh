@@ -412,6 +412,7 @@ ptest_program "examples/continue_in_switch.om" 4
 ptest_program "examples/continue_in_switch_loop.om" 27
 ptest_program "examples/typeof_assert_test.om" 1
 ptest_program "examples/bool_test.om" 73
+ptest_program "examples/flag_pred_test.om" 3
 ptest_program "examples/bitwise_assign_test.om" 55
 ptest_program "examples/array_compound_test.om" 164
 ptest_program "examples/print_char_return_test.om" 1

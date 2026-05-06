@@ -1402,6 +1402,7 @@ std::vector<RewriteRule> getAlgebraicRules() {
         [](EGraph& g, const Subst&) { return g.addConst(0); });
 
     // ── Modulo by power of 2: x % 2^n → x & (2^n - 1) ──────────────────
+    // Only valid for non-negative x (signed integers: (-7) % 2 == -1, not 1).
     for (int n = 1; n <= 30; ++n) {
         long long pow2 = 1LL << n;
         long long mask = pow2 - 1;
@@ -1409,6 +1410,9 @@ std::vector<RewriteRule> getAlgebraicRules() {
             P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(pow2)}),
             [mask](EGraph& g, const Subst& s) {
                 return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(mask));
+            },
+            [](const EGraph& g, const Subst& s) -> bool {
+                return g.getClass(s.at("x")).isNonNeg;
             });
     }
 
@@ -6696,7 +6700,10 @@ std::vector<RewriteRule> getComparisonRules() {
     // ── Double logical not: !!x → x (for boolean context) ───────────────
     rules.emplace_back("double_log_not",
         P::OpPat(Op::LogNot, {P::OpPat(Op::LogNot, {P::Wild("x")})}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.getClass(s.at("x")).isBoolean;
+        });
 
     // ── Complement: !(a > b) → a <= b ────────────────────────────────────
     rules.emplace_back("not_gt_to_le",
@@ -6898,7 +6905,10 @@ std::vector<RewriteRule> getComparisonRules() {
     // ── Double logical NOT: !!x → x ─────────────────────────────────────
     rules.emplace_back("lognot_lognot",
         P::OpPat(Op::LogNot, {P::OpPat(Op::LogNot, {P::Wild("x")})}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.getClass(s.at("x")).isBoolean;
+        });
 
     // ─────────────────────────────────────────────────────────────────────
 
@@ -8192,7 +8202,10 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
     // !!x → x  (when x is known boolean: double logical negation is identity)
     rules.emplace_back("double_lognot",
         P::OpPat(Op::LogNot, {P::OpPat(Op::LogNot, {P::Wild("x")})}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.getClass(s.at("x")).isBoolean;
+        });
 
 
     return rules;
@@ -9203,99 +9216,119 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
 
     // ─────────────────────────────────────────────────────────────────────
 
-    // x & 1 → x % 2  (last bit is parity)
+    // x & 1 → x % 2  (last bit is parity — only valid when x >= 0)
     rules.emplace_back("and_one_to_mod2",
         P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(1)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(2)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(2)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x % 2 → x & 1
+    // x % 2 → x & 1  (only valid when x >= 0)
     rules.emplace_back("mod2_to_and_one",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x & 3 → x % 4
+    // x & 3 → x % 4  (only valid when x >= 0)
     rules.emplace_back("and_three_to_mod4",
         P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(3)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(4)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(4)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x % 4 → x & 3
+    // x % 4 → x & 3  (only valid when x >= 0)
     rules.emplace_back("mod4_to_and_three",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(4)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(3)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(3)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x & 7 → x % 8
+    // x & 7 → x % 8  (only valid when x >= 0)
     rules.emplace_back("and_seven_to_mod8",
         P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(7)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(8)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(8)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x % 8 → x & 7
+    // x % 8 → x & 7  (only valid when x >= 0)
     rules.emplace_back("mod8_to_and_seven",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(8)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(7)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(7)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x & 15 → x % 16
+    // x & 15 → x % 16  (only valid when x >= 0)
     rules.emplace_back("and_15_to_mod16",
         P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(15)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(16)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(16)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x % 16 → x & 15
+    // x % 16 → x & 15  (only valid when x >= 0)
     rules.emplace_back("mod16_to_and_15",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(16)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(15)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(15)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x & 31 → x % 32
+    // x & 31 → x % 32  (only valid when x >= 0)
     rules.emplace_back("and_31_to_mod32",
         P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(31)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(32)); });
-    // x % 32 → x & 31
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(32)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
+    // x % 32 → x & 31  (only valid when x >= 0)
     rules.emplace_back("mod32_to_and_31",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(32)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(31)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(31)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x & 63 → x % 64
+    // x & 63 → x % 64  (only valid when x >= 0)
     rules.emplace_back("and_63_to_mod64",
         P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(63)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(64)); });
-    // x % 64 → x & 63
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(64)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
+    // x % 64 → x & 63  (only valid when x >= 0)
     rules.emplace_back("mod64_to_and_63",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(64)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(63)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(63)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x & 127 → x % 128
+    // x & 127 → x % 128  (only valid when x >= 0)
     rules.emplace_back("and_127_to_mod128",
         P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(127)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(128)); });
-    // x % 128 → x & 127
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(128)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
+    // x % 128 → x & 127  (only valid when x >= 0)
     rules.emplace_back("mod128_to_and_127",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(128)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(127)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(127)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x & 255 → x % 256
+    // x & 255 → x % 256  (only valid when x >= 0)
     rules.emplace_back("and_255_to_mod256",
         P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(255)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(256)); });
-    // x % 256 → x & 255
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(256)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
+    // x % 256 → x & 255  (only valid when x >= 0)
     rules.emplace_back("mod256_to_and_255",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(256)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(255)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(255)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x & 511 → x % 512
+    // x & 511 → x % 512  (only valid when x >= 0)
     rules.emplace_back("and_511_to_mod512",
         P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(511)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(512)); });
-    // x % 512 → x & 511
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(512)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
+    // x % 512 → x & 511  (only valid when x >= 0)
     rules.emplace_back("mod512_to_and_511",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(512)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(511)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(511)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
-    // x & 1023 → x % 1024
+    // x & 1023 → x % 1024  (only valid when x >= 0)
     rules.emplace_back("and_1023_to_mod1024",
         P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(1023)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(1024)); });
-    // x % 1024 → x & 1023
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(1024)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
+    // x % 1024 → x & 1023  (only valid when x >= 0)
     rules.emplace_back("mod1024_to_and_1023",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(1024)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1023)); });
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1023)); },
+        [](const EGraph& g, const Subst& s) -> bool { return g.getClass(s.at("x")).isNonNeg; });
 
     // ─────────────────────────────────────────────────────────────────────
 
@@ -9642,7 +9675,8 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             auto cv = g.getConstValue(s.at("c"));
             if (!cv) return false;
             long long v = *cv;
-            return v > 1 && (v & (v - 1)) == 0;
+            if (v <= 1 || (v & (v - 1)) != 0) return false;  // must be power of 2 > 1
+            return g.isClassNonNeg(s.at("x"));  // only valid for non-negative dividend
         });
 
     // ─────────────────────────────────────────────────────────────────────
