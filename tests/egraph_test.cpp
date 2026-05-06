@@ -473,7 +473,6 @@ TEST(EGraphTest, DoubleLogicalNot) {
     // !!x → x is only valid when x is already boolean (0 or 1).
     // Mark the class so the guarded rule fires.
     g.getClass(x).isBoolean = true;
-    g.getClass(x).isNonNeg  = true;
     ClassId not1 = g.addUnaryOp(Op::LogNot, x);
     ClassId not2 = g.addUnaryOp(Op::LogNot, not1);
 
