@@ -8,6 +8,7 @@
 #include "opt_context.h"
 #include "opt_orchestrator.h"
 #include "rlc_pass.h"
+#include "sir.h"
 #include "synthesize.h"
 #include <climits>
 #include <cmath>
@@ -5087,7 +5088,50 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         ++argIt;
     }
 
-    // @optmax assumes=[...]: emit llvm.assume intrinsics for each assertion
+    // ── SIR-driven parameter facts ────────────────────────────────────────
+    // If the Semantic IR has been built, seed non-negativity and tight value
+    // ranges for integer parameters *before* the function body is lowered.
+    // This eliminates redundant re-derivation inside the body.
+    if (optCtx_ && optCtx_->hasSIR()) {
+        const auto* sir = optCtx_->sirTyped<SIRModule>();
+        if (sir) {
+            llvm::Function* assumeIntr = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume);
+            for (const auto& param : func->parameters) {
+                const SIRVarFacts* vf = sir->getVarFacts(func->name, param.name);
+                if (!vf) continue;
+                auto nvIt = namedValues.find(param.name);
+                if (nvIt == namedValues.end()) continue;
+                auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(nvIt->second);
+                if (!alloca || !alloca->getAllocatedType()->isIntegerTy()) continue;
+                // Seed nonNegValues_ for non-negative parameters
+                if (vf->isNonNeg) {
+                    nonNegValues_.insert(alloca);
+                }
+                // Emit llvm.assume for tight integer ranges (not just non-neg)
+                if (vf->range && vf->range->isNarrowed()) {
+                    llvm::Value* loaded = builder->CreateLoad(
+                        alloca->getAllocatedType(), alloca, param.name + ".sir.load");
+                    llvm::Value* loadedI64 = loaded->getType() == getDefaultType()
+                        ? loaded
+                        : builder->CreateSExtOrBitCast(loaded, getDefaultType(),
+                                                        param.name + ".sir.cast");
+                    // Emit: assume(param >= lo && param <= hi)
+                    llvm::Value* loC = llvm::ConstantInt::get(getDefaultType(), vf->range->lo, true);
+                    llvm::Value* hiC = llvm::ConstantInt::get(getDefaultType(), vf->range->hi, true);
+                    llvm::Value* geLo = builder->CreateICmpSGE(loadedI64, loC, param.name + ".sir.ge");
+                    llvm::Value* leHi = builder->CreateICmpSLE(loadedI64, hiC, param.name + ".sir.le");
+                    llvm::Value* inRange = builder->CreateAnd(geLo, leHi, param.name + ".sir.range");
+                    builder->CreateCall(assumeIntr, {inRange});
+                    if (vf->range->lo >= 0) nonNegValues_.insert(loaded);
+                }
+                // Fold constant parameters directly into constIntFolds_
+                if (vf->constIntVal) {
+                    constIntFolds_[param.name] = *vf->constIntVal;
+                }
+            }
+        }
+    }
+
     if (inOptMaxFunction && !currentOptMaxConfig_.assumes.empty()) {
         llvm::Function* assumeIntr = OMSC_GET_INTRINSIC(
             module.get(), llvm::Intrinsic::assume);

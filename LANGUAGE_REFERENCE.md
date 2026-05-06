@@ -7803,6 +7803,65 @@ The compiler is divided into four conceptual layers. Layer boundaries prevent op
 
 **Known violation to fix**: `nonNegValues_` (a Layer 3 fact set in `CodeGenerator`) is consumed inside `generateWhile` (a Layer 4 function) to emit `assume()` calls without a corresponding Layer 2 proof. This is the canonical example of a layer-3/4 boundary violation; it should be guarded with a Layer 2 proof predicate before use.
 
+### 25.7 Semantic IR (SIR)
+
+The **Semantic IR** (`include/sir.h`, `src/sir_builder.cpp`) is a rich, queryable intermediate representation built between the AST and LLVM IR. It consolidates *all* semantic analysis results into a single queryable object so that codegen and optimization passes have maximum information without having to re-derive it.
+
+#### When it is built
+
+The SIR is constructed by the **`kSIR` pre-pass** (registered in `src/opt_orchestrator.cpp`). This pass runs *last*, after every other pre-pass has finished:
+
+```
+kEffects → kERSL → kRangeAnalysis → kUniqueness → kBorrowCheck → kHGOEEGraph → kSIR
+```
+
+The result is stored in `OptimizationContext::sir_` and accessed via `ctx.sirTyped<SIRModule>()`.
+
+#### Key types
+
+| Type | Description |
+|------|-------------|
+| `SIRType` | Fully resolved scalar / aggregate type (kind, bitWidth, signedness, isConst, isAtomic, isVolatile) |
+| `SIRVarFacts` | Per-variable semantic facts: type, constancy, known integer/string value, `ValueRange`, non-negativity, aliasing, atomic/volatile flags |
+| `SIRParam` | Per-parameter version of `SIRVarFacts` plus the declared name and optional range annotation |
+| `SIRCallSite` | Per-call-site info: callee name, effect kind, stability, constant-argument values, tail-position flag, escape analysis result |
+| `SIRLoopInfo` | Loop analysis: iterator variable, nesting depth, static start/end/step bounds, exact or max trip count, countability, array read/write sets |
+| `SIRFunction` | Per-function aggregate: signature, all `SIRVarFacts`, all `SIRCallSite`s, all `SIRLoopInfo`s, `FunctionFacts`, annotation hints, estimated body size, leaf/recursive flags, entry flag |
+| `SIRStructType` | Per-struct aggregate: field list (name + type + `FieldAttrs`), layout repr, SoA/packed/extern-C flags |
+| `SIRModule` | Whole-program view: all `SIRFunction`s, `SIRStructType`s, call graph, caller graph, entry-point set, estimated total size |
+
+#### Information captured
+
+- **Types**: fully resolved from annotation strings (`int`, `i32`, `f64`, `string`, `Point[]`, …).
+- **Variable ranges**: populated from `computeVarRanges()` (via `var_range_analysis.h`), including tightly bounded parameters.
+- **Uniqueness / aliasing**: populated from `computeUniqueness()` per function.
+- **Constant propagation**: integer and string literal initialisers are recorded in `constIntVal` / `constStrVal`.
+- **Loop bounds**: static start, end, step; exact trip count (when computable); nesting depth; read/written array names.
+- **Call graph**: direct-callee sets + inverted caller-of map across all functions.
+- **Effect classification**: IO / Read / Write / None per call site; stability (stable vs input-dependent).
+- **Annotation hints**: `forceInline`, `neverInline`, `isHot`, `isCold`, `neverReturns`, `alwaysReturns`.
+- **Struct layout**: field attributes (`hot`, `cold`, `noalias`, `immut`, `align`, `range`), SoA / packed flags.
+
+#### Codegen integration
+
+`CodeGenerator::generateFunction()` reads the SIR (via `optCtx_->sirTyped<SIRModule>()`) after parameters are allocated and:
+
+1. Seeds `nonNegValues_` for integer parameters whose SIR range is non-negative.
+2. Emits `llvm.assume(param >= lo && param <= hi)` for parameters with tightly bounded ranges.
+3. Pre-populates `constIntFolds_` for parameters known to be compile-time constants.
+
+This eliminates redundant re-derivation of these facts during function body lowering.
+
+#### Query API
+
+```cpp
+const SIRModule* sir = ctx.sirTyped<SIRModule>();
+const SIRFunction* fn  = sir->getFunction("myFunc");
+const SIRVarFacts*  vf = sir->getVarFacts("myFunc", "x");
+bool isPure            = sir->isFunctionPure("myFunc");
+bool hasCallee         = sir->calls("myFunc", "helper");
+```
+
 ---
 
 ## 26. Advanced Optimization Features

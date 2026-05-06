@@ -1,0 +1,46 @@
+// SIR integration test: exercises SIR-based parameter range assumptions and
+// constant folding from the Semantic IR.  Tests that the compiler correctly
+// generates code for a range of patterns that the SIR builder analyses.
+
+fn abs_val(n: int) -> int {
+    if (n < 0) { return -n; }
+    return n;
+}
+
+@pure fn sum_range(lo: int, hi: int) -> int {
+    var s: int = 0;
+    for (i in lo...hi) {
+        s = s + i;
+    }
+    return s;
+}
+
+@inline fn triple(x: int) -> int {
+    return x * 3;
+}
+
+@noinline fn noinline_add(a: int, b: int) -> int {
+    return a + b;
+}
+
+fn main() {
+    // Test: abs_val correctness
+    var a: int = abs_val(-5);
+    var b: int = abs_val(5);
+    if (a != 5) { return 1; }
+    if (b != 5) { return 2; }
+
+    // Test: loop sum (SIR extracts trip count = 10, iterVar non-neg)
+    var s: int = sum_range(0, 10);
+    if (s != 45) { return 3; }
+
+    // Test: inline function with const arg (SIR emits assume for const)
+    var t: int = triple(7);
+    if (t != 21) { return 4; }
+
+    // Test: noinline function
+    var r: int = noinline_add(3, 4);
+    if (r != 7) { return 5; }
+
+    return 0;
+}

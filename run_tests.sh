@@ -228,6 +228,8 @@ test_cli_output "help" "Usage:" 0 ./build/omsc --help
 test_cli_output "help-command" "Usage:" 0 ./build/omsc help
 test_cli_output "parse-leading-verbose" "Parsed program" 0 ./build/omsc -V parse examples/test.om
 test_cli_output "emit-ir-leading-opt" "i64 @main" 0 ./build/omsc -O3 emit-ir examples/exit_zero.om
+# SIR verbose: at -V -O2 the SIR pass prints "[sir] SIR built"
+test_cli_output "sir-verbose" "[sir] SIR built" 0 ./build/omsc -V -O2 emit-ir examples/sir_test.om
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
 test_cli_output "lex-flag" "FN" 0 ./build/omsc --lex examples/test.om
 test_cli_output "lex-compound-ops" "PLUS_ASSIGN" 0 ./build/omsc lex examples/compound_assign.om
@@ -858,6 +860,8 @@ ptest_program "examples/ternary_positions_test.om" 150
 ptest_program "examples/function_call_patterns_test.om" 10
 # ── HTTP client builtins ──────────────────────────────────────────────────
 ptest_program "examples/http_test.om" 0
+# ── SIR (Semantic IR) integration ────────────────────────────────────────
+ptest_program "examples/sir_test.om" 0
 flush_ptests
 
 echo ""

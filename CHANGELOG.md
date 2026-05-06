@@ -5,7 +5,34 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.5.0] - 2026-05-06
+## [4.6.0] - 2026-05-06
+
+### Added
+
+- **Semantic IR (SIR)** (`include/sir.h`, `src/sir_builder.cpp`) — a rich, queryable intermediate representation built between the AST and LLVM IR that consolidates *all* semantic analysis results for maximum optimization potential:
+  - `SIRType` — fully resolved scalar / aggregate types with bitwidth, signedness, `isConst`, `isAtomic`, `isVolatile`.
+  - `SIRVarFacts` — per-variable semantic facts: type, constancy, known integer/string constant value, `ValueRange`, non-negativity, aliasing, atomic/volatile flags.
+  - `SIRParam` — per-parameter version of `SIRVarFacts` with name and optional range annotation.
+  - `SIRCallSite` — per-call-site facts: callee, effect kind (IO/Read/Write/None), stability, per-argument constant values (integer and string), tail-position flag, escape class.
+  - `SIRLoopInfo` — loop analysis facts: iterator variable, nesting depth, static start/end/step bounds, exact trip count (when computable), maximum trip count, countability flag, read/written array names.
+  - `SIRFunction` — per-function aggregate: full signature, all `SIRVarFacts`, all `SIRCallSite`s, all `SIRLoopInfo`s, `FunctionFacts` (purity/effects/ERSL), annotation hints (`forceInline`, `neverInline`, `isHot`, `isCold`), estimated body size, leaf/recursive/entry flags.
+  - `SIRStructType` — per-struct aggregate: field list with `FieldAttrs`, layout repr, SoA/packed/extern-C flags.
+  - `SIRModule` — whole-program view: all functions, struct types, call graph, inverted caller graph, entry-point set, estimated total instruction count.
+  - `buildSIR()` — builder function (`src/sir_builder.cpp`) that walks the AST and consolidates range maps, uniqueness sets, effect summaries, struct type tables, and FunctionFacts into a `SIRModule` in a single pass.
+
+- **`kSIR` pre-pass** (`src/opt_orchestrator.cpp`) — the SIR builder is registered as the final pre-pass in the optimization pipeline, running after all analysis passes (`kEffects`, `kERSL`, `kRangeAnalysis`, `kUniqueness`, `kBorrowCheck`, `kHGOEEGraph`). It eagerly runs `computeVarRanges()` and `computeUniqueness()` per function before building the SIR module.
+
+- **`OptimizationContext::setSIR<T>()` / `sirTyped<T>()` / `hasSIR()`** (`include/opt_context.h`) — type-erased SIR storage on the optimization context. Uses `shared_ptr<void>` with a typed deleter to avoid a circular include between `opt_context.h` ↔ `sir.h`. `AnalysisValidity::sir` flag tracks whether the SIR has been built.
+
+- **SIR-driven codegen integration** (`src/codegen.cpp`) — `CodeGenerator::generateFunction()` now seeds `nonNegValues_` and emits `llvm.assume(lo ≤ param ≤ hi)` for parameters with SIR-known ranges, and pre-populates `constIntFolds_` for compile-time-constant parameters. This eliminates redundant re-derivation during function body lowering.
+
+- **`var_range_analysis.cpp` added to build** (`CMakeLists.txt`) — previously compiled only as part of the test binary; now included in the main compiler build so the SIR pass can call `computeVarRanges()` directly.
+
+- **Tests**: `examples/sir_test.om` — integration test exercising SIR-driven annotation hints, loop trip counts, inline/noinline, and pure function semantics. `run_tests.sh` extended with `sir_test` (program exit-code test) and `sir-verbose` (verify `[sir] SIR built` diagnostic output at `-V -O2`). Total tests: 421.
+
+- **Documentation**: `LANGUAGE_REFERENCE.md §25.7` — comprehensive section describing the SIR design, information captured, key types, codegen integration, and query API.
+
+
 
 ### Added
 
