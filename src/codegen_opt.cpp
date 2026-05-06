@@ -3349,7 +3349,6 @@ void CodeGenerator::runOptimizationPasses() {
     //   1. Remove i1→iN→i1 round-trip materializations.
     //   2. Deduplicate same-operand comparisons so one CMP sets flags for all.
     //   3. Pack XOR-of-icmps into POPCNT-based parity (exploits PF on x86).
-    //   4. Annotate zext i1 with !range {0, 2} for downstream passes.
     // Run before VectorCombine so vectorizer sees clean i1 chains.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(

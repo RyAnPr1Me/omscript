@@ -25,7 +25,7 @@ fn count_valid(a: int, b: int, c: int, d: int) {
     count = count + (b > 0);
     count = count + (c > 0);
     count = count + (d > 0);
-    return count;   // should be 3 for (1, -1, 2, 0)
+    return count;   // returns the number of positive values
 }
 
 // ── 2. Range check with repeated operands (exercises Phase 2) ─────────────────
@@ -61,7 +61,7 @@ fn classify(x: int) {
 }
 
 fn main() {
-    // count_valid(1, -1, 2, 0) → 2 positive values (1, 2) → 2
+    // count_valid(1, -1, 2, 0) → 2 positive values (1 and 2 are > 0) → 2
     var r1 = count_valid(1, -1, 2, 0);
 
     // in_range_strict(5, 0, 10) → true → 1
