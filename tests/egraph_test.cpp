@@ -470,6 +470,9 @@ TEST(EGraphTest, SelfLessEqualIsOne) {
 TEST(EGraphTest, DoubleLogicalNot) {
     EGraph g;
     ClassId x = g.addVar("x");
+    // !!x → x is only valid when x is already boolean (0 or 1).
+    // Mark the class so the guarded rule fires.
+    g.getClass(x).isBoolean = true;
     ClassId not1 = g.addUnaryOp(Op::LogNot, x);
     ClassId not2 = g.addUnaryOp(Op::LogNot, not1);
 
@@ -2021,6 +2024,8 @@ TEST(EGraphTest, GuardedRuleModPow2ToAnd) {
     // x % 32 should be merged with x & 31 via the relational guard.
     EGraph g;
     ClassId x   = g.addVar("x");
+    // The mod-to-and rule is guarded: only fires when x is non-negative.
+    g.getClass(x).isNonNeg = true;
     ClassId c32 = g.addConst(32);
     ClassId mod = g.addBinOp(Op::Mod, x, c32);
     ClassId c31 = g.addConst(31);
