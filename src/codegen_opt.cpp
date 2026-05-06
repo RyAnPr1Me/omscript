@@ -2675,7 +2675,11 @@ private:
         llvm::LLVMContext& ctx = F.getContext();
         llvm::Type* i8Ty = llvm::Type::getInt8Ty(ctx);
         llvm::Type* i1Ty = llvm::Type::getInt1Ty(ctx);
+#if LLVM_VERSION_MAJOR >= 19
+        llvm::Function* ctpopFn = llvm::Intrinsic::getOrInsertDeclaration(
+#else
         llvm::Function* ctpopFn = llvm::Intrinsic::getDeclaration(
+#endif
             F.getParent(), llvm::Intrinsic::ctpop, {i8Ty});
 
         for (auto* xorI : xorCandidates) {
