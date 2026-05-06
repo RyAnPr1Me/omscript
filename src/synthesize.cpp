@@ -85,14 +85,6 @@ static bool isUnaryOp(SynthOp op) {
     return op == SynthOp::NEG || op == SynthOp::ABS || op == SynthOp::NOT;
 }
 
-static const std::string& opToString(SynthOp op) {
-    static const std::string names[] = {
-        "PARAM","CONST","neg","abs","~",
-        "+","-","*","/","%","&","|","^","<<",">>","**","min","max"
-    };
-    return names[static_cast<int>(op)];
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // SynthNode clone helper
 // ═══════════════════════════════════════════════════════════════════════════

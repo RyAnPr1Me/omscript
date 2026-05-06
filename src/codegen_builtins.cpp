@@ -690,7 +690,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                             using I128 = __int128;
                             I128 res = static_cast<I128>(*a) + static_cast<I128>(*b);
                             int64_t lo = -(int64_t(1)<<(bw-1)), hi = (int64_t(1)<<(bw-1))-1;
-                            if (res < lo) res = lo; if (res > hi) res = hi;
+                            if (res < lo) res = lo;
+                            if (res > hi) res = hi;
                             return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(res));
                         }
                     llvm::Function* fn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sadd_sat, {narrowTy});
@@ -704,7 +705,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                             using I128 = __int128;
                             I128 res = static_cast<I128>(*a) - static_cast<I128>(*b);
                             int64_t lo = -(int64_t(1)<<(bw-1)), hi = (int64_t(1)<<(bw-1))-1;
-                            if (res < lo) res = lo; if (res > hi) res = hi;
+                            if (res < lo) res = lo;
+                            if (res > hi) res = hi;
                             return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(res));
                         }
                     llvm::Function* fn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ssub_sat, {narrowTy});
@@ -4218,7 +4220,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
 
         // Allocate result array: (arrLen + 1) * 8
         llvm::Value* buf = emitAllocArray(arrLen, "amap");
@@ -7478,7 +7479,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         emitStoreArrayLen(arLenLoad, arBuf);
         // Handle empty array
         llvm::Function* arParentFn = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* arPreBB  = builder->GetInsertBlock();
         llvm::BasicBlock* arDoBB   = llvm::BasicBlock::Create(*context, "arot.do",   arParentFn);
         llvm::BasicBlock* arLoopBB = llvm::BasicBlock::Create(*context, "arot.loop", arParentFn);
         llvm::BasicBlock* arBodyBB = llvm::BasicBlock::Create(*context, "arot.body", arParentFn);

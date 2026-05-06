@@ -28,11 +28,6 @@ namespace {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Return the FixedVectorType if @p v has one, otherwise nullptr.
-static llvm::FixedVectorType* vecTypeOf(llvm::Value* v) noexcept {
-    return llvm::dyn_cast<llvm::FixedVectorType>(v->getType());
-}
-
 /// True when @p inst is an arithmetic or bitwise binary operator on a vector type.
 static bool isVectorArith(const llvm::Instruction* inst) noexcept {
     if (!inst->getType()->isVectorTy()) return false;
@@ -270,7 +265,7 @@ static DataflowResult phase3Analyze(const SdrRegion& region,
 
 /// Map a binary opcode to the corresponding llvm.vector.reduce.* intrinsic ID.
 /// Returns Intrinsic::not_intrinsic for unsupported opcodes.
-static llvm::Intrinsic::ID reduceIntrinsicFor(unsigned opcode, bool isFP) noexcept {
+static llvm::Intrinsic::ID reduceIntrinsicFor(unsigned opcode) noexcept {
     switch (opcode) {
         case llvm::Instruction::Add:
         case llvm::Instruction::FAdd: return llvm::Intrinsic::vector_reduce_add;
@@ -361,7 +356,7 @@ static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
         // ── Case 1: Reduction → intrinsic ────────────────────────────────
         if (df.isReduction && cfg.enableReductionRecognition) {
             const llvm::Intrinsic::ID iid =
-                reduceIntrinsicFor(reg.root->getOpcode(), elemTy->isFloatingPointTy());
+                reduceIntrinsicFor(reg.root->getOpcode());
             if (iid != llvm::Intrinsic::not_intrinsic) {
                 // Cost of reduction intrinsic vs. extract+arith chain.
                 auto redCost = TTI.getArithmeticReductionCost(

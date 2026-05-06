@@ -75,7 +75,7 @@ SemanticWidth SemanticWidth::fromSignedRange(int64_t lo, int64_t hi) noexcept {
     return {std::max(bLo, bHi), /*isSigned=*/true};
 }
 
-SemanticWidth SemanticWidth::fromUnsignedRange(uint64_t lo, uint64_t hi) noexcept {
+SemanticWidth SemanticWidth::fromUnsignedRange(uint64_t /*lo*/, uint64_t hi) noexcept {
     const uint32_t bHi = minBitsUnsigned(hi); // lo ≤ hi; hi dominates
     return {bHi, /*isSigned=*/false};
 }
@@ -540,7 +540,8 @@ void WidthLegalizationPass::run(const Program* program) {
         }
         case ASTNodeType::CALL_EXPR: {
             const auto* c = static_cast<const CallExpr*>(e);
-            for (const auto& a : c->arguments) countExpr(a.get()); break;
+            for (const auto& a : c->arguments) countExpr(a.get());
+            break;
         }
         case ASTNodeType::INDEX_EXPR: {
             const auto* i = static_cast<const IndexExpr*>(e);
@@ -559,7 +560,8 @@ void WidthLegalizationPass::run(const Program* program) {
         switch (s->type) {
         case ASTNodeType::BLOCK: {
             const auto* b = static_cast<const BlockStmt*>(s);
-            for (const auto& st : b->statements) countStmt(st.get()); break;
+            for (const auto& st : b->statements) countStmt(st.get());
+            break;
         }
         case ASTNodeType::VAR_DECL: {
             const auto* v = static_cast<const VarDecl*>(s);

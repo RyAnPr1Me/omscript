@@ -333,18 +333,18 @@ ClassId EGraph::addUnaryOp(Op op, ClassId operand) {
     classes_[a].isInt   = classes_[a].isInt   || classes_[b].isInt;
 
     // ── Incremental-rebuild bookkeeping ──────────────────────────────────
+    // Invariant: parents_.size() == classes_.size() (both grow together in
+    // add()), so every canonical ClassId is a valid index into parents_.
     ++mergeCount_;
     markDirty(a);
-    if (b < parents_.size()) {
-        for (ClassId user : parents_[b]) {
-            // `find(user)` may differ from `user` if `user` was itself
-            // already merged — markDirty resolves that.
-            markDirty(user);
-            // Re-home this user under `a` so a future merge of `a` cascades.
-            if (a < parents_.size()) parents_[a].push_back(user);
-        }
-        parents_[b].clear();
+    for (ClassId user : parents_[b]) {
+        // `find(user)` may differ from `user` if `user` was itself
+        // already merged — markDirty resolves that.
+        markDirty(user);
+        // Re-home this user under `a` so a future merge of `a` cascades.
+        parents_[a].push_back(user);
     }
+    parents_[b].clear();
 
     return a;
 }

@@ -82,7 +82,7 @@ struct SemanticWidth {
     static SemanticWidth fromSignedRange(int64_t lo, int64_t hi) noexcept;
 
     /// Derive from a closed unsigned integer range [lo, hi].
-    static SemanticWidth fromUnsignedRange(uint64_t lo, uint64_t hi) noexcept;
+    static SemanticWidth fromUnsignedRange(uint64_t lo, uint64_t hi) noexcept; ///< lo unused (hi dominates for unsigned)
 
     /// Parse a type-annotation string ("i32", "u64", "int" → i64, "uint" → u64).
     /// Returns unknown() if the annotation is not a recognized width form.
