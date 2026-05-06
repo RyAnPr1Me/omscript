@@ -757,7 +757,11 @@ void EGraph::foldConstants(ClassId cls) {
             for (Op op : kFoldableOps) {
                 const auto idx = static_cast<size_t>(op);
                 if (idx >= classesByOp_.size()) continue;
-                const auto& bucket = classesByOp_[idx];
+                // Copy bucket before iterating: foldConstants() may call
+                // merge() or addConst(), which push_back to classesByOp_[idx]
+                // and can reallocate the vector, invalidating references and
+                // iterators. Using a copy makes the iteration stable.
+                const std::vector<ClassId> bucket = classesByOp_[idx];
                 for (ClassId raw : bucket) {
                     if (raw >= classes_.size()) continue;
                     ClassId canonical = find(raw);
