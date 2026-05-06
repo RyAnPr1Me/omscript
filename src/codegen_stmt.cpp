@@ -4,6 +4,7 @@
 // if they have been proven at Layer 2 first — see §6 of the architecture doc.
 #include "codegen.h"
 #include "diagnostic.h"
+#include "sir.h"
 #include <algorithm>
 #include <functional>
 #include <iostream>
@@ -682,6 +683,59 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         else {
             const unsigned bits = allocaType->isIntegerTy() ? allocaType->getIntegerBitWidth() : 64;
             builder->CreateAlignedStore(llvm::ConstantInt::get(*context, llvm::APInt(bits, 0)), alloca, alloca->getAlign());
+        }
+    }
+
+    // ── SIR-driven local variable facts ───────────────────────────────────────
+    // After the alloca and its initial store have been emitted, query the SIR
+    // for additional facts that the pre-pass pipeline derived.  These fill gaps
+    // that the existing tracking code might miss (e.g. facts inferred across
+    // function-level analysis that only the SIR builder can see holistically).
+    if (optCtx_ && optCtx_->hasSIR() && currentFuncDecl_) {
+        const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+        if (sirMod) {
+            const SIRVarFacts* vf = sirMod->getVarFacts(currentFuncDecl_->name, stmt->name);
+            if (vf) {
+                // 1. Non-negativity: pre-seed nonNegValues_ so that the body's
+                //    bounds-check elimination and ULT-comparison optimizations
+                //    can fire even when the init expression is opaque.
+                if (vf->isNonNeg && allocaType->isIntegerTy() &&
+                        !nonNegValues_.count(alloca))
+                    nonNegValues_.insert(alloca);
+
+                // 2. Constant integer: pre-populate constIntFolds_ for variables
+                //    whose value was proven constant by the SIR range analysis.
+                //    IMPORTANT: only propagate for immutable (const) variables.
+                //    The SIR constIntVal is also set for mutable vars initialised
+                //    with a literal (so the builder can reason about init-time
+                //    ranges), but seeding constIntFolds_ for mutable vars would
+                //    prevent later stores from being seen by identifier loads.
+                if (vf->isImmutable && vf->constIntVal && allocaType->isIntegerTy() &&
+                        !constIntFolds_.count(stmt->name))
+                    constIntFolds_[stmt->name] = *vf->constIntVal;
+
+                // 3. Immutable scalar locals → @llvm.invariant.start.p0
+                //    This intrinsic tells LLVM's alias analysis that the memory
+                //    pointed to by the alloca will never change after this point,
+                //    enabling LICM, load CSE, and mem2reg to be more aggressive.
+                //    Only valid for scalar (non-struct, non-array) allocas because
+                //    the invariant.start size argument must cover the exact type.
+                if (vf->isImmutable && !stmt->isGlobal &&
+                        !allocaType->isArrayTy() && !allocaType->isStructTy() &&
+                        !allocaType->isPointerTy()) {
+                    const uint64_t allocSz =
+                        module->getDataLayout().getTypeAllocSize(allocaType);
+                    auto* szVal = llvm::ConstantInt::get(
+                        llvm::Type::getInt64Ty(*context),
+                        static_cast<int64_t>(allocSz),
+                        /*isSigned=*/true);
+                    auto* invStartFn = OMSC_GET_INTRINSIC_STMT(
+                        module.get(),
+                        llvm::Intrinsic::invariant_start,
+                        {llvm::PointerType::getUnqual(*context)});
+                    builder->CreateCall(invStartFn, {szVal, alloca});
+                }
+            }
         }
     }
 }
@@ -1414,6 +1468,26 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             nonNegValues_.insert(iterAlloca);
     }
 
+    // ── SIR-driven iterator non-negativity ──────────────────────────────────
+    // The SIR loop analysis may have proven isIterVarNonNeg even for loops
+    // whose start expression is not a compile-time constant (e.g. the start
+    // comes from a function call that returns a non-negative value).
+    if (!nonNegValues_.count(iterAlloca) &&
+            optCtx_ && optCtx_->hasSIR() && currentFuncDecl_) {
+        const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+        if (sirMod) {
+            const SIRFunction* sirFn = sirMod->getFunction(currentFuncDecl_->name);
+            if (sirFn) {
+                for (const auto& li : sirFn->loops) {
+                    if (li.iterVar == stmt->iteratorVar && li.isIterVarNonNeg) {
+                        nonNegValues_.insert(iterAlloca);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // Get end value
     llvm::Value* endVal = generateExpression(stmt->end.get());
     endVal = convertTo(endVal, iterType);
@@ -1938,6 +2012,57 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                                      llvm::Type::getInt32Ty(*context),
                                      static_cast<uint32_t>(multiple)))}));
                         }
+                    }
+                }
+            }
+        }
+        // ── SIR-driven trip-count hint ────────────────────────────────────────
+        // When the SIR loop analysis has resolved a precise trip count for this
+        // loop (via range analysis of a non-literal start/end expression), emit
+        // the same unroll / trip.count.multiple hints as the constant-bounds
+        // path above.  Only applies when the compile-time constant path did NOT
+        // already fire (addedUnrollHint == false).
+        if (!addedUnrollHint && optimizationLevel >= OptimizationLevel::O3
+                && enableUnrollLoops_
+                && optCtx_ && optCtx_->hasSIR() && currentFuncDecl_) {
+            const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+            if (sirMod) {
+                const SIRFunction* sirFn = sirMod->getFunction(currentFuncDecl_->name);
+                if (sirFn) {
+                    for (const auto& li : sirFn->loops) {
+                        if (li.iterVar != stmt->iteratorVar) continue;
+                        if (!li.tripCount) break;
+                        const uint64_t tc = static_cast<uint64_t>(*li.tripCount);
+                        if (tc > 0 && tc <= 64) {
+                            if (tc <= 8) {
+                                loopMDs.push_back(llvm::MDNode::get(
+                                    *context,
+                                    {llvm::MDString::get(*context, "llvm.loop.unroll.full")}));
+                            } else {
+                                loopMDs.push_back(llvm::MDNode::get(
+                                    *context,
+                                    {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                         llvm::Type::getInt32Ty(*context),
+                                         static_cast<uint32_t>(tc)))}));
+                            }
+                            addedUnrollHint = true;
+                        }
+                        if (enableVectorize_ && tc > 8) {
+                            uint64_t multiple = 1;
+                            for (uint64_t p = 64; p > 1; p >>= 1) {
+                                if (tc % p == 0) { multiple = p; break; }
+                            }
+                            if (multiple >= 2) {
+                                loopMDs.push_back(llvm::MDNode::get(
+                                    *context,
+                                    {llvm::MDString::get(*context, "llvm.loop.trip.count.multiple"),
+                                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                         llvm::Type::getInt32Ty(*context),
+                                         static_cast<uint32_t>(multiple)))}));
+                            }
+                        }
+                        break;
                     }
                 }
             }

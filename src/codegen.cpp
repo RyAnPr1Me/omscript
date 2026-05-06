@@ -4817,6 +4817,46 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoUnwind);
     }
 
+    // ── SIR-driven function attributes ────────────────────────────────────
+    // Consume per-function semantic facts from the Semantic IR (built by the
+    // kSIR pre-pass) to inject LLVM attributes that are not derivable from
+    // the annotation alone.
+    if (optCtx_ && optCtx_->hasSIR()) {
+        const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+        if (sirMod) {
+            const SIRFunction* sirFn = sirMod->getFunction(func->name);
+            if (sirFn) {
+                // Leaf functions (no calls at all) with no side effects are
+                // guaranteed nounwind + nofree + nosync + willreturn.
+                if (sirFn->isLeaf && !sirFn->facts.effects.hasIO
+                        && !sirFn->facts.effects.writesMemory) {
+                    if (!function->hasFnAttribute(llvm::Attribute::NoUnwind))
+                        function->addFnAttr(llvm::Attribute::NoUnwind);
+                    if (!function->hasFnAttribute(llvm::Attribute::NoFree))
+                        function->addFnAttr(llvm::Attribute::NoFree);
+                    if (!function->hasFnAttribute(llvm::Attribute::NoSync))
+                        function->addFnAttr(llvm::Attribute::NoSync);
+                    if (!isSelfRecursive &&
+                            !function->hasFnAttribute(llvm::Attribute::WillReturn))
+                        function->addFnAttr(llvm::Attribute::WillReturn);
+                }
+                // Dead functions (unreachable from any entry point): mark cold
+                // so the back-end spills them to cold section and doesn't waste
+                // I-cache on them.
+                if (sirFn->facts.isDead &&
+                        !function->hasFnAttribute(llvm::Attribute::Hot)) {
+                    if (!function->hasFnAttribute(llvm::Attribute::Cold))
+                        function->addFnAttr(llvm::Attribute::Cold);
+                }
+                // Inferred noreturn (annotated @semantics(noreturn) or detected
+                // by SIR body scan) that was not already applied via hintNoReturn.
+                if (sirFn->neverReturns && !func->hintNoReturn) {
+                    function->addFnAttr(llvm::Attribute::NoReturn);
+                }
+            }
+        }
+    }
+
     // @allocator(size=N) / @allocator(size=N, count=M): mark as allocator wrapper.
     if (func->allocatorSizeParam >= 0) {
         const unsigned sizeIdx  = static_cast<unsigned>(func->allocatorSizeParam);

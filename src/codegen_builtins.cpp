@@ -1,6 +1,7 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
+#include "sir.h"
 #include <climits>
 #include <cmath>
 #include <cstdlib>
@@ -9277,6 +9278,44 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // has !range [0, INT64_MAX) metadata, mark the result as non-negative.
     if (callee->hasRetAttribute(llvm::Attribute::ZExt))
         nonNegValues_.insert(callResult);
+
+    // ── SIR-driven call-site attributes ────────────────────────────────────
+    // Query the SIR for per-callee semantic facts that are not yet encoded in
+    // the LLVM function attributes (e.g. because the callee has not been
+    // lowered yet or because the SIR has richer information than LLVM knows).
+    if (optCtx_ && optCtx_->hasSIR()) {
+        const auto* sirMod = optCtx_->sirTyped<SIRModule>();
+        if (sirMod) {
+            const SIRFunction* sirFn = sirMod->getFunction(expr->callee);
+            if (sirFn) {
+                // Pure callee: mark this call as readonly so LLVM's alias
+                // analysis / CSE can hoist/deduplicate it.  Only apply when
+                // the LLVM function attribute was not already set (avoids
+                // duplicate annotations that can confuse the verifier).
+                if (sirFn->facts.isPure &&
+                        !callResult->hasFnAttr(llvm::Attribute::Memory)) {
+                    callResult->addFnAttr(
+                        llvm::Attribute::getWithMemoryEffects(
+                            *context, llvm::MemoryEffects::readOnly()));
+                }
+                // Dead callee (proven unreachable from entry points): bias the
+                // call site as cold so the back-end assigns a low-probability
+                // branch weight and can move the call to a cold section.
+                if (sirFn->facts.isDead &&
+                        !callResult->hasFnAttr(llvm::Attribute::Hot)) {
+                    callResult->addFnAttr(llvm::Attribute::Cold);
+                }
+                // WillReturn: if the SIR knows the callee always terminates
+                // (isLeaf + isCountable or explicit annotation) and we have not
+                // yet set willreturn on the call, add it now.
+                if (sirFn->isLeaf && !sirFn->isRecursive &&
+                        !sirFn->neverReturns &&
+                        !callResult->hasFnAttr(llvm::Attribute::WillReturn)) {
+                    callResult->addFnAttr(llvm::Attribute::WillReturn);
+                }
+            }
+        }
+    }
     return callResult;
 }
 
