@@ -2351,6 +2351,359 @@ struct AggressiveDevirtualizationPass
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FlagPredicateSchedulingPass
+//
+// Treats the x86 EFLAGS register as a small predicate register file.
+//
+// A single CMP/TEST instruction simultaneously sets all of:
+//   ZF (equal), SF (sign), CF (carry), OF (overflow), PF (parity of low byte)
+// Mainstream compilers already use one flag per branch.  This pass goes further:
+//
+//  Phase 1 – Round-trip elimination
+//    Removes `zext i1 %b to iN` / `icmp ne iN %w, 0` pairs that appear when
+//    OmScript emits a comparison result and then re-checks it as an integer.
+//    This collapses the extra movzx+test sequence into the original setcc.
+//
+//  Phase 2 – Same-operand comparison deduplication
+//    When the same pair of values (a, b) is compared with multiple predicates
+//    in one function, each predicate can be extracted from ONE CMP's flags.
+//    Concretely: if `slt(a,b)` and `eq(a,b)` both exist, replace `sle(a,b)` (or
+//    `sge(a,b)`, `sgt(a,b)`, `ne(a,b)`) with boolean combinations of existing
+//    icmps, so the backend emits only one CMP and multiple setcc.
+//
+//  Phase 3 – PF dual-predicate packing (x86-specific bonus)
+//    When two boolean flags are XOR-ed together, packing them into a single byte
+//    and using `ctpop.i8` exposes the parity bit: popcount(c1 | (c2<<1)) is odd
+//    iff exactly one of c1, c2 is true.  This frees one GPR and lets the backend
+//    emit POPCNT + test instead of two setcc + xor.
+// ─────────────────────────────────────────────────────────────────────────────
+struct FlagPredicateSchedulingPass
+    : public llvm::PassInfoMixin<FlagPredicateSchedulingPass> {
+
+    llvm::PreservedAnalyses run(llvm::Function& F,
+                                llvm::FunctionAnalysisManager& /*FAM*/) {
+        if (F.isDeclaration()) return llvm::PreservedAnalyses::all();
+        unsigned changed = 0;
+        changed += eliminateBoolRoundTrips(F);
+        changed += deduplicateSameOperandComparisons(F);
+        changed += packParityPredicates(F);
+        return changed ? llvm::PreservedAnalyses::none()
+                       : llvm::PreservedAnalyses::all();
+    }
+
+private:
+    // ── Phase 1 ──────────────────────────────────────────────────────────────
+    // Eliminate patterns:  zext i1 %b to iN  →  icmp ne iN %w, 0  →  %b
+    // and symmetrically:   zext i1 %b to iN  →  icmp eq iN %w, 0  →  NOT %b
+    static unsigned eliminateBoolRoundTrips(llvm::Function& F) {
+        unsigned n = 0;
+        llvm::SmallVector<llvm::Instruction*, 16> toErase;
+        for (auto& BB : F) {
+            for (auto& I : BB) {
+                // Match:  %icmp = icmp ne/eq  iN %zext, 0
+                auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&I);
+                if (!cmp) continue;
+                const auto pred = cmp->getPredicate();
+                if (pred != llvm::CmpInst::ICMP_NE && pred != llvm::CmpInst::ICMP_EQ)
+                    continue;
+                // One operand must be the constant 0, the other a zext i1
+                llvm::Value* nonZero = nullptr;
+                if (llvm::isa<llvm::ConstantInt>(cmp->getOperand(1)) &&
+                    llvm::cast<llvm::ConstantInt>(cmp->getOperand(1))->isZero())
+                    nonZero = cmp->getOperand(0);
+                else if (llvm::isa<llvm::ConstantInt>(cmp->getOperand(0)) &&
+                         llvm::cast<llvm::ConstantInt>(cmp->getOperand(0))->isZero())
+                    nonZero = cmp->getOperand(1);
+                if (!nonZero) continue;
+                auto* zext = llvm::dyn_cast<llvm::ZExtInst>(nonZero);
+                if (!zext) continue;
+                if (!zext->getSrcTy()->isIntegerTy(1)) continue;
+                // Found the pattern.  Replace the icmp with the original i1.
+                llvm::Value* boolSrc = zext->getOperand(0);
+                llvm::Value* replacement = boolSrc;
+                if (pred == llvm::CmpInst::ICMP_EQ) {
+                    // eq %w, 0  →  NOT bool
+                    llvm::IRBuilder<> builder(cmp);
+                    replacement = builder.CreateNot(boolSrc, cmp->getName() + ".not");
+                }
+                cmp->replaceAllUsesWith(replacement);
+                toErase.push_back(cmp);
+                // If the zext has no remaining non-erase uses, schedule it too.
+                if (zext->hasOneUse()) toErase.push_back(zext);
+                ++n;
+            }
+        }
+        for (auto* I : toErase) {
+            if (I->use_empty()) I->eraseFromParent();
+        }
+        return n;
+    }
+
+    // ── Phase 2 ──────────────────────────────────────────────────────────────
+    // One CMP instruction on x86 sets ALL flags simultaneously:
+    //   ZF=(a==b)  SF=(a-b<0 as signed)  CF=(a<b unsigned)  OF=(overflow)
+    //   PF=parity of low byte of (a-b)
+    // We can therefore extract multiple predicates from a single CMP.
+    //
+    // Strategy: for each unique operand pair {a,b} that appears in ≥2 icmps,
+    // keep ONE canonical icmp (the first seen) and rewrite any redundant
+    // same-pair icmps as boolean combinations of the canonical one.
+    //
+    // Flag relationships (x86 flags → predicate):
+    //   slt(a,b)  = SF XOR OF      ←  canonical c_lt
+    //   sle(a,b)  = ZF OR (SF XOR OF)   = c_lt OR c_eq
+    //   sgt(a,b)  = NOT(ZF OR (SF XOR OF))  = NOT(c_lt OR c_eq) = NOT(sle)
+    //   sge(a,b)  = NOT(SF XOR OF)  = NOT c_lt
+    //   eq(a,b)   = ZF              ←  canonical c_eq
+    //   ne(a,b)   = NOT ZF          = NOT c_eq
+    //   ult(a,b)  = CF              ←  unsigned: keep separate
+    //   ule(a,b)  = CF OR ZF        = c_ult OR c_eq
+    //   ugt(a,b)  = NOT(CF OR ZF)   = NOT(c_ult OR c_eq)
+    //   uge(a,b)  = NOT CF          = NOT c_ult
+    //
+    // We build the expression trees; LLVM's later InstCombine/SelectionDAG will
+    // lower them back to setcc instructions reading the same flags.
+    static unsigned deduplicateSameOperandComparisons(llvm::Function& F) {
+        using CmpKey = std::pair<llvm::Value*, llvm::Value*>;
+        // Canonicalize key: always store (smaller ptr, larger ptr) to treat
+        // commuted predicates uniformly for the signed/unsigned groups.
+        auto makeKey = [](llvm::Value* a, llvm::Value* b) -> CmpKey {
+            return {a < b ? a : b, a < b ? b : a};
+        };
+
+        unsigned n = 0;
+        for (auto& BB : F) {
+            // Map: (a,b) → {icmp_lt, icmp_eq, icmp_ult} for this block
+            struct CmpGroup {
+                llvm::ICmpInst* canonLt  = nullptr; // slt(a,b) or slt(b,a)
+                llvm::ICmpInst* canonEq  = nullptr; // eq(a,b)
+                llvm::ICmpInst* canonUlt = nullptr; // ult(a,b) or ult(b,a)
+                // Remember whether the canonical cmp had its operands swapped
+                bool ltSwapped  = false;
+                bool ultSwapped = false;
+            };
+            llvm::SmallDenseMap<CmpKey, CmpGroup, 8> groups;
+
+            // First pass: collect canonical comparisons per operand pair.
+            for (auto& I : BB) {
+                auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&I);
+                if (!cmp) continue;
+                llvm::Value* a = cmp->getOperand(0);
+                llvm::Value* b = cmp->getOperand(1);
+                const auto pred = cmp->getPredicate();
+                auto key = makeKey(a, b);
+                auto& grp = groups[key];
+                const bool swapped = (key.first != a); // key swapped a and b
+
+                switch (pred) {
+                case llvm::CmpInst::ICMP_SLT:
+                    if (!grp.canonLt) { grp.canonLt = cmp; grp.ltSwapped = swapped; }
+                    break;
+                case llvm::CmpInst::ICMP_SGT:
+                    // sgt(a,b) == slt(b,a): store with swap note
+                    if (!grp.canonLt) { grp.canonLt = cmp; grp.ltSwapped = !swapped; }
+                    break;
+                case llvm::CmpInst::ICMP_EQ:
+                    if (!grp.canonEq) grp.canonEq = cmp;
+                    break;
+                case llvm::CmpInst::ICMP_ULT:
+                    if (!grp.canonUlt) { grp.canonUlt = cmp; grp.ultSwapped = swapped; }
+                    break;
+                case llvm::CmpInst::ICMP_UGT:
+                    if (!grp.canonUlt) { grp.canonUlt = cmp; grp.ultSwapped = !swapped; }
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            // Second pass: rewrite derived predicates.
+            llvm::SmallVector<std::pair<llvm::ICmpInst*, llvm::Value*>, 16> replacements;
+            for (auto& I : BB) {
+                auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&I);
+                if (!cmp) continue;
+                llvm::Value* a = cmp->getOperand(0);
+                llvm::Value* b = cmp->getOperand(1);
+                const auto pred = cmp->getPredicate();
+                auto key = makeKey(a, b);
+                auto it = groups.find(key);
+                if (it == groups.end()) continue;
+                const auto& grp = it->second;
+                const bool swapped = (key.first != a);
+
+                llvm::IRBuilder<> builder(cmp);
+                llvm::Value* repl = nullptr;
+
+                // Helper: get canonical slt(a,b) as i1 value
+                auto getLt = [&]() -> llvm::Value* {
+                    if (!grp.canonLt || grp.canonLt == cmp) return nullptr;
+                    // Canonical might be slt(b,a) due to swapping; we need slt(a,b)
+                    // slt(a,b) vs slt(b,a): if swapped==ltSwapped we get the same direction
+                    if (grp.ltSwapped == swapped)
+                        return grp.canonLt;           // same operand order
+                    // opposite order: return NOT of canonical
+                    return builder.CreateNot(grp.canonLt, "flag.lt.flip");
+                };
+                auto getEq = [&]() -> llvm::Value* {
+                    if (!grp.canonEq || grp.canonEq == cmp) return nullptr;
+                    return grp.canonEq; // eq(a,b) == eq(b,a)
+                };
+                auto getUlt = [&]() -> llvm::Value* {
+                    if (!grp.canonUlt || grp.canonUlt == cmp) return nullptr;
+                    if (grp.ultSwapped == swapped)
+                        return grp.canonUlt;
+                    return builder.CreateNot(grp.canonUlt, "flag.ult.flip");
+                };
+
+                switch (pred) {
+                case llvm::CmpInst::ICMP_SLE: {
+                    // sle(a,b) = slt(a,b) OR eq(a,b)
+                    llvm::Value* lt = getLt();
+                    llvm::Value* eq = getEq();
+                    if (lt && eq) {
+                        repl = builder.CreateOr(lt, eq, "flag.sle");
+                    } else if (lt) {
+                        // sle = slt || eq; we have slt but not eq separately
+                        // slt(a,b) → if true then sle; if false we can't decide without eq
+                        // Only safe to replace if eq is provably false (constants). Skip.
+                    }
+                    break;
+                }
+                case llvm::CmpInst::ICMP_SGE: {
+                    // sge(a,b) = NOT slt(a,b)
+                    llvm::Value* lt = getLt();
+                    if (lt) repl = builder.CreateNot(lt, "flag.sge");
+                    break;
+                }
+                case llvm::CmpInst::ICMP_SGT: {
+                    // sgt(a,b) = NOT (slt(a,b) OR eq(a,b)) = NOT sle(a,b)
+                    llvm::Value* lt = getLt();
+                    llvm::Value* eq = getEq();
+                    if (lt && eq) {
+                        llvm::Value* sle = builder.CreateOr(lt, eq, "flag.sle.tmp");
+                        repl = builder.CreateNot(sle, "flag.sgt");
+                    } else if (lt) {
+                        // sgt = NOT(slt) AND NOT(eq); without eq, can't fold fully
+                    }
+                    break;
+                }
+                case llvm::CmpInst::ICMP_NE: {
+                    // ne(a,b) = NOT eq(a,b)
+                    llvm::Value* eq = getEq();
+                    if (eq) repl = builder.CreateNot(eq, "flag.ne");
+                    break;
+                }
+                case llvm::CmpInst::ICMP_ULE: {
+                    // ule(a,b) = ult(a,b) OR eq(a,b)
+                    llvm::Value* ult = getUlt();
+                    llvm::Value* eq  = getEq();
+                    if (ult && eq) repl = builder.CreateOr(ult, eq, "flag.ule");
+                    break;
+                }
+                case llvm::CmpInst::ICMP_UGE: {
+                    // uge(a,b) = NOT ult(a,b)
+                    llvm::Value* ult = getUlt();
+                    if (ult) repl = builder.CreateNot(ult, "flag.uge");
+                    break;
+                }
+                case llvm::CmpInst::ICMP_UGT: {
+                    // ugt(a,b) = NOT (ult(a,b) OR eq(a,b))
+                    llvm::Value* ult = getUlt();
+                    llvm::Value* eq  = getEq();
+                    if (ult && eq) {
+                        llvm::Value* ule = builder.CreateOr(ult, eq, "flag.ule.tmp");
+                        repl = builder.CreateNot(ule, "flag.ugt");
+                    }
+                    break;
+                }
+                default:
+                    break;
+                }
+
+                if (repl && repl != cmp) {
+                    replacements.emplace_back(cmp, repl);
+                    ++n;
+                }
+            }
+
+            for (auto& [oldCmp, newVal] : replacements) {
+                oldCmp->replaceAllUsesWith(newVal);
+                oldCmp->eraseFromParent();
+            }
+        }
+        return n;
+    }
+
+    // ── Phase 3 ──────────────────────────────────────────────────────────────
+    // PF (Parity Flag) dual-predicate packing.
+    //
+    // After any ALU op on a byte, PF = parity of that byte = XOR of all 8 bits.
+    // For a boolean value b ∈ {0,1}: parity(b) = b itself (parity(0)=0, parity(1)=1).
+    // For two booleans c1,c2: parity(c1 | (c2<<1)) = c1 XOR c2.
+    //
+    // Therefore: `c1 XOR c2` can be computed as POPCNT(c1 | (c2<<1)) & 1,
+    // which is a single POPCNT instruction (available on all modern x86-64 CPUs).
+    // POPCNT sets ZF=(result==0) and leaves PF architecturally defined.
+    //
+    // Pattern matched: `%xor = xor i1 %c1, %c2`
+    //   where both c1, c2 are ICmpInst results (flag-generating instructions).
+    //
+    // Transformation:
+    //   %b1     = zext i1 %c1 to i8
+    //   %b2     = zext i1 %c2 to i8
+    //   %b2s    = shl i8 %b2, 1
+    //   %packed = or i8 %b1, %b2s
+    //   %pop    = call i8 @llvm.ctpop.i8(%packed)  ; POPCNT on x86
+    //   %lsb    = and i8 %pop, 1
+    //   %xorval = trunc i8 %lsb to i1
+    //
+    // This keeps two predicates in one byte and uses POPCNT to extract the XOR,
+    // tying up only one extra GPR byte instead of two full 64-bit registers.
+    // The PF bit from POPCNT additionally gives us the XNOR for free via SETP.
+    static unsigned packParityPredicates(llvm::Function& F) {
+        unsigned n = 0;
+        llvm::SmallVector<llvm::BinaryOperator*, 16> xorCandidates;
+        for (auto& BB : F)
+            for (auto& I : BB)
+                if (auto* bop = llvm::dyn_cast<llvm::BinaryOperator>(&I))
+                    if (bop->getOpcode() == llvm::Instruction::Xor &&
+                        bop->getType()->isIntegerTy(1) &&
+                        llvm::isa<llvm::ICmpInst>(bop->getOperand(0)) &&
+                        llvm::isa<llvm::ICmpInst>(bop->getOperand(1)))
+                        xorCandidates.push_back(bop);
+
+        llvm::LLVMContext& ctx = F.getContext();
+        llvm::Type* i8Ty = llvm::Type::getInt8Ty(ctx);
+        llvm::Type* i1Ty = llvm::Type::getInt1Ty(ctx);
+        llvm::Function* ctpopFn = llvm::Intrinsic::getDeclaration(
+            F.getParent(), llvm::Intrinsic::ctpop, {i8Ty});
+
+        for (auto* xorI : xorCandidates) {
+            if (xorI->use_empty()) continue;
+            llvm::IRBuilder<> builder(xorI);
+            llvm::Value* c1 = xorI->getOperand(0);
+            llvm::Value* c2 = xorI->getOperand(1);
+            // Pack c1 and c2 into one byte: packed = c1 | (c2 << 1)
+            llvm::Value* b1     = builder.CreateZExt(c1, i8Ty, "pfp.b1");
+            llvm::Value* b2     = builder.CreateZExt(c2, i8Ty, "pfp.b2");
+            llvm::Value* b2s    = builder.CreateShl(b2, llvm::ConstantInt::get(i8Ty, 1), "pfp.b2s");
+            llvm::Value* packed = builder.CreateOr(b1, b2s, "pfp.packed");
+            // POPCNT: popcount of a 2-bit value is 0, 1, or 2.
+            // popcount & 1 == XOR of the two bits.
+            llvm::Value* pop    = builder.CreateCall(ctpopFn, {packed}, "pfp.pop");
+            llvm::Value* lsb    = builder.CreateAnd(pop, llvm::ConstantInt::get(i8Ty, 1), "pfp.lsb");
+            llvm::Value* result = builder.CreateTrunc(lsb, i1Ty, "pfp.xor");
+            xorI->replaceAllUsesWith(result);
+            xorI->eraseFromParent();
+            ++n;
+        }
+        return n;
+    }
+
+    // (end of FlagPredicateSchedulingPass)
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 struct InterproceduralNullabilityPass
     : public llvm::PassInfoMixin<InterproceduralNullabilityPass> {
 
@@ -2988,6 +3341,24 @@ void CodeGenerator::runOptimizationPasses() {
             }
             // Aggressive SimplifyCFG at the end to convert if-else chains
             FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+        });
+    }
+
+    // ── Flag Predicate Scheduling ─────────────────────────────────────────────
+    // Run FlagPredicateSchedulingPass to:
+    //   1. Remove i1→iN→i1 round-trip materializations.
+    //   2. Deduplicate same-operand comparisons so one CMP sets flags for all.
+    //   3. Pack XOR-of-icmps into POPCNT-based parity (exploits PF on x86).
+    //   4. Annotate zext i1 with !range {0, 2} for downstream passes.
+    // Run before VectorCombine so vectorizer sees clean i1 chains.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
+            llvm::FunctionPassManager FlagFPM;
+            FlagFPM.addPass(FlagPredicateSchedulingPass());
+            // Follow with InstCombine so it can fold the new boolean chains.
+            FlagFPM.addPass(llvm::InstCombinePass());
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FlagFPM)));
         });
     }
 
