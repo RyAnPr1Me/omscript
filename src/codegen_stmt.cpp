@@ -2532,7 +2532,31 @@ void CodeGenerator::generateBlock(BlockStmt* stmt) {
 }
 
 void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
-    generateExpression(stmt->expression.get());
+    auto* expr = stmt->expression.get();
+    // When push() is used as a statement (its return value is discarded), the
+    // returned pointer may differ from the input pointer if realloc() moved the
+    // buffer to a new address.  Without writing back, the variable's alloca
+    // keeps the old (now-freed) pointer, causing a use-after-free on the next
+    // access.  Detect this pattern and store the new pointer back to the alloca.
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<CallExpr*>(expr);
+        if (call->callee == "push" && !call->arguments.empty() &&
+            call->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const std::string& arrVarName =
+                static_cast<IdentifierExpr*>(call->arguments[0].get())->name;
+            auto it = namedValues.find(arrVarName);
+            if (it != namedValues.end() && it->second) {
+                // Generate push IR (returns i64: new buffer pointer as integer).
+                llvm::Value* newPtr = generateExpression(expr);
+                // Write the (possibly-updated) pointer back into the variable's
+                // alloca so that subsequent push/pop/index operations on this
+                // variable use the correct post-realloc address.
+                builder->CreateAlignedStore(newPtr, it->second, llvm::MaybeAlign(8));
+                return;
+            }
+        }
+    }
+    generateExpression(expr);
 }
 
 void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
