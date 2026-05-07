@@ -249,6 +249,12 @@ static void collectStringArrayVars(
         collectStringArrayVars(fes->body.get(), strVars, arrVars);
         return;
     }
+    if (const auto* sw = dynamic_cast<const SwitchStmt*>(stmt)) {
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                collectStringArrayVars(s.get(), strVars, arrVars);
+        return;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,10 +338,12 @@ static void markSharedVars(
         // Recurse into sub-expressions (binary, unary, ternary, etc.)
         if (expr->type == ASTNodeType::BINARY_EXPR) {
             const auto* bin = static_cast<const BinaryExpr*>(expr);
-            // For binary concat x + y, neither x nor y is captured.
-            // But for other binary ops we recurse.
-            if (bin->op != "+" && bin->op != "*")
-                scanExprForAliases(bin->left.get());
+            // Always recurse into both operands.  For string/array concat (+)
+            // or repeat (*), isFreshStringExpr already handles the "result is
+            // fresh" case; here we're tracking whether existing variables are
+            // passed to functions that could capture them, which can happen
+            // equally on the left side (e.g. `f(str) + y`).
+            scanExprForAliases(bin->left.get());
             scanExprForAliases(bin->right.get());
             return;
         }
@@ -420,6 +428,16 @@ static void markSharedVars(
     if (const auto* fes = dynamic_cast<const ForEachStmt*>(stmt)) {
         scanExprForAliases(fes->collection.get());
         markSharedVars(fes->body.get(), strVars, arrVars, sharedVars);
+        return;
+    }
+    if (const auto* sw = dynamic_cast<const SwitchStmt*>(stmt)) {
+        scanExprForAliases(sw->condition.get());
+        for (const auto& sc : sw->cases) {
+            if (sc.value) scanExprForAliases(sc.value.get());
+            for (const auto& val : sc.values) scanExprForAliases(val.get());
+            for (const auto& s : sc.body)
+                markSharedVars(s.get(), strVars, arrVars, sharedVars);
+        }
         return;
     }
 }

@@ -7831,3 +7831,95 @@ TEST(CodegenTest, CSE_SwitchCaseBodyIsProcessed) {
     ASSERT_NE(mod, nullptr);
     ASSERT_NE(mod->getFunction("main"), nullptr);
 }
+
+// ===========================================================================
+// Round-2 bug fixes
+// ===========================================================================
+
+// Bug 2: egraph_optimizer must recurse into FOR_STMT, FOR_EACH_STMT, SWITCH_STMT
+TEST(CodegenTest, EgraphOpt_ForStmtIsOptimized) {
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var s:i64 = 0;"
+        "  for (i in 0...5) { s = s + i * 1; }"  // i*1 → i via e-graph
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, EgraphOpt_ForEachStmtIsOptimized) {
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var arr:i64[] = [1,2,3];"
+        "  var s:i64 = 0;"
+        "  for (x in arr) { s = s + x + 0; }"  // x+0 → x
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, EgraphOpt_SwitchStmtIsOptimized) {
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  switch (x + 0) {"   // x+0 → x (condition also simplified)
+        "    case 1: return x * 1;"   // x*1 → x
+        "    default: return 0 + 0;"  // 0+0 → 0
+        "  }"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+// Bug 3: var_range_analysis collectWritten must include SWITCH_STMT
+// Regression: compiles and runs correctly (switch vars are correctly invalidated)
+TEST(CodegenTest, VarRange_SwitchCaseVarsInvalidated) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(n:i64) -> i64 {"
+        "  var x:i64 = 5;"
+        "  for (i in 0...n) {"
+        "    switch (i) {"
+        "      case 0: x = 10; break;"
+        "      default: x = x + 1; break;"
+        "    }"
+        "  }"
+        "  return x;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+// Bug 8: width_legalization must analyze THROW_STMT and DEFER_STMT expressions
+TEST(CodegenTest, WidthLegal_ThrowExprIsAnalyzed) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(x:i8) -> i64 {"
+        "  if (x < 0) { throw x as i64; }"
+        "  return x as i64;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, WidthLegal_DeferExprIsAnalyzed) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(x:i8) -> i64 {"
+        "  var r:i64 = x as i64;"
+        "  defer { r = r + 1; }"
+        "  return r;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}

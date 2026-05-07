@@ -169,7 +169,11 @@ static std::vector<SdrRegion> phase1Detect(llvm::Function& F,
                 // Scan users for extract-chain vs. partial-use vs. scalar-mix.
                 unsigned extractUsers = 0, nonExtractUsers = 0;
                 for (llvm::User* u : I.users()) {
-                    if (isConstExtract(llvm::cast<llvm::Instruction>(u)))
+                    // Users can be ConstantExpr nodes (not Instruction subtypes),
+                    // especially in constant-folded IR.  Always use dyn_cast.
+                    auto* inst = llvm::dyn_cast<llvm::Instruction>(u);
+                    if (!inst) { ++nonExtractUsers; continue; }
+                    if (isConstExtract(inst))
                         ++extractUsers;
                     else
                         ++nonExtractUsers;

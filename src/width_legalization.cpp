@@ -304,6 +304,16 @@ void WidthAnalyzer::analyzeStmt(const Statement* stmt) {
         if (ts->body) analyzeStmt(ts->body.get());
         break;
     }
+    case ASTNodeType::THROW_STMT: {
+        const auto* th = static_cast<const ThrowStmt*>(stmt);
+        if (th->value) analyzeExpr(th->value.get());
+        break;
+    }
+    case ASTNodeType::DEFER_STMT: {
+        const auto* ds = static_cast<const DeferStmt*>(stmt);
+        if (ds->body) analyzeStmt(ds->body.get());
+        break;
+    }
     default:
         break; // break/continue/invalidate/prefetch — no sub-expressions to traverse
     }

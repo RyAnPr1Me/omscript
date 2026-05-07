@@ -484,6 +484,30 @@ static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx) 
         }
         break;
     }
+    case ASTNodeType::FOR_STMT: {
+        auto* fs = static_cast<ForStmt*>(stmt);
+        if (fs->start) fs->start = tryOptimize(std::move(fs->start), ctx);
+        if (fs->end)   fs->end   = tryOptimize(std::move(fs->end),   ctx);
+        if (fs->step)  fs->step  = tryOptimize(std::move(fs->step),  ctx);
+        if (fs->body)  optimizeStatementImpl(fs->body.get(), ctx);
+        break;
+    }
+    case ASTNodeType::FOR_EACH_STMT: {
+        auto* fe = static_cast<ForEachStmt*>(stmt);
+        if (fe->collection) fe->collection = tryOptimize(std::move(fe->collection), ctx);
+        if (fe->body) optimizeStatementImpl(fe->body.get(), ctx);
+        break;
+    }
+    case ASTNodeType::SWITCH_STMT: {
+        auto* sw = static_cast<SwitchStmt*>(stmt);
+        if (sw->condition) sw->condition = tryOptimize(std::move(sw->condition), ctx);
+        for (auto& sc : sw->cases) {
+            if (sc.value) sc.value = tryOptimize(std::move(sc.value), ctx);
+            for (auto& val : sc.values) val = tryOptimize(std::move(val), ctx);
+            for (auto& s : sc.body) optimizeStatementImpl(s.get(), ctx);
+        }
+        break;
+    }
     case ASTNodeType::INVALIDATE_STMT:
         [[fallthrough]];
     default:

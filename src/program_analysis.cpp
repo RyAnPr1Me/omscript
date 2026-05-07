@@ -58,7 +58,10 @@ static unsigned maxDepth(const llvm::Loop* L, unsigned currentDepth) noexcept {
 // ─────────────────────────────────────────────────────────────────────────────
 
 static bool allArgsConst(const llvm::CallBase* CB) noexcept {
-    if (CB->arg_empty()) return false;
+    // A call with no arguments is vacuously "all args constant" — do NOT
+    // return false here, otherwise pure zero-argument functions are excluded
+    // from const-arg specialisation analysis.
+    if (CB->arg_empty()) return true;
     for (unsigned i = 0; i < CB->arg_size(); ++i)
         if (!llvm::isa<llvm::Constant>(CB->getArgOperand(i))) return false;
     return true;
