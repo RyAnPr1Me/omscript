@@ -1384,7 +1384,10 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "saturating_sub" && n == 2) {
         auto a = intArg(0), b = intArg(1);
         if (a && b) {
-            int64_t r; if (__builtin_sub_overflow(*a, *b, &r)) r = (*a >= 0) ? INT64_MAX : INT64_MIN;
+            // When overflow occurs, the saturation direction depends on whether
+            // we subtracted a negative (effectively added), overflowing positively,
+            // or subtracted a positive, overflowing negatively.
+            int64_t r; if (__builtin_sub_overflow(*a, *b, &r)) r = (*b < 0) ? INT64_MAX : INT64_MIN;
             return CTValue::fromI64(r);
         }
         return std::nullopt;
