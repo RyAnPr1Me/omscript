@@ -314,10 +314,11 @@ static void registerAllPasses() {
         {AnalysisFact::kCFCTRE},
         {AnalysisFact::kEGraph},
         // E-graph rewrites change expressions; any fact derived from expression
-        // shapes (ranges, CSE candidates) is now stale.  CF-CTRE purity and
-        // effect facts remain valid since the transformations are
-        // semantics-preserving.
-        {},
+        // shapes (ranges, CSE candidates, width information) is now stale.
+        // CF-CTRE purity and effect facts remain valid since the transformations
+        // are semantics-preserving.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCSE,
+         AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 
     PassId::kRangeAnalysis = reg.registerPass({
@@ -352,8 +353,10 @@ static void registerAllPasses() {
         // operates on literal constants alone and is safe to run earlier.
         {AnalysisFact::kCFCTRE},
         {AnalysisFact::kDCE},
-        // Removing branches may invalidate range analysis results.
-        {AnalysisFact::kRangeAnalysis},
+        // Removing branches invalidates range analysis and width maps that
+        // were computed over the now-removed code paths.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization,
+         AnalysisFact::kWidthOpt},
     });
 
     PassId::kCSE = reg.registerPass({
@@ -382,8 +385,9 @@ static void registerAllPasses() {
         // DCE runs first to avoid simplifying dead branches.
         {AnalysisFact::kCFCTRE, AnalysisFact::kDCE},
         {AnalysisFact::kAlgSimp},
-        // AlgSimp replaces expressions; any shape-derived facts are stale.
-        {AnalysisFact::kRangeAnalysis},
+        // AlgSimp replaces expressions; all shape-derived downstream facts are stale.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization,
+         AnalysisFact::kWidthOpt},
     });
 
     PassId::kCopyProp = reg.registerPass({
@@ -398,8 +402,9 @@ static void registerAllPasses() {
         {AnalysisFact::kCFCTRE, AnalysisFact::kDCE, AnalysisFact::kAlgSimp},
         {AnalysisFact::kCopyProp},
         // Substituting identifiers changes the shape of expressions; CSE,
-        // range analysis, and any name-based facts are potentially stale.
-        {AnalysisFact::kCSE, AnalysisFact::kRangeAnalysis},
+        // range analysis, width maps, and any name-based facts are potentially stale.
+        {AnalysisFact::kCSE, AnalysisFact::kRangeAnalysis,
+         AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 
     PassId::kWidthLegalization = reg.registerPass({
@@ -487,8 +492,9 @@ static void registerAllPasses() {
         // to have resolved constant-foldable sub-expressions.
         {AnalysisFact::kEGraph, AnalysisFact::kCFCTRE},
         {AnalysisFact::kHGOEEGraph},
-        // Rewrites expressions — invalidates shape-derived facts.
-        {AnalysisFact::kRangeAnalysis},
+        // Rewrites expressions — invalidates all shape-derived downstream facts.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCSE,
+         AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 }
 

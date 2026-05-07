@@ -307,6 +307,44 @@ AnalysisDependencyGraph AnalysisDependencyGraph::createDefault() {
     g.addDependency(F::kRangeAnalysis, F::kEffects);
     g.addDependency(F::kRangeAnalysis, F::kCFCTRE);
 
+    // rlc depends on effects:
+    //   region coalescing uses effect summaries to detect safe merge candidates
+    g.addDependency(F::kRLC, F::kEffects);
+
+    // dce depends on cfctre:
+    //   DCE folds constant-condition branches using CF-CTRE compile-time values
+    g.addDependency(F::kDCE, F::kCFCTRE);
+
+    // cse depends on dce:
+    //   CSE only considers live code; run after DCE removes dead branches
+    g.addDependency(F::kCSE, F::kDCE);
+
+    // alg_simp depends on cfctre and dce:
+    //   AlgSimp uses CFCTRE-folded constants and only runs on live code
+    g.addDependency(F::kAlgSimp, F::kCFCTRE);
+    g.addDependency(F::kAlgSimp, F::kDCE);
+
+    // copy_prop depends on cfctre, dce, and alg_simp:
+    //   CopyProp builds on identity simplifications from AlgSimp
+    g.addDependency(F::kCopyProp, F::kCFCTRE);
+    g.addDependency(F::kCopyProp, F::kDCE);
+    g.addDependency(F::kCopyProp, F::kAlgSimp);
+
+    // width_legalization depends on range_analysis, copy_prop, and alg_simp:
+    //   Width computation uses narrowed value ranges and simplified expressions
+    g.addDependency(F::kWidthLegalization, F::kRangeAnalysis);
+    g.addDependency(F::kWidthLegalization, F::kCopyProp);
+    g.addDependency(F::kWidthLegalization, F::kAlgSimp);
+
+    // width_opt depends on width_legalization:
+    //   Width-aware rewrites require the semantic bit-width map to be valid
+    g.addDependency(F::kWidthOpt, F::kWidthLegalization);
+
+    // hgoe_egraph depends on egraph and cfctre:
+    //   HGOE-guided pass expects expressions in canonical e-graph normal form
+    g.addDependency(F::kHGOEEGraph, F::kEGraph);
+    g.addDependency(F::kHGOEEGraph, F::kCFCTRE);
+
     return g;
 }
 
