@@ -463,6 +463,8 @@ class CodeGenerator {
     // String type tracking: stringVars_ (i64-stored string vars), stringReturningFunctions_,
     // funcParamStringTypes_ (param indices), stringArrayVars_ (arrays of string pointers).
     llvm::StringSet<> stringVars_;
+    /// String vars that point directly at a string literal (no strdup) — no free() on invalidate.
+    llvm::StringSet<> staticStringVars_;
     llvm::StringSet<> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
     llvm::StringSet<> stringArrayVars_;
@@ -768,8 +770,9 @@ class CodeGenerator {
     /// Returns true if every use of varName is provably read-only (for RO-global optimization).
     bool doesVarHaveOnlyReadOnlyUses(const std::string& varName) const;
 
-    /// Max array elements for stack allocation (64 × 8B = 512B, prevents stack overflow).
-    static constexpr size_t kMaxStackArrayElements = 64;
+    /// Max array elements for stack allocation (512 × 8B = 4 KiB).
+    /// Staying well under the 8 KiB T1 alloc<T> threshold and typical stack limits.
+    static constexpr size_t kMaxStackArrayElements = 512;
 
     /// Track which variables hold stack-allocated arrays so that free()
     /// is not called on them and bounds-check code uses the correct base.

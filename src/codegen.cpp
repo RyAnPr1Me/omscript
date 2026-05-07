@@ -4915,6 +4915,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constValues.clear();
     constScopeStack.clear();
     stringVars_.clear();
+    staticStringVars_.clear();
     stringArrayVars_.clear();
     stringLenCache_.clear();
     stringCapCache_.clear();

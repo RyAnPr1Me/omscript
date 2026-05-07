@@ -193,10 +193,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         optimizationLevel >= OptimizationLevel::O2 &&
                         doesVarHaveOnlyReadOnlyUses(stmt->name)) {
                         useReadOnlyGlobal = true;
-                    } else if (stmt->isConst && n <= kMaxStackArrayElements) {
-                        useStackAlloc = true;
-                    } else if (!stmt->isConst && allIntLiterals && n <= 16 &&
-                               !doesVarEscapeCurrentScope(stmt->name)) {
+                    } else if (n <= kMaxStackArrayElements &&
+                               (stmt->isConst || !doesVarEscapeCurrentScope(stmt->name))) {
+                        // Any array literal with a compile-time-constant element count
+                        // goes on the stack as long as it fits and doesn't escape.
+                        // The element values may be dynamic — only the size must be known.
                         useStackAlloc = true;
                     }
                 }
@@ -264,12 +265,21 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             allocaType = initValue->getType();
 
         // When a string literal is assigned to a mutable string variable,
+        // ordinarily strdup() is needed to make the copy mutable.  However, if
+        // the variable has only read-only uses throughout its lifetime we can
+        // point it directly at the (read-only) string literal — no heap copy.
         if (!stmt->isConst &&
             stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
             static_cast<LiteralExpr*>(stmt->initializer.get())->literalType ==
                 LiteralExpr::LiteralType::STRING) {
-            initValue = builder->CreateCall(getOrDeclareStrdup(), {initValue}, "strdup.init");
-            allocaType = initValue->getType();
+            if (doesVarHaveOnlyReadOnlyUses(stmt->name)) {
+                // Static: use the literal pointer directly — no allocation.
+                staticStringVars_.insert(stmt->name);
+                // initValue is already the literal pointer; no strdup needed.
+            } else {
+                initValue = builder->CreateCall(getOrDeclareStrdup(), {initValue}, "strdup.init");
+                allocaType = initValue->getType();
+            }
         }
 
         // Convert the initializer to match the declared type when an annotation
@@ -3017,7 +3027,8 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     const std::string& name = stmt->varName;
 
     // ── Heap-free heap-allocated variables ────────────────────────────────
-    const bool isHeapString = stringVars_.count(name) > 0;
+    const bool isHeapString = stringVars_.count(name) > 0 &&
+                               !staticStringVars_.count(name);
     const bool isHeapArray  = arrayVars_.count(name) > 0 &&
                                !stackAllocatedArrays_.count(name);
     const bool isHeapDict   = dictVarNames_.count(name) > 0;
@@ -3100,6 +3111,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     constStringFolds_.erase(name);
     varTypeAnnotations_.erase(name);
     stringVars_.erase(name);
+    staticStringVars_.erase(name);
     arrayVars_.erase(name);
     dictVarNames_.erase(name);
     ptrVarNames_.erase(name);

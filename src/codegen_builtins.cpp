@@ -524,8 +524,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 funcArenaUsedBytes_ += alignedBytes;
 
                 // GEP directly into the slab alloca — no load needed.
-                auto* slabArrayTy = llvm::cast<llvm::ArrayType>(
-                    funcArenaBaseAlloca_->getAllocatedType());
+                // Recompute the array type from the constant rather than casting
+                // funcArenaBaseAlloca_->getAllocatedType() to avoid a redundant cast.
+                auto* slabArrayTy = llvm::ArrayType::get(i8Ty, kFuncArenaSlabSize);
                 auto* zero32 = llvm::ConstantInt::get(
                     llvm::Type::getInt32Ty(*context), 0);
                 llvm::Value* arenaBase = builder->CreateInBoundsGEP(
@@ -2144,7 +2145,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::AllocaInst* capCacheAlloca = nullptr;
         if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto* id = static_cast<IdentifierExpr*>(expr->arguments[0].get());
-            if (stringVars_.count(id->name)) {
+            // Static literal strings (staticStringVars_) must NOT be realloc'd —
+            // they point at read-only .rodata constants.  Treat as non-heap so
+            // the malloc + memcpy path is used instead.
+            if (stringVars_.count(id->name) && !staticStringVars_.count(id->name)) {
                 lhsIsHeap = true;
                 // Look up or create a capacity cache alloca for this variable.
                 auto capIt = stringCapCache_.find(id->name);
