@@ -258,6 +258,8 @@ BENCH_DESC=(
     "OPTMAX memory={noalias=true} pointer loop: noalias+dereferenceable attrs enable vectorizer"
     "const_fold: compile-time constant folding of integer literal expressions in alg_simp_pass"
     "mul_new_str: strength reduction for new multipliers 23/29/35/38/39/42/44 via e-graph shift+add/sub"
+    "ternary_fold: constant-condition ternary folded at AST level; not-of-comparison pushed to !=/>= etc."
+    "mul_more_str: strength reduction for 3-op multipliers 46/47/52/54/55/58/59/61 via e-graph"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.

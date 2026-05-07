@@ -182,6 +182,8 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 else if (op == "&&" )                    result = (lv && rv) ? 1LL : 0LL;
                 else if (op == "||" )                    result = (lv || rv) ? 1LL : 0LL;
                 else if (op == "<<" && rv >= 0 && rv < 64) result = static_cast<long long>(static_cast<uint64_t>(lv) << static_cast<uint64_t>(rv));
+                // OmScript `>>` on scalar integers is always a logical (unsigned) right-shift
+                // (maps to LLVM CreateLShr).  Cast through uint64_t to match that semantics.
                 else if (op == ">>" && rv >= 0 && rv < 64) result = static_cast<long long>(static_cast<uint64_t>(lv) >> static_cast<uint64_t>(rv));
                 if (result.has_value()) {
                     expr = makeIntLiteral(*result);
