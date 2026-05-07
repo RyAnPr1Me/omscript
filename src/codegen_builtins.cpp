@@ -413,13 +413,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     //                      Alloca is placed in the function entry block so
     //                      mem2reg / SROA can reason about it universally.
     //
-    //  T2 (arena):         count is a ConstantInt AND
+    //  T2 (static arena):  count is a ConstantInt AND
     //                      count*sizeof(T) > kStackAllocThreshold AND
     //                      remaining arena capacity >= count*sizeof(T).
     //                      All T2 allocations in a function share a single
-    //                      malloc'd slab (emitted once in the entry block).
-    //                      Sub-allocation is a compile-time-constant GEP.
-    //                      The slab is freed at every function return.
+    //                      static stack alloca slab (emitted once in entry
+    //                      block).  Sub-allocation is a compile-time-constant
+    //                      GEP.  lifetime.end is emitted at function exit.
     //
     //  T3 (heap malloc):   dynamic count OR compile-time count whose size
     //                      exceeds the remaining arena capacity.
@@ -489,46 +489,56 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 return ptr;
             }
 
-            // ── Tier 2: per-function arena sub-allocation ─────────────────────
+            // ── Tier 2: per-function arena sub-allocation (static stack) ─────
             // Use when the compile-time allocation fits in the remaining arena
-            // capacity.  The arena slab is a single malloc in the entry block
-            // shared by all T2 allocations; no per-alloc malloc overhead.
+            // capacity.  The arena slab is a single entry-block alloca shared
+            // by all T2 allocations; no heap involvement whatsoever.
             if (alignedBytes <= kFuncArenaSlabSize &&
                 funcArenaUsedBytes_ + alignedBytes <= kFuncArenaSlabSize) {
                 llvm::Function* fn = builder->GetInsertBlock()->getParent();
                 llvm::IRBuilder<> entryB(&fn->getEntryBlock(),
                                          fn->getEntryBlock().begin());
                 auto* ptrTy  = llvm::PointerType::getUnqual(*context);
+                auto* i8Ty   = llvm::Type::getInt8Ty(*context);
                 auto* i64Ty  = llvm::Type::getInt64Ty(*context);
 
-                // Lazily emit the arena slab malloc in the entry block.
+                // Lazily emit the arena slab as a static stack alloca.
                 if (!funcArenaBaseAlloca_) {
+                    auto* slabArrayTy = llvm::ArrayType::get(i8Ty, kFuncArenaSlabSize);
                     funcArenaBaseAlloca_ = entryB.CreateAlloca(
-                        ptrTy, nullptr, "arena.base");
-                    funcArenaBaseAlloca_->setAlignment(llvm::Align(8));
-                    // malloc(kFuncArenaSlabSize) — one allocation for the whole
-                    // slab, shared by all T2 alloc<T> calls in this function.
-                    llvm::Value* slabSz = llvm::ConstantInt::get(
+                        slabArrayTy, nullptr, "arena.slab");
+                    // 16-byte alignment satisfies all scalar and SIMD types.
+                    funcArenaBaseAlloca_->setAlignment(llvm::Align(16));
+                    // lifetime.start scopes the slab for DSE/LICM and stack
+                    // coloring — the optimizer may overlap non-live slabs.
+                    auto* lifeSzVal = llvm::ConstantInt::get(
                         i64Ty, static_cast<int64_t>(kFuncArenaSlabSize));
-                    llvm::Value* slabPtr = entryB.CreateCall(
-                        getOrDeclareMalloc(), {slabSz}, "arena.slab");
-                    entryB.CreateStore(slabPtr, funcArenaBaseAlloca_);
+                    auto* lifetimeStart = OMSC_GET_INTRINSIC(
+                        module.get(), llvm::Intrinsic::lifetime_start,
+                        {ptrTy});
+                    entryB.CreateCall(lifetimeStart, {lifeSzVal, funcArenaBaseAlloca_});
                 }
 
                 // Sub-allocate at a compile-time-constant byte offset.
                 const uint64_t offset = funcArenaUsedBytes_;
                 funcArenaUsedBytes_ += alignedBytes;
 
-                // Load the arena base and GEP to the sub-allocation slot.
-                llvm::Value* arenaBase = builder->CreateLoad(
-                    ptrTy, funcArenaBaseAlloca_, "arena.base.ld");
+                // GEP directly into the slab alloca — no load needed.
+                // Recompute the array type from the constant rather than casting
+                // funcArenaBaseAlloca_->getAllocatedType() to avoid a redundant cast.
+                auto* slabArrayTy = llvm::ArrayType::get(i8Ty, kFuncArenaSlabSize);
+                auto* zero32 = llvm::ConstantInt::get(
+                    llvm::Type::getInt32Ty(*context), 0);
+                llvm::Value* arenaBase = builder->CreateInBoundsGEP(
+                    slabArrayTy, funcArenaBaseAlloca_,
+                    {zero32, zero32}, "arena.base");
                 llvm::Value* slotPtr = builder->CreateInBoundsGEP(
-                    llvm::Type::getInt8Ty(*context),
+                    i8Ty,
                     arenaBase,
                     llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(offset)),
                     "arena.slot." + elemTypeName);
                 // Cast to the element pointer type for type safety.
-                llvm::Value* typedPtr = (elemTy != llvm::Type::getInt8Ty(*context))
+                llvm::Value* typedPtr = (elemTy != i8Ty)
                     ? builder->CreatePointerCast(slotPtr, ptrTy, "arena.ptr")
                     : slotPtr;
                 lastAllocWasArena_ = true;
@@ -2135,7 +2145,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::AllocaInst* capCacheAlloca = nullptr;
         if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto* id = static_cast<IdentifierExpr*>(expr->arguments[0].get());
-            if (stringVars_.count(id->name)) {
+            // Static literal strings (staticStringVars_) must NOT be realloc'd —
+            // they point at read-only .rodata constants.  Treat as non-heap so
+            // the malloc + memcpy path is used instead.
+            if (stringVars_.count(id->name) && !staticStringVars_.count(id->name)) {
                 lhsIsHeap = true;
                 // Look up or create a capacity cache alloca for this variable.
                 auto capIt = stringCapCache_.find(id->name);

@@ -193,10 +193,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         optimizationLevel >= OptimizationLevel::O2 &&
                         doesVarHaveOnlyReadOnlyUses(stmt->name)) {
                         useReadOnlyGlobal = true;
-                    } else if (stmt->isConst && n <= kMaxStackArrayElements) {
-                        useStackAlloc = true;
-                    } else if (!stmt->isConst && allIntLiterals && n <= 16 &&
-                               !doesVarEscapeCurrentScope(stmt->name)) {
+                    } else if (n <= kMaxStackArrayElements &&
+                               (stmt->isConst || !doesVarEscapeCurrentScope(stmt->name))) {
+                        // n is the literal element count — always a compile-time constant
+                        // (it's the size of the ArrayInitializer's elements list).
+                        // Element values may be dynamic; only the count need be static.
                         useStackAlloc = true;
                     }
                 }
@@ -264,12 +265,21 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             allocaType = initValue->getType();
 
         // When a string literal is assigned to a mutable string variable,
+        // ordinarily strdup() is needed to make the copy mutable.  However, if
+        // the variable has only read-only uses throughout its lifetime we can
+        // point it directly at the (read-only) string literal — no heap copy.
         if (!stmt->isConst &&
             stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
             static_cast<LiteralExpr*>(stmt->initializer.get())->literalType ==
                 LiteralExpr::LiteralType::STRING) {
-            initValue = builder->CreateCall(getOrDeclareStrdup(), {initValue}, "strdup.init");
-            allocaType = initValue->getType();
+            if (doesVarHaveOnlyReadOnlyUses(stmt->name)) {
+                // Static: use the literal pointer directly — no allocation.
+                staticStringVars_.insert(stmt->name);
+                // initValue is already the literal pointer; no strdup needed.
+            } else {
+                initValue = builder->CreateCall(getOrDeclareStrdup(), {initValue}, "strdup.init");
+                allocaType = initValue->getType();
+            }
         }
 
         // Convert the initializer to match the declared type when an annotation
@@ -683,16 +693,19 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 }
 
 void CodeGenerator::generateReturn(ReturnStmt* stmt) {
-    // Helper: free the per-function arena slab if one was allocated.
-    // Must be called immediately before every return instruction so that
-    // the slab is reclaimed on every exit path.
+    // Helper: end the lifetime of the per-function arena slab if one was
+    // allocated.  The slab is a static stack alloca — no free() is needed;
+    // lifetime.end lets the optimizer reclaim and reuse the stack slot.
     auto emitArenaFreeIfNeeded = [&]() {
         if (!funcArenaBaseAlloca_)
             return;
-        auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* slabPtr = builder->CreateLoad(
-            ptrTy, funcArenaBaseAlloca_, "arena.base.ret");
-        builder->CreateCall(getOrDeclareFree(), {slabPtr});
+        auto* ptrTy  = llvm::PointerType::getUnqual(*context);
+        auto* i64Ty  = llvm::Type::getInt64Ty(*context);
+        auto* lifeSzVal = llvm::ConstantInt::get(
+            i64Ty, static_cast<int64_t>(kFuncArenaSlabSize));
+        auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(  // same as OMSC_GET_INTRINSIC; _STMT suffix is the local alias
+            module.get(), llvm::Intrinsic::lifetime_end, {ptrTy});
+        builder->CreateCall(lifetimeEnd, {lifeSzVal, funcArenaBaseAlloca_});
     };
     // Prefetch invalidation enforcement: check that all prefetched variables
     if (!prefetchedVars_.empty()) {
@@ -3014,7 +3027,8 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     const std::string& name = stmt->varName;
 
     // ── Heap-free heap-allocated variables ────────────────────────────────
-    const bool isHeapString = stringVars_.count(name) > 0;
+    const bool isHeapString = stringVars_.count(name) > 0 &&
+                               !staticStringVars_.count(name);
     const bool isHeapArray  = arrayVars_.count(name) > 0 &&
                                !stackAllocatedArrays_.count(name);
     const bool isHeapDict   = dictVarNames_.count(name) > 0;
@@ -3097,6 +3111,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     constStringFolds_.erase(name);
     varTypeAnnotations_.erase(name);
     stringVars_.erase(name);
+    staticStringVars_.erase(name);
     arrayVars_.erase(name);
     dictVarNames_.erase(name);
     ptrVarNames_.erase(name);

@@ -4674,6 +4674,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         !volatileVars_.count(expr->name) &&
         uniqueStringVars_.count(expr->name) &&
         stringVars_.count(expr->name) &&
+        !staticStringVars_.count(expr->name) &&
         expr->value && expr->value->type == ASTNodeType::BINARY_EXPR) {
         auto* bin = static_cast<BinaryExpr*>(expr->value.get());
         // Must be   x + rhs   where LHS is the same variable and both are strings.
@@ -4859,6 +4860,8 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         stringVars_.insert(expr->name);
     else
         stringVars_.erase(expr->name);
+    // Any reassignment invalidates the "static literal" assumption.
+    staticStringVars_.erase(expr->name);
     // Update string-array tracking after assignment.
     if (isStringArrayExpr(expr->value.get()))
         stringArrayVars_.insert(expr->name);

@@ -205,15 +205,31 @@ TEST(EGraphTest, DivOneSimplification) {
 }
 
 TEST(EGraphTest, DivSelfSimplification) {
-    EGraph g;
-    ClassId x = g.addVar("x");
-    ClassId expr = g.addBinOp(Op::Div, x, x);
-
-    auto rules = getAlgebraicRules();
-    g.saturate(rules);
-
-    ClassId one = g.addConst(1);
-    EXPECT_EQ(g.find(expr), g.find(one));
+    // The div_self rule (x / x → 1) is guarded: it only fires when x is a
+    // provably non-zero constant to avoid folding 0/0 (undefined behaviour).
+    // Test both the guarded-fires case (non-zero constant) and the
+    // guarded-skips case (symbolic variable whose value is unknown).
+    {
+        // Non-zero constant: rule must fire.
+        EGraph g;
+        ClassId x = g.addConst(7);
+        ClassId expr = g.addBinOp(Op::Div, x, x);
+        auto rules = getAlgebraicRules();
+        g.saturate(rules);
+        ClassId one = g.addConst(1);
+        EXPECT_EQ(g.find(expr), g.find(one)) << "7/7 should simplify to 1";
+    }
+    {
+        // Symbolic variable: guard cannot prove non-zero, so rule must NOT fire.
+        EGraph g;
+        ClassId x = g.addVar("x");
+        ClassId expr = g.addBinOp(Op::Div, x, x);
+        auto rules = getAlgebraicRules();
+        g.saturate(rules);
+        ClassId one = g.addConst(1);
+        // find() merges equivalence classes; x/x and 1 must be in different classes.
+        EXPECT_NE(g.find(expr), g.find(one)) << "x/x must not collapse to 1 for unknown x";
+    }
 }
 
 TEST(EGraphTest, DoubleNegation) {
@@ -858,15 +874,28 @@ TEST(EGraphTest, BitwiseRulesNotEmpty) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(EGraphTest, ModSelfIsZero) {
-    EGraph g;
-    ClassId x = g.addVar("x");
-    ClassId expr = g.addBinOp(Op::Mod, x, x);
-
-    auto rules = getAlgebraicRules();
-    g.saturate(rules);
-
-    ClassId zero = g.addConst(0);
-    EXPECT_EQ(g.find(expr), g.find(zero));
+    // The mod_self rule (x % x → 0) is guarded: it only fires for provably
+    // non-zero constants to avoid folding 0 % 0 (undefined behaviour).
+    {
+        // Non-zero constant: rule must fire.
+        EGraph g;
+        ClassId x = g.addConst(5);
+        ClassId expr = g.addBinOp(Op::Mod, x, x);
+        auto rules = getAlgebraicRules();
+        g.saturate(rules);
+        ClassId zero = g.addConst(0);
+        EXPECT_EQ(g.find(expr), g.find(zero)) << "5%5 should simplify to 0";
+    }
+    {
+        // Symbolic variable: guard cannot prove non-zero, so rule must NOT fire.
+        EGraph g;
+        ClassId x = g.addVar("x");
+        ClassId expr = g.addBinOp(Op::Mod, x, x);
+        auto rules = getAlgebraicRules();
+        g.saturate(rules);
+        ClassId zero = g.addConst(0);
+        EXPECT_NE(g.find(expr), g.find(zero)) << "x%x must not collapse to 0 for unknown x";
+    }
 }
 
 TEST(EGraphTest, NegSubSwap) {
@@ -2483,23 +2512,32 @@ TEST(EGraphTest, CombineNonZeroChecks) {
 }
 
 TEST(EGraphTest, RangeCheckUnsigned) {
-    // (x >= 5) && (x <= 10) → (x - 5) <= 5
+    // The range-check unsigned optimisation ((x>=lo)&&(x<=hi) → (x-lo)<=range)
+    // requires an unsigned less-than-or-equal operator to be correct.  The
+    // EGraph currently only has a signed Op::Le, so the rule is disabled to
+    // prevent incorrect simplifications when x is negative.
+    // This test verifies that the optimisation does NOT fire with the current
+    // signed-only relational operators, and documents the expected signature of
+    // the transformation so it can be re-enabled when Op::ULe is added.
     EGraph g;
-    ClassId x = g.addVar("x");
-    ClassId c5 = g.addConst(5);
+    ClassId x  = g.addVar("x");
+    ClassId c5  = g.addConst(5);
     ClassId c10 = g.addConst(10);
-    ClassId ge = g.addBinOp(Op::Ge, x, c5);
-    ClassId le = g.addBinOp(Op::Le, x, c10);
+    ClassId ge  = g.addBinOp(Op::Ge, x, c5);
+    ClassId le  = g.addBinOp(Op::Le, x, c10);
     ClassId conj = g.addBinOp(Op::LogAnd, ge, le);
 
-    ClassId diff = g.addBinOp(Op::Sub, x, c5);
-    ClassId range = g.addConst(5);  // 10 - 5
+    ClassId diff  = g.addBinOp(Op::Sub, x, c5);
+    ClassId range = g.addConst(5);
     ClassId expected = g.addBinOp(Op::Le, diff, range);
 
     auto rules = getRelationalRules();
     g.saturate(rules);
 
-    EXPECT_EQ(g.find(conj), g.find(expected));
+    // Rule is disabled — the two expressions must remain in distinct classes.
+    EXPECT_NE(g.find(conj), g.find(expected))
+        << "range_check_unsigned must not fire with signed Op::Le "
+           "(would produce wrong results for negative x)";
 }
 
 TEST(EGraphTest, RelationalRulesNotEmpty) {
