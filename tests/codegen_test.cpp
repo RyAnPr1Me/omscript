@@ -4207,8 +4207,204 @@ TEST(CodegenTest, DCE_DeadCodeAfterNestedAlwaysTrueIf) {
 }
 
 // ===========================================================================
-// OPTMAX EarlyCSE with MemorySSA
+// DCE -- do{B}while(0) break/continue safety (over-trim fix)
 // ===========================================================================
+
+// do { break; } while (0) must NOT be replaced with a bare {break;} block,
+// because the break would then escape to the outer for loop and the next
+// statement (print) would be incorrectly pruned by stmtAlwaysExits.
+// Instead the do-while is left as-is (the break exits the do-while, not
+// the for), and both statements inside the for body must remain.
+TEST(CodegenTest, DCE_DoWhileBreakDoesNotPruneOuterForBody) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var s:i64 = 0;"
+        "  for (i in 0...5) {"
+        "    do { break; } while (0);"
+        "    s = s + 1;"   // LIVE -- must NOT be pruned
+        "  }"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    // s = s + 1 is live, so the function body must contain a store or add.
+    bool hasAddOrStore = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (llvm::isa<llvm::StoreInst>(I) || llvm::isa<llvm::BinaryOperator>(I))
+                hasAddOrStore = true;
+        }
+    }
+    EXPECT_TRUE(hasAddOrStore) << "s = s + 1 should be live (not over-pruned)";
+}
+
+// do { continue; } while (0) must similarly not be replaced.
+TEST(CodegenTest, DCE_DoWhileContinueDoesNotPruneOuterWhileBody) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var s:i64 = 0;"
+        "  var i:i64 = 0;"
+        "  while (i < 5) {"
+        "    do { continue; } while (0);"
+        "    s = s + 1;"   // LIVE -- continue targets the do-while, not the while
+        "    i = i + 1;"
+        "  }"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}
+
+// do { if (cond) { break; } work(); } while (0) -- break nested inside an if
+// inside the body still targets the do-while; the statements after the do-while
+// in the outer loop must remain.
+TEST(CodegenTest, DCE_DoWhileNestedBreakInIfDoesNotPruneOuterBody) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn check(x:i64) -> i64 { return x; }"
+        "fn main() -> i64 {"
+        "  var s:i64 = 0;"
+        "  for (i in 0...5) {"
+        "    do {"
+        "      if (check(i) == 2) { break; }"
+        "    } while (0);"
+        "    s = s + 1;"   // LIVE
+        "  }"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}
+
+// do { B } while (0) where B has NO break/continue CAN still be replaced.
+// Verify the dead `return 0` is still pruned in this safe case.
+TEST(CodegenTest, DCE_DoWhileNoBreakContinueSafeToEliminate) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  do { return 7; } while (0);"
+        "  return 0;"   // dead -- no break/continue, safe to prune
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    auto& entry = mainFn->getEntryBlock();
+    bool found7 = false;
+    for (auto& I : entry) {
+        if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I))
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                if (ci->getSExtValue() == 7) found7 = true;
+    }
+    EXPECT_TRUE(found7) << "safe do-while(0) body should still be inlined";
+}
+
+// ===========================================================================
+// DCE -- stmtAlwaysExits: if-else both branches return
+// ===========================================================================
+
+// Dead code after `if(cond){return a;}else{return b;}` must be pruned because
+// both branches unconditionally exit.  stmtAlwaysExits now handles IF_STMT
+// when both branches always exit and an else branch is present.
+TEST(CodegenTest, DCE_DeadCodeAfterIfElseBothReturn) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  if (x > 0) { return 1; } else { return 0; }"
+        "  return 99;"   // dead -- both branches return
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    // 99 should never appear in the IR.
+    bool found99 = false;
+    for (auto& BB : *mainFn)
+        for (auto& I : BB)
+            if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I))
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                    if (ci->getSExtValue() == 99) found99 = true;
+    EXPECT_FALSE(found99) << "return 99 is dead (both if-else branches return)";
+}
+
+// Without an else branch the if does NOT always exit; the subsequent return
+// must be preserved.
+TEST(CodegenTest, DCE_IfWithoutElseDoesNotPruneFollowingReturn) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  if (x > 0) { return 1; }"
+        "  return 0;"   // LIVE -- no else branch, condition might be false
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    // return 0 must be reachable.
+    bool found0 = false;
+    for (auto& BB : *mainFn)
+        for (auto& I : BB)
+            if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I))
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                    if (ci->getSExtValue() == 0) found0 = true;
+    EXPECT_TRUE(found0) << "return 0 must be live (no else branch on the if)";
+}
+
+// ===========================================================================
+// DCE -- recursion into ForEach, Switch, Catch, Defer bodies
+// ===========================================================================
+
+// Dead code inside a foreach loop body must be eliminated.
+TEST(CodegenTest, DCE_DeadCodeInsideForEachBody) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var s:i64 = 0;"
+        "  var arr:i64[] = [1,2,3];"
+        "  foreach (x in arr) {"
+        "    while (0) { s = s + 99; }"   // dead loop inside foreach
+        "    s = s + x;"
+        "  }"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("main"), nullptr);
+}
+
+// Dead code inside a switch case must be eliminated.
+TEST(CodegenTest, DCE_DeadCodeInsideSwitchCase) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  switch (x) {"
+        "    case 1:"
+        "      while (0) { return 99; }"   // dead loop inside case
+        "      return 1;"
+        "    default:"
+        "      return 0;"
+        "  }"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("main"), nullptr);
+}
+
+
 
 TEST(CodegenTest, OptmaxEarlyCSEMemorySSA) {
     // OPTMAX functions should use EarlyCSE with MemorySSA for better CSE
