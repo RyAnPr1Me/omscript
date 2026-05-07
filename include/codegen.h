@@ -909,6 +909,7 @@ class CodeGenerator {
     [[nodiscard]] llvm::Type* resolveAnnotatedType(const std::string& annotation);
     llvm::Value* toBool(llvm::Value* v);
     llvm::Value* toDefaultType(llvm::Value* v);
+    [[nodiscard]] llvm::Value* getArrayPtr(llvm::Value* v);
     /// Convert v to targetTy inserting appropriate casts (unchanged if not needed).
     llvm::Value* convertTo(llvm::Value* v, llvm::Type* targetTy);
     llvm::Value* ensureFloat(llvm::Value* v);

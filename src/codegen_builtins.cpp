@@ -3450,7 +3450,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         valArg = toDefaultType(valArg);
         // Array layout: [length, elem0, elem1, ...]
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "push.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* pushLenLoad = emitLoadArrayLen(arrPtr, "push.oldlen");
         llvm::Value* oldLen = pushLenLoad;
         llvm::Value* newLen = builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -3542,7 +3542,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* newElemPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, newElemIdx, "push.elemptr");
         emitStoreArrayElem(valArg, newElemPtr);
         // Return new array pointer as i64
-        return builder->CreatePtrToInt(newBuf, getDefaultType(), "push.result");
+        return newBuf;
     }
 
     if (bid == BuiltinId::POP) {
@@ -3550,7 +3550,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "pop.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* popLenLoad = emitLoadArrayLen(arrPtr, "pop.oldlen");
         llvm::Value* oldLen = popLenLoad;
 
@@ -3593,10 +3593,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "shift", 1);
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
-        llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy()
-                ? arrArg
-                : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "shift.arrptr");
+        llvm::Value* arrPtr = getArrayPtr(arrArg);
         llvm::Value* oldLen = emitLoadArrayLen(arrPtr, "shift.oldlen");
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
@@ -3647,10 +3644,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
         valArg = toDefaultType(valArg);
-        llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy()
-                ? arrArg
-                : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "ush.arrptr");
+        llvm::Value* arrPtr = getArrayPtr(arrArg);
         llvm::Value* oldLen = emitLoadArrayLen(arrPtr, "ush.oldlen");
         llvm::Value* one64  = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight  = llvm::ConstantInt::get(getDefaultType(), 8);
@@ -3730,7 +3724,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Update length header.
         emitStoreArrayLen(newLen, newBuf);
-        return builder->CreatePtrToInt(newBuf, getDefaultType(), "ush.result");
+        return newBuf;
     }
 
     if (bid == BuiltinId::INDEX_OF) {
@@ -3756,7 +3750,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         valArg = toDefaultType(valArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "indexof.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* idxofLenLoad = emitLoadArrayLen(arrPtr, "indexof.len");
         llvm::Value* arrLen = idxofLenLoad;
 
@@ -3821,7 +3815,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         valArg = toDefaultType(valArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "contains.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* containsLenLoad = emitLoadArrayLen(arrPtr, "contains.len");
         llvm::Value* arrLen = containsLenLoad;
 
@@ -3866,7 +3860,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "sort.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* sortLenLoad = emitLoadArrayLen(arrPtr, "sort.len");
         llvm::Value* arrLen = sortLenLoad;
 
@@ -4014,7 +4008,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                     llvm::GlobalValue::PrivateLinkage, initArray, "fill.ro.const");
                 gv->setAlignment(llvm::Align(16));
                 gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-                return builder->CreatePtrToInt(gv, getDefaultType(), "fill.ro.int");
+                return gv;
             }
         }
         llvm::Value* sizeArg = generateExpression(expr->arguments[0].get());
@@ -4090,7 +4084,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                         llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
                 });
         }
-        return builder->CreatePtrToInt(buf, getDefaultType(), "fill.result");
+        return buf;
     }
 
     if (bid == BuiltinId::ARRAY_CONCAT) {
@@ -4099,8 +4093,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arr2Arg = generateExpression(expr->arguments[1].get());
         arr1Arg = toDefaultType(arr1Arg);
         arr2Arg = toDefaultType(arr2Arg);
-        llvm::Value* arr1Ptr = builder->CreateIntToPtr(arr1Arg, llvm::PointerType::getUnqual(*context), "aconcat.ptr1");
-        llvm::Value* arr2Ptr = builder->CreateIntToPtr(arr2Arg, llvm::PointerType::getUnqual(*context), "aconcat.ptr2");
+        llvm::Value* arr1Ptr = getArrayPtr(arr1Arg);
+        llvm::Value* arr2Ptr = getArrayPtr(arr2Arg);
                 llvm::Value* acatLen1Load = emitLoadArrayLen(arr1Ptr, "aconcat.len1");
         llvm::Value* len1 = acatLen1Load;
                 llvm::Value* acatLen2Load = emitLoadArrayLen(arr2Ptr, "aconcat.len2");
@@ -4139,7 +4133,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* src2 = builder->CreateInBoundsGEP(getDefaultType(), arr2Ptr, one, "aconcat.src2");
         llvm::Value* copy2Size = builder->CreateMul(len2, eight, "aconcat.copy2size", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCall(getOrDeclareMemcpy(), {dst2, src2, copy2Size});
-        return builder->CreatePtrToInt(buf, getDefaultType(), "aconcat.result");
+        return buf;
     }
 
     if (bid == BuiltinId::ARRAY_SLICE) {
@@ -4151,7 +4145,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         startArg = toDefaultType(startArg);
         endArg = toDefaultType(endArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "slice.arrptr");
+            getArrayPtr(arrArg);
         llvm::Value* sliceLenLoad = emitLoadArrayLen(arrPtr, "slice.arrlen");
         llvm::Value* arrLen = sliceLenLoad;
 
@@ -4200,7 +4194,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* dst = builder->CreateInBoundsGEP(getDefaultType(), buf, one, "slice.dst");
         llvm::Value* copySize = builder->CreateMul(sliceLen, eight, "slice.copysize", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCall(getOrDeclareMemcpy(), {dst, src, copySize});
-        return builder->CreatePtrToInt(buf, getDefaultType(), "slice.result");
+        return buf;
     }
 
     if (bid == BuiltinId::ARRAY_COPY) {
@@ -4208,7 +4202,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acopy.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* acopyLenLoad = emitLoadArrayLen(arrPtr, "acopy.len");
         llvm::Value* arrLen = acopyLenLoad;
         // Allocate: (length + 1) * 8 bytes
@@ -4220,7 +4214,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::cast<llvm::CallInst>(buf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, 8));
         builder->CreateCall(getOrDeclareMemcpy(), {buf, arrPtr, bytes});
-        return builder->CreatePtrToInt(buf, getDefaultType(), "acopy.result");
+        return buf;
     }
 
     if (bid == BuiltinId::ARRAY_REMOVE) {
@@ -4230,7 +4224,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         idxArg = toDefaultType(idxArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aremove.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* aremLenLoad = emitLoadArrayLen(arrPtr, "aremove.len");
         llvm::Value* arrLen = aremLenLoad;
         // Bounds check: 0 <= idx < length
@@ -4302,7 +4296,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "amap.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* amapLenLoad = emitLoadArrayLen(arrPtr, "amap.len");
         llvm::Value* arrLen = amapLenLoad;
 
@@ -4338,7 +4332,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                     llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
             });
         (void)amapArrLen;
-        return builder->CreatePtrToInt(buf, getDefaultType(), "amap.result");
+        return buf;
     }
 
     // -----------------------------------------------------------------------
@@ -4361,7 +4355,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "afilt.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* afiltLenLoad = emitLoadArrayLen(arrPtr, "afilt.len");
         llvm::Value* arrLen = afiltLenLoad;
 
@@ -4433,7 +4427,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Done: store final length
         builder->SetInsertPoint(doneBB);
         emitStoreArrayLen(outIdx, buf);
-        return builder->CreatePtrToInt(buf, getDefaultType(), "afilt.result");
+        return buf;
     }
 
     // -----------------------------------------------------------------------
@@ -4460,7 +4454,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         initVal = toDefaultType(initVal);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "areduce.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* aredLenLoad = emitLoadArrayLen(arrPtr, "areduce.len");
         llvm::Value* arrLen = aredLenLoad;
 
@@ -4528,7 +4522,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             }
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "amin.arrptr");
+        llvm::Value* arrPtr = getArrayPtr(arg);
                 llvm::Value* aminLenLoad = emitLoadArrayLen(arrPtr, "amin.len");
         llvm::Value* length = aminLenLoad;
 
@@ -4623,7 +4617,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             }
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "amax.arrptr");
+        llvm::Value* arrPtr = getArrayPtr(arg);
                 llvm::Value* amaxLenLoad = emitLoadArrayLen(arrPtr, "amax.len");
         llvm::Value* length = amaxLenLoad;
 
@@ -4711,7 +4705,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aany.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* aanyLenLoad = emitLoadArrayLen(arrPtr, "aany.len");
         llvm::Value* length = aanyLenLoad;
 
@@ -4779,7 +4773,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aevery.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* aeveryLenLoad = emitLoadArrayLen(arrPtr, "aevery.len");
         llvm::Value* length = aeveryLenLoad;
 
@@ -4848,7 +4842,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* target = generateExpression(expr->arguments[1].get());
         target = toDefaultType(target);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "afind.arrptr");
+        llvm::Value* arrPtr = getArrayPtr(arg);
                 llvm::Value* afindLenLoad = emitLoadArrayLen(arrPtr, "afind.len");
         llvm::Value* length = afindLenLoad;
 
@@ -4915,7 +4909,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acnt.arrptr");
+            getArrayPtr(arrArg);
                 llvm::Value* acntLenLoad = emitLoadArrayLen(arrPtr, "acnt.len");
         llvm::Value* length = acntLenLoad;
 
@@ -5298,7 +5292,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(splitLoopBB)));
 
         builder->SetInsertPoint(splitDoneBB);
-        return builder->CreatePtrToInt(arrBuf, getDefaultType(), "split.result");
+        return arrBuf;
     }
 
     // -----------------------------------------------------------------------
@@ -5355,7 +5349,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
 
         builder->SetInsertPoint(doneBB);
-        return builder->CreatePtrToInt(buf, getDefaultType(), "chars.result");
+        return buf;
     }
 
     // -----------------------------------------------------------------------
@@ -5365,10 +5359,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* delimArg = generateExpression(expr->arguments[1].get());
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* arrPtr =
-            arrArg->getType()->isPointerTy()
-                ? arrArg
-                : builder->CreateIntToPtr(arrArg, ptrTy, "join.arrptr");
+        llvm::Value* arrPtr = getArrayPtr(arrArg);
         llvm::Value* delimPtr =
             delimArg->getType()->isPointerTy()
                 ? delimArg
@@ -5791,7 +5782,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::MAP_NEW) {
         validateArgCount(expr, "map_new", 0);
         llvm::Value* buf = builder->CreateCall(getOrEmitHashMapNew(), {}, "mapnew.buf");
-        return builder->CreatePtrToInt(buf, getDefaultType(), "mapnew.result");
+        return buf;
     }
 
     if (bid == BuiltinId::MAP_SET) {
@@ -5804,9 +5795,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = mapArg->getType()->isPointerTy()
-            ? mapArg : builder->CreateIntToPtr(toDefaultType(mapArg), ptrTy, "mapset.ptr");
+            ? mapArg : getArrayPtr(mapArg);
         llvm::Value* result = builder->CreateCall(getOrEmitHashMapSet(), {mapPtr, keyArg, valArg}, "mapset.result");
-        return builder->CreatePtrToInt(result, getDefaultType(), "mapset.i64");
+        return result;
     }
 
     if (bid == BuiltinId::MAP_GET) {
@@ -5845,7 +5836,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* mapPtr = mapArg->getType()->isPointerTy()
             ? mapArg : builder->CreateIntToPtr(toDefaultType(mapArg), ptrTy, "maprem.ptr");
         llvm::Value* result = builder->CreateCall(getOrEmitHashMapRemove(), {mapPtr, keyArg}, "maprem.result");
-        return builder->CreatePtrToInt(result, getDefaultType(), "maprem.i64");
+        return result;
     }
 
     if (bid == BuiltinId::MAP_KEYS) {
@@ -5856,7 +5847,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* mapPtr = mapArg->getType()->isPointerTy()
             ? mapArg : builder->CreateIntToPtr(toDefaultType(mapArg), ptrTy, "mapkeys.ptr");
         llvm::Value* buf = builder->CreateCall(getOrEmitHashMapKeys(), {mapPtr}, "mapkeys.buf");
-        return builder->CreatePtrToInt(buf, getDefaultType(), "mapkeys.result");
+        return buf;
     }
 
     if (bid == BuiltinId::MAP_VALUES) {
@@ -5867,7 +5858,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* mapPtr = mapArg->getType()->isPointerTy()
             ? mapArg : builder->CreateIntToPtr(toDefaultType(mapArg), ptrTy, "mapvals.ptr");
         llvm::Value* buf = builder->CreateCall(getOrEmitHashMapValues(), {mapPtr}, "mapvals.buf");
-        return builder->CreatePtrToInt(buf, getDefaultType(), "mapvals.result");
+        return buf;
     }
 
     if (bid == BuiltinId::MAP_SIZE) {
@@ -5930,7 +5921,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
 
         builder->SetInsertPoint(doneBB);
-        return builder->CreatePtrToInt(buf, getDefaultType(), "range.result");
+        return buf;
     }
 
     if (bid == BuiltinId::RANGE_STEP) {
@@ -6002,7 +5993,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
-        return builder->CreatePtrToInt(buf, getDefaultType(), "rstep.result");
+        return buf;
     }
 
     if (bid == BuiltinId::CHAR_CODE) {
@@ -6156,7 +6147,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nullAttr = llvm::ConstantPointerNull::get(ptrTy);
         builder->CreateCall(getOrDeclarePthreadMutexInit(), {mutex, nullAttr});
         // Return as i64
-        return builder->CreatePtrToInt(mutex, getDefaultType(), "mutex.val");
+        return mutex;
     }
 
     if (bid == BuiltinId::MUTEX_LOCK) {
@@ -6748,7 +6739,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* postBytes = builder->CreateMul(postCount, eight, "ains.postbytes", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCall(getOrDeclareMemcpy(), {postDst, postSrc, postBytes});
 
-        return builder->CreatePtrToInt(buf, getDefaultType(), "ains.result");
+        return buf;
     }
 
     // -----------------------------------------------------------------------
@@ -6822,7 +6813,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // --- No-pad path: return original string pointer as i64 ---
         builder->SetInsertPoint(noPadBB);
-        llvm::Value* origI64 = builder->CreatePtrToInt(strPtr, getDefaultType(), "strpad.origval");
+        llvm::Value* origI64 = strPtr;
         builder->CreateBr(mergeBB);
 
         // --- Pad path ---
@@ -6854,12 +6845,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullPtr);
         }
 
-        llvm::Value* padI64 = builder->CreatePtrToInt(buf, getDefaultType(), "strpad.padval");
+        llvm::Value* padI64 = buf;
         builder->CreateBr(mergeBB);
 
         // --- Merge ---
         builder->SetInsertPoint(mergeBB);
-        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "strpad.result");
+        llvm::PHINode* result = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "strpad.result");
         result->addIncoming(origI64, noPadBB);
         result->addIncoming(padI64, padBB);
         stringReturningFunctions_.insert(fnName);
@@ -6914,7 +6905,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "cmd.empty");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf);
-        llvm::Value* emptyI64 = builder->CreatePtrToInt(emptyBuf, getDefaultType(), "cmd.emptyi64");
+        llvm::Value* emptyI64 = emptyBuf;
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* nullEndBB = builder->GetInsertBlock();
 
@@ -6983,12 +6974,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* finalBuf = builder->CreateAlignedLoad(ptrTy, bufPtr, llvm::MaybeAlign(8), "cmd.fbuf");
         llvm::Value* ntPtr    = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), finalBuf, finalSz, "cmd.nt");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ntPtr);
-        llvm::Value* readResult = builder->CreatePtrToInt(finalBuf, getDefaultType(), "cmd.res");
+        llvm::Value* readResult = finalBuf;
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* readEndBB = builder->GetInsertBlock();
 
         builder->SetInsertPoint(mergeBB);
-        llvm::PHINode* cmdPhi = builder->CreatePHI(getDefaultType(), 2, "cmd.phi");
+        llvm::PHINode* cmdPhi = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "cmd.phi");
         cmdPhi->addIncoming(emptyI64, nullEndBB);
         cmdPhi->addIncoming(readResult, readEndBB);
         stringReturningFunctions_.insert("command");
@@ -7074,7 +7065,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Type::getInt8Ty(*context), outBuf, outIdx, "sfilt.nullptr");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullCharPtr);
         stringReturningFunctions_.insert("str_filter");
-        return builder->CreatePtrToInt(outBuf, getDefaultType(), "sfilt.result");
+        return outBuf;
     }
 
     // -----------------------------------------------------------------------
@@ -7349,7 +7340,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Type::getInt8Ty(*context), lsBuf, lsResultLen, "lstrip.nul");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), lsNulPtr);
         stringReturningFunctions_.insert("str_lstrip");
-        return builder->CreatePtrToInt(lsBuf, getDefaultType(), "lstrip.result");
+        return lsBuf;
     }
 
     // -----------------------------------------------------------------------
@@ -7406,7 +7397,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Type::getInt8Ty(*context), rsBuf, rsFinalEnd, "rstrip.nul");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), rsNulPtr);
         stringReturningFunctions_.insert("str_rstrip");
-        return builder->CreatePtrToInt(rsBuf, getDefaultType(), "rstrip.result");
+        return rsBuf;
     }
 
     // -----------------------------------------------------------------------
@@ -7475,7 +7466,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* adDst    = builder->CreateInBoundsGEP(getDefaultType(), adBuf, adOne, "adrop.dst");
         llvm::Value* adCpSz   = builder->CreateMul(adSliceLen, adEight, "adrop.cpsz", true, true);
         builder->CreateCall(getOrDeclareMemcpy(), {adDst, adSrc, adCpSz});
-        return builder->CreatePtrToInt(adBuf, getDefaultType(), "adrop.result");
+        return adBuf;
     }
 
     // -----------------------------------------------------------------------
@@ -7544,7 +7535,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(auDoneBB);
         llvm::Value* auFinalLen = builder->CreateAlignedLoad(getDefaultType(), auOutLenA, llvm::MaybeAlign(8), "auniq.fl");
         emitStoreArrayLen(auFinalLen, auBuf);
-        return builder->CreatePtrToInt(auBuf, getDefaultType(), "auniq.result");
+        return auBuf;
     }
 
     // -----------------------------------------------------------------------
@@ -7604,7 +7595,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(arLoopBB)));
 
         builder->SetInsertPoint(arDoneBB);
-        return builder->CreatePtrToInt(arBuf, getDefaultType(), "arot.result");
+        return arBuf;
     }
 
     // -----------------------------------------------------------------------
@@ -7762,7 +7753,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         mmInsertAll(mmBPtr, "mmerge.b");
 
         llvm::Value* mmFinalRes = builder->CreateAlignedLoad(mmPtrTy, mmResA, llvm::MaybeAlign(8), "mmerge.final");
-        return builder->CreatePtrToInt(mmFinalRes, getDefaultType(), "mmerge.result");
+        return mmFinalRes;
     }
 
     // -----------------------------------------------------------------------
@@ -7829,7 +7820,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(miDoneBB);
         llvm::Value* miFinalRes = builder->CreateAlignedLoad(miPtrTy, miResA, llvm::MaybeAlign(8), "minv.final");
-        return builder->CreatePtrToInt(miFinalRes, getDefaultType(), "minv.result");
+        return miFinalRes;
     }
 
     // -----------------------------------------------------------------------
@@ -7978,7 +7969,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* scEmptyBuf = builder->CreateCall(getOrDeclareMalloc(),
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "sudo.empty");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scEmptyBuf);
-        llvm::Value* scEmptyI64 = builder->CreatePtrToInt(scEmptyBuf, getDefaultType(), "sudo.emptyi64");
+        llvm::Value* scEmptyI64 = scEmptyBuf;
         builder->CreateBr(scMergeBB);
         llvm::BasicBlock* scNullEndBB = builder->GetInsertBlock();
 
@@ -8048,12 +8039,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* scNtPtr    = builder->CreateInBoundsGEP(
             llvm::Type::getInt8Ty(*context), scFinalBuf, scFinalSz, "sudo.nt");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scNtPtr);
-        llvm::Value* scReadResult = builder->CreatePtrToInt(scFinalBuf, getDefaultType(), "sudo.res");
+        llvm::Value* scReadResult = scFinalBuf;
         builder->CreateBr(scMergeBB);
         llvm::BasicBlock* scReadEndBB = builder->GetInsertBlock();
 
         builder->SetInsertPoint(scMergeBB);
-        llvm::PHINode* scPhi = builder->CreatePHI(getDefaultType(), 2, "sudo.phi");
+        llvm::PHINode* scPhi = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "sudo.phi");
         scPhi->addIncoming(scEmptyI64, scNullEndBB);
         scPhi->addIncoming(scReadResult, scReadEndBB);
         stringReturningFunctions_.insert("sudo_command");
@@ -8087,15 +8078,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "env_get.empty");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf);
-        llvm::Value* emptyI64 = builder->CreatePtrToInt(emptyBuf, getDefaultType(), "env_get.emptyi64");
+        llvm::Value* emptyI64 = emptyBuf;
         builder->CreateBr(mergeBB);
 
         builder->SetInsertPoint(okBB);
-        llvm::Value* okI64 = builder->CreatePtrToInt(envPtr, getDefaultType(), "env_get.i64");
+        llvm::Value* okI64 = envPtr;
         builder->CreateBr(mergeBB);
 
         builder->SetInsertPoint(mergeBB);
-        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "env_get.phi");
+        llvm::PHINode* phi = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "env_get.phi");
         phi->addIncoming(emptyI64, nullBB);
         phi->addIncoming(okI64, okBB);
         stringReturningFunctions_.insert("env_get");
@@ -8324,7 +8315,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(doneBB);
         arrayReturningFunctions_.insert("array_zip");
-        return builder->CreatePtrToInt(buf, getDefaultType(), "azip.result");
+        return buf;
     }
 
     // ── BigInt builtins ──────────────────────────────────────────────────────
@@ -8648,7 +8639,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // mat_new returns a matrix handle — treat it like an array-returning function
         // so the codegen knows its result is a heap pointer.
         arrayReturningFunctions_.insert("mat_new");
-        return builder->CreatePtrToInt(buf, getDefaultType(), "mat.new.result");
+        return buf;
     }
 
     // ── mat_fill(rows, cols, val) ───────────────────────────────────────────
@@ -8702,7 +8693,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                     llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
             });
         arrayReturningFunctions_.insert("mat_fill");
-        return builder->CreatePtrToInt(buf, getDefaultType(), "matf.result");
+        return buf;
     }
 
     // ── mat_rows(m) ─────────────────────────────────────────────────────────
@@ -8832,7 +8823,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 builder->CreateBr(jLoopBB);
             });
         arrayReturningFunctions_.insert("mat_transp");
-        return builder->CreatePtrToInt(tBuf, getDefaultType(), "matt.result");
+        return tBuf;
     }
 
     // ── mat_mul(a, b) ────────────────────────────────────────────────────────
@@ -8923,7 +8914,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 builder->CreateBr(jLoopBB);
             });
         arrayReturningFunctions_.insert("mat_mul");
-        return builder->CreatePtrToInt(cBuf, getDefaultType(), "matm.result");
+        return cBuf;
     }
 
     // ── newRegion() ── create a region handle (malloc-backed arena pointer) ──
@@ -8943,7 +8934,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             {llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 8)},
             "region.hdr");
         // Return as a pointer-sized integer so it fits in the default i64 type.
-        return builder->CreatePtrToInt(hdr, getDefaultType(), "region.handle");
+        return hdr;
     }
 
     // ── alloc(region, size) ── allocate `size` bytes via malloc ──────────────
@@ -8965,7 +8956,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             mallocFn,
             {builder->CreateIntCast(sizeVal, llvm::Type::getInt64Ty(*context), false, "alloc.sz64")},
             "region.alloc");
-        return builder->CreatePtrToInt(ptr, getDefaultType(), "region.ptr");
+        return ptr;
     }
 
     // ── malloc(size) ── allocate `size` bytes, return raw ptr ────────────────
@@ -9022,7 +9013,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             ? urlVal
             : builder->CreateIntToPtr(urlVal, ptrTy, "hget.url");
         llvm::Value* result = builder->CreateCall(getOrDeclareHttpGet(), {urlPtr}, "hget.body");
-        return builder->CreatePtrToInt(result, getDefaultType(), "hget.i64");
+        return result;
     }
 
     // http_post(url, body[, content_type]) → body string
@@ -9045,7 +9036,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* result = builder->CreateCall(
             getOrDeclareHttpPost(), {urlPtr, bodyPtr, ctPtr}, "hpost.body");
-        return builder->CreatePtrToInt(result, getDefaultType(), "hpost.i64");
+        return result;
     }
 
     // http_request(method, url, body, headers) → body string
@@ -9070,7 +9061,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             : nullPtr();
         llvm::Value* result = builder->CreateCall(
             getOrDeclareHttpRequest(), {methodPtr, urlPtr, bodyPtr, hdrsPtr}, "hreq.body");
-        return builder->CreatePtrToInt(result, getDefaultType(), "hreq.i64");
+        return result;
     }
 
     // http_status(url) → HTTP status code (int)

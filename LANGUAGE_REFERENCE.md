@@ -45,14 +45,14 @@
 
 ## 1. Overview
 
-OmScript is a dynamically typed, compiled programming language designed for high-performance computing with an emphasis on optimization, control, and clarity. Variables hold i64 values by default; type annotations are optional in general code but required inside `OPTMAX` blocks and accepted everywhere for documentation and LLVM optimization hints. It compiles to native code via LLVM, offering manual control over optimization strategies while maintaining modern language ergonomics.
+OmScript is a **statically typed**, compiled programming language designed for high-performance computing with an emphasis on optimization, control, and clarity. All variable declarations require explicit type annotations. Arrays, maps, strings, and structs are represented as typed pointers in LLVM IR — there are no runtime type tags and no boxing. It compiles to native code via LLVM, offering manual control over optimization strategies while maintaining modern language ergonomics.
 
 ### Design Goals
 
 - **Performance**: Native compilation through LLVM with a multi-layer optimizer (AST pre-passes → E-graph → superoptimizer → HGOE)
 - **Control**: Fine-grained control over optimization strategies, vectorization, memory layout, and per-function annotations
-- **Explicit memory**: Arrays, maps, and strings are heap-allocated (`malloc`/`free`); the compiler promotes safe allocations to stack or read-only globals automatically
-- **Ergonomics**: Modern syntax with type inference, functional programming builtins, lambdas, and pipe operator
+- **Explicit memory**: Arrays, maps, and strings are heap-allocated (`malloc`/`free`); the compiler promotes safe allocations to stack or read-only globals automatically; typed values are represented as LLVM pointer types throughout — no `ptrtoint` round-trips for typed array/struct/map variables
+- **Ergonomics**: Modern syntax with mandatory type annotations, functional programming builtins, lambdas, and pipe operator
 - **Compiler transparency**: Optimization feedback (`-v`), LLVM IR emission (`emit-ir`), and direct access to compiler hints via `@opt`, `@semantics`, `@memory`
 
 ### Source of Truth
@@ -1252,7 +1252,7 @@ struct Point {
 }
 ```
 
-**Fields are untyped** in the declaration (dynamic typing); type information is inferred from usage.
+**Fields** must have explicit type annotations when the struct is declared with typed fields. For structs declared without per-field annotations (legacy form), fields default to `i64` and type information is inferred from usage.
 
 **Representation**: Opaque pointer to heap-allocated struct object (reference-counted).
 
@@ -6013,15 +6013,17 @@ Subtract with INT64_MAX/MIN clamping.
 
 ### 19.5 Type utilities
 
-#### `typeof(any) → string`
+#### `typeof(any) → int` *(deprecated)*
 
-Return a string representing the type: `"int"`, `"float"`, `"string"`, `"array"`, `"dict"`, etc.
+**Deprecated** — emit a compile-time integer tag based on the static type of the argument: `1` = integer, `2` = float, `3` = string. This function is resolved entirely at compile time from static type information; it does not perform any runtime type query. Use explicit type annotations instead.
 
-**Example:**
+> **Migration**: Replace `if (typeof(x) == 2)` guards with properly typed function overloads or separate typed variables. `typeof` will be removed in a future version.
+
+**Example (legacy):**
 ```omscript
-println(typeof(42));      // "int"
-println(typeof(3.14));    // "float"
-println(typeof("hello")); // "string"
+println(typeof(42));      // 1  (compile-time constant; argument evaluated for side effects only)
+println(typeof(3.14));    // 2
+println(typeof("hello")); // 3
 ```
 
 ---
@@ -8246,7 +8248,7 @@ if (res.applied()) { /* update analyses */ }
 
 ## 27. Integer Type-Cast Reference
 
-OmScript provides explicit integer type casts as built-in functions. These are **not** part of the type system (OmScript is dynamically typed at runtime) but are codegen-time operations that emit truncation or sign-extension instructions.
+OmScript provides explicit integer type casts as built-in functions. These are codegen-time operations that emit truncation or sign-extension instructions; the result is always a 64-bit integer at the LLVM IR level.
 
 ### 27.1 Overview Table
 
@@ -8448,11 +8450,11 @@ When the argument to a cast is a **compile-time constant**, CF-CTRE folds the ca
 
 ### 27.8 Type-system interaction
 
-Casts are **runtime operations**, not type annotations. OmScript has a single `int` type at the AST level. The cast functions are built-in functions that emit IR at codegen time.
+Casts are **codegen-time operations**, not type annotations. OmScript has a single `int` type at the AST level for integer values. The cast functions are built-in functions that emit IR at codegen time.
 
-**Contrast with statically-typed languages**:
+**Contrast with C**:
 - In C: `uint32_t x = (uint32_t)y;` — type-level constraint enforced at compile time.
-- In OmScript: `let x = u32(y);` — runtime operation, `x` still has dynamic type `int`.
+- In OmScript: `let x: int = u32(y);` — codegen-time truncation + zero-extension; result is stored as `i64`.
 
 ### 27.9 Worked examples
 

@@ -5424,7 +5424,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                 llvm::GlobalValue::PrivateLinkage, initArray, "arr.ro.const");
             gv->setAlignment(llvm::Align(16));
             gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-            return builder->CreatePtrToInt(gv, getDefaultType(), "arr.ro.int");
+            return gv;
         }
 
         llvm::Value* arrPtr;
@@ -5524,7 +5524,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             }
         }
 
-        return builder->CreatePtrToInt(arrPtr, getDefaultType(), "arr.int");
+        return arrPtr;
     }
 
     // Spread path: compute total length dynamically
@@ -5644,7 +5644,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         }
     }
 
-    return builder->CreatePtrToInt(buf, getDefaultType(), "spread.result");
+    return buf;
 }
 
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
@@ -6109,7 +6109,7 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     }
 
     // The struct value travels through the rest of codegen as a pointer.
-    return builder->CreatePtrToInt(structAlloca, getDefaultType(), "struct.int");
+    return structAlloca;
 }
 
 llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
@@ -6315,7 +6315,7 @@ llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
         mapPtr = builder->CreateCall(getOrEmitHashMapSet(), {mapPtr, keyVal, valVal}, "dict.set");
     }
 
-    return builder->CreatePtrToInt(mapPtr, getDefaultType(), "dict.i");
+    return mapPtr;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6411,7 +6411,7 @@ llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
 
     // Return the new pointer (matches what generateAssign normally returns for
     // string assignments: the result is the pointer value as an i64 integer).
-    return builder->CreatePtrToInt(newPtr, getDefaultType(), "iap.result");
+    return newPtr;
 }
 
 } // namespace omscript

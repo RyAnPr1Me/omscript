@@ -777,6 +777,15 @@ llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
     return v;
 }
 
+llvm::Value* CodeGenerator::getArrayPtr(llvm::Value* v) {
+    if (v->getType()->isPointerTy())
+        return v;
+    llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
+    if (v->getType() != getDefaultType())
+        v = toDefaultType(v);
+    return builder->CreateIntToPtr(v, ptrTy, "arr.ptr");
+}
+
 llvm::Value* CodeGenerator::ensureFloat(llvm::Value* v) {
     if (v->getType()->isDoubleTy())
         return v;
@@ -6704,7 +6713,7 @@ llvm::Value* CodeGenerator::emitComptimeArray(const std::vector<ConstValue>& ele
         llvm::GlobalValue::PrivateLinkage, arrConst, ".comptime.arr");
     gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
     gv->setAlignment(llvm::Align(8));
-    return builder->CreatePtrToInt(gv, i64Ty, "comptime.arr");
+    return gv;
 }
 
 void CodeGenerator::generateAssume(AssumeStmt* stmt) {
