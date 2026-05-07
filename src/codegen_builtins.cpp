@@ -4038,15 +4038,33 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // calloc(slots, 8) returns pre-zeroed memory — both the header
             buf = builder->CreateCall(getOrDeclareCalloc(), {slots, eight}, "fill.buf");
             llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
-            llvm::cast<llvm::CallInst>(buf)->addRetAttr(
-                llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+            // Advertise exact allocation when sizeArg is constant (common case after
+            // constant propagation: `array_fill(100, 0)` → known 808-byte buffer).
+            if (auto* constSize = llvm::dyn_cast<llvm::ConstantInt>(sizeArg)) {
+                const uint64_t exactBytes = (constSize->getZExtValue() + 1) * 8;
+                llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                    llvm::Attribute::getWithDereferenceableBytes(*context, exactBytes));
+            } else {
+                llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                    llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+            }
             // Store length in header (calloc zeroed it; overwrite with actual size)
             emitStoreArrayLen(sizeArg, buf);
         } else {
             llvm::Value* bytes = builder->CreateMul(slots, eight, "fill.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
             buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "fill.buf");
-            llvm::cast<llvm::CallInst>(buf)->addRetAttr(
-                llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+            llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+            // Advertise exact allocation size to LLVM when sizeArg is a constant
+            // so alias analysis, bounds checks, and vectorization can use it.
+            if (auto* constSize = llvm::dyn_cast<llvm::ConstantInt>(sizeArg)) {
+                const uint64_t exactBytes = (constSize->getZExtValue() + 1) * 8;
+                llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                    llvm::Attribute::getWithDereferenceableBytes(*context, exactBytes));
+            } else {
+                // Dynamic size: at minimum the 8-byte header is always valid.
+                llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                    llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+            }
             emitStoreArrayLen(sizeArg, buf);
             // Fill loop
             llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -4088,8 +4106,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "aconcat.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, llvm::ConstantInt::get(getDefaultType(), 8), "aconcat.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "aconcat.buf");
-        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
-            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+        // Advertise exact allocation when both source lengths are known constants.
+        if (auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(len1)) {
+            if (auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(len2)) {
+                const uint64_t exactBytes = (c1->getZExtValue() + c2->getZExtValue() + 1) * 8;
+                llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                    llvm::Attribute::getWithDereferenceableBytes(*context, exactBytes));
+            } else {
+                llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                    llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+            }
+        } else {
+            llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+                llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        }
         emitStoreArrayLen(totalLen, buf);
         // Copy arr1 elements (len1 * 8 bytes starting at arr1[1])
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);

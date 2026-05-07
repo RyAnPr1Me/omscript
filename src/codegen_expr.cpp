@@ -5549,6 +5549,17 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     llvm::Value* slots = builder->CreateAdd(totalLen, one, "spread.slots");
     llvm::Value* bytes = builder->CreateMul(slots, eight, "spread.bytes");
     llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "spread.buf");
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+    // Advertise exact allocation size when bytes is a compile-time constant
+    // (all elements are scalars with no dynamic spreads) so LLVM's alias
+    // analysis and vectorizer can reason about the buffer extent.
+    if (auto* constBytes = llvm::dyn_cast<llvm::ConstantInt>(bytes)) {
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, constBytes->getZExtValue()));
+    } else {
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+    }
     // AlignedStore(8) + tbaaArrayLen_: length header in slot 0 is 8-byte aligned.
     auto* totalLenSt = builder->CreateAlignedStore(totalLen, buf, llvm::MaybeAlign(8));
     totalLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);

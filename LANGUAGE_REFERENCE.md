@@ -45,15 +45,15 @@
 
 ## 1. Overview
 
-OmScript is a statically-typed, compiled programming language designed for high-performance computing with an emphasis on optimization, control, and clarity. It compiles to native code via LLVM, offering manual control over optimization strategies while maintaining modern language ergonomics.
+OmScript is a dynamically typed, compiled programming language designed for high-performance computing with an emphasis on optimization, control, and clarity. Variables hold i64 values by default; type annotations are optional in general code but required inside `OPTMAX` blocks and accepted everywhere for documentation and LLVM optimization hints. It compiles to native code via LLVM, offering manual control over optimization strategies while maintaining modern language ergonomics.
 
 ### Design Goals
 
-- **Performance**: Native compilation through LLVM with aggressive optimization support
-- **Control**: Fine-grained control over optimization strategies, vectorization, and memory layout
-- **Safety with escape hatches**: Type safety by default with explicit mechanisms for unsafe operations
-- **Ergonomics**: Modern syntax with type inference, pattern matching, and functional programming features
-- **Compiler transparency**: Direct access to compiler optimization hints and runtime characteristics
+- **Performance**: Native compilation through LLVM with a multi-layer optimizer (AST pre-passes → E-graph → superoptimizer → HGOE)
+- **Control**: Fine-grained control over optimization strategies, vectorization, memory layout, and per-function annotations
+- **Explicit memory**: Arrays, maps, and strings are heap-allocated (`malloc`/`free`); the compiler promotes safe allocations to stack or read-only globals automatically
+- **Ergonomics**: Modern syntax with type inference, functional programming builtins, lambdas, and pipe operator
+- **Compiler transparency**: Optimization feedback (`-v`), LLVM IR emission (`emit-ir`), and direct access to compiler hints via `@opt`, `@semantics`, `@memory`
 
 ### Source of Truth
 
@@ -3483,19 +3483,25 @@ var g: int = Color::GREEN;  // 10 (scope resolution syntax)
 [length: i64][element₀: i64][element₁: i64]...[element_{n-1}: i64]
 ```
 
-- **Header:** 8-byte signed integer storing the logical element count.
-- **Element storage:** Contiguous i64 slots immediately following the header.
-- **Element type:** All array elements are i64 by default (supports integers, floats-as-i64-bits, and string pointers).
-- **Zero-initialization:** Array elements are NOT zero-initialized by default (caller must explicitly fill or assign).
-- **Pointer representation:** Arrays pass as i64 (ptrtoint of the allocation) across function boundaries; callers convert via `IntToPtr` to access elements.
+- **Header:** 8-byte signed integer at slot 0 storing the logical element count.
+- **Element storage:** Contiguous i64 slots at offsets 8, 16, 24, … from the base pointer.
+- **Element type:** All array elements are i64 by default (integers, floats stored as IEEE 754 bits, string pointers cast to i64).
+- **Zero-initialization:** Array elements are NOT zero-initialized by default unless `array_fill(n, 0)` is used (which emits `calloc`) or the literal path detects all-zero elements.
+- **Pointer representation:** Arrays are passed as `i64` (pointer-to-integer) across function call boundaries. Callers convert back via `IntToPtr` before accessing elements.
+- **Minimum heap capacity:** An empty heap array (`var a = []`) pre-allocates **16 slots = 128 bytes** so the first 15 `push()` calls never trigger a `realloc`. This eliminates the LLVM `dereferenceable(8)`/`allocsize` mismatch that breaks alias analysis when `malloc(8)` is immediately followed by `realloc`.
 
 **Metadata tracking:**
-- `arrayLenRangeMD_`: LLVM range metadata `!range [0, 2^63)` attached to length loads, informing optimizations that array lengths are always non-negative.
-- `tbaaArrayLen_`, `tbaaArrayData_`: TBAA (Type-Based Alias Analysis) tags distinguish length field from element data, enabling aggressive load/store reordering.
+- `arrayLenRangeMD_`: LLVM `!range [0, 2^63)` metadata attached to all length loads, proving to the optimizer that lengths are always non-negative (enables unsigned comparisons for loop bounds).
+- `tbaaArrayLen_`, `tbaaArrayElem_`: distinct TBAA tags on the header slot vs element slots; lets the optimizer reorder element stores past length loads (they can't alias).
 
 **Address calculations:**
-- Element at index `i` resides at byte offset `(i + 1) * 8` from the array base pointer.
-- Negative indices are NOT supported by the runtime (indexing with `i < 0` is undefined behavior).
+- Element at index `i` (0-based) resides at `basePtr + (i + 1) * 8`.
+- Negative indices are NOT supported — indexing with `i < 0` is undefined behavior.
+
+**`push()` growth strategy:**
+- Capacity is tracked implicitly: the number of allocated slots = the next power-of-2 ≥ `length + 1`, or `kMinArrayCapacity` (16) if smaller.
+- On every `push(arr, v)`, the code checks whether `oldSlots` is a power-of-2 AND ≥ 16. If so, the buffer is doubled using `ctlz`-based `nextPow2(newLen + 1)` and `realloc`. Otherwise the existing buffer is reused at zero cost.
+- `realloc` is called at most O(log n) times for n pushes. The grow path is weighted 1:99 (predicted not-taken) for branch predictor hinting.
 
 ### 11.2 Construction
 
@@ -3504,16 +3510,34 @@ var g: int = Color::GREEN;  // 10 (scope resolution syntax)
 ```omscript
 var a = [1, 2, 3, 4];            // 4-element array
 var b = [10 * 2, 30, sum(x)];    // expressions allowed
+var c = [1, ...a, 5];            // spread — creates a new 6-element array
 ```
 
-**Compile-time evaluation:** When all elements are compile-time constant integers, the parser emits a `LiteralExpr` with `literalType = ARRAY` and `arrayValue = vector<int64_t>`. The code generator replaces this with a single `memcpy` from a global constant array, eliminating per-element stores.
+**Three-tier allocation strategy** (decided at the variable-declaration site):
+
+| Tier | Condition | IR emitted |
+|------|-----------|------------|
+| **Read-only global** (O2+) | All elements are compile-time integer constants AND the variable has only read-only uses | `private unnamed_addr constant [n+1 x i64]` global; pointer returned as `ptrtoint`. Zero runtime cost; length + data in a single cache line. |
+| **Stack alloca** (O1+) | Element count ≤ 512 AND variable doesn't escape its scope (or is `const`) | `alloca [n+1 x i64]` in function entry block; 16-byte aligned. Freed automatically on function exit. |
+| **Heap malloc** | Everything else (dynamic expressions, escaping variables, > 512 elements) | `malloc((n+1)*8)` with `nonnull` + `dereferenceable((n+1)*8)` return attributes. For empty arrays (`n=0`), pre-allocates `kMinArrayCapacity * 8 = 128` bytes. |
+
+**Const integer literal fast path (heap tier):** When all elements are compile-time integer constants but the variable escapes (so a heap allocation is needed), the code generator builds a `private unnamed_addr constant` global for the data and emits a single `memcpy` into the malloc'd buffer — no per-element stores.
+
+**Spread literals:** A spread expression `[a, ...b, c]` computes the total element count dynamically (summing `len()` of each spread source), allocates exactly `(totalLen+1)*8` bytes, and copies elements using typed loops with `inbounds` GEPs and TBAA-tagged stores. The malloc call carries `nonnull` and, when `totalLen` is a compile-time constant, `dereferenceable(totalBytes)`.
 
 #### `array_fill(n, val)`
 
 **Signature:** `array_fill(i64, any) → array`  
 **Semantics:** Allocate an array of length `n` and initialize every element to `val`.  
-**Time complexity:** O(n)  
-**Implementation:** Allocates `(n+1)*8` bytes via `malloc`, stores `n` in slot 0, then loop-stores `val` into slots 1..n.
+**Time complexity:** O(n)
+
+**Allocation fast paths:**
+
+1. **Read-only global (O2+):** When both `n` and `val` are compile-time constants, `2 ≤ n ≤ 1024`, and the variable has only read-only uses, the compiler emits a `private unnamed_addr constant` LLVM global initialized with `[n, val, val, …]` — zero runtime allocation.
+2. **Zero-fill heap:** When `val` is 0 at compile time, emits `calloc(n+1, 8)` — avoids a `malloc` + fill loop, lets the OS/allocator supply pre-zeroed pages.
+3. **General heap:** For dynamic `val`, emits `malloc((n+1)*8)` followed by a vectorizable fill loop with `llvm.loop.vectorize.enable` metadata.
+
+In all heap paths the returned pointer carries `nonnull` and `dereferenceable((n+1)*8)` (exact bytes when `n` is constant, conservative `dereferenceable(8)` otherwise).
 
 **Example:**
 ```omscript
@@ -3521,8 +3545,6 @@ var a = array_fill(100, 42);   // [42, 42, ..., 42] (100 elements)
 println(len(a));                // 100
 println(a[0]);                  // 42
 ```
-
-**Constant folding:** When both `n` and `val` are compile-time constants AND `n*sizeof(i64) <= 4096`, the compiler may emit a stack alloca + unrolled stores instead of a heap allocation.
 
 #### Type-annotated literals (planned feature)
 

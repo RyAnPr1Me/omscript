@@ -1,6 +1,6 @@
 # OmScript
 
-A low-level, C-like programming language with dynamic typing and **automatic reference counting memory management**. Features a **heavily optimized AOT compiler** using LLVM, a **lightweight adaptive JIT runtime** that recompiles hot functions with aggressive optimizations, and a **three-layer optimization engine** (equality-saturation E-graph, superoptimizer, and hardware-graph-driven instruction scheduler) that produces near-optimal native machine code for each target CPU.
+A low-level, C-like programming language with dynamic typing and **explicit malloc/free memory management** (no garbage collector, no reference counting). Features a **heavily optimized AOT compiler** using LLVM, a **lightweight adaptive JIT runtime** that recompiles hot functions with aggressive optimizations, and a **multi-layer optimization engine** (AST pre-passes, equality-saturation E-graph, superoptimizer, and hardware-graph-driven instruction scheduler) that produces near-optimal native machine code for each target CPU.
 
 **Current version: 4.3.2**
 
@@ -11,7 +11,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Structs**: Lightweight named record types with field access and mutation
 - **Modules / Import**: Split programs across files with `import "file.om";` — duplicate/circular imports are silently deduplicated
 - **Aggressive AOT Compilation**: Multi-level LLVM optimization (O0–O3) for maximum performance
-- **Reference Counted Memory**: Automatic memory management using malloc/free with deterministic deallocation; no GC pauses
+- **Explicit Memory Management**: Arrays, maps, and strings are heap-allocated via `malloc`/`free`; no GC pauses, no reference counting. Small, non-escaping arrays are automatically stack-allocated (alloca) by the escape-analysis pass. Read-only integer-literal arrays become zero-overhead private globals at O2+.
 - **Lambda Expressions**: Anonymous functions with `|x| x * 2` syntax for use with higher-order builtins
 - **Pipe Operator**: Left-to-right function chaining with `expr |> fn`
 - **Spread Operator**: Array unpacking in literals with `[1, ...arr, 2]`
@@ -520,7 +520,7 @@ var x = 10; /* inline */
 ### Threading
 | Function | Description |
 |----------|-------------|
-| `thread_create(fn, arg)` | Spawn thread, returns handle |
+| `thread_create(fn)` | Spawn thread, returns handle |
 | `thread_join(t)` | Wait for thread to finish |
 | `mutex_new()` | Create mutex |
 | `mutex_lock(m)` | Acquire mutex |
