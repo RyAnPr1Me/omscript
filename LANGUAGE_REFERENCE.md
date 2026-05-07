@@ -1943,6 +1943,9 @@ Declares behavioral contracts that the optimizer may rely on.
 | `restrict` | Pointer parameters do not alias each other (C `restrict` on all ptr params) |
 | `noalias` | Same as `restrict` |
 | `const_eval` | Compile-time foldable when all arguments are constants |
+| `willreturn` | Function always terminates in finite time (no infinite loops or unbounded recursion). Enables DSE and load-forwarding across the call. |
+| `nosync` | No synchronization, mutex, or blocking I/O. Enables call reordering and speculative CSE. |
+| `nofree` | Function never deallocates memory. Alias analysis can prove that pointers live across the call remain valid. |
 
 ```omscript
 @semantics(pure, nounwind)
@@ -1962,9 +1965,18 @@ fn dot_product(a: ptr<int>, b: ptr<int>, n: int) -> int {
     for (i: int in 0...n) { s = s + a[i] * b[i] }
     return s
 }
+
+@semantics(willreturn, nosync, nofree)
+fn compute_hash(data: ptr<int>, n: int) -> int {
+    var h: int = 0
+    for (i: int in 0...n) { h = h ^ (data[i] * 2654435761) }
+    return h
+}
 ```
 
 **Combining `pure` + `speculatable`** gives the strongest optimization signal: `pure` proves read-only semantics; `speculatable` additionally permits the call to be executed speculatively before all guards are evaluated.
+
+**`willreturn` + `nosync` + `nofree`** is a strong combination for pure compute functions: it tells LLVM the call can be sunk/hoisted, reordered freely, and all pointers passed in remain alive after the call returns.
 
 ---
 

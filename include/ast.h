@@ -642,6 +642,9 @@ class FunctionDecl : public ASTNode {
     bool hintConstEval = false;   ///< @semantics(const_eval) — evaluate at compile time when all args are constants
     int  hintAlign = 0;           ///< @opt(align=N) / @opt(align=AUTO) — align function entry (0=default, -1=auto/64B, N=exact)
     bool hintSpeculatable = false; ///< @semantics(speculatable) — may be hoisted/speculated across branches
+    bool hintWillReturn = false;  ///< @semantics(willreturn) — function always terminates in finite time
+    bool hintNoSync = false;      ///< @semantics(nosync) — no synchronization, mutex, or I/O side effects
+    bool hintNoFree = false;      ///< @semantics(nofree) — function never frees/deallocates memory
     OptMaxConfig optMaxConfig;    ///< OPTMAX v2 configuration (enabled when @optmax / @optmax(...) is used)
 
     /// @memory(allocator, size=N, count=M) — marks this function as an allocator

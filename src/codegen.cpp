@@ -4868,6 +4868,25 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::Speculatable);
     }
 
+    // @semantics(willreturn): user guarantees this function always terminates in
+    // finite time (no infinite loops, no unbounded recursion).  LLVM uses this
+    // to allow DSE and loop-carried analysis across the call.
+    if (func->hintWillReturn) {
+        function->addFnAttr(llvm::Attribute::WillReturn);
+    }
+
+    // @semantics(nosync): no synchronization, mutex, or blocking I/O inside.
+    // Lets the optimizer reorder or CSE calls across speculative paths.
+    if (func->hintNoSync) {
+        function->setNoSync();
+    }
+
+    // @semantics(nofree): function never deallocates memory.  Alias analysis can
+    // then prove that pointers live across the call boundary remain valid.
+    if (func->hintNoFree) {
+        function->addFnAttr(llvm::Attribute::NoFree);
+    }
+
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.
     if (inOptMaxFunction) {
         // OPTMAX is the user's guarantee that this function always terminates,

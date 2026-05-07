@@ -510,6 +510,9 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintMinSize = false, hintOptNone = false, hintNoUnwind = false;
             bool hintConstEval = false;
             bool hintSpeculatable = false;
+            bool hintWillReturn = false;
+            bool hintNoSync = false;
+            bool hintNoFree = false;
             int  hintAlign = 0;
             bool isOptMaxFromAnnotation = false;
             OptMaxConfig optMaxCfgFromAnnotation;
@@ -586,11 +589,15 @@ std::unique_ptr<Program> Parser::parse() {
                         else if (key.lexeme == "restrict")   hintRestrict     = true;
                         else if (key.lexeme == "noalias")    hintRestrict     = true;
                         else if (key.lexeme == "const_eval") hintConstEval    = true;
+                        else if (key.lexeme == "willreturn") hintWillReturn   = true;
+                        else if (key.lexeme == "nosync")     hintNoSync       = true;
+                        else if (key.lexeme == "nofree")     hintNoFree       = true;
                         else {
                             error("Unknown attribute '" + key.lexeme +
                                   "' in @semantics(...);"
                                   " valid: pure, speculatable, noreturn, nounwind,"
-                                  " restrict, noalias, const_eval");
+                                  " restrict, noalias, const_eval,"
+                                  " willreturn, nosync, nofree");
                         }
                         if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
                     }
@@ -782,7 +789,8 @@ std::unique_ptr<Program> Parser::parse() {
                           "            unroll, nounroll, parallel, noparallel, flatten,\n"
                           "            minsize, optnone, align, align=N, align=AUTO\n"
                           "  @semantics: pure, speculatable, noreturn, nounwind,\n"
-                          "              restrict, noalias, const_eval\n"
+                          "              restrict, noalias, const_eval,\n"
+                          "              willreturn, nosync, nofree\n"
                           "  @memory : none, readonly, writeonly, readwrite,\n"
                           "            argmem, argmem_ro,\n"
                           "            inaccessiblemem, inaccessiblemem_or_argmem,\n"
@@ -812,6 +820,9 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintNoUnwind = hintNoUnwind;
             func->hintConstEval = hintConstEval;
             func->hintSpeculatable = hintSpeculatable;
+            func->hintWillReturn = hintWillReturn;
+            func->hintNoSync = hintNoSync;
+            func->hintNoFree = hintNoFree;
             func->hintAlign = hintAlign;
             func->allocatorSizeParam = allocatorSizeParam;
             func->allocatorCountParam = allocatorCountParam;
@@ -852,6 +863,11 @@ std::unique_ptr<Program> Parser::parse() {
             if (hintParallelize && hintNoParallelize) {
                 warnings_.push_back("warning: '@opt(parallel)' and '@opt(noparallel)' are contradictory on function '"
                     + func->name + "' — noparallel takes precedence");
+            }
+            // @semantics(willreturn) and @semantics(noreturn) are contradictory.
+            if (hintWillReturn && hintNoReturn) {
+                warnings_.push_back("warning: '@semantics(willreturn)' and '@semantics(noreturn)' are contradictory on function '"
+                    + func->name + "' — noreturn takes precedence");
             }
             // @semantics(pure) implies memory(none) or memory(read) — warn if
             // an explicit @memory access level contradicts that contract.
