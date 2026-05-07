@@ -66,7 +66,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=92
+NUM_BENCHMARKS=94
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -161,6 +161,8 @@ BENCH_NAME=(
     "ptr_noalias"        # 89 — OPTMAX memory={noalias=true} on pointer-heavy computation
     "const_fold"         # 90 — compile-time integer constant folding in alg_simp_pass
     "mul_new_str"        # 91 — strength reduction for multipliers 23, 29, 35, 38, 39, 42, 44
+    "ternary_fold"       # 92 — constant-condition ternary folding + not-of-comparison pushdown
+    "mul_more_str"       # 93 — strength reduction for multipliers 46, 47, 52, 54, 55, 58, 59, 61
 )
 
 BENCH_DESC=(
@@ -352,6 +354,8 @@ BENCH_N=(
      5000000  # 89  ptr_noalias
     10000000  # 90  const_fold
     10000000  # 91  mul_new_str
+    10000000  # 92  ternary_fold
+    10000000  # 93  mul_more_str
 )
 
 BOTTLENECK_LABELS=(
@@ -447,6 +451,8 @@ BOTTLENECK_LABELS=(
     "OPTMAX noalias ptr loop: all ptr params marked noalias → wide SIMD without alias guards"
     "const_fold: early literal folding removes redundant IR nodes before LLVM sees them"
     "mul_new_str: e-graph shift+add/sub sequences for unusual multipliers reduce latency chains"
+    "ternary_fold: constant-condition ternary removed at AST; not-of-comparison pushed to !=/>= etc."
+    "mul_more_str: e-graph strength reduction for 3-op multipliers 46/47/52/54/55/58/59/61"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -2474,6 +2480,51 @@ fn bench_mulnewstr(@prefetch n:int) -> int {
     return acc;
 }
 
+// ── 92. ternary_fold ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+// Tests ternary constant-condition folding (1?a:b→a, 0?a:b→b) and
+// logical-not-of-comparison pushdown (!(a<b)→a>=b) in alg_simp_pass.
+// The folded selects become plain arithmetic; C writes the same without
+// any conditionals so both see the same loop body.
+@hot @flatten @unroll @pure @vectorize @static @nounwind
+fn bench_ternfold(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        // Constant-condition ternaries that alg_simp_pass must eliminate.
+        // After folding, these collapse to purely arithmetic expressions.
+        const pick:int = 1 > 0 ? i * 3 : i * 7;   // folds to i*3
+        const skip:int = 0 > 1 ? i * 5 : i * 2;   // folds to i*2
+        // not-of-comparison: !(i < n) becomes i >= n; used as a multiplier
+        // to exercise the pushdown.  When i < n is always true in [0,n),
+        // !(i < n) is always 0 so acc += 0 (DCE removes it).
+        var not_lt:int = !(i < n) ? 1 : 0;
+        acc += pick + skip + not_lt;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 93. mul_more_str ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+// Tests strength reduction for new 3-op multipliers 46, 47, 52, 54, 55,
+// 58, 59, 61 added to the e-graph.
+@hot @flatten @unroll @pure @vectorize @static @nounwind
+fn bench_mulmorestr(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        acc += i * 46;
+        acc ^= i * 47;
+        acc += i * 52;
+        acc ^= i * 54;
+        acc += i * 55;
+        acc ^= i * 58;
+        acc += i * 59;
+        acc ^= i * 61;
+    }
+    invalidate n;
+    return acc;
+}
+
 // ── main dispatch ─────────────────────────────────────────────
 fn main() -> int {
     var test_id:int = input();
@@ -2572,6 +2623,8 @@ fn main() -> int {
         case 89: print(bench_ptr_noalias(n));      break;
         case 90: print(bench_constfold(n));        break;
         case 91: print(bench_mulnewstr(n));        break;
+        case 92: print(bench_ternfold(n));         break;
+        case 93: print(bench_mulmorestr(n));       break;
         default: print(0);
     }
     invalidate n;
@@ -4162,6 +4215,40 @@ static long bench_mulnewstr(long n) {
     return acc;
 }
 
+static long bench_ternfold(long n) {
+    /* Test ternary constant folding and not-of-comparison.
+       C resolves the same conditions at compile time; OM achieves
+       equivalent IR via the new alg_simp_pass rules. */
+    long acc = 0;
+    BH_IVDEP
+    for (long i = 0; i < n; i++) {
+        /* Constant-condition ternaries folded at compile time */
+        long pick = (1 > 0) ? i * 3 : i * 7;   /* → i*3 */
+        long skip = (0 > 1) ? i * 5 : i * 2;   /* → i*2 */
+        long not_lt = (i < n) ? 0 : 1;          /* always 0 in [0,n) */
+        acc += pick + skip + not_lt;
+    }
+    return acc;
+}
+
+static long bench_mulmorestr(long n) {
+    /* Test strength reduction for 3-op multipliers 46, 47, 52, 54, 55,
+       58, 59, 61.  Clang -O3 emits shift+add/sub; OM via new e-graph rules. */
+    long acc = 0;
+    BH_IVDEP
+    for (long i = 0; i < n; i++) {
+        acc += i * 46;
+        acc ^= i * 47;
+        acc += i * 52;
+        acc ^= i * 54;
+        acc += i * 55;
+        acc ^= i * 58;
+        acc += i * 59;
+        acc ^= i * 61;
+    }
+    return acc;
+}
+
 /* ── Close the global hot-attribute push ─────────────────────── */
 #ifdef __clang__
 #  pragma clang attribute pop
@@ -4265,6 +4352,8 @@ int main(void) {
         case 89: r = bench_ptr_noalias(n);         break;
         case 90: r = bench_constfold(n);           break;
         case 91: r = bench_mulnewstr(n);           break;
+        case 92: r = bench_ternfold(n);            break;
+        case 93: r = bench_mulmorestr(n);          break;
     }
     printf("%ld\n", r);
     return 0;

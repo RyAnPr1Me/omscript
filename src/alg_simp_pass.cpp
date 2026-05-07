@@ -496,6 +496,62 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 return count;
             }
         }
+
+        // ── Push logical NOT into comparison operators ─────────────────────
+        // !(a == b) → a != b,  !(a != b) → a == b,
+        // !(a <  b) → a >= b,  !(a >  b) → a <= b,
+        // !(a <= b) → a >  b,  !(a >= b) → a <  b
+        // This is always correct for integers; the egraph does it at the IR
+        // level, but doing it at the AST level allows downstream passes to
+        // see a simpler comparison expression.
+        if (un->op == "!" && un->operand &&
+                un->operand->type == ASTNodeType::BINARY_EXPR) {
+            auto* inner = static_cast<BinaryExpr*>(un->operand.get());
+            std::string flipped;
+            if      (inner->op == "==") flipped = "!=";
+            else if (inner->op == "!=") flipped = "==";
+            else if (inner->op == "<" ) flipped = ">=";
+            else if (inner->op == ">" ) flipped = "<=";
+            else if (inner->op == "<=") flipped = ">";
+            else if (inner->op == ">=") flipped = "<";
+            if (!flipped.empty()) {
+                auto newBin = std::make_unique<BinaryExpr>(
+                    flipped,
+                    std::move(inner->left),
+                    std::move(inner->right));
+                expr = std::move(newBin);
+                ++count;
+                return count;
+            }
+        }
+    }
+
+    // ── Ternary constant-condition folding ────────────────────────────────
+    // If the condition is an integer literal, we can statically choose a branch.
+    //   non-zero ? a : b  →  a
+    //   0        ? a : b  →  b
+    // If both arms are the same identifier we can also drop the condition.
+    //   cond ? x : x  →  x  (when both arms are the same variable name)
+    if (expr->type == ASTNodeType::TERNARY_EXPR) {
+        auto* tern = static_cast<TernaryExpr*>(expr.get());
+        long long cv = 0;
+        if (isIntLiteral(tern->condition.get(), &cv)) {
+            // Statically resolve the branch.
+            if (cv != 0) {
+                expr = std::move(tern->thenExpr);
+            } else {
+                expr = std::move(tern->elseExpr);
+            }
+            ++count;
+            return count;
+        }
+        // cond ? x : x  →  x  (both arms are the same simple identifier)
+        if (sameIdent(tern->thenExpr.get(), tern->elseExpr.get())) {
+            expr = makeIdentifier(
+                static_cast<IdentifierExpr*>(tern->thenExpr.get())->name);
+            ++count;
+            return count;
+        }
     }
 
     return count;
