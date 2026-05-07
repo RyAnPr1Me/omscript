@@ -683,16 +683,19 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 }
 
 void CodeGenerator::generateReturn(ReturnStmt* stmt) {
-    // Helper: free the per-function arena slab if one was allocated.
-    // Must be called immediately before every return instruction so that
-    // the slab is reclaimed on every exit path.
+    // Helper: end the lifetime of the per-function arena slab if one was
+    // allocated.  The slab is a static stack alloca — no free() is needed;
+    // lifetime.end lets the optimizer reclaim and reuse the stack slot.
     auto emitArenaFreeIfNeeded = [&]() {
         if (!funcArenaBaseAlloca_)
             return;
-        auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* slabPtr = builder->CreateLoad(
-            ptrTy, funcArenaBaseAlloca_, "arena.base.ret");
-        builder->CreateCall(getOrDeclareFree(), {slabPtr});
+        auto* ptrTy  = llvm::PointerType::getUnqual(*context);
+        auto* i64Ty  = llvm::Type::getInt64Ty(*context);
+        auto* lifeSzVal = llvm::ConstantInt::get(
+            i64Ty, static_cast<int64_t>(kFuncArenaSlabSize));
+        auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(
+            module.get(), llvm::Intrinsic::lifetime_end, {ptrTy});
+        builder->CreateCall(lifetimeEnd, {lifeSzVal, funcArenaBaseAlloca_});
     };
     // Prefetch invalidation enforcement: check that all prefetched variables
     if (!prefetchedVars_.empty()) {

@@ -667,22 +667,22 @@ class CodeGenerator {
     llvm::AllocaInst* lastStackAllocBacking_ = nullptr;
 
     // ── Per-function arena scratch buffer ─────────────────────────────────
-    // alloc<T>(N) heap allocations within a single function are sub-allocated
+    // alloc<T>(N) allocations within a single function are sub-allocated
     // from a shared entry-block arena slab when the compile-time total fits
     // within kFuncArenaSlabSize bytes.  All tier decisions are made entirely
     // at compile time — no runtime branches are emitted.
     //
     // Tier 1 (stack alloca): compile-time constant count AND
     //         count*sizeof(T) <= kStackAllocThreshold  → entry-block alloca.
-    // Tier 2 (arena):        compile-time constant count AND
+    // Tier 2 (static arena): compile-time constant count AND
     //         count*sizeof(T) > kStackAllocThreshold AND
     //         remaining arena capacity >= count*sizeof(T)
-    //                                                  → GEP into arena slab.
+    //                                                  → GEP into static arena slab alloca.
     // Tier 3 (malloc):       dynamic count OR size exceeds arena capacity
     //                                                  → malloc / aligned_alloc.
     //
     // Individual invalidate() calls on arena-backed pointers are no-ops for
-    // memory; the single arena slab is freed at every function return.
+    // memory; the arena slab lifetime ends at every function return.
 
     /// Raised stack-alloca threshold (8 KiB). Entry-block allocas never
     /// grow with loops, so a larger threshold is safe.
@@ -690,12 +690,12 @@ class CodeGenerator {
     /// Per-function arena slab capacity (64 KiB).
     static constexpr uint64_t kFuncArenaSlabSize = 65536u;
 
-    /// Entry-block alloca holding the arena base pointer (ptr type, null = unused).
+    /// Entry-block static alloca for the arena slab ([kFuncArenaSlabSize x i8], null = unused).
     llvm::AllocaInst* funcArenaBaseAlloca_  = nullptr;
     /// Compile-time bytes consumed in the arena so far for the current function.
     uint64_t          funcArenaUsedBytes_   = 0u;
     /// Variable names whose alloc<T> memory is backed by the function arena.
-    /// invalidate() emits no free() for these; the slab is freed at function exit.
+    /// invalidate() emits no free() for these; lifetime.end is emitted at function exit.
     llvm::StringSet<> arenaPtrVarNames_;
     /// Side-channel: set by the arena path in generateCall so that the
     /// immediately-following VarDecl codegen can register the variable.
