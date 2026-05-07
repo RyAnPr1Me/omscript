@@ -2,7 +2,7 @@
 
 A low-level, C-like programming language with **static typing** and **explicit malloc/free memory management** (no garbage collector, no reference counting). Features a **heavily optimized AOT compiler** using LLVM and a **multi-layer optimization engine** (AST pre-passes, equality-saturation E-graph, superoptimizer, and hardware-graph-driven instruction scheduler) that produces near-optimal native machine code for each target CPU.
 
-**Current version: 4.3.2**
+**Current version: 4.4.0**
 
 ## Key Features
 

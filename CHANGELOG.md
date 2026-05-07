@@ -5,6 +5,72 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.4.0] - 2026-05-07
+
+### Added
+
+- **`@semantics(willreturn)` annotation** (`include/ast.h`, `src/parser.cpp`, `src/codegen.cpp`):
+  - Applies LLVM `WillReturn` attribute to the generated function.
+  - Asserts that every execution of the function will eventually return to the caller (no infinite loops, no `abort()`-class calls).
+  - Enables dead-store elimination, load-forwarding, and LICM across call sites that LLVM's inter-procedural analysis cannot otherwise prove safe.
+  - Emits a parse-time warning when combined with `@semantics(noreturn)` (contradictory; `noreturn` wins).
+
+- **`@semantics(nosync)` annotation** (`include/ast.h`, `src/parser.cpp`, `src/codegen.cpp`):
+  - Applies LLVM `NoSync` attribute.
+  - Asserts that the function contains no synchronization primitives (mutexes, atomics, memory barriers, blocking I/O).
+  - Enables the optimizer to reorder or speculate calls across this function's boundary without breaking happens-before guarantees.
+
+- **`@semantics(nofree)` annotation** (`include/ast.h`, `src/parser.cpp`, `src/codegen.cpp`):
+  - Applies LLVM `NoFree` attribute.
+  - Asserts that the function does not free (deallocate) any memory reachable through its pointer arguments or global state.
+  - Allows alias analysis to prove that pointer values remain valid across the call, enabling store elimination, LICM, and vectorization of surrounding code.
+
+  **Usage**:
+  ```omscript
+  @semantics(pure, willreturn, nofree)
+  fn fastHash(data: int) -> int { ... }
+
+  @semantics(nosync, nofree)
+  fn processBuffer(buf: ptr, len: int) -> void { ... }
+  ```
+
+### Fixed
+
+- **Optimization pipeline: missing `extern` PassId declarations** (`include/opt_pass.h`):
+  - `PassId::kDCE`, `kCSE`, `kAlgSimp`, `kCopyProp`, and `kRLC` were defined as `uint32_t` variables in `opt_orchestrator.cpp` but had no corresponding `extern` declaration in the public header. Any translation unit that included `opt_pass.h` and referenced these names could not link.
+  - Added the five missing `extern uint32_t` declarations to the `namespace PassId` block in `opt_pass.h`.
+
+- **Optimization pipeline: incomplete cascade-invalidation dependency graph** (`src/optimization_manager.cpp`):
+  - `AnalysisDependencyGraph::createDefault()` previously wired only 10 of the 23 analysis dependency edges. The 13 missing edges — covering `rlc`, `dce`, `cse`, `alg_simp`, `copy_prop`, `width_legalization`, `width_opt`, and `hgoe_egraph` — meant that calling `ctx.validity().invalidate("dce")` would not cascade-invalidate `cse`, `alg_simp`, or `copy_prop`. In `runInvalidated()` mode, downstream passes silently operated on stale analysis.
+  - Added all 13 missing dependency edges with explanatory comments.
+
+- **Optimization pipeline: incorrect `invalidates_` declarations in pass metadata** (`src/opt_orchestrator.cpp`):
+  - Five AST-rewriting passes declared incomplete invalidation sets. Width legalization and width-opt facts were never listed as stale even though they depend entirely on expression shapes.
+  - `egraph`: `{}` → `{range_analysis, cse, width_legalization, width_opt}`
+  - `hgoe_egraph`: `{range_analysis}` → `{range_analysis, cse, width_legalization, width_opt}`
+  - `alg_simp`: `{range_analysis}` → `{range_analysis, width_legalization, width_opt}`
+  - `copy_prop`: `{cse, range_analysis}` → `{cse, range_analysis, width_legalization, width_opt}`
+  - `dce`: `{range_analysis}` → `{range_analysis, width_legalization, width_opt}`
+
+- **Optimization pipeline: `CostTransform` passes ran unconditionally at O0** (`src/opt_orchestrator.cpp`):
+  - DCE, CSE, AlgSimp, and the width optimiser are classified as `PassKind::CostTransform` — they exist to improve runtime performance, not to ensure correctness. They were always run regardless of the active optimization level.
+  - At O0 the user expects minimal compile time and maximum AST fidelity for debugger step-level accuracy; running these passes modified the AST unpredictably.
+  - Added an O-level gate to `runPassPipeline`: `CostTransform` passes are now skipped when `optLevel_ == OptimizationLevel::O0`. `Analysis` and `SemanticTransform` passes are unaffected.
+
+- **Optimization pipeline: per-pass wrappers performed redundant manual invalidation** (`src/opt_orchestrator.cpp`):
+  - `runDCE`, `runAlgSimp`, and `runCopyProp` each explicitly set downstream validity flags to `false` immediately before `PassScheduler::applyInvalidation()` performs the same operation through the metadata-driven cascade. The manual assignments were redundant and obscured the single source of truth for invalidation policy.
+  - Removed the manual flag assignments; `applyInvalidation()` is now the sole invalidation path for these three passes.
+
+### Documentation
+
+- **`LANGUAGE_REFERENCE.md`**:
+  - §6.6 `@semantics` table: added `willreturn`, `nosync`, `nofree` rows with LLVM attribute mapping and optimizer-effect descriptions.
+  - §25 Optimization Pipeline: updated pass dependency graph comment to list all 16 dependency edges.
+  - §33: bumped version to `4.4.0`.
+- **`README.md`**: updated "Current version" badge to `4.4.0`.
+- **`include/version.h`**: bumped `OMSCRIPT_VERSION_MINOR` to `4` and `OMSCRIPT_VERSION_PATCH` to `0`.
+- **`include/opt_pass.h`**: updated `AnalysisDependencyGraph` doc comment to list all 16 dependency edges.
+
 ## [4.3.2] - 2026-05-07
 
 ### Fixed

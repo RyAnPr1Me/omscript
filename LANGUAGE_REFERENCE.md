@@ -852,7 +852,7 @@ The preprocessor defines the following macros automatically:
 | `__BASE_FILE__` | `"main.om"` | Top-level source as passed on the command line — preserved across `#line` (string) |
 | `__DATE__` | `"Jan 23 2026"` | Compilation date in C-style `Mmm dd yyyy` form (string) |
 | `__TIME__` | `"14:05:09"` | Compilation time in `HH:MM:SS` form (string) |
-| `__VERSION__` | `"4.3.2"` | OmScript compiler version (string) |
+| `__VERSION__` | `"4.4.0"` | OmScript compiler version (string) |
 | `__OS__` | `"linux"` / `"windows"` / `"macos"` | Target operating system (string) |
 | `__ARCH__` | `"x86_64"` / `"aarch64"` / `"arm"` | Target architecture (string) |
 | `__COUNTER__` | `0`, `1`, ... | Global counter, increments on each use (integer) |
@@ -9531,14 +9531,14 @@ fn multiply_add(a: int, b: int, c: int) -> int {
 
 ### Version
 
-**OmScript Compiler Version**: `4.3.2`
+**OmScript Compiler Version**: `4.4.0`
 
 Defined in `include/version.h`:
 ```cpp
 #define OMSCRIPT_VERSION_MAJOR 4
-#define OMSCRIPT_VERSION_MINOR 3
-#define OMSCRIPT_VERSION_PATCH 2
-#define OMSC_VERSION "4.3.2"
+#define OMSCRIPT_VERSION_MINOR 4
+#define OMSCRIPT_VERSION_PATCH 0
+#define OMSC_VERSION "4.4.0"
 ```
 
 ### Stability Statement
@@ -9571,7 +9571,7 @@ fn compute(x: int) -> int {
 ```
 
 **Compatibility**:
-- Source files written for v4.x will compile with warnings in v4.3.
+- Source files written for v4.x will compile with warnings in v4.4.
 - v5.0 will require explicit migration (automated tool planned).
 
 **LLVM compatibility**:

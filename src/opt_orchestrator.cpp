@@ -651,6 +651,18 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
             continue;
         }
 
+        // ── O-level gating: skip cost-driven transforms at O0 ──────────
+        // CostTransform passes (DCE, CSE, AlgSimp, WidthOpt, etc.) exist to
+        // improve performance.  At O0 the user expects minimal compile time
+        // and maximum debuggability; running these passes would modify the AST
+        // and make single-step debugging unpredictable.
+        // SemanticTransform and Analysis passes always run regardless of level.
+        if (meta->kind == PassKind::CostTransform &&
+            optLevel_ == OptimizationLevel::O0) {
+            ++stats_.passesSkipped;
+            continue;
+        }
+
         // ── Precondition check & recovery ───────────────────────────────
         // checkPreconditions() warns (or asserts in strict mode) if any
         // required fact is invalid.  This commonly happens when an earlier
@@ -1105,8 +1117,8 @@ void OptimizationOrchestrator::runRLC(Program* program, OptimizationContext& ctx
 void OptimizationOrchestrator::runDCE(Program* program, OptimizationContext& ctx) {
     runDCEPass(program, verbose_);
     ctx.validity().dce = true;
-    // DCE removes code branches; range analysis results may be stale.
-    ctx.validity().rangeAnalysis = false;
+    // Downstream invalidation (range_analysis, width_legalization, width_opt)
+    // is handled by PassScheduler::applyInvalidation() from the pass metadata.
 }
 
 void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx) {
@@ -1132,19 +1144,15 @@ void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx
 void OptimizationOrchestrator::runAlgSimp(Program* program, OptimizationContext& ctx) {
     runAlgSimpPass(program, verbose_);
     ctx.validity().algSimp = true;
-    // AlgSimp rewrites expressions; range facts derived from expression shapes
-    // may be stale.
-    ctx.validity().rangeAnalysis = false;
+    // Downstream invalidation (range_analysis, width_legalization, width_opt)
+    // is handled by PassScheduler::applyInvalidation() from the pass metadata.
 }
 
 void OptimizationOrchestrator::runCopyProp(Program* program, OptimizationContext& ctx) {
     runCopyPropPass(program, verbose_);
     ctx.validity().copyProp = true;
-    // CopyProp substitutes identifiers; CSE keys and range values are stale.
-    ctx.validity().cse          = false;
-    ctx.validity().rangeAnalysis = false;
-    // Width legalization depends on expression shapes — re-run after CopyProp.
-    ctx.validity().widthLegalization = false;
+    // Downstream invalidation (cse, range_analysis, width_legalization, width_opt)
+    // is handled by PassScheduler::applyInvalidation() from the pass metadata.
 }
 
 void OptimizationOrchestrator::runWidthLegalization(Program* program,
@@ -1164,7 +1172,9 @@ void OptimizationOrchestrator::runWidthOpt(Program* program,
     const uint32_t n = runWidthOptPass(program, ctx, verbose_);
     ctx.validity().widthOpt = true;
     if (n > 0) {
-        // AST was modified — width legalization and range analysis are stale.
+        // WidthOpt modified expressions — explicitly invalidate shape-derived
+        // facts now so demand-driven recomputation works correctly even before
+        // PassScheduler::applyInvalidation() runs its unconditional pass.
         ctx.validity().widthLegalization = false;
         ctx.validity().rangeAnalysis     = false;
         ctx.validity().cse               = false;
