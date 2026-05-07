@@ -7616,7 +7616,7 @@ Exception: functions that contain concurrency primitives (e.g. explicit atomic o
 | `noalias` + `nonnull` + `dereferenceable(8)` + `align(16)` + `nocapture` (pointer params) | All pointer parameters, because OmScript's ownership model prevents aliasing across function boundaries |
 | `nosync` (function-level reinforcement) | Explicit even for functions without concurrency primitives |
 | `nonnull` (pointer params) | Ownership model guarantees non-null pointer arguments |
-| Range return attribute (`!range [lo, hi+1)`) | When the AST pre-pass proves a narrowed `ValueRange` for the function's return value (LLVM 19+) |
+| `!range [lo, hi+1)` on CallInst | When the AST pre-pass proves a narrowed `ValueRange` for the function's return value |
 | Function entry alignment (16 B default; 32 B for `@hot`; 64 B for `@align`) | I-cache alignment |
 
 #### Call-site attribute propagation

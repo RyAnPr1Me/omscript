@@ -3414,10 +3414,15 @@ llvm::Value* CodeGenerator::generateReborrowExpr(ReborrowExpr* expr) {
         // Partial borrow: array element → GEP to element slot
         llvm::Value* arrPtr = generateExpression(expr->source.get());
         llvm::Value* idx = generateExpression(expr->indexExpr.get());
-        // Arrays: [len, e0, e1, ...]  — element i is at slot i+1
+        // Arrays: [len, e0, e1, ...]  — element i is at slot i+1.
+        // The borrow checker has already verified 0 <= idx < len, so:
+        //   • nuw: idx >= 0, so idx+1 > 0 and cannot wrap unsigned
+        //   • nsw: idx < len <= INT64_MAX-1, so idx+1 <= INT64_MAX (no signed wrap)
+        //   • inbounds: idx+1 <= len <= capacity, within the malloc'd slab
         llvm::Value* elemIdx = builder->CreateAdd(
-            idx, llvm::ConstantInt::get(getDefaultType(), 1), "reborrow.idx");
-        val = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "reborrow.elem");
+            idx, llvm::ConstantInt::get(getDefaultType(), 1), "reborrow.idx",
+            /*HasNUW=*/true, /*HasNSW=*/true);
+        val = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "reborrow.elem");
     }
 
     return val;

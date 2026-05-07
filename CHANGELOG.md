@@ -65,16 +65,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `generateCall` (user function call path) did not copy the callee's `WillReturn`, `NoSync`, `NoFree`, or `MemoryEffects` attributes to the `CallInst`. LLVM's LICM, DSE, and call-site devirtualization passes operate on `CallInst` attributes directly — without them, passes running before inlining could not hoist pure calls out of loops or eliminate their stores.
   - Now, after creating the `CallInst`, `generateCall` copies all four attribute classes to the call instruction. Callee memory effects are propagated only when they are not `unknown()` so that the existing conservative path is not regressed.
 
+- **IR quality: reborrow element GEP missing `inbounds` + non-wrapping flags** (`src/codegen_stmt.cpp`):
+  - The partial-borrow path (`borrow arr[i]`) emitted a plain `CreateGEP` without `inbounds` and without `nuw`/`nsw` on the `idx+1` offset computation.
+  - The borrow checker guarantees `0 ≤ idx < len`, which means `idx+1` cannot overflow unsigned (`nuw`) or signed (`nsw`), and the resulting pointer is within the array's malloc'd slab (`inbounds`). These flags are now set so that GVN, LICM, and alias analysis can fold/hoist through reborrow-derived pointer expressions.
+
 ### Documentation
 
 - **`LANGUAGE_REFERENCE.md`**:
   - §6.6 `@semantics` table: `willreturn`, `nosync`, `nofree` rows with LLVM attribute mapping and optimizer-effect descriptions.
   - §25.2.3 Analysis dependency graph: corrected from the old 7-edge stub to all 22 edges now in `createDefault()`.
   - §25.3 Per-O-level pass list: added `PassKind` O-level gating note; documented `CostTransform` passes are skipped at O0 and listed in their correct pipeline position at O1/O2.
-  - §25.6 LLVM IR quality guarantees (new section): documents every unconditional per-function attribute, O2+ additions, call-site attribute propagation, and load/store metadata emitted by the code generator.
+  - §25.6 LLVM IR quality guarantees (new section): documents every unconditional per-function attribute, O2+ additions, call-site attribute propagation, and load/store metadata emitted by the code generator. Corrected: `!range` on call sites is metadata on `CallInst`, not a function return attribute; the inaccurate "LLVM 19+" qualifier was removed.
   - §33: bumped version to `4.4.0`.
 - **`README.md`**: updated "Current version" badge to `4.4.0`.
 - **`include/version.h`**: bumped `OMSCRIPT_VERSION_MINOR` to `4` and `OMSCRIPT_VERSION_PATCH` to `0`.
+- **`src/codegen_stmt.cpp`**: reborrow GEP comments updated to explain borrow-checker preconditions enabling `inbounds`/`nuw`/`nsw`.
 
 ## [4.3.2] - 2026-05-07
 
