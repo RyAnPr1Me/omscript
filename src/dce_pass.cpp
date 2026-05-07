@@ -112,7 +112,7 @@ static bool stmtAlwaysExits(const Statement* s) {
         const auto* blk = static_cast<const BlockStmt*>(s);
         if (blk->statements.empty()) return false;
         // Walk backwards past any null slots to find the last real statement.
-        // By the time Pass B runs, Pass 1 has already pruned inner-block dead
+        // By the time Pass B runs, Pass A has already pruned inner-block dead
         // code, so the last statement is the last *reachable* statement.
         for (auto it = blk->statements.rbegin(); it != blk->statements.rend(); ++it) {
             if (*it) return stmtAlwaysExits(it->get());
