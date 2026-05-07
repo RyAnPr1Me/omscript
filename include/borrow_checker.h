@@ -58,11 +58,12 @@ namespace omscript {
 
 /// Ownership and borrow state for a single variable.
 struct BorrowState {
-    int  immutBorrows = 0;      ///< Number of active immutable borrows
-    bool mutBorrowed  = false;  ///< True when a mutable borrow is active
-    bool moved        = false;  ///< True after the variable's value was moved out
-    bool invalidated  = false;  ///< True after an explicit `invalidate` statement
-    bool frozen       = false;  ///< True after a `freeze` statement
+    int  immutBorrows   = 0;  ///< Active immutable borrows (from `borrow`)
+    int  reborrows      = 0;  ///< Active reborrow aliases (from `reborrow`)
+    bool mutBorrowed    = false;  ///< True when a mutable borrow is active
+    bool moved          = false;  ///< True after the variable's value was moved out
+    bool invalidated    = false;  ///< True after an explicit `invalidate` statement
+    bool frozen         = false;  ///< True after a `freeze` statement
 
     /// True if the variable cannot be used at all (moved or invalidated).
     bool isDead()      const noexcept { return moved || invalidated; }
@@ -72,12 +73,19 @@ struct BorrowState {
 
     /// True if the variable can be written (assigned to).
     bool isWritable()  const noexcept {
-        return !isDead() && !mutBorrowed && immutBorrows == 0 && !frozen;
+        return !isDead() && !mutBorrowed && immutBorrows == 0 && reborrows == 0 && !frozen;
     }
 
     /// True if ownership can be moved out.
+    /// A frozen variable may be moved even when it has active *reborrow* aliases
+    /// (`reborrow` is explicitly a short-lived, non-owning alias; the programmer
+    /// promises not to use the alias after the move).  Full `borrow` aliases still
+    /// block the move.
     bool isMovable()   const noexcept {
-        return !isDead() && !mutBorrowed && immutBorrows == 0;
+        if (isDead() || mutBorrowed || immutBorrows > 0) return false;
+        // Frozen + only reborrows: caller has promised the reborrows are dead.
+        if (frozen && reborrows > 0) return true;
+        return reborrows == 0;
     }
 
     /// True if an additional immutable borrow can be created.
@@ -85,7 +93,7 @@ struct BorrowState {
 
     /// True if a mutable borrow can be created.
     bool canMutBorrow()   const noexcept {
-        return !isDead() && !mutBorrowed && immutBorrows == 0 && !frozen;
+        return !isDead() && !mutBorrowed && immutBorrows == 0 && reborrows == 0 && !frozen;
     }
 };
 

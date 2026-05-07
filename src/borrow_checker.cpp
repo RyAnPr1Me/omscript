@@ -22,9 +22,10 @@ using BorrowMap = std::unordered_map<std::string, BorrowState>;
 /// A borrow record: the alias variable that holds the borrow, and the source
 /// variable being borrowed.
 struct BorrowRecord {
-    std::string refVar;   ///< Name of the borrow alias
-    std::string srcVar;   ///< Name of the source variable
-    bool        isMut;    ///< True for mutable borrows
+    std::string refVar;      ///< Name of the borrow alias
+    std::string srcVar;      ///< Name of the source variable
+    bool        isMut;       ///< True for mutable borrows
+    bool        isReborrow;  ///< True when created via `reborrow` (not `borrow`)
 };
 
 /// Make a DiagnosticError with source location extracted from an ASTNode.
@@ -62,6 +63,7 @@ static BorrowMap joinMaps(const BorrowMap& a, const BorrowMap& b) {
             rs.invalidated = rs.invalidated || sb.invalidated;
             // Take maximum borrow count (conservative).
             rs.immutBorrows = std::max(rs.immutBorrows, sb.immutBorrows);
+            rs.reborrows    = std::max(rs.reborrows,    sb.reborrows);
             // Mutable borrow in either branch.
             rs.mutBorrowed = rs.mutBorrowed || sb.mutBorrowed;
             // Frozen in either branch.
@@ -87,6 +89,9 @@ private:
     BorrowMap           states_;     ///< Per-variable borrow state
     /// Stack of borrow scopes.  Each scope holds records to release on exit.
     std::vector<std::vector<BorrowRecord>> scopeStack_;
+    /// Deferred statement bodies per scope — run at scope exit (LIFO), in
+    /// reverse order to match the "last defer runs first" semantics.
+    std::vector<std::vector<const Statement*>> deferredBodies_;
 
     // ── State accessors ────────────────────────────────────────────────────
 
@@ -100,10 +105,21 @@ private:
 
     // ── Scope management ──────────────────────────────────────────────────
 
-    void pushScope() { scopeStack_.emplace_back(); }
+    void pushScope() {
+        scopeStack_.emplace_back();
+        deferredBodies_.emplace_back();
+    }
 
     void popScope() {
         if (scopeStack_.empty()) return;
+        // Run deferred bodies in reverse order (last defer fires first).
+        if (!deferredBodies_.empty()) {
+            for (auto it = deferredBodies_.back().rbegin();
+                      it != deferredBodies_.back().rend(); ++it) {
+                if (*it) checkStmt(*it);
+            }
+            deferredBodies_.pop_back();
+        }
         // Release all borrows registered in the innermost scope.
         for (const auto& rec : scopeStack_.back())
             releaseBorrow(rec);
@@ -121,6 +137,8 @@ private:
         BorrowState& s = it->second;
         if (rec.isMut) {
             s.mutBorrowed = false;
+        } else if (rec.isReborrow) {
+            if (s.reborrows > 0) --s.reborrows;
         } else {
             if (s.immutBorrows > 0) --s.immutBorrows;
         }
@@ -195,6 +213,16 @@ private:
             throw makeBorrowError(ErrorCode::E018_MOVE_WHILE_BORROWED,
                 "cannot move '" + name + "' — it has active borrow(s); "
                 "end the borrow before moving", site);
+        }
+        // A frozen variable with only reborrow (not borrow) aliases is
+        // movable: `reborrow` is an explicitly short-lived, non-owning
+        // alias and the programmer promises the alias won't be used after
+        // the move.  A regular `borrow` alias blocks the move (handled above
+        // via immutBorrows check).
+        if (s->reborrows > 0 && !s->frozen) {
+            throw makeBorrowError(ErrorCode::E018_MOVE_WHILE_BORROWED,
+                "cannot move '" + name + "' — it has active reborrow alias(es); "
+                "end the reborrow scope before moving", site);
         }
     }
 
@@ -341,7 +369,7 @@ private:
                             "' — it already has an active mutable borrow", vd);
                     }
                     src.mutBorrowed = true;
-                    registerBorrow({vd->name, srcName, true});
+                    registerBorrow({vd->name, srcName, true, /*isReborrow=*/false});
                 } else {
                     if (src.mutBorrowed) {
                         throw makeBorrowError(ErrorCode::E017_DOUBLE_MUT_BORROW,
@@ -349,7 +377,7 @@ private:
                             "' — it already has an active mutable borrow", vd);
                     }
                     ++src.immutBorrows;
-                    registerBorrow({vd->name, srcName, false});
+                    registerBorrow({vd->name, srcName, false, /*isReborrow=*/false});
                 }
                 // The borrow alias itself starts as Owned (it's a reference var).
                 stateOf(vd->name) = BorrowState{};
@@ -372,21 +400,21 @@ private:
                         (src.moved ? "moved" : "invalidated"), vd);
                 }
                 if (rb->isMut) {
-                    if (src.mutBorrowed || src.immutBorrows > 0) {
+                    if (src.mutBorrowed || src.immutBorrows > 0 || src.reborrows > 0) {
                         throw makeBorrowError(ErrorCode::E017_DOUBLE_MUT_BORROW,
                             "cannot create mutable reborrow of '" + srcName +
                             "' — it already has active borrow(s)", vd);
                     }
                     src.mutBorrowed = true;
-                    registerBorrow({vd->name, srcName, true});
+                    registerBorrow({vd->name, srcName, true, /*isReborrow=*/true});
                 } else {
                     if (src.mutBorrowed) {
                         throw makeBorrowError(ErrorCode::E017_DOUBLE_MUT_BORROW,
                             "cannot create immutable reborrow of '" + srcName +
                             "' — it already has an active mutable borrow", vd);
                     }
-                    ++src.immutBorrows;
-                    registerBorrow({vd->name, srcName, false});
+                    ++src.reborrows;
+                    registerBorrow({vd->name, srcName, false, /*isReborrow=*/true});
                 }
                 stateOf(vd->name) = BorrowState{};
             }
@@ -563,7 +591,13 @@ private:
         }
         case ASTNodeType::DEFER_STMT: {
             const auto* ds = static_cast<const DeferStmt*>(stmt);
-            if (ds->body) checkStmt(ds->body.get());
+            // The deferred body runs at the END of the enclosing scope, not
+            // at the point the `defer` statement appears.  Register it to be
+            // checked when the scope is popped so that variables declared
+            // after the defer can still be used between the defer and scope
+            // exit without a false "use of invalidated variable" error.
+            if (ds->body && !deferredBodies_.empty())
+                deferredBodies_.back().push_back(ds->body.get());
             break;
         }
         default:
