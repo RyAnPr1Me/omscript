@@ -382,7 +382,7 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
 
     // Execute.
     ++currentDepth_;
-    fuel_ = 0;
+    if (currentDepth_ == 1) fuel_ = 0;  // reset only for the outermost call
     const bool ok = executeBody(frame, fn->body.get());
     --currentDepth_;
 
@@ -443,7 +443,7 @@ std::optional<CTValue> CTEngine::evalComptimeBlock(
     for (auto& [k, v] : env) frame.locals[k] = v;
 
     ++currentDepth_;
-    fuel_ = 0;
+    if (currentDepth_ == 1) fuel_ = 0;  // reset only for the outermost call
     const bool ok = executeBody(frame, body);
     --currentDepth_;
 
@@ -915,8 +915,16 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
     if (op == "+")  return CTValue::fromI64(a + b);
     if (op == "-")  return CTValue::fromI64(a - b);
     if (op == "*")  return CTValue::fromI64(a * b);
-    if (op == "/" && b != 0) return CTValue::fromI64(a / b);
-    if (op == "%" && b != 0) return CTValue::fromI64(a % b);
+    if (op == "/" && b != 0) {
+        // Guard against INT64_MIN / -1 which overflows (UB / SIGFPE on x86-64).
+        if (a == INT64_MIN && b == -1) return CTValue::fromI64(INT64_MIN);
+        return CTValue::fromI64(a / b);
+    }
+    if (op == "%" && b != 0) {
+        // Guard against INT64_MIN % -1 which is UB / SIGFPE on x86-64.
+        if (a == INT64_MIN && b == -1) return CTValue::fromI64(0);
+        return CTValue::fromI64(a % b);
+    }
     if (op == "&")  return CTValue::fromI64(a & b);
     if (op == "|")  return CTValue::fromI64(a | b);
     if (op == "^")  return CTValue::fromI64(a ^ b);
@@ -943,8 +951,14 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
     if (op == "+=") return CTValue::fromI64(a + b);
     if (op == "-=") return CTValue::fromI64(a - b);
     if (op == "*=") return CTValue::fromI64(a * b);
-    if (op == "/=" && b != 0) return CTValue::fromI64(a / b);
-    if (op == "%=" && b != 0) return CTValue::fromI64(a % b);
+    if (op == "/=" && b != 0) {
+        if (a == INT64_MIN && b == -1) return CTValue::fromI64(INT64_MIN);
+        return CTValue::fromI64(a / b);
+    }
+    if (op == "%=" && b != 0) {
+        if (a == INT64_MIN && b == -1) return CTValue::fromI64(0);
+        return CTValue::fromI64(a % b);
+    }
     if (op == "&=") return CTValue::fromI64(a & b);
     if (op == "|=") return CTValue::fromI64(a | b);
     if (op == "^=") return CTValue::fromI64(a ^ b);
@@ -1370,7 +1384,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "saturating_sub" && n == 2) {
         auto a = intArg(0), b = intArg(1);
         if (a && b) {
-            int64_t r; if (__builtin_sub_overflow(*a, *b, &r)) r = (*a > 0) ? INT64_MAX : INT64_MIN;
+            int64_t r; if (__builtin_sub_overflow(*a, *b, &r)) r = (*a >= 0) ? INT64_MAX : INT64_MIN;
             return CTValue::fromI64(r);
         }
         return std::nullopt;
