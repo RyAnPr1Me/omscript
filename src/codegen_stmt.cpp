@@ -1105,6 +1105,42 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
 
+    // ── Preheader: emit loop-entry non-negativity assumes ────────────────────
+    // These assumes are placed in the loop preheader (before the back-edge)
+    // rather than at the top of the loop body.  An assume inside the loop body
+    // is re-evaluated every iteration and, when combined with pointer-mutating
+    // calls such as push()/realloc(), prevents LLVM's LoopVectorize,
+    // LoopDistribute, and LoopReorder passes from treating the loop as "safe"
+    // because the assume creates an opaque dependency on loop-variant memory.
+    // A preheader assume is emitted once, establishes the invariant at loop
+    // entry, and does not appear on any hot back-edge path.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
+            module.get(), llvm::Intrinsic::assume, {});
+        llvm::Type* i64Ty = getDefaultType();
+        for (auto& kv : namedValues) {
+            auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(kv.second);
+            if (!alloca) continue;
+            if (!nonNegValues_.count(alloca)) continue;
+            // Only assume for integer allocas — float/pointer non-negativity
+            // is not expressed the same way and would confuse LLVM.
+            if (!alloca->getAllocatedType()->isIntegerTy()) continue;
+            const std::string varName = kv.first().str();
+            llvm::Value* loaded = builder->CreateAlignedLoad(
+                alloca->getAllocatedType(), alloca,
+                llvm::MaybeAlign(8), (varName + ".pre.nn").c_str());
+            // Widen to i64 if narrower (e.g. i1, i32) before comparison.
+            llvm::Value* asI64 = loaded->getType() == i64Ty
+                ? loaded
+                : builder->CreateSExt(loaded, i64Ty, "nn.sext");
+            llvm::Value* isNN = builder->CreateICmpSGE(
+                asI64,
+                llvm::ConstantInt::get(i64Ty, 0),
+                (varName + ".nn").c_str());
+            builder->CreateCall(assumeFn, {isNN});
+        }
+    }
+
     builder->CreateBr(condBB);
 
     // Condition block
@@ -1122,34 +1158,6 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
-
-    // Emit llvm.assume(var >= 0) for all alloca variables known to be
-    if (optimizationLevel >= OptimizationLevel::O2) {
-        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
-            module.get(), llvm::Intrinsic::assume, {});
-        llvm::Type* i64Ty = getDefaultType();
-        for (auto& kv : namedValues) {
-            auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(kv.second);
-            if (!alloca) continue;
-            if (!nonNegValues_.count(alloca)) continue;
-            // Only assume for integer allocas — float/pointer non-negativity
-            // is not expressed the same way and would confuse LLVM.
-            if (!alloca->getAllocatedType()->isIntegerTy()) continue;
-            const std::string varName = kv.first().str();
-            llvm::Value* loaded = builder->CreateAlignedLoad(
-                alloca->getAllocatedType(), alloca,
-                llvm::MaybeAlign(8), (varName + ".assume.nn").c_str());
-            // Widen to i64 if narrower (e.g. i1, i32) before comparison.
-            llvm::Value* asI64 = loaded->getType() == i64Ty
-                ? loaded
-                : builder->CreateSExt(loaded, i64Ty, "nn.sext");
-            llvm::Value* isNN = builder->CreateICmpSGE(
-                asI64,
-                llvm::ConstantInt::get(i64Ty, 0),
-                (varName + ".nn").c_str());
-            builder->CreateCall(assumeFn, {isNN});
-        }
-    }
 
     auto savedLenCacheW = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();

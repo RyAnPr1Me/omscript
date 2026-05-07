@@ -5421,8 +5421,21 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                  llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)},
                 "arr.stack.ptr");
         } else {
-            llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalBytes);
+            // For empty arrays (numElements == 0) that land on the heap, pre-
+            // allocate at least kMinArrayCapacity slots so that:
+            //  (a) malloc(8) is never emitted for a dynamic array — `allocsize`
+            //      on malloc causes LLVM to infer dereferenceable(8), which
+            //      then mismatches the first-push realloc,
+            //  (b) the first 15 push() calls never trigger a realloc at all,
+            //      reducing branching inside push loops.
+            const size_t allocBytes = (numElements == 0)
+                ? kMinArrayCapacity * 8
+                : totalBytes;
+            llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), allocBytes);
             arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
+            // Advertise the actual capacity to LLVM's alias/bounds analysis.
+            llvm::cast<llvm::CallInst>(arrPtr)->addRetAttr(
+                llvm::Attribute::getWithDereferenceableBytes(*context, allocBytes));
         }
 
         // Fast path: if ALL elements are compile-time integer constants, build

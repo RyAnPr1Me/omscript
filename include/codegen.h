@@ -777,6 +777,14 @@ class CodeGenerator {
     /// separately for oversized element types (e.g. large structs).
     static constexpr size_t kMaxStackArrayElements = 512;
 
+    /// Minimum number of element slots to reserve when heap-allocating an empty
+    /// array that may later grow via push().  Matches the `minSlots` constant in
+    /// the push/unshift builtins (16 slots × 8 bytes = 128 bytes).  This avoids
+    /// emitting `malloc(8)` for `var arr = []`, which confuses LLVM's
+    /// dereferenceable-size inference and triggers an immediate realloc on the
+    /// first push.
+    static constexpr size_t kMinArrayCapacity = 16;
+
     /// Track which variables hold stack-allocated arrays so that free()
     /// is not called on them and bounds-check code uses the correct base.
     llvm::StringSet<> stackAllocatedArrays_;

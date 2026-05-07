@@ -3506,6 +3506,30 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         newBuf->addIncoming(grownBuf, growBB);
         newBuf->addIncoming(arrPtr, nogrowBB);
 
+        // ── Issue (E) fix: dereferenceable assume on newBuf ──────────────────
+        // After the realloc/no-grow PHI, LLVM does not know how many bytes are
+        // valid through newBuf.  Without this information, LoopVectorize and
+        // LoopDistribute treat the pointer as "could be any size" and refuse to
+        // transform loops that call push().  Emitting a dereferenceable operand-
+        // bundle assume tells LLVM the buffer holds at least (newLen+1)*8 valid
+        // bytes, enabling downstream optimization passes to reason about the
+        // pointer's extent without relying on the realloc's allocsize attribute.
+        {
+            llvm::Value* derefSlots = builder->CreateAdd(
+                newLen, one64, "push.deref.slots", /*NUW=*/true, /*NSW=*/true);
+            llvm::Value* derefBytes = builder->CreateMul(
+                derefSlots, llvm::ConstantInt::get(getDefaultType(), 8),
+                "push.deref.bytes", /*NUW=*/true, /*NSW=*/true);
+            llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(),
+                llvm::Intrinsic::assume, {});
+            llvm::Value* derefArgs[] = {static_cast<llvm::Value*>(newBuf), derefBytes};
+            llvm::OperandBundleDef derefBundle("dereferenceable",
+                llvm::ArrayRef<llvm::Value*>(derefArgs));
+            builder->CreateCall(
+                assumeFn, {llvm::ConstantInt::getTrue(*context)},
+                llvm::ArrayRef<llvm::OperandBundleDef>{derefBundle});
+        }
+
         // Update length
         emitStoreArrayLen(newLen, newBuf);
         // Store new value at index oldLen + 1 (after header)
@@ -3672,6 +3696,22 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* newBuf = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "ush.buf");
         newBuf->addIncoming(grownBuf, growBB);
         newBuf->addIncoming(arrPtr, nogrowBB);
+
+        // Dereferenceable assume — same rationale as push() (Issue E fix).
+        {
+            llvm::Value* derefSlots = builder->CreateAdd(
+                newLen, one64, "ush.deref.slots", /*NUW=*/true, /*NSW=*/true);
+            llvm::Value* derefBytes = builder->CreateMul(
+                derefSlots, eight, "ush.deref.bytes", /*NUW=*/true, /*NSW=*/true);
+            llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(),
+                llvm::Intrinsic::assume, {});
+            llvm::Value* derefArgs[] = {static_cast<llvm::Value*>(newBuf), derefBytes};
+            llvm::OperandBundleDef derefBundle("dereferenceable",
+                llvm::ArrayRef<llvm::Value*>(derefArgs));
+            builder->CreateCall(
+                assumeFn, {llvm::ConstantInt::getTrue(*context)},
+                llvm::ArrayRef<llvm::OperandBundleDef>{derefBundle});
+        }
 
         // memmove arr[1..oldLen+1) → arr[2..newLen+1) — overlapping, dest > src.
         llvm::Value* moveBytes = builder->CreateMul(oldLen, eight, "ush.movebytes", /*HasNUW=*/true, /*HasNSW=*/true);

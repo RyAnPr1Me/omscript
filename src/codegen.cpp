@@ -1158,7 +1158,10 @@ llvm::LoadInst* CodeGenerator::emitLoadArrayElem(llvm::Value* elemPtr,
 }
 
 void CodeGenerator::emitStoreArrayLen(llvm::Value* len, llvm::Value* arrPtr) {
-    auto* st = builder->CreateStore(len, arrPtr);
+    // Use aligned store (align 8) to match the aligned load in emitLoadArrayLen.
+    // This is required for consistent TBAA and allows LLVM to reason correctly
+    // about the length slot without treating it as an unaligned scalar access.
+    auto* st = builder->CreateAlignedStore(len, arrPtr, llvm::MaybeAlign(8));
     st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 }
 
@@ -1187,8 +1190,17 @@ llvm::Value* CodeGenerator::emitAllocArray(llvm::Value* len,
                                              /*NUW=*/true, /*NSW=*/true);
     llvm::Value* buf   = builder->CreateCall(getOrDeclareMalloc(), {bytes},
                                               name + ".buf");
+    // Set dereferenceable to the actual allocation size when known at compile
+    // time.  For dynamic sizes, conservatively use 8 bytes (one slot).
+    // This lets LLVM's alias analysis and bounds reasoning use the tightest
+    // safe lower-bound rather than always assuming only 8 bytes are valid.
+    uint64_t derefBytes = 8;
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(len)) {
+        uint64_t n = static_cast<uint64_t>(ci->getSExtValue());
+        derefBytes = (n + 1) * 8;
+    }
     llvm::cast<llvm::CallInst>(buf)->addRetAttr(
-        llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        llvm::Attribute::getWithDereferenceableBytes(*context, derefBytes));
     emitStoreArrayLen(len, buf);
     return buf;
 }
