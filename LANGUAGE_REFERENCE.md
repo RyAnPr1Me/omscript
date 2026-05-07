@@ -7479,16 +7479,25 @@ The four currently defined `IRInvariant` values (`opt_pass.h:203-208`):
 
 `AnalysisDependencyGraph` (`opt_pass.h:283-343`) records "fact A depends on fact B" edges. When a transform invalidates fact B, every fact that transitively depends on B is also invalidated. Callers therefore only need to invalidate the *directly* affected fact; the cascade is computed automatically.
 
-The standard OmScript dependency graph is built by `AnalysisDependencyGraph::createDefault()` (`opt_pass.h:336`):
+The standard OmScript dependency graph is built by `AnalysisDependencyGraph::createDefault()` (`src/optimization_manager.cpp`):
 
 ```
-constant_returns → (no dependencies)
-purity           → constant_returns
-effects          → purity
-synthesis        → purity, effects
-cfctre           → purity, effects, synthesis
-egraph           → cfctre
-range_analysis   → purity, effects, cfctre
+constant_returns    → (no dependencies)
+purity              → constant_returns
+effects             → purity
+ersl                → effects
+synthesis           → purity, effects
+cfctre              → purity, effects, synthesis
+egraph              → cfctre
+range_analysis      → purity, effects, cfctre
+rlc                 → effects
+dce                 → cfctre
+cse                 → dce
+alg_simp            → cfctre, dce
+copy_prop           → cfctre, dce, alg_simp
+width_legalization  → range_analysis, copy_prop, alg_simp
+width_opt           → width_legalization
+hgoe_egraph         → egraph, cfctre
 ```
 
 Read this as "the named fact depends on the listed facts": invalidating `purity` therefore cascades to `effects`, `synthesis`, `cfctre`, `egraph`, and `range_analysis`. Lookup is via `getAllDependents(key)`, which performs a BFS over the dependency edges and returns the fact itself plus every transitive dependent.
@@ -7512,11 +7521,17 @@ Stages run in numerical order and `PassMetadata::phase` (a `PassPhase` value) ma
 
 ### 25.3 Per-O-level pass list
 
+`PassKind` controls which passes run at each level:
+- **`Analysis`** and **`SemanticTransform`** passes run at every level that needs the fact.
+- **`CostTransform`** passes (DCE, CSE, AlgSimp, WidthOpt, etc.) are skipped at O0. At O0 the user expects minimal compile time and maximum AST fidelity for debugger step-accuracy; running rewrites would unpredictably modify the code structure.
+
 #### O0 (debug)
 1. Lexer
 2. Parser
 3. Type pre-analysis
-4. Codegen (no optimization)
+4. Codegen (no optimization; `CostTransform` passes skipped)
+
+**IR quality at O0**: All functions still receive `nounwind`, `mustprogress`, `nosync`, `nofree`, `willreturn`, `noundef` (on params/return), `nonnull` (on pointer return), `ZExt`/`SExt` signedness on integer params — these correctness-enabling attributes are unconditional and do not depend on O-level.
 
 #### O1 (basic)
 1. Lexer
@@ -7524,22 +7539,24 @@ Stages run in numerical order and `PassMetadata::phase` (a `PassPhase` value) ma
 3. Type pre-analysis
 4. Purity inference (lightweight, no cross-function analysis)
 5. CF-CTRE (same fuel/depth limits as O2 — see below)
-6. Codegen
-7. LLVM: SimplifyCFG, Mem2Reg, SROA, EarlyCSE
+6. DCE (`CostTransform`), CSE, AlgSimp, CopyProp
+7. Codegen
+8. LLVM: SimplifyCFG, Mem2Reg, SROA, EarlyCSE
 
 #### O2 (standard)
-1–6. (All AST phases)
+1–6. All AST phases (Analysis + SemanticTransform passes)
 7. **Synthesis expansion** (if `std::synthesize` present)
 8. **CF-CTRE** (fuel limit `kMaxInstructions = 10,000,000`, depth limit `kMaxDepth = 128` — see `include/cfctre.h:483-484`)
-9. **Abstract interpretation**
-10. **E-graph optimization** (`SaturationConfig`: `maxNodes = 50,000`, `maxIterations = 30` — see `include/egraph.h:331-332`)
-11. Codegen
-12. LLVM canonicalization: LoopSimplify, LCSSA, IndVarSimplify
-13. **Polyhedral optimizer** (tiling, interchange, skewing — see §26.13)
-14. LLVM midend: Inlining, IPSCCP, GVN, LICM, DSE, Loop Vectorizer, SLP Vectorizer
-15. **Superoptimizer** (idiom recognition + algebraic + branch→select + synthesis, level 2 default — see §26.2)
-16. **HGOE** (only when a hardware profile is available — i.e. `-march=` or `-mtune=` resolves to a known microarch — see §26.3)
-17. Post-pipeline cleanup: AggressiveDCE, GlobalDCE
+9. **Abstract interpretation / range analysis**
+10. **DCE, CSE, AlgSimp, CopyProp, WidthLegalization, WidthOpt** (`CostTransform` passes)
+11. **E-graph optimization** (`SaturationConfig`: `maxNodes = 50,000`, `maxIterations = 30` — see `include/egraph.h:331-332`)
+12. Codegen
+13. LLVM canonicalization: LoopSimplify, LCSSA, IndVarSimplify
+14. **Polyhedral optimizer** (tiling, interchange, skewing — see §26.13)
+15. LLVM midend: Inlining, IPSCCP, GVN, LICM, DSE, Loop Vectorizer, SLP Vectorizer
+16. **Superoptimizer** (idiom recognition + algebraic + branch→select + synthesis, level 2 default — see §26.2)
+17. **HGOE** (only when a hardware profile is available — i.e. `-march=` or `-mtune=` resolves to a known microarch — see §26.3)
+18. Post-pipeline cleanup: AggressiveDCE, GlobalDCE
 
 **CF-CTRE fuel/depth limits are constants, not per-O-level knobs.** All O-levels that run CF-CTRE share the same `kMaxInstructions` / `kMaxDepth` budgets. See `include/cfctre.h:483-484` and §28.10.
 
@@ -7569,6 +7586,63 @@ Diagnostic(level, code, message, location) → DiagnosticManager → stderr
 **Current status**: Not implemented. Every invocation recompiles from source.
 
 **Planned**: Timestamp-based invalidation of `oms.toml` → build cache mapping.
+
+### 25.6 LLVM IR quality guarantees
+
+The code generator (`src/codegen.cpp`) applies a layered set of LLVM attributes and metadata to produce IR that LLVM's midend can optimize without guesswork.
+
+#### Unconditional per-function attributes (all O-levels)
+
+Every user-defined function receives the following attributes regardless of optimization level:
+
+| Attribute | Why |
+|-----------|-----|
+| `nounwind` | OmScript uses a flag-based error model, never C++ exceptions |
+| `mustprogress` | Every loop in OmScript is finite (no `while(true)` without `break` or `return`); enables LICM and loop transforms |
+| `prefer-vector-width=N` | Set to the target's preferred SIMD width for autovectorization hints |
+| `nosync` | OmScript is single-threaded; no concurrent memory access |
+| `nofree` | User functions never call `free()` directly |
+| `willreturn` | Asserts finite termination; enables DSE and load-forwarding across the call |
+| `noundef` (params + return) | OmScript always initializes variables before use |
+| `ZExt`/`SExt` (integer params + return) | Signals correct signedness to calling-convention optimization |
+| `nonnull` + `dereferenceable(8)` (pointer return, O1+) | OmScript functions that return arrays/strings always return non-null |
+
+Exception: functions that contain concurrency primitives (e.g. explicit atomic operations) have `nosync`, `nofree`, and `willreturn` suppressed.
+
+#### O2+ additions
+
+| Attribute | When applied |
+|-----------|-------------|
+| `noalias` + `nonnull` + `dereferenceable(8)` + `align(16)` + `nocapture` (pointer params) | All pointer parameters, because OmScript's ownership model prevents aliasing across function boundaries |
+| `nosync` (function-level reinforcement) | Explicit even for functions without concurrency primitives |
+| `nonnull` (pointer params) | Ownership model guarantees non-null pointer arguments |
+| Range return attribute (`!range [lo, hi+1)`) | When the AST pre-pass proves a narrowed `ValueRange` for the function's return value (LLVM 19+) |
+| Function entry alignment (16 B default; 32 B for `@hot`; 64 B for `@align`) | I-cache alignment |
+
+#### Call-site attribute propagation
+
+At every user function call site, `generateCall` propagates the callee's
+function-level attributes to the `CallInst`:
+
+| Call-site attribute | Source |
+|--------------------|--------|
+| `speculatable` | Callee has `@semantics(speculatable)` |
+| `willreturn` | Callee has `WillReturn` attribute |
+| `nosync` | Callee has `NoSync` attribute |
+| `nofree` | Callee has `NoFree` attribute |
+| memory effects (`memory(none)`, `memory(read)`, …) | Copied from callee's `MemoryEffects`; enables LICM to hoist calls out of loops |
+| `!range [lo, hi+1)` metadata | When the pre-pass `returnRange` fact provides a narrowed `ValueRange` |
+
+These are redundant with the function definition in theory, but LLVM's LICM, DSE, and call-site devirtualization passes scan `CallInst` attributes directly; without them on the call instruction, passes that run before inlining cannot see them.
+
+#### Load/store metadata
+
+| Metadata | Location |
+|----------|----------|
+| `!noundef` | All local variable loads and array element loads |
+| `!range` | Array-length loads and array-element loads of integer elements (range `[0, INT64_MAX)` for lengths) |
+| `!nonnull` | `stdout` global pointer load; `malloc`/`calloc` return values |
+| `!invariant.load` | Read-only globals and string literals |
 
 ---
 

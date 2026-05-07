@@ -61,15 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `runDCE`, `runAlgSimp`, and `runCopyProp` each explicitly set downstream validity flags to `false` immediately before `PassScheduler::applyInvalidation()` performs the same operation through the metadata-driven cascade. The manual assignments were redundant and obscured the single source of truth for invalidation policy.
   - Removed the manual flag assignments; `applyInvalidation()` is now the sole invalidation path for these three passes.
 
+- **IR quality: callee attributes not propagated to call instructions** (`src/codegen_builtins.cpp`):
+  - `generateCall` (user function call path) did not copy the callee's `WillReturn`, `NoSync`, `NoFree`, or `MemoryEffects` attributes to the `CallInst`. LLVM's LICM, DSE, and call-site devirtualization passes operate on `CallInst` attributes directly — without them, passes running before inlining could not hoist pure calls out of loops or eliminate their stores.
+  - Now, after creating the `CallInst`, `generateCall` copies all four attribute classes to the call instruction. Callee memory effects are propagated only when they are not `unknown()` so that the existing conservative path is not regressed.
+
 ### Documentation
 
 - **`LANGUAGE_REFERENCE.md`**:
-  - §6.6 `@semantics` table: added `willreturn`, `nosync`, `nofree` rows with LLVM attribute mapping and optimizer-effect descriptions.
-  - §25 Optimization Pipeline: updated pass dependency graph comment to list all 16 dependency edges.
+  - §6.6 `@semantics` table: `willreturn`, `nosync`, `nofree` rows with LLVM attribute mapping and optimizer-effect descriptions.
+  - §25.2.3 Analysis dependency graph: corrected from the old 7-edge stub to all 22 edges now in `createDefault()`.
+  - §25.3 Per-O-level pass list: added `PassKind` O-level gating note; documented `CostTransform` passes are skipped at O0 and listed in their correct pipeline position at O1/O2.
+  - §25.6 LLVM IR quality guarantees (new section): documents every unconditional per-function attribute, O2+ additions, call-site attribute propagation, and load/store metadata emitted by the code generator.
   - §33: bumped version to `4.4.0`.
 - **`README.md`**: updated "Current version" badge to `4.4.0`.
 - **`include/version.h`**: bumped `OMSCRIPT_VERSION_MINOR` to `4` and `OMSCRIPT_VERSION_PATCH` to `0`.
-- **`include/opt_pass.h`**: updated `AnalysisDependencyGraph` doc comment to list all 16 dependency edges.
 
 ## [4.3.2] - 2026-05-07
 

@@ -9337,6 +9337,25 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (callee->hasFnAttribute(llvm::Attribute::Speculatable)) {
         callResult->addFnAttr(llvm::Attribute::Speculatable);
     }
+    // Propagate callee function-level attributes to the call instruction so
+    // LLVM's LICM, DSE, and alias-analysis passes can see them even before
+    // inlining.  The attributes are already on the function definition, but
+    // LLVM requires them on the CallInst too for interprocedural passes that
+    // scan call uses rather than visiting the callee definition.
+    if (callee->hasFnAttribute(llvm::Attribute::WillReturn))
+        callResult->addFnAttr(llvm::Attribute::WillReturn);
+    if (callee->hasFnAttribute(llvm::Attribute::NoSync))
+        callResult->addFnAttr(llvm::Attribute::NoSync);
+    if (callee->hasFnAttribute(llvm::Attribute::NoFree))
+        callResult->addFnAttr(llvm::Attribute::NoFree);
+    // Memory effects: copy the callee's memory attribute to the call so that
+    // LICM can hoist calls with memory(none) or memory(read) out of loops.
+    {
+        llvm::MemoryEffects calleeMemFX = callee->getMemoryEffects();
+        if (calleeMemFX != llvm::MemoryEffects::unknown())
+            callResult->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, calleeMemFX));
+    }
     // Emit !range metadata when a narrowed value range is known for this callee.
     if (optCtx_ && callee->getReturnType()->isIntegerTy(64)) {
         if (auto rng = optCtx_->returnRange(expr->callee)) {
