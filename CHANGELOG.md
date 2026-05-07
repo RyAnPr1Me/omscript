@@ -5,7 +5,64 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.3.1] - 2026-05-04
+## [4.3.2] - 2026-05-07
+
+### Fixed
+
+- **E-graph: `div_self` rule fires for `x = 0`** (`src/egraph.cpp`):
+  - The rule `x / x → 1` previously had no guard, causing it to silently fold `0 / 0 → 1` (a division-by-zero that should trap at runtime).
+  - Added a guard that requires `x` to be a provably non-zero constant.
+
+- **E-graph: `mod_self` rule fires for `x = 0`** (`src/egraph.cpp`):
+  - The rule `x % x → 0` previously had no guard, causing `0 % 0 → 0` (undefined behavior) to be silently optimized away.
+  - Added a guard that requires `x` to be a provably non-zero constant.
+
+- **E-graph: `mul_div_cancel` unguarded algebraic version shadows guarded relational version** (`src/egraph.cpp`):
+  - `getAlgebraicRules()` registered `mul_div_cancel` without a non-zero divisor guard. `getRelationalRules()` registered a correctly guarded version under the same name. `getAllRules()` deduplicates by keeping only the first occurrence, so the guarded version was silently discarded, allowing `(x * 0) / 0 → x` to fire.
+  - Renamed the algebraic rule to `mul_div_cancel_alg` and added a non-zero guard to it, so both rules coexist in the rule set.
+
+- **E-graph: `range_check_unsigned` produces wrong results for negative `x`** (`src/egraph.cpp`):
+  - The rule `(x >= C1) && (x <= C2) → (x - C1) <= (C2 - C1)` is only semantically valid with **unsigned** comparison. The EGraph only has signed `Op::Le`, so the rewrite was incorrect for negative `x` (signed subtraction overflow + incorrect signed compare could flip the result).
+  - Disabled the rule with a detailed comment. It can be re-enabled once an unsigned comparison operator is added to the `Op` enum.
+
+- **E-graph: `mask_shift_normalize` uses arithmetic (signed) C++ shift for `newMask`** (`src/egraph.cpp`):
+  - The rule `(x & mask) >> a → (x >> a) & (mask >> a)` computed the new mask constant via C++ signed right-shift. OmScript's `>>` operator maps to `CreateLShr` (logical / unsigned-fill). For negative mask values the arithmetic shift fills high bits with ones while the logical shift fills with zeros, producing an incorrect constant.
+  - Changed to cast through `unsigned long long` before shifting: `static_cast<long long>(static_cast<unsigned long long>(*m) >> static_cast<unsigned>(*a))`.
+
+- **`rotate_left` / `rotate_right` constant fold: undefined behavior when rotation amount is 0** (`src/codegen_builtins.cpp`):
+  - The constant-fold paths for both builtins computed `v >> (64 - amt)` and `v << (64 - amt)`. When `amt == 0`, `64 - amt = 64` and shifting a 64-bit value by its own width is undefined behavior in C++.
+  - Added `amt == 0` identity short-circuit: when the rotation amount is zero the value is returned unchanged.
+
+- **Preprocessor: `\<newline>` line continuation inserts a spurious space** (`src/preprocessor.cpp`):
+  - The line-joining step appended `' '` when it saw `\<LF>`, breaking macro-name splicing (e.g., `MY_\<newline>MACRO` produced `MY_ MACRO` instead of `MY_MACRO`).
+  - Changed to a zero-character splice (no character appended), matching C preprocessor semantics. Also handles `\<CR><LF>` Windows line endings.
+
+- **Debug build profile incorrectly enables `optMax`** (`src/project.cpp`):
+  - `BuildProfile::makeDebug()` had `p.optMax = true` despite setting `optLevel = O0` and `debugInfo = true`. Maximum optimization passes defeat debug-info fidelity and step-level correctness.
+  - Changed to `p.optMax = false` in the debug profile.
+
+- **`scanImports` fails to recognize `import` when separated from the path by a newline** (`src/build_graph.cpp`):
+  - The whitespace-skip loop after the `import` keyword only consumed spaces and tabs, not `\n` or `\r`. A multi-line import statement (`import\n"file.om"`) was silently skipped by the incremental build scanner.
+  - Added `\n` and `\r` to the accepted whitespace characters.
+
+- **`functionsChanged` statistics counter is never incremented** (`src/opt_context.cpp`):
+  - `EGraphSubsystem::optimizeFunction()` checked whether `stats_.expressionsSimplified` had increased after calling `egraph::optimizeFunction()`. However, `egraph::optimizeFunction()` never updates that counter (only `optimizeExpression()` does), so `functionsChanged` was always 0.
+  - Changed to unconditionally increment `functionsChanged` after each `optimizeFunction()` call, with a comment explaining the limitation.
+
+- **`version.h` inconsistency: component macros said 4.3.0 but `OMSC_VERSION` said "4.5.0"** (`include/version.h`):
+  - All version constants are now consistently set to 4.3.2.
+
+### Documentation
+
+- **`LANGUAGE_REFERENCE.md`**:
+  - §2.6: Fixed `>>` operator description. The operator always performs a **logical** (zero-fill) right shift via LLVM `CreateLShr`, regardless of whether the value is signed or unsigned. The previous description ("arithmetic for signed, logical for unsigned") was incorrect.
+  - §3.3: Updated `__VERSION__` predefined macro value to `"4.3.2"`. Updated `__VECTOR_WIDTH__` and `__SIMD_*__` descriptions to clarify these are detected at **runtime** via `llvm::sys::getHostCPUFeatures()`, not at C compile time.
+  - §3.4: Rewrote Line Continuation section to document **zero-character splice** semantics: `\<newline>` removes both characters with no separator, enabling macro-name splitting across lines.
+  - §33: Updated version number from `4.1.1` to `4.3.2`. Updated LLVM compatibility note (LLVM 18 primary). Updated source-compatibility note to reference v4.3.
+
+- **`README.md`**: Updated "Current version" badge to 4.3.2.
+
+
 
 ### Added
 

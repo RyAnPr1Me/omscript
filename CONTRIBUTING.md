@@ -34,9 +34,15 @@ Thank you for considering contributing to OmScript! This document covers everyth
 
 ```bash
 mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Debug
+cmake .. -DCMAKE_BUILD_TYPE=Debug \
+         -DLLVM_DIR=$(llvm-config-18 --cmakedir)
 make -j$(nproc)
 ```
+
+> **Tip**: On systems where `llvm-config-18` is at `/usr/lib/llvm-18/bin/llvm-config`, use:
+> ```bash
+> cmake .. -DLLVM_DIR=$(/usr/lib/llvm-18/bin/llvm-config --cmakedir)
+> ```
 
 ### Release Build with LLVM
 
