@@ -162,6 +162,9 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             long long lv = 0, rv = 0;
             if (isIntLiteral(L, &lv) && isIntLiteral(R, &rv)) {
                 std::optional<long long> result;
+                // Cast through uint64_t for +, -, * so that overflow is
+                // well-defined (two's complement wrapping), matching the
+                // language's integer semantics for 64-bit wrap-around.
                 if      (op == "+")                      result = static_cast<long long>(static_cast<uint64_t>(lv) + static_cast<uint64_t>(rv));
                 else if (op == "-")                      result = static_cast<long long>(static_cast<uint64_t>(lv) - static_cast<uint64_t>(rv));
                 else if (op == "*")                      result = static_cast<long long>(static_cast<uint64_t>(lv) * static_cast<uint64_t>(rv));

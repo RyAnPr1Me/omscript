@@ -2428,9 +2428,10 @@ fn bench_ptr_noalias(@prefetch n:int) -> int {
 
 // ── 90. const_fold ───────────────────────────────────────────
 @optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
-// Tests compile-time constant folding in alg_simp_pass:
-// integer literal expressions are evaluated before LLVM sees them.
-// C writes the same constants as literals; OM folds them at the AST level.
+// Tests compile-time constant folding in alg_simp_pass (runs on all code,
+// before any LLVM passes).  Integer literal sub-expressions like 3*4+5
+// are evaluated at the AST level during compilation, yielding simpler IR.
+// C writes the same constants as literals; both compilers fold them.
 @hot @flatten @unroll @pure @vectorize @static @nounwind
 fn bench_constfold(@prefetch n:int) -> int {
     var acc:int = 0;
