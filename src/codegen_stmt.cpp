@@ -195,9 +195,9 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         useReadOnlyGlobal = true;
                     } else if (n <= kMaxStackArrayElements &&
                                (stmt->isConst || !doesVarEscapeCurrentScope(stmt->name))) {
-                        // Any array literal with a compile-time-constant element count
-                        // goes on the stack as long as it fits and doesn't escape.
-                        // The element values may be dynamic — only the size must be known.
+                        // n is the literal element count — always a compile-time constant
+                        // (it's the size of the ArrayInitializer's elements list).
+                        // Element values may be dynamic; only the count need be static.
                         useStackAlloc = true;
                     }
                 }
@@ -703,7 +703,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
         auto* i64Ty  = llvm::Type::getInt64Ty(*context);
         auto* lifeSzVal = llvm::ConstantInt::get(
             i64Ty, static_cast<int64_t>(kFuncArenaSlabSize));
-        auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(
+        auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(  // same as OMSC_GET_INTRINSIC; _STMT suffix is the local alias
             module.get(), llvm::Intrinsic::lifetime_end, {ptrTy});
         builder->CreateCall(lifetimeEnd, {lifeSzVal, funcArenaBaseAlloca_});
     };

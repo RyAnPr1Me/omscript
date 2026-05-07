@@ -770,8 +770,11 @@ class CodeGenerator {
     /// Returns true if every use of varName is provably read-only (for RO-global optimization).
     bool doesVarHaveOnlyReadOnlyUses(const std::string& varName) const;
 
-    /// Max array elements for stack allocation (512 × 8B = 4 KiB).
-    /// Staying well under the 8 KiB T1 alloc<T> threshold and typical stack limits.
+    /// Max array elements for stack allocation.
+    /// At 8 bytes/element (typical int64/pointer), 512 elements = 4 KiB — well
+    /// under the 8 KiB T1 alloc<T> threshold and typical OS stack-guard pages.
+    /// Actual byte cost depends on element size; the codegen checks element type
+    /// separately for oversized element types (e.g. large structs).
     static constexpr size_t kMaxStackArrayElements = 512;
 
     /// Track which variables hold stack-allocated arrays so that free()

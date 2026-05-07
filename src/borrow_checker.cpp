@@ -209,20 +209,20 @@ private:
             throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
                 "cannot move invalidated variable '" + name + "'", site);
         }
+        // Full `borrow` aliases always block moves.
         if (s->mutBorrowed || s->immutBorrows > 0) {
             throw makeBorrowError(ErrorCode::E018_MOVE_WHILE_BORROWED,
                 "cannot move '" + name + "' — it has active borrow(s); "
                 "end the borrow before moving", site);
         }
-        // A frozen variable with only reborrow (not borrow) aliases is
-        // movable: `reborrow` is an explicitly short-lived, non-owning
-        // alias and the programmer promises the alias won't be used after
-        // the move.  A regular `borrow` alias blocks the move (handled above
-        // via immutBorrows check).
+        // `reborrow` aliases block moves *unless* the variable is frozen.
+        // A frozen variable with only reborrow aliases is movable: `reborrow`
+        // is explicitly a short-lived, non-owning alias and the programmer
+        // promises the alias won't be used after the move.
         if (s->reborrows > 0 && !s->frozen) {
             throw makeBorrowError(ErrorCode::E018_MOVE_WHILE_BORROWED,
                 "cannot move '" + name + "' — it has active reborrow alias(es); "
-                "end the reborrow scope before moving", site);
+                "end the reborrow scope or freeze '" + name + "' before moving", site);
         }
     }
 
