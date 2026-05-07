@@ -4122,8 +4122,91 @@ TEST(CodegenTest, DoWhileConstantFalseSingleExec) {
 }
 
 // ===========================================================================
-// OPTMAX EarlyCSE with MemorySSA
+// DCE Pass B — BlockStmt exit detection (stmtAlwaysExits fix)
 // ===========================================================================
+
+// Dead code after `if(1){return x;}` must be pruned.
+// Before the fix, Pass A replaced the if with a BlockStmt `{return x;}` but
+// Pass B only recognised bare RETURN_STMT nodes as pruning boundaries, so the
+// statements after it were left alive.  stmtAlwaysExits() now walks into the
+// BlockStmt and detects the exit, causing main to have exactly one statement.
+TEST(CodegenTest, DCE_DeadCodeAfterAlwaysTrueIfBraceReturn) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  if (1) { return 42; }"
+        "  return 0;"   // dead — should be pruned by the fixed DCE
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    // The function should return 42, not 0.
+    auto& entry = mainFn->getEntryBlock();
+    bool found42 = false;
+    for (auto& I : entry) {
+        if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I)) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                if (ci->getSExtValue() == 42) found42 = true;
+        }
+    }
+    EXPECT_TRUE(found42) << "main should return 42 (dead `return 0` was pruned)";
+}
+
+// Dead code after `do { return x; } while (0);` must also be pruned.
+// Pass A replaces do { return x; } while (0) with the body `{return x;}`.
+// The fixed Pass B then recognises the resulting BlockStmt as an exit and
+// prunes subsequent statements.
+TEST(CodegenTest, DCE_DeadCodeAfterDoWhileFalseReturn) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  do { return 7; } while (0);"
+        "  return 0;"   // dead — should be pruned
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    auto& entry = mainFn->getEntryBlock();
+    bool found7 = false;
+    for (auto& I : entry) {
+        if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I)) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                if (ci->getSExtValue() == 7) found7 = true;
+        }
+    }
+    EXPECT_TRUE(found7) << "main should return 7 (dead `return 0` was pruned)";
+}
+
+// Nested BlockStmt exits: `if(1){ if(1){ return 5; } }` becomes
+// `{ {return 5;} }`.  stmtAlwaysExits() recurses and should still detect the exit.
+TEST(CodegenTest, DCE_DeadCodeAfterNestedAlwaysTrueIf) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  if (1) { if (1) { return 5; } }"
+        "  return 99;"  // dead
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    auto& entry = mainFn->getEntryBlock();
+    bool found5 = false;
+    for (auto& I : entry) {
+        if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I)) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                if (ci->getSExtValue() == 5) found5 = true;
+        }
+    }
+    EXPECT_TRUE(found5) << "main should return 5 (nested dead code was pruned)";
+}
+
+
 
 TEST(CodegenTest, OptmaxEarlyCSEMemorySSA) {
     // OPTMAX functions should use EarlyCSE with MemorySSA for better CSE

@@ -11,8 +11,14 @@
 ///     do { B } while (0)         → B          (executes exactly once)
 ///
 ///   Pass B — unreachable-after-return pruning (per block):
-///     Once a return, break, continue, or throw is encountered in a block's
-///     statement list, all following statements are dropped.
+///     Once a statement that unconditionally exits the block (return, break,
+///     continue, throw, or a BlockStmt whose last statement always exits) is
+///     encountered in the statement list, all following statements are dropped.
+///
+///     NOTE on BlockStmt exits: Pass A may replace `if(1){return x;}` with
+///     a bare BlockStmt `{return x;}`.  Pass B must recognise such blocks as
+///     unconditional exits so that subsequent statements — which are now dead
+///     — are correctly pruned rather than left in the AST.
 
 #include "dce_pass.h"
 #include "pass_utils.h"
@@ -30,6 +36,42 @@ namespace omscript {
 
 static DCEStats transformBlock(BlockStmt* block);
 static DCEStats transformStmt(std::unique_ptr<Statement>& stmt);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// stmtAlwaysExits — does this statement unconditionally exit the block?
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Returns true when control can never fall through past @p s:
+//   • return / break / continue — direct exits.
+//   • BlockStmt — exits iff its last non-null statement always exits
+//     (handles the case where Pass A replaced `if(1){return x;}` with the
+//     bare BlockStmt `{return x;}`; without this, Pass B sees a BLOCK at
+//     position i and leaves all subsequent statements alive, producing dead
+//     code that makes main appear empty of meaningful work).
+//
+// throw is deliberately excluded — it is handled separately in Pass B because
+// it may be followed by catch() handlers that must be preserved.
+
+static bool stmtAlwaysExits(const Statement* s) {
+    if (!s) return false;
+    switch (s->type) {
+    case ASTNodeType::RETURN_STMT:
+    case ASTNodeType::BREAK_STMT:
+    case ASTNodeType::CONTINUE_STMT:
+        return true;
+    case ASTNodeType::BLOCK: {
+        const auto* blk = static_cast<const BlockStmt*>(s);
+        if (blk->statements.empty()) return false;
+        // Walk backwards past any null slots to the last real statement.
+        for (auto it = blk->statements.rbegin(); it != blk->statements.rend(); ++it) {
+            if (*it) return stmtAlwaysExits(it->get());
+        }
+        return false;
+    }
+    default:
+        return false;
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // transformStmt — recursively eliminate dead code in a single statement
@@ -205,9 +247,12 @@ static DCEStats transformBlock(BlockStmt* block) {
             // Has catch handlers — do not prune; let codegen handle the jump table.
             continue;
         }
-        if (s->type == ASTNodeType::RETURN_STMT ||
-            s->type == ASTNodeType::BREAK_STMT  ||
-            s->type == ASTNodeType::CONTINUE_STMT) {
+        // For all other statement types, use stmtAlwaysExits() which covers
+        // return / break / continue directly, and also BlockStmts whose last
+        // statement always exits (e.g. `{return x;}` produced by Pass A when
+        // folding `if(1){return x;}`).  Without this, dead code that follows
+        // such a block is not pruned and main appears to have empty/useless body.
+        if (stmtAlwaysExits(s)) {
             cutoff = i + 1;
             break;
         }
