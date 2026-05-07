@@ -1053,8 +1053,17 @@ std::string Preprocessor::process(const std::string& source) {
     for (size_t i = 0; i < source.size(); i++) {
         const char c = source[i];
         if (c == '\\' && i + 1 < source.size() && source[i + 1] == '\n') {
-            joined += ' ';
+            // Line continuation: `\<newline>` is a zero-character splice in the
+            // C preprocessor model — the two characters are deleted entirely,
+            // joining the logical lines with no separator.  Inserting a space
+            // would break macro name merging (e.g. `MY_\<newline>MACRO`).
             i++;
+            continue;
+        }
+        // Also handle `\<CR><LF>` (Windows CRLF line continuation).
+        if (c == '\\' && i + 2 < source.size() &&
+                source[i + 1] == '\r' && source[i + 2] == '\n') {
+            i += 2;
             continue;
         }
         // CRLF → LF (drop the \r)

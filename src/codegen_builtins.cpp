@@ -6299,7 +6299,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (auto va = tryFoldInt(expr->arguments[1].get())) {
                 uint64_t v = static_cast<uint64_t>(*vv);
                 unsigned amt = static_cast<unsigned>(*va) & 63;
-                uint64_t result = (v << amt) | (v >> (64 - amt));
+                // Guard against shift-by-64 UB: when amt==0, the rotation is identity.
+                uint64_t result = (amt == 0) ? v : (v << amt) | (v >> (64 - amt));
                 return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(result));
             }
         }
@@ -6319,7 +6320,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (auto va = tryFoldInt(expr->arguments[1].get())) {
                 uint64_t v = static_cast<uint64_t>(*vv);
                 unsigned amt = static_cast<unsigned>(*va) & 63;
-                uint64_t result = (v >> amt) | (v << (64 - amt));
+                // Guard against shift-by-64 UB: when amt==0, the rotation is identity.
+                uint64_t result = (amt == 0) ? v : (v >> amt) | (v << (64 - amt));
                 return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(result));
             }
         }
