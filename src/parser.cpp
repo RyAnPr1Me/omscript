@@ -868,6 +868,7 @@ std::unique_ptr<Program> Parser::parse() {
             if (hintWillReturn && hintNoReturn) {
                 warnings_.push_back("warning: '@semantics(willreturn)' and '@semantics(noreturn)' are contradictory on function '"
                     + func->name + "' — noreturn takes precedence");
+                hintWillReturn = false; // noreturn wins
             }
             // @semantics(pure) implies memory(none) or memory(read) — warn if
             // an explicit @memory access level contradicts that contract.
