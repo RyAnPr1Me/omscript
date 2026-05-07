@@ -1912,9 +1912,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return result;
     }
 
-    // typeof(x) returns a type tag: 1=integer, 2=float, 3=string.
+    // typeof(x) returns a compile-time type tag: 1=integer, 2=float, 3=string.
+    // DEPRECATED: typeof() resolves at compile time from static type information,
+    // not at runtime. Use explicit type annotations instead.
     if (bid == BuiltinId::TYPEOF) {
         validateArgCount(expr, "typeof", 1);
+        std::cerr << "[warning] 'typeof' is deprecated and will be removed in a future version."
+                     " It resolves statically at compile time; use explicit type annotations instead.\n";
         // Evaluate the argument for its side effects, then derive type tag.
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         long long tag;

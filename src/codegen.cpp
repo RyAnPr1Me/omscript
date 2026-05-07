@@ -745,8 +745,11 @@ llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
     if (v->getType()->isDoubleTy()) {
         return builder->CreateFCmpONE(v, llvm::ConstantFP::get(getFloatType(), 0.0), "tobool");
     } else if (v->getType()->isPointerTy()) {
-        llvm::Value* intVal = builder->CreatePtrToInt(v, getDefaultType(), "ptrtoint");
-        return builder->CreateICmpNE(intVal, llvm::ConstantInt::get(getDefaultType(), 0), "tobool");
+        // Compare the pointer directly against null — avoids a ptrtoint and
+        // preserves provenance / nonnull information for alias analysis.
+        return builder->CreateICmpNE(
+            v, llvm::ConstantPointerNull::get(
+                   llvm::cast<llvm::PointerType>(v->getType())), "tobool");
     } else {
         return builder->CreateICmpNE(v, llvm::ConstantInt::get(v->getType(), 0, true), "tobool");
     }

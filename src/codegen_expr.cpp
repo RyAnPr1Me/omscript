@@ -1442,12 +1442,34 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // fall through to the integer path.
     }
 
-    // Convert pointer types to i64 for integer operations (fallback)
-    if (left->getType()->isPointerTy()) {
-        left = builder->CreatePtrToInt(left, getDefaultType(), "ptoi");
-    }
-    if (right->getType()->isPointerTy()) {
+    // Convert pointer types to i64 for integer operations (fallback).
+    // For comparison operators between two pointers, prefer direct pointer icmp
+    // to preserve provenance and avoid unnecessary ptrtoint round-trips.
+    if (left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
+        const std::string& op = expr->op;
+        llvm::Value* cmpBool = nullptr;
+        if (op == "==")
+            cmpBool = builder->CreateICmpEQ(left, right, "pcmp.eq");
+        else if (op == "!=")
+            cmpBool = builder->CreateICmpNE(left, right, "pcmp.ne");
+        else if (op == "<")
+            cmpBool = builder->CreateICmpULT(left, right, "pcmp.lt");
+        else if (op == "<=")
+            cmpBool = builder->CreateICmpULE(left, right, "pcmp.le");
+        else if (op == ">")
+            cmpBool = builder->CreateICmpUGT(left, right, "pcmp.gt");
+        else if (op == ">=")
+            cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
+        if (cmpBool)
+            return builder->CreateZExt(cmpBool, getDefaultType(), "pcmp.result");
+        // Non-comparison ops on two pointers: fall through to ptrtoint path.
+        left  = builder->CreatePtrToInt(left,  getDefaultType(), "ptoi");
         right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
+    } else {
+        if (left->getType()->isPointerTy())
+            left = builder->CreatePtrToInt(left, getDefaultType(), "ptoi");
+        if (right->getType()->isPointerTy())
+            right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
     }
 
     // Constant-literal narrowing: when one operand is a wider ConstantInt and
