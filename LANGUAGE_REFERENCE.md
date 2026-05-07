@@ -78,7 +78,7 @@ OmScript source code undergoes the following compilation stages:
 - **Preprocessor**: Macros, conditional compilation, predefined macros (§3)
 - **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), mandatory type annotations (§4)
 - **Variables and constants**: `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, compound assignment, destructuring (§5)
-- **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, generics, annotations (`@inline`, `@hot`, `@pure`, `@vectorize`, etc.), tail calls, lambdas (§6)
+- **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, generics, annotations (`@opt(hot)`, `@semantics(pure)`, `@memory(allocator)`, etc.), tail calls, lambdas (§6)
 - **Control flow**: `if`/`elif`/`else`, `unless`, `guard`, `switch`, `when`, `defer`, `with`, branch hints (§7)
 - **Loops**: `while`, `do`/`while`, `until`, `for` (ranges, downto, step), `foreach`, `loop`, `repeat`, `forever`, `times`, `parallel`, `pipeline`, loop annotations (`@loop(unroll=N)`, `@loop(vectorize)`) (§8)
 - **Operators**: Arithmetic, comparison, logical, bitwise, null-coalescing, range, spread, pipe-forward, address-of, precedence table (§9)
@@ -1862,260 +1862,184 @@ fn main() {
 
 Functions may be preceded by **annotation attributes** (introduced by `@`) that modify compilation and optimization behavior.
 
-**Annotation syntax**: `@annotation` appears on the line before `fn`:
-```omscript
-@inline
-fn fast_add(a: int, b: int) -> int {
-    return a + b;
-}
-```
+OmScript provides three **compound annotation forms** that group related hints into a single, namespaced annotation.  Multiple options may appear comma-separated inside the parentheses, and multiple compound annotations may be stacked on separate lines before `fn`.
 
-**Multiple annotations**: Stack annotations on separate lines:
 ```omscript
-@vectorize
-@inline
+@opt(hot, inline, vectorize)
+@semantics(pure, nounwind)
 fn compute(x: int) -> int {
-    return x * 2;
+    return x * 2
 }
 ```
 
-**Recognized function annotations**:
+---
 
-#### `@inline` — Force Inlining
-Requests that the function be inlined at all call sites (LLVM `alwaysinline` attribute).
+#### `@opt(...)` — Optimization Hints
 
-```omscript
-@inline
-fn add(a: int, b: int) -> int {
-    return a + b;
-}
-```
+Controls how the compiler optimizes this function.
 
-**Effect**: Function body is substituted directly at call sites, eliminating call overhead. Use for small, hot functions.
+**Syntax**: `@opt(option, option, ...)` where options are:
 
-#### `@noinline` — Prevent Inlining
-Requests that the function never be inlined (LLVM `noinline` attribute).
-
-```omscript
-@noinline
-fn large_computation(x: int) -> int {
-    // Complex logic that should remain a separate function
-    return x * x * x;
-}
-```
-
-**Effect**: Function always emits a call instruction. Use for debugging or code size control.
-
-#### `@hot` — Hot Function Hint
-Marks the function as frequently executed (LLVM `hot` attribute).
+| Option | Effect |
+|--------|--------|
+| `inline` | Force-inline at all call sites (`alwaysinline`) |
+| `noinline` | Never inline (`noinline`) |
+| `hot` | Mark as frequently executed; prioritizes optimization effort |
+| `cold` | Mark as rarely executed; deprioritizes and may move off hot paths |
+| `vectorize` | Hint SIMD vectorization for loops in this function |
+| `novectorize` | Disable auto-vectorization |
+| `unroll` | Request loop unrolling |
+| `nounroll` | Disable loop unrolling |
+| `parallel` | Hint that loops may be parallelized across threads |
+| `noparallel` | Prevent loop parallelization |
+| `flatten` | Aggressively unroll and flatten control flow |
+| `minsize` | Optimize for code size over speed (`minsize` + `optsize`) |
+| `optnone` | Disable all optimizations (useful for debugging IR) |
+| `align=N` | Align function entry to `N` bytes (power of two) |
+| `align` | Auto-align to cache-line optimal (64 bytes); also aligns all local allocas |
 
 ```omscript
-@hot
+@opt(hot, inline)
 fn inner_loop(n: int) -> int {
-    var sum: int = 0;
-    for (i: int in 0...n) {
-        sum = sum + i;
-    }
-    return sum;
+    var sum: int = 0
+    for (i: int in 0...n) { sum = sum + i }
+    return sum
 }
-```
 
-**Effect**: Compiler prioritizes optimizations for this function (e.g., aggressive inlining, vectorization).
-
-#### `@cold` — Cold Function Hint
-Marks the function as rarely executed (LLVM `cold` attribute).
-
-```omscript
-@cold
+@opt(cold, minsize)
 fn error_handler(code: int) {
-    println("Error: ", code);
+    println("Error: ", code)
+}
+
+@opt(align=32)
+fn simd_kernel(x: int) -> int {
+    return x * 2
 }
 ```
 
-**Effect**: Compiler deprioritizes this function (may move it out-of-line, reduce optimization effort).
+---
 
-#### `@pure` — Pure Function (No Side Effects)
-Indicates the function has no side effects and returns the same result for the same inputs (LLVM `readonly` or `readnone` attribute).
+#### `@semantics(...)` — Semantic / ABI Attributes
+
+Declares behavioral contracts that the optimizer may rely on.
+
+**Syntax**: `@semantics(attr, attr, ...)` where attrs are:
+
+| Attribute | Effect |
+|-----------|--------|
+| `pure` | No side effects; same inputs always produce same outputs (`readonly`/`readnone`) |
+| `speculatable` | May be hoisted across branches and into loop preheaders without observable cost |
+| `noreturn` | Function never returns (e.g., calls `exit()`, throws unconditionally) |
+| `nounwind` | Never throws; enables more aggressive inlining and frame omission |
+| `restrict` | Pointer parameters do not alias each other (C `restrict` on all ptr params) |
+| `noalias` | Same as `restrict` |
+| `const_eval` | Compile-time foldable when all arguments are constants |
 
 ```omscript
-@pure
+@semantics(pure, nounwind)
 fn square(x: int) -> int {
-    return x * x;
+    return x * x
+}
+
+@semantics(noreturn)
+fn fatal(msg: str) {
+    println(msg)
+    exit(1)
+}
+
+@semantics(restrict, pure)
+fn dot_product(a: ptr<int>, b: ptr<int>, n: int) -> int {
+    var s: int = 0
+    for (i: int in 0...n) { s = s + a[i] * b[i] }
+    return s
 }
 ```
 
-**Effect**: Enables memoization, dead-code elimination, and reordering. Use only if the function truly has no side effects (no I/O, no global state mutation).
+**Combining `pure` + `speculatable`** gives the strongest optimization signal: `pure` proves read-only semantics; `speculatable` additionally permits the call to be executed speculatively before all guards are evaluated.
 
-#### `@static` — Static Function (Internal Linkage)
-Marks the function as having internal linkage (not exported from the module).
+---
+
+#### `@memory(...)` — Memory Model Attributes
+
+Provides allocator metadata so the optimizer can reason about pointer provenance and aliasing.
+
+**Syntax**: `@memory(option, ...)` where options are:
+
+| Option | Effect |
+|--------|--------|
+| `allocator` | Return pointer is a freshly allocated, non-aliasing region |
+| `size=N` | Parameter index `N` specifies the allocation size |
+| `count=M` | Parameter index `M` is a count multiplied by the size |
+
+```omscript
+@memory(allocator, size=0)
+fn my_alloc(bytes: int) -> ptr {
+    return malloc(bytes)
+}
+
+@memory(allocator, size=1, count=0)
+fn my_calloc(count: int, size: int) -> ptr {
+    return calloc(count, size)
+}
+```
+
+---
+
+#### `@static` — Internal Linkage
+
+Marks the function as module-private (not exported). May enable additional interprocedural optimizations.
 
 ```omscript
 @static
-fn helper(x: int) -> int {
-    return x + 1;
-}
+fn helper(x: int) -> int { return x + 1 }
 ```
 
-**Effect**: Function is not visible outside the compilation unit. May enable additional interprocedural optimizations.
+---
 
-#### `@vectorize` — Request Vectorization
-Hints that the function should be optimized for SIMD vectorization (applies to loops within the function).
+#### `@optmax` / `@optmax(...)` — Maximum Optimization
 
-```omscript
-@vectorize
-fn sum_array(arr: int[], n: int) -> int {
-    var total: int = 0;
-    for (i: int in 0...n) {
-        total = total + arr[i];
-    }
-    return total;
-}
-```
-
-**Effect**: Compiler attempts to generate SIMD instructions for loops. May combine with loop annotations (see §8.16).
-
-#### `@flatten` — Flatten Control Flow
-Requests aggressive loop unrolling and branch flattening to reduce control flow overhead.
-
-```omscript
-@flatten
-fn compute_polynomial(x: int) -> int {
-    var result: int = 0;
-    for (i: int in 0...5) {
-        result = result + i * x;
-    }
-    return result;
-}
-```
-
-**Effect**: Loops may be fully unrolled, branches may be converted to selects. Increases code size but reduces branch mispredictions.
-
-#### `@allocator` — Allocator Function Hint
-Marks the function as a memory allocator (LLVM `noalias` return and specific allocator attributes).
-
-```omscript
-@allocator
-fn my_malloc(size: int) -> ptr {
-    // Allocation logic
-    return null;  // Placeholder
-}
-```
-
-**Effect**: Return pointer is guaranteed not to alias any existing pointer. Enables optimizations around memory operations.
-
-#### `@optmax` — Maximum Optimization (OPTMAX)
-Marks a function for aggressive optimization (equivalent to wrapping in `OPTMAX=:` / `OPTMAX!:` markers).
+Applies the OPTMAX optimization profile (aggressive inlining, loop transforms, etc.). See §18.3 for configuration options.
 
 ```omscript
 @optmax
-fn optimize_me(n: int) -> int {
-    var sum: int = 0;
-    for (i: int in 0...n) {
-        sum = sum + i;
-    }
-    return sum;
+fn hot_kernel(n: int) -> int {
+    var s: int = 0
+    for (i: int in 0...n) { s = s + i }
+    return s
 }
 ```
 
-**Effect**: Applies OPTMAX optimization profile (see §6 for OPTMAX details).
+---
 
-#### `@prefetch` — Memory Prefetch Hint
-Requests that pointer parameters be prefetched at function entry.
+#### Deprecated Flat Annotations
 
-```omscript
-@prefetch
-fn process_array(arr: ptr<int>, n: int) {
-    // Array processing
-}
-```
+The individual flat forms (`@hot`, `@cold`, `@inline`, `@pure`, `@noreturn`, etc.) are **deprecated**.  They still compile — the compiler emits a warning and applies the same effect — but all new code should use the compound forms above.
 
-**Effect**: Emits `llvm.prefetch` intrinsics at function entry for pointer parameters. Reduces memory latency in pointer-heavy code.
+| Deprecated | Replacement |
+|------------|-------------|
+| `@inline` | `@opt(inline)` |
+| `@noinline` | `@opt(noinline)` |
+| `@hot` | `@opt(hot)` |
+| `@cold` | `@opt(cold)` |
+| `@vectorize` | `@opt(vectorize)` |
+| `@novectorize` | `@opt(novectorize)` |
+| `@unroll` | `@opt(unroll)` |
+| `@nounroll` | `@opt(nounroll)` |
+| `@parallel` | `@opt(parallel)` |
+| `@noparallel` | `@opt(noparallel)` |
+| `@flatten` | `@opt(flatten)` |
+| `@minsize` | `@opt(minsize)` |
+| `@optnone` | `@opt(optnone)` |
+| `@align(N)` | `@opt(align=N)` |
+| `@pure` | `@semantics(pure)` |
+| `@speculatable` | `@semantics(speculatable)` |
+| `@noreturn` | `@semantics(noreturn)` |
+| `@nounwind` | `@semantics(nounwind)` |
+| `@restrict` | `@semantics(restrict)` |
+| `@noalias` | `@semantics(noalias)` |
+| `@const_eval` | `@semantics(const_eval)` |
+| `@allocator(size=N)` | `@memory(allocator, size=N)` |
 
-#### `@musttail` — Mandatory Tail Call
-Guarantees that all `return call(...)` statements in the function are compiled as tail calls (no stack frame growth).
-
-```omscript
-@musttail
-fn factorial_tail(n: int, acc: int) -> int {
-    if (n == 0) {
-        return acc;
-    }
-    return factorial_tail(n - 1, acc * n);
-}
-```
-
-**Effect**: Recursive calls do not consume stack space (equivalent to iteration). Compilation fails if tail-call optimization is not possible.
-
-#### Additional Annotations
-
-**`@novectorize`**: Opposite of `@vectorize` — disables auto-vectorization for this function.
-
-**`@nounroll`**: Disables loop unrolling inside this function.
-
-**`@unroll`**: Requests loop unrolling (may combine with `@vectorize`). Also available as a per-loop annotation (see §8.16).
-
-**`@noreturn`**: Declares that the function never returns (e.g., it calls `exit()` or throws unconditionally). Emits LLVM `noreturn` attribute. Enables dead-code elimination after call sites.
-
-**`@restrict`**: Asserts that pointer parameters do not alias each other (LLVM `noalias` on all pointer arguments). Equivalent to C `restrict` on every pointer parameter.
-
-**`@noalias`**: Same as `@restrict` — annotates all pointer parameters as non-aliasing.
-
-**`@nounwind`**: Declares that the function never throws an exception or calls `unwind`. Enables more aggressive inlining and frame-omission.
-
-**`@const_eval`**: Marks the function as a compile-time-evaluable constant function. The optimizer attempts to fold calls at compile time when all arguments are constants.
-
-**`@minsize`**: Requests minimum code-size optimization (LLVM `minsize` + `optsize` attributes). Trades runtime speed for smaller binary footprint.
-
-**`@optnone`**: Completely disables all optimizations for this function. Useful for debugging generated code.
-
-**`@parallel`**: Hints that loops in this function may be parallelized across threads.
-
-**`@noparallel`**: Prevents loop parallelization in this function.
-
-#### `@align` — Function and Body Alignment
-
-`@align(N)` aligns the function entry point to exactly `N` bytes (must be a power of two).
-
-`@align()` (no argument) selects **cache-line-optimal alignment** (64 bytes) for the function entry point AND aligns every local variable alloca in the function body to 64 bytes, maximising cache locality.
-
-```omscript
-@align(16)
-fn hot_loop(x: int) -> int {
-    return x * 2;
-}
-
-@align()
-fn cache_friendly(arr: int[], n: int) -> int {
-    // All local variables are 64-byte cache-line aligned.
-    var sum: int = 0;
-    for (i: int in 0...n) {
-        sum = sum + arr[i];
-    }
-    return sum;
-}
-```
-
-**Sentinels**:
-- `hintAlign = 0` — not set (uses optimization-level default: 16 bytes at O2+, 32 for `@hot`)
-- `hintAlign = N` (N > 0) — exact alignment: function entry only
-- `hintAlign = -1` — auto/cache-line: aligns function entry and ALL allocas to 64 bytes
-
-**Effect**: Improves I-cache density for hot functions; 64-byte alignment prevents false-sharing between cache lines. At O2+ the default is 16 bytes; `@hot` uses 32 bytes.
-
-#### `@speculatable` — Speculatable Function
-
-Marks the function as having no observable side effects, allowing LLVM to **hoist or speculate calls** across branches and into loop preheaders.
-
-```omscript
-@speculatable @pure
-fn square(x: int) -> int {
-    return x * x;
-}
-```
-
-**Effect**: Adds LLVM `Speculatable` attribute. The optimizer may execute the call even on paths that are not reached, provided it cannot cause undefined behaviour. Only safe when the function is truly free of side effects (no I/O, no global mutation, no trapping operations).
-
-**Combine with `@pure`** for the strongest optimization signal: `@pure` proves read-only semantics; `@speculatable` additionally enables speculative execution.
 
 ### 6.7 Method-Call Syntax — Universal Function Call Syntax (UFCS)
 
@@ -7356,7 +7280,7 @@ The OmScript compiler processes source code through eleven phases:
    Identify functions that always return a compile-time constant (used by CF-CTRE).
 
 5. **Purity Inference**  
-   Mark functions as `@pure` when they have no side effects and deterministic output. Propagates across call graph.
+   Mark functions as `@semantics(pure)` when they have no side effects and deterministic output. Propagates across call graph.
 
 6. **Effect Inference**  
    Build `FunctionEffects` summaries: `hasIO`, `hasMutation`, `readsMemory`, `writesMemory`. Used by loop optimizer legality checks.
@@ -8607,9 +8531,9 @@ A function is eligible for CF-CTRE evaluation if:
 4. **Fuel remaining**: Instruction budget not exhausted.
 
 **Purity inference** (phase 5 of pipeline):
-- Mark function `@pure` if:
+- Mark function `@semantics(pure)` if:
   - Body contains no `print`, `input`, `file_read`, `file_write`, `sleep`, `random`, `time`.
-  - All called functions are also `@pure`.
+  - All called functions are also `@semantics(pure)`.
   - No global variable writes.
 
 ### 28.4 Execution Model
@@ -9113,7 +9037,7 @@ When `std::synthesize` is the **sole expression** in a function's return stateme
 2. Extracts examples from the literal array argument.
 3. Runs `SynthesisEngine::synthesize()`.
 4. **Replaces the function body** with the synthesized expression AST.
-5. Marks the function `@pure` and `@const_eval`.
+5. Marks the function `@semantics(pure, const_eval)`.
 
 **Example**:
 ```omscript
