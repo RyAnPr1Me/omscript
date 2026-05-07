@@ -8,11 +8,22 @@
 ///     if (0)  { T } else { E }  → E          (or nothing if no else-branch)
 ///     if (!0) { T } else { E }  → T
 ///     while (0) { ... }          → (removed)
-///     do { B } while (0)         → B          (executes exactly once)
+///     do { B } while (0)         → B          (executes exactly once,
+///                                              ONLY when B has no top-level
+///                                              break/continue — see below)
 ///
 ///   Pass B — unreachable-after-return pruning (per block):
-///     Once a return, break, continue, or throw is encountered in a block's
-///     statement list, all following statements are dropped.
+///     Once a statement that unconditionally exits the block is encountered,
+///     all following statements are dropped.  "Unconditionally exits" is
+///     determined by stmtAlwaysExits() (see below).
+///
+/// ── do{B}while(0) safety constraint ────────────────────────────────────────
+///   A break or continue directly inside B (not inside a nested loop or
+///   switch) targets the do-while loop itself.  If we blindly replace
+///   do{B}while(0) with just B, those jumps now escape to the *outer* loop,
+///   changing the program's semantics and causing Pass B to over-prune the
+///   statements that follow the do-while inside the outer loop body.
+///   Fix: only apply the transformation when B has no top-level break/continue.
 
 #include "dce_pass.h"
 #include "pass_utils.h"
@@ -30,6 +41,96 @@ namespace omscript {
 
 static DCEStats transformBlock(BlockStmt* block);
 static DCEStats transformStmt(std::unique_ptr<Statement>& stmt);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// hasTopLevelBreakContinue — would a break/continue inside @p s escape to the
+// enclosing do-while that we are about to eliminate?
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Returns true if @p s (or a nested statement reachable without crossing
+// another loop or switch boundary) is a break or continue statement.
+//
+// We stop recursing into nested FOR/WHILE/DO_WHILE/FOR_EACH and SWITCH because
+// any break/continue inside those targets *them*, not the do-while being
+// considered for elimination.  We do recurse into BLOCK and IF because
+// those are transparent to break/continue flow.
+
+static bool hasTopLevelBreakContinue(const Statement* s) {
+    if (!s) return false;
+    switch (s->type) {
+    case ASTNodeType::BREAK_STMT:
+    case ASTNodeType::CONTINUE_STMT:
+        return true;
+    case ASTNodeType::BLOCK: {
+        const auto* blk = static_cast<const BlockStmt*>(s);
+        for (const auto& st : blk->statements)
+            if (hasTopLevelBreakContinue(st.get())) return true;
+        return false;
+    }
+    case ASTNodeType::IF_STMT: {
+        const auto* ifs = static_cast<const IfStmt*>(s);
+        return hasTopLevelBreakContinue(ifs->thenBranch.get()) ||
+               hasTopLevelBreakContinue(ifs->elseBranch.get());
+    }
+    // Nested loops and switch absorb break/continue — do not recurse.
+    case ASTNodeType::FOR_STMT:
+    case ASTNodeType::WHILE_STMT:
+    case ASTNodeType::DO_WHILE_STMT:
+    case ASTNodeType::FOR_EACH_STMT:
+    case ASTNodeType::SWITCH_STMT:
+        return false;
+    default:
+        return false;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// stmtAlwaysExits — does this statement unconditionally exit the current block?
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Returns true when control can NEVER fall through past @p s:
+//   • return / break / continue — direct exits.
+//   • BlockStmt — exits iff its last non-null statement always exits.
+//     (Pass A may produce a bare BlockStmt by folding `if(1){return x;}`
+//     into `{return x;}`; Pass B must recognise such blocks as exits so the
+//     dead code that follows is pruned.)
+//   • IF_STMT with an else branch — exits iff BOTH the then-branch AND the
+//     else-branch always exit.  Without an else branch the condition might
+//     be false and fall through to the next statement.
+//
+// throw is deliberately excluded: it is handled specially in Pass B because a
+// throw may be followed by catch() handlers that must NOT be removed.
+
+static bool stmtAlwaysExits(const Statement* s) {
+    if (!s) return false;
+    switch (s->type) {
+    case ASTNodeType::RETURN_STMT:
+    case ASTNodeType::BREAK_STMT:
+    case ASTNodeType::CONTINUE_STMT:
+        return true;
+    case ASTNodeType::BLOCK: {
+        const auto* blk = static_cast<const BlockStmt*>(s);
+        if (blk->statements.empty()) return false;
+        // Walk backwards past any null slots to find the last real statement.
+        // By the time Pass B runs, Pass A has already pruned inner-block dead
+        // code, so the last statement is the last *reachable* statement.
+        for (auto it = blk->statements.rbegin(); it != blk->statements.rend(); ++it) {
+            if (*it) return stmtAlwaysExits(it->get());
+        }
+        return false;
+    }
+    case ASTNodeType::IF_STMT: {
+        const auto* ifs = static_cast<const IfStmt*>(s);
+        // Only an if WITH an else can guarantee both paths exit.
+        // An if without else may fall through when the condition is false.
+        return ifs->elseBranch &&
+               stmtAlwaysExits(ifs->thenBranch.get()) &&
+               stmtAlwaysExits(ifs->elseBranch.get());
+    }
+    default:
+        return false;
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // transformStmt — recursively eliminate dead code in a single statement
@@ -119,9 +220,17 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
 
         long long condVal = 0;
         if (isIntLiteral(doWhile->condition.get(), &condVal) && condVal == 0) {
-            // do { B } while (0) — body executes exactly once; replace with body.
-            ++stats.deadLoops;
-            stmt = std::move(doWhile->body);
+            // do { B } while (0) — body executes exactly once.
+            // SAFETY: only replace with the body when the body has no
+            // top-level break or continue.  A break/continue inside B
+            // targets the do-while; if we lift B to the enclosing scope those
+            // jumps would escape to the *outer* loop, changing semantics and
+            // causing Pass B to over-prune the statements that follow this
+            // do-while (the "trimmed too much" bug).
+            if (!hasTopLevelBreakContinue(doWhile->body.get())) {
+                ++stats.deadLoops;
+                stmt = std::move(doWhile->body);
+            }
         }
         break;
     }
@@ -152,6 +261,59 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
     case ASTNodeType::VAR_DECL:
         // No dead-code structure inside a simple declaration.
         break;
+
+    // ── ForEach statement ───────────────────────────────────────────────────
+    case ASTNodeType::FOR_EACH_STMT: {
+        auto* feStmt = static_cast<ForEachStmt*>(stmt.get());
+        if (feStmt->body) {
+            auto sub = transformStmt(feStmt->body);
+            stats.deadIfBranches   += sub.deadIfBranches;
+            stats.deadLoops        += sub.deadLoops;
+            stats.unreachableStmts += sub.unreachableStmts;
+        }
+        break;
+    }
+
+    // ── Switch statement ────────────────────────────────────────────────────
+    case ASTNodeType::SWITCH_STMT: {
+        auto* swStmt = static_cast<SwitchStmt*>(stmt.get());
+        for (auto& sc : swStmt->cases) {
+            // Each case body is a vector of statements: wrap in a temporary
+            // block so transformBlock can apply both Pass 1 and Pass 2 to it.
+            // We then unwrap the (possibly pruned) block back into the case.
+            auto tmpBlock = std::make_unique<BlockStmt>(std::move(sc.body));
+            auto sub = transformBlock(tmpBlock.get());
+            sc.body = std::move(tmpBlock->statements);
+            stats.deadIfBranches   += sub.deadIfBranches;
+            stats.deadLoops        += sub.deadLoops;
+            stats.unreachableStmts += sub.unreachableStmts;
+        }
+        break;
+    }
+
+    // ── Catch handler ───────────────────────────────────────────────────────
+    case ASTNodeType::CATCH_STMT: {
+        auto* catchStmt = static_cast<CatchStmt*>(stmt.get());
+        if (catchStmt->body) {
+            auto sub = transformBlock(catchStmt->body.get());
+            stats.deadIfBranches   += sub.deadIfBranches;
+            stats.deadLoops        += sub.deadLoops;
+            stats.unreachableStmts += sub.unreachableStmts;
+        }
+        break;
+    }
+
+    // ── Defer statement ─────────────────────────────────────────────────────
+    case ASTNodeType::DEFER_STMT: {
+        auto* deferStmt = static_cast<DeferStmt*>(stmt.get());
+        if (deferStmt->body) {
+            auto sub = transformStmt(deferStmt->body);
+            stats.deadIfBranches   += sub.deadIfBranches;
+            stats.deadLoops        += sub.deadLoops;
+            stats.unreachableStmts += sub.unreachableStmts;
+        }
+        break;
+    }
 
     // ── Return / expression statements / other leaf nodes ───────────────────
     default:
@@ -205,9 +367,12 @@ static DCEStats transformBlock(BlockStmt* block) {
             // Has catch handlers — do not prune; let codegen handle the jump table.
             continue;
         }
-        if (s->type == ASTNodeType::RETURN_STMT ||
-            s->type == ASTNodeType::BREAK_STMT  ||
-            s->type == ASTNodeType::CONTINUE_STMT) {
+        // For all other statement types, use stmtAlwaysExits() which covers
+        // return / break / continue directly, and also BlockStmts whose last
+        // statement always exits (e.g. `{return x;}` produced by Pass A when
+        // folding `if(1){return x;}`).  Without this, dead code that follows
+        // such a block is not pruned and main appears to have empty/useless body.
+        if (stmtAlwaysExits(s)) {
             cutoff = i + 1;
             break;
         }

@@ -264,8 +264,11 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                     return count;
                 }
             }
-            // 1 ** x → 1  (pure LHS only; side-effecting RHS must still execute)
-            if (isIntLiteralVal(L, 1)) {
+            // 1 ** x → 1  ONLY when x is provably pure (a literal sub-expression).
+            // If x has side effects (e.g. a function call), the call must still
+            // execute.  `definitelyInteger(R)` returns false for identifiers and
+            // any expression involving a function call, so this is safe.
+            if (isIntLiteralVal(L, 1) && definitelyInteger(R)) {
                 expr = makeIntLiteral(1);
                 ++count;
                 return count;
@@ -359,9 +362,23 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
         // ── Boolean short-circuit simplification ──────────────────────────
         // Note: OmScript uses 0 = false, non-zero = true (like C).
         // We only fold when the operand is the integer literal 0 or 1.
+        //
+        // Short-circuit safety:
+        //   `0 && x`  — the LHS is 0, so x is NEVER evaluated.  Drop x. ✓
+        //   `x && 0`  — the LHS x IS evaluated.  We can only drop x when x
+        //               is provably pure (definitelyInteger → no calls/idents).
+        //   `1 || x`  — the LHS is 1, so x is NEVER evaluated.  Drop x. ✓
+        //   `x || 1`  — the LHS x IS evaluated.  Same purity guard needed.
         if (op == "&&") {
-            if (isIntLiteralVal(R, 0) || isIntLiteralVal(L, 0)) {
-                // x && 0 → 0,  0 && x → 0
+            if (isIntLiteralVal(L, 0)) {
+                // 0 && x → 0  (safe: short-circuit, x never evaluated)
+                expr = makeIntLiteral(0);
+                ++count;
+                return count;
+            }
+            if (isIntLiteralVal(R, 0) && definitelyInteger(L)) {
+                // x && 0 → 0  ONLY when x is a pure integer expression
+                // (definitelyInteger is false for identifiers and function calls).
                 expr = makeIntLiteral(0);
                 ++count;
                 return count;
@@ -380,8 +397,14 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
         }
         if (op == "||") {
-            if (isIntLiteralVal(R, 1) || isIntLiteralVal(L, 1)) {
-                // x || 1 → 1,  1 || x → 1
+            if (isIntLiteralVal(L, 1)) {
+                // 1 || x → 1  (safe: short-circuit, x never evaluated)
+                expr = makeIntLiteral(1);
+                ++count;
+                return count;
+            }
+            if (isIntLiteralVal(R, 1) && definitelyInteger(L)) {
+                // x || 1 → 1  ONLY when x is a pure integer expression
                 expr = makeIntLiteral(1);
                 ++count;
                 return count;
@@ -486,6 +509,39 @@ static unsigned simplifyStmt(Statement* stmt) {
 
     case ASTNodeType::THROW_STMT:
         count += simplifyExpr(static_cast<ThrowStmt*>(stmt)->value);
+        break;
+
+    case ASTNodeType::FOR_EACH_STMT: {
+        auto* fe = static_cast<ForEachStmt*>(stmt);
+        count += simplifyExpr(fe->collection);
+        count += simplifyStmt(fe->body.get());
+        break;
+    }
+
+    case ASTNodeType::SWITCH_STMT: {
+        auto* sw = static_cast<SwitchStmt*>(stmt);
+        count += simplifyExpr(sw->condition);
+        for (auto& sc : sw->cases) {
+            count += simplifyExpr(sc.value);
+            for (auto& val : sc.values)
+                count += simplifyExpr(val);
+            for (auto& s : sc.body)
+                count += simplifyStmt(s.get());
+        }
+        break;
+    }
+
+    case ASTNodeType::CATCH_STMT: {
+        auto* cs = static_cast<CatchStmt*>(stmt);
+        if (cs->body) {
+            for (auto& s : cs->body->statements)
+                count += simplifyStmt(s.get());
+        }
+        break;
+    }
+
+    case ASTNodeType::DEFER_STMT:
+        count += simplifyStmt(static_cast<DeferStmt*>(stmt)->body.get());
         break;
 
     default:

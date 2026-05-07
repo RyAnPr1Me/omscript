@@ -90,10 +90,11 @@ static std::vector<std::string> scanImports(const std::string& source) {
             }
         }
 
-        // Skip whitespace after keyword.
+        // Skip whitespace after keyword (spaces, tabs, and newlines).
         pos = after;
         while (pos < source.size() &&
-               (source[pos] == ' ' || source[pos] == '\t')) {
+               (source[pos] == ' ' || source[pos] == '\t' ||
+                source[pos] == '\n' || source[pos] == '\r')) {
             ++pos;
         }
 

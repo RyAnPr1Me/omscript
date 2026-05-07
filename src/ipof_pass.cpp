@@ -85,18 +85,24 @@ static bool isUnfoldedConstantExpr(const llvm::Instruction* I) noexcept {
     return true;
 }
 
-/// Check whether @p I is a load whose pointer was already loaded/stored
-/// earlier in the same basic block without an intervening store.
+/// Check whether @p I is a load whose pointer was already loaded (and not
+/// stored to) earlier in the same basic block.  Scans BACKWARDS from LD so
+/// that the first same-pointer instruction encountered is the most recent one:
+///   - Another load  → LD is redundant (no intervening store).
+///   - A store       → LD is NOT redundant (the store may have changed the value).
+/// A forward scan would incorrectly mark LD redundant in the sequence
+/// `load ptr → store ptr → load ptr(=LD)` because it finds the first load
+/// before reaching the store.
 static bool isRedundantLoad(const llvm::LoadInst* LD) noexcept {
     const llvm::Value* ptr = LD->getPointerOperand();
     const llvm::BasicBlock* BB = LD->getParent();
-    // Walk backwards from LD within its BB.
-    for (auto it = BB->begin(), end = BB->end(); it != end; ++it) {
-        const llvm::Instruction* cur = &*it;
-        if (cur == LD) break;
-        if (auto* prevLD = llvm::dyn_cast<llvm::LoadInst>(cur))
+    // Walk backwards from LD (exclusive) toward the beginning of the block.
+    auto it = LD->getIterator();
+    while (it != BB->begin()) {
+        --it;
+        if (const auto* prevLD = llvm::dyn_cast<llvm::LoadInst>(&*it))
             if (prevLD->getPointerOperand() == ptr) return true;
-        if (auto* prevST = llvm::dyn_cast<llvm::StoreInst>(cur))
+        if (const auto* prevST = llvm::dyn_cast<llvm::StoreInst>(&*it))
             if (prevST->getPointerOperand() == ptr) return false;
     }
     return false;
@@ -257,7 +263,6 @@ static IpofStats runOnFunction(llvm::Function& F,
     auto ops = step1Detect(F, cfg);
     if (ops.empty()) return stats;
     stats.opportunitiesFound = static_cast<unsigned>(ops.size());
-    ++stats.opportunitiesActed;
 
     // Step 2: select pass sequence.
     const PassSeq seq = selectPassSeq(ops);
@@ -314,6 +319,12 @@ static IpofStats runOnFunction(llvm::Function& F,
         auto remaining = step1Detect(F, cfg);
         if (remaining.empty()) break;
     }
+
+    // Count this function as "acted upon" only when at least one improvement
+    // was accepted.  Incrementing before iterations ran (or when all iterations
+    // were rejected) made the counter misleading.
+    if (stats.acceptedImprovements > 0)
+        ++stats.opportunitiesActed;
 
     return stats;
 }

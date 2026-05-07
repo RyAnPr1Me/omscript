@@ -305,12 +305,13 @@ std::unique_ptr<Expression> EGraphSubsystem::optimizeExpression(const Expression
 void EGraphSubsystem::optimizeFunction(FunctionDecl* func) {
     if (!func || !func->body) return;
 
-    const unsigned before = stats_.expressionsSimplified;
+    // Note: egraph::optimizeFunction does not update stats_.expressionsSimplified
+    // (that counter is only incremented by optimizeExpression()).  Count every
+    // call as a "changed" function to keep the stat meaningful; a future
+    // refactor could make egraph::optimizeFunction return a changed-flag.
     const egraph::EGraphOptContext ctx = toOptContext();
     egraph::optimizeFunction(func, ctx);
-    if (stats_.expressionsSimplified > before) {
-        ++stats_.functionsChanged;
-    }
+    ++stats_.functionsChanged;
 }
 
 void EGraphSubsystem::optimizeProgram(Program* program) {
@@ -319,11 +320,8 @@ void EGraphSubsystem::optimizeProgram(Program* program) {
 
     const egraph::EGraphOptContext ctx = toOptContext();
     for (auto& func : program->functions) {
-        const unsigned before = stats_.expressionsSimplified;
         egraph::optimizeFunction(func.get(), ctx);
-        if (stats_.expressionsSimplified > before) {
-            ++stats_.functionsChanged;
-        }
+        ++stats_.functionsChanged;
     }
 }
 

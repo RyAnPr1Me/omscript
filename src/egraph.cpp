@@ -1340,10 +1340,15 @@ std::vector<RewriteRule> getAlgebraicRules() {
         P::OpPat(Op::Div, {P::Wild("x"), P::ConstPat(1)}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
-    // ── Self-division: x / x → 1 ────────────────────────────────────────
+    // ── Self-division: x / x → 1  (only when x is a provably non-zero constant)
+    // Guard required: x / x with x = 0 is division-by-zero — do not fold it.
     rules.emplace_back("div_self",
         P::OpPat(Op::Div, {P::Wild("x"), P::Wild("x")}),
-        [](EGraph& g, const Subst&) { return g.addConst(1); });
+        [](EGraph& g, const Subst&) { return g.addConst(1); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("x"));
+            return cv && *cv != 0;
+        });
 
     // NOTE: x / 2^n → x >> n is NOT valid for signed integers.
 
@@ -1407,10 +1412,15 @@ std::vector<RewriteRule> getAlgebraicRules() {
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(1)}),
         [](EGraph& g, const Subst&) { return g.addConst(0); });
 
-    // ── Self-modulo: x % x → 0 ──────────────────────────────────────────
+    // ── Self-modulo: x % x → 0  (only when x is a provably non-zero constant)
+    // Guard required: 0 % 0 is undefined behavior — do not fold it.
     rules.emplace_back("mod_self",
         P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("x")}),
-        [](EGraph& g, const Subst&) { return g.addConst(0); });
+        [](EGraph& g, const Subst&) { return g.addConst(0); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("x"));
+            return cv && *cv != 0;
+        });
 
     // ── Modulo by power of 2: x % 2^n → x & (2^n - 1) ──────────────────
     // Only valid for non-negative x (signed integers: (-7) % 2 == -1, not 1).
@@ -2211,10 +2221,17 @@ std::vector<RewriteRule> getAlgebraicRules() {
 
     // ─────────────────────────────────────────────────────────────────────
 
-    // (x * n) / n → x
-    rules.emplace_back("mul_div_cancel",
+    // (x * n) / n → x  (named differently from the guarded relational variant
+    // so dedup in getAllRules() keeps both; the relational version is stricter
+    // because it guards against n == 0; the algebraic version fires only when
+    // 'n' is known non-zero as a constant through pattern matching)
+    rules.emplace_back("mul_div_cancel_alg",
         P::OpPat(Op::Div, {P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("n")}), P::Wild("n")}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("n"));
+            return cv && *cv != 0;
+        });
 
     // (x * n) % n → 0
     rules.emplace_back("mul_mod_cancel",
@@ -10000,7 +10017,10 @@ std::vector<RewriteRule> getRelationalRules() {
         [](EGraph& g, const Subst& s) {
             auto a = g.getConstValue(s.at("a"));
             auto m = g.getConstValue(s.at("mask"));
-            long long newMask = *m >> *a;
+            // Use logical (unsigned) shift to match OmScript's `>>` semantics
+            // (which maps to CreateLShr, not arithmetic shift).
+            long long newMask = static_cast<long long>(
+                static_cast<unsigned long long>(*m) >> static_cast<unsigned>(*a));
             return g.addBinOp(Op::BitAnd,
                 g.addBinOp(Op::Shr, s.at("x"), s.at("a")),
                 g.addConst(newMask));
@@ -10016,25 +10036,14 @@ std::vector<RewriteRule> getRelationalRules() {
 
     // ─────────────────────────────────────────────────────────────────────
 
-    // (x >= C1) && (x <= C2) → (x - C1) <= (C2 - C1)
-    rules.emplace_back("range_check_unsigned",
-        P::OpPat(Op::LogAnd, {
-            P::OpPat(Op::Ge, {P::Wild("x"), P::Wild("lo")}),
-            P::OpPat(Op::Le, {P::Wild("x"), P::Wild("hi")})
-        }),
-        [](EGraph& g, const Subst& s) {
-            auto lo = g.getConstValue(s.at("lo"));
-            auto hi = g.getConstValue(s.at("hi"));
-            ClassId diff = g.addBinOp(Op::Sub, s.at("x"), s.at("lo"));
-            ClassId range = g.addConst(*hi - *lo);
-            return g.addBinOp(Op::Le, diff, range);
-        },
-        [](const EGraph& g, const Subst& s) -> bool {
-            auto lo = g.getConstValue(s.at("lo"));
-            auto hi = g.getConstValue(s.at("hi"));
-            if (!lo || !hi) return false;
-            return *hi >= *lo;
-        });
+    // DISABLED: (x >= C1) && (x <= C2) → (x - C1) <= (C2 - C1)
+    // This "unsigned range check" trick requires an unsigned comparison (ULe)
+    // but the EGraph only has signed Op::Le.  For negative x with non-negative
+    // lo, the signed rewrite produces incorrect results (signed subtraction
+    // overflow + incorrect signed compare).  Re-enable only if an unsigned
+    // comparison operator is added to the EGraph Op enum.
+    //
+    // rules.emplace_back("range_check_unsigned", ...)
 
     // ─────────────────────────────────────────────────────────────────────
 

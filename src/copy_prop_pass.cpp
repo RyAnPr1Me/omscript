@@ -274,7 +274,7 @@ static unsigned killAndRecurseBody(Statement* body, CopyMap& map,
                                     const OpaqueSet& opaque) {
     if (!body) return 0;
     std::unordered_set<std::string> writes;
-    collectWrittenInStmt(body, writes);
+    collectWrittenDeep(body, writes);
     for (const auto& w : writes) killName(map, w);
     if (body->type == ASTNodeType::BLOCK)
         return propagateInBlock(static_cast<BlockStmt*>(body), map, opaque);
@@ -341,11 +341,14 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
             count += propagateInExpr(ifS->condition, map, opaque);
             // Compute a conservative set of names written in either branch,
             // then invalidate those copies so the post-if map is safe.
+            // Use collectWrittenDeep so writes inside nested blocks inside the
+            // branch body are also killed (collectWrittenInStmt is shallow and
+            // misses writes inside BlockStmt children).
             std::unordered_set<std::string> branchWrites;
             if (ifS->thenBranch)
-                collectWrittenInStmt(ifS->thenBranch.get(), branchWrites);
+                collectWrittenDeep(ifS->thenBranch.get(), branchWrites);
             if (ifS->elseBranch)
-                collectWrittenInStmt(ifS->elseBranch.get(), branchWrites);
+                collectWrittenDeep(ifS->elseBranch.get(), branchWrites);
             // Recurse into branches with a *copy* of the current map.
             if (ifS->thenBranch && ifS->thenBranch->type == ASTNodeType::BLOCK)
                 count += propagateInBlock(

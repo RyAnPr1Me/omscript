@@ -148,13 +148,13 @@ int64_t SynthesisEngine::eval(const SynthNode* node,
     case SynthOp::XOR:
         return eval(node->left.get(), inputs) ^ eval(node->right.get(), inputs);
     case SynthOp::SHL: {
-        int64_t shift = eval(node->right.get(), inputs) & 62;
+        int64_t shift = eval(node->right.get(), inputs) & 63;
         if (shift < 0) shift = 0;
         return static_cast<int64_t>(
             static_cast<uint64_t>(eval(node->left.get(), inputs)) << static_cast<unsigned>(shift));
     }
     case SynthOp::SHR: {
-        int64_t shift = eval(node->right.get(), inputs) & 62;
+        int64_t shift = eval(node->right.get(), inputs) & 63;
         if (shift < 0) shift = 0;
         return eval(node->left.get(), inputs) >> static_cast<int>(shift);
     }

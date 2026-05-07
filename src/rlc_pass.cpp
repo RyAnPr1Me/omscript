@@ -669,7 +669,11 @@ static void processBlock(
             if (renameMap.count(rv)) ++stats.allocsRedirected;
         }
     }
-    stats.invalidatesRemoved += static_cast<unsigned>(removedStmts.size());
+    // Count only the removed *invalidate* statements (one per coalesced pair),
+    // not the create-statements which are also in removedStmts.
+    // Each coalescing pair contributes exactly one invalidate to removedStmts
+    // (via r1InvToRemove) and one create (via r2.createIdx).
+    stats.invalidatesRemoved += stats.regionsCoalesced;
 
     std::vector<std::unique_ptr<Statement>> newStmts;
     newStmts.reserve(static_cast<size_t>(n) - removedStmts.size());

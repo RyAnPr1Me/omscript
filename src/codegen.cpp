@@ -4609,7 +4609,21 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
     if (func->hintPure) {
         // @pure: function has no side effects and does not read/write memory
-        function->setOnlyReadsMemory();
+        // beyond what its pointer parameters allow.  Functions whose parameters
+        // are all scalars (no pointers) cannot touch memory at all — use the
+        // stronger memory(none) attribute.  Functions with at least one pointer
+        // parameter may read through it, so memory(read) is the correct bound.
+        bool hasPointerParam = false;
+        for (unsigned pi = 0; pi < function->arg_size(); ++pi) {
+            if (function->getArg(pi)->getType()->isPointerTy()) {
+                hasPointerParam = true;
+                break;
+            }
+        }
+        if (hasPointerParam)
+            function->setOnlyReadsMemory();   // memory(read): may read via ptrs
+        else
+            function->setDoesNotAccessMemory(); // memory(none): pure scalar math
         function->setDoesNotThrow();
         function->setDoesNotFreeMemory();
         // NoSync: the function does not communicate with other threads via

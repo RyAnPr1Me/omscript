@@ -7,6 +7,9 @@
 #include <ctime>
 #include <sstream>
 #include <unordered_set>
+#include <llvm/ADT/StringMap.h>
+#include <llvm/Config/llvm-config.h>
+#include <llvm/TargetParser/Host.h>
 
 // Detect OS and architecture at compile time for __OS__ / __ARCH__
 #if defined(_WIN32) || defined(_WIN64)
@@ -79,58 +82,57 @@ Preprocessor::Preprocessor(std::string filename)
         reserve("__TIME__", timeBuf);
     }
 
-    // Target-feature predefined macros — reflect the SIMD / ISA feature set
-    // the compiler binary itself was built for.  This lets user code
-    // conditionally select vector widths and intrinsics, e.g.
+    // Target-feature predefined macros — reflect the SIMD / ISA feature set of
+    // the *target* machine (i.e. the machine running the compiled program).
+    // These are queried at OmScript compile time via LLVM's host-feature API so
+    // that `omsc --march=native` and cross-compilation with an explicit -march
+    // both see the correct feature set, regardless of what ISA extensions the
+    // omsc binary itself was built with.
+    //
     //   #if defined(__SIMD_AVX2__)
     //       var v: i32x8 = ...;
     //   #else
     //       var v: i32x4 = ...;
     //   #endif
-    // Only macros for features actually present are defined (mirrors GCC /
-    // clang behavior for __AVX2__, __SSE4_2__, etc.).
+    //
+    // Only macros for features actually present on the host are defined (mirrors
+    // GCC / clang behavior for __AVX2__, __SSE4_2__, etc.).
     auto define1 = [&](const char* name) { reserve(name, "1"); };
-#if defined(__SSE2__)
-    define1("__SIMD_SSE2__");
-#endif
-#if defined(__SSE3__)
-    define1("__SIMD_SSE3__");
-#endif
-#if defined(__SSSE3__)
-    define1("__SIMD_SSSE3__");
-#endif
-#if defined(__SSE4_1__)
-    define1("__SIMD_SSE41__");
-#endif
-#if defined(__SSE4_2__)
-    define1("__SIMD_SSE42__");
-#endif
-#if defined(__AVX__)
-    define1("__SIMD_AVX__");
-#endif
-#if defined(__AVX2__)
-    define1("__SIMD_AVX2__");
-#endif
-#if defined(__AVX512F__)
-    define1("__SIMD_AVX512F__");
-#endif
-#if defined(__AVX512BW__)
-    define1("__SIMD_AVX512BW__");
-#endif
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-    define1("__SIMD_NEON__");
-#endif
-
-    // The natural SIMD vector width (lane count for i32) — matches the
-    // value codegen reports via preferredVectorWidth_.  Lets user code
-    // size hand-tuned SIMD chunks without hardcoding `4` or `8`.
-#if defined(__AVX512F__)
-    reserve("__VECTOR_WIDTH__", "16");
-#elif defined(__AVX2__) || defined(__AVX__)
-    reserve("__VECTOR_WIDTH__", "8");
+    {
+#if LLVM_VERSION_MAJOR >= 19
+        llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
 #else
-    reserve("__VECTOR_WIDTH__", "4");
+        llvm::StringMap<bool> hostFeatures;
+        llvm::sys::getHostCPUFeatures(hostFeatures);
 #endif
+        // Helper: true iff the named LLVM feature is present and enabled.
+        auto on = [&](const char* f) -> bool {
+            auto it = hostFeatures.find(f);
+            return it != hostFeatures.end() && it->second;
+        };
+
+        if (on("sse2"))     define1("__SIMD_SSE2__");
+        if (on("sse3"))     define1("__SIMD_SSE3__");
+        if (on("ssse3"))    define1("__SIMD_SSSE3__");
+        if (on("sse4.1"))   define1("__SIMD_SSE41__");
+        if (on("sse4.2"))   define1("__SIMD_SSE42__");
+        if (on("avx"))      define1("__SIMD_AVX__");
+        if (on("avx2"))     define1("__SIMD_AVX2__");
+        if (on("avx512f"))  define1("__SIMD_AVX512F__");
+        if (on("avx512bw")) define1("__SIMD_AVX512BW__");
+        if (on("neon"))     define1("__SIMD_NEON__");
+
+        // __VECTOR_WIDTH__: natural i32 SIMD lane count on this host.
+        // Matches the preferredVectorWidth_ that codegen computes from the same
+        // feature set so that hand-written SIMD loops can size themselves without
+        // hardcoding 4 or 8.
+        if (on("avx512f"))
+            reserve("__VECTOR_WIDTH__", "16");
+        else if (on("avx2") || on("avx"))
+            reserve("__VECTOR_WIDTH__", "8");
+        else
+            reserve("__VECTOR_WIDTH__", "4");
+    }
 }
 
 // ============================================================
@@ -1051,8 +1053,17 @@ std::string Preprocessor::process(const std::string& source) {
     for (size_t i = 0; i < source.size(); i++) {
         const char c = source[i];
         if (c == '\\' && i + 1 < source.size() && source[i + 1] == '\n') {
-            joined += ' ';
+            // Line continuation: `\<newline>` is a zero-character splice in the
+            // C preprocessor model — the two characters are deleted entirely,
+            // joining the logical lines with no separator.  Inserting a space
+            // would break macro name merging (e.g. `MY_\<newline>MACRO`).
             i++;
+            continue;
+        }
+        // Also handle `\<CR><LF>` (Windows CRLF line continuation).
+        if (c == '\\' && i + 2 < source.size() &&
+                source[i + 1] == '\r' && source[i + 2] == '\n') {
+            i += 2;
             continue;
         }
         // CRLF → LF (drop the \r)

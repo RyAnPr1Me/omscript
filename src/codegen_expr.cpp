@@ -671,9 +671,27 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             unsigned srcBits = srcTy->getIntegerBitWidth();
             unsigned dstBits = dstTy->getIntegerBitWidth();
             if (dstBits > srcBits) {
-                // unsigned types get zero-extension; signed types get sign-extension.
-                // Treat u-prefixed types as unsigned, others as signed.
-                bool isUnsignedSrc = (targetType.size() > 0 && targetType[0] == 'u');
+                // Extension: the signedness is a property of the SOURCE value,
+                // not the target type.  Determine it from the source's declared
+                // type annotation when possible.
+                //   u-prefixed source → zero-extend  (unsigned)
+                //   i-/other source   → sign-extend   (signed, default)
+                bool isUnsignedSrc = false;
+                // Case 1: source is a named variable — look up its declared annotation.
+                if (const auto* srcId = asIdentifier(expr->left.get())) {
+                    auto annIt = varTypeAnnotations_.find(srcId->name);
+                    if (annIt != varTypeAnnotations_.end())
+                        isUnsignedSrc = isUnsignedAnnot(annIt->second);
+                }
+                // Case 2: source is itself an `as` cast — its target type determines
+                // the signedness of the resulting value (e.g. `(x as u8) as i32`).
+                else if (expr->left->type == ASTNodeType::BINARY_EXPR) {
+                    const auto* inner = static_cast<const BinaryExpr*>(expr->left.get());
+                    if (inner->op == "as" && inner->right) {
+                        if (const auto* typeId = asIdentifier(inner->right.get()))
+                            isUnsignedSrc = isUnsignedAnnot(typeId->name);
+                    }
+                }
                 return isUnsignedSrc
                     ? builder->CreateZExt(val, dstTy, "as.zext")
                     : builder->CreateSExt(val, dstTy, "as.sext");

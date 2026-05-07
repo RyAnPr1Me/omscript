@@ -257,7 +257,11 @@ static void narrowFromBinary(const BinaryExpr* bin, VarRangeMap& env, bool taken
         else if (op == "<=") narrowed.lo = std::max(cur.lo, static_cast<int64_t>(lit) + 1);
         else if (op == ">")  narrowed.hi = std::min(cur.hi, static_cast<int64_t>(lit));
         else if (op == ">=") narrowed.hi = std::min(cur.hi, static_cast<int64_t>(lit) - 1);
-        else if (op == "!=") { /* can't narrow usefully */ }
+        else if (op == "!=") {
+            // !taken means the condition `id != lit` is FALSE → id == lit.
+            // We can narrow to the exact value.
+            narrowed = ValueRange{static_cast<int64_t>(lit), static_cast<int64_t>(lit)};
+        }
         else if (op == "==") { /* we know id != lit; can't represent easily */ }
     }
 
@@ -350,6 +354,13 @@ static void collectWritten(const Statement* stmt,
             collectWritten(s.get(), out);
         break;
     }
+    case ASTNodeType::SWITCH_STMT: {
+        const auto* sw = static_cast<const SwitchStmt*>(stmt);
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                collectWritten(s.get(), out);
+        break;
+    }
     default:
         break;
     }
@@ -417,9 +428,12 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         auto er = evalExprRange(fs->end.get(),   env);
 
         if (sr && er) {
-            // Induction variable: [min(start,end), max(start,end) - 1]
-            // (OmScript for-loops are exclusive of end, like Python range)
-            const int64_t lo = std::min(sr->lo, er->lo);
+            // Induction variable: [start_lo, end_hi - 1]
+            // The iterator always starts at `start`, so lo = sr->lo.
+            // It stops before `end`, so hi = er->hi - 1.
+            // Using min(start_lo, end_lo) was wrong: it mixed end values into
+            // the lower bound, producing a range wider than the actual values.
+            const int64_t lo = sr->lo;
             const int64_t hi = std::max(sr->hi, er->hi) - 1;
             if (lo <= hi)
                 env[fs->iteratorVar] = ValueRange{lo, hi};

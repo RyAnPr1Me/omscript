@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -265,7 +266,7 @@ MultiCost HGOEGuidedOptimizer::computeNodeCost(const ENode& node,
     mc.cycles             += sumChildCycles;
     mc.registerPressure   += maxChildReg;
     mc.memoryPressure     += sumChildMem;
-    mc.throughputPressure += mc.cycles;  // simple model: throughput tracks cycles
+    mc.throughputPressure += sumChildCycles;  // add only child contribution; own baseline already in mc.throughputPressure
     return mc;
 }
 
@@ -335,8 +336,12 @@ void HGOEGuidedOptimizer::updateLowerBound(ClassId id) {
 
     // Lower bound: node's own baseline cost (children's lower bounds summed)
     MultiCost lb;
+    // Initialize to +∞ so the first nodeLB always wins; a zero initialization
+    // means the comparison `scalar(nodeLB) < scalar(lb)` never fires for
+    // multi-node classes since all costs are non-negative.
     lb.cycles = lb.uops = lb.latency = lb.throughputPressure =
-        lb.registerPressure = lb.memoryPressure = lb.branchPenalty = 0.0;
+        lb.registerPressure = lb.memoryPressure = lb.branchPenalty =
+            std::numeric_limits<double>::infinity();
 
     for (const ENode& node : cls.nodes) {
         MultiCost nodeLB = baselineCost(node); // leaf cost only

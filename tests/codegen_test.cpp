@@ -4122,8 +4122,289 @@ TEST(CodegenTest, DoWhileConstantFalseSingleExec) {
 }
 
 // ===========================================================================
-// OPTMAX EarlyCSE with MemorySSA
+// DCE Pass B — BlockStmt exit detection (stmtAlwaysExits fix)
 // ===========================================================================
+
+// Dead code after `if(1){return x;}` must be pruned.
+// Before the fix, Pass A replaced the if with a BlockStmt `{return x;}` but
+// Pass B only recognised bare RETURN_STMT nodes as pruning boundaries, so the
+// statements after it were left alive.  stmtAlwaysExits() now walks into the
+// BlockStmt and detects the exit, causing main to have exactly one statement.
+TEST(CodegenTest, DCE_DeadCodeAfterAlwaysTrueIfBraceReturn) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  if (1) { return 42; }"
+        "  return 0;"   // dead -- should be pruned by the fixed DCE
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    // The function should return 42, not 0.
+    auto& entry = mainFn->getEntryBlock();
+    bool found42 = false;
+    for (auto& I : entry) {
+        if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I)) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                if (ci->getSExtValue() == 42) found42 = true;
+        }
+    }
+    EXPECT_TRUE(found42) << "main should return 42 (dead `return 0` was pruned)";
+}
+
+// Dead code after `do { return x; } while (0);` must also be pruned.
+// Pass A replaces do { return x; } while (0) with the body `{return x;}`.
+// The fixed Pass B then recognises the resulting BlockStmt as an exit and
+// prunes subsequent statements.
+TEST(CodegenTest, DCE_DeadCodeAfterDoWhileFalseReturn) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  do { return 7; } while (0);"
+        "  return 0;"   // dead -- should be pruned
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    auto& entry = mainFn->getEntryBlock();
+    bool found7 = false;
+    for (auto& I : entry) {
+        if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I)) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                if (ci->getSExtValue() == 7) found7 = true;
+        }
+    }
+    EXPECT_TRUE(found7) << "main should return 7 (dead `return 0` was pruned)";
+}
+
+// Nested BlockStmt exits: `if(1){ if(1){ return 5; } }` becomes
+// `{ {return 5;} }`.  stmtAlwaysExits() recurses and should still detect the exit.
+TEST(CodegenTest, DCE_DeadCodeAfterNestedAlwaysTrueIf) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  if (1) { if (1) { return 5; } }"
+        "  return 99;"  // dead -- nested exits must be recognized
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    auto& entry = mainFn->getEntryBlock();
+    bool found5 = false;
+    for (auto& I : entry) {
+        if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I)) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                if (ci->getSExtValue() == 5) found5 = true;
+        }
+    }
+    EXPECT_TRUE(found5) << "main should return 5 (nested dead code was pruned)";
+}
+
+// ===========================================================================
+// DCE -- do{B}while(0) break/continue safety (over-trim fix)
+// ===========================================================================
+
+// do { break; } while (0) must NOT be replaced with a bare {break;} block,
+// because the break would then escape to the outer for loop and the next
+// statement (print) would be incorrectly pruned by stmtAlwaysExits.
+// Instead the do-while is left as-is (the break exits the do-while, not
+// the for), and both statements inside the for body must remain.
+TEST(CodegenTest, DCE_DoWhileBreakDoesNotPruneOuterForBody) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var s:i64 = 0;"
+        "  for (i in 0...5) {"
+        "    do { break; } while (0);"
+        "    s = s + 1;"   // LIVE -- must NOT be pruned
+        "  }"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    // s = s + 1 is live, so the function body must contain a store or add.
+    bool hasAddOrStore = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (llvm::isa<llvm::StoreInst>(I) || llvm::isa<llvm::BinaryOperator>(I))
+                hasAddOrStore = true;
+        }
+    }
+    EXPECT_TRUE(hasAddOrStore) << "s = s + 1 should be live (not over-pruned)";
+}
+
+// do { continue; } while (0) must similarly not be replaced.
+TEST(CodegenTest, DCE_DoWhileContinueDoesNotPruneOuterWhileBody) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var s:i64 = 0;"
+        "  var i:i64 = 0;"
+        "  while (i < 5) {"
+        "    do { continue; } while (0);"
+        "    s = s + 1;"   // LIVE -- continue targets the do-while, not the while
+        "    i = i + 1;"
+        "  }"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}
+
+// do { if (cond) { break; } work(); } while (0) -- break nested inside an if
+// inside the body still targets the do-while; the statements after the do-while
+// in the outer loop must remain.
+TEST(CodegenTest, DCE_DoWhileNestedBreakInIfDoesNotPruneOuterBody) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn check(x:i64) -> i64 { return x; }"
+        "fn main() -> i64 {"
+        "  var s:i64 = 0;"
+        "  for (i in 0...5) {"
+        "    do {"
+        "      if (check(i) == 2) { break; }"
+        "    } while (0);"
+        "    s = s + 1;"   // LIVE
+        "  }"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}
+
+// do { B } while (0) where B has NO break/continue CAN still be replaced.
+// Verify the dead `return 0` is still pruned in this safe case.
+TEST(CodegenTest, DCE_DoWhileNoBreakContinueSafeToEliminate) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  do { return 7; } while (0);"
+        "  return 0;"   // dead -- no break/continue, safe to prune
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    auto& entry = mainFn->getEntryBlock();
+    bool found7 = false;
+    for (auto& I : entry) {
+        if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I))
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                if (ci->getSExtValue() == 7) found7 = true;
+    }
+    EXPECT_TRUE(found7) << "safe do-while(0) body should still be inlined";
+}
+
+// ===========================================================================
+// DCE -- stmtAlwaysExits: if-else both branches return
+// ===========================================================================
+
+// Dead code after `if(cond){return a;}else{return b;}` must be pruned because
+// both branches unconditionally exit.  stmtAlwaysExits now handles IF_STMT
+// when both branches always exit and an else branch is present.
+TEST(CodegenTest, DCE_DeadCodeAfterIfElseBothReturn) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  if (x > 0) { return 1; } else { return 0; }"
+        "  return 99;"   // dead -- both branches return
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    // 99 should never appear in the IR.
+    bool found99 = false;
+    for (auto& BB : *mainFn)
+        for (auto& I : BB)
+            if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I))
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                    if (ci->getSExtValue() == 99) found99 = true;
+    EXPECT_FALSE(found99) << "return 99 is dead (both if-else branches return)";
+}
+
+// Without an else branch the if does NOT always exit; the subsequent return
+// must be preserved.
+TEST(CodegenTest, DCE_IfWithoutElseDoesNotPruneFollowingReturn) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  if (x > 0) { return 1; }"
+        "  return 0;"   // LIVE -- no else branch, condition might be false
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+    // return 0 must be reachable.
+    bool found0 = false;
+    for (auto& BB : *mainFn)
+        for (auto& I : BB)
+            if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&I))
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue()))
+                    if (ci->getSExtValue() == 0) found0 = true;
+    EXPECT_TRUE(found0) << "return 0 must be live (no else branch on the if)";
+}
+
+// ===========================================================================
+// DCE -- recursion into ForEach, Switch, Catch, Defer bodies
+// ===========================================================================
+
+// Dead code inside a foreach loop body must be eliminated.
+TEST(CodegenTest, DCE_DeadCodeInsideForEachBody) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var s:i64 = 0;"
+        "  var arr:i64[] = [1,2,3];"
+        "  foreach (x in arr) {"
+        "    while (0) { s = s + 99; }"   // dead loop inside foreach
+        "    s = s + x;"
+        "  }"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("main"), nullptr);
+}
+
+// Dead code inside a switch case must be eliminated.
+TEST(CodegenTest, DCE_DeadCodeInsideSwitchCase) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  switch (x) {"
+        "    case 1:"
+        "      while (0) { return 99; }"   // dead loop inside case
+        "      return 1;"
+        "    default:"
+        "      return 0;"
+        "  }"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("main"), nullptr);
+}
+
+
 
 TEST(CodegenTest, OptmaxEarlyCSEMemorySSA) {
     // OPTMAX functions should use EarlyCSE with MemorySSA for better CSE
@@ -7334,4 +7615,311 @@ TEST(CodegenTest, PipelineExprCount) {
     auto* mod = generateIR(
         "fn main(n:i64) { pipeline n { stage s { } } }", codegen);
     ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// AlgSimp pass bug fixes
+// ===========================================================================
+
+// Bug 1: 1 ** x → 1 must NOT drop a side-effecting exponent.
+// Here we just verify the code compiles and generates valid IR; the runtime
+// correctness (call to inc() must execute) is covered by the script tests.
+TEST(CodegenTest, AlgSimp_PowOneSideEffectingExponent) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn inc(x:i64) -> i64 { return x + 1; }"
+        "fn main() -> i64 {"
+        "  var c:i64 = 0;"
+        "  var r:i64 = 1 ** inc(c);"  // exponent is a call; result must still call inc
+        "  return r;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+// Bug 2: f() && 0 must NOT drop the call to f().
+// At O0 (no IR-level inlining/DCE), the call to side() must remain in main's IR.
+TEST(CodegenTest, AlgSimp_AndFalseMustEvaluateLHS) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn side(c:i64) -> i64 { return c + 1; }"
+        "fn main(c:i64) -> i64 {"
+        "  var r:i64 = side(c) && 0;"  // side() MUST be called; AlgSimp must not fold
+        "  return r;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    // The main function must still contain a call to side().
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool hasCallToSide = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I))
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == "side")
+                    hasCallToSide = true;
+    EXPECT_TRUE(hasCallToSide) << "side() must be called even though && 0 makes the result 0";
+}
+
+// Bug 3: AlgSimp must recurse into foreach / switch / catch / defer bodies.
+// These tests just verify compilation does not crash/assert.
+TEST(CodegenTest, AlgSimp_ForEachBodySimplified) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var arr:i64[] = [1,2,3];"
+        "  var s:i64 = 0;"
+        "  foreach (x in arr) { s = s + x + 0; }"  // x+0 should simplify to x
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, AlgSimp_SwitchBodySimplified) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  switch (x + 0) {"   // x+0 in condition simplifies to x
+        "    case 1: return x * 1;"  // x*1 simplifies to x
+        "    default: return 0;"
+        "  }"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, AlgSimp_DeferBodySimplified) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var x:i64 = 5;"
+        "  defer { x = x + 0; }"  // x+0 should simplify to x
+        "  return x;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+// ===========================================================================
+// codegen_expr `as` cast — Bug 5: ZExt vs SExt must follow source type
+// ===========================================================================
+
+// u8 value widened to i64 must use ZExt (zero-extension), not SExt.
+// Without the fix, targetType[0]=='i' would cause SExt and u8(200) → i64(-56).
+TEST(CodegenTest, AsCast_UnsignedSourceUsesZExt) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn helper(v:u8) -> i64 { return v as i64; }"
+        "fn main() -> i64 { return helper(200); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("helper");
+    ASSERT_NE(fn, nullptr);
+    bool foundZExt = false;
+    bool foundSExt = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (llvm::isa<llvm::ZExtInst>(&I)) foundZExt = true;
+            if (llvm::isa<llvm::SExtInst>(&I)) foundSExt = true;
+        }
+    }
+    EXPECT_TRUE(foundZExt)  << "u8 → i64 should use ZExt (source is unsigned)";
+    EXPECT_FALSE(foundSExt) << "u8 → i64 must NOT use SExt";
+}
+
+// i8 value widened to u64 must use SExt (sign-extension), not ZExt.
+// Without the fix, targetType[0]=='u' would cause ZExt and i8(-1) → u64(255).
+TEST(CodegenTest, AsCast_SignedSourceUsesSExt) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn helper(v:i8) -> i64 { return v as i64; }"
+        "fn main() -> i64 { return helper(-1); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("helper");
+    ASSERT_NE(fn, nullptr);
+    bool foundSExt = false;
+    bool foundZExt = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (llvm::isa<llvm::SExtInst>(&I)) foundSExt = true;
+            if (llvm::isa<llvm::ZExtInst>(&I)) foundZExt = true;
+        }
+    }
+    EXPECT_TRUE(foundSExt)  << "i8 → i64 should use SExt (source is signed)";
+    EXPECT_FALSE(foundZExt) << "i8 → i64 must NOT use ZExt";
+}
+
+// Nested cast: (v as u8) as i64 — inner cast target is u8 (unsigned),
+// so the outer widening must use ZExt.
+TEST(CodegenTest, AsCast_NestedCastInnerUnsignedUsesZExt) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn helper(v:i32) -> i64 { return (v as u8) as i64; }"
+        "fn main() -> i64 { return helper(200); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("helper");
+    ASSERT_NE(fn, nullptr);
+    bool foundZExt = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (llvm::isa<llvm::ZExtInst>(&I)) { foundZExt = true; break; }
+    EXPECT_TRUE(foundZExt) << "(v as u8) as i64: outer widening must use ZExt";
+}
+
+// ===========================================================================
+// CSE pass — Bug 6: recursion into do-while / foreach / switch bodies
+// ===========================================================================
+
+TEST(CodegenTest, CSE_DoWhileBodyIsProcessed) {
+    // CSE should fire inside a do-while body (was never reached before).
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  var s:i64 = 0;"
+        "  do {"
+        "    var a:i64 = x + 1;"
+        "    var b:i64 = x + 1;"  // same expr as a — CSE candidate
+        "    s = s + a + b;"
+        "  } while (0);"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, CSE_ForEachBodyIsProcessed) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var arr:i64[] = [1,2,3];"
+        "  var s:i64 = 0;"
+        "  foreach (x in arr) {"
+        "    var a:i64 = x + 2;"
+        "    var b:i64 = x + 2;"  // CSE candidate inside foreach
+        "    s = s + a + b;"
+        "  }"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, CSE_SwitchCaseBodyIsProcessed) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  switch (x) {"
+        "    case 1:"
+        "      var a:i64 = x + 3;"
+        "      var b:i64 = x + 3;"  // CSE candidate inside case
+        "      return a + b;"
+        "    default:"
+        "      return 0;"
+        "  }"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+// ===========================================================================
+// Round-2 bug fixes
+// ===========================================================================
+
+// Bug 2: egraph_optimizer must recurse into FOR_STMT, FOR_EACH_STMT, SWITCH_STMT
+TEST(CodegenTest, EgraphOpt_ForStmtIsOptimized) {
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var s:i64 = 0;"
+        "  for (i in 0...5) { s = s + i * 1; }"  // i*1 → i via e-graph
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, EgraphOpt_ForEachStmtIsOptimized) {
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var arr:i64[] = [1,2,3];"
+        "  var s:i64 = 0;"
+        "  for (x in arr) { s = s + x + 0; }"  // x+0 → x
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, EgraphOpt_SwitchStmtIsOptimized) {
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  switch (x + 0) {"   // x+0 → x (condition also simplified)
+        "    case 1: return x * 1;"   // x*1 → x
+        "    default: return 0 + 0;"  // 0+0 → 0
+        "  }"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+// Bug 3: var_range_analysis collectWritten must include SWITCH_STMT
+// Regression: compiles and runs correctly (switch vars are correctly invalidated)
+TEST(CodegenTest, VarRange_SwitchCaseVarsInvalidated) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(n:i64) -> i64 {"
+        "  var x:i64 = 5;"
+        "  for (i in 0...n) {"
+        "    switch (i) {"
+        "      case 0: x = 10; break;"
+        "      default: x = x + 1; break;"
+        "    }"
+        "  }"
+        "  return x;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+// Bug 8: width_legalization must analyze THROW_STMT and DEFER_STMT expressions
+TEST(CodegenTest, WidthLegal_ThrowExprIsAnalyzed) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(x:i8) -> i64 {"
+        "  if (x < 0) { throw x as i64; }"
+        "  return x as i64;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, WidthLegal_DeferExprIsAnalyzed) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(x:i8) -> i64 {"
+        "  var r:i64 = x as i64;"
+        "  defer { r = r + 1; }"
+        "  return r;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
 }

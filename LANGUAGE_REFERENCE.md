@@ -465,7 +465,7 @@ The following tokens represent operators and punctuation. They are listed with t
 | `CARET` | `^` | Bitwise XOR |
 | `TILDE` | `~` | Bitwise NOT |
 | `LSHIFT` | `<<` | Left shift |
-| `RSHIFT` | `>>` | Right shift (arithmetic for signed, logical for unsigned) |
+| `RSHIFT` | `>>` | Right shift (always logical / unsigned-fill; sign bit is NOT propagated) |
 
 **Assignment operators:**
 | Token | Symbol | Name |
@@ -852,13 +852,13 @@ The preprocessor defines the following macros automatically:
 | `__BASE_FILE__` | `"main.om"` | Top-level source as passed on the command line — preserved across `#line` (string) |
 | `__DATE__` | `"Jan 23 2026"` | Compilation date in C-style `Mmm dd yyyy` form (string) |
 | `__TIME__` | `"14:05:09"` | Compilation time in `HH:MM:SS` form (string) |
-| `__VERSION__` | `"0.1.0"` | OmScript compiler version (string) |
+| `__VERSION__` | `"4.3.2"` | OmScript compiler version (string) |
 | `__OS__` | `"linux"` / `"windows"` / `"macos"` | Target operating system (string) |
 | `__ARCH__` | `"x86_64"` / `"aarch64"` / `"arm"` | Target architecture (string) |
 | `__COUNTER__` | `0`, `1`, ... | Global counter, increments on each use (integer) |
-| `__VECTOR_WIDTH__` | `4` / `8` / `16` | Natural i32-lane SIMD width on the host the compiler was built for (integer) |
-| `__SIMD_SSE2__` … `__SIMD_AVX512F__` | `1` (defined only if available) | Defined when the corresponding x86 SIMD feature is present in the compiler build |
-| `__SIMD_NEON__` | `1` (defined only on ARM) | Defined when ARM NEON is available in the compiler build |
+| `__VECTOR_WIDTH__` | `4` / `8` / `16` | Natural i32-lane SIMD width on the **host CPU at compile time** (detected via `llvm::sys::getHostCPUFeatures()` — reflects the machine running the compiler, not the C build ISA) |
+| `__SIMD_SSE2__` … `__SIMD_AVX512F__` | `1` (defined only if available) | Defined when the corresponding x86 SIMD feature is present on the **host CPU at compile time** (runtime LLVM query, not C compile-time `#ifdef`) |
+| `__SIMD_NEON__` | `1` (defined only on ARM) | Defined when ARM NEON is available on the host CPU at compile time |
 
 The SIMD-feature macros let portable user code conditionally pick a vector width:
 
@@ -898,7 +898,8 @@ var c = MY_ID;  // 2
 
 ### 3.4 Line Continuation
 
-A backslash `\` at the end of a line continues the preprocessor directive to the next line:
+A backslash `\` immediately followed by a newline (LF or CRLF) performs a **zero-character splice**: both characters are removed and the two physical lines are joined into a single logical line with no separator inserted. The lexer sees the joined line as a single logical line.
+
 ```omscript
 #define LONG_MACRO \
     some_function(arg1, \
@@ -906,7 +907,13 @@ A backslash `\` at the end of a line continues the preprocessor directive to the
                   arg3)
 ```
 
-**Note**: Line continuation is implemented in the preprocessor; the lexer sees the joined line as a single logical line.
+**Important**: The splice inserts **nothing** — not even a space. This means macro names and identifiers can be split across lines:
+```omscript
+#define MY_\
+MACRO 42       // defines MY_MACRO (not "MY_ MACRO")
+```
+
+**Splice precedence**: Line continuation is processed before tokenisation, so a `\<newline>` inside a string literal is also spliced (removing both the backslash and the newline from the literal). To include a literal backslash at the end of a line, use `\\`.
 
 ### 3.5 Conditional Expressions Allowed in `#if`
 
@@ -1014,7 +1021,7 @@ OmScript provides signed and unsigned integer types of various widths:
 - Signed integers use two's complement representation
 - Unsigned integers use zero-extension
 - Division `/` and modulus `%` on signed integers truncate toward zero
-- Right-shift `>>` is arithmetic (sign-extending) for signed integers, logical (zero-filling) for unsigned
+- Right-shift `>>` is always **logical** (zero-filling) regardless of signedness. OmScript does not have an arithmetic right-shift operator; use `i32(x) >> n` with explicit sign-extension casts if arithmetic shift semantics are needed.
 
 **Overflow behavior**: Integer overflow is **undefined behavior** for signed integers (enabling optimizations); unsigned integers wrap modulo 2ⁿ.
 
@@ -3071,9 +3078,9 @@ if (ptr != null && ptr.value > 0) {
 
 **Shift semantics**:
 - **Left shift `<<`**: Fills vacated bits with zeros
-- **Right shift `>>`**:
-  - **Arithmetic shift** (signed integers): Fills vacated bits with sign bit (preserves sign)
-  - **Logical shift** (unsigned integers): Fills vacated bits with zeros
+- **Right shift `>>`**: Always **logical** — fills vacated bits with zeros regardless of whether the value is signed or unsigned. OmScript does not expose an arithmetic right shift at the language level.
+
+**Note**: SIMD vector right-shifts are an exception — element-wise `>>` on vector types (e.g., `i32x4`) uses arithmetic shift (`CreateAShr`). The logical-only guarantee applies to scalar integers.
 
 **Shift amount**: Must be non-negative and less than the bit width of the left operand (undefined behavior otherwise).
 
@@ -9501,14 +9508,14 @@ fn multiply_add(a: int, b: int, c: int) -> int {
 
 ### Version
 
-**OmScript Compiler Version**: `4.1.1`
+**OmScript Compiler Version**: `4.3.2`
 
 Defined in `include/version.h`:
 ```cpp
 #define OMSCRIPT_VERSION_MAJOR 4
-#define OMSCRIPT_VERSION_MINOR 1
-#define OMSCRIPT_VERSION_PATCH 1
-#define OMSC_VERSION "4.1.1"
+#define OMSCRIPT_VERSION_MINOR 3
+#define OMSCRIPT_VERSION_PATCH 2
+#define OMSC_VERSION "4.3.2"
 ```
 
 ### Stability Statement
@@ -9541,11 +9548,11 @@ fn compute(x: int) -> int {
 ```
 
 **Compatibility**:
-- Source files written for v4.x will compile with warnings in v4.1.
+- Source files written for v4.x will compile with warnings in v4.3.
 - v5.0 will require explicit migration (automated tool planned).
 
 **LLVM compatibility**:
-- Current: LLVM 17–21 supported.
+- Current: LLVM 18 (primary). LLVM 17 and 19–21 are expected to work but are not CI-tested.
 - Future: LLVM 22+ will require updates to HGOE and superoptimizer (latency tables).
 
 **End of Part 3**

@@ -23,7 +23,7 @@ BuildProfile BuildProfile::makeDebug() {
     p.strip         = false;
     p.lto           = false;
     p.fastMath      = false;
-    p.optMax        = true;
+    p.optMax        = false;  // debug builds must not use maximum optimization (defeats debuggability)
     p.vectorize     = false;
     p.unrollLoops   = false;
     p.loopOptimize  = false;
