@@ -4135,7 +4135,7 @@ TEST(CodegenTest, DCE_DeadCodeAfterAlwaysTrueIfBraceReturn) {
     auto* mod = generateIR(
         "fn main() -> i64 {"
         "  if (1) { return 42; }"
-        "  return 0;"   // dead — should be pruned by the fixed DCE
+        "  return 0;"   // dead -- should be pruned by the fixed DCE
         "}",
         codegen);
     ASSERT_NE(mod, nullptr);
@@ -4163,7 +4163,7 @@ TEST(CodegenTest, DCE_DeadCodeAfterDoWhileFalseReturn) {
     auto* mod = generateIR(
         "fn main() -> i64 {"
         "  do { return 7; } while (0);"
-        "  return 0;"   // dead — should be pruned
+        "  return 0;"   // dead -- should be pruned
         "}",
         codegen);
     ASSERT_NE(mod, nullptr);
@@ -4188,7 +4188,7 @@ TEST(CodegenTest, DCE_DeadCodeAfterNestedAlwaysTrueIf) {
     auto* mod = generateIR(
         "fn main() -> i64 {"
         "  if (1) { if (1) { return 5; } }"
-        "  return 99;"  // dead
+        "  return 99;"  // dead -- nested exits must be recognized
         "}",
         codegen);
     ASSERT_NE(mod, nullptr);
@@ -4206,7 +4206,9 @@ TEST(CodegenTest, DCE_DeadCodeAfterNestedAlwaysTrueIf) {
     EXPECT_TRUE(found5) << "main should return 5 (nested dead code was pruned)";
 }
 
-
+// ===========================================================================
+// OPTMAX EarlyCSE with MemorySSA
+// ===========================================================================
 
 TEST(CodegenTest, OptmaxEarlyCSEMemorySSA) {
     // OPTMAX functions should use EarlyCSE with MemorySSA for better CSE
