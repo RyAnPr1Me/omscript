@@ -604,6 +604,22 @@ class FunctionDecl : public ASTNode {
     bool isOptMax;
     std::string returnType;  // Optional return type annotation (e.g. "int", "int[]", "Point")
 
+    /// Memory-access level from @memory(none|readonly|writeonly|readwrite|
+    /// argmem|argmem_ro|inaccessiblemem|inaccessiblemem_or_argmem).
+    /// Mutually exclusive; Default means no explicit annotation (rely on inference).
+    enum class MemoryEffect {
+        Default = 0,          ///< no explicit annotation — use inference
+        None,                 ///< memory(none)  — function touches no memory
+        ReadOnly,             ///< memory(read)  — only reads memory
+        WriteOnly,            ///< memory(write) — only writes memory
+        ReadWrite,            ///< memory(readwrite) — explicit default (no-op)
+        ArgMem,               ///< memory(argmem: readwrite) — arg memory only
+        ArgMemRO,             ///< memory(argmem: read) — arg memory readonly
+        InaccessibleMem,      ///< memory(inaccessiblemem: readwrite)
+        InaccessibleOrArgMem, ///< memory(inaccessiblemem: rw, argmem: rw)
+    };
+    MemoryEffect hintMemoryEffect = MemoryEffect::Default;
+
     /// Compiler hint annotations for functions.
     bool hintInline = false;    ///< @opt(inline) — suggest inlining this function
     bool hintNoInline = false;  ///< @opt(noinline) — prevent inlining this function
@@ -634,6 +650,12 @@ class FunctionDecl : public ASTNode {
     ///   allocatorCountParam >= 0: 0-based index of the "count" parameter (-1 = none)
     int allocatorSizeParam  = -1; ///< -1 = not an allocator wrapper
     int allocatorCountParam = -1; ///< -1 = no count parameter
+
+    /// @memory(noalias_ret) — return pointer is guaranteed not to alias any existing
+    /// pointer visible to the caller (LLVM `noalias` return attribute).
+    /// Useful for factory / builder functions that always return fresh memory even
+    /// when they are not full allocators (so @memory(allocator) would be wrong).
+    bool hintNoAliasReturn = false;
 
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {

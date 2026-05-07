@@ -515,6 +515,8 @@ std::unique_ptr<Program> Parser::parse() {
             OptMaxConfig optMaxCfgFromAnnotation;
             int allocatorSizeParam = -1;
             int allocatorCountParam = -1;
+            FunctionDecl::MemoryEffect hintMemoryEffect = FunctionDecl::MemoryEffect::Default;
+            bool hintNoAliasReturn = false;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -616,10 +618,37 @@ std::unique_ptr<Program> Parser::parse() {
                             const Token v = consume(TokenType::INTEGER,
                                 "Expected integer after count= in @memory");
                             allocatorCountParam = static_cast<int>(v.intValue);
+
+                        // ── Memory-access level options (mutually exclusive) ───
+                        } else if (key.lexeme == "none") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::None;
+                        } else if (key.lexeme == "readonly") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::ReadOnly;
+                        } else if (key.lexeme == "writeonly") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::WriteOnly;
+                        } else if (key.lexeme == "readwrite") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::ReadWrite;
+                        } else if (key.lexeme == "argmem_ro") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::ArgMemRO;
+                        } else if (key.lexeme == "argmem") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::ArgMem;
+                        } else if (key.lexeme == "inaccessiblemem_or_argmem") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::InaccessibleOrArgMem;
+                        } else if (key.lexeme == "inaccessiblemem") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::InaccessibleMem;
+
+                        // ── Aliasing hint ──────────────────────────────────────
+                        } else if (key.lexeme == "noalias_ret") {
+                            hintNoAliasReturn = true;
+
                         } else {
                             error("Unknown option '" + key.lexeme +
-                                  "' in @memory(...);"
-                                  " valid: allocator, size=N, count=M");
+                                  "' in @memory(...);\n"
+                                  "  Allocator : allocator, size=N, count=M\n"
+                                  "  Access    : none, readonly, writeonly, readwrite\n"
+                                  "              argmem, argmem_ro\n"
+                                  "              inaccessiblemem, inaccessiblemem_or_argmem\n"
+                                  "  Aliasing  : noalias_ret");
                         }
                         if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
                     }
@@ -754,7 +783,11 @@ std::unique_ptr<Program> Parser::parse() {
                           "            minsize, optnone, align, align=N, align=AUTO\n"
                           "  @semantics: pure, speculatable, noreturn, nounwind,\n"
                           "              restrict, noalias, const_eval\n"
-                          "  @memory : allocator, size=N, count=M\n"
+                          "  @memory : none, readonly, writeonly, readwrite,\n"
+                          "            argmem, argmem_ro,\n"
+                          "            inaccessiblemem, inaccessiblemem_or_argmem,\n"
+                          "            noalias_ret,\n"
+                          "            allocator, size=N, count=M\n"
                           "  Other   : @static, @optmax, @optmax(...)");
                 }
             }
@@ -782,6 +815,8 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintAlign = hintAlign;
             func->allocatorSizeParam = allocatorSizeParam;
             func->allocatorCountParam = allocatorCountParam;
+            func->hintMemoryEffect = hintMemoryEffect;
+            func->hintNoAliasReturn = hintNoAliasReturn;
             if (isOptMaxFromAnnotation) {
                 func->isOptMax = true;
                 func->optMaxConfig = optMaxCfgFromAnnotation;
@@ -817,6 +852,25 @@ std::unique_ptr<Program> Parser::parse() {
             if (hintParallelize && hintNoParallelize) {
                 warnings_.push_back("warning: '@opt(parallel)' and '@opt(noparallel)' are contradictory on function '"
                     + func->name + "' — noparallel takes precedence");
+            }
+            // @semantics(pure) implies memory(none) or memory(read) — warn if
+            // an explicit @memory access level contradicts that contract.
+            using ME = FunctionDecl::MemoryEffect;
+            if (hintPure && (hintMemoryEffect == ME::WriteOnly ||
+                             hintMemoryEffect == ME::ArgMem    ||
+                             hintMemoryEffect == ME::ReadWrite)) {
+                warnings_.push_back("warning: '@semantics(pure)' and '@memory(" +
+                    std::string(hintMemoryEffect == ME::WriteOnly ? "writeonly"
+                              : hintMemoryEffect == ME::ArgMem    ? "argmem"
+                                                                  : "readwrite") +
+                    ")' are contradictory on function '" + func->name +
+                    "' — pure implies readonly or no-memory access");
+            }
+            // allocator + none is a contradiction (allocator must write memory).
+            if (func->allocatorSizeParam >= 0 && hintMemoryEffect == ME::None) {
+                warnings_.push_back("warning: '@memory(allocator)' and '@memory(none)' are"
+                    " contradictory on function '" + func->name +
+                    "' — an allocator must write memory");
             }
             functions.push_back(std::move(func));
         } catch (const std::exception& e) {

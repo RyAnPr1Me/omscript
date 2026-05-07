@@ -1970,27 +1970,81 @@ fn dot_product(a: ptr<int>, b: ptr<int>, n: int) -> int {
 
 #### `@memory(...)` — Memory Model Attributes
 
-Provides allocator metadata so the optimizer can reason about pointer provenance and aliasing.
+Provides memory-access level, aliasing, and allocator metadata so the optimizer can reason about pointer provenance, alias analysis, and reordering safety.
 
-**Syntax**: `@memory(option, ...)` where options are:
+**Syntax**: `@memory(option, option, ...)` — options may be combined freely.
 
-| Option | Effect |
-|--------|--------|
-| `allocator` | Return pointer is a freshly allocated, non-aliasing region |
-| `size=N` | Parameter index `N` specifies the allocation size |
-| `count=M` | Parameter index `M` is a count multiplied by the size |
+##### Memory-Access Level (mutually exclusive)
+
+| Option | LLVM effect | Description |
+|--------|-------------|-------------|
+| `none` | `memory(none)` | No memory access at all. Implies `nounwind`, `nosync`, `willreturn`. |
+| `readonly` | `memory(read)` | Only reads memory; never writes. |
+| `writeonly` | `memory(write)` | Only writes memory; never reads. |
+| `readwrite` | *(explicit default)* | Documents that both reads and writes may occur (no-op). |
+| `argmem` | `memory(argmem: readwrite)` | Only reads/writes through its own pointer arguments. |
+| `argmem_ro` | `memory(argmem: read)` | Only reads through its own pointer arguments. |
+| `inaccessiblemem` | `memory(inaccessiblemem: readwrite)` | Only accesses memory the caller cannot see (e.g., global errno, thread-local state). |
+| `inaccessiblemem_or_argmem` | `memory(inaccessiblemem: rw, argmem: rw)` | Combines inaccessible-memory and arg-memory access. |
+
+##### Aliasing Hints
+
+| Option | LLVM effect | Description |
+|--------|-------------|-------------|
+| `noalias_ret` | `noalias` on return | Return pointer is guaranteed not to alias any pointer visible to the caller. Use for factory functions that return fresh objects but are not full allocators. |
+
+##### Allocator Metadata
+
+| Option | LLVM effect | Description |
+|--------|-------------|-------------|
+| `allocator` | `allocsize(0)` + `noalias` return | Return pointer is a freshly allocated region; default size param is index 0. |
+| `size=N` | Overrides allocsize size-param index | Parameter at index `N` (0-based) holds the allocation byte count. |
+| `count=M` | Overrides allocsize count-param index | Parameter at index `M` is a count multiplied by `size`. |
 
 ```omscript
+// Pure math — no memory access at all.
+@memory(none)
+@semantics(pure)
+fn clamp(v: int, lo: int, hi: int) -> int {
+    if (v < lo) { return lo }
+    if (v > hi) { return hi }
+    return v
+}
+
+// Reads only through its pointer arguments.
+@memory(argmem_ro)
+fn sum(data: ptr<int>, n: int) -> int {
+    var s: int = 0
+    for (i: int in 0...n) { s = s + data[i] }
+    return s
+}
+
+// Returns a fresh object — not a full allocator but still non-aliasing.
+@memory(noalias_ret)
+fn make_point(x: int, y: int) -> ptr {
+    // builds and returns a Point
+}
+
+// Full allocator: arg 0 is the byte count.
 @memory(allocator, size=0)
 fn my_alloc(bytes: int) -> ptr {
     return malloc(bytes)
 }
 
+// Calloc-style: arg 0 is count, arg 1 is element size.
 @memory(allocator, size=1, count=0)
 fn my_calloc(count: int, size: int) -> ptr {
     return calloc(count, size)
 }
+
+// Only touches memory inaccessible to the caller (e.g., errno).
+@memory(inaccessiblemem_or_argmem)
+fn safe_sqrt(x: f64) -> f64 {
+    return sqrt(x)
+}
 ```
+
+**Combining with `@semantics`**: `@memory(none)` and `@semantics(pure, nounwind)` produce identical LLVM attributes; using both is redundant. `@memory(readonly)` is weaker than `@semantics(pure)` (pure also implies `nosync` and `willreturn` for non-recursive functions). The compiler warns when contradictory combinations are used.
 
 ---
 

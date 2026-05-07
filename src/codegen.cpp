@@ -4738,7 +4738,60 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoUnwind);
     }
 
-    // @allocator(size=N) / @allocator(size=N, count=M): mark as allocator wrapper.
+    // @memory(none|readonly|writeonly|...) — explicit memory-effect annotation.
+    // Applied AFTER @semantics(pure) so an explicit @memory always wins.
+    // @memory(readwrite) is a no-op (documents intent, emits no attribute).
+    if (func->hintMemoryEffect != FunctionDecl::MemoryEffect::Default &&
+        func->hintMemoryEffect != FunctionDecl::MemoryEffect::ReadWrite) {
+        using ME = FunctionDecl::MemoryEffect;
+        switch (func->hintMemoryEffect) {
+        case ME::None:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::none()));
+            // none implies nothrow, nosync, willreturn.
+            function->addFnAttr(llvm::Attribute::NoUnwind);
+            function->setNoSync();
+            if (!isSelfRecursive) function->setWillReturn();
+            break;
+        case ME::ReadOnly:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects(llvm::ModRefInfo::Ref)));
+            function->setNoSync();
+            if (!isSelfRecursive) function->setWillReturn();
+            break;
+        case ME::WriteOnly:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects(llvm::ModRefInfo::Mod)));
+            break;
+        case ME::ArgMem:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::argMemOnly()));
+            break;
+        case ME::ArgMemRO:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+            function->setNoSync();
+            break;
+        case ME::InaccessibleMem:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::inaccessibleMemOnly()));
+            break;
+        case ME::InaccessibleOrArgMem:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
+            break;
+        default:
+            break;
+        }
+    }
+
+    // @memory(noalias_ret) — return pointer does not alias any existing pointer.
+    if (func->hintNoAliasReturn && function->getReturnType()->isPointerTy()) {
+        function->addRetAttr(llvm::Attribute::NoAlias);
+    }
+
+    // @memory(allocator, size=N) / @memory(allocator, size=N, count=M):
+    // mark as allocator wrapper.
     if (func->allocatorSizeParam >= 0) {
         const unsigned sizeIdx  = static_cast<unsigned>(func->allocatorSizeParam);
         if (func->allocatorCountParam >= 0) {
