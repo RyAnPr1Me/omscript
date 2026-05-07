@@ -96,7 +96,7 @@ Preprocessor::Preprocessor(std::string filename)
     //   #endif
     //
     // Only macros for features actually present on the host are defined (mirrors
-    // GCC / clang behaviour for __AVX2__, __SSE4_2__, etc.).
+    // GCC / clang behavior for __AVX2__, __SSE4_2__, etc.).
     auto define1 = [&](const char* name) { reserve(name, "1"); };
     {
 #if LLVM_VERSION_MAJOR >= 19

@@ -2550,8 +2550,13 @@ void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
                 llvm::Value* newPtr = generateExpression(expr);
                 // Write the (possibly-updated) pointer back into the variable's
                 // alloca so that subsequent push/pop/index operations on this
-                // variable use the correct post-realloc address.
-                builder->CreateAlignedStore(newPtr, it->second, llvm::MaybeAlign(8));
+                // variable use the correct post-realloc address.  Use the
+                // alloca's own alignment so the store is always correct across
+                // target architectures.
+                auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+                llvm::MaybeAlign storeAlign =
+                    allocaInst ? llvm::MaybeAlign(allocaInst->getAlign()) : llvm::MaybeAlign(8);
+                builder->CreateAlignedStore(newPtr, it->second, storeAlign);
                 return;
             }
         }
