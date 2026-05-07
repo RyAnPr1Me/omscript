@@ -66,7 +66,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=90
+NUM_BENCHMARKS=92
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -159,6 +159,8 @@ BENCH_NAME=(
     "borrow_alias"       # 87 — borrow var ref: &T = &x immutable reference auto-deref
     "borrow_mut"         # 88 — borrow mut ref: &T = &x mutable write-through pointer
     "ptr_noalias"        # 89 — OPTMAX memory={noalias=true} on pointer-heavy computation
+    "const_fold"         # 90 — compile-time integer constant folding in alg_simp_pass
+    "mul_new_str"        # 91 — strength reduction for multipliers 23, 29, 35, 38, 39, 42, 44
 )
 
 BENCH_DESC=(
@@ -252,6 +254,8 @@ BENCH_DESC=(
     "borrow var ref: &T — immutable reference alias; auto-deref reads from &x"
     "borrow mut ref: &T — mutable reference; write-through r=v stores to source"
     "OPTMAX memory={noalias=true} pointer loop: noalias+dereferenceable attrs enable vectorizer"
+    "const_fold: compile-time constant folding of integer literal expressions in alg_simp_pass"
+    "mul_new_str: strength reduction for new multipliers 23/29/35/38/39/42/44 via e-graph shift+add/sub"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -346,6 +350,8 @@ BENCH_N=(
     10000000  # 87  borrow_alias
     10000000  # 88  borrow_mut
      5000000  # 89  ptr_noalias
+    10000000  # 90  const_fold
+    10000000  # 91  mul_new_str
 )
 
 BOTTLENECK_LABELS=(
@@ -439,6 +445,8 @@ BOTTLENECK_LABELS=(
     "borrow var auto-deref: noalias+dereferenceable on reference alias enables load hoisting"
     "borrow mut write-through: pointer alias store; OM proves no-escape → scalar substitute"
     "OPTMAX noalias ptr loop: all ptr params marked noalias → wide SIMD without alias guards"
+    "const_fold: early literal folding removes redundant IR nodes before LLVM sees them"
+    "mul_new_str: e-graph shift+add/sub sequences for unusual multipliers reduce latency chains"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -2418,6 +2426,53 @@ fn bench_ptr_noalias(@prefetch n:int) -> int {
     return sum % 1000000007;
 }
 
+// ── 90. const_fold ───────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+// Tests compile-time constant folding in alg_simp_pass:
+// integer literal expressions are evaluated before LLVM sees them.
+// C writes the same constants as literals; OM folds them at the AST level.
+@hot @flatten @unroll @pure @vectorize @static @nounwind
+fn bench_constfold(@prefetch n:int) -> int {
+    var acc:int = 0;
+    // Constants the alg_simp_pass must fold at compile time.
+    // These are written as expressions to exercise the folding path:
+    //   3*4+5 → 17,  1<<10 → 1024,  (1<<8)-1 → 255,  100/4 → 25
+    // After folding, the loop body is acc += 17 + i, etc.
+    const C1:int = 3 * 4 + 5;        // → 17
+    const C2:int = 1 << 10;          // → 1024
+    const C3:int = (1 << 8) - 1;     // → 255
+    const C4:int = 100 / 4;          // → 25
+    const C5:int = 7 * 7 - 6 * 8;   // → 49 - 48 → 1
+    for (i:int in 0...n) {
+        acc += i * C5 + (i & C3) ^ (i % C4);
+        acc ^= (i * C1) & C2;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 91. mul_new_str ──────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+// Tests e-graph strength reduction for newly added multipliers:
+// 23 = (x<<4)+(x<<3)-x,  29 = (x<<5)-(x<<2)+x,  35 = (x<<5)+(x<<1)+x,
+// 38 = (x<<5)+(x<<2)+(x<<1),  39 = (x<<5)+(x<<3)-x,  42 = (x<<5)+(x<<3)+(x<<1),
+// 44 = (x<<5)+(x<<3)+(x<<2)
+@hot @flatten @unroll @pure @vectorize @static @nounwind
+fn bench_mulnewstr(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        acc += i * 23;
+        acc += i * 29;
+        acc += i * 35;
+        acc ^= i * 38;
+        acc += i * 39;
+        acc ^= i * 42;
+        acc += i * 44;
+    }
+    invalidate n;
+    return acc;
+}
+
 // ── main dispatch ─────────────────────────────────────────────
 fn main() -> int {
     var test_id:int = input();
@@ -2514,6 +2569,8 @@ fn main() -> int {
         case 87: print(bench_borrow_alias(n));     break;
         case 88: print(bench_borrow_mut(n));       break;
         case 89: print(bench_ptr_noalias(n));      break;
+        case 90: print(bench_constfold(n));        break;
+        case 91: print(bench_mulnewstr(n));        break;
         default: print(0);
     }
     invalidate n;
@@ -4068,6 +4125,42 @@ static long bench_ptr_noalias(long n) {
     return sum % 1000000007L;
 }
 
+static long bench_constfold(long n) {
+    /* C uses the same constant expressions; the compiler evaluates them
+       at compile time.  Tests whether OM achieves equivalent IR quality
+       after alg_simp_pass constant folding removes the expression nodes. */
+    const long C1 = 3 * 4 + 5;       /* 17 */
+    const long C2 = 1 << 10;         /* 1024 */
+    const long C3 = (1 << 8) - 1;    /* 255 */
+    const long C4 = 100 / 4;         /* 25 */
+    const long C5 = 7 * 7 - 6 * 8;  /* 1 */
+    long acc = 0;
+    BH_IVDEP
+    for (long i = 0; i < n; i++) {
+        acc += i * C5 + (i & C3) ^ (i % C4);
+        acc ^= (i * C1) & C2;
+    }
+    return acc;
+}
+
+static long bench_mulnewstr(long n) {
+    /* Test strength reduction for multipliers 23, 29, 35, 38, 39, 42, 44.
+       Clang -O3 will emit the same shift+add/sub sequences.  OM achieves
+       parity via the newly added e-graph rules. */
+    long acc = 0;
+    BH_IVDEP
+    for (long i = 0; i < n; i++) {
+        acc += i * 23;
+        acc += i * 29;
+        acc += i * 35;
+        acc ^= i * 38;
+        acc += i * 39;
+        acc ^= i * 42;
+        acc += i * 44;
+    }
+    return acc;
+}
+
 /* ── Close the global hot-attribute push ─────────────────────── */
 #ifdef __clang__
 #  pragma clang attribute pop
@@ -4169,6 +4262,8 @@ int main(void) {
         case 87: r = bench_borrow_alias(n);        break;
         case 88: r = bench_borrow_mut(n);          break;
         case 89: r = bench_ptr_noalias(n);         break;
+        case 90: r = bench_constfold(n);           break;
+        case 91: r = bench_mulnewstr(n);           break;
     }
     printf("%ld\n", r);
     return 0;

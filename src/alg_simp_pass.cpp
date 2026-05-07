@@ -25,6 +25,7 @@
 
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace omscript {
@@ -128,11 +129,64 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 
     // ── Apply rules at this node ─────────────────────────────────────────
 
+    // ── Unary literal folding ──────────────────────────────────────────────
+    // Evaluate unary operators on integer literals at compile time.
+    // Must come before double-negation so that e.g. -(-5) → -(−5) = 5 folds.
+    if (expr->type == ASTNodeType::UNARY_EXPR) {
+        auto* un = static_cast<UnaryExpr*>(expr.get());
+        long long lv = 0;
+        if (isIntLiteral(un->operand.get(), &lv)) {
+            std::optional<long long> result;
+            if      (un->op == "-") result = static_cast<long long>(-static_cast<uint64_t>(lv));
+            else if (un->op == "!") result = (lv != 0) ? 0LL : 1LL;
+            else if (un->op == "~") result = ~lv;
+            if (result.has_value()) {
+                expr = makeIntLiteral(*result);
+                ++count;
+                return count;
+            }
+        }
+    }
+
     if (expr->type == ASTNodeType::BINARY_EXPR) {
         auto* bin = static_cast<BinaryExpr*>(expr.get());
         const std::string& op = bin->op;
         Expression* L = bin->left.get();
         Expression* R = bin->right.get();
+
+        // ── Integer literal constant folding ──────────────────────────────
+        // When both operands are integer literals, evaluate the operation at
+        // compile time.  Runs before identity rules so that a folded constant
+        // (e.g. 3-3=0, 2*3=6) can immediately trigger further simplifications.
+        {
+            long long lv = 0, rv = 0;
+            if (isIntLiteral(L, &lv) && isIntLiteral(R, &rv)) {
+                std::optional<long long> result;
+                if      (op == "+")                      result = static_cast<long long>(static_cast<uint64_t>(lv) + static_cast<uint64_t>(rv));
+                else if (op == "-")                      result = static_cast<long long>(static_cast<uint64_t>(lv) - static_cast<uint64_t>(rv));
+                else if (op == "*")                      result = static_cast<long long>(static_cast<uint64_t>(lv) * static_cast<uint64_t>(rv));
+                else if (op == "/" && rv != 0)           result = lv / rv;
+                else if (op == "%" && rv != 0)           result = lv % rv;
+                else if (op == "&")                      result = lv & rv;
+                else if (op == "|")                      result = lv | rv;
+                else if (op == "^")                      result = lv ^ rv;
+                else if (op == "==" )                    result = (lv == rv) ? 1LL : 0LL;
+                else if (op == "!=" )                    result = (lv != rv) ? 1LL : 0LL;
+                else if (op == "<"  )                    result = (lv <  rv) ? 1LL : 0LL;
+                else if (op == "<=" )                    result = (lv <= rv) ? 1LL : 0LL;
+                else if (op == ">"  )                    result = (lv >  rv) ? 1LL : 0LL;
+                else if (op == ">=" )                    result = (lv >= rv) ? 1LL : 0LL;
+                else if (op == "&&" )                    result = (lv && rv) ? 1LL : 0LL;
+                else if (op == "||" )                    result = (lv || rv) ? 1LL : 0LL;
+                else if (op == "<<" && rv >= 0 && rv < 64) result = static_cast<long long>(static_cast<uint64_t>(lv) << static_cast<uint64_t>(rv));
+                else if (op == ">>" && rv >= 0 && rv < 64) result = static_cast<long long>(static_cast<uint64_t>(lv) >> static_cast<uint64_t>(rv));
+                if (result.has_value()) {
+                    expr = makeIntLiteral(*result);
+                    ++count;
+                    return count;
+                }
+            }
+        }
 
         // ── Additive identity ──────────────────────────────────────────────
         if (op == "+") {
