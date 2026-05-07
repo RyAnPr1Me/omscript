@@ -1896,7 +1896,8 @@ Controls how the compiler optimizes this function.
 | `minsize` | Optimize for code size over speed (`minsize` + `optsize`) |
 | `optnone` | Disable all optimizations (useful for debugging IR) |
 | `align=N` | Align function entry to `N` bytes (power of two) |
-| `align` | Auto-align to cache-line optimal (64 bytes); also aligns all local allocas |
+| `align=AUTO` | Auto-align to cache-line optimal (64 bytes); also aligns all local allocas |
+| `align` | Same as `align=AUTO` (bare form) |
 
 ```omscript
 @opt(hot, inline)
@@ -1914,6 +1915,14 @@ fn error_handler(code: int) {
 @opt(align=32)
 fn simd_kernel(x: int) -> int {
     return x * 2
+}
+
+@opt(align=AUTO)
+fn cache_friendly_kernel(arr: int[], n: int) -> int {
+    // All local allocas are 64-byte (cache-line) aligned.
+    var sum: int = 0
+    for (i: int in 0...n) { sum = sum + arr[i] }
+    return sum
 }
 ```
 
@@ -2030,7 +2039,7 @@ The individual flat forms (`@hot`, `@cold`, `@inline`, `@pure`, `@noreturn`, etc
 | `@flatten` | `@opt(flatten)` |
 | `@minsize` | `@opt(minsize)` |
 | `@optnone` | `@opt(optnone)` |
-| `@align(N)` | `@opt(align=N)` |
+| `@align(N)` | `@opt(align=N)` / `@opt(align=AUTO)` |
 | `@pure` | `@semantics(pure)` |
 | `@speculatable` | `@semantics(speculatable)` |
 | `@noreturn` | `@semantics(noreturn)` |

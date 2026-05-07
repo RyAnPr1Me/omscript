@@ -543,18 +543,30 @@ std::unique_ptr<Program> Parser::parse() {
                         else if (key.lexeme == "optnone")    hintOptNone     = true;
                         else if (key.lexeme == "align") {
                             if (match(TokenType::ASSIGN)) {
-                                const Token v = consume(TokenType::INTEGER,
-                                    "Expected integer after align= in @opt");
-                                hintAlign = static_cast<int>(v.intValue);
+                                // align=AUTO  →  cache-line optimal (same as bare align)
+                                // align=N     →  explicit power-of-two alignment
+                                if (check(TokenType::IDENTIFIER)) {
+                                    const Token v = advance();
+                                    if (v.lexeme == "AUTO" || v.lexeme == "auto") {
+                                        hintAlign = -1;
+                                    } else {
+                                        error("Expected integer or AUTO after align= in @opt;"
+                                              " got '" + v.lexeme + "'");
+                                    }
+                                } else {
+                                    const Token v = consume(TokenType::INTEGER,
+                                        "Expected integer or AUTO after align= in @opt");
+                                    hintAlign = static_cast<int>(v.intValue);
+                                }
                             } else {
-                                hintAlign = -1; // auto / cache-line
+                                hintAlign = -1; // bare align — auto / cache-line
                             }
                         } else {
                             error("Unknown option '" + key.lexeme +
                                   "' in @opt(...);"
                                   " valid: inline, noinline, hot, cold, vectorize,"
                                   " novectorize, unroll, nounroll, parallel, noparallel,"
-                                  " flatten, minsize, optnone, align, align=N");
+                                  " flatten, minsize, optnone, align, align=N, align=AUTO");
                         }
                         if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
                     }
@@ -588,7 +600,11 @@ std::unique_ptr<Program> Parser::parse() {
                         const Token key = consume(TokenType::IDENTIFIER,
                             "Expected option in @memory(...)");
                         if (key.lexeme == "allocator") {
-                            // @memory(allocator) — default: size param is index 0
+                            // `allocator` enables the allocator attribute with default
+                            // size-param index 0.  A subsequent `size=N` in the same
+                            // annotation overrides the index; `size=N` appearing BEFORE
+                            // `allocator` in the list is also respected (the guard keeps
+                            // the already-set value).
                             if (allocatorSizeParam < 0) allocatorSizeParam = 0;
                         } else if (key.lexeme == "size") {
                             consume(TokenType::ASSIGN, "Expected '=' after size in @memory");
@@ -735,11 +751,11 @@ std::unique_ptr<Program> Parser::parse() {
                           "  Use compound forms: @opt(...), @semantics(...), @memory(...)\n"
                           "  @opt    : inline, noinline, hot, cold, vectorize, novectorize,\n"
                           "            unroll, nounroll, parallel, noparallel, flatten,\n"
-                          "            minsize, optnone, align, align=N\n"
+                          "            minsize, optnone, align, align=N, align=AUTO\n"
                           "  @semantics: pure, speculatable, noreturn, nounwind,\n"
                           "              restrict, noalias, const_eval\n"
                           "  @memory : allocator, size=N, count=M\n"
-                          "  Other   : @static, @optmax, @optmax(...), @align(N) [deprecated]");
+                          "  Other   : @static, @optmax, @optmax(...)");
                 }
             }
             auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
@@ -772,6 +788,7 @@ std::unique_ptr<Program> Parser::parse() {
                 func->optMaxConfig.enabled = true;
             }
             // Warn about conflicting annotations at parse time.
+            // optnone is the strongest suppressor — nothing else is meaningful with it.
             if (hintOptNone && hintInline) {
                 warnings_.push_back("warning: '@opt(optnone)' and '@opt(inline)' are mutually exclusive on function '"
                     + func->name + "' — inline will be ignored (optnone requires noinline)");
@@ -779,6 +796,27 @@ std::unique_ptr<Program> Parser::parse() {
             if (hintOptNone && hintHot) {
                 warnings_.push_back("warning: '@opt(optnone)' disables all optimizations on function '"
                     + func->name + "' — hot hint will have no effect");
+            }
+            // Paired contradictions.
+            if (hintHot && hintCold) {
+                warnings_.push_back("warning: '@opt(hot)' and '@opt(cold)' are contradictory on function '"
+                    + func->name + "' — hot takes precedence");
+            }
+            if (hintInline && hintNoInline) {
+                warnings_.push_back("warning: '@opt(inline)' and '@opt(noinline)' are contradictory on function '"
+                    + func->name + "' — noinline takes precedence");
+            }
+            if (hintVectorize && hintNoVectorize) {
+                warnings_.push_back("warning: '@opt(vectorize)' and '@opt(novectorize)' are contradictory on function '"
+                    + func->name + "' — novectorize takes precedence");
+            }
+            if (hintUnroll && hintNoUnroll) {
+                warnings_.push_back("warning: '@opt(unroll)' and '@opt(nounroll)' are contradictory on function '"
+                    + func->name + "' — nounroll takes precedence");
+            }
+            if (hintParallelize && hintNoParallelize) {
+                warnings_.push_back("warning: '@opt(parallel)' and '@opt(noparallel)' are contradictory on function '"
+                    + func->name + "' — noparallel takes precedence");
             }
             functions.push_back(std::move(func));
         } catch (const std::exception& e) {

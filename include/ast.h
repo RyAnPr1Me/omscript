@@ -605,32 +605,31 @@ class FunctionDecl : public ASTNode {
     std::string returnType;  // Optional return type annotation (e.g. "int", "int[]", "Point")
 
     /// Compiler hint annotations for functions.
-    bool hintInline = false;    ///< @inline — suggest inlining this function
-    bool hintNoInline = false;  ///< @noinline — prevent inlining this function
-    bool hintCold = false;      ///< @cold — mark function as rarely executed
-    bool hintHot = false;       ///< @hot — mark function as frequently executed
-    bool hintPure = false;      ///< @pure — function has no side effects
-    bool hintNoReturn = false;  ///< @noreturn — function never returns
+    bool hintInline = false;    ///< @opt(inline) — suggest inlining this function
+    bool hintNoInline = false;  ///< @opt(noinline) — prevent inlining this function
+    bool hintCold = false;      ///< @opt(cold) — mark function as rarely executed
+    bool hintHot = false;       ///< @opt(hot) — mark function as frequently executed
+    bool hintPure = false;      ///< @semantics(pure) — function has no side effects
+    bool hintNoReturn = false;  ///< @semantics(noreturn) — function never returns
     bool hintStatic = false;    ///< @static — use internal linkage for better IPO
-    bool hintFlatten = false;   ///< @flatten — inline all callees within this function
-    bool hintUnroll = false;    ///< @unroll — aggressively unroll all loops in this function
-    bool hintNoUnroll = false;  ///< @nounroll — disable loop unrolling in this function
-    bool hintRestrict = false;  ///< @restrict — all pointer params are noalias (no aliasing)
-    bool hintVectorize = false;   ///< @vectorize — enable loop vectorization for all loops
-    bool hintNoVectorize = false; ///< @novectorize — disable loop vectorization for all loops
-    bool hintParallelize = false;   ///< @parallel — enable auto-parallelization for all loops
-    bool hintNoParallelize = false; ///< @noparallel — disable auto-parallelization for all loops
-    bool hintMinSize = false;     ///< @minsize — optimize for minimum code size
-    bool hintOptNone = false;     ///< @optnone — disable all optimizations (useful for debugging)
-    bool hintNoUnwind = false;    ///< @nounwind — function never throws C++ exceptions
-    bool hintConstEval = false;   ///< @const_eval — evaluate at compile time when all args are constants
-    int  hintAlign = 0;           ///< @align(N) — align function entry to N bytes (0 = default, -1 = auto-optimal)
-    bool hintSpeculatable = false; ///< @speculatable — function has no observable side effects; LLVM may hoist/speculate calls
-    OptMaxConfig optMaxConfig;    ///< OPTMAX v2 configuration (enabled when @optmax(...) annotation is used)
+    bool hintFlatten = false;   ///< @opt(flatten) — inline all callees within this function
+    bool hintUnroll = false;    ///< @opt(unroll) — aggressively unroll all loops in this function
+    bool hintNoUnroll = false;  ///< @opt(nounroll) — disable loop unrolling in this function
+    bool hintRestrict = false;  ///< @semantics(restrict) — all pointer params are noalias
+    bool hintVectorize = false;   ///< @opt(vectorize) — enable loop vectorization for all loops
+    bool hintNoVectorize = false; ///< @opt(novectorize) — disable loop vectorization for all loops
+    bool hintParallelize = false;   ///< @opt(parallel) — enable auto-parallelization for all loops
+    bool hintNoParallelize = false; ///< @opt(noparallel) — disable auto-parallelization for all loops
+    bool hintMinSize = false;     ///< @opt(minsize) — optimize for minimum code size
+    bool hintOptNone = false;     ///< @opt(optnone) — disable all optimizations (useful for debugging)
+    bool hintNoUnwind = false;    ///< @semantics(nounwind) — function never throws C++ exceptions
+    bool hintConstEval = false;   ///< @semantics(const_eval) — evaluate at compile time when all args are constants
+    int  hintAlign = 0;           ///< @opt(align=N) / @opt(align=AUTO) — align function entry (0=default, -1=auto/64B, N=exact)
+    bool hintSpeculatable = false; ///< @semantics(speculatable) — may be hoisted/speculated across branches
+    OptMaxConfig optMaxConfig;    ///< OPTMAX v2 configuration (enabled when @optmax / @optmax(...) is used)
 
-    /// @allocator(size=N) or @allocator(size=N, count=M) annotation.
-    /// Marks this function as an allocator wrapper: LLVM will add the
-    /// `allocsize` attribute so alias analysis can track allocation sizes.
+    /// @memory(allocator, size=N, count=M) — marks this function as an allocator
+    /// wrapper. LLVM adds `allocsize` so alias analysis can track allocation sizes.
     ///   allocatorSizeParam >= 0: 0-based index of the "size" parameter
     ///   allocatorCountParam >= 0: 0-based index of the "count" parameter (-1 = none)
     int allocatorSizeParam  = -1; ///< -1 = not an allocator wrapper
