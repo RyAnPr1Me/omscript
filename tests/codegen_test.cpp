@@ -7616,3 +7616,218 @@ TEST(CodegenTest, PipelineExprCount) {
         "fn main(n:i64) { pipeline n { stage s { } } }", codegen);
     ASSERT_NE(mod, nullptr);
 }
+
+// ===========================================================================
+// AlgSimp pass bug fixes
+// ===========================================================================
+
+// Bug 1: 1 ** x → 1 must NOT drop a side-effecting exponent.
+// Here we just verify the code compiles and generates valid IR; the runtime
+// correctness (call to inc() must execute) is covered by the script tests.
+TEST(CodegenTest, AlgSimp_PowOneSideEffectingExponent) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn inc(x:i64) -> i64 { return x + 1; }"
+        "fn main() -> i64 {"
+        "  var c:i64 = 0;"
+        "  var r:i64 = 1 ** inc(c);"  // exponent is a call; result must still call inc
+        "  return r;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+// Bug 2: f() && 0 must NOT drop the call to f().
+// At O0 (no IR-level inlining/DCE), the call to side() must remain in main's IR.
+TEST(CodegenTest, AlgSimp_AndFalseMustEvaluateLHS) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn side(c:i64) -> i64 { return c + 1; }"
+        "fn main(c:i64) -> i64 {"
+        "  var r:i64 = side(c) && 0;"  // side() MUST be called; AlgSimp must not fold
+        "  return r;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    // The main function must still contain a call to side().
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool hasCallToSide = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I))
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == "side")
+                    hasCallToSide = true;
+    EXPECT_TRUE(hasCallToSide) << "side() must be called even though && 0 makes the result 0";
+}
+
+// Bug 3: AlgSimp must recurse into foreach / switch / catch / defer bodies.
+// These tests just verify compilation does not crash/assert.
+TEST(CodegenTest, AlgSimp_ForEachBodySimplified) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var arr:i64[] = [1,2,3];"
+        "  var s:i64 = 0;"
+        "  foreach (x in arr) { s = s + x + 0; }"  // x+0 should simplify to x
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, AlgSimp_SwitchBodySimplified) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  switch (x + 0) {"   // x+0 in condition simplifies to x
+        "    case 1: return x * 1;"  // x*1 simplifies to x
+        "    default: return 0;"
+        "  }"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, AlgSimp_DeferBodySimplified) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var x:i64 = 5;"
+        "  defer { x = x + 0; }"  // x+0 should simplify to x
+        "  return x;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+// ===========================================================================
+// codegen_expr `as` cast — Bug 5: ZExt vs SExt must follow source type
+// ===========================================================================
+
+// u8 value widened to i64 must use ZExt (zero-extension), not SExt.
+// Without the fix, targetType[0]=='i' would cause SExt and u8(200) → i64(-56).
+TEST(CodegenTest, AsCast_UnsignedSourceUsesZExt) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn helper(v:u8) -> i64 { return v as i64; }"
+        "fn main() -> i64 { return helper(200); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("helper");
+    ASSERT_NE(fn, nullptr);
+    bool foundZExt = false;
+    bool foundSExt = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (llvm::isa<llvm::ZExtInst>(&I)) foundZExt = true;
+            if (llvm::isa<llvm::SExtInst>(&I)) foundSExt = true;
+        }
+    }
+    EXPECT_TRUE(foundZExt)  << "u8 → i64 should use ZExt (source is unsigned)";
+    EXPECT_FALSE(foundSExt) << "u8 → i64 must NOT use SExt";
+}
+
+// i8 value widened to u64 must use SExt (sign-extension), not ZExt.
+// Without the fix, targetType[0]=='u' would cause ZExt and i8(-1) → u64(255).
+TEST(CodegenTest, AsCast_SignedSourceUsesSExt) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn helper(v:i8) -> i64 { return v as i64; }"
+        "fn main() -> i64 { return helper(-1); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("helper");
+    ASSERT_NE(fn, nullptr);
+    bool foundSExt = false;
+    bool foundZExt = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (llvm::isa<llvm::SExtInst>(&I)) foundSExt = true;
+            if (llvm::isa<llvm::ZExtInst>(&I)) foundZExt = true;
+        }
+    }
+    EXPECT_TRUE(foundSExt)  << "i8 → i64 should use SExt (source is signed)";
+    EXPECT_FALSE(foundZExt) << "i8 → i64 must NOT use ZExt";
+}
+
+// Nested cast: (v as u8) as i64 — inner cast target is u8 (unsigned),
+// so the outer widening must use ZExt.
+TEST(CodegenTest, AsCast_NestedCastInnerUnsignedUsesZExt) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn helper(v:i32) -> i64 { return (v as u8) as i64; }"
+        "fn main() -> i64 { return helper(200); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("helper");
+    ASSERT_NE(fn, nullptr);
+    bool foundZExt = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (llvm::isa<llvm::ZExtInst>(&I)) { foundZExt = true; break; }
+    EXPECT_TRUE(foundZExt) << "(v as u8) as i64: outer widening must use ZExt";
+}
+
+// ===========================================================================
+// CSE pass — Bug 6: recursion into do-while / foreach / switch bodies
+// ===========================================================================
+
+TEST(CodegenTest, CSE_DoWhileBodyIsProcessed) {
+    // CSE should fire inside a do-while body (was never reached before).
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  var s:i64 = 0;"
+        "  do {"
+        "    var a:i64 = x + 1;"
+        "    var b:i64 = x + 1;"  // same expr as a — CSE candidate
+        "    s = s + a + b;"
+        "  } while (0);"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, CSE_ForEachBodyIsProcessed) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main() -> i64 {"
+        "  var arr:i64[] = [1,2,3];"
+        "  var s:i64 = 0;"
+        "  foreach (x in arr) {"
+        "    var a:i64 = x + 2;"
+        "    var b:i64 = x + 2;"  // CSE candidate inside foreach
+        "    s = s + a + b;"
+        "  }"
+        "  return s;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}
+
+TEST(CodegenTest, CSE_SwitchCaseBodyIsProcessed) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn main(x:i64) -> i64 {"
+        "  switch (x) {"
+        "    case 1:"
+        "      var a:i64 = x + 3;"
+        "      var b:i64 = x + 3;"  // CSE candidate inside case
+        "      return a + b;"
+        "    default:"
+        "      return 0;"
+        "  }"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(mod->getFunction("main"), nullptr);
+}

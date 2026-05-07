@@ -398,6 +398,31 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
                 stats.expressionsHoisted += sub.expressionsHoisted;
                 stats.tempVarsIntroduced += sub.tempVarsIntroduced;
             }
+        } else if (stmt->type == ASTNodeType::DO_WHILE_STMT) {
+            auto* dw = static_cast<DoWhileStmt*>(stmt.get());
+            if (dw->body && dw->body->type == ASTNodeType::BLOCK) {
+                auto sub = processBlock(static_cast<BlockStmt*>(dw->body.get()), nextId, idempotent, opaque);
+                stats.expressionsHoisted += sub.expressionsHoisted;
+                stats.tempVarsIntroduced += sub.tempVarsIntroduced;
+            }
+        } else if (stmt->type == ASTNodeType::FOR_EACH_STMT) {
+            auto* fe = static_cast<ForEachStmt*>(stmt.get());
+            if (fe->body && fe->body->type == ASTNodeType::BLOCK) {
+                auto sub = processBlock(static_cast<BlockStmt*>(fe->body.get()), nextId, idempotent, opaque);
+                stats.expressionsHoisted += sub.expressionsHoisted;
+                stats.tempVarsIntroduced += sub.tempVarsIntroduced;
+            }
+        } else if (stmt->type == ASTNodeType::SWITCH_STMT) {
+            // Each case body is a flat statement list, not a BlockStmt — wrap
+            // temporarily so processBlock can apply CSE within it.
+            auto* sw = static_cast<SwitchStmt*>(stmt.get());
+            for (auto& sc : sw->cases) {
+                auto tmpBlock = std::make_unique<BlockStmt>(std::move(sc.body));
+                auto sub = processBlock(tmpBlock.get(), nextId, idempotent, opaque);
+                sc.body = std::move(tmpBlock->statements);
+                stats.expressionsHoisted += sub.expressionsHoisted;
+                stats.tempVarsIntroduced += sub.tempVarsIntroduced;
+            }
         }
     }
 
