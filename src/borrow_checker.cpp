@@ -589,6 +589,18 @@ private:
             if (ts->value) checkExpr(ts->value.get());
             break;
         }
+        case ASTNodeType::CATCH_STMT: {
+            const auto* cs = static_cast<const CatchStmt*>(stmt);
+            // The catch handler runs in its own borrow scope: borrows made
+            // inside the handler must be released before the handler exits.
+            if (cs->body) {
+                pushScope();
+                for (const auto& s : cs->body->statements)
+                    checkStmt(s.get());
+                popScope();
+            }
+            break;
+        }
         case ASTNodeType::DEFER_STMT: {
             const auto* ds = static_cast<const DeferStmt*>(stmt);
             // The deferred body runs at the END of the enclosing scope, not

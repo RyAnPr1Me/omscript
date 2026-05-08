@@ -255,6 +255,14 @@ static void collectStringArrayVars(
                 collectStringArrayVars(s.get(), strVars, arrVars);
         return;
     }
+    if (const auto* cs = dynamic_cast<const CatchStmt*>(stmt)) {
+        collectStringArrayVars(cs->body.get(), strVars, arrVars);
+        return;
+    }
+    if (const auto* ds = dynamic_cast<const DeferStmt*>(stmt)) {
+        collectStringArrayVars(ds->body.get(), strVars, arrVars);
+        return;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -438,6 +446,14 @@ static void markSharedVars(
             for (const auto& s : sc.body)
                 markSharedVars(s.get(), strVars, arrVars, sharedVars);
         }
+        return;
+    }
+    if (const auto* cs = dynamic_cast<const CatchStmt*>(stmt)) {
+        markSharedVars(cs->body.get(), strVars, arrVars, sharedVars);
+        return;
+    }
+    if (const auto* ds = dynamic_cast<const DeferStmt*>(stmt)) {
+        markSharedVars(ds->body.get(), strVars, arrVars, sharedVars);
         return;
     }
 }

@@ -257,6 +257,19 @@ static void collectWrittenDeep(const Statement* stmt,
             collectWrittenDeep(s.get(), out);
         break;
     }
+    case ASTNodeType::SWITCH_STMT: {
+        const auto* sw = static_cast<const SwitchStmt*>(stmt);
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                collectWrittenDeep(s.get(), out);
+        break;
+    }
+    case ASTNodeType::CATCH_STMT:
+        collectWrittenDeep(static_cast<const CatchStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::DEFER_STMT:
+        collectWrittenDeep(static_cast<const DeferStmt*>(stmt)->body.get(), out);
+        break;
     default:
         break;
     }
@@ -429,6 +442,46 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
             count += propagateInExpr(
                 static_cast<ThrowStmt*>(stmt.get())->value, map, opaque);
             break;
+
+        case ASTNodeType::SWITCH_STMT: {
+            auto* sw = static_cast<SwitchStmt*>(stmt.get());
+            count += propagateInExpr(sw->condition, map, opaque);
+            // Collect every name written across all cases, kill them before
+            // recursing so the post-switch map is conservatively safe.
+            std::unordered_set<std::string> switchWrites;
+            for (auto& sc : sw->cases)
+                for (auto& s : sc.body)
+                    collectWrittenDeep(s.get(), switchWrites);
+            for (const auto& w : switchWrites) killName(map, w);
+            // Propagate into each case body with a snapshot of the current
+            // (already-killed) map for intra-case opportunities.
+            for (auto& sc : sw->cases) {
+                if (sc.value) count += propagateInExpr(sc.value, map, opaque);
+                for (auto& val : sc.values) count += propagateInExpr(val, map, opaque);
+                for (auto& s : sc.body) {
+                    if (s && s->type == ASTNodeType::BLOCK)
+                        count += propagateInBlock(
+                            static_cast<BlockStmt*>(s.get()), map, opaque);
+                }
+            }
+            break;
+        }
+
+        case ASTNodeType::CATCH_STMT: {
+            auto* cs = static_cast<CatchStmt*>(stmt.get());
+            // Catch body runs only on the exceptional path; kill writes
+            // conservatively and propagate inside the body.
+            count += killAndRecurseBody(cs->body.get(), map, opaque);
+            break;
+        }
+
+        case ASTNodeType::DEFER_STMT: {
+            auto* ds = static_cast<DeferStmt*>(stmt.get());
+            // Defer body runs at scope exit; kill writes conservatively and
+            // propagate inside the body.
+            count += killAndRecurseBody(ds->body.get(), map, opaque);
+            break;
+        }
 
         default:
             break;

@@ -485,6 +485,53 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         break;
     }
 
+    // ── For-each loop — iterator var unranged, invalidate body writes ─────────
+    case ASTNodeType::FOR_EACH_STMT: {
+        const auto* fe = static_cast<const ForEachStmt*>(stmt);
+        // Iterator variable takes an element value from the collection —
+        // its range is unknown without element-type analysis.
+        env.erase(fe->iteratorVar);
+        std::unordered_set<std::string> writes;
+        collectWritten(fe->body.get(), writes);
+        for (const auto& w : writes) env.erase(w);
+        if (fe->body) scanStmt(fe->body.get(), env);
+        break;
+    }
+
+    // ── Switch — invalidate writes in all cases, recurse into each case ───────
+    case ASTNodeType::SWITCH_STMT: {
+        const auto* sw = static_cast<const SwitchStmt*>(stmt);
+        // Kill all variables assigned in any case (may or may not execute).
+        std::unordered_set<std::string> writes;
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                collectWritten(s.get(), writes);
+        for (const auto& w : writes) env.erase(w);
+        // Recurse into case bodies for nested declarations.
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                scanStmt(s.get(), env);
+        break;
+    }
+
+    // ── Catch / defer — invalidate writes, recurse ───────────────────────────
+    case ASTNodeType::CATCH_STMT: {
+        const auto* cs = static_cast<const CatchStmt*>(stmt);
+        std::unordered_set<std::string> writes;
+        collectWritten(cs->body.get(), writes);
+        for (const auto& w : writes) env.erase(w);
+        if (cs->body) scanStmt(cs->body.get(), env);
+        break;
+    }
+    case ASTNodeType::DEFER_STMT: {
+        const auto* ds = static_cast<const DeferStmt*>(stmt);
+        std::unordered_set<std::string> writes;
+        collectWritten(ds->body.get(), writes);
+        for (const auto& w : writes) env.erase(w);
+        if (ds->body) scanStmt(ds->body.get(), env);
+        break;
+    }
+
     // ── Block ─────────────────────────────────────────────────────────────────
     case ASTNodeType::BLOCK:
         scanBlock(static_cast<const BlockStmt*>(stmt), env);

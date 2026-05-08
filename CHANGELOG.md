@@ -98,6 +98,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`include/version.h`**: bumped `OMSCRIPT_VERSION_MINOR` to `4` and `OMSCRIPT_VERSION_PATCH` to `0`.
 - **`src/codegen_stmt.cpp`**: reborrow GEP comments updated to explain borrow-checker preconditions enabling `inbounds`/`nuw`/`nsw`.
 
+## [4.4.1] - 2026-05-08
+
+### Fixed
+
+- **Copy-propagation: `collectWrittenDeep` misses `switch`/`catch`/`defer`** (`src/copy_prop_pass.cpp`):
+  - `collectWrittenDeep` — used by `killAndRecurseBody` to conservatively kill all variables written inside a compound body before recursing into it — did not recurse into `SWITCH_STMT` case bodies, `CATCH_STMT` bodies, or `DEFER_STMT` bodies. This meant that when a loop body contained a `switch`, `catch`, or `defer` statement, variables assigned inside those sub-blocks were not killed before the loop was entered. A stale copy (e.g., `y → x` from before the loop) could remain alive even though `y` is unconditionally assigned a new value inside the loop body's switch arm, allowing the pass to incorrectly forward the pre-loop value of `x` for reads of `y` after the loop.
+  - Added `SWITCH_STMT`, `CATCH_STMT`, and `DEFER_STMT` cases to `collectWrittenDeep`.
+
+- **Copy-propagation: `propagateInBlock` does not process `switch`/`catch`/`defer` bodies** (`src/copy_prop_pass.cpp`):
+  - `propagateInBlock` had no cases for `SWITCH_STMT`, `CATCH_STMT`, or `DEFER_STMT`. Both effects were wrong: (1) copy-propagation opportunities inside those bodies were silently missed; (2) after the block, variables written inside the block had not been killed from the copy map, so the pass could still forward stale copies to code appearing after the `switch`/`catch`/`defer` in the same enclosing block.
+  - Added handling for all three statement types: propagate into the condition (for `switch`), kill all writes across all cases/body, then recurse with the updated map.
+
+- **Variable-range analysis: `scanStmt` misses `for each`/`switch`/`catch`/`defer`** (`src/var_range_analysis.cpp`):
+  - `scanStmt` updated the range environment only for `if`, `for`, `while`, `do-while`, and bare blocks. Statements of type `FOR_EACH_STMT`, `SWITCH_STMT`, `CATCH_STMT`, and `DEFER_STMT` hit `default: break`, so: (a) variable declarations inside those bodies were never added to the range environment; (b) variables reassigned inside those bodies were never invalidated, leaving falsely-narrowed ranges for the enclosing scope.
+  - Added all four missing cases, each with the same "collect writes, erase from env, then recurse" pattern used by `for`/`while`/`do-while`.
+
+- **Uniqueness analysis: `catch`/`defer` bodies not traversed** (`src/uniqueness_analysis.cpp`):
+  - Phase 1 (`collectStringArrayVars`) and Phase 2 (`markSharedVars`) both stopped at `SWITCH_STMT` (which was already handled) without covering `CATCH_STMT` or `DEFER_STMT`. String/array variables declared or aliased exclusively inside catch or defer handlers were invisible to the analysis, making the compiler falsely assume they are uniquely owned. This could suppress necessary `strdup`/copy-on-write operations for those variables.
+  - Added `CATCH_STMT` and `DEFER_STMT` traversal to both phases.
+
+- **Borrow checker: `catch` handler bodies not checked** (`src/borrow_checker.cpp`):
+  - The borrow checker's statement dispatcher had no `CATCH_STMT` case. Catch handler bodies were silently skipped, meaning: borrows made inside a catch block were never validated; use-after-move errors in catch handlers were not reported; and borrows that should be released before the handler exits were not tracked.
+  - Added a `CATCH_STMT` case that pushes a borrow scope, processes all statements in the handler body, then pops the scope — the same pattern used for loop bodies and block statements.
+
+- **`stmtCallsAny`: `switch`/`catch`/`defer` bodies not searched for concurrency primitives** (`src/codegen.cpp`):
+  - `stmtCallsAny` (used by `usesConcurrencyPrimitive` to decide whether a function body contains any call to `thread_create`, `mutex_lock`, etc.) did not recurse into `SWITCH_STMT` case bodies, `CATCH_STMT` bodies, or `DEFER_STMT` bodies. A function that only called concurrency primitives inside a switch arm or a deferred cleanup block would be incorrectly classified as "not concurrent", potentially allowing the effect-inference pass to attach `nosync` or downgrade memory-ordering assumptions.
+  - Added `SWITCH_STMT`, `CATCH_STMT`, and `DEFER_STMT` cases to `stmtCallsAny`. Also added the three corresponding `using omscript::` declarations to the anonymous namespace so the type names resolve without qualification.
+
 ## [4.3.2] - 2026-05-07
 
 ### Fixed

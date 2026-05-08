@@ -72,6 +72,8 @@ using omscript::ASTNodeType;
 using omscript::BinaryExpr;
 using omscript::BlockStmt;
 using omscript::CallExpr;
+using omscript::CatchStmt;
+using omscript::DeferStmt;
 using omscript::DoWhileStmt;
 using omscript::Expression;
 using omscript::ExprStmt;
@@ -86,6 +88,7 @@ using omscript::PostfixExpr;
 using omscript::PrefixExpr;
 using omscript::ReturnStmt;
 using omscript::Statement;
+using omscript::SwitchStmt;
 using omscript::TernaryExpr;
 using omscript::UnaryExpr;
 using omscript::VarDecl;
@@ -176,6 +179,22 @@ static bool stmtCallsAny(const Statement* s, const std::unordered_set<std::strin
         auto* fe = static_cast<const ForEachStmt*>(s);
         return exprCallsAny(fe->collection.get(), names) || stmtCallsAny(fe->body.get(), names);
     }
+    case ASTNodeType::SWITCH_STMT: {
+        auto* sw = static_cast<const SwitchStmt*>(s);
+        if (exprCallsAny(sw->condition.get(), names)) return true;
+        for (const auto& sc : sw->cases) {
+            if (sc.value && exprCallsAny(sc.value.get(), names)) return true;
+            for (const auto& val : sc.values)
+                if (exprCallsAny(val.get(), names)) return true;
+            for (const auto& st : sc.body)
+                if (stmtCallsAny(st.get(), names)) return true;
+        }
+        return false;
+    }
+    case ASTNodeType::CATCH_STMT:
+        return stmtCallsAny(static_cast<const CatchStmt*>(s)->body.get(), names);
+    case ASTNodeType::DEFER_STMT:
+        return stmtCallsAny(static_cast<const DeferStmt*>(s)->body.get(), names);
     default:
         return false;
     }
