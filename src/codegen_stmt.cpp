@@ -541,6 +541,13 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                                      llvm::SyncScope::System);
                 initStore->setAlignment(atomAlign);
             }
+            // Tag non-volatile, non-atomic scalar init stores with the scalar
+            // TBAA node so LLVM AA can distinguish named-variable slots from
+            // heap array/struct/map data.
+            if (!stmt->isVolatile && !stmt->isAtomic && tbaaScalar_ &&
+                (allocaType->isIntegerTy() || allocaType->isFloatTy() ||
+                 allocaType->isDoubleTy()  || allocaType->isPointerTy()))
+                initStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
         }
         // Track non-negativity: if a variable is initialized with a
         if (allocaType->isIntegerTy()) {
@@ -1132,9 +1139,21 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
             // is not expressed the same way and would confuse LLVM.
             if (!alloca->getAllocatedType()->isIntegerTy()) continue;
             const std::string varName = kv.first().str();
-            llvm::Value* loaded = builder->CreateAlignedLoad(
+            auto* preLoad = builder->CreateAlignedLoad(
                 alloca->getAllocatedType(), alloca,
                 llvm::MaybeAlign(8), (varName + ".pre.nn").c_str());
+            // Annotate the preheader load with all applicable metadata so
+            // LLVM's LVI/SCEV can use it:
+            //   !noundef — OmScript guarantees init before use.
+            //   !tbaa    — scalar variable slot, not heap data.
+            //   !range   — value proven non-negative ([0, INT64_MAX)).
+            if (tbaaScalar_)
+                preLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+            preLoad->setMetadata(llvm::LLVMContext::MD_noundef,
+                                 llvm::MDNode::get(*context, {}));
+            if (preLoad->getType()->isIntegerTy(64))
+                preLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            llvm::Value* loaded = preLoad;
             // Widen to i64 if narrower (e.g. i1, i32) before comparison.
             llvm::Value* asI64 = loaded->getType() == i64Ty
                 ? loaded

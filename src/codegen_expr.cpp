@@ -552,6 +552,12 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         load = builder->CreateAlignedLoad(loadType, it->second,
                                           llvm::MaybeAlign(8), expr->name.c_str());
         if (isVol) load->setVolatile(true);
+        // Tag non-volatile scalar loads from named variable slots with the
+        // scalar TBAA node so LLVM AA distinguishes them from heap data.
+        if (!isVol && tbaaScalar_ &&
+            (loadType->isIntegerTy() || loadType->isFloatTy() ||
+             loadType->isDoubleTy()  || loadType->isPointerTy()))
+            load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     }
 
     // If this is a const variable, a prefetch-immut variable, or a frozen
@@ -4135,7 +4141,26 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const int64_t sv = ci->getSExtValue();
             if (sv >= 0 && sv < 64) {
-                result = builder->CreateLShr(left, right, "lshrtmp");
+                // `exact` flag on lshr: legal when the bits shifted out are all
+                // zero, i.e., left is divisible by 2^sv.  This holds precisely
+                // when the left operand itself is a `shl` by the same constant
+                // (the round-trip `(x << k) >> k` would equal x).
+                bool isExact = false;
+                if (sv > 0) {
+                    if (auto* shlInst = llvm::dyn_cast<llvm::ShlOperator>(left)) {
+                        if (auto* shlAmt = llvm::dyn_cast<llvm::ConstantInt>(
+                                shlInst->getOperand(1)))
+                            isExact = shlAmt->getSExtValue() >= sv;
+                    }
+                    // KnownBits: if the lowest sv bits of left are provably
+                    // zero (e.g., because left == shl of something) then exact.
+                    if (!isExact) {
+                        const llvm::KnownBits lhsKB =
+                            llvm::computeKnownBits(left, module->getDataLayout());
+                        isExact = lhsKB.countMinTrailingZeros() >= static_cast<unsigned>(sv);
+                    }
+                }
+                result = builder->CreateLShr(left, right, "lshrtmp", isExact);
                 nonNegValues_.insert(result);
                 return result;
             }
@@ -5090,10 +5115,15 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     // load instruction matches what generateIdentifier emits.
     auto* loadInst = builder->CreateAlignedLoad(loadType, it->second,
         llvm::MaybeAlign(8), identifier->name.c_str());
-    if (volatileVars_.count(identifier->name)) loadInst->setVolatile(true);
+    const bool isIncDecVol = volatileVars_.count(identifier->name) != 0;
+    if (isIncDecVol) loadInst->setVolatile(true);
+    // Tag non-volatile scalar variable loads with the scalar TBAA node.
+    if (!isIncDecVol && tbaaScalar_ &&
+        (loadType->isIntegerTy() || loadType->isFloatTy() ||
+         loadType->isDoubleTy()  || loadType->isPointerTy()))
+        loadInst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     // OmScript guarantees variables are initialized before use → !noundef.
-    if (optimizationLevel >= OptimizationLevel::O1 &&
-        !volatileVars_.count(identifier->name)) {
+    if (optimizationLevel >= OptimizationLevel::O1 && !isIncDecVol) {
         loadInst->setMetadata(llvm::LLVMContext::MD_noundef,
                               llvm::MDNode::get(*context, {}));
     }
@@ -5131,7 +5161,12 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
     {
         llvm::StoreInst* storeInst = builder->CreateAlignedStore(updated, it->second, llvm::MaybeAlign(8));
-        if (volatileVars_.count(identifier->name)) storeInst->setVolatile(true);
+        if (isIncDecVol) storeInst->setVolatile(true);
+        // Tag non-volatile scalar stores with the scalar TBAA node.
+        if (!isIncDecVol && tbaaScalar_ &&
+            (loadType->isIntegerTy() || loadType->isFloatTy() ||
+             loadType->isDoubleTy()  || loadType->isPointerTy()))
+            storeInst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     }
 
     // Update non-negativity state for the alloca after the mutation.
