@@ -5052,6 +5052,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constFloatFolds_.clear();
     stackAllocatedArrays_.clear();
     readOnlyGlobalArrays_.clear();
+    deferredFreeQueue_.clear();
     pendingArrayStackAlloc_ = false;
     pendingArrayReadOnlyGlobal_ = false;
     scopeComptimeInts_.clear();

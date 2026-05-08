@@ -373,6 +373,14 @@ class CodeGenerator {
     // Defer stack: each scope level has its own list of deferred statements (LIFO)
     std::vector<std::vector<Statement*>> deferStack;
 
+    /// Deferred-free queue: heap pointers queued by `invalidate` statements.
+    /// The actual free() call is emitted in a batch at the function's exit point
+    /// (generateReturn / generateThrow), rather than at the invalidate site.
+    /// Variables are logically dead immediately at the invalidate call; any
+    /// subsequent use is a compile-time error.  The deferred physical free lets
+    /// LLVM move or coalesce the free() calls to an optimal CFG point.
+    std::vector<llvm::Value*> deferredFreeQueue_;
+
     struct LoopContext {
         llvm::BasicBlock* breakTarget;
         llvm::BasicBlock* continueTarget;
@@ -1085,6 +1093,12 @@ class CodeGenerator {
     llvm::Function* getOrDeclareMemchr();
     llvm::Function* getOrDeclareFree();
     llvm::Function* getOrDeclareStrstr();
+
+    /// Emit free() for every pointer queued in deferredFreeQueue_ and clear the
+    /// queue.  Called just before every function-exit edge (return / throw /
+    /// unreachable-abort) so that all invalidated heap objects are freed in a
+    /// single batch at the optimal CFG exit point.
+    void emitDeferredFrees();
     llvm::Function* getOrDeclareMemcpy();
     llvm::Function* getOrDeclareMemmove();
     llvm::Function* getOrDeclareToupper();

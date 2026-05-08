@@ -799,6 +799,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
             }
         }
 
+        emitDeferredFrees();
         emitArenaFreeIfNeeded();
         builder->CreateRet(retValue);
     } else {
@@ -826,6 +827,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 
         llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
         llvm::Type* retTy = currentFn->getReturnType();
+        emitDeferredFrees();
         emitArenaFreeIfNeeded();
         if (retTy->isVoidTy())
             builder->CreateRetVoid();
@@ -2978,6 +2980,9 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
     llvm::Value* val = generateExpression(stmt->value.get());
     val = toDefaultType(val);
 
+    // Flush any deferred frees before leaving this function via throw.
+    emitDeferredFrees();
+
     if (catchTable_.empty()) {
         // No catch blocks in this function — abort with a clear error.
         std::string errText = stmt->line > 0
@@ -3013,6 +3018,31 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
             llvm::cast<llvm::IntegerType>(getDefaultType()), key);
         sw->addCase(caseVal, handlerBB);
     }
+}
+
+// ---------------------------------------------------------------------------
+// emitDeferredFrees — flush the per-function deferred-free queue.
+//
+// This is the single canonical point where `free()` is emitted for every heap
+// pointer that was logically invalidated during the function body.  All
+// pointers are freed together in a tight sequence so the allocator can merge
+// adjacent free-list operations and the CPU's store buffer is fully drained in
+// one pass.  The function is called just before every function-exit edge
+// (generateReturn, generateThrow) so the queue is always empty when the
+// function terminates.
+// ---------------------------------------------------------------------------
+void CodeGenerator::emitDeferredFrees() {
+    if (deferredFreeQueue_.empty()) return;
+    // Guard: don't insert after a terminator (e.g. after an unreachable block).
+    if (builder->GetInsertBlock() && builder->GetInsertBlock()->getTerminator()) {
+        deferredFreeQueue_.clear();
+        return;
+    }
+    llvm::Function* freeFn = getOrDeclareFree();
+    for (llvm::Value* ptr : deferredFreeQueue_) {
+        builder->CreateCall(freeFn, {ptr});
+    }
+    deferredFreeQueue_.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -3068,9 +3098,11 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
                 if (!heapPtr->getType()->isPointerTy()) {
                     heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy, name + ".heapptr");
                 }
-                // Emit free().  The compiler already knows free() is
-                // InaccessibleOrArgMemOnly so this is safe to CSE/hoist.
-                builder->CreateCall(getOrDeclareFree(), {heapPtr});
+                // Defer the free() to the function exit so all invalidated
+                // pointers are freed in a single batch at the optimal CFG
+                // point.  The variable is already logically dead (deadVars_);
+                // any use before then is a compile-time error.
+                deferredFreeQueue_.push_back(heapPtr);
             }
         }
     }

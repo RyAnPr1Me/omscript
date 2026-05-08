@@ -5,6 +5,21 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.5.0] - 2026-05-08
+
+### Changed
+
+- **`invalidate` deferred-free semantics** (`src/codegen_stmt.cpp`, `include/codegen.h`):
+  - Logical invalidation is still instantaneous: any use of an invalidated variable after the `invalidate` statement is a compile-time error (borrow checker + `deadVars_` detection unchanged).
+  - Physical `free()` is now **deferred** to the function's exit point instead of being emitted at the `invalidate` site.  Every heap pointer queued by `invalidate` statements is freed in a single **batch** just before `ret` (or `throw` dispatch), giving the allocator a dense sequence of `free()` calls that it can merge and LLVM's optimizer a wider window to reorder, hoist, or sink them.
+  - Implemented via `deferredFreeQueue_` (a per-function `vector<Value*>` in `CodeGenerator`) and a new `emitDeferredFrees()` helper called from `generateReturn()` and `generateThrow()`.
+  - Arena-backed and stack-backed pointers continue to be handled exactly as before (no `free()` for arena, `lifetime.end` only for stack).
+
+### Fixed
+
+- **Round-6 statement/expression traversal** (`src/copy_prop_pass.cpp`, `src/alg_simp_pass.cpp`, `src/hgoe_egraph.cpp`, `src/egraph_optimizer.cpp`, `src/var_range_analysis.cpp`, `src/uniqueness_analysis.cpp`, `src/borrow_checker.cpp`, `src/opt_orchestrator.cpp`):
+  - All remaining AST node types now handled in every analysis and transform pass: `MOVE_DECL`, `PREFETCH_STMT`, `PIPELINE_STMT`, `ASSUME_STMT` (deoptBody), `INVALIDATE_STMT`, and all expression types including `ARRAY_EXPR`, `STRUCT_LITERAL_EXPR`, `SPREAD_EXPR`, `PIPE_EXPR`, `MOVE_EXPR`, `BORROW_EXPR`, `REBORROW_EXPR`, `DICT_EXPR`, `RANGE_ANNOT_EXPR`.
+
 ## [4.4.0] - 2026-05-07
 
 ### Added
