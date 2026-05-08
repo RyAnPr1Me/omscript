@@ -533,6 +533,12 @@ static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx) 
             if (stage.body) optimizeStatementImpl(stage.body.get(), ctx);
         break;
     }
+    case ASTNodeType::ASSUME_STMT: {
+        auto* as = static_cast<AssumeStmt*>(stmt);
+        if (as->condition) as->condition = tryOptimize(std::move(as->condition), ctx);
+        if (as->deoptBody) optimizeStatementImpl(as->deoptBody.get(), ctx);
+        break;
+    }
     case ASTNodeType::INVALIDATE_STMT:
         [[fallthrough]];
     default:

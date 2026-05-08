@@ -587,6 +587,21 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         break;
     }
 
+    // ── Assume statement — narrow from the condition, scan deopt body ─────────
+    case ASTNodeType::ASSUME_STMT: {
+        const auto* as = static_cast<const AssumeStmt*>(stmt);
+        // Narrow the range environment from the assume condition being true.
+        narrowFromCondition(as->condition.get(), env, /*taken=*/true);
+        // The deopt body executes only on the exceptional (violation) path;
+        // we don't merge its effects back into the main env.
+        break;
+    }
+
+    // ── Invalidate statement — clear the variable's range ────────────────────
+    case ASTNodeType::INVALIDATE_STMT:
+        env.erase(static_cast<const InvalidateStmt*>(stmt)->varName);
+        break;
+
     // ── Block ─────────────────────────────────────────────────────────────────
     case ASTNodeType::BLOCK:
         scanBlock(static_cast<const BlockStmt*>(stmt), env);

@@ -159,6 +159,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `pipeline N { stage name { ... } ... }` sequences multiple named stage bodies. No analysis or transformation pass (except `rlc_pass.cpp`) traversed the stage bodies. Writes inside stages were not killed in range/copy maps, algebraic rules were not applied to stage expressions, string/array vars inside stages were invisible to uniqueness analysis, and borrow-checker did not scope-check stage bodies.
   - Added `PIPELINE_STMT` handling to all seven passes. Stage bodies are each treated as a separate nested scope, and the `count` expression is treated as a loop-count operand.
 
+- **Multiple passes: `ASSUME_STMT` deopt body not traversed; `ASSUME_STMT` absent from `egraph_optimizer` and `hgoe_egraph`** (`src/alg_simp_pass.cpp`, `src/copy_prop_pass.cpp`, `src/egraph_optimizer.cpp`, `src/hgoe_egraph.cpp`, `src/var_range_analysis.cpp`):
+  - `assume(cond) else { deoptBody }` has an optional deopt body that runs if the assumption is violated. `alg_simp_pass` and `copy_prop_pass` already visited the `condition` but skipped the `deoptBody`. Neither `egraph_optimizer` nor `hgoe_egraph` handled `ASSUME_STMT` at all. Additionally, `var_range_analysis` did not exploit `assume` conditions for range narrowing.
+  - Fixed all five passes: deopt body is now recursed in `alg_simp` and `copy_prop`; `egraph_optimizer` and `hgoe_egraph` now visit both the condition and deopt body; `var_range_analysis` now calls `narrowFromCondition` on the assume condition to propagate the proven constraint into subsequent code.
+
+- **`INVALIDATE_STMT` not erasing the variable's range in `var_range_analysis`** (`src/var_range_analysis.cpp`):
+  - `invalidate x;` marks variable `x` as dead (no longer usable). The variable-range pass did not handle this statement, so stale range constraints could persist through an invalidation point, potentially allowing the pass to emit incorrect bounds for `x` after it was invalidated.
+  - Added `INVALIDATE_STMT` to `scanStmt`: the variable's range entry is now erased when an invalidation is encountered.
+
+- **Multiple passes: expression traversal gaps for `ARRAY_EXPR`, `STRUCT_LITERAL_EXPR`, `SPREAD_EXPR`, `PIPE_EXPR`, `MOVE_EXPR`, `BORROW_EXPR`, `REBORROW_EXPR`, `DICT_EXPR`, `RANGE_ANNOT_EXPR`** (`src/copy_prop_pass.cpp` `propagateInExpr`; `src/alg_simp_pass.cpp` `simplifyExpr`; `src/hgoe_egraph.cpp` `visitExpr`):
+  - All three bottom-up expression traversers had `default: break` for every OmScript-specific expression type. Sub-expressions inside array literals, struct literals, spread operators, pipe operators, move/borrow/reborrow expressions, dict literals, and range annotations were silently skipped.
+  - Added all nine missing cases to each traverser. Each case recurses into all reachable child sub-expressions.
+
 ## [4.3.2] - 2026-05-07
 
 ### Fixed

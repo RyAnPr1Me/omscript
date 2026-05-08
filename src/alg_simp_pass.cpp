@@ -148,6 +148,47 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
     case ASTNodeType::ASSIGN_EXPR:
         count += simplifyExpr(static_cast<AssignExpr*>(expr.get())->value);
         break;
+    case ASTNodeType::SPREAD_EXPR:
+        count += simplifyExpr(static_cast<SpreadExpr*>(expr.get())->operand);
+        break;
+    case ASTNodeType::PIPE_EXPR:
+        count += simplifyExpr(static_cast<PipeExpr*>(expr.get())->left);
+        break;
+    case ASTNodeType::MOVE_EXPR:
+        count += simplifyExpr(static_cast<MoveExpr*>(expr.get())->source);
+        break;
+    case ASTNodeType::BORROW_EXPR:
+        count += simplifyExpr(static_cast<BorrowExpr*>(expr.get())->source);
+        break;
+    case ASTNodeType::REBORROW_EXPR: {
+        auto* rb = static_cast<ReborrowExpr*>(expr.get());
+        count += simplifyExpr(rb->source);
+        if (rb->indexExpr) count += simplifyExpr(rb->indexExpr);
+        break;
+    }
+    case ASTNodeType::RANGE_ANNOT_EXPR:
+        count += simplifyExpr(static_cast<RangeAnnotExpr*>(expr.get())->inner);
+        break;
+    case ASTNodeType::STRUCT_LITERAL_EXPR: {
+        auto* sl = static_cast<StructLiteralExpr*>(expr.get());
+        for (auto& fv : sl->fieldValues)
+            count += simplifyExpr(fv.second);
+        break;
+    }
+    case ASTNodeType::DICT_EXPR: {
+        auto* de = static_cast<DictExpr*>(expr.get());
+        for (auto& p : de->pairs) {
+            count += simplifyExpr(p.first);
+            count += simplifyExpr(p.second);
+        }
+        break;
+    }
+    case ASTNodeType::ARRAY_EXPR: {
+        auto* ae = static_cast<ArrayExpr*>(expr.get());
+        for (auto& el : ae->elements)
+            count += simplifyExpr(el);
+        break;
+    }
     default:
         break;
     }
@@ -656,9 +697,12 @@ static unsigned simplifyStmt(Statement* stmt) {
         break;
     }
 
-    case ASTNodeType::ASSUME_STMT:
-        count += simplifyExpr(static_cast<AssumeStmt*>(stmt)->condition);
+    case ASTNodeType::ASSUME_STMT: {
+        auto* as = static_cast<AssumeStmt*>(stmt);
+        count += simplifyExpr(as->condition);
+        if (as->deoptBody) count += simplifyStmt(as->deoptBody.get());
         break;
+    }
 
     case ASTNodeType::THROW_STMT:
         count += simplifyExpr(static_cast<ThrowStmt*>(stmt)->value);

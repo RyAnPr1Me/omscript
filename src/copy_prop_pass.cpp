@@ -160,6 +160,47 @@ static unsigned propagateInExpr(std::unique_ptr<Expression>& expr,
     case ASTNodeType::PREFIX_EXPR:
         count += propagateInExpr(static_cast<PrefixExpr*>(expr.get())->operand, map, opaque);
         break;
+    case ASTNodeType::SPREAD_EXPR:
+        count += propagateInExpr(static_cast<SpreadExpr*>(expr.get())->operand, map, opaque);
+        break;
+    case ASTNodeType::PIPE_EXPR:
+        count += propagateInExpr(static_cast<PipeExpr*>(expr.get())->left, map, opaque);
+        break;
+    case ASTNodeType::MOVE_EXPR:
+        count += propagateInExpr(static_cast<MoveExpr*>(expr.get())->source, map, opaque);
+        break;
+    case ASTNodeType::BORROW_EXPR:
+        count += propagateInExpr(static_cast<BorrowExpr*>(expr.get())->source, map, opaque);
+        break;
+    case ASTNodeType::REBORROW_EXPR: {
+        auto* rb = static_cast<ReborrowExpr*>(expr.get());
+        count += propagateInExpr(rb->source, map, opaque);
+        if (rb->indexExpr) count += propagateInExpr(rb->indexExpr, map, opaque);
+        break;
+    }
+    case ASTNodeType::RANGE_ANNOT_EXPR:
+        count += propagateInExpr(static_cast<RangeAnnotExpr*>(expr.get())->inner, map, opaque);
+        break;
+    case ASTNodeType::STRUCT_LITERAL_EXPR: {
+        auto* sl = static_cast<StructLiteralExpr*>(expr.get());
+        for (auto& fv : sl->fieldValues)
+            count += propagateInExpr(fv.second, map, opaque);
+        break;
+    }
+    case ASTNodeType::DICT_EXPR: {
+        auto* de = static_cast<DictExpr*>(expr.get());
+        for (auto& p : de->pairs) {
+            count += propagateInExpr(p.first,  map, opaque);
+            count += propagateInExpr(p.second, map, opaque);
+        }
+        break;
+    }
+    case ASTNodeType::ARRAY_EXPR: {
+        auto* ae = static_cast<ArrayExpr*>(expr.get());
+        for (auto& el : ae->elements)
+            count += propagateInExpr(el, map, opaque);
+        break;
+    }
     default:
         break;
     }
@@ -491,10 +532,13 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
             killName(map, static_cast<InvalidateStmt*>(stmt.get())->varName);
             break;
 
-        case ASTNodeType::ASSUME_STMT:
-            count += propagateInExpr(
-                static_cast<AssumeStmt*>(stmt.get())->condition, map, opaque);
+        case ASTNodeType::ASSUME_STMT: {
+            auto* as = static_cast<AssumeStmt*>(stmt.get());
+            count += propagateInExpr(as->condition, map, opaque);
+            if (as->deoptBody)
+                count += killAndRecurseBody(as->deoptBody.get(), map, opaque);
             break;
+        }
 
         case ASTNodeType::THROW_STMT:
             count += propagateInExpr(

@@ -987,6 +987,47 @@ static void visitExpr(std::unique_ptr<Expression>& exprPtr,
         visitExpr(fa->value,  rules, cfg, stats);
         break;
     }
+    case ASTNodeType::SPREAD_EXPR:
+        visitExpr(static_cast<SpreadExpr*>(expr)->operand, rules, cfg, stats);
+        break;
+    case ASTNodeType::PIPE_EXPR:
+        visitExpr(static_cast<PipeExpr*>(expr)->left, rules, cfg, stats);
+        break;
+    case ASTNodeType::MOVE_EXPR:
+        visitExpr(static_cast<MoveExpr*>(expr)->source, rules, cfg, stats);
+        break;
+    case ASTNodeType::BORROW_EXPR:
+        visitExpr(static_cast<BorrowExpr*>(expr)->source, rules, cfg, stats);
+        break;
+    case ASTNodeType::REBORROW_EXPR: {
+        auto* rb = static_cast<ReborrowExpr*>(expr);
+        visitExpr(rb->source, rules, cfg, stats);
+        if (rb->indexExpr) visitExpr(rb->indexExpr, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::RANGE_ANNOT_EXPR:
+        visitExpr(static_cast<RangeAnnotExpr*>(expr)->inner, rules, cfg, stats);
+        break;
+    case ASTNodeType::STRUCT_LITERAL_EXPR: {
+        auto* sl = static_cast<StructLiteralExpr*>(expr);
+        for (auto& fv : sl->fieldValues)
+            visitExpr(fv.second, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::DICT_EXPR: {
+        auto* de = static_cast<DictExpr*>(expr);
+        for (auto& p : de->pairs) {
+            visitExpr(p.first,  rules, cfg, stats);
+            visitExpr(p.second, rules, cfg, stats);
+        }
+        break;
+    }
+    case ASTNodeType::ARRAY_EXPR: {
+        auto* ae = static_cast<ArrayExpr*>(expr);
+        for (auto& el : ae->elements)
+            visitExpr(el, rules, cfg, stats);
+        break;
+    }
     default:
         break;
     }
@@ -1113,6 +1154,12 @@ static void visitStmt(Statement* stmt,
         if (pl->count) visitExpr(pl->count, rules, cfg, stats);
         for (auto& stage : pl->stages)
             if (stage.body) visitBlock(stage.body.get(), rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::ASSUME_STMT: {
+        auto* as = static_cast<AssumeStmt*>(stmt);
+        if (as->condition) visitExpr(as->condition, rules, cfg, stats);
+        if (as->deoptBody) visitStmt(as->deoptBody.get(), rules, cfg, stats);
         break;
     }
     default:
