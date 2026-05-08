@@ -773,9 +773,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (auto* ri = llvm::dyn_cast<llvm::ConstantInt>(right))
                     return llvm::ConstantInt::get(getDefaultType(), ri->isZero() ? 0 : 1);
                 llvm::Value* rightBool = toBool(right);
-                auto* r763 = builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
-                nonNegValues_.insert(r763);
-                return r763;
+                return emitBoolZExt(rightBool);
             } else {
                 if (leftTrue)
                     return llvm::ConstantInt::get(getDefaultType(), 1); // true || x → 1
@@ -785,9 +783,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (auto* ri = llvm::dyn_cast<llvm::ConstantInt>(right))
                     return llvm::ConstantInt::get(getDefaultType(), ri->isZero() ? 0 : 1);
                 llvm::Value* rightBool = toBool(right);
-                auto* r773 = builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
-                nonNegValues_.insert(r773);
-                return r773;
+                return emitBoolZExt(rightBool);
             }
         }
 
@@ -832,8 +828,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             } else {
                 result = builder->CreateOr(leftBool, rightBool, "logic.or");
             }
-            auto* logicResult = builder->CreateZExt(result, getDefaultType(), "booltmp");
-            nonNegValues_.insert(logicResult);
+            auto* logicResult = emitBoolZExt(result);
             return logicResult;
         }
 
@@ -862,9 +857,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             phi->addIncoming(rightBool, rightBB);
         }
         // Boolean phi: i1, so result is always 0 or 1 after ZExt; track non-neg.
-        auto* logicResult = builder->CreateZExt(phi, getDefaultType(), "booltmp");
-        nonNegValues_.insert(logicResult);
-        return logicResult;
+        return emitBoolZExt(phi);
     }
 
     // Null coalescing operator: x ?? y → x != 0 ? x : y (short-circuit)
@@ -1130,33 +1123,27 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         if (expr->op == "==") {
             auto cmp = builder->CreateFCmpOEQ(left, right, "fcmptmp");
-            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-            nonNegValues_.insert(r); return r;
+            return emitBoolZExt(cmp);
         }
         if (expr->op == "!=") {
             auto cmp = builder->CreateFCmpONE(left, right, "fcmptmp");
-            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-            nonNegValues_.insert(r); return r;
+            return emitBoolZExt(cmp);
         }
         if (expr->op == "<") {
             auto cmp = builder->CreateFCmpOLT(left, right, "fcmptmp");
-            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-            nonNegValues_.insert(r); return r;
+            return emitBoolZExt(cmp);
         }
         if (expr->op == "<=") {
             auto cmp = builder->CreateFCmpOLE(left, right, "fcmptmp");
-            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-            nonNegValues_.insert(r); return r;
+            return emitBoolZExt(cmp);
         }
         if (expr->op == ">") {
             auto cmp = builder->CreateFCmpOGT(left, right, "fcmptmp");
-            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-            nonNegValues_.insert(r); return r;
+            return emitBoolZExt(cmp);
         }
         if (expr->op == ">=") {
             auto cmp = builder->CreateFCmpOGE(left, right, "fcmptmp");
-            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-            nonNegValues_.insert(r); return r;
+            return emitBoolZExt(cmp);
         }
         if (expr->op == "**") {
             // Float exponent specialization: emit cheaper inline sequences
@@ -1431,8 +1418,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             llvm::Value* slowBool = (expr->op == "==")
                 ? builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "scmp.eq")
                 : builder->CreateICmpNE(cmpResult, builder->getInt32(0), "scmp.ne");
-            llvm::Value* slowResult = builder->CreateZExt(slowBool, getDefaultType(), "scmp.zext");
-            nonNegValues_.insert(slowResult);
+            llvm::Value* slowResult = emitBoolZExt(slowBool, "scmp.zext");
             builder->CreateBr(mergeBB);
 
             builder->SetInsertPoint(mergeBB);
@@ -1462,9 +1448,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             cmpBool = nullptr;
 
         if (cmpBool) {
-            auto* r = builder->CreateZExt(cmpBool, getDefaultType(), "scmp.result");
-            nonNegValues_.insert(r);
-            return r;
+            return emitBoolZExt(cmpBool, "scmp.result");
         }
         // For non-comparison operators on strings (should not normally occur here),
         // fall through to the integer path.
@@ -1489,9 +1473,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         else if (op == ">=")
             cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
         if (cmpBool) {
-            auto* r = builder->CreateZExt(cmpBool, getDefaultType(), "pcmp.result");
-            nonNegValues_.insert(r);
-            return r;
+            return emitBoolZExt(cmpBool, "pcmp.result");
         }
         // Non-comparison ops on two pointers: fall through to ptrtoint path.
         left  = builder->CreatePtrToInt(left,  getDefaultType(), "ptoi");
@@ -1807,9 +1789,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             llvm::Value* cmp = (expr->op == "==")
                                 ? builder->CreateICmpEQ(mulRight, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp")
                                 : builder->CreateICmpNE(mulRight, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp");
-                            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-                            nonNegValues_.insert(r);
-                            return r;
+                            return emitBoolZExt(cmp);
                         }
                     }
                 }
@@ -1827,9 +1807,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             llvm::Value* cmp = (expr->op == "==")
                                 ? builder->CreateICmpEQ(subInst->getOperand(0), subInst->getOperand(1), "cmptmp")
                                 : builder->CreateICmpNE(subInst->getOperand(0), subInst->getOperand(1), "cmptmp");
-                            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-                            nonNegValues_.insert(r);
-                            return r;
+                            return emitBoolZExt(cmp);
                         }
                     }
                 }
@@ -3911,14 +3889,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return isDivision ? builder->CreateSDiv(left, right, "divtmp") : builder->CreateSRem(left, right, "modtmp");
     } else if (expr->op == "==") {
         llvm::Value* cmp = builder->CreateICmpEQ(left, right, "cmptmp");
-        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(cmp);
     } else if (expr->op == "!=") {
         llvm::Value* cmp = builder->CreateICmpNE(left, right, "cmptmp");
-        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(cmp);
     } else if (expr->op == "<") {
         // Fast path: when the left operand is known non-negative and the right
         if (nonNegValues_.count(left)) {
@@ -3951,9 +3925,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpULT(left, right, "cmptmp")
             : builder->CreateICmpSLT(left, right, "cmptmp");
-        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(cmp);
     } else if (expr->op == "<=") {
         // Fast path: non-neg value <= negative constant → always false.
         // Negative constant <= non-neg value → always true.
@@ -3983,9 +3955,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpULE(left, right, "cmptmp")
             : builder->CreateICmpSLE(left, right, "cmptmp");
-        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(cmp);
     } else if (expr->op == ">") {
         // Fast path: non-neg value > negative constant → always true.
         // Negative constant > non-neg value → always false.
@@ -4015,9 +3985,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpUGT(left, right, "cmptmp")
             : builder->CreateICmpSGT(left, right, "cmptmp");
-        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(cmp);
     } else if (expr->op == ">=") {
         // Fast path: non-neg value >= negative constant → always true.
         // Negative constant >= non-neg value → always false.
@@ -4047,9 +4015,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpUGE(left, right, "cmptmp")
             : builder->CreateICmpSGE(left, right, "cmptmp");
-        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(cmp);
     } else if (expr->op == "&") {
         auto* result = builder->CreateAnd(left, right, "andtmp");
         // AND with a non-negative value always produces a non-negative result.
@@ -4064,7 +4030,25 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "|") {
-        auto* result = builder->CreateOr(left, right, "ortmp");
+        // Check if the two operands have no overlapping bits (KnownBits), in
+        // which case `or disjoint` (i.e., add-like semantics) enables more opts.
+        bool isDisjoint = false;
+        if (!inOptMaxFunction) {
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(
+                left, module->getDataLayout());
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(
+                right, module->getDataLayout());
+            // `or disjoint` is legal when the OR of the two values is the same
+            // as their ADD (i.e., no bits are set in both operands simultaneously).
+            // KnownBits conservative check: every bit known-one in LHS is known-zero
+            // in RHS, and every bit known-one in RHS is known-zero in LHS.
+            isDisjoint = (lhsKB.One & ~rhsKB.Zero).isZero()
+                      && (rhsKB.One & ~lhsKB.Zero).isZero();
+        }
+        auto* orInst = builder->CreateOr(left, right, "ortmp");
+        if (isDisjoint)
+            llvm::cast<llvm::PossiblyDisjointInst>(orInst)->setIsDisjoint(true);
+        auto* result = orInst;
         // OR of two non-negative values is non-negative (sign bit stays 0).
         bool resultNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
         if (!resultNonNeg) {
@@ -4615,9 +4599,7 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         llvm::Value* boolVal = toBool(operand);
         llvm::Value* notVal = builder->CreateNot(boolVal, "nottmp");
         // Logical NOT of a boolean produces 0 or 1 — always non-negative.
-        auto* result = builder->CreateZExt(notVal, getDefaultType(), "booltmp");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(notVal);
     } else if (expr->op == "~") {
         if (operand->getType()->isDoubleTy()) {
             operand = builder->CreateFPToSI(operand, getDefaultType(), "ftoi");

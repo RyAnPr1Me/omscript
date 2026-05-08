@@ -960,6 +960,11 @@ class CodeGenerator {
 
     // IR emit helpers: each performs one logical operation with all required metadata attached.
 
+    /// Emit a ZExt from i1 → i64 with `!range [0,2)` metadata attached and the
+    /// result inserted into nonNegValues_.  Use instead of bare CreateZExt for
+    /// all boolean (comparison-result) widening operations.
+    llvm::Value* emitBoolZExt(llvm::Value* i1Val, const llvm::Twine& name = "booltmp");
+
     /// Load the array length header word (attaches tbaaArrayLen_ + arrayLenRangeMD_; result marked non-neg).
     llvm::Value* emitLoadArrayLen(llvm::Value* arrPtr, const llvm::Twine& name = "arrlen");
 

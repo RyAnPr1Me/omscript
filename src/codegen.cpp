@@ -1180,6 +1180,16 @@ CodeGenerator::CountingLoopInfo CodeGenerator::emitCountingLoop(
 
 // ── IR emit helpers ───────────────────────────────────────────────────────────
 
+llvm::Value* CodeGenerator::emitBoolZExt(llvm::Value* i1Val, const llvm::Twine& name) {
+    auto* result = builder->CreateZExt(i1Val, getDefaultType(), name);
+    // Attach !range [0,2) so LLVM knows this is a 0-or-1 value.
+    if (boolRangeMD_)
+        llvm::cast<llvm::Instruction>(result)->setMetadata(
+            llvm::LLVMContext::MD_range, boolRangeMD_);
+    nonNegValues_.insert(result);
+    return result;
+}
+
 llvm::Value* CodeGenerator::emitLoadArrayLen(llvm::Value* arrPtr,
                                               const llvm::Twine& name) {
     auto* load = builder->CreateAlignedLoad(getDefaultType(), arrPtr,
