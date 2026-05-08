@@ -4032,8 +4032,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "|") {
         // Check if the two operands have no overlapping bits (KnownBits), in
         // which case `or disjoint` (i.e., add-like semantics) enables more opts.
+        // Guard with O1+ to avoid spending KnownBits analysis budget at O0.
         bool isDisjoint = false;
-        if (!inOptMaxFunction) {
+        if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O1) {
             const llvm::KnownBits lhsKB = llvm::computeKnownBits(
                 left, module->getDataLayout());
             const llvm::KnownBits rhsKB = llvm::computeKnownBits(
