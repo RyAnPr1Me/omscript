@@ -3947,10 +3947,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             auto* b = builder->CreateAlignedLoad(getDefaultType(), bPtr, llvm::MaybeAlign(8), "b");
             llvm::cast<llvm::Instruction>(a)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
             llvm::cast<llvm::Instruction>(b)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            // zext nneg: i1 sign bit is always 0, so extension is non-negative.
             auto* gt = builder->CreateZExt(builder->CreateICmpSGT(a, b, "gt"),
-                                           llvm::Type::getInt32Ty(*context));
+                                           llvm::Type::getInt32Ty(*context), "gt.zext",
+                                           /*IsNonNeg=*/true);
             auto* lt = builder->CreateZExt(builder->CreateICmpSLT(a, b, "lt"),
-                                           llvm::Type::getInt32Ty(*context));
+                                           llvm::Type::getInt32Ty(*context), "lt.zext",
+                                           /*IsNonNeg=*/true);
             builder->CreateRet(builder->CreateSub(gt, lt, "cmp"));
             builder->restoreIP(savedIP);
             return fn;
@@ -5819,7 +5822,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             {pathPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)}, "fexists.access");
         llvm::Value* isZero = builder->CreateICmpEQ(result,
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "fexists.cmp");
-        return builder->CreateZExt(isZero, getDefaultType(), "fexists.result");
+        return emitBoolZExt(isZero, "fexists.result");
     }
 
     // -----------------------------------------------------------------------
@@ -6329,9 +6332,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isAnd0 = builder->CreateICmpEQ(andVal, zero, "ispow2.and0");
         // x > 0 && (x & (x-1)) == 0
         llvm::Value* result = builder->CreateAnd(isPos, isAnd0, "ispow2.result");
-        auto* ext = builder->CreateZExt(result, getDefaultType(), "ispow2.ext");
-        nonNegValues_.insert(ext);  // is_power_of_2 returns 0 or 1 — always non-negative
-        return ext;
+        // emitBoolZExt attaches !range [0,2), zext nneg, and nonNegValues_ tracking.
+        return emitBoolZExt(result, "ispow2.ext");
     }
 
     if (bid == BuiltinId::LCM) {
@@ -6395,7 +6397,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* aGtB = builder->CreateICmpUGT(phiA, bOdd, "lcm.gt");
         llvm::Value* lo = builder->CreateSelect(aGtB, bOdd, phiA, "lcm.lo");
         llvm::Value* hi = builder->CreateSelect(aGtB, phiA, bOdd, "lcm.hi");
-        llvm::Value* diff = builder->CreateSub(hi, lo, "lcm.diff");
+        // hi = max(phiA, bOdd), lo = min(phiA, bOdd) via select: hi ≥ lo → nuw+nsw.
+        llvm::Value* diff = builder->CreateSub(hi, lo, "lcm.diff",
+                                               /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* gcdDone = builder->CreateICmpEQ(diff, zero, "lcm.dz");
         phiA->addIncoming(lo, loopBB);
         phiB->addIncoming(diff, loopBB);
@@ -8157,8 +8161,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // setenv returns 0 on success, -1 on failure; convert to 1/0
         llvm::Value* success = builder->CreateICmpEQ(rc,
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "env_set.ok");
-        llvm::Value* result = builder->CreateZExt(success, getDefaultType(), "env_set.res");
-        return result;
+        return emitBoolZExt(success, "env_set.res");
     }
 
     // ── str_format(fmt, val1[, val2[, val3[, val4]]]) ──────────────────────
@@ -8438,31 +8441,33 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto [a, b] = getBigintBinaryArgs("bigint_gcd");
         return builder->CreateCall(getOrDeclareBigintGcd(), {a, b}, "bigint.gcd");
     }
-    // Comparison builtins: return i32 (0 or 1), widened to i64 for OmScript
+    // Comparison builtins: return i32 (0 or 1), widened to i64 for OmScript.
+    // ICmpNE converts the i32 0/1 to i1, then emitBoolZExt adds zext nneg +
+    // !range [0,2) + nonNegValues_ tracking.
     if (bid == BuiltinId::BIGINT_EQ) {
         auto [a, b] = getBigintBinaryArgs("bigint_eq");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintEq(), {a, b}, "bigint.eq");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.eq.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.eq.cmp"), "bigint.eq.zext");
     }
     if (bid == BuiltinId::BIGINT_LT) {
         auto [a, b] = getBigintBinaryArgs("bigint_lt");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintLt(), {a, b}, "bigint.lt");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.lt.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.lt.cmp"), "bigint.lt.zext");
     }
     if (bid == BuiltinId::BIGINT_LE) {
         auto [a, b] = getBigintBinaryArgs("bigint_le");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintLe(), {a, b}, "bigint.le");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.le.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.le.cmp"), "bigint.le.zext");
     }
     if (bid == BuiltinId::BIGINT_GT) {
         auto [a, b] = getBigintBinaryArgs("bigint_gt");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintGt(), {a, b}, "bigint.gt");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.gt.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.gt.cmp"), "bigint.gt.zext");
     }
     if (bid == BuiltinId::BIGINT_GE) {
         auto [a, b] = getBigintBinaryArgs("bigint_ge");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintGe(), {a, b}, "bigint.ge");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.ge.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.ge.cmp"), "bigint.ge.zext");
     }
     if (bid == BuiltinId::BIGINT_CMP) {
         auto [a, b] = getBigintBinaryArgs("bigint_cmp");
@@ -8614,7 +8619,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* fval = ensureFloat(arg);
         // IEEE NaN: unordered comparison with itself is true only for NaN.
         llvm::Value* cmp = builder->CreateFCmpUNO(fval, fval, "is_nan.cmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "is_nan.result");
+        return emitBoolZExt(cmp, "is_nan.result");
     }
 
     // ── is_inf(x) — 1 if x (as f64) is ±Infinity, else 0 ───────────────────
@@ -8634,7 +8639,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isPos = builder->CreateFCmpOEQ(fval, pos, "is_inf.pos");
         llvm::Value* isNeg = builder->CreateFCmpOEQ(fval, neg, "is_inf.neg");
         llvm::Value* either = builder->CreateOr(isPos, isNeg, "is_inf.either");
-        return builder->CreateZExt(either, getDefaultType(), "is_inf.result");
+        return emitBoolZExt(either, "is_inf.result");
     }
 
     // ── 2D Column-Major Matrix Builtins ──────────────────────────────────────

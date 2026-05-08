@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-23: `emitBoolZExt` sweep + arithmetic precision** (`src/codegen_builtins.cpp`):
+  - **`emitBoolZExt` on `file_exists`**: `access()==0` comparison result gains `zext nneg` + `!range [0,2)`.
+  - **`emitBoolZExt` on `is_power_of_2`**: bare `CreateZExt + nonNegValues_.insert` replaced by `emitBoolZExt` (which does both, plus the `nneg` flag).
+  - **`emitBoolZExt` on `env_set`**: `setenv()==0` comparison gains the full boolean metadata.
+  - **`emitBoolZExt` on `is_nan`**: `fcmp uno` result gains `zext nneg` + `!range [0,2)`.
+  - **`emitBoolZExt` on `is_inf`**: `or(fcmp oeq pos, fcmp oeq neg)` result gains full boolean metadata.
+  - **`zext nneg` on array sort comparator**: the two `zext i1→i32` in `__omsc_cmp_arr_asc` now carry the `nneg` flag (LLVM can propagate the `[0,1]` range into the `sub` that computes the 3-way result).
+  - **`emitBoolZExt` on `bigint_eq/lt/le/gt/ge`**: the C library returns i32 0/1; `CreateIsNotNull` converts to i1, then `emitBoolZExt` adds `zext nneg` + `!range [0,2)` + `nonNegValues_` tracking for all five comparison builtins.
+  - **`nuw+nsw` on `lcm.diff`**: the Stein-GCD inner loop for `lcm` has the same `hi-lo` (select-proven) structure as `gcd.diff` fixed in Round 22; now tagged `nuw+nsw`.
+
 - **Round-22: Unsigned bounds checks + arithmetic precision** (`src/codegen_builtins.cpp`):
   - **ULT/ULE single-check bounds checks**: the double-check pattern `SGE(idx, 0) && SLT(idx, len)` is replaced with a single `ULT(idx, len)` (or `ULE` for insert-at-end). Since array/string lengths are always non-negative (proven by `nonNegValues_`), `ULT(idx, len)` is equivalent to the two-check pattern but emits one fewer `icmp` and eliminates the `and` instruction. Applied to: `swap`, `char_at`, `array_remove`, `array_insert`.
   - **`emitBoolZExt` for `array_count`**: the bare `CreateZExt(isNonZero, ...)` predicate accumulator increment is migrated to `emitBoolZExt`, adding `zext nneg` + `!range [0,2)` + `nonNegValues_` tracking.
