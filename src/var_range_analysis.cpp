@@ -273,11 +273,30 @@ static void narrowFromBinary(const BinaryExpr* bin, VarRangeMap& env, bool taken
 }
 
 /// Narrow @p env using the condition @p cond being taken or not-taken.
-/// Only handles simple binary comparisons for now.
 static void narrowFromCondition(const Expression* cond, VarRangeMap& env, bool taken) {
     if (!cond) return;
     if (cond->type == ASTNodeType::BINARY_EXPR) {
         const auto* bin = static_cast<const BinaryExpr*>(cond);
+        if (bin->op == "&&") {
+            if (taken) {
+                // Both sub-conditions are true: narrow for each in sequence.
+                narrowFromCondition(bin->left.get(),  env, true);
+                narrowFromCondition(bin->right.get(), env, true);
+            } else {
+                // !(a && b) = !a || !b: conservative — can't narrow further.
+            }
+            return;
+        }
+        if (bin->op == "||") {
+            if (!taken) {
+                // Both sub-conditions are false: narrow for each in sequence.
+                narrowFromCondition(bin->left.get(),  env, false);
+                narrowFromCondition(bin->right.get(), env, false);
+            } else {
+                // a || b is true but we don't know which branch: conservative.
+            }
+            return;
+        }
         narrowFromBinary(bin, env, taken);
         return;
     }

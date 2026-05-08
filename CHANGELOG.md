@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-15: compound condition range narrowing** (`src/var_range_analysis.cpp`):
+  - `narrowFromCondition` now handles `&&` (AND) and `||` (OR) compound conditions.
+  - `if (x > 0 && y > 0)` — both `x` and `y` ranges are narrowed in the true branch.
+  - `if (x > 0 || y > 0)` else branch — both ranges narrowed (both conditions false).
+  - Correctly conservative for the cases where narrowing cannot be proven (OR taken, AND not-taken).
+
 - **Round-14B: parser diagnostic guards** (`src/parser.cpp`):
   - `parseShift()`: warns when a shift count literal exceeds 63 (undefined behaviour in LLVM IR).
   - `parseMultiplication()`: warns when the right-hand literal of `/` or `%` is zero (division by zero).
