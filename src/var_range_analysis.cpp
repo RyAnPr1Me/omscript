@@ -300,6 +300,11 @@ static void collectWritten(const Statement* stmt,
     case ASTNodeType::MOVE_DECL:
         out.insert(static_cast<const MoveDecl*>(stmt)->name);
         break;
+    case ASTNodeType::PREFETCH_STMT: {
+        const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+        if (ps->varDecl) out.insert(ps->varDecl->name);
+        break;
+    }
     case ASTNodeType::EXPR_STMT: {
         std::function<void(const Expression*)> scan = [&](const Expression* e) {
             if (!e) return;
@@ -374,6 +379,12 @@ static void collectWritten(const Statement* stmt,
         collectWritten(ds->body.get(), out);
         break;
     }
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        for (const auto& stage : pl->stages)
+            collectWritten(stage.body.get(), out);
+        break;
+    }
     default:
         break;
     }
@@ -417,6 +428,19 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
             env[md->name] = *r;
         else
             env.erase(md->name);
+        break;
+    }
+
+    // ── Prefetch declaration — treat the embedded VarDecl like VAR_DECL ──────
+    case ASTNodeType::PREFETCH_STMT: {
+        const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+        if (ps->varDecl) {
+            auto r = evalExprRange(ps->varDecl->initializer.get(), env);
+            if (r && r->isNarrowed())
+                env[ps->varDecl->name] = *r;
+            else
+                env.erase(ps->varDecl->name);
+        }
         break;
     }
 
@@ -547,6 +571,19 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         collectWritten(ds->body.get(), writes);
         for (const auto& w : writes) env.erase(w);
         if (ds->body) scanStmt(ds->body.get(), env);
+        break;
+    }
+
+    // ── Pipeline statement ─────────────────────────────────────────────────────
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        // Kill all variables written inside any stage body, then scan stages.
+        std::unordered_set<std::string> writes;
+        for (const auto& stage : pl->stages)
+            collectWritten(stage.body.get(), writes);
+        for (const auto& w : writes) env.erase(w);
+        for (const auto& stage : pl->stages)
+            if (stage.body) scanStmt(stage.body.get(), env);
         break;
     }
 

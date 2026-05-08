@@ -465,6 +465,16 @@ private:
             stateOf(md->name) = BorrowState{};
             break;
         }
+        case ASTNodeType::PREFETCH_STMT: {
+            const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+            if (ps->varDecl) {
+                // prefetch var x = expr — treat like VAR_DECL.
+                checkVarDecl(ps->varDecl.get());
+            } else if (ps->addrExpr) {
+                checkExpr(ps->addrExpr.get());
+            }
+            break;
+        }
         case ASTNodeType::EXPR_STMT: {
             const auto* es = static_cast<const ExprStmt*>(stmt);
             checkExpr(es->expression.get());
@@ -612,8 +622,21 @@ private:
                 deferredBodies_.back().push_back(ds->body.get());
             break;
         }
+        case ASTNodeType::PIPELINE_STMT: {
+            const auto* pl = static_cast<const PipelineStmt*>(stmt);
+            if (pl->count) checkExpr(pl->count.get());
+            // Each stage is a separate scope.
+            for (const auto& stage : pl->stages) {
+                if (!stage.body) continue;
+                pushScope();
+                for (const auto& s : stage.body->statements)
+                    checkStmt(s.get());
+                popScope();
+            }
+            break;
+        }
         default:
-            // Break, Continue, Assume, Prefetch, etc. — no ownership effects.
+            // Break, Continue, Assume, etc. — no ownership effects.
             break;
         }
     }

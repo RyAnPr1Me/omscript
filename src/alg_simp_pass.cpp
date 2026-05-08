@@ -605,6 +605,15 @@ static unsigned simplifyStmt(Statement* stmt) {
         count += simplifyExpr(static_cast<MoveDecl*>(stmt)->initializer);
         break;
 
+    case ASTNodeType::PREFETCH_STMT: {
+        auto* ps = static_cast<PrefetchStmt*>(stmt);
+        if (ps->varDecl)
+            count += simplifyExpr(ps->varDecl->initializer);
+        if (ps->addrExpr)
+            count += simplifyExpr(ps->addrExpr);
+        break;
+    }
+
     case ASTNodeType::RETURN_STMT:
         count += simplifyExpr(static_cast<ReturnStmt*>(stmt)->value);
         break;
@@ -687,6 +696,17 @@ static unsigned simplifyStmt(Statement* stmt) {
     case ASTNodeType::DEFER_STMT:
         count += simplifyStmt(static_cast<DeferStmt*>(stmt)->body.get());
         break;
+
+    case ASTNodeType::PIPELINE_STMT: {
+        auto* pl = static_cast<PipelineStmt*>(stmt);
+        if (pl->count) count += simplifyExpr(pl->count);
+        for (auto& stage : pl->stages) {
+            if (stage.body)
+                for (auto& s : stage.body->statements)
+                    count += simplifyStmt(s.get());
+        }
+        break;
+    }
 
     default:
         break;

@@ -1095,6 +1095,26 @@ static void visitStmt(Statement* stmt,
         visitStmt(ds->body.get(), rules, cfg, stats);
         break;
     }
+    case ASTNodeType::MOVE_DECL: {
+        auto* md = static_cast<MoveDecl*>(stmt);
+        if (md->initializer) visitExpr(md->initializer, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::PREFETCH_STMT: {
+        auto* ps = static_cast<PrefetchStmt*>(stmt);
+        if (ps->varDecl && ps->varDecl->initializer)
+            visitExpr(ps->varDecl->initializer, rules, cfg, stats);
+        if (ps->addrExpr)
+            visitExpr(ps->addrExpr, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::PIPELINE_STMT: {
+        auto* pl = static_cast<PipelineStmt*>(stmt);
+        if (pl->count) visitExpr(pl->count, rules, cfg, stats);
+        for (auto& stage : pl->stages)
+            if (stage.body) visitBlock(stage.body.get(), rules, cfg, stats);
+        break;
+    }
     default:
         break;
     }

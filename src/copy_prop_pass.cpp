@@ -213,6 +213,11 @@ static void collectWrittenInStmt(const Statement* stmt,
     case ASTNodeType::MOVE_DECL:
         out.insert(static_cast<const MoveDecl*>(stmt)->name);
         break;
+    case ASTNodeType::PREFETCH_STMT: {
+        const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+        if (ps->varDecl) out.insert(ps->varDecl->name);
+        break;
+    }
     case ASTNodeType::EXPR_STMT:
         collectWrittenNames(static_cast<const ExprStmt*>(stmt)->expression.get(), out);
         break;
@@ -239,6 +244,11 @@ static void collectWrittenDeep(const Statement* stmt,
     case ASTNodeType::MOVE_DECL:
         out.insert(static_cast<const MoveDecl*>(stmt)->name);
         break;
+    case ASTNodeType::PREFETCH_STMT: {
+        const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+        if (ps->varDecl) out.insert(ps->varDecl->name);
+        break;
+    }
     case ASTNodeType::EXPR_STMT:
         collectWrittenNames(static_cast<const ExprStmt*>(stmt)->expression.get(), out);
         break;
@@ -285,6 +295,12 @@ static void collectWrittenDeep(const Statement* stmt,
     case ASTNodeType::DEFER_STMT:
         collectWrittenDeep(static_cast<const DeferStmt*>(stmt)->body.get(), out);
         break;
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        for (const auto& stage : pl->stages)
+            collectWrittenDeep(stage.body.get(), out);
+        break;
+    }
     default:
         break;
     }
@@ -359,6 +375,19 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
             // Always kill the destination: move semantics means the new name
             // holds a unique copy and cannot alias a prior expression.
             killName(map, md->name);
+            break;
+        }
+
+        case ASTNodeType::PREFETCH_STMT: {
+            auto* ps = static_cast<PrefetchStmt*>(stmt.get());
+            if (ps->varDecl) {
+                // prefetch [hot] var x = expr  — treats the embedded VarDecl
+                // exactly like a regular VAR_DECL for copy-propagation purposes.
+                count += propagateInExpr(ps->varDecl->initializer, map, opaque);
+                killName(map, ps->varDecl->name);
+            } else if (ps->addrExpr) {
+                count += propagateInExpr(ps->addrExpr, map, opaque);
+            }
             break;
         }
 
@@ -512,6 +541,20 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
             break;
         }
 
+        case ASTNodeType::PIPELINE_STMT: {
+            auto* pl = static_cast<PipelineStmt*>(stmt.get());
+            // Propagate into the count expression first.
+            if (pl->count) count += propagateInExpr(pl->count, map, opaque);
+            // Kill all writes across all stages, then recurse into each.
+            std::unordered_set<std::string> pipeWrites;
+            for (const auto& stage : pl->stages)
+                collectWrittenDeep(stage.body.get(), pipeWrites);
+            for (const auto& w : pipeWrites) killName(map, w);
+            for (auto& stage : pl->stages)
+                count += killAndRecurseBody(stage.body.get(), map, opaque);
+            break;
+        }
+
         default:
             break;
         }
@@ -568,6 +611,12 @@ static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out) {
     case ASTNodeType::DEFER_STMT:
         collectOpaqueVarsInStmt(static_cast<const DeferStmt*>(stmt)->body.get(), out);
         break;
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        for (const auto& stage : pl->stages)
+            collectOpaqueVarsInStmt(stage.body.get(), out);
+        break;
+    }
     default:
         break;
     }

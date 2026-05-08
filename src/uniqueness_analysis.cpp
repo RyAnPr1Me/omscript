@@ -247,6 +247,29 @@ static void collectStringArrayVars(
         return;
     }
 
+    // Prefetch with embedded VarDecl: track like VarDecl.
+    if (const auto* ps = dynamic_cast<const PrefetchStmt*>(stmt)) {
+        if (ps->varDecl) {
+            const auto* vd = ps->varDecl.get();
+            if (vd->initializer) {
+                if (vd->typeName == "string" || vd->typeName == "str") {
+                    strVars.insert(vd->name);
+                } else if (isFreshStringExpr(vd->initializer.get(), strVars, arrVars)) {
+                    strVars.insert(vd->name);
+                } else if (vd->initializer->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    const auto* id = static_cast<const IdentifierExpr*>(vd->initializer.get());
+                    if (strVars.count(id->name))
+                        strVars.insert(vd->name);
+                    else if (arrVars.count(id->name))
+                        arrVars.insert(vd->name);
+                } else if (isFreshArrayExpr(vd->initializer.get(), strVars, arrVars)) {
+                    arrVars.insert(vd->name);
+                }
+            }
+        }
+        return;
+    }
+
     // Recurse into compound statements
     if (const auto* ifc = dynamic_cast<const IfStmt*>(stmt)) {
         collectStringArrayVars(ifc->thenBranch.get(), strVars, arrVars);
@@ -282,6 +305,11 @@ static void collectStringArrayVars(
     }
     if (const auto* ds = dynamic_cast<const DeferStmt*>(stmt)) {
         collectStringArrayVars(ds->body.get(), strVars, arrVars);
+        return;
+    }
+    if (const auto* pl = dynamic_cast<const PipelineStmt*>(stmt)) {
+        for (const auto& stage : pl->stages)
+            collectStringArrayVars(stage.body.get(), strVars, arrVars);
         return;
     }
 }
@@ -428,6 +456,17 @@ static void markSharedVars(
         return;
     }
 
+    // Prefetch with embedded VarDecl: check the initializer for captures.
+    if (const auto* ps = dynamic_cast<const PrefetchStmt*>(stmt)) {
+        if (ps->varDecl && ps->varDecl->initializer &&
+            ps->varDecl->initializer->type == ASTNodeType::CALL_EXPR) {
+            const auto* call = static_cast<const CallExpr*>(ps->varDecl->initializer.get());
+            for (const auto& arg : call->arguments)
+                markArgShared(arg.get(), call->callee);
+        }
+        return;
+    }
+
     if (const auto* es = dynamic_cast<const ExprStmt*>(stmt)) {
         scanExprForAliases(es->expression.get());
         return;
@@ -487,6 +526,11 @@ static void markSharedVars(
     }
     if (const auto* ds = dynamic_cast<const DeferStmt*>(stmt)) {
         markSharedVars(ds->body.get(), strVars, arrVars, sharedVars);
+        return;
+    }
+    if (const auto* pl = dynamic_cast<const PipelineStmt*>(stmt)) {
+        for (const auto& stage : pl->stages)
+            markSharedVars(stage.body.get(), strVars, arrVars, sharedVars);
         return;
     }
 }

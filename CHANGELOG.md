@@ -146,6 +146,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **Uniqueness analysis**: neither `collectStringArrayVars` nor `markSharedVars` handled `MOVE_DECL`. String/array variables declared via `move` were invisible to the analysis, causing under-approximation of the unique-string set and potentially unsafe `strdup`-skip decisions.
   - Added `MOVE_DECL` handling to all four passes with semantics appropriate for each.
 
+- **Multiple passes: `PREFETCH_STMT` with embedded `VarDecl` not tracked as a variable declaration** (`src/copy_prop_pass.cpp`, `src/var_range_analysis.cpp`, `src/alg_simp_pass.cpp`, `src/uniqueness_analysis.cpp`, `src/borrow_checker.cpp`, `src/egraph_optimizer.cpp`, `src/hgoe_egraph.cpp`):
+  - `prefetch [hot] var x = expr` embeds a `VarDecl` inside a `PrefetchStmt`. None of the analysis/transform passes recognised this form. As a result, the variable declared by the prefetch statement was:
+    - Not added to "written" sets in `copy_prop`, `var_range` — so `killAndRecurseBody` / range invalidation did not kill it on loop back-edges.
+    - Not tracked for range narrowing in `var_range`.
+    - Not simplified (the `addrExpr` and `varDecl->initializer` were not folded) by `alg_simp`, `egraph_optimizer`, and `hgoe`.
+    - Invisible to `uniqueness_analysis` — string/array prefetch variables had undefined uniqueness.
+    - Not scope-checked by `borrow_checker` — ownership effects of the embedded declaration were ignored.
+  - Added `PREFETCH_STMT` handling to all seven passes.
+
+- **Multiple passes: `PIPELINE_STMT` stages not traversed** (`src/copy_prop_pass.cpp`, `src/var_range_analysis.cpp`, `src/alg_simp_pass.cpp`, `src/uniqueness_analysis.cpp`, `src/borrow_checker.cpp`, `src/egraph_optimizer.cpp`, `src/hgoe_egraph.cpp`):
+  - `pipeline N { stage name { ... } ... }` sequences multiple named stage bodies. No analysis or transformation pass (except `rlc_pass.cpp`) traversed the stage bodies. Writes inside stages were not killed in range/copy maps, algebraic rules were not applied to stage expressions, string/array vars inside stages were invisible to uniqueness analysis, and borrow-checker did not scope-check stage bodies.
+  - Added `PIPELINE_STMT` handling to all seven passes. Stage bodies are each treated as a separate nested scope, and the `count` expression is treated as a loop-count operand.
+
 ## [4.3.2] - 2026-05-07
 
 ### Fixed
