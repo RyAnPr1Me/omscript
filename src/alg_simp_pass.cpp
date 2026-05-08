@@ -234,8 +234,17 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 if      (op == "+")                      result = static_cast<long long>(static_cast<uint64_t>(lv) + static_cast<uint64_t>(rv));
                 else if (op == "-")                      result = static_cast<long long>(static_cast<uint64_t>(lv) - static_cast<uint64_t>(rv));
                 else if (op == "*")                      result = static_cast<long long>(static_cast<uint64_t>(lv) * static_cast<uint64_t>(rv));
-                else if (op == "/" && rv != 0)           result = lv / rv;
-                else if (op == "%" && rv != 0)           result = lv % rv;
+                else if (op == "/" && rv != 0) {
+                    // Guard: INT64_MIN / -1 is UB (signed overflow); return INT64_MIN to match
+                    // wrap-around semantics consistent with runtime integer evaluation.
+                    if (lv == LLONG_MIN && rv == -1) result = static_cast<long long>(LLONG_MIN);
+                    else                             result = lv / rv;
+                }
+                else if (op == "%" && rv != 0) {
+                    // Guard: INT64_MIN % -1 is UB/SIGFPE on x86-64; result is 0.
+                    if (lv == LLONG_MIN && rv == -1) result = 0LL;
+                    else                             result = lv % rv;
+                }
                 else if (op == "&")                      result = lv & rv;
                 else if (op == "|")                      result = lv | rv;
                 else if (op == "^")                      result = lv ^ rv;

@@ -635,8 +635,14 @@ private:
             }
             break;
         }
+        case ASTNodeType::ASSUME_STMT: {
+            const auto* as = static_cast<const AssumeStmt*>(stmt);
+            checkExpr(as->condition.get());
+            if (as->deoptBody) checkStmt(as->deoptBody.get());
+            break;
+        }
         default:
-            // Break, Continue, Assume, etc. — no ownership effects.
+            // Break, Continue, etc. — no ownership effects.
             break;
         }
     }

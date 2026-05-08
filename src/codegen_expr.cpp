@@ -965,7 +965,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (expr->op == "|") return builder->CreateOr(left, right, "simd.or");
             if (expr->op == "^") return builder->CreateXor(left, right, "simd.xor");
             if (expr->op == "<<") return builder->CreateShl(left, right, "simd.shl");
-            if (expr->op == ">>") return builder->CreateAShr(left, right, "simd.ashr");
+            if (expr->op == ">>") return builder->CreateLShr(left, right, "simd.lshr");
         }
         codegenError("Unsupported operator '" + expr->op + "' for SIMD vector types", expr);
     }
