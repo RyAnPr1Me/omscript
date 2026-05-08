@@ -4235,7 +4235,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
         }
 
-        llvm::Value* sliceLen = builder->CreateSub(endArg, startArg, "slice.len");
+        // endArg ≥ startArg is guaranteed by all clamp paths above — nuw+nsw.
+        llvm::Value* sliceLen = builder->CreateSub(endArg, startArg, "slice.len",
+                                                   /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = emitAllocArray(sliceLen, "slice");
         // Copy elements: arr[start+1..end+1) to buf[1..)
         llvm::Value* srcIdx = builder->CreateAdd(startArg, one, "slice.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -6037,7 +6039,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* val = builder->CreateAdd(startArg,
             builder->CreateMul(i, stepArg, "rstep.offset"), "rstep.val");
-        llvm::Value* slot = builder->CreateAdd(i, one, "rstep.slot");
+        // i is ULT-bounded in [0, count); slot = i+1 is in [1, count+1] — nuw+nsw.
+        llvm::Value* slot = builder->CreateAdd(i, one, "rstep.slot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, slot, "rstep.elemptr");
         builder->CreateStore(val, elemPtr);
         llvm::Value* nextI = builder->CreateAdd(i, one, "rstep.next", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -6061,7 +6064,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
             ? strArg : builder->CreateIntToPtr(strArg, ptrTy, "charcode.ptr");
         llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), strPtr, "charcode.ch");
-        return builder->CreateZExt(ch, getDefaultType(), "charcode.result");
+        // Zero-extend to i64; result is always in [0, 256).
+        auto* result = builder->CreateZExt(ch, getDefaultType(), "charcode.result");
+        if (charRangeMD_)
+            llvm::cast<llvm::Instruction>(result)->setMetadata(
+                llvm::LLVMContext::MD_range, charRangeMD_);
+        nonNegValues_.insert(result);
+        return result;
     }
 
     if (bid == BuiltinId::NUMBER_TO_STRING) {
@@ -8251,7 +8260,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             getOrDeclareSnprintf(), probeCallArgs, "strfmt.probe");
         // snprintf returns the number of characters that would have been written
         // (not counting the null terminator).  Extend to i64 for arithmetic.
-        llvm::Value* neededLen = builder->CreateZExt(probeResult, getDefaultType(), "strfmt.needed");
+        // snprintf returns non-negative on success; zext nneg allows LLVM to infer [0,2^31).
+        llvm::Value* neededLen = builder->CreateZExt(probeResult, getDefaultType(), "strfmt.needed",
+                                                     /*IsNonNeg=*/true);
         nonNegValues_.insert(neededLen);
 
         // Allocate neededLen + 1 bytes (room for null terminator).
@@ -8490,12 +8501,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::BIGINT_IS_ZERO) {
         llvm::Value* a = getBigintUnaryArg("bigint_is_zero");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintIsZero(), {a}, "bigint.iszero");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.iszero.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.iszero.cmp"), "bigint.iszero.zext");
     }
     if (bid == BuiltinId::BIGINT_IS_NEGATIVE) {
         llvm::Value* a = getBigintUnaryArg("bigint_is_negative");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintIsNegative(), {a}, "bigint.isneg");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.isneg.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.isneg.cmp"), "bigint.isneg.zext");
     }
     if (bid == BuiltinId::BIGINT_SHL) {
         validateArgCount(expr, "bigint_shl", 2);

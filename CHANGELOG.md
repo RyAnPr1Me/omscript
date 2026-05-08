@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-24: boolean metadata sweep + no-wrap arithmetic** (`src/codegen_builtins.cpp`):
+  - **`emitBoolZExt` on `bigint_is_zero` / `bigint_is_negative`**: C library returns i32 0/1; `CreateIsNotNull` converts to i1, then `emitBoolZExt` attaches `zext nneg` + `!range [0,2)` + `nonNegValues_` (consistent with `bigint_eq/lt/le/gt/ge` from Round-23).
+  - **`charRangeMD_` + `nonNegValues_` on `char_code` result**: i8 loaded from string extended to i64 now gets the same `!range [0,256)` metadata and non-negative tracking as `char_at`.
+  - **`zext nneg` on `str_format` probe length**: snprintf returns a non-negative count on success; `CreateZExt(probeResult, i64, IsNonNeg=true)` expresses this so LLVM can infer `[0, 2^31)` on the widened value without a separate analysis pass.
+  - **`nuw+nsw` on `range_step` slot index**: `slot = i + 1` where `i` is ULT-bounded in `[0, count)` (non-negative by clamp) → `i+1` is in `[1, count+1]`, no unsigned or signed overflow. Companion `rstep.next` already had these flags.
+  - **`nuw+nsw` on `array_slice` length**: `endArg - startArg` where all code paths above the subtraction clamp `endArg ≥ startArg` (via `select(endArg < startArg, startArg, endArg)`) — no underflow possible.
+
 - **Round-23: `emitBoolZExt` sweep + arithmetic precision** (`src/codegen_builtins.cpp`):
   - **`emitBoolZExt` on `file_exists`**: `access()==0` comparison result gains `zext nneg` + `!range [0,2)`.
   - **`emitBoolZExt` on `is_power_of_2`**: bare `CreateZExt + nonNegValues_.insert` replaced by `emitBoolZExt` (which does both, plus the `nneg` flag).
