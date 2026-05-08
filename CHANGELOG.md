@@ -73,6 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `collectOpaqueVars` (which marks variable names as non-CSE-able) only recursed into `if`/`while`/`for` bodies. Variables declared `volatile` or `atomic` inside `for each`, `do...while`, `switch`, `catch`, or `defer` blocks were invisible to the opaque set, allowing the CSE pass to incorrectly fold their repeated reads into a single cached copy — violating the `volatile`/`atomic` semantics that every read must reach the underlying storage.
   - Refactored into a recursive `collectOpaqueVarsInStmt` dispatch that handles all compound statement forms. `collectOpaqueVars` and `collectOpaqueVarsInList` now delegate to it, so the opaque set is always complete before CSE runs.
 
+- **Copy-propagation pass: same `collectOpaqueVarsInStmt` gap for `switch`/`catch`/`defer`** (`src/copy_prop_pass.cpp`):
+  - The equivalent `collectOpaqueVarsInStmt` helper in the copy-propagation pass also lacked `SWITCH_STMT`, `CATCH_STMT`, and `DEFER_STMT` cases. This could allow copies of volatile/atomic variables declared in those blocks to be forwarded across reads — the same semantic violation as the CSE bug above.
+  - Added the three missing cases with the same pattern already used by `rlc_pass.cpp` and `var_range_analysis.cpp`.
+
 ### Documentation
 
 - **`LANGUAGE_REFERENCE.md`**:

@@ -473,6 +473,19 @@ static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out) {
     case ASTNodeType::FOR_EACH_STMT:
         collectOpaqueVarsInStmt(static_cast<const ForEachStmt*>(stmt)->body.get(), out);
         break;
+    case ASTNodeType::SWITCH_STMT: {
+        const auto* sw = static_cast<const SwitchStmt*>(stmt);
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                collectOpaqueVarsInStmt(s.get(), out);
+        break;
+    }
+    case ASTNodeType::CATCH_STMT:
+        collectOpaqueVarsInStmt(static_cast<const CatchStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::DEFER_STMT:
+        collectOpaqueVarsInStmt(static_cast<const DeferStmt*>(stmt)->body.get(), out);
+        break;
     default:
         break;
     }
