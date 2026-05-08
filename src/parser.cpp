@@ -3695,7 +3695,17 @@ std::unique_ptr<Expression> Parser::parseShift() {
     while ((check(TokenType::LSHIFT) || check(TokenType::RSHIFT)) && !isStartOfLongerCustomOp(2)) {
         advance();
         const std::string op = tokens[current - 1].lexeme;
+        const int opLine = tokens[current - 1].line;
         auto right = parseAddition();
+        // Warn on a shift count that definitely exceeds 63: the result is
+        // undefined in C/LLVM and is almost always a programming error.
+        if (right && right->type == ASTNodeType::LITERAL_EXPR) {
+            const auto* lit = static_cast<const LiteralExpr*>(right.get());
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue > 63) {
+                warnings_.push_back("warning: shift count " + std::to_string(lit->intValue)
+                    + " exceeds 63 (line " + std::to_string(opLine) + ")");
+            }
+        }
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
 
@@ -3719,7 +3729,17 @@ std::unique_ptr<Expression> Parser::parseMultiplication() {
 
     while (match(TokenType::STAR) || match(TokenType::SLASH) || match(TokenType::PERCENT)) {
         const std::string op = tokens[current - 1].lexeme;
+        const int opLine = tokens[current - 1].line;
         auto right = parsePower();
+        // Warn on a literal zero divisor: integer division/modulo by zero is
+        // undefined behaviour and is almost certainly a programming error.
+        if ((op == "/" || op == "%") && right && right->type == ASTNodeType::LITERAL_EXPR) {
+            const auto* lit = static_cast<const LiteralExpr*>(right.get());
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue == 0) {
+                warnings_.push_back("warning: " + op
+                    + " by zero literal (line " + std::to_string(opLine) + ")");
+            }
+        }
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
 

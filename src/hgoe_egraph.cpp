@@ -1044,6 +1044,93 @@ static void visitStmt(Statement* stmt,
                       const HGOEGuidedConfig& cfg,
                       HGOEGuidedStats& stats);
 
+// ── LICM helpers ─────────────────────────────────────────────────────────────
+
+/// Returns true when @p expr references any identifier in @p vars.
+static bool exprRefersToAny(const Expression* expr,
+                             const std::unordered_set<std::string>& vars) {
+    if (!expr) return false;
+    switch (expr->type) {
+    case ASTNodeType::IDENTIFIER_EXPR:
+        return vars.count(static_cast<const IdentifierExpr*>(expr)->name) > 0;
+    case ASTNodeType::BINARY_EXPR: {
+        const auto* b = static_cast<const BinaryExpr*>(expr);
+        return exprRefersToAny(b->left.get(), vars)
+            || exprRefersToAny(b->right.get(), vars);
+    }
+    case ASTNodeType::UNARY_EXPR:
+        return exprRefersToAny(
+            static_cast<const UnaryExpr*>(expr)->operand.get(), vars);
+    case ASTNodeType::CALL_EXPR:
+        return true; // conservative: treat all calls as non-invariant
+    default:
+        return false; // literals and other leaves — invariant
+    }
+}
+
+/// Returns true when @p expr is a pure, side-effect-free expression.
+static bool exprIsPure(const Expression* expr) {
+    if (!expr) return true;
+    switch (expr->type) {
+    case ASTNodeType::LITERAL_EXPR:
+    case ASTNodeType::IDENTIFIER_EXPR:
+        return true;
+    case ASTNodeType::BINARY_EXPR: {
+        const auto* b = static_cast<const BinaryExpr*>(expr);
+        return exprIsPure(b->left.get()) && exprIsPure(b->right.get());
+    }
+    case ASTNodeType::UNARY_EXPR:
+        return exprIsPure(
+            static_cast<const UnaryExpr*>(expr)->operand.get());
+    case ASTNodeType::CALL_EXPR:
+        return false; // calls may have side effects
+    default:
+        return false; // conservative
+    }
+}
+
+/// Collect names of all variables written by @p stmt or its descendants.
+static void collectWrittenVars(const Statement* stmt,
+                                std::unordered_set<std::string>& out) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case ASTNodeType::VAR_DECL:
+        out.insert(static_cast<const VarDecl*>(stmt)->name);
+        break;
+    case ASTNodeType::MOVE_DECL:
+        out.insert(static_cast<const MoveDecl*>(stmt)->name);
+        break;
+    case ASTNodeType::BLOCK: {
+        const auto* blk = static_cast<const BlockStmt*>(stmt);
+        for (const auto& s : blk->statements) collectWrittenVars(s.get(), out);
+        break;
+    }
+    case ASTNodeType::IF_STMT: {
+        const auto* is = static_cast<const IfStmt*>(stmt);
+        collectWrittenVars(is->thenBranch.get(), out);
+        collectWrittenVars(is->elseBranch.get(), out);
+        break;
+    }
+    case ASTNodeType::WHILE_STMT:
+        collectWrittenVars(static_cast<const WhileStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::FOR_STMT: {
+        const auto* fs = static_cast<const ForStmt*>(stmt);
+        out.insert(fs->iteratorVar);
+        collectWrittenVars(fs->body.get(), out);
+        break;
+    }
+    case ASTNodeType::FOR_EACH_STMT: {
+        const auto* fe = static_cast<const ForEachStmt*>(stmt);
+        out.insert(fe->iteratorVar);
+        collectWrittenVars(fe->body.get(), out);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 static void visitBlock(BlockStmt* block,
                        const std::vector<RewriteRule>& rules,
                        const HGOEGuidedConfig& cfg,
@@ -1051,6 +1138,60 @@ static void visitBlock(BlockStmt* block,
     if (!block) return;
     for (auto& s : block->statements)
         visitStmt(s.get(), rules, cfg, stats);
+
+    // ── LICM: hoist loop-invariant VarDecls before FOR_STMTs ─────────────
+    // For each FOR_STMT in this block whose body is a BlockStmt, move any
+    // VarDecl whose initializer is pure and references no loop-variant
+    // variable to just before the loop.  This ensures the computation runs
+    // once rather than on every iteration.
+    size_t i = 0;
+    while (i < block->statements.size()) {
+        Statement* s = block->statements[i].get();
+        if (!s || s->type != ASTNodeType::FOR_STMT) { ++i; continue; }
+        auto* fs = static_cast<ForStmt*>(s);
+        if (!fs->body || fs->body->type != ASTNodeType::BLOCK) { ++i; continue; }
+        auto* body = static_cast<BlockStmt*>(fs->body.get());
+
+        // Build the set of loop-variant variables (iterator + all written).
+        std::unordered_set<std::string> loopVars;
+        loopVars.insert(fs->iteratorVar);
+        collectWrittenVars(body, loopVars);
+
+        // Partition body statements: hoistable VarDecls vs. the rest.
+        std::vector<std::unique_ptr<Statement>> toHoist;
+        std::vector<std::unique_ptr<Statement>> remaining;
+        for (auto& bodyStmt : body->statements) {
+            bool doHoist = false;
+            if (bodyStmt && bodyStmt->type == ASTNodeType::VAR_DECL) {
+                const auto* vd = static_cast<const VarDecl*>(bodyStmt.get());
+                if (vd->initializer
+                    && exprIsPure(vd->initializer.get())
+                    && !exprRefersToAny(vd->initializer.get(), loopVars)) {
+                    doHoist = true;
+                }
+            }
+            if (doHoist)
+                toHoist.push_back(std::move(bodyStmt));
+            else
+                remaining.push_back(std::move(bodyStmt));
+        }
+
+        if (toHoist.empty()) { ++i; continue; }
+
+        // Insert hoisted declarations just before the FOR_STMT at index i.
+        const size_t numHoisted = toHoist.size();
+        for (size_t h = 0; h < numHoisted; ++h) {
+            block->statements.insert(
+                block->statements.begin() + static_cast<ptrdiff_t>(i + h),
+                std::move(toHoist[h]));
+        }
+        // The FOR_STMT is now at i + numHoisted; advance past it.
+        i += numHoisted + 1;
+
+        // Update loop body to the non-hoisted statements.
+        body->statements = std::move(remaining);
+        stats.rewrites += static_cast<size_t>(numHoisted);
+    }
 }
 
 static void visitStmt(Statement* stmt,

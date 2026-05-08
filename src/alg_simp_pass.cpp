@@ -282,6 +282,27 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 ++count;
                 return count;
             }
+            // x + x → x * 2  (same identifier — always valid for any numeric type)
+            if (sameIdent(L, R)) {
+                auto dup = std::make_unique<IdentifierExpr>(
+                    static_cast<const IdentifierExpr*>(L)->name);
+                expr = makeBinary("*", std::move(dup), makeIntLiteral(2));
+                ++count;
+                return count;
+            }
+            // (-x) + (-y) → -(x + y)
+            if (L->type == ASTNodeType::UNARY_EXPR && R->type == ASTNodeType::UNARY_EXPR) {
+                auto* ul = static_cast<UnaryExpr*>(bin->left.get());
+                auto* ur = static_cast<UnaryExpr*>(bin->right.get());
+                if (ul->op == "-" && ur->op == "-") {
+                    auto inner = makeBinary("+",
+                        std::move(ul->operand),
+                        std::move(ur->operand));
+                    expr = makeUnary("-", std::move(inner));
+                    ++count;
+                    return count;
+                }
+            }
         }
 
         // ── Subtractive identity ───────────────────────────────────────────
@@ -303,6 +324,15 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 expr = makeIntLiteral(0);
                 ++count;
                 return count;
+            }
+            // x - (-y) → x + y
+            if (R->type == ASTNodeType::UNARY_EXPR) {
+                auto* ur = static_cast<UnaryExpr*>(bin->right.get());
+                if (ur->op == "-") {
+                    expr = makeBinary("+", std::move(bin->left), std::move(ur->operand));
+                    ++count;
+                    return count;
+                }
             }
         }
 
@@ -341,6 +371,16 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 expr = std::make_unique<UnaryExpr>("-", std::move(bin->right));
                 ++count;
                 return count;
+            }
+            // (-x) * (-y) → x * y
+            if (L->type == ASTNodeType::UNARY_EXPR && R->type == ASTNodeType::UNARY_EXPR) {
+                auto* ul = static_cast<UnaryExpr*>(bin->left.get());
+                auto* ur = static_cast<UnaryExpr*>(bin->right.get());
+                if (ul->op == "-" && ur->op == "-") {
+                    expr = makeBinary("*", std::move(ul->operand), std::move(ur->operand));
+                    ++count;
+                    return count;
+                }
             }
         }
 

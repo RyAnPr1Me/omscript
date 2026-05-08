@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-14B: parser diagnostic guards** (`src/parser.cpp`):
+  - `parseShift()`: warns when a shift count literal exceeds 63 (undefined behaviour in LLVM IR).
+  - `parseMultiplication()`: warns when the right-hand literal of `/` or `%` is zero (division by zero).
+
+- **Round-14B: algebraic simplification rules** (`src/alg_simp_pass.cpp`):
+  - `x + x → x * 2` for same-identifier operands (always valid for any numeric type).
+  - `(-x) + (-y) → -(x + y)` — factoring out the negation from addition.
+  - `x - (-y) → x + y` — double-negation cancellation on the subtrahend.
+  - `(-x) * (-y) → x * y` — product of two negations is positive.
+
+- **Round-14B: LICM for FOR loops** (`src/hgoe_egraph.cpp`):
+  - `visitBlock()` now performs a conservative loop-invariant code motion pass after expression
+    optimisation: `VarDecl` statements in a `FOR_STMT` body whose initializer is pure and does
+    not reference the loop iterator or any variable written inside the loop are hoisted to
+    immediately before the loop, ensuring they are computed only once.
+  - Three new static helpers support the analysis: `exprRefersToAny`, `exprIsPure`, and
+    `collectWrittenVars`.
+
 - **`eliminateDeadFunctions` API** (`src/program_analysis.cpp`, `include/program_analysis.h`):
   - New public function `eliminateDeadFunctions(Module&, ProgramFactsSnapshot&)` that removes
     internal/private functions identified as unreachable by `computeProgramFacts()`.
