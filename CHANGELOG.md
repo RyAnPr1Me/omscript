@@ -36,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `borrow_checker.cpp`: `ASSUME_STMT` was not handled in `checkStmt`, so use-after-move errors inside `assume(cond)` conditions and deopt bodies were silently missed; added explicit case that checks both the condition expression and the optional deopt body.
   - `codegen_expr.cpp`: SIMD vector `>>` emitted `CreateAShr` (arithmetic shift) while the scalar path and language semantics mandate `CreateLShr` (logical shift); changed to `CreateLShr`.
 
+- **Round-11 optimization improvements** (`src/var_range_analysis.cpp`, `src/width_legalization.cpp`, `src/cfctre.cpp`, `src/copy_prop_pass.cpp`):
+  - `var_range_analysis.cpp` `scanStmt`: Added `EXPR_STMT` case so that reassignment expressions (e.g. `x = a & 0xFF`) update the live range map; previously only `VAR_DECL` declarations triggered range narrowing, causing subsequent reassignments to leave stale over-wide ranges.
+  - `width_legalization.cpp`: `x & literal` now returns `fromUnsignedValue(literal)` when the literal is a non-negative integer, producing 8/16/32-bit widths for masks like `0xFF`/`0xFFFF`/`0xFFFFFFFF` instead of the over-wide bitwise default. `x % N` now returns `fromUnsignedValue(N - 1)` for a known positive literal divisor, bounding the width to fit `[0, N-1]`.
+  - `cfctre.cpp`: Added same-value identity folds for built-in calls — `min(x, x) → x` and `max(x, x) → x` fire before the concrete-integer path so they apply to symbolic operands; `pow(x, 0) → 1` checks the exponent before requiring a concrete base, enabling the fold when only the exponent is a literal `0`.
+  - `copy_prop_pass.cpp` `collectOpaqueVarsInStmt`: Added `ASSUME_STMT` case so that volatile/atomic variable declarations inside `assume` deopt bodies are correctly added to the opaque set; previously such declarations were invisible to copy propagation, allowing incorrect substitution across opaque barriers.
+
+- **Round-12 traversal audit** (`src/rlc_pass.cpp`, `src/sdr_pass.cpp`, `src/codegen_expr.cpp`):
+  - `rlc_pass.cpp`: Audit confirmed `THROW_STMT`, `INVALIDATE_STMT`, `ASSUME_STMT`, and `PIPELINE_STMT` are all already handled in both `stmtUsesVar` and `renameInStmt` traversals — no changes needed.
+  - `sdr_pass.cpp`: Pass operates entirely on LLVM IR (not AST); all values generated from `THROW_STMT`, `ASSUME_STMT`, `PIPELINE_STMT`, and `PREFETCH_STMT` are visible as LLVM instructions — no AST-level traversal gaps.
+  - `codegen_expr.cpp`: Division by power-of-2 fast path is already present — unsigned operands and non-negative tracked values both emit `CreateLShr` (with `udiv.lshr`/`div.lshr` names) instead of `CreateUDiv`/`CreateSDiv`; also covers modulo by power-of-2 via `CreateAnd` mask — no changes needed.
+
 ## [4.4.0] - 2026-05-07
 
 ### Added
