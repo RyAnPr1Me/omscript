@@ -503,6 +503,33 @@ static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out) {
         collectOpaqueVarsInStmt(ds->body.get(), out);
         break;
     }
+    case ASTNodeType::MOVE_DECL: {
+        const auto* md = static_cast<const MoveDecl*>(stmt);
+        // move-declared variables are unique-ownership; treat volatile/atomic
+        // move-decls the same way as var-decls so CSE doesn't sink loads
+        // across their re-initialization site.
+        (void)md; // name is not tagged volatile/atomic on MoveDecl; no action needed
+        break;
+    }
+    case ASTNodeType::ASSUME_STMT: {
+        const auto* as = static_cast<const AssumeStmt*>(stmt);
+        collectOpaqueVarsInStmt(as->deoptBody.get(), out);
+        break;
+    }
+    case ASTNodeType::PREFETCH_STMT: {
+        const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+        if (ps->varDecl) {
+            if (ps->varDecl->isVolatile || ps->varDecl->isAtomic)
+                out.insert(ps->varDecl->name);
+        }
+        break;
+    }
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        for (const auto& stage : pl->stages)
+            collectOpaqueVarsInStmt(stage.body.get(), out);
+        break;
+    }
     default:
         break;
     }

@@ -362,6 +362,40 @@ void WidthOptPass::transformStmtInPlace(std::unique_ptr<Statement>& stmt) {
         }
         break;
     }
+    case ASTNodeType::THROW_STMT:
+        transformExprInPlace(static_cast<ThrowStmt*>(stmt.get())->value);
+        break;
+    case ASTNodeType::DEFER_STMT:
+        transformStmtInPlace(static_cast<DeferStmt*>(stmt.get())->body);
+        break;
+    case ASTNodeType::CATCH_STMT: {
+        auto* cs = static_cast<CatchStmt*>(stmt.get());
+        if (cs->body)
+            for (auto& s : cs->body->statements) transformStmtInPlace(s);
+        break;
+    }
+    case ASTNodeType::ASSUME_STMT: {
+        auto* as = static_cast<AssumeStmt*>(stmt.get());
+        transformExprInPlace(as->condition);
+        transformStmtInPlace(as->deoptBody);
+        break;
+    }
+    case ASTNodeType::PREFETCH_STMT: {
+        auto* ps = static_cast<PrefetchStmt*>(stmt.get());
+        if (ps->varDecl && ps->varDecl->initializer)
+            transformExprInPlace(ps->varDecl->initializer);
+        if (ps->addrExpr)
+            transformExprInPlace(ps->addrExpr);
+        break;
+    }
+    case ASTNodeType::PIPELINE_STMT: {
+        auto* pl = static_cast<PipelineStmt*>(stmt.get());
+        if (pl->count) transformExprInPlace(pl->count);
+        for (auto& stage : pl->stages)
+            if (stage.body)
+                for (auto& s : stage.body->statements) transformStmtInPlace(s);
+        break;
+    }
     default: break;
     }
 }

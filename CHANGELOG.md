@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Round-6 statement/expression traversal** (`src/copy_prop_pass.cpp`, `src/alg_simp_pass.cpp`, `src/hgoe_egraph.cpp`, `src/egraph_optimizer.cpp`, `src/var_range_analysis.cpp`, `src/uniqueness_analysis.cpp`, `src/borrow_checker.cpp`, `src/opt_orchestrator.cpp`):
   - All remaining AST node types now handled in every analysis and transform pass: `MOVE_DECL`, `PREFETCH_STMT`, `PIPELINE_STMT`, `ASSUME_STMT` (deoptBody), `INVALIDATE_STMT`, and all expression types including `ARRAY_EXPR`, `STRUCT_LITERAL_EXPR`, `SPREAD_EXPR`, `PIPE_EXPR`, `MOVE_EXPR`, `BORROW_EXPR`, `REBORROW_EXPR`, `DICT_EXPR`, `RANGE_ANNOT_EXPR`.
 
+- **Round-7 optimization-pass coverage** (`src/width_opt_pass.cpp`, `src/cse_pass.cpp`, `src/dce_pass.cpp`):
+  - `width_opt_pass.cpp` `transformStmtInPlace`: added `THROW_STMT`, `DEFER_STMT`, `CATCH_STMT`, `ASSUME_STMT`, `PREFETCH_STMT`, and `PIPELINE_STMT` so that sub-expressions inside those constructs are now subject to integer-width narrowing.
+  - `cse_pass.cpp` `collectOpaqueVarsInStmt`: added `ASSUME_STMT` (recurses into deoptBody), `PREFETCH_STMT` (registers volatile/atomic prefetch-declared vars), and `PIPELINE_STMT` (recurses into each stage body) so CSE correctly avoids sinking loads across opaque barriers inside those constructs.
+  - `dce_pass.cpp` `transformStmt`: added `ASSUME_STMT` (recurses into deoptBody), `PREFETCH_STMT` (explicit leaf case), and `PIPELINE_STMT` (recurses into each stage's `BlockStmt` via `transformBlock`) so dead-code elimination propagates into all reachable sub-statements.
+
 ## [4.4.0] - 2026-05-07
 
 ### Added

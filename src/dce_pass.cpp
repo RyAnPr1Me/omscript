@@ -315,6 +315,38 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         break;
     }
 
+    // ── Assume statement ─────────────────────────────────────────────────────
+    case ASTNodeType::ASSUME_STMT: {
+        auto* asStmt = static_cast<AssumeStmt*>(stmt.get());
+        if (asStmt->deoptBody) {
+            auto sub = transformStmt(asStmt->deoptBody);
+            stats.deadIfBranches   += sub.deadIfBranches;
+            stats.deadLoops        += sub.deadLoops;
+            stats.unreachableStmts += sub.unreachableStmts;
+        }
+        break;
+    }
+
+    // ── Prefetch statement ───────────────────────────────────────────────────
+    // Nothing structurally to simplify; the embedded VarDecl is not a
+    // compound statement so DCE cannot prune it independently.
+    case ASTNodeType::PREFETCH_STMT:
+        break;
+
+    // ── Pipeline statement ───────────────────────────────────────────────────
+    case ASTNodeType::PIPELINE_STMT: {
+        auto* plStmt = static_cast<PipelineStmt*>(stmt.get());
+        for (auto& stage : plStmt->stages) {
+            if (stage.body) {
+                auto sub = transformBlock(stage.body.get());
+                stats.deadIfBranches   += sub.deadIfBranches;
+                stats.deadLoops        += sub.deadLoops;
+                stats.unreachableStmts += sub.unreachableStmts;
+            }
+        }
+        break;
+    }
+
     // ── Return / expression statements / other leaf nodes ───────────────────
     default:
         // Nothing to simplify at this level.
