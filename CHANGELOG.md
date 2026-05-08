@@ -69,6 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The partial-borrow path (`borrow arr[i]`) emitted a plain `CreateGEP` without `inbounds` and without `nuw`/`nsw` on the `idx+1` offset computation.
   - The borrow checker guarantees `0 ≤ idx < len`, which means `idx+1` cannot overflow unsigned (`nuw`) or signed (`nsw`), and the resulting pointer is within the array's malloc'd slab (`inbounds`). These flags are now set so that GVN, LICM, and alias analysis can fold/hoist through reborrow-derived pointer expressions.
 
+- **CSE pass: incorrect CSE of volatile/atomic variables in `foreach`/`do-while`/`switch`/`catch`/`defer` bodies** (`src/cse_pass.cpp`):
+  - `collectOpaqueVars` (which marks variable names as non-CSE-able) only recursed into `if`/`while`/`for` bodies. Variables declared `volatile` or `atomic` inside `for each`, `do...while`, `switch`, `catch`, or `defer` blocks were invisible to the opaque set, allowing the CSE pass to incorrectly fold their repeated reads into a single cached copy — violating the `volatile`/`atomic` semantics that every read must reach the underlying storage.
+  - Refactored into a recursive `collectOpaqueVarsInStmt` dispatch that handles all compound statement forms. `collectOpaqueVars` and `collectOpaqueVarsInList` now delegate to it, so the opaque set is always complete before CSE runs.
+
 ### Documentation
 
 - **`LANGUAGE_REFERENCE.md`**:
