@@ -8235,6 +8235,30 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
             return g.getClass(s.at("x")).isBoolean;
         });
 
+    // !!x → x != 0  (for non-boolean x: coerce to boolean via comparison)
+    rules.emplace_back("double_lognot_to_ne_zero",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::LogNot, {P::Wild("x")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("x"), g.addConst(0));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return !g.getClass(s.at("x")).isBoolean;
+        });
+
+    // (x == 0) == 0 → x != 0  (double negation via equality)
+    rules.emplace_back("eq_zero_eq_zero_to_ne_zero",
+        P::OpPat(Op::Eq, {P::OpPat(Op::Eq, {P::Wild("x"), P::ConstPat(0)}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("x"), g.addConst(0));
+        });
+
+    // (x != 0) == 0 → x == 0  (negation via equality)
+    rules.emplace_back("ne_zero_eq_zero_to_eq_zero",
+        P::OpPat(Op::Eq, {P::OpPat(Op::Ne, {P::Wild("x"), P::ConstPat(0)}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Eq, s.at("x"), g.addConst(0));
+        });
+
 
     return rules;
 }

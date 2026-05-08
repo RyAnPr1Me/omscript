@@ -529,6 +529,12 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 ++count;
                 return count;
             }
+            // x && x → x  (idempotent logical and)
+            if (sameIdent(L, R)) {
+                expr = std::move(bin->left);
+                ++count;
+                return count;
+            }
         }
         if (op == "||") {
             if (isIntLiteralVal(L, 1)) {
@@ -552,6 +558,12 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             if (isIntLiteralVal(L, 0)) {
                 // 0 || x → x
                 expr = std::move(bin->right);
+                ++count;
+                return count;
+            }
+            // x || x → x  (idempotent logical or)
+            if (sameIdent(L, R)) {
+                expr = std::move(bin->left);
                 ++count;
                 return count;
             }
