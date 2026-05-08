@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-16: IR quality improvements** (`src/codegen_expr.cpp`):
+  - **Identity cast elimination**: `as`-cast on same-size integer types (e.g. `i32 as i32`) now returns the value directly instead of emitting a `bitcast` instruction. Opaque pointer→pointer casts also return directly (all pointers share the `ptr` type). Fallback `as`-cast path guards `srcTy == dstTy` before creating a `bitcast`.
+  - **`nonNegValues_` propagation for all boolean/comparison results**: Float comparison results (`==`, `!=`, `<`, `<=`, `>`, `>=`), short-circuit constant-fold paths (`true && x`, `false || x`), mul-by-zero strength-reduction comparisons, subtraction-comparison folds, string comparison results (including the fast/slow PHI), and pointer comparison results are now all tracked in `nonNegValues_`. This allows downstream arithmetic (add/sub/mul) on boolean values to pick up `nsw`/`nuw` flags and unsigned `icmp` variants, improving LLVM's SCEV analysis and loop vectorization.
+
 - **Round-15: compound condition range narrowing** (`src/var_range_analysis.cpp`):
   - `narrowFromCondition` now handles `&&` (AND) and `||` (OR) compound conditions.
   - `if (x > 0 && y > 0)` — both `x` and `y` ranges are narrowed in the true branch.
