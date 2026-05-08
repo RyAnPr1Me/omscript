@@ -2392,7 +2392,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Multiply result by 2^k (common factor)
         builder->SetInsertPoint(contBB);
-        llvm::Value* shifted = builder->CreateShl(lo, k, "gcd.shifted");
+        // lo is the GCD of the odd-part loop (positive), k = ctz(abs(a)|abs(b)) ≤ 62.
+        // Result = lo * 2^k = gcd(a,b) ≤ min(|a|,|b|) ≤ INT64_MAX → nuw+nsw.
+        llvm::Value* shifted = builder->CreateShl(lo, k, "gcd.shifted", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateBr(doneBB);
 
         // Final merge
@@ -4800,6 +4802,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "aany.result");
         result->addIncoming(zero, loopBB);
         result->addIncoming(one, foundBB);
+        // aany returns 0 or 1 — attach !range [0,2) and track non-negativity.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(result);
         return result;
     }
 
@@ -4867,6 +4873,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "aevery.result");
         result->addIncoming(one, loopBB);
         result->addIncoming(zero, failBB);
+        // aevery returns 0 or 1 — attach !range [0,2) and track non-negativity.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(result);
         return result;
     }
 
@@ -5615,6 +5625,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "scount.result");
         result->addIncoming(zero, emptySubBB);
         result->addIncoming(count, doneBB);
+        // Both incoming values are non-negative (zero / nuw-accumulated count).
+        nonNegValues_.insert(result);
         return result;
     }
 
@@ -6418,7 +6430,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(gcdDone, contBB, loopBB);
 
         builder->SetInsertPoint(contBB);
-        llvm::Value* gcdShifted = builder->CreateShl(lo, k, "lcm.gcdval");
+        // lo is the GCD odd-part (positive), k = ctz(|a||b|) ≤ 62.
+        // gcdShifted = lo * 2^k = gcd(a,b) ≤ min(|a|,|b|) ≤ INT64_MAX → nuw+nsw.
+        llvm::Value* gcdShifted = builder->CreateShl(lo, k, "lcm.gcdval", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateBr(doneBB);
 
         // lcm(a, b) = |a| / gcd(a, b) * |b|  (divide first to avoid overflow)

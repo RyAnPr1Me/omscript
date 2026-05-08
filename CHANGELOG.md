@@ -15,7 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-25: `nonNegValues_` completeness sweep** (`src/codegen_builtins.cpp`):
+- **Round-26: nuw+nsw on GCD/LCM Stein shifts + boolean PHI metadata** (`src/codegen_builtins.cpp`):
+  - **`nuw+nsw` on `gcd.shifted`**: In binary Stein's GCD, `shifted = lo << k` where `lo` is the minimum of two positive odd integers derived from `llvm.abs` of the inputs (is_int_min_poison=true ⟹ inputs ≤ INT64_MAX) and `k = ctz(|a|∣|b|) ≤ 62`. The product equals `gcd(a,b) ≤ min(|a|,|b|) ≤ INT64_MAX`, so neither unsigned nor signed overflow is possible.
+  - **`nuw+nsw` on `lcm.gcdval`**: Identical reasoning applies to the embedded GCD step inside the `lcm` builtin.
+  - **`!range [0,2)` + `nonNegValues_` on `aany.result`**: `array_any` always returns 0 (not found) or 1 (found); the result PHI is given the same boolean-range metadata as `array_count`, `file_exists`, `is_nan`, etc.
+  - **`!range [0,2)` + `nonNegValues_` on `aevery.result`**: Same treatment for `array_every`, which also returns a strict 0/1 boolean.
+  - **`nonNegValues_` on `scount.result`**: `str_count` accumulates a match count starting at zero with `nuw+nsw` increments; the final PHI (merging the zero-on-empty path with the loop exit count) is now tracked as non-negative.
+
+
   - **`nonNegValues_.insert` on `join.celemlen`**: the concatenation loop's per-element strlen (`join.celemlen`) had `arrayLenRangeMD_` but was not added to `nonNegValues_`, unlike its sizing-loop counterpart `join.elemlen` (which already had both). Now consistent.
   - **`nonNegValues_.insert` on `fwrite.len` / `fappend.len`**: strlen results in `file_write` and `file_append` had `arrayLenRangeMD_` but missed `nonNegValues_` tracking. Adding it keeps value-range state consistent so downstream passes can exploit non-negativity if the block is inlined.
   - **`nonNegValues_.insert` on `strpad.slen`**: strlen result in `str_pad_left` / `str_pad_right` had `arrayLenRangeMD_` but no `nonNegValues_` entry. The value feeds a `ULT(slen, effectiveWidth)` branch guard and a `nuw+nsw` subtract — proper tracking helps LLVM propagate the non-negativity through both.
