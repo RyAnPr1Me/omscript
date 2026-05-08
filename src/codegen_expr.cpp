@@ -4031,6 +4031,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Check if the two operands have no overlapping bits (KnownBits), in
         // which case `or disjoint` (i.e., add-like semantics) enables more opts.
         // Guard with O1+ to avoid spending KnownBits analysis budget at O0.
+        // `inOptMaxFunction` disables it too: functions opted into maximum
+        // optimisation already produce very clean IR; the extra KnownBits
+        // analysis at every `|` in @opt(optnone)-equivalent paths is wasteful.
         bool isDisjoint = false;
         if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O1) {
             const llvm::KnownBits lhsKB = llvm::computeKnownBits(
@@ -4125,9 +4128,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const int64_t sv = ci->getSExtValue();
             if (sv >= 0 && sv < 64) {
                 // `exact` flag on lshr: legal when the bits shifted out are all
-                // zero, i.e., left is divisible by 2^sv.  This holds precisely
-                // when the left operand itself is a `shl` by the same constant
-                // (the round-trip `(x << k) >> k` would equal x).
+                // zero, i.e., left is divisible by 2^sv.  Two paths detect this:
+                //   1. Structural: left is itself a `shl` by ≥ sv (round-trip).
+                //   2. KnownBits: the lowest sv bits of left are all known-zero,
+                //      regardless of how they got that way (e.g., AND mask, mul,
+                //      another shl, or a value-range inference from a load).
                 bool isExact = false;
                 if (sv > 0) {
                     if (auto* shlInst = llvm::dyn_cast<llvm::ShlOperator>(left)) {
