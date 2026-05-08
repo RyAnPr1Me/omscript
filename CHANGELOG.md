@@ -134,6 +134,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The `simplifyExpr` bottom-up recurser had no cases for `INDEX_EXPR`, `INDEX_ASSIGN_EXPR`, `FIELD_ACCESS_EXPR`, `FIELD_ASSIGN_EXPR`, or `ASSIGN_EXPR`. Algebraic simplification rules (constant folding, identity elimination, strength reduction) were silently skipped for sub-expressions inside array indexing (`arr[i+0]`), element writes, struct field reads and writes, and direct assignment RHS values.
   - Added the five missing cases. Each recurses into all child sub-expressions so that bottom-up folding works through nested containers.
 
+- **HGOE pass: `visitExpr` does not recurse into `INDEX_ASSIGN_EXPR`/`FIELD_ACCESS_EXPR`/`FIELD_ASSIGN_EXPR`** (`src/hgoe_egraph.cpp`):
+  - `visitExpr` handled `INDEX_EXPR` but not `INDEX_ASSIGN_EXPR`, `FIELD_ACCESS_EXPR`, or `FIELD_ASSIGN_EXPR`. Sub-expressions inside element writes and struct field expressions were not visited by the HGOE strength-reduction pass, leaving valid rewrites (e.g., strength-reductions of index arithmetic or field-value computations) undiscovered.
+  - Added all three missing cases.
+
+- **Multiple passes: `MOVE_DECL` statements not treated as variable writes or definitions** (`src/copy_prop_pass.cpp`, `src/var_range_analysis.cpp`, `src/alg_simp_pass.cpp`, `src/uniqueness_analysis.cpp`):
+  - `MOVE_DECL` (the `var y = move x` statement) declares a new variable `y` and consumes `x`. Every analysis and transformation pass that handled `VAR_DECL` failed to also handle `MOVE_DECL`:
+    - **Copy propagation**: neither `collectWrittenInStmt`, `collectWrittenDeep`, nor `propagateInBlock` knew about `MOVE_DECL`. The destination name was not added to "writes", so `killAndRecurseBody` did not kill it; and after a `move`, any prior copy-map entry for the source was not invalidated, allowing the pass to continue forwarding a stale value for a variable that was just moved-from.
+    - **Variable-range analysis**: `collectWritten` did not include the destination name, so range invalidation for loop bodies containing `move` declarations was incomplete. `scanStmt` did not compute the new variable's range or invalidate the moved-from variable's range.
+    - **Algebraic simplification**: `simplifyStmt` did not recurse into the `MoveDecl` initializer, leaving constant-fold and identity-elimination opportunities inside `move` initializer expressions unreachable.
+    - **Uniqueness analysis**: neither `collectStringArrayVars` nor `markSharedVars` handled `MOVE_DECL`. String/array variables declared via `move` were invisible to the analysis, causing under-approximation of the unique-string set and potentially unsafe `strdup`-skip decisions.
+  - Added `MOVE_DECL` handling to all four passes with semantics appropriate for each.
+
 ## [4.3.2] - 2026-05-07
 
 ### Fixed

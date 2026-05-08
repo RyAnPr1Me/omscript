@@ -601,6 +601,10 @@ static unsigned simplifyStmt(Statement* stmt) {
         count += simplifyExpr(static_cast<VarDecl*>(stmt)->initializer);
         break;
 
+    case ASTNodeType::MOVE_DECL:
+        count += simplifyExpr(static_cast<MoveDecl*>(stmt)->initializer);
+        break;
+
     case ASTNodeType::RETURN_STMT:
         count += simplifyExpr(static_cast<ReturnStmt*>(stmt)->value);
         break;

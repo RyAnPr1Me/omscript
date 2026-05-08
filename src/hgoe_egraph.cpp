@@ -971,6 +971,22 @@ static void visitExpr(std::unique_ptr<Expression>& exprPtr,
         visitExpr(idx->index, rules, cfg, stats);
         break;
     }
+    case ASTNodeType::INDEX_ASSIGN_EXPR: {
+        auto* ia = static_cast<IndexAssignExpr*>(expr);
+        visitExpr(ia->array, rules, cfg, stats);
+        visitExpr(ia->index, rules, cfg, stats);
+        visitExpr(ia->value, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::FIELD_ACCESS_EXPR:
+        visitExpr(static_cast<FieldAccessExpr*>(expr)->object, rules, cfg, stats);
+        break;
+    case ASTNodeType::FIELD_ASSIGN_EXPR: {
+        auto* fa = static_cast<FieldAssignExpr*>(expr);
+        visitExpr(fa->object, rules, cfg, stats);
+        visitExpr(fa->value,  rules, cfg, stats);
+        break;
+    }
     default:
         break;
     }

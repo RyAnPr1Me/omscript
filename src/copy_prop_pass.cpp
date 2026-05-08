@@ -210,6 +210,9 @@ static void collectWrittenInStmt(const Statement* stmt,
     case ASTNodeType::VAR_DECL:
         out.insert(static_cast<const VarDecl*>(stmt)->name);
         break;
+    case ASTNodeType::MOVE_DECL:
+        out.insert(static_cast<const MoveDecl*>(stmt)->name);
+        break;
     case ASTNodeType::EXPR_STMT:
         collectWrittenNames(static_cast<const ExprStmt*>(stmt)->expression.get(), out);
         break;
@@ -232,6 +235,9 @@ static void collectWrittenDeep(const Statement* stmt,
     switch (stmt->type) {
     case ASTNodeType::VAR_DECL:
         out.insert(static_cast<const VarDecl*>(stmt)->name);
+        break;
+    case ASTNodeType::MOVE_DECL:
+        out.insert(static_cast<const MoveDecl*>(stmt)->name);
         break;
     case ASTNodeType::EXPR_STMT:
         collectWrittenNames(static_cast<const ExprStmt*>(stmt)->expression.get(), out);
@@ -339,6 +345,20 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
                 // var y = <expr> — kill any copy whose destination or source is y.
                 killName(map, vd->name);
             }
+            break;
+        }
+
+        case ASTNodeType::MOVE_DECL: {
+            auto* md = static_cast<MoveDecl*>(stmt.get());
+            // Propagate into the initializer FIRST.
+            count += propagateInExpr(md->initializer, map, opaque);
+            // A move consumes the source variable — kill any copy entry that
+            // references the source name (if the initializer is a simple ident).
+            if (const auto* initId = asIdentifier(md->initializer.get()))
+                killName(map, initId->name);
+            // Always kill the destination: move semantics means the new name
+            // holds a unique copy and cannot alias a prior expression.
+            killName(map, md->name);
             break;
         }
 

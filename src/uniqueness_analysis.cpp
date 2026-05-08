@@ -226,6 +226,27 @@ static void collectStringArrayVars(
         return;  // No nested body to scan in a VarDecl
     }
 
+    // Move declaration: the new variable takes ownership of the source.
+    // Track string/array type on the new name the same way VarDecl does.
+    if (const auto* md = dynamic_cast<const MoveDecl*>(stmt)) {
+        if (md->initializer) {
+            if (md->typeName == "string" || md->typeName == "str") {
+                strVars.insert(md->name);
+            } else if (isFreshStringExpr(md->initializer.get(), strVars, arrVars)) {
+                strVars.insert(md->name);
+            } else if (md->initializer->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const auto* id = static_cast<const IdentifierExpr*>(md->initializer.get());
+                if (strVars.count(id->name))
+                    strVars.insert(md->name);
+                else if (arrVars.count(id->name))
+                    arrVars.insert(md->name);
+            } else if (isFreshArrayExpr(md->initializer.get(), strVars, arrVars)) {
+                arrVars.insert(md->name);
+            }
+        }
+        return;
+    }
+
     // Recurse into compound statements
     if (const auto* ifc = dynamic_cast<const IfStmt*>(stmt)) {
         collectStringArrayVars(ifc->thenBranch.get(), strVars, arrVars);
@@ -389,6 +410,18 @@ static void markSharedVars(
         // var y = call(x) — scan arguments for captures.
         if (vd->initializer && vd->initializer->type == ASTNodeType::CALL_EXPR) {
             const auto* call = static_cast<const CallExpr*>(vd->initializer.get());
+            for (const auto& arg : call->arguments)
+                markArgShared(arg.get(), call->callee);
+        }
+        return;
+    }
+
+    // Move declaration: ownership is transferred, so the source is NOT shared
+    // (it is consumed).  Only the new variable needs tracking; it is unique
+    // by definition unless the initializer is a call that captures.
+    if (const auto* md = dynamic_cast<const MoveDecl*>(stmt)) {
+        if (md->initializer && md->initializer->type == ASTNodeType::CALL_EXPR) {
+            const auto* call = static_cast<const CallExpr*>(md->initializer.get());
             for (const auto& arg : call->arguments)
                 markArgShared(arg.get(), call->callee);
         }

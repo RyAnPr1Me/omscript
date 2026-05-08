@@ -297,6 +297,9 @@ static void collectWritten(const Statement* stmt,
     case ASTNodeType::VAR_DECL:
         out.insert(static_cast<const VarDecl*>(stmt)->name);
         break;
+    case ASTNodeType::MOVE_DECL:
+        out.insert(static_cast<const MoveDecl*>(stmt)->name);
+        break;
     case ASTNodeType::EXPR_STMT: {
         std::function<void(const Expression*)> scan = [&](const Expression* e) {
             if (!e) return;
@@ -399,6 +402,21 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
             env[vd->name] = *r;
         else
             env.erase(vd->name); // unknown range: remove stale entry
+        break;
+    }
+
+    // ── Move declaration ─────────────────────────────────────────────────────
+    case ASTNodeType::MOVE_DECL: {
+        const auto* md = static_cast<const MoveDecl*>(stmt);
+        // The moved-from variable loses its range (value is consumed).
+        if (const auto* initId = dynamic_cast<const IdentifierExpr*>(md->initializer.get()))
+            env.erase(initId->name);
+        // The new variable may inherit the source's range if known.
+        auto r = evalExprRange(md->initializer.get(), env);
+        if (r && r->isNarrowed())
+            env[md->name] = *r;
+        else
+            env.erase(md->name);
         break;
     }
 
