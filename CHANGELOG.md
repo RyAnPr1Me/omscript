@@ -77,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The equivalent `collectOpaqueVarsInStmt` helper in the copy-propagation pass also lacked `SWITCH_STMT`, `CATCH_STMT`, and `DEFER_STMT` cases. This could allow copies of volatile/atomic variables declared in those blocks to be forwarded across reads — the same semantic violation as the CSE bug above.
   - Added the three missing cases with the same pattern already used by `rlc_pass.cpp` and `var_range_analysis.cpp`.
 
+- **Variable-range analysis: `collectWritten` missed `catch`/`defer` bodies** (`src/var_range_analysis.cpp`):
+  - `collectWritten` (used to conservatively widen loop-iteration variable ranges when the loop body may reassign them) handled `switch` cases but not `catch` or `defer` bodies. A variable reassigned inside a `catch` or `defer` block nested in a loop would not be widened, potentially keeping a stale narrowed range. This could cause incorrect range-guided optimizations (e.g., mis-folding comparisons) on variables that are actually overwritten on the exceptional path.
+  - Added `CATCH_STMT` and `DEFER_STMT` cases to `collectWritten`.
+
 ### Documentation
 
 - **`LANGUAGE_REFERENCE.md`**:

@@ -361,6 +361,16 @@ static void collectWritten(const Statement* stmt,
                 collectWritten(s.get(), out);
         break;
     }
+    case ASTNodeType::CATCH_STMT: {
+        const auto* cs = static_cast<const CatchStmt*>(stmt);
+        collectWritten(cs->body.get(), out);
+        break;
+    }
+    case ASTNodeType::DEFER_STMT: {
+        const auto* ds = static_cast<const DeferStmt*>(stmt);
+        collectWritten(ds->body.get(), out);
+        break;
+    }
     default:
         break;
     }
