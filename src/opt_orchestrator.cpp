@@ -850,7 +850,8 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
         case ASTNodeType::REBORROW_EXPR: {
             const auto* rb = static_cast<const ReborrowExpr*>(e);
             checkExpr(rb->source.get(), fnName);
-            if (rb->indexExpr) checkExpr(rb->indexExpr.get(), fnName); break;
+            if (rb->indexExpr) checkExpr(rb->indexExpr.get(), fnName);
+            break;
         }
         case ASTNodeType::RANGE_ANNOT_EXPR:
             checkExpr(static_cast<const RangeAnnotExpr*>(e)->inner.get(), fnName); break;
