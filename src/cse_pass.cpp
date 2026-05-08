@@ -504,11 +504,10 @@ static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out) {
         break;
     }
     case ASTNodeType::MOVE_DECL: {
-        const auto* md = static_cast<const MoveDecl*>(stmt);
-        // move-declared variables are unique-ownership; treat volatile/atomic
-        // move-decls the same way as var-decls so CSE doesn't sink loads
-        // across their re-initialization site.
-        (void)md; // name is not tagged volatile/atomic on MoveDecl; no action needed
+        // MoveDecl transfers unique ownership from the source variable; it does
+        // not carry its own volatile/atomic flag because volatility is a property
+        // of the storage site (the original VarDecl), not of the move operation
+        // itself.  No new opaque variable is introduced here.
         break;
     }
     case ASTNodeType::ASSUME_STMT: {
