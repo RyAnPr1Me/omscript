@@ -297,9 +297,12 @@ AnalysisDependencyGraph AnalysisDependencyGraph::createDefault() {
     g.addDependency(F::kCFCTRE, F::kEffects);
     g.addDependency(F::kCFCTRE, F::kSynthesis);
 
-    // egraph depends on cfctre:
-    //   e-graph uses compile-time evaluation results from CF-CTRE
+    // egraph depends on cfctre and alg_simp:
+    //   e-graph uses compile-time evaluation results from CF-CTRE.
+    //   AlgSimp reduces expressions to canonical form first, shrinking the
+    //   e-graph search space and avoiding redundant rewrites.
     g.addDependency(F::kEGraph, F::kCFCTRE);
+    g.addDependency(F::kEGraph, F::kAlgSimp);
 
     // range_analysis depends on purity, effects, and cfctre:
     //   range inference uses function effects and CF-CTRE uniform-return facts
@@ -315,9 +318,12 @@ AnalysisDependencyGraph AnalysisDependencyGraph::createDefault() {
     //   DCE folds constant-condition branches using CF-CTRE compile-time values
     g.addDependency(F::kDCE, F::kCFCTRE);
 
-    // cse depends on dce:
-    //   CSE only considers live code; run after DCE removes dead branches
+    // cse depends on dce and copy_prop:
+    //   CSE only considers live code; run after DCE removes dead branches.
+    //   Copy-propagation exposes additional CSE opportunities by substituting
+    //   copies of the same value, so copy_prop must run before CSE.
     g.addDependency(F::kCSE, F::kDCE);
+    g.addDependency(F::kCSE, F::kCopyProp);
 
     // alg_simp depends on cfctre and dce:
     //   AlgSimp uses CFCTRE-folded constants and only runs on live code

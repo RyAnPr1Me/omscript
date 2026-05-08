@@ -5,6 +5,40 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`eliminateDeadFunctions` API** (`src/program_analysis.cpp`, `include/program_analysis.h`):
+  - New public function `eliminateDeadFunctions(Module&, ProgramFactsSnapshot&)` that removes
+    internal/private functions identified as unreachable by `computeProgramFacts()`.
+  - Avoids re-running BFS by reusing `snapshot.unreachableFunctions`; only removes functions
+    with `hasLocalLinkage()` and no remaining users.
+
+- **Escape analysis** (`src/program_analysis.cpp`, `include/program_analysis.h`):
+  - New `FunctionSnapshot::hasEscapedLocals` field; set to `true` when any alloca address is
+    stored to memory, returned, or passed to a non-pure callee.
+  - Enables downstream passes (mem2reg, alias analysis) to skip escape-free functions.
+
+- **`definitelyNonNeg` helper** (`src/var_range_analysis.cpp`, `include/var_range_analysis.h`):
+  - Returns `true` when `evalExprRange(expr, env)` yields a range with `lo >= 0`.
+  - Used by `AlgSimpPass` and `CodeGenerator` for strength reductions and comparison folding.
+
+### Fixed
+
+- **Round-14 optimization-pass ordering** (`src/optimization_manager.cpp`):
+  - Added `g.addDependency(F::kCSE, F::kCopyProp)`: copy-propagation now runs before CSE,
+    creating more CSE opportunities by substituting canonical copies.
+  - Added `g.addDependency(F::kEGraph, F::kAlgSimp)`: algebraic simplification now runs before
+    the e-graph pass, reducing the e-graph search space and avoiding redundant rewrites.
+
+- **Round-14 builtin constant folds** (`src/codegen_builtins.cpp`):
+  - `abs(x)` when `x` is known non-negative: folded to identity (returns `x` directly, no intrinsic).
+  - `min(x, x)` / `max(x, x)`: folded to identity (returns the argument directly).
+  - `clamp(val, lo, lo)` when both bounds are the same value: folded to `lo` directly.
+  - `pow(2, n)` integer fast path: replaced O(log n) binary-exponentiation loop with a
+    single `shl` + `select`; negative exponents yield 0 (consistent with runtime semantics).
+
 ## [4.5.0] - 2026-05-08
 
 ### Changed

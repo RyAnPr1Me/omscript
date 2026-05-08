@@ -142,6 +142,13 @@ struct FunctionSnapshot {
     /// internal functions with no remaining callers (candidates for GlobalDCE).
     bool isReachable = true;
 
+    // ── Escape analysis ───────────────────────────────────────────────────
+    /// True when at least one locally-allocated value (alloca) has its address
+    /// stored to memory, returned, or passed to a non-pure callee.  When false,
+    /// all stack allocations remain local — enabling stack-to-register promotion
+    /// and alias-analysis optimisations that require non-escaping pointers.
+    bool hasEscapedLocals = false;
+
     // ── ERSL: Effect Refinement & Speculation Layer ───────────────────────
     /// Aggregated ERSL facts derived from the function's LLVM IR attributes.
     /// Populated by computeProgramFacts(); zero-initialised (conservative)
@@ -227,6 +234,21 @@ struct ProgramFactsSnapshot {
 ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
                                          llvm::ModuleAnalysisManager& MAM,
                                          unsigned wave);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// eliminateDeadFunctions — remove unreachable internal functions from a module
+// ─────────────────────────────────────────────────────────────────────────────
+///
+/// Uses the reachability data already computed in @p snapshot to identify and
+/// remove functions that have internal (or private) linkage and no remaining
+/// callers.  Externally-visible functions are never removed.
+///
+/// This is a lightweight GlobalDCE specialisation that avoids re-running BFS:
+/// the BFS was already done by computeProgramFacts(), so we reuse its results.
+///
+/// @returns The number of functions removed from @p M.
+unsigned eliminateDeadFunctions(llvm::Module& M,
+                                const ProgramFactsSnapshot& snapshot);
 
 } // namespace omscript
 

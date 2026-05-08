@@ -38,6 +38,7 @@
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 namespace omscript {
 
 namespace {
@@ -112,6 +113,56 @@ computeReachable(const llvm::Module& M) {
         }
     }
     return visited;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: determine whether any alloca in @p F has its address escape.
+//
+// An alloca "escapes" when its address is:
+//   (a) stored to memory (StoreInst with the pointer as the *value* operand),
+//   (b) passed to a non-pure callee (any call where the callee is not readnone),
+//   (c) returned from the function (ReturnInst).
+//
+// We use the pure-function set computed in the same snapshot pass (accumulated
+// in @p pureFunctions) so that passing a local to a pure callee is NOT counted
+// as an escape — pure functions cannot store the address.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static bool computeHasEscapedLocals(
+    const llvm::Function& F,
+    const std::unordered_set<std::string>& pureFunctions) noexcept
+{
+    for (const llvm::BasicBlock& BB : F) {
+        for (const llvm::Instruction& I : BB) {
+            // Only track alloca addresses.
+            const auto* AI = llvm::dyn_cast<llvm::AllocaInst>(&I);
+            if (!AI) continue;
+
+            for (const llvm::User* U : AI->users()) {
+                // (c) Address is returned.
+                if (llvm::isa<llvm::ReturnInst>(U))
+                    return true;
+
+                // (a) Address is stored somewhere.
+                if (const auto* SI = llvm::dyn_cast<llvm::StoreInst>(U)) {
+                    // The alloca's address is the value being stored (not the ptr).
+                    if (SI->getValueOperand() == AI)
+                        return true;
+                }
+
+                // (b) Address is passed to a non-pure callee.
+                if (const auto* CB = llvm::dyn_cast<llvm::CallBase>(U)) {
+                    const llvm::Function* callee = CB->getCalledFunction();
+                    // Unknown callee (indirect call) → conservatively escape.
+                    if (!callee) return true;
+                    // Declaration or non-pure function → escape.
+                    if (!pureFunctions.count(callee->getName().str()))
+                        return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 } // anonymous namespace
@@ -299,7 +350,48 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
             snapshot.specializationCandidates.insert(name);
     }
 
+    // ── Escape analysis — requires pureFunctions to be fully populated ────
+    // Run after the aggregate pass so pureFunctions is complete.
+    for (auto& [fn, fs] : snapshot.functions) {
+        const llvm::Function* Fptr = M.getFunction(fn);
+        if (!Fptr || Fptr->isDeclaration()) continue;
+        fs.hasEscapedLocals =
+            computeHasEscapedLocals(*Fptr, snapshot.pureFunctions);
+    }
+
     return snapshot;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// eliminateDeadFunctions — public API
+// ─────────────────────────────────────────────────────────────────────────────
+
+unsigned eliminateDeadFunctions(llvm::Module& M,
+                                const ProgramFactsSnapshot& snapshot)
+{
+    unsigned removed = 0;
+
+    // Collect functions to erase first; erasing while iterating is unsafe.
+    std::vector<llvm::Function*> toErase;
+    toErase.reserve(snapshot.unreachableFunctions.size());
+
+    for (const std::string& name : snapshot.unreachableFunctions) {
+        llvm::Function* F = M.getFunction(name);
+        if (!F) continue;
+        // Only remove functions with internal or private linkage — externally
+        // visible functions may be called from outside the module.
+        if (!F->hasLocalLinkage()) continue;
+        // Double-check: no uses remaining (guards against stale snapshots).
+        if (!F->use_empty()) continue;
+        toErase.push_back(F);
+    }
+
+    for (llvm::Function* F : toErase) {
+        F->eraseFromParent();
+        ++removed;
+    }
+
+    return removed;
 }
 
 } // namespace omscript

@@ -193,9 +193,11 @@ std::optional<ValueRange> evalExprRange(const Expression* expr,
     return {};
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers
-// ─────────────────────────────────────────────────────────────────────────────
+bool definitelyNonNeg(const Expression* expr, const VarRangeMap& env)
+{
+    const auto r = evalExprRange(expr, env);
+    return r.has_value() && r->lo >= 0;
+}
 
 /// Join two VarRangeMaps: for each variable present in both, join the ranges;
 /// for variables only in one map, use the full range (conservative).

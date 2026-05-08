@@ -895,6 +895,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             return c;
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // Identity fold: abs(x) = x when x is known non-negative — the
+        // intrinsic call is unnecessary and the value is already non-negative.
+        if (nonNegValues_.count(arg)) return arg;
         if (arg->getType()->isDoubleTy()) {
             // Use llvm.fabs intrinsic for native hardware abs on floats
             llvm::Function* fabsIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::fabs, {getFloatType()});
@@ -1056,6 +1059,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
+        // Identity fold: min(x, x) = x — no intrinsic needed.
+        if (a == b) {
+            if (nonNegValues_.count(a)) nonNegValues_.insert(a);
+            return a;
+        }
         if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
             if (!a->getType()->isDoubleTy())
                 a = ensureFloat(a);
@@ -1092,6 +1100,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
+        // Identity fold: max(x, x) = x — no intrinsic needed.
+        if (a == b) {
+            if (nonNegValues_.count(a)) nonNegValues_.insert(a);
+            return a;
+        }
         if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
             if (!a->getType()->isDoubleTy())
                 a = ensureFloat(a);
@@ -1166,6 +1179,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         llvm::Value* lo = generateExpression(expr->arguments[1].get());
         llvm::Value* hi = generateExpression(expr->arguments[2].get());
+        // Identity fold: clamp(val, lo, lo) = lo — both bounds are identical.
+        if (lo == hi) {
+            if (nonNegValues_.count(lo)) nonNegValues_.insert(lo);
+            return lo;
+        }
         // clamp(val, lo, hi) = max(lo, min(val, hi))
         if (val->getType()->isDoubleTy() || lo->getType()->isDoubleTy() || hi->getType()->isDoubleTy()) {
             if (!val->getType()->isDoubleTy())
@@ -1303,6 +1321,40 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 auto* q4 = mkMulP(sq, sq, "powb.8.q4");
                 auto* r  = mkMulP(q4, q4, "powb.8");
                 nonNegValues_.insert(r);  // even exponent → always non-neg
+                return r;
+            }
+        }
+
+        // Constant-base fast path: pow(2, n) → 1 << n for integer n.
+        // This avoids the O(log n) binary-exponentiation loop entirely.
+        // Negative exponents yield 0 (integer truncation); exponents ≥ 64 also
+        // yield 0 (2^64 mod 2^64 = 0 in modular arithmetic).
+        if (auto* baseCI = llvm::dyn_cast<llvm::ConstantInt>(base)) {
+            if (baseCI->getSExtValue() == 2) {
+                llvm::Value* zero64 = llvm::ConstantInt::get(getDefaultType(), 0, true);
+                llvm::Value* one64  = llvm::ConstantInt::get(getDefaultType(), 1, true);
+                llvm::Value* c63    = llvm::ConstantInt::get(getDefaultType(), 63, true);
+                // Clamp exp into [0, 63] — LLVM UB if shift amount ≥ bitwidth.
+                llvm::Function* smaxI =
+                    OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
+                llvm::Function* sminI =
+                    OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
+                llvm::Value* expPos =
+                    builder->CreateCall(smaxI, {exp, zero64}, "pow2.expnn");
+                llvm::Value* expClamped =
+                    builder->CreateCall(sminI, {expPos, c63}, "pow2.expclamp");
+                llvm::Value* shifted =
+                    builder->CreateShl(one64, expClamped, "pow2.shl");
+                // Return 0 for negative exponents (integer pow(2,-1) = 0).
+                llvm::Value* isNegExp =
+                    builder->CreateICmpSLT(exp, zero64, "pow2.isneg");
+                auto* r = builder->CreateSelect(isNegExp, zero64, shifted, "pow2.result");
+                nonNegValues_.insert(r);
+                if (optimizationLevel >= OptimizationLevel::O1) {
+                    if (auto* rInst = llvm::dyn_cast<llvm::Instruction>(r))
+                        rInst->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                }
+                ++optStats_.constFolded;
                 return r;
             }
         }
