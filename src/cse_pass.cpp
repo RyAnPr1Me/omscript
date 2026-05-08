@@ -158,6 +158,9 @@ static void collectKeysFromStmt(const Statement* stmt,
     case ASTNodeType::RETURN_STMT:
         collectKeys(static_cast<const ReturnStmt*>(stmt)->value.get(), freq, idempotent, opaque);
         break;
+    case ASTNodeType::THROW_STMT:
+        collectKeys(static_cast<const ThrowStmt*>(stmt)->value.get(), freq, idempotent, opaque);
+        break;
     case ASTNodeType::IF_STMT: {
         const auto* ifS = static_cast<const IfStmt*>(stmt);
         collectKeys(ifS->condition.get(), freq, idempotent, opaque);
@@ -229,6 +232,9 @@ static void replaceInStmt(Statement* stmt,
         break;
     case ASTNodeType::RETURN_STMT:
         replaceInExpr(static_cast<ReturnStmt*>(stmt)->value, key, varName, idempotent);
+        break;
+    case ASTNodeType::THROW_STMT:
+        replaceInExpr(static_cast<ThrowStmt*>(stmt)->value, key, varName, idempotent);
         break;
     case ASTNodeType::IF_STMT:
         replaceInExpr(static_cast<IfStmt*>(stmt)->condition, key, varName, idempotent);

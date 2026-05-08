@@ -248,6 +248,18 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
     // ── For statement (range loop) ──────────────────────────────────────────
     case ASTNodeType::FOR_STMT: {
         auto* forStmt = static_cast<ForStmt*>(stmt.get());
+        // If both bounds are compile-time integer literals and start >= end,
+        // the loop body is unreachable — replace the entire for statement with
+        // an empty block.
+        long long startVal = 0, endVal = 0;
+        if (isIntLiteral(forStmt->start.get(), &startVal) &&
+            isIntLiteral(forStmt->end.get(),   &endVal)   &&
+            startVal >= endVal) {
+            ++stats.deadLoops;
+            stmt = std::make_unique<BlockStmt>(
+                std::vector<std::unique_ptr<Statement>>{});
+            break;
+        }
         if (forStmt->body) {
             auto sub = transformStmt(forStmt->body);
             stats.deadIfBranches   += sub.deadIfBranches;

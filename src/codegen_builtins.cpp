@@ -1963,6 +1963,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_LEN) {
         validateArgCount(expr, "str_len", 1);
+        // ── Compile-time str_len folding ────────────────────────────
+        if (auto strConst = tryFoldStr(expr->arguments[0].get()))
+            return llvm::ConstantInt::get(getDefaultType(),
+                                          static_cast<uint64_t>(strConst->size()));
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // String may be a raw pointer (from a literal/local) or an i64 holding a pointer.
         llvm::Value* strPtr = arg->getType()->isPointerTy()
