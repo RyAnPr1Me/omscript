@@ -2496,12 +2496,10 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // character loads within bounds are always defined.
         if (optimizationLevel >= OptimizationLevel::O1)
             charByte->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
-        auto* charExt = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext");
         // i8 zero-extended to i64: always in [0, 256) and provably non-negative.
-        // Mirrors the identical treatment of idx.charext in codegen_expr.cpp.
-        if (charRangeMD_)
-            llvm::cast<llvm::Instruction>(charExt)->setMetadata(
-                llvm::LLVMContext::MD_range, charRangeMD_);
+        // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
+        auto* charExt = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext",
+                                             /*IsNonNeg=*/true);
         nonNegValues_.insert(charExt);
         elemVal = charExt;
     } else {

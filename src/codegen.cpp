@@ -1196,10 +1196,8 @@ llvm::Value* CodeGenerator::emitBoolZExt(llvm::Value* i1Val, const llvm::Twine& 
     // is always 0 or 1, so the sign bit of the result is always 0.
     // This lets LLVM's value-range analysis skip a separate analysis step.
     auto* result = builder->CreateZExt(i1Val, getDefaultType(), name, /*IsNonNeg=*/true);
-    // Attach !range [0,2) so LLVM knows this is a 0-or-1 value.
-    if (boolRangeMD_)
-        llvm::cast<llvm::Instruction>(result)->setMetadata(
-            llvm::LLVMContext::MD_range, boolRangeMD_);
+    // Note: !range metadata is not valid on zext instructions (only load/call/invoke).
+    // The `zext nneg` flag already communicates to LLVM that the result is in [0,2).
     nonNegValues_.insert(result);
     return result;
 }

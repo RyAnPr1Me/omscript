@@ -1153,13 +1153,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* negOrZero = builder->CreateSelect(isNeg, neg, zero, "signNZ");
         llvm::Value* isPos = builder->CreateICmpSGT(x, zero, "signpos");
         auto* signVal = builder->CreateSelect(isPos, pos, negOrZero, "signval");
-        // !range [-1, 2): sign always returns -1, 0, or 1.  This lets CVP/LVI
-        // fold downstream comparisons like sign(x) == 2 → false.
-        auto* signRange = llvm::MDNode::get(*context, {
-            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(-1), true)),
-            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(getDefaultType(), 2))});
-        if (auto* signInst = llvm::dyn_cast<llvm::Instruction>(signVal))
-            signInst->setMetadata(llvm::LLVMContext::MD_range, signRange);
+        // Note: !range is not valid on select instructions in LLVM 18.
+        // Range information is conveyed to the optimizer via nonNegValues_ tracking
+        // and downstream llvm.assume calls if needed.
         return signVal;
     }
 
@@ -1350,10 +1346,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                     builder->CreateICmpSLT(exp, zero64, "pow2.isneg");
                 auto* r = builder->CreateSelect(isNegExp, zero64, shifted, "pow2.result");
                 nonNegValues_.insert(r);
-                if (optimizationLevel >= OptimizationLevel::O1) {
-                    if (auto* rInst = llvm::dyn_cast<llvm::Instruction>(r))
-                        rInst->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-                }
+                // Note: !range is not valid on select instructions in LLVM 18;
+                // non-negativity is tracked via nonNegValues_.
                 ++optStats_.constFolded;
                 return r;
             }
@@ -2070,10 +2064,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "charat.char");
         charVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // Zero-extend to i64; result is always in [0, 256).
-        auto* result = builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
-        if (charRangeMD_)
-            llvm::cast<llvm::Instruction>(result)->setMetadata(
-                llvm::LLVMContext::MD_range, charRangeMD_);
+        // Use zext nneg (LLVM 18+) to communicate non-negativity; !range is not
+        // valid on zext instructions in LLVM 18.
+        auto* result = builder->CreateZExt(charVal, getDefaultType(), "charat.ext",
+                                            /*IsNonNeg=*/true);
         nonNegValues_.insert(result);
         return result;
     }
@@ -3899,9 +3893,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "contains.result");
         result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), loopBB);
         result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), foundBB);
-        // array_contains returns 0 or 1 — attach !range [0,2) and mark non-negative.
-        if (optimizationLevel >= OptimizationLevel::O1)
-            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        // array_contains returns 0 or 1 — mark non-negative.
+        // Note: !range is not valid on phi instructions in LLVM 18.
         nonNegValues_.insert(result);
         return result;
     }
@@ -4806,9 +4799,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "aany.result");
         result->addIncoming(zero, loopBB);
         result->addIncoming(one, foundBB);
-        // aany returns 0 or 1 — attach !range [0,2) and track non-negativity.
-        if (optimizationLevel >= OptimizationLevel::O1)
-            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        // aany returns 0 or 1 — track non-negativity.
+        // Note: !range is not valid on phi instructions in LLVM 18.
         nonNegValues_.insert(result);
         return result;
     }
@@ -4877,9 +4869,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "aevery.result");
         result->addIncoming(one, loopBB);
         result->addIncoming(zero, failBB);
-        // aevery returns 0 or 1 — attach !range [0,2) and track non-negativity.
-        if (optimizationLevel >= OptimizationLevel::O1)
-            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        // aevery returns 0 or 1 — track non-negativity.
+        // Note: !range is not valid on phi instructions in LLVM 18.
         nonNegValues_.insert(result);
         return result;
     }
@@ -5783,8 +5774,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), nullBB);
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), okBB);
         // file_write returns 0 (success) or 1 (fopen failed) — always in [0,2).
-        if (optimizationLevel >= OptimizationLevel::O1)
-            phi->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        // Note: !range is not valid on phi instructions in LLVM 18.
         nonNegValues_.insert(phi);
         return phi;
     }
@@ -5834,8 +5824,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), nullBB);
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), okBB);
         // file_append returns 0 (success) or 1 (fopen failed) — always in [0,2).
-        if (optimizationLevel >= OptimizationLevel::O1)
-            phi->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        // Note: !range is not valid on phi instructions in LLVM 18.
         nonNegValues_.insert(phi);
         return phi;
     }
@@ -6098,10 +6087,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             ? strArg : builder->CreateIntToPtr(strArg, ptrTy, "charcode.ptr");
         llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), strPtr, "charcode.ch");
         // Zero-extend to i64; result is always in [0, 256).
-        auto* result = builder->CreateZExt(ch, getDefaultType(), "charcode.result");
-        if (charRangeMD_)
-            llvm::cast<llvm::Instruction>(result)->setMetadata(
-                llvm::LLVMContext::MD_range, charRangeMD_);
+        // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
+        auto* result = builder->CreateZExt(ch, getDefaultType(), "charcode.result",
+                                            /*IsNonNeg=*/true);
         nonNegValues_.insert(result);
         return result;
     }

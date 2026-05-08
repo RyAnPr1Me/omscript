@@ -5903,11 +5903,10 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
         auto* charLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
         charLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        auto* charExt = builder->CreateZExt(charLoad, getDefaultType(), "idx.charext");
-        // !range [0, 256) — char is always a byte value
-        if (charRangeMD_)
-            llvm::cast<llvm::Instruction>(charExt)->setMetadata(
-                llvm::LLVMContext::MD_range, charRangeMD_);
+        // Zero-extend to i64; result is always in [0, 256).
+        // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
+        auto* charExt = builder->CreateZExt(charLoad, getDefaultType(), "idx.charext",
+                                             /*IsNonNeg=*/true);
         nonNegValues_.insert(charExt);
         return charExt;
     }
