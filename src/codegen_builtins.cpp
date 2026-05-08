@@ -5509,6 +5509,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::MDNode::get(*context, {}));
         llvm::Value* celemPtr = builder->CreateIntToPtr(celemInt, ptrTy, "join.celemptr");
         llvm::Value* celemLen = builder->CreateCall(getOrDeclareStrlen(), {celemPtr}, "join.celemlen");
+        nonNegValues_.insert(celemLen);
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(celemLen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -5752,6 +5753,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {contentPtr}, "fwrite.len");
+        nonNegValues_.insert(slen);
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(slen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -5798,6 +5800,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {contentPtr}, "fappend.len");
+        nonNegValues_.insert(slen);
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(slen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -6851,6 +6854,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // slen = strlen(str)
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strpad.slen");
+        nonNegValues_.insert(slen);
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(slen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -7004,10 +7008,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(appendBB);
         llvm::Value* chunkLen = builder->CreateCall(getOrDeclareStrlen(), {chunkBuf}, "cmd.clen");
+        nonNegValues_.insert(chunkLen);
         llvm::Value* curSize  = builder->CreateAlignedLoad(getDefaultType(), sizePtr, llvm::MaybeAlign(8), "cmd.csz");
         llvm::Value* curCap   = builder->CreateAlignedLoad(getDefaultType(), capPtr,  llvm::MaybeAlign(8), "cmd.ccap");
         llvm::Value* newSize  = builder->CreateAdd(curSize, chunkLen, "cmd.nsz", true, true);
-        llvm::Value* needOne  = builder->CreateAdd(newSize, llvm::ConstantInt::get(getDefaultType(), 1), "cmd.ns1");
+        // newSize = curSize + chunkLen (both non-negative); newSize + 1 can't wrap.
+        llvm::Value* needOne  = builder->CreateAdd(newSize, llvm::ConstantInt::get(getDefaultType(), 1), "cmd.ns1", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* needGrow = builder->CreateICmpUGT(needOne, curCap, "cmd.needgrow");
         builder->CreateCondBr(needGrow, growBB, copyBB);
 

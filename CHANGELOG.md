@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-25: `nonNegValues_` completeness sweep** (`src/codegen_builtins.cpp`):
+  - **`nonNegValues_.insert` on `join.celemlen`**: the concatenation loop's per-element strlen (`join.celemlen`) had `arrayLenRangeMD_` but was not added to `nonNegValues_`, unlike its sizing-loop counterpart `join.elemlen` (which already had both). Now consistent.
+  - **`nonNegValues_.insert` on `fwrite.len` / `fappend.len`**: strlen results in `file_write` and `file_append` had `arrayLenRangeMD_` but missed `nonNegValues_` tracking. Adding it keeps value-range state consistent so downstream passes can exploit non-negativity if the block is inlined.
+  - **`nonNegValues_.insert` on `strpad.slen`**: strlen result in `str_pad_left` / `str_pad_right` had `arrayLenRangeMD_` but no `nonNegValues_` entry. The value feeds a `ULT(slen, effectiveWidth)` branch guard and a `nuw+nsw` subtract — proper tracking helps LLVM propagate the non-negativity through both.
+  - **`nonNegValues_.insert` on `cmd.clen`**: strlen result in `command` had no metadata at all. Added `nonNegValues_` to match the pattern of other strlen-derived values.
+  - **`nuw+nsw` on `cmd.ns1`**: `needOne = newSize + 1` where `newSize = curSize + chunkLen` already carries `nuw+nsw` (curSize is a non-negative byte counter, chunkLen is a non-negative strlen). Adding `nuw+nsw` to the `+1` lets LLVM track the full chain through `ICmpUGT(needOne, curCap)` without an artificial upper-bound hypothesis.
+
 - **Round-24: boolean metadata sweep + no-wrap arithmetic** (`src/codegen_builtins.cpp`):
   - **`emitBoolZExt` on `bigint_is_zero` / `bigint_is_negative`**: C library returns i32 0/1; `CreateIsNotNull` converts to i1, then `emitBoolZExt` attaches `zext nneg` + `!range [0,2)` + `nonNegValues_` (consistent with `bigint_eq/lt/le/gt/ge` from Round-23).
   - **`charRangeMD_` + `nonNegValues_` on `char_code` result**: i8 loaded from string extended to i64 now gets the same `!range [0,256)` metadata and non-negative tracking as `char_at`.
