@@ -15,7 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-26: nuw+nsw on GCD/LCM Stein shifts + boolean PHI metadata** (`src/codegen_builtins.cpp`):
+- **Round-27: Final comprehensive metadata sweep** (`src/codegen_builtins.cpp`, `src/codegen_stmt.cpp`):
+  - **`!range [0,256)` + `nonNegValues_` on `foreach.charext`** (`codegen_stmt.cpp`): When iterating over a string with `foreach`, each character is loaded as `i8` and zero-extended to `i64`. This ZExt was missing the `charRangeMD_` and `nonNegValues_` tracking already applied to the identical `idx.charext` instruction in `codegen_expr.cpp`. Now consistent.
+  - **`!range [0,2)` + `nonNegValues_` on `contains.result`** (`codegen_builtins.cpp`): `array_contains` always returns 0 (not found) or 1 (found). The result PHI node now receives `boolRangeMD_` and is inserted into `nonNegValues_`, matching the treatment of `array_any`, `array_every`, and boolean comparison results.
+  - **`!range [0,2)` + `nonNegValues_` on `fwrite.result`** (`codegen_builtins.cpp`): `file_write` returns 0 on success or 1 when `fopen` fails. The result PHI is always in {0, 1} so `boolRangeMD_` + `nonNegValues_` apply.
+  - **`!range [0,2)` + `nonNegValues_` on `fappend.result`** (`codegen_builtins.cpp`): Same treatment for `file_append`, which has an identical 0/1 error-code return PHI.
+  - **`arrayLenRangeMD_` + `nonNegValues_` on `mapsize.result`** (`codegen_builtins.cpp`): `map_size` returns the count of entries in a hash map, which is always ≥ 0. The `CallInst` result now gets `!range [0, i64max)` metadata (matching `emitLoadArrayLen` and `strlen` results) and is tracked in `nonNegValues_`. This lets downstream comparisons (`map_size(m) > 0`, etc.) benefit from LLVM's value-range inference.
+
+
   - **`nuw+nsw` on `gcd.shifted`**: In binary Stein's GCD, `shifted = lo << k` where `lo` is the minimum of two positive odd integers derived from `llvm.abs` of the inputs (is_int_min_poison=true ⟹ inputs ≤ INT64_MAX) and `k = ctz(|a|∣|b|) ≤ 62`. The product equals `gcd(a,b) ≤ min(|a|,|b|) ≤ INT64_MAX`, so neither unsigned nor signed overflow is possible.
   - **`nuw+nsw` on `lcm.gcdval`**: Identical reasoning applies to the embedded GCD step inside the `lcm` builtin.
   - **`!range [0,2)` + `nonNegValues_` on `aany.result`**: `array_any` always returns 0 (not found) or 1 (found); the result PHI is given the same boolean-range metadata as `array_count`, `file_exists`, `is_nan`, etc.

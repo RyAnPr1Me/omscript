@@ -3899,6 +3899,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "contains.result");
         result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), loopBB);
         result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), foundBB);
+        // array_contains returns 0 or 1 — attach !range [0,2) and mark non-negative.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(result);
         return result;
     }
 
@@ -5778,6 +5782,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "fwrite.result");
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), nullBB);
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), okBB);
+        // file_write returns 0 (success) or 1 (fopen failed) — always in [0,2).
+        if (optimizationLevel >= OptimizationLevel::O1)
+            phi->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(phi);
         return phi;
     }
 
@@ -5825,6 +5833,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "fappend.result");
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), nullBB);
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), okBB);
+        // file_append returns 0 (success) or 1 (fopen failed) — always in [0,2).
+        if (optimizationLevel >= OptimizationLevel::O1)
+            phi->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(phi);
         return phi;
     }
 
@@ -5937,7 +5949,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = mapArg->getType()->isPointerTy()
             ? mapArg : builder->CreateIntToPtr(toDefaultType(mapArg), ptrTy, "mapsize.ptr");
-        return builder->CreateCall(getOrEmitHashMapSize(), {mapPtr}, "mapsize.result");
+        llvm::Value* sz = builder->CreateCall(getOrEmitHashMapSize(), {mapPtr}, "mapsize.result");
+        // Map entry count is always non-negative; annotate like array lengths.
+        nonNegValues_.insert(sz);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::CallInst>(sz)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        return sz;
     }
 
     // -----------------------------------------------------------------------
