@@ -602,6 +602,22 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         env.erase(static_cast<const InvalidateStmt*>(stmt)->varName);
         break;
 
+    // ── Expression statement — propagate ranges through assignments ──────────
+    case ASTNodeType::EXPR_STMT: {
+        const auto* es = static_cast<const ExprStmt*>(stmt);
+        if (es->expression &&
+            es->expression->type == ASTNodeType::ASSIGN_EXPR) {
+            const auto* ae =
+                static_cast<const AssignExpr*>(es->expression.get());
+            auto r = evalExprRange(ae->value.get(), env);
+            if (r && r->isNarrowed())
+                env[ae->name] = *r;
+            else
+                env.erase(ae->name);
+        }
+        break;
+    }
+
     // ── Block ─────────────────────────────────────────────────────────────────
     case ASTNodeType::BLOCK:
         scanBlock(static_cast<const BlockStmt*>(stmt), env);

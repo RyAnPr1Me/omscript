@@ -655,6 +655,10 @@ static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out) {
     case ASTNodeType::DEFER_STMT:
         collectOpaqueVarsInStmt(static_cast<const DeferStmt*>(stmt)->body.get(), out);
         break;
+    case ASTNodeType::ASSUME_STMT:
+        collectOpaqueVarsInStmt(
+            static_cast<const AssumeStmt*>(stmt)->deoptBody.get(), out);
+        break;
     case ASTNodeType::PIPELINE_STMT: {
         const auto* pl = static_cast<const PipelineStmt*>(stmt);
         for (const auto& stage : pl->stages)

@@ -1196,6 +1196,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // ── min / max ────────────────────────────────────────────────────────
     if (name == "min" && n == 2) {
+        if (args[0] == args[1]) return args[0];  // min(x, x) → x
         auto a = intArg(0), b = intArg(1);
         if (a && b) return CTValue::fromI64(std::min(*a, *b));
         auto da = dArg(0), db = dArg(1);
@@ -1203,6 +1204,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         return std::nullopt;
     }
     if (name == "max" && n == 2) {
+        if (args[0] == args[1]) return args[0];  // max(x, x) → x
         auto a = intArg(0), b = intArg(1);
         if (a && b) return CTValue::fromI64(std::max(*a, *b));
         auto da = dArg(0), db = dArg(1);
@@ -1232,6 +1234,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // ── pow ──────────────────────────────────────────────────────────────
     if (name == "pow" && n == 2) {
+        // pow(x, 0) = 1 for any x (even symbolic).
+        auto ie0 = intArg(1);
+        if (ie0 && *ie0 == 0) return CTValue::fromI64(1);
         auto db = dArg(0), de = dArg(1);
         if (db && de) {
             // If both are exact integers, keep integer semantics.
