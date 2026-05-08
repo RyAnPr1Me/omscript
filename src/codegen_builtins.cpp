@@ -1610,9 +1610,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* bit = builder->CreateAnd(x, one, "evenbit");
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* isEven = builder->CreateICmpEQ(bit, zero, "iseven");
-        auto* result = builder->CreateZExt(isEven, getDefaultType(), "evenval");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isEven, "evenval");
     }
 
     if (bid == BuiltinId::IS_ODD) {
@@ -1874,10 +1872,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* lower = builder->CreateICmpULE(
             builder->CreateSub(x, ca, "sub.a"), c25, "islower");
         llvm::Value* isAlpha = builder->CreateOr(upper, lower, "isalpha");
-        auto* result = builder->CreateZExt(isAlpha, getDefaultType(), "alphaval");
-        // is_alpha always returns 0 or 1.
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isAlpha, "alphaval");
     }
 
     if (bid == BuiltinId::IS_DIGIT) {
@@ -1890,10 +1885,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* c9 = llvm::ConstantInt::get(getDefaultType(), 9);   // '9'-'0'
         llvm::Value* isDigit = builder->CreateICmpULE(
             builder->CreateSub(x, c0, "sub.0"), c9, "isdigit");
-        auto* result = builder->CreateZExt(isDigit, getDefaultType(), "digitval");
-        // is_digit always returns 0 or 1.
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isDigit, "digitval");
     }
 
     if (bid == BuiltinId::IS_UPPER) {
@@ -1905,9 +1897,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* c25 = llvm::ConstantInt::get(getDefaultType(), 25); // 'Z'-'A'
         llvm::Value* isUpper = builder->CreateICmpULE(
             builder->CreateSub(x, cA, "sub.A"), c25, "isupper");
-        auto* result = builder->CreateZExt(isUpper, getDefaultType(), "upperval");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isUpper, "upperval");
     }
 
     if (bid == BuiltinId::IS_LOWER) {
@@ -1919,9 +1909,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* c25 = llvm::ConstantInt::get(getDefaultType(), 25); // 'z'-'a'
         llvm::Value* isLower = builder->CreateICmpULE(
             builder->CreateSub(x, ca, "sub.a"), c25, "islower");
-        auto* result = builder->CreateZExt(isLower, getDefaultType(), "lowerval");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isLower, "lowerval");
     }
 
     if (bid == BuiltinId::IS_SPACE) {
@@ -1936,9 +1924,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateSub(x, c9, "sub.9"), c4, "isctrl");
         llvm::Value* isSpc = builder->CreateICmpEQ(x, c32, "isspc");
         llvm::Value* isSpace = builder->CreateOr(isCtrl, isSpc, "isspace");
-        auto* result = builder->CreateZExt(isSpace, getDefaultType(), "spaceval");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isSpace, "spaceval");
     }
 
     if (bid == BuiltinId::IS_ALNUM) {
@@ -1959,9 +1945,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateSub(x, c0, "sub.0"), c9,  "isdigit2");
         llvm::Value* isAlnum = builder->CreateOr(
             builder->CreateOr(upper, lower, "isalpha2"), digit, "isalnum");
-        auto* result = builder->CreateZExt(isAlnum, getDefaultType(), "alnumval");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isAlnum, "alnumval");
     }
 
     // typeof(x) returns a compile-time type tag: 1=integer, 2=float, 3=string.
@@ -2091,6 +2075,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         charVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // Zero-extend to i64; result is always in [0, 256).
         auto* result = builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
+        if (charRangeMD_)
+            llvm::cast<llvm::Instruction>(result)->setMetadata(
+                llvm::LLVMContext::MD_range, charRangeMD_);
         nonNegValues_.insert(result);
         return result;
     }
@@ -2111,9 +2098,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lhsPtr, rhsPtr}, "streq.cmp");
         // strcmp returns 0 on equality; convert to boolean (1 if equal, 0 otherwise)
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "streq.eq");
-        auto* streqResult = builder->CreateZExt(isEqual, getDefaultType(), "streq.result");
-        nonNegValues_.insert(streqResult);
-        return streqResult;
+        return emitBoolZExt(isEqual, "streq.result");
     }
 
     if (bid == BuiltinId::STR_CONCAT) {
@@ -2938,9 +2923,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNotNull = builder->CreateICmpNE(result, nullPtr, "contains.notnull");
-        auto* containsResult = builder->CreateZExt(isNotNull, getDefaultType(), "contains.result");
-        nonNegValues_.insert(containsResult);
-        return containsResult;
+        return emitBoolZExt(isNotNull, "contains.result");
     }
 
     if (bid == BuiltinId::STR_INDEX_OF) {
@@ -3291,9 +3274,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrncmp(),
             {strPtr, prefixPtr, prefixLen}, "startswith.cmp");
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "startswith.eq");
-        auto* swResult = builder->CreateZExt(isEqual, getDefaultType(), "startswith.result");
-        nonNegValues_.insert(swResult);
-        return swResult;
+        return emitBoolZExt(isEqual, "startswith.result");
     }
 
     if (bid == BuiltinId::STR_ENDS_WITH) {
@@ -3356,7 +3337,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* tailPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, offset, "endswith.tail");
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareMemcmp(), {tailPtr, suffixPtr, sufLen}, "endswith.cmp");
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "endswith.eq");
-        llvm::Value* resultCheck = builder->CreateZExt(isEqual, getDefaultType(), "endswith.result");
+        llvm::Value* resultCheck = emitBoolZExt(isEqual, "endswith.result");
         builder->CreateBr(mergeBB);
         builder->SetInsertPoint(mergeBB);
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "endswith.phi");
@@ -5879,7 +5860,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = mapArg->getType()->isPointerTy()
             ? mapArg : builder->CreateIntToPtr(toDefaultType(mapArg), ptrTy, "maphas.ptr");
-        return builder->CreateCall(getOrEmitHashMapHas(), {mapPtr, keyArg}, "maphas.result");
+        auto* callResult = builder->CreateCall(getOrEmitHashMapHas(), {mapPtr, keyArg}, "maphas.result");
+        if (boolRangeMD_)
+            callResult->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(callResult);
+        return callResult;
     }
 
     if (bid == BuiltinId::MAP_REMOVE) {
@@ -9293,9 +9278,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 // bool(x): normalise to 0 or 1; return as i64 (conventional boolean width)
                 auto* zero = llvm::ConstantInt::get(arg->getType(), 0);
                 auto* cmp  = builder->CreateICmpNE(arg, zero, "bool.cmp");
-                auto* r = builder->CreateZExt(cmp, getDefaultType(), "bool.zext");
-                nonNegValues_.insert(r);
-                return r;
+                return emitBoolZExt(cmp, "bool.zext");
             }
 
             if (castBits == srcBits) {
