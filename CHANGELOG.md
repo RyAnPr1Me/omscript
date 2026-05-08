@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-22: Unsigned bounds checks + arithmetic precision** (`src/codegen_builtins.cpp`):
+  - **ULT/ULE single-check bounds checks**: the double-check pattern `SGE(idx, 0) && SLT(idx, len)` is replaced with a single `ULT(idx, len)` (or `ULE` for insert-at-end). Since array/string lengths are always non-negative (proven by `nonNegValues_`), `ULT(idx, len)` is equivalent to the two-check pattern but emits one fewer `icmp` and eliminates the `and` instruction. Applied to: `swap`, `char_at`, `array_remove`, `array_insert`.
+  - **`emitBoolZExt` for `array_count`**: the bare `CreateZExt(isNonZero, ...)` predicate accumulator increment is migrated to `emitBoolZExt`, adding `zext nneg` + `!range [0,2)` + `nonNegValues_` tracking.
+  - **`nuw+nsw` on `gcd.diff`**: `hi - lo` where `hi = max(a, b_odd)` and `lo = min(a, b_odd)` (proven by select) — no underflow/overflow possible.
+  - **`nuw+nsw` on `log2.val`**: `63 - ctlz(n)` where `ctlz(n) ∈ [0, 63]` (guarded by `isPositive` + `is_zero_poison=true`) — result is in `[0, 63]`.
+
 - **Round-21: `zext nneg` flag + no-wrap arithmetic** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `src/codegen_builtins.cpp`):
   - `emitBoolZExt()` now passes `IsNonNeg=true` to `CreateZExt`, emitting `zext nneg` (LLVM 18+). This lets LLVM's value-range inference skip a separate sign-bit analysis on all boolean 0/1 values.
   - `toDefaultType()` passes `IsNonNeg=true` for `i1` sources and values in `nonNegValues_`. Non-negative source → `zext nneg`; unsigned-tagged but potentially high-bit sources remain plain `zext` (correct semantics preserved).

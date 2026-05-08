@@ -1743,14 +1743,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::Value* swapLenLoad = emitLoadArrayLen(arrPtr, "swap.len");
         llvm::Value* length = swapLenLoad;
 
-        // Bounds check both indices: 0 <= i < length and 0 <= j < length
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* iInBounds = builder->CreateICmpSLT(i, length, "swap.i.inbounds");
-        llvm::Value* iNotNeg = builder->CreateICmpSGE(i, zero, "swap.i.notneg");
-        llvm::Value* iValid = builder->CreateAnd(iInBounds, iNotNeg, "swap.i.valid");
-        llvm::Value* jInBounds = builder->CreateICmpSLT(j, length, "swap.j.inbounds");
-        llvm::Value* jNotNeg = builder->CreateICmpSGE(j, zero, "swap.j.notneg");
-        llvm::Value* jValid = builder->CreateAnd(jInBounds, jNotNeg, "swap.j.valid");
+        // Bounds check both indices: 0 <= i < length and 0 <= j < length.
+        // ULT(i, length) is equivalent to (SLT(i, length) && SGE(i, 0)) when
+        // length >= 0 (guaranteed: emitLoadArrayLen tracks into nonNegValues_).
+        // This eliminates one icmp + one and per index check.
+        llvm::Value* iValid = builder->CreateICmpULT(i, length, "swap.i.valid");
+        llvm::Value* jValid = builder->CreateICmpULT(j, length, "swap.j.valid");
         llvm::Value* bothValid = builder->CreateAnd(iValid, jValid, "swap.valid");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2046,10 +2044,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(strLen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* inBounds = builder->CreateICmpSLT(idxArg, strLen, "charat.inbounds");
-        llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "charat.notneg");
-        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "charat.valid");
+        // ULT(idx, strLen) ≡ (SGE(idx,0) && SLT(idx,strLen)) when strLen ≥ 0.
+        llvm::Value* valid = builder->CreateICmpULT(idxArg, strLen, "charat.valid");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "charat.ok", function);
@@ -2309,7 +2305,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // is_zero_poison=true since we guard with isPositive
         llvm::Value* clz = builder->CreateCall(
             ctlzIntrinsic, {n, builder->getTrue()}, "log2.clz");
-        llvm::Value* log2val = builder->CreateSub(bits, clz, "log2.val");
+        // clz ∈ [0, 63] (is_zero_poison=true + isPositive guard), so
+        // 63 - clz ∈ [0, 63]: the subtraction is nuw+nsw.
+        llvm::Value* log2val = builder->CreateSub(bits, clz, "log2.val",
+                                                   /*HasNUW=*/true, /*HasNSW=*/true);
 
         return builder->CreateSelect(isPositive, log2val, negOne, "log2.result");
     }
@@ -2381,7 +2380,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* aGtB = builder->CreateICmpUGT(phiA, bOdd, "gcd.gt");
         llvm::Value* lo = builder->CreateSelect(aGtB, bOdd, phiA, "gcd.lo");
         llvm::Value* hi = builder->CreateSelect(aGtB, phiA, bOdd, "gcd.hi");
-        llvm::Value* diff = builder->CreateSub(hi, lo, "gcd.diff");
+        // hi = max(phiA, bOdd), lo = min(phiA, bOdd): hi ≥ lo → nuw+nsw.
+        llvm::Value* diff = builder->CreateSub(hi, lo, "gcd.diff",
+                                               /*HasNUW=*/true, /*HasNSW=*/true);
 
         // Continue if diff != 0
         llvm::Value* done = builder->CreateICmpEQ(diff, zero, "gcd.dz");
@@ -4272,13 +4273,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             getArrayPtr(arrArg);
                 llvm::Value* aremLenLoad = emitLoadArrayLen(arrPtr, "aremove.len");
         llvm::Value* arrLen = aremLenLoad;
-        // Bounds check: 0 <= idx < length
+        // Bounds check: 0 <= idx < length.
+        // ULT(idx, arrLen) ≡ (SGE(idx,0) && SLT(idx,arrLen)) since arrLen ≥ 0.
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
-        llvm::Value* inBounds = builder->CreateICmpSLT(idxArg, arrLen, "aremove.inbounds");
-        llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "aremove.notneg");
-        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "aremove.valid");
+        llvm::Value* valid = builder->CreateICmpULT(idxArg, arrLen, "aremove.valid");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "aremove.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "aremove.fail", function);
@@ -4988,7 +4988,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "acnt.pred");
         predResult = toDefaultType(predResult);
         llvm::Value* isNonZero = builder->CreateICmpNE(predResult, zero, "acnt.nz");
-        llvm::Value* incr = builder->CreateZExt(isNonZero, getDefaultType(), "acnt.incr");
+        llvm::Value* incr = emitBoolZExt(isNonZero, "acnt.incr");
         // acnt.newacc: acc is in [0, length], incr in {0,1}; sum ≤ INT64_MAX so
         // both nsw and nuw are safe and let SCEV prove the accumulator is non-negative.
         llvm::Value* newAcc = builder->CreateAdd(acc, incr, "acnt.newacc", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -6733,13 +6733,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::Value* ainsLenLoad = emitLoadArrayLen(arrPtr, "ains.len");
         llvm::Value* arrLen = ainsLenLoad;
 
-        // Bounds check: 0 <= idx <= length (insert at end is allowed)
+        // Bounds check: 0 <= idx <= length (insert at end is allowed).
+        // ULE(idx, arrLen) ≡ (SGE(idx,0) && SLE(idx,arrLen)) since arrLen ≥ 0.
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
-        llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "ains.notneg");
-        llvm::Value* notOver = builder->CreateICmpSLE(idxArg, arrLen, "ains.notover");
-        llvm::Value* valid = builder->CreateAnd(notNeg, notOver, "ains.valid");
+        llvm::Value* valid = builder->CreateICmpULE(idxArg, arrLen, "ains.valid");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "ains.ok", function);
