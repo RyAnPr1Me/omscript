@@ -1,17 +1,17 @@
 # OmScript
 
-A low-level, C-like programming language with dynamic typing and **automatic reference counting memory management**. Features a **heavily optimized AOT compiler** using LLVM, a **lightweight adaptive JIT runtime** that recompiles hot functions with aggressive optimizations, and a **three-layer optimization engine** (equality-saturation E-graph, superoptimizer, and hardware-graph-driven instruction scheduler) that produces near-optimal native machine code for each target CPU.
+A low-level, C-like programming language with **static typing** and **explicit malloc/free memory management** (no garbage collector, no reference counting). Features a **heavily optimized AOT compiler** using LLVM and a **multi-layer optimization engine** (AST pre-passes, equality-saturation E-graph, superoptimizer, and hardware-graph-driven instruction scheduler) that produces near-optimal native machine code for each target CPU.
 
-**Current version: 4.3.2**
+**Current version: 4.4.0**
 
 ## Key Features
 
 - **C-like Syntax**: Familiar syntax for C/JavaScript programmers
-- **Dynamic Typing**: Variables are dynamically typed; optional type annotations for documentation and OPTMAX hot paths
+- **Static Typing**: Mandatory type annotations on all variable and parameter declarations; type-annotated arrays, maps, structs, and scalars are each represented with their native LLVM types throughout the compiler — no runtime type tags
 - **Structs**: Lightweight named record types with field access and mutation
 - **Modules / Import**: Split programs across files with `import "file.om";` — duplicate/circular imports are silently deduplicated
 - **Aggressive AOT Compilation**: Multi-level LLVM optimization (O0–O3) for maximum performance
-- **Reference Counted Memory**: Automatic memory management using malloc/free with deterministic deallocation; no GC pauses
+- **Explicit Memory Management**: Arrays, maps, and strings are heap-allocated via `malloc`/`free`; no GC pauses, no reference counting. Small, non-escaping arrays are automatically stack-allocated (alloca) by the escape-analysis pass. Read-only integer-literal arrays become zero-overhead private globals at O2+.
 - **Lambda Expressions**: Anonymous functions with `|x| x * 2` syntax for use with higher-order builtins
 - **Pipe Operator**: Left-to-right function chaining with `expr |> fn`
 - **Spread Operator**: Array unpacking in literals with `[1, ...arr, 2]`
@@ -35,7 +35,6 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **String Interpolation**: `$"hello {name}, count = {n + 1}"` with auto type conversion
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
 - **140+ Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
-- **Adaptive JIT Runtime**: Hot functions are automatically recompiled at higher optimization levels using runtime profiling data
 - **Optimization Feedback**: Run with `-v` to see what the compiler folded, inlined, stack-allocated, and fused
 
 ## Optimization Pipeline
@@ -138,7 +137,7 @@ fn main() {
     return 0;
 }
 ```
-Structs are lightweight named record types. Fields are dynamically typed. Structs can be passed to and returned from functions.
+Structs are lightweight named record types. All fields require type annotations. Structs can be passed to and returned from functions.
 
 ### Import
 ```omscript
@@ -520,7 +519,7 @@ var x = 10; /* inline */
 ### Threading
 | Function | Description |
 |----------|-------------|
-| `thread_create(fn, arg)` | Spawn thread, returns handle |
+| `thread_create(fn)` | Spawn thread, returns handle |
 | `thread_join(t)` | Wait for thread to finish |
 | `mutex_new()` | Create mutex |
 | `mutex_lock(m)` | Acquire mutex |
@@ -530,7 +529,7 @@ var x = 10; /* inline */
 ### Type / System / Optimizer Hints
 | Function | Description |
 |----------|-------------|
-| `typeof(x)` | Type tag: 1=integer, 2=float, 3=string |
+| `typeof(x)` | **Deprecated** — compile-time type tag (1=int, 2=float, 3=string); use type annotations |
 | `to_int(x)` / `to_float(x)` | Type conversion |
 | `assert(cond)` | Abort if false (runtime assertion) |
 | `exit_program(code)` | Exit with code |
@@ -656,7 +655,7 @@ brew install ccache               # macOS
 # Compile a source file to an executable
 ./build/omsc source.om -o output
 
-# Compile and immediately run (hybrid JIT mode)
+# Compile and immediately run (AOT-compiled, then execute)
 ./build/omsc run source.om
 
 # Validate syntax without compiling
@@ -713,7 +712,6 @@ brew install ccache               # macOS
 | `-floop-optimize` | Polyhedral loop optimizations (Polly) | on |
 | `-fpic` | Position-independent code | on |
 | `-foptmax` | OPTMAX block optimization | on |
-| `-fjit` | Hybrid JIT for `omsc run` | on |
 | `-fstack-protector` | Stack buffer overflow protection | off |
 | `-static` | Static linking | off |
 | `-s` / `--strip` | Strip debug symbols | off |
@@ -723,7 +721,7 @@ brew install ccache               # macOS
 | `-q` / `--quiet` | Suppress non-error output | off |
 | `--time` | Show timing breakdown | off |
 
-Use `-fno-<flag>` to disable any `-f` flag (e.g. `-fno-vectorize`, `-fno-jit`).
+Use `-fno-<flag>` to disable any `-f` flag (e.g. `-fno-vectorize`).
 
 ## Examples
 
@@ -881,14 +879,6 @@ Source (.om)
     └─ LLVM Backend   → native object → executable
 ```
 
-### Adaptive JIT Runtime
-When using `omsc run`, the program executes through a hybrid AOT + tiered JIT:
-
-- **Tier 1**: JIT-compiled at O2 via LLVM MCJIT; execution begins immediately
-- **Runtime Profiling**: Call counts, branch probabilities, argument types, and observed constants are tracked
-- **Tier 2 (Hot Recompile)**: Functions exceeding a call-count threshold are recompiled at O3 with profile-guided hints (PGO entry counts, branch weights)
-- **Deoptimization**: Guard-based fallback to baseline code when speculative assumptions fail
-
 ### Runtime Safety Features
 - **Array bounds checking**: All array accesses are bounds-checked
 - **Division by zero**: Integer division and modulo operations check for zero divisor
@@ -903,13 +893,13 @@ When using `omsc run`, the program executes through a hybrid AOT + tiered JIT:
 |------|-------------|
 | `int` | 64-bit signed integer |
 | `float` | 64-bit double-precision float |
-| `string` | Reference-counted UTF-8 string |
-| `array` | Dynamically-sized heterogeneous array |
-| `map` | Hash map with string keys |
-| `bool` | `true` (1) / `false` (0), stored as integer |
+| `string` | Heap-allocated UTF-8 string (pointer) |
+| `int[]` / `T[]` | Typed, dynamically-sized array |
+| `dict` | Hash map with string keys |
+| `bool` | `true` (1) / `false` (0), stored as `i1`→`i64` |
 | `null` | Absence of value |
 
-Types are determined at runtime; LLVM compiles each operation to native instructions.
+All types are resolved at compile time. Arrays, strings, maps, and structs are represented as pointer types in LLVM IR — no runtime type tags, no `ptrtoint` round-trips for typed values.
 
 ## Testing
 
@@ -968,11 +958,7 @@ omscript/
 │   ├── parser.cpp
 │   └── superoptimizer.cpp
 ├── runtime/
-│   ├── aot_profile.cpp     # Adaptive JIT / hot recompilation
-│   ├── deopt.cpp           # Guard-based deoptimization
-│   ├── jit_profiler.cpp    # Runtime profiling
-│   ├── refcounted.h        # Reference-counted string type
-│   └── value.cpp/h         # Dynamic value representation
+│   └── http_runtime.c          # HTTP request runtime support
 ├── tests/                  # GTest unit tests (14 suites)
 ├── examples/               # 125+ example programs
 └── user-packages/          # Installable packages

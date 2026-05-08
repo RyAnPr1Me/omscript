@@ -484,6 +484,14 @@ static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx) 
         }
         break;
     }
+    case ASTNodeType::PREFETCH_STMT: {
+        auto* ps = static_cast<PrefetchStmt*>(stmt);
+        if (ps->varDecl && ps->varDecl->initializer)
+            ps->varDecl->initializer = tryOptimize(std::move(ps->varDecl->initializer), ctx);
+        if (ps->addrExpr)
+            ps->addrExpr = tryOptimize(std::move(ps->addrExpr), ctx);
+        break;
+    }
     case ASTNodeType::FOR_STMT: {
         auto* fs = static_cast<ForStmt*>(stmt);
         if (fs->start) fs->start = tryOptimize(std::move(fs->start), ctx);
@@ -506,6 +514,29 @@ static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx) 
             for (auto& val : sc.values) val = tryOptimize(std::move(val), ctx);
             for (auto& s : sc.body) optimizeStatementImpl(s.get(), ctx);
         }
+        break;
+    }
+    case ASTNodeType::CATCH_STMT: {
+        auto* cs = static_cast<CatchStmt*>(stmt);
+        if (cs->body) optimizeStatementImpl(cs->body.get(), ctx);
+        break;
+    }
+    case ASTNodeType::DEFER_STMT: {
+        auto* ds = static_cast<DeferStmt*>(stmt);
+        if (ds->body) optimizeStatementImpl(ds->body.get(), ctx);
+        break;
+    }
+    case ASTNodeType::PIPELINE_STMT: {
+        auto* pl = static_cast<PipelineStmt*>(stmt);
+        if (pl->count) pl->count = tryOptimize(std::move(pl->count), ctx);
+        for (auto& stage : pl->stages)
+            if (stage.body) optimizeStatementImpl(stage.body.get(), ctx);
+        break;
+    }
+    case ASTNodeType::ASSUME_STMT: {
+        auto* as = static_cast<AssumeStmt*>(stmt);
+        if (as->condition) as->condition = tryOptimize(std::move(as->condition), ctx);
+        if (as->deoptBody) optimizeStatementImpl(as->deoptBody.get(), ctx);
         break;
     }
     case ASTNodeType::INVALIDATE_STMT:

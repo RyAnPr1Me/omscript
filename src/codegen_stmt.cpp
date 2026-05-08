@@ -799,6 +799,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
             }
         }
 
+        emitDeferredFrees();
         emitArenaFreeIfNeeded();
         builder->CreateRet(retValue);
     } else {
@@ -826,6 +827,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 
         llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
         llvm::Type* retTy = currentFn->getReturnType();
+        emitDeferredFrees();
         emitArenaFreeIfNeeded();
         if (retTy->isVoidTy())
             builder->CreateRetVoid();
@@ -1105,6 +1107,42 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
 
+    // ── Preheader: emit loop-entry non-negativity assumes ────────────────────
+    // These assumes are placed in the loop preheader (before the back-edge)
+    // rather than at the top of the loop body.  An assume inside the loop body
+    // is re-evaluated every iteration and, when combined with pointer-mutating
+    // calls such as push()/realloc(), prevents LLVM's LoopVectorize,
+    // LoopDistribute, and LoopReorder passes from treating the loop as "safe"
+    // because the assume creates an opaque dependency on loop-variant memory.
+    // A preheader assume is emitted once, establishes the invariant at loop
+    // entry, and does not appear on any hot back-edge path.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
+            module.get(), llvm::Intrinsic::assume, {});
+        llvm::Type* i64Ty = getDefaultType();
+        for (auto& kv : namedValues) {
+            auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(kv.second);
+            if (!alloca) continue;
+            if (!nonNegValues_.count(alloca)) continue;
+            // Only assume for integer allocas — float/pointer non-negativity
+            // is not expressed the same way and would confuse LLVM.
+            if (!alloca->getAllocatedType()->isIntegerTy()) continue;
+            const std::string varName = kv.first().str();
+            llvm::Value* loaded = builder->CreateAlignedLoad(
+                alloca->getAllocatedType(), alloca,
+                llvm::MaybeAlign(8), (varName + ".pre.nn").c_str());
+            // Widen to i64 if narrower (e.g. i1, i32) before comparison.
+            llvm::Value* asI64 = loaded->getType() == i64Ty
+                ? loaded
+                : builder->CreateSExt(loaded, i64Ty, "nn.sext");
+            llvm::Value* isNN = builder->CreateICmpSGE(
+                asI64,
+                llvm::ConstantInt::get(i64Ty, 0),
+                (varName + ".nn").c_str());
+            builder->CreateCall(assumeFn, {isNN});
+        }
+    }
+
     builder->CreateBr(condBB);
 
     // Condition block
@@ -1122,34 +1160,6 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
-
-    // Emit llvm.assume(var >= 0) for all alloca variables known to be
-    if (optimizationLevel >= OptimizationLevel::O2) {
-        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
-            module.get(), llvm::Intrinsic::assume, {});
-        llvm::Type* i64Ty = getDefaultType();
-        for (auto& kv : namedValues) {
-            auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(kv.second);
-            if (!alloca) continue;
-            if (!nonNegValues_.count(alloca)) continue;
-            // Only assume for integer allocas — float/pointer non-negativity
-            // is not expressed the same way and would confuse LLVM.
-            if (!alloca->getAllocatedType()->isIntegerTy()) continue;
-            const std::string varName = kv.first().str();
-            llvm::Value* loaded = builder->CreateAlignedLoad(
-                alloca->getAllocatedType(), alloca,
-                llvm::MaybeAlign(8), (varName + ".assume.nn").c_str());
-            // Widen to i64 if narrower (e.g. i1, i32) before comparison.
-            llvm::Value* asI64 = loaded->getType() == i64Ty
-                ? loaded
-                : builder->CreateSExt(loaded, i64Ty, "nn.sext");
-            llvm::Value* isNN = builder->CreateICmpSGE(
-                asI64,
-                llvm::ConstantInt::get(i64Ty, 0),
-                (varName + ".nn").c_str());
-            builder->CreateCall(assumeFn, {isNN});
-        }
-    }
 
     auto savedLenCacheW = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
@@ -2970,6 +2980,9 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
     llvm::Value* val = generateExpression(stmt->value.get());
     val = toDefaultType(val);
 
+    // Flush any deferred frees before leaving this function via throw.
+    emitDeferredFrees();
+
     if (catchTable_.empty()) {
         // No catch blocks in this function — abort with a clear error.
         std::string errText = stmt->line > 0
@@ -3005,6 +3018,31 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
             llvm::cast<llvm::IntegerType>(getDefaultType()), key);
         sw->addCase(caseVal, handlerBB);
     }
+}
+
+// ---------------------------------------------------------------------------
+// emitDeferredFrees — flush the per-function deferred-free queue.
+//
+// This is the single canonical point where `free()` is emitted for every heap
+// pointer that was logically invalidated during the function body.  All
+// pointers are freed together in a tight sequence so the allocator can merge
+// adjacent free-list operations and the CPU's store buffer is fully drained in
+// one pass.  The function is called just before every function-exit edge
+// (generateReturn, generateThrow) so the queue is always empty when the
+// function terminates.
+// ---------------------------------------------------------------------------
+void CodeGenerator::emitDeferredFrees() {
+    if (deferredFreeQueue_.empty()) return;
+    // Guard: don't insert after a terminator (e.g. after an unreachable block).
+    if (builder->GetInsertBlock() && builder->GetInsertBlock()->getTerminator()) {
+        deferredFreeQueue_.clear();
+        return;
+    }
+    llvm::Function* freeFn = getOrDeclareFree();
+    for (llvm::Value* ptr : deferredFreeQueue_) {
+        builder->CreateCall(freeFn, {ptr});
+    }
+    deferredFreeQueue_.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -3060,9 +3098,11 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
                 if (!heapPtr->getType()->isPointerTy()) {
                     heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy, name + ".heapptr");
                 }
-                // Emit free().  The compiler already knows free() is
-                // InaccessibleOrArgMemOnly so this is safe to CSE/hoist.
-                builder->CreateCall(getOrDeclareFree(), {heapPtr});
+                // Defer the free() to the function exit so all invalidated
+                // pointers are freed in a single batch at the optimal CFG
+                // point.  The variable is already logically dead (deadVars_);
+                // any use before then is a compile-time error.
+                deferredFreeQueue_.push_back(heapPtr);
             }
         }
     }
@@ -3406,10 +3446,15 @@ llvm::Value* CodeGenerator::generateReborrowExpr(ReborrowExpr* expr) {
         // Partial borrow: array element → GEP to element slot
         llvm::Value* arrPtr = generateExpression(expr->source.get());
         llvm::Value* idx = generateExpression(expr->indexExpr.get());
-        // Arrays: [len, e0, e1, ...]  — element i is at slot i+1
+        // Arrays: [len, e0, e1, ...]  — element i is at slot i+1.
+        // The borrow checker has already verified 0 <= idx < len, so:
+        //   • nuw: idx >= 0, so idx+1 > 0 and cannot wrap unsigned
+        //   • nsw: idx < len <= INT64_MAX-1, so idx+1 <= INT64_MAX (no signed wrap)
+        //   • inbounds: idx+1 <= len <= capacity, within the malloc'd slab
         llvm::Value* elemIdx = builder->CreateAdd(
-            idx, llvm::ConstantInt::get(getDefaultType(), 1), "reborrow.idx");
-        val = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "reborrow.elem");
+            idx, llvm::ConstantInt::get(getDefaultType(), 1), "reborrow.idx",
+            /*HasNUW=*/true, /*HasNSW=*/true);
+        val = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "reborrow.elem");
     }
 
     return val;
@@ -3841,6 +3886,51 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
             const auto* fs = static_cast<const ForStmt*>(s);
             scanExpr(fs->start.get()); scanExpr(fs->end.get());
             scanExpr(fs->step.get()); scanStmt(fs->body.get());
+            break;
+        }
+        case ASTNodeType::FOR_EACH_STMT: {
+            const auto* fe = static_cast<const ForEachStmt*>(s);
+            scanExpr(fe->collection.get());
+            scanStmt(fe->body.get());
+            break;
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            const auto* dw = static_cast<const DoWhileStmt*>(s);
+            scanStmt(dw->body.get());
+            scanExpr(dw->condition.get());
+            break;
+        }
+        case ASTNodeType::SWITCH_STMT: {
+            const auto* sw = static_cast<const SwitchStmt*>(s);
+            scanExpr(sw->condition.get());
+            for (const auto& sc : sw->cases)
+                for (const auto& sub : sc.body)
+                    scanStmt(sub.get());
+            break;
+        }
+        case ASTNodeType::CATCH_STMT:
+            scanStmt(static_cast<const CatchStmt*>(s)->body.get()); break;
+        case ASTNodeType::DEFER_STMT:
+            scanStmt(static_cast<const DeferStmt*>(s)->body.get()); break;
+        case ASTNodeType::PREFETCH_STMT: {
+            const auto* ps = static_cast<const PrefetchStmt*>(s);
+            if (ps->varDecl) scanExpr(ps->varDecl->initializer.get());
+            if (ps->addrExpr) scanExpr(ps->addrExpr.get());
+            break;
+        }
+        case ASTNodeType::PIPELINE_STMT: {
+            const auto* pl = static_cast<const PipelineStmt*>(s);
+            if (pl->count) scanExpr(pl->count.get());
+            for (const auto& stage : pl->stages)
+                if (stage.body)
+                    for (const auto& sub : stage.body->statements)
+                        scanStmt(sub.get());
+            break;
+        }
+        case ASTNodeType::ASSUME_STMT: {
+            const auto* as = static_cast<const AssumeStmt*>(s);
+            if (as->condition) scanExpr(as->condition.get());
+            if (as->deoptBody) scanStmt(as->deoptBody.get());
             break;
         }
         default: break;

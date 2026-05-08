@@ -698,7 +698,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             } else if (dstBits < srcBits) {
                 return builder->CreateTrunc(val, dstTy, "as.trunc");
             } else {
-                return builder->CreateBitCast(val, dstTy, "as.bitcast");
+                // Same bit-width integer-to-integer: identity, no instruction needed.
+                return val;
             }
         }
         // Float → integer
@@ -714,7 +715,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return builder->CreatePtrToInt(val, dstTy, "as.ptrtoint");
         if (srcTy->isIntegerTy() && dstTy->isPointerTy())
             return builder->CreateIntToPtr(val, dstTy, "as.inttoptr");
-        // Fallback: bitcast
+        // Pointer → pointer (opaque pointers are all `ptr` — no instruction needed).
+        if (srcTy->isPointerTy() && dstTy->isPointerTy())
+            return val;
+        // Equal types: identity.
+        if (srcTy == dstTy)
+            return val;
+        // Fallback: bitcast (e.g. float ↔ float, int ↔ float reinterpret)
         return builder->CreateBitCast(val, dstTy, "as.bitcast");
     }
     // --- Compile-time string constant folding (recursive) ---
@@ -760,7 +767,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (auto* ri = llvm::dyn_cast<llvm::ConstantInt>(right))
                     return llvm::ConstantInt::get(getDefaultType(), ri->isZero() ? 0 : 1);
                 llvm::Value* rightBool = toBool(right);
-                return builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
+                auto* r763 = builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
+                nonNegValues_.insert(r763);
+                return r763;
             } else {
                 if (leftTrue)
                     return llvm::ConstantInt::get(getDefaultType(), 1); // true || x → 1
@@ -770,7 +779,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (auto* ri = llvm::dyn_cast<llvm::ConstantInt>(right))
                     return llvm::ConstantInt::get(getDefaultType(), ri->isZero() ? 0 : 1);
                 llvm::Value* rightBool = toBool(right);
-                return builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
+                auto* r773 = builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
+                nonNegValues_.insert(r773);
+                return r773;
             }
         }
 
@@ -965,7 +976,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (expr->op == "|") return builder->CreateOr(left, right, "simd.or");
             if (expr->op == "^") return builder->CreateXor(left, right, "simd.xor");
             if (expr->op == "<<") return builder->CreateShl(left, right, "simd.shl");
-            if (expr->op == ">>") return builder->CreateAShr(left, right, "simd.ashr");
+            if (expr->op == ">>") return builder->CreateLShr(left, right, "simd.lshr");
         }
         codegenError("Unsupported operator '" + expr->op + "' for SIMD vector types", expr);
     }
@@ -1113,27 +1124,33 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         if (expr->op == "==") {
             auto cmp = builder->CreateFCmpOEQ(left, right, "fcmptmp");
-            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            nonNegValues_.insert(r); return r;
         }
         if (expr->op == "!=") {
             auto cmp = builder->CreateFCmpONE(left, right, "fcmptmp");
-            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            nonNegValues_.insert(r); return r;
         }
         if (expr->op == "<") {
             auto cmp = builder->CreateFCmpOLT(left, right, "fcmptmp");
-            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            nonNegValues_.insert(r); return r;
         }
         if (expr->op == "<=") {
             auto cmp = builder->CreateFCmpOLE(left, right, "fcmptmp");
-            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            nonNegValues_.insert(r); return r;
         }
         if (expr->op == ">") {
             auto cmp = builder->CreateFCmpOGT(left, right, "fcmptmp");
-            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            nonNegValues_.insert(r); return r;
         }
         if (expr->op == ">=") {
             auto cmp = builder->CreateFCmpOGE(left, right, "fcmptmp");
-            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+            nonNegValues_.insert(r); return r;
         }
         if (expr->op == "**") {
             // Float exponent specialization: emit cheaper inline sequences
@@ -1409,12 +1426,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 ? builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "scmp.eq")
                 : builder->CreateICmpNE(cmpResult, builder->getInt32(0), "scmp.ne");
             llvm::Value* slowResult = builder->CreateZExt(slowBool, getDefaultType(), "scmp.zext");
+            nonNegValues_.insert(slowResult);
             builder->CreateBr(mergeBB);
 
             builder->SetInsertPoint(mergeBB);
             llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "streq.phi");
             phi->addIncoming(fastResult, ptrEqBB);
             phi->addIncoming(slowResult, slowBB);
+            nonNegValues_.insert(phi);
             return phi;
         }
 
@@ -1436,18 +1455,46 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         else
             cmpBool = nullptr;
 
-        if (cmpBool)
-            return builder->CreateZExt(cmpBool, getDefaultType(), "scmp.result");
+        if (cmpBool) {
+            auto* r = builder->CreateZExt(cmpBool, getDefaultType(), "scmp.result");
+            nonNegValues_.insert(r);
+            return r;
+        }
         // For non-comparison operators on strings (should not normally occur here),
         // fall through to the integer path.
     }
 
-    // Convert pointer types to i64 for integer operations (fallback)
-    if (left->getType()->isPointerTy()) {
-        left = builder->CreatePtrToInt(left, getDefaultType(), "ptoi");
-    }
-    if (right->getType()->isPointerTy()) {
+    // Convert pointer types to i64 for integer operations (fallback).
+    // For comparison operators between two pointers, prefer direct pointer icmp
+    // to preserve provenance and avoid unnecessary ptrtoint round-trips.
+    if (left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
+        const std::string& op = expr->op;
+        llvm::Value* cmpBool = nullptr;
+        if (op == "==")
+            cmpBool = builder->CreateICmpEQ(left, right, "pcmp.eq");
+        else if (op == "!=")
+            cmpBool = builder->CreateICmpNE(left, right, "pcmp.ne");
+        else if (op == "<")
+            cmpBool = builder->CreateICmpULT(left, right, "pcmp.lt");
+        else if (op == "<=")
+            cmpBool = builder->CreateICmpULE(left, right, "pcmp.le");
+        else if (op == ">")
+            cmpBool = builder->CreateICmpUGT(left, right, "pcmp.gt");
+        else if (op == ">=")
+            cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
+        if (cmpBool) {
+            auto* r = builder->CreateZExt(cmpBool, getDefaultType(), "pcmp.result");
+            nonNegValues_.insert(r);
+            return r;
+        }
+        // Non-comparison ops on two pointers: fall through to ptrtoint path.
+        left  = builder->CreatePtrToInt(left,  getDefaultType(), "ptoi");
         right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
+    } else {
+        if (left->getType()->isPointerTy())
+            left = builder->CreatePtrToInt(left, getDefaultType(), "ptoi");
+        if (right->getType()->isPointerTy())
+            right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
     }
 
     // Constant-literal narrowing: when one operand is a wider ConstantInt and
@@ -1729,7 +1776,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             llvm::Value* cmp = (expr->op == "==")
                                 ? builder->CreateICmpEQ(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp")
                                 : builder->CreateICmpNE(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp");
-                            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                            nonNegValues_.insert(r);
+                            return r;
                         }
                     }
                     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(mulLeft)) {
@@ -1737,7 +1786,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             llvm::Value* cmp = (expr->op == "==")
                                 ? builder->CreateICmpEQ(mulRight, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp")
                                 : builder->CreateICmpNE(mulRight, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp");
-                            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                            nonNegValues_.insert(r);
+                            return r;
                         }
                     }
                 }
@@ -1755,7 +1806,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             llvm::Value* cmp = (expr->op == "==")
                                 ? builder->CreateICmpEQ(subInst->getOperand(0), subInst->getOperand(1), "cmptmp")
                                 : builder->CreateICmpNE(subInst->getOperand(0), subInst->getOperand(1), "cmptmp");
-                            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                            nonNegValues_.insert(r);
+                            return r;
                         }
                     }
                 }
@@ -5402,7 +5455,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                 llvm::GlobalValue::PrivateLinkage, initArray, "arr.ro.const");
             gv->setAlignment(llvm::Align(16));
             gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-            return builder->CreatePtrToInt(gv, getDefaultType(), "arr.ro.int");
+            return gv;
         }
 
         llvm::Value* arrPtr;
@@ -5421,8 +5474,21 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                  llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)},
                 "arr.stack.ptr");
         } else {
-            llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalBytes);
+            // For empty arrays (numElements == 0) that land on the heap, pre-
+            // allocate at least kMinArrayCapacity slots so that:
+            //  (a) malloc(8) is never emitted for a dynamic array — `allocsize`
+            //      on malloc causes LLVM to infer dereferenceable(8), which
+            //      then mismatches the first-push realloc,
+            //  (b) the first 15 push() calls never trigger a realloc at all,
+            //      reducing branching inside push loops.
+            const size_t allocBytes = (numElements == 0)
+                ? kMinArrayCapacity * 8
+                : totalBytes;
+            llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), allocBytes);
             arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
+            // Advertise the actual capacity to LLVM's alias/bounds analysis.
+            llvm::cast<llvm::CallInst>(arrPtr)->addRetAttr(
+                llvm::Attribute::getWithDereferenceableBytes(*context, allocBytes));
         }
 
         // Fast path: if ALL elements are compile-time integer constants, build
@@ -5489,7 +5555,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             }
         }
 
-        return builder->CreatePtrToInt(arrPtr, getDefaultType(), "arr.int");
+        return arrPtr;
     }
 
     // Spread path: compute total length dynamically
@@ -5536,6 +5602,17 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     llvm::Value* slots = builder->CreateAdd(totalLen, one, "spread.slots");
     llvm::Value* bytes = builder->CreateMul(slots, eight, "spread.bytes");
     llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "spread.buf");
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+    // Advertise exact allocation size when bytes is a compile-time constant
+    // (all elements are scalars with no dynamic spreads) so LLVM's alias
+    // analysis and vectorizer can reason about the buffer extent.
+    if (auto* constBytes = llvm::dyn_cast<llvm::ConstantInt>(bytes)) {
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, constBytes->getZExtValue()));
+    } else {
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+    }
     // AlignedStore(8) + tbaaArrayLen_: length header in slot 0 is 8-byte aligned.
     auto* totalLenSt = builder->CreateAlignedStore(totalLen, buf, llvm::MaybeAlign(8));
     totalLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
@@ -5598,7 +5675,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         }
     }
 
-    return builder->CreatePtrToInt(buf, getDefaultType(), "spread.result");
+    return buf;
 }
 
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
@@ -6063,7 +6140,7 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     }
 
     // The struct value travels through the rest of codegen as a pointer.
-    return builder->CreatePtrToInt(structAlloca, getDefaultType(), "struct.int");
+    return structAlloca;
 }
 
 llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
@@ -6269,7 +6346,7 @@ llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
         mapPtr = builder->CreateCall(getOrEmitHashMapSet(), {mapPtr, keyVal, valVal}, "dict.set");
     }
 
-    return builder->CreatePtrToInt(mapPtr, getDefaultType(), "dict.i");
+    return mapPtr;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6365,7 +6442,7 @@ llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
 
     // Return the new pointer (matches what generateAssign normally returns for
     // string assignments: the result is the pointer value as an i64 integer).
-    return builder->CreatePtrToInt(newPtr, getDefaultType(), "iap.result");
+    return newPtr;
 }
 
 } // namespace omscript

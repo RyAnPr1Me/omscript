@@ -248,6 +248,18 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
     // ── For statement (range loop) ──────────────────────────────────────────
     case ASTNodeType::FOR_STMT: {
         auto* forStmt = static_cast<ForStmt*>(stmt.get());
+        // If both bounds are compile-time integer literals and start >= end,
+        // the loop body is unreachable — replace the entire for statement with
+        // an empty block.
+        long long startVal = 0, endVal = 0;
+        if (isIntLiteral(forStmt->start.get(), &startVal) &&
+            isIntLiteral(forStmt->end.get(),   &endVal)   &&
+            startVal >= endVal) {
+            ++stats.deadLoops;
+            stmt = std::make_unique<BlockStmt>(
+                std::vector<std::unique_ptr<Statement>>{});
+            break;
+        }
         if (forStmt->body) {
             auto sub = transformStmt(forStmt->body);
             stats.deadIfBranches   += sub.deadIfBranches;
@@ -311,6 +323,38 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
             stats.deadIfBranches   += sub.deadIfBranches;
             stats.deadLoops        += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
+        }
+        break;
+    }
+
+    // ── Assume statement ─────────────────────────────────────────────────────
+    case ASTNodeType::ASSUME_STMT: {
+        auto* asStmt = static_cast<AssumeStmt*>(stmt.get());
+        if (asStmt->deoptBody) {
+            auto sub = transformStmt(asStmt->deoptBody);
+            stats.deadIfBranches   += sub.deadIfBranches;
+            stats.deadLoops        += sub.deadLoops;
+            stats.unreachableStmts += sub.unreachableStmts;
+        }
+        break;
+    }
+
+    // ── Prefetch statement ───────────────────────────────────────────────────
+    // Nothing structurally to simplify; the embedded VarDecl is not a
+    // compound statement so DCE cannot prune it independently.
+    case ASTNodeType::PREFETCH_STMT:
+        break;
+
+    // ── Pipeline statement ───────────────────────────────────────────────────
+    case ASTNodeType::PIPELINE_STMT: {
+        auto* plStmt = static_cast<PipelineStmt*>(stmt.get());
+        for (auto& stage : plStmt->stages) {
+            if (stage.body) {
+                auto sub = transformBlock(stage.body.get());
+                stats.deadIfBranches   += sub.deadIfBranches;
+                stats.deadLoops        += sub.deadLoops;
+                stats.unreachableStmts += sub.unreachableStmts;
+            }
         }
         break;
     }

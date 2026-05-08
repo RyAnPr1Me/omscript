@@ -314,10 +314,11 @@ static void registerAllPasses() {
         {AnalysisFact::kCFCTRE},
         {AnalysisFact::kEGraph},
         // E-graph rewrites change expressions; any fact derived from expression
-        // shapes (ranges, CSE candidates) is now stale.  CF-CTRE purity and
-        // effect facts remain valid since the transformations are
-        // semantics-preserving.
-        {},
+        // shapes (ranges, CSE candidates, width information) is now stale.
+        // CF-CTRE purity and effect facts remain valid since the transformations
+        // are semantics-preserving.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCSE,
+         AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 
     PassId::kRangeAnalysis = reg.registerPass({
@@ -352,8 +353,10 @@ static void registerAllPasses() {
         // operates on literal constants alone and is safe to run earlier.
         {AnalysisFact::kCFCTRE},
         {AnalysisFact::kDCE},
-        // Removing branches may invalidate range analysis results.
-        {AnalysisFact::kRangeAnalysis},
+        // Removing branches invalidates range analysis and width maps that
+        // were computed over the now-removed code paths.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization,
+         AnalysisFact::kWidthOpt},
     });
 
     PassId::kCSE = reg.registerPass({
@@ -382,8 +385,9 @@ static void registerAllPasses() {
         // DCE runs first to avoid simplifying dead branches.
         {AnalysisFact::kCFCTRE, AnalysisFact::kDCE},
         {AnalysisFact::kAlgSimp},
-        // AlgSimp replaces expressions; any shape-derived facts are stale.
-        {AnalysisFact::kRangeAnalysis},
+        // AlgSimp replaces expressions; all shape-derived downstream facts are stale.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization,
+         AnalysisFact::kWidthOpt},
     });
 
     PassId::kCopyProp = reg.registerPass({
@@ -398,8 +402,9 @@ static void registerAllPasses() {
         {AnalysisFact::kCFCTRE, AnalysisFact::kDCE, AnalysisFact::kAlgSimp},
         {AnalysisFact::kCopyProp},
         // Substituting identifiers changes the shape of expressions; CSE,
-        // range analysis, and any name-based facts are potentially stale.
-        {AnalysisFact::kCSE, AnalysisFact::kRangeAnalysis},
+        // range analysis, width maps, and any name-based facts are potentially stale.
+        {AnalysisFact::kCSE, AnalysisFact::kRangeAnalysis,
+         AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 
     PassId::kWidthLegalization = reg.registerPass({
@@ -487,8 +492,9 @@ static void registerAllPasses() {
         // to have resolved constant-foldable sub-expressions.
         {AnalysisFact::kEGraph, AnalysisFact::kCFCTRE},
         {AnalysisFact::kHGOEEGraph},
-        // Rewrites expressions — invalidates shape-derived facts.
-        {AnalysisFact::kRangeAnalysis},
+        // Rewrites expressions — invalidates all shape-derived downstream facts.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCSE,
+         AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 }
 
@@ -641,6 +647,18 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
 
         // ── Skip already-valid passes (runInvalidated mode) ────────────
         if (skipValid && scheduler.allProvidedValid(*meta)) {
+            ++stats_.passesSkipped;
+            continue;
+        }
+
+        // ── O-level gating: skip cost-driven transforms at O0 ──────────
+        // CostTransform passes (DCE, CSE, AlgSimp, WidthOpt, etc.) exist to
+        // improve performance.  At O0 the user expects minimal compile time
+        // and maximum debuggability; running these passes would modify the AST
+        // and make single-step debugging unpredictable.
+        // SemanticTransform and Analysis passes always run regardless of level.
+        if (meta->kind == PassKind::CostTransform &&
+            optLevel_ == OptimizationLevel::O0) {
             ++stats_.passesSkipped;
             continue;
         }
@@ -810,6 +828,46 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
         }
         case ASTNodeType::ASSIGN_EXPR:
             checkExpr(static_cast<const AssignExpr*>(e)->value.get(), fnName); break;
+        case ASTNodeType::INDEX_ASSIGN_EXPR: {
+            const auto* ia = static_cast<const IndexAssignExpr*>(e);
+            checkExpr(ia->array.get(), fnName); checkExpr(ia->index.get(), fnName);
+            checkExpr(ia->value.get(), fnName); break;
+        }
+        case ASTNodeType::FIELD_ACCESS_EXPR:
+            checkExpr(static_cast<const FieldAccessExpr*>(e)->object.get(), fnName); break;
+        case ASTNodeType::FIELD_ASSIGN_EXPR: {
+            const auto* fa = static_cast<const FieldAssignExpr*>(e);
+            checkExpr(fa->object.get(), fnName); checkExpr(fa->value.get(), fnName); break;
+        }
+        case ASTNodeType::SPREAD_EXPR:
+            checkExpr(static_cast<const SpreadExpr*>(e)->operand.get(), fnName); break;
+        case ASTNodeType::PIPE_EXPR:
+            checkExpr(static_cast<const PipeExpr*>(e)->left.get(), fnName); break;
+        case ASTNodeType::MOVE_EXPR:
+            checkExpr(static_cast<const MoveExpr*>(e)->source.get(), fnName); break;
+        case ASTNodeType::BORROW_EXPR:
+            checkExpr(static_cast<const BorrowExpr*>(e)->source.get(), fnName); break;
+        case ASTNodeType::REBORROW_EXPR: {
+            const auto* rb = static_cast<const ReborrowExpr*>(e);
+            checkExpr(rb->source.get(), fnName);
+            if (rb->indexExpr) checkExpr(rb->indexExpr.get(), fnName); break;
+        }
+        case ASTNodeType::RANGE_ANNOT_EXPR:
+            checkExpr(static_cast<const RangeAnnotExpr*>(e)->inner.get(), fnName); break;
+        case ASTNodeType::STRUCT_LITERAL_EXPR:
+            for (const auto& fv : static_cast<const StructLiteralExpr*>(e)->fieldValues)
+                checkExpr(fv.second.get(), fnName);
+            break;
+        case ASTNodeType::DICT_EXPR:
+            for (const auto& p : static_cast<const DictExpr*>(e)->pairs) {
+                checkExpr(p.first.get(),  fnName);
+                checkExpr(p.second.get(), fnName);
+            }
+            break;
+        case ASTNodeType::ARRAY_EXPR:
+            for (const auto& el : static_cast<const ArrayExpr*>(e)->elements)
+                checkExpr(el.get(), fnName);
+            break;
         default: break;
         }
     };
@@ -860,6 +918,41 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
                 for (const auto& v : c.values) checkExpr(v.get(), fnName);
                 for (const auto& st : c.body) checkStmt(st.get(), fnName);
             }
+            break;
+        }
+        case ASTNodeType::CATCH_STMT: {
+            const auto* cs = static_cast<const CatchStmt*>(s);
+            checkStmt(cs->body.get(), fnName);
+            break;
+        }
+        case ASTNodeType::DEFER_STMT: {
+            const auto* ds = static_cast<const DeferStmt*>(s);
+            checkStmt(ds->body.get(), fnName);
+            break;
+        }
+        case ASTNodeType::THROW_STMT: {
+            const auto* ts = static_cast<const ThrowStmt*>(s);
+            if (ts->value) checkExpr(ts->value.get(), fnName);
+            break;
+        }
+        case ASTNodeType::PREFETCH_STMT: {
+            const auto* ps = static_cast<const PrefetchStmt*>(s);
+            if (ps->varDecl && ps->varDecl->initializer)
+                checkExpr(ps->varDecl->initializer.get(), fnName);
+            if (ps->addrExpr) checkExpr(ps->addrExpr.get(), fnName);
+            break;
+        }
+        case ASTNodeType::ASSUME_STMT: {
+            const auto* as = static_cast<const AssumeStmt*>(s);
+            if (as->condition) checkExpr(as->condition.get(), fnName);
+            if (as->deoptBody) checkStmt(as->deoptBody.get(), fnName);
+            break;
+        }
+        case ASTNodeType::PIPELINE_STMT: {
+            const auto* pl = static_cast<const PipelineStmt*>(s);
+            if (pl->count) checkExpr(pl->count.get(), fnName);
+            for (const auto& stage : pl->stages)
+                if (stage.body) checkStmt(stage.body.get(), fnName);
             break;
         }
         default: break;
@@ -1099,8 +1192,8 @@ void OptimizationOrchestrator::runRLC(Program* program, OptimizationContext& ctx
 void OptimizationOrchestrator::runDCE(Program* program, OptimizationContext& ctx) {
     runDCEPass(program, verbose_);
     ctx.validity().dce = true;
-    // DCE removes code branches; range analysis results may be stale.
-    ctx.validity().rangeAnalysis = false;
+    // Downstream invalidation (range_analysis, width_legalization, width_opt)
+    // is handled by PassScheduler::applyInvalidation() from the pass metadata.
 }
 
 void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx) {
@@ -1126,19 +1219,15 @@ void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx
 void OptimizationOrchestrator::runAlgSimp(Program* program, OptimizationContext& ctx) {
     runAlgSimpPass(program, verbose_);
     ctx.validity().algSimp = true;
-    // AlgSimp rewrites expressions; range facts derived from expression shapes
-    // may be stale.
-    ctx.validity().rangeAnalysis = false;
+    // Downstream invalidation (range_analysis, width_legalization, width_opt)
+    // is handled by PassScheduler::applyInvalidation() from the pass metadata.
 }
 
 void OptimizationOrchestrator::runCopyProp(Program* program, OptimizationContext& ctx) {
     runCopyPropPass(program, verbose_);
     ctx.validity().copyProp = true;
-    // CopyProp substitutes identifiers; CSE keys and range values are stale.
-    ctx.validity().cse          = false;
-    ctx.validity().rangeAnalysis = false;
-    // Width legalization depends on expression shapes — re-run after CopyProp.
-    ctx.validity().widthLegalization = false;
+    // Downstream invalidation (cse, range_analysis, width_legalization, width_opt)
+    // is handled by PassScheduler::applyInvalidation() from the pass metadata.
 }
 
 void OptimizationOrchestrator::runWidthLegalization(Program* program,
@@ -1158,7 +1247,9 @@ void OptimizationOrchestrator::runWidthOpt(Program* program,
     const uint32_t n = runWidthOptPass(program, ctx, verbose_);
     ctx.validity().widthOpt = true;
     if (n > 0) {
-        // AST was modified — width legalization and range analysis are stale.
+        // WidthOpt modified expressions — explicitly invalidate shape-derived
+        // facts now so demand-driven recomputation works correctly even before
+        // PassScheduler::applyInvalidation() runs its unconditional pass.
         ctx.validity().widthLegalization = false;
         ctx.validity().rangeAnalysis     = false;
         ctx.validity().cse               = false;

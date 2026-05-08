@@ -374,8 +374,29 @@ SemanticWidth WidthAnalyzer::analyzeExpr(const Expression* expr) {
         SemanticWidth result;
         if (op == "+"  || op == "-")               result = OpWidthRules::addSub(lhsW, rhsW);
         else if (op == "*")                         result = OpWidthRules::mul(lhsW, rhsW);
-        else if (op == "/" || op == "%")            result = OpWidthRules::divRem(lhsW, rhsW);
-        else if (op == "&" || op == "|" || op == "^") result = OpWidthRules::bitwise(lhsW, rhsW);
+        else if (op == "%") {
+            // x % N ∈ [0, N-1] when N is a known positive literal.
+            long long divisor = 0;
+            if (isIntLiteral(bin->right.get(), &divisor) && divisor > 1)
+                result = SemanticWidth::fromUnsignedValue(
+                             static_cast<uint64_t>(divisor - 1));
+            else
+                result = OpWidthRules::divRem(lhsW, rhsW);
+        }
+        else if (op == "/")                         result = OpWidthRules::divRem(lhsW, rhsW);
+        else if (op == "&") {
+            // x & mask ≤ mask, so the result fits in the mask's unsigned width.
+            long long mask = 0;
+            if (isIntLiteral(bin->right.get(), &mask) && mask >= 0)
+                result = SemanticWidth::fromUnsignedValue(
+                             static_cast<uint64_t>(mask));
+            else if (isIntLiteral(bin->left.get(), &mask) && mask >= 0)
+                result = SemanticWidth::fromUnsignedValue(
+                             static_cast<uint64_t>(mask));
+            else
+                result = OpWidthRules::bitwise(lhsW, rhsW);
+        }
+        else if (op == "|" || op == "^")            result = OpWidthRules::bitwise(lhsW, rhsW);
         else if (op == "<<") {
             // If the shift amount is a literal, we know its max value exactly.
             uint32_t shiftMax = 6; // conservative: up to 63 for 64-bit

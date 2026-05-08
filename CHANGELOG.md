@@ -5,6 +5,286 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Round-16: IR quality improvements** (`src/codegen_expr.cpp`):
+  - **Identity cast elimination**: `as`-cast on same-size integer types (e.g. `i32 as i32`) now returns the value directly instead of emitting a `bitcast` instruction. Opaque pointer→pointer casts also return directly (all pointers share the `ptr` type). Fallback `as`-cast path guards `srcTy == dstTy` before creating a `bitcast`.
+  - **`nonNegValues_` propagation for all boolean/comparison results**: Float comparison results (`==`, `!=`, `<`, `<=`, `>`, `>=`), short-circuit constant-fold paths (`true && x`, `false || x`), mul-by-zero strength-reduction comparisons, subtraction-comparison folds, string comparison results (including the fast/slow PHI), and pointer comparison results are now all tracked in `nonNegValues_`. This allows downstream arithmetic (add/sub/mul) on boolean values to pick up `nsw`/`nuw` flags and unsigned `icmp` variants, improving LLVM's SCEV analysis and loop vectorization.
+
+- **Round-15: compound condition range narrowing** (`src/var_range_analysis.cpp`):
+  - `narrowFromCondition` now handles `&&` (AND) and `||` (OR) compound conditions.
+  - `if (x > 0 && y > 0)` — both `x` and `y` ranges are narrowed in the true branch.
+  - `if (x > 0 || y > 0)` else branch — both ranges narrowed (both conditions false).
+  - Correctly conservative for the cases where narrowing cannot be proven (OR taken, AND not-taken).
+
+- **Round-14B: parser diagnostic guards** (`src/parser.cpp`):
+  - `parseShift()`: warns when a shift count literal exceeds 63 (undefined behaviour in LLVM IR).
+  - `parseMultiplication()`: warns when the right-hand literal of `/` or `%` is zero (division by zero).
+
+- **Round-14B: algebraic simplification rules** (`src/alg_simp_pass.cpp`):
+  - `x + x → x * 2` for same-identifier operands (always valid for any numeric type).
+  - `(-x) + (-y) → -(x + y)` — factoring out the negation from addition.
+  - `x - (-y) → x + y` — double-negation cancellation on the subtrahend.
+  - `(-x) * (-y) → x * y` — product of two negations is positive.
+
+- **Round-14B: LICM for FOR loops** (`src/hgoe_egraph.cpp`):
+  - `visitBlock()` now performs a conservative loop-invariant code motion pass after expression
+    optimisation: `VarDecl` statements in a `FOR_STMT` body whose initializer is pure and does
+    not reference the loop iterator or any variable written inside the loop are hoisted to
+    immediately before the loop, ensuring they are computed only once.
+  - Three new static helpers support the analysis: `exprRefersToAny`, `exprIsPure`, and
+    `collectWrittenVars`.
+
+- **`eliminateDeadFunctions` API** (`src/program_analysis.cpp`, `include/program_analysis.h`):
+  - New public function `eliminateDeadFunctions(Module&, ProgramFactsSnapshot&)` that removes
+    internal/private functions identified as unreachable by `computeProgramFacts()`.
+  - Avoids re-running BFS by reusing `snapshot.unreachableFunctions`; only removes functions
+    with `hasLocalLinkage()` and no remaining users.
+
+- **Escape analysis** (`src/program_analysis.cpp`, `include/program_analysis.h`):
+  - New `FunctionSnapshot::hasEscapedLocals` field; set to `true` when any alloca address is
+    stored to memory, returned, or passed to a non-pure callee.
+  - Enables downstream passes (mem2reg, alias analysis) to skip escape-free functions.
+
+- **`definitelyNonNeg` helper** (`src/var_range_analysis.cpp`, `include/var_range_analysis.h`):
+  - Returns `true` when `evalExprRange(expr, env)` yields a range with `lo >= 0`.
+  - Used by `AlgSimpPass` and `CodeGenerator` for strength reductions and comparison folding.
+
+### Fixed
+
+- **Round-14 optimization-pass ordering** (`src/optimization_manager.cpp`):
+  - Added `g.addDependency(F::kCSE, F::kCopyProp)`: copy-propagation now runs before CSE,
+    creating more CSE opportunities by substituting canonical copies.
+  - Added `g.addDependency(F::kEGraph, F::kAlgSimp)`: algebraic simplification now runs before
+    the e-graph pass, reducing the e-graph search space and avoiding redundant rewrites.
+
+- **Round-14 builtin constant folds** (`src/codegen_builtins.cpp`):
+  - `abs(x)` when `x` is known non-negative: folded to identity (returns `x` directly, no intrinsic).
+  - `min(x, x)` / `max(x, x)`: folded to identity (returns the argument directly).
+  - `clamp(val, lo, lo)` when both bounds are the same value: folded to `lo` directly.
+  - `pow(2, n)` integer fast path: replaced O(log n) binary-exponentiation loop with a
+    single `shl` + `select`; negative exponents yield 0 (consistent with runtime semantics).
+
+## [4.5.0] - 2026-05-08
+
+### Changed
+
+- **`invalidate` deferred-free semantics** (`src/codegen_stmt.cpp`, `include/codegen.h`):
+  - Logical invalidation is still instantaneous: any use of an invalidated variable after the `invalidate` statement is a compile-time error (borrow checker + `deadVars_` detection unchanged).
+  - Physical `free()` is now **deferred** to the function's exit point instead of being emitted at the `invalidate` site.  Every heap pointer queued by `invalidate` statements is freed in a single **batch** just before `ret` (or `throw` dispatch), giving the allocator a dense sequence of `free()` calls that it can merge and LLVM's optimizer a wider window to reorder, hoist, or sink them.
+  - Implemented via `deferredFreeQueue_` (a per-function `vector<Value*>` in `CodeGenerator`) and a new `emitDeferredFrees()` helper called from `generateReturn()` and `generateThrow()`.
+  - Arena-backed and stack-backed pointers continue to be handled exactly as before (no `free()` for arena, `lifetime.end` only for stack).
+
+### Fixed
+
+- **Round-6 statement/expression traversal** (`src/copy_prop_pass.cpp`, `src/alg_simp_pass.cpp`, `src/hgoe_egraph.cpp`, `src/egraph_optimizer.cpp`, `src/var_range_analysis.cpp`, `src/uniqueness_analysis.cpp`, `src/borrow_checker.cpp`, `src/opt_orchestrator.cpp`):
+  - All remaining AST node types now handled in every analysis and transform pass: `MOVE_DECL`, `PREFETCH_STMT`, `PIPELINE_STMT`, `ASSUME_STMT` (deoptBody), `INVALIDATE_STMT`, and all expression types including `ARRAY_EXPR`, `STRUCT_LITERAL_EXPR`, `SPREAD_EXPR`, `PIPE_EXPR`, `MOVE_EXPR`, `BORROW_EXPR`, `REBORROW_EXPR`, `DICT_EXPR`, `RANGE_ANNOT_EXPR`.
+
+- **Round-7 optimization-pass coverage** (`src/width_opt_pass.cpp`, `src/cse_pass.cpp`, `src/dce_pass.cpp`):
+  - `width_opt_pass.cpp` `transformStmtInPlace`: added `THROW_STMT`, `DEFER_STMT`, `CATCH_STMT`, `ASSUME_STMT`, `PREFETCH_STMT`, and `PIPELINE_STMT` so that sub-expressions inside those constructs are now subject to integer-width narrowing.
+  - `cse_pass.cpp` `collectOpaqueVarsInStmt`: added `ASSUME_STMT` (recurses into deoptBody), `PREFETCH_STMT` (registers volatile/atomic prefetch-declared vars), and `PIPELINE_STMT` (recurses into each stage body) so CSE correctly avoids sinking loads across opaque barriers inside those constructs.
+  - `dce_pass.cpp` `transformStmt`: added `ASSUME_STMT` (recurses into deoptBody), `PREFETCH_STMT` (explicit leaf case), and `PIPELINE_STMT` (recurses into each stage's `BlockStmt` via `transformBlock`) so dead-code elimination propagates into all reachable sub-statements.
+
+- **Round-8 correctness audit** (`src/cfctre.cpp`, `src/alg_simp_pass.cpp`, `src/borrow_checker.cpp`, `src/codegen_expr.cpp`):
+  - `cfctre.cpp`: Fixed 6 C++ undefined-behavior issues in the compile-time evaluator:
+    - `>>` and `>>=` operators used C++ arithmetic (signed) right-shift instead of logical (unsigned), diverging from OmScript semantics; fixed by casting operands to `uint64_t` before shifting.
+    - Unary negation of `INT64_MIN` is signed overflow (UB); fixed with `uint64_t` two's-complement negation.
+    - `abs(INT64_MIN)` in the built-in `abs` evaluator overflows; guarded with early return of `INT64_MIN`.
+    - `std::abs(INT64_MIN)` in `gcd` and `lcm` built-in evaluators is UB; replaced with explicit unsigned-cast negation.
+    - `rotate_left`/`rotate_right` with shift amount 0 caused `x >> 64` / `x << 64` (UB for 64-bit integers); guarded with early return for `sh == 0`.
+  - `alg_simp_pass.cpp`: Constant-fold guard for `INT64_MIN / -1` and `INT64_MIN % -1` (SIGFPE on x86-64) was missing from the literal-folding path; added explicit guards matching `cfctre.cpp`.
+  - `borrow_checker.cpp`: `ASSUME_STMT` was not handled in `checkStmt`, so use-after-move errors inside `assume(cond)` conditions and deopt bodies were silently missed; added explicit case that checks both the condition expression and the optional deopt body.
+  - `codegen_expr.cpp`: SIMD vector `>>` emitted `CreateAShr` (arithmetic shift) while the scalar path and language semantics mandate `CreateLShr` (logical shift); changed to `CreateLShr`.
+
+- **Round-11 optimization improvements** (`src/var_range_analysis.cpp`, `src/width_legalization.cpp`, `src/cfctre.cpp`, `src/copy_prop_pass.cpp`):
+  - `var_range_analysis.cpp` `scanStmt`: Added `EXPR_STMT` case so that reassignment expressions (e.g. `x = a & 0xFF`) update the live range map; previously only `VAR_DECL` declarations triggered range narrowing, causing subsequent reassignments to leave stale over-wide ranges.
+  - `width_legalization.cpp`: `x & literal` now returns `fromUnsignedValue(literal)` when the literal is a non-negative integer, producing 8/16/32-bit widths for masks like `0xFF`/`0xFFFF`/`0xFFFFFFFF` instead of the over-wide bitwise default. `x % N` now returns `fromUnsignedValue(N - 1)` for a known positive literal divisor, bounding the width to fit `[0, N-1]`.
+  - `cfctre.cpp`: Added same-value identity folds for built-in calls — `min(x, x) → x` and `max(x, x) → x` fire before the concrete-integer path so they apply to symbolic operands; `pow(x, 0) → 1` checks the exponent before requiring a concrete base, enabling the fold when only the exponent is a literal `0`.
+  - `copy_prop_pass.cpp` `collectOpaqueVarsInStmt`: Added `ASSUME_STMT` case so that volatile/atomic variable declarations inside `assume` deopt bodies are correctly added to the opaque set; previously such declarations were invisible to copy propagation, allowing incorrect substitution across opaque barriers.
+
+- **Round-13 optimization audit** (`src/egraph.cpp`, `src/hgoe_egraph.cpp`, `src/synthesize.cpp`, `src/opt_orchestrator.cpp`):
+  - `egraph.cpp`: Confirmed all 16 target algebraic rewrite rules are present — `sub_self` (x−x→0), `xor_self` (x^x→0), `and_self`/`or_self` (idempotent AND/OR), `or_zero`/`xor_zero` (identity with 0), `and_all_ones` (x&−1→x), `add_zero_right`/`add_zero_left` (x+0→x), `mul_one_right`/`mul_one_left` (x∗1→x), `shl_zero`/`shr_zero` (x⟨⟨0→x), `zero_sub_to_neg` (0−x→−x), `sub_zero` (x−0→x), `double_bitnot` (~(~x)→x), `double_neg` (−(−x)→x), `add_sub_cancel_right` ((x+y)−y→x), and `sub_add_cancel` ((x−y)+y→x). No rules were missing; no changes required.
+  - `hgoe_egraph.cpp`: Confirmed `Op::Mod` is grouped with `Op::Div` at 25-cycle cost (matching single `idiv` instruction latency); `Op::Call` already carries a 10-cycle cost with `memoryPressure = 1.0`; `Op::Load`/`Op::Store` do not exist in the egraph `Op` enum (memory ops are modelled via `NodeMeta::readsMemory`/`writesMemory` flags rather than separate opcodes). No changes required.
+  - `synthesize.cpp`: Confirmed both `SynthOp::SHL` and `SynthOp::SHR` eval paths apply `& 63` to the shift amount; no residual `& 62` or `& 30` off-by-one masks remain. No changes required.
+  - `opt_orchestrator.cpp`: Confirmed `checkStmt` handles all statement types that carry sub-expressions — `BLOCK`, `VAR_DECL`, `MOVE_DECL`, `RETURN_STMT`, `EXPR_STMT`, `IF_STMT`, `WHILE_STMT`, `DO_WHILE_STMT`, `FOR_STMT`, `FOR_EACH_STMT`, `SWITCH_STMT`, `CATCH_STMT`, `DEFER_STMT`, `THROW_STMT`, `PREFETCH_STMT`, `ASSUME_STMT`, and `PIPELINE_STMT`; `INVALIDATE_STMT` and `FREEZE_STMT` contain only a `varName` string (no sub-expression to analyse) and are correctly handled by `default: break`. No changes required.
+
+- **Round-12 traversal audit** (`src/rlc_pass.cpp`, `src/sdr_pass.cpp`, `src/codegen_expr.cpp`):
+  - `rlc_pass.cpp`: Audit confirmed `THROW_STMT`, `INVALIDATE_STMT`, `ASSUME_STMT`, and `PIPELINE_STMT` are all already handled in both `stmtUsesVar` and `renameInStmt` traversals — no changes needed.
+  - `sdr_pass.cpp`: Pass operates entirely on LLVM IR (not AST); all values generated from `THROW_STMT`, `ASSUME_STMT`, `PIPELINE_STMT`, and `PREFETCH_STMT` are visible as LLVM instructions — no AST-level traversal gaps.
+  - `codegen_expr.cpp`: Division by power-of-2 fast path is already present — unsigned operands and non-negative tracked values both emit `CreateLShr` (with `udiv.lshr`/`div.lshr` names) instead of `CreateUDiv`/`CreateSDiv`; also covers modulo by power-of-2 via `CreateAnd` mask — no changes needed.
+
+## [4.4.0] - 2026-05-07
+
+### Added
+
+- **`@semantics(willreturn)` annotation** (`include/ast.h`, `src/parser.cpp`, `src/codegen.cpp`):
+  - Applies LLVM `WillReturn` attribute to the generated function.
+  - Asserts that every execution of the function will eventually return to the caller (no infinite loops, no `abort()`-class calls).
+  - Enables dead-store elimination, load-forwarding, and LICM across call sites that LLVM's inter-procedural analysis cannot otherwise prove safe.
+  - Emits a parse-time warning when combined with `@semantics(noreturn)` (contradictory; `noreturn` wins).
+
+- **`@semantics(nosync)` annotation** (`include/ast.h`, `src/parser.cpp`, `src/codegen.cpp`):
+  - Applies LLVM `NoSync` attribute.
+  - Asserts that the function contains no synchronization primitives (mutexes, atomics, memory barriers, blocking I/O).
+  - Enables the optimizer to reorder or speculate calls across this function's boundary without breaking happens-before guarantees.
+
+- **`@semantics(nofree)` annotation** (`include/ast.h`, `src/parser.cpp`, `src/codegen.cpp`):
+  - Applies LLVM `NoFree` attribute.
+  - Asserts that the function does not free (deallocate) any memory reachable through its pointer arguments or global state.
+  - Allows alias analysis to prove that pointer values remain valid across the call, enabling store elimination, LICM, and vectorization of surrounding code.
+
+  **Usage**:
+  ```omscript
+  @semantics(pure, willreturn, nofree)
+  fn fastHash(data: int) -> int { ... }
+
+  @semantics(nosync, nofree)
+  fn processBuffer(buf: ptr, len: int) -> void { ... }
+  ```
+
+### Fixed
+
+- **Optimization pipeline: missing `extern` PassId declarations** (`include/opt_pass.h`):
+  - `PassId::kDCE`, `kCSE`, `kAlgSimp`, `kCopyProp`, and `kRLC` were defined as `uint32_t` variables in `opt_orchestrator.cpp` but had no corresponding `extern` declaration in the public header. Any translation unit that included `opt_pass.h` and referenced these names could not link.
+  - Added the five missing `extern uint32_t` declarations to the `namespace PassId` block in `opt_pass.h`.
+
+- **Optimization pipeline: incomplete cascade-invalidation dependency graph** (`src/optimization_manager.cpp`):
+  - `AnalysisDependencyGraph::createDefault()` previously wired only 10 of the 23 analysis dependency edges. The 13 missing edges — covering `rlc`, `dce`, `cse`, `alg_simp`, `copy_prop`, `width_legalization`, `width_opt`, and `hgoe_egraph` — meant that calling `ctx.validity().invalidate("dce")` would not cascade-invalidate `cse`, `alg_simp`, or `copy_prop`. In `runInvalidated()` mode, downstream passes silently operated on stale analysis.
+  - Added all 13 missing dependency edges with explanatory comments.
+
+- **Optimization pipeline: incorrect `invalidates_` declarations in pass metadata** (`src/opt_orchestrator.cpp`):
+  - Five AST-rewriting passes declared incomplete invalidation sets. Width legalization and width-opt facts were never listed as stale even though they depend entirely on expression shapes.
+  - `egraph`: `{}` → `{range_analysis, cse, width_legalization, width_opt}`
+  - `hgoe_egraph`: `{range_analysis}` → `{range_analysis, cse, width_legalization, width_opt}`
+  - `alg_simp`: `{range_analysis}` → `{range_analysis, width_legalization, width_opt}`
+  - `copy_prop`: `{cse, range_analysis}` → `{cse, range_analysis, width_legalization, width_opt}`
+  - `dce`: `{range_analysis}` → `{range_analysis, width_legalization, width_opt}`
+
+- **Optimization pipeline: `CostTransform` passes ran unconditionally at O0** (`src/opt_orchestrator.cpp`):
+  - DCE, CSE, AlgSimp, and the width optimiser are classified as `PassKind::CostTransform` — they exist to improve runtime performance, not to ensure correctness. They were always run regardless of the active optimization level.
+  - At O0 the user expects minimal compile time and maximum AST fidelity for debugger step-level accuracy; running these passes modified the AST unpredictably.
+  - Added an O-level gate to `runPassPipeline`: `CostTransform` passes are now skipped when `optLevel_ == OptimizationLevel::O0`. `Analysis` and `SemanticTransform` passes are unaffected.
+
+- **Optimization pipeline: per-pass wrappers performed redundant manual invalidation** (`src/opt_orchestrator.cpp`):
+  - `runDCE`, `runAlgSimp`, and `runCopyProp` each explicitly set downstream validity flags to `false` immediately before `PassScheduler::applyInvalidation()` performs the same operation through the metadata-driven cascade. The manual assignments were redundant and obscured the single source of truth for invalidation policy.
+  - Removed the manual flag assignments; `applyInvalidation()` is now the sole invalidation path for these three passes.
+
+- **IR quality: callee attributes not propagated to call instructions** (`src/codegen_builtins.cpp`):
+  - `generateCall` (user function call path) did not copy the callee's `WillReturn`, `NoSync`, `NoFree`, or `MemoryEffects` attributes to the `CallInst`. LLVM's LICM, DSE, and call-site devirtualization passes operate on `CallInst` attributes directly — without them, passes running before inlining could not hoist pure calls out of loops or eliminate their stores.
+  - Now, after creating the `CallInst`, `generateCall` copies all four attribute classes to the call instruction. Callee memory effects are propagated only when they are not `unknown()` so that the existing conservative path is not regressed.
+
+- **IR quality: reborrow element GEP missing `inbounds` + non-wrapping flags** (`src/codegen_stmt.cpp`):
+  - The partial-borrow path (`borrow arr[i]`) emitted a plain `CreateGEP` without `inbounds` and without `nuw`/`nsw` on the `idx+1` offset computation.
+  - The borrow checker guarantees `0 ≤ idx < len`, which means `idx+1` cannot overflow unsigned (`nuw`) or signed (`nsw`), and the resulting pointer is within the array's malloc'd slab (`inbounds`). These flags are now set so that GVN, LICM, and alias analysis can fold/hoist through reborrow-derived pointer expressions.
+
+- **CSE pass: incorrect CSE of volatile/atomic variables in `foreach`/`do-while`/`switch`/`catch`/`defer` bodies** (`src/cse_pass.cpp`):
+  - `collectOpaqueVars` (which marks variable names as non-CSE-able) only recursed into `if`/`while`/`for` bodies. Variables declared `volatile` or `atomic` inside `for each`, `do...while`, `switch`, `catch`, or `defer` blocks were invisible to the opaque set, allowing the CSE pass to incorrectly fold their repeated reads into a single cached copy — violating the `volatile`/`atomic` semantics that every read must reach the underlying storage.
+  - Refactored into a recursive `collectOpaqueVarsInStmt` dispatch that handles all compound statement forms. `collectOpaqueVars` and `collectOpaqueVarsInList` now delegate to it, so the opaque set is always complete before CSE runs.
+
+- **Copy-propagation pass: same `collectOpaqueVarsInStmt` gap for `switch`/`catch`/`defer`** (`src/copy_prop_pass.cpp`):
+  - The equivalent `collectOpaqueVarsInStmt` helper in the copy-propagation pass also lacked `SWITCH_STMT`, `CATCH_STMT`, and `DEFER_STMT` cases. This could allow copies of volatile/atomic variables declared in those blocks to be forwarded across reads — the same semantic violation as the CSE bug above.
+  - Added the three missing cases with the same pattern already used by `rlc_pass.cpp` and `var_range_analysis.cpp`.
+
+- **Variable-range analysis: `collectWritten` missed `catch`/`defer` bodies** (`src/var_range_analysis.cpp`):
+  - `collectWritten` (used to conservatively widen loop-iteration variable ranges when the loop body may reassign them) handled `switch` cases but not `catch` or `defer` bodies. A variable reassigned inside a `catch` or `defer` block nested in a loop would not be widened, potentially keeping a stale narrowed range. This could cause incorrect range-guided optimizations (e.g., mis-folding comparisons) on variables that are actually overwritten on the exceptional path.
+  - Added `CATCH_STMT` and `DEFER_STMT` cases to `collectWritten`.
+
+- **E-graph optimizer and HGOE pass: `catch`/`defer` bodies not traversed** (`src/egraph_optimizer.cpp`, `src/hgoe_egraph.cpp`):
+  - `optimizeStatementImpl` in `egraph_optimizer.cpp` and `visitStmt` in `hgoe_egraph.cpp` did not recurse into `CATCH_STMT` or `DEFER_STMT` bodies. Expressions inside catch-handler and defer blocks were silently skipped, leaving valid e-graph and HGOE rewrites (e.g., strength reductions, algebraic simplifications) on the table.
+  - `hgoe_egraph.cpp::visitStmt` also missed `DO_WHILE_STMT` and `SWITCH_STMT`.
+  - Added the missing cases to both files. `opt_orchestrator.cpp`'s `checkStmt` preflight validator received the same additions (`CATCH_STMT`, `DEFER_STMT`, `THROW_STMT`) for completeness.
+
+### Documentation
+
+- **`LANGUAGE_REFERENCE.md`**:
+  - §6.6 `@semantics` table: `willreturn`, `nosync`, `nofree` rows with LLVM attribute mapping and optimizer-effect descriptions.
+  - §25.2.3 Analysis dependency graph: corrected from the old 7-edge stub to all 22 edges now in `createDefault()`.
+  - §25.3 Per-O-level pass list: added `PassKind` O-level gating note; documented `CostTransform` passes are skipped at O0 and listed in their correct pipeline position at O1/O2.
+  - §25.6 LLVM IR quality guarantees (new section): documents every unconditional per-function attribute, O2+ additions, call-site attribute propagation, and load/store metadata emitted by the code generator. Corrected: `!range` on call sites is metadata on `CallInst`, not a function return attribute; the inaccurate "LLVM 19+" qualifier was removed.
+  - §33: bumped version to `4.4.0`.
+- **`README.md`**: updated "Current version" badge to `4.4.0`.
+- **`include/version.h`**: bumped `OMSCRIPT_VERSION_MINOR` to `4` and `OMSCRIPT_VERSION_PATCH` to `0`.
+- **`src/codegen_stmt.cpp`**: reborrow GEP comments updated to explain borrow-checker preconditions enabling `inbounds`/`nuw`/`nsw`.
+
+## [4.4.1] - 2026-05-08
+
+### Fixed
+
+- **Copy-propagation: `collectWrittenDeep` misses `switch`/`catch`/`defer`** (`src/copy_prop_pass.cpp`):
+  - `collectWrittenDeep` — used by `killAndRecurseBody` to conservatively kill all variables written inside a compound body before recursing into it — did not recurse into `SWITCH_STMT` case bodies, `CATCH_STMT` bodies, or `DEFER_STMT` bodies. This meant that when a loop body contained a `switch`, `catch`, or `defer` statement, variables assigned inside those sub-blocks were not killed before the loop was entered. A stale copy (e.g., `y → x` from before the loop) could remain alive even though `y` is unconditionally assigned a new value inside the loop body's switch arm, allowing the pass to incorrectly forward the pre-loop value of `x` for reads of `y` after the loop.
+  - Added `SWITCH_STMT`, `CATCH_STMT`, and `DEFER_STMT` cases to `collectWrittenDeep`.
+
+- **Copy-propagation: `propagateInBlock` does not process `switch`/`catch`/`defer` bodies** (`src/copy_prop_pass.cpp`):
+  - `propagateInBlock` had no cases for `SWITCH_STMT`, `CATCH_STMT`, or `DEFER_STMT`. Both effects were wrong: (1) copy-propagation opportunities inside those bodies were silently missed; (2) after the block, variables written inside the block had not been killed from the copy map, so the pass could still forward stale copies to code appearing after the `switch`/`catch`/`defer` in the same enclosing block.
+  - Added handling for all three statement types: propagate into the condition (for `switch`), kill all writes across all cases/body, then recurse with the updated map.
+
+- **Variable-range analysis: `scanStmt` misses `for each`/`switch`/`catch`/`defer`** (`src/var_range_analysis.cpp`):
+  - `scanStmt` updated the range environment only for `if`, `for`, `while`, `do-while`, and bare blocks. Statements of type `FOR_EACH_STMT`, `SWITCH_STMT`, `CATCH_STMT`, and `DEFER_STMT` hit `default: break`, so: (a) variable declarations inside those bodies were never added to the range environment; (b) variables reassigned inside those bodies were never invalidated, leaving falsely-narrowed ranges for the enclosing scope.
+  - Added all four missing cases, each with the same "collect writes, erase from env, then recurse" pattern used by `for`/`while`/`do-while`.
+
+- **Uniqueness analysis: `catch`/`defer` bodies not traversed** (`src/uniqueness_analysis.cpp`):
+  - Phase 1 (`collectStringArrayVars`) and Phase 2 (`markSharedVars`) both stopped at `SWITCH_STMT` (which was already handled) without covering `CATCH_STMT` or `DEFER_STMT`. String/array variables declared or aliased exclusively inside catch or defer handlers were invisible to the analysis, making the compiler falsely assume they are uniquely owned. This could suppress necessary `strdup`/copy-on-write operations for those variables.
+  - Added `CATCH_STMT` and `DEFER_STMT` traversal to both phases.
+
+- **Borrow checker: `catch` handler bodies not checked** (`src/borrow_checker.cpp`):
+  - The borrow checker's statement dispatcher had no `CATCH_STMT` case. Catch handler bodies were silently skipped, meaning: borrows made inside a catch block were never validated; use-after-move errors in catch handlers were not reported; and borrows that should be released before the handler exits were not tracked.
+  - Added a `CATCH_STMT` case that pushes a borrow scope, processes all statements in the handler body, then pops the scope — the same pattern used for loop bodies and block statements.
+
+- **`stmtCallsAny`: `switch`/`catch`/`defer` bodies not searched for concurrency primitives** (`src/codegen.cpp`):
+  - `stmtCallsAny` (used by `usesConcurrencyPrimitive` to decide whether a function body contains any call to `thread_create`, `mutex_lock`, etc.) did not recurse into `SWITCH_STMT` case bodies, `CATCH_STMT` bodies, or `DEFER_STMT` bodies. A function that only called concurrency primitives inside a switch arm or a deferred cleanup block would be incorrectly classified as "not concurrent", potentially allowing the effect-inference pass to attach `nosync` or downgrade memory-ordering assumptions.
+  - Added `SWITCH_STMT`, `CATCH_STMT`, and `DEFER_STMT` cases to `stmtCallsAny`. Also added the three corresponding `using omscript::` declarations to the anonymous namespace so the type names resolve without qualification.
+
+- **Copy-propagation: `propagateInExpr` does not recurse into field-access and field-assign expressions** (`src/copy_prop_pass.cpp`):
+  - `propagateInExpr` handled `BINARY_EXPR`, `UNARY_EXPR`, `TERNARY_EXPR`, `CALL_EXPR`, `ASSIGN_EXPR`, `INDEX_EXPR`, `INDEX_ASSIGN_EXPR`, `POSTFIX_EXPR`, and `PREFIX_EXPR`, but had no cases for `FIELD_ACCESS_EXPR` or `FIELD_ASSIGN_EXPR`. Sub-expressions inside a struct field access (`obj.field`) or assignment (`obj.field = rhs`) were silently skipped, so copies could not be propagated into either the object expression or the right-hand-side value of a field assignment.
+  - Added both cases: `FIELD_ACCESS_EXPR` recurses into the `object` sub-expression; `FIELD_ASSIGN_EXPR` recurses into both `object` and `value`.
+
+- **Algebraic simplification: `simplifyExpr` does not recurse into index/field sub-expressions** (`src/alg_simp_pass.cpp`):
+  - The `simplifyExpr` bottom-up recurser had no cases for `INDEX_EXPR`, `INDEX_ASSIGN_EXPR`, `FIELD_ACCESS_EXPR`, `FIELD_ASSIGN_EXPR`, or `ASSIGN_EXPR`. Algebraic simplification rules (constant folding, identity elimination, strength reduction) were silently skipped for sub-expressions inside array indexing (`arr[i+0]`), element writes, struct field reads and writes, and direct assignment RHS values.
+  - Added the five missing cases. Each recurses into all child sub-expressions so that bottom-up folding works through nested containers.
+
+- **HGOE pass: `visitExpr` does not recurse into `INDEX_ASSIGN_EXPR`/`FIELD_ACCESS_EXPR`/`FIELD_ASSIGN_EXPR`** (`src/hgoe_egraph.cpp`):
+  - `visitExpr` handled `INDEX_EXPR` but not `INDEX_ASSIGN_EXPR`, `FIELD_ACCESS_EXPR`, or `FIELD_ASSIGN_EXPR`. Sub-expressions inside element writes and struct field expressions were not visited by the HGOE strength-reduction pass, leaving valid rewrites (e.g., strength-reductions of index arithmetic or field-value computations) undiscovered.
+  - Added all three missing cases.
+
+- **Multiple passes: `MOVE_DECL` statements not treated as variable writes or definitions** (`src/copy_prop_pass.cpp`, `src/var_range_analysis.cpp`, `src/alg_simp_pass.cpp`, `src/uniqueness_analysis.cpp`):
+  - `MOVE_DECL` (the `var y = move x` statement) declares a new variable `y` and consumes `x`. Every analysis and transformation pass that handled `VAR_DECL` failed to also handle `MOVE_DECL`:
+    - **Copy propagation**: neither `collectWrittenInStmt`, `collectWrittenDeep`, nor `propagateInBlock` knew about `MOVE_DECL`. The destination name was not added to "writes", so `killAndRecurseBody` did not kill it; and after a `move`, any prior copy-map entry for the source was not invalidated, allowing the pass to continue forwarding a stale value for a variable that was just moved-from.
+    - **Variable-range analysis**: `collectWritten` did not include the destination name, so range invalidation for loop bodies containing `move` declarations was incomplete. `scanStmt` did not compute the new variable's range or invalidate the moved-from variable's range.
+    - **Algebraic simplification**: `simplifyStmt` did not recurse into the `MoveDecl` initializer, leaving constant-fold and identity-elimination opportunities inside `move` initializer expressions unreachable.
+    - **Uniqueness analysis**: neither `collectStringArrayVars` nor `markSharedVars` handled `MOVE_DECL`. String/array variables declared via `move` were invisible to the analysis, causing under-approximation of the unique-string set and potentially unsafe `strdup`-skip decisions.
+  - Added `MOVE_DECL` handling to all four passes with semantics appropriate for each.
+
+- **Multiple passes: `PREFETCH_STMT` with embedded `VarDecl` not tracked as a variable declaration** (`src/copy_prop_pass.cpp`, `src/var_range_analysis.cpp`, `src/alg_simp_pass.cpp`, `src/uniqueness_analysis.cpp`, `src/borrow_checker.cpp`, `src/egraph_optimizer.cpp`, `src/hgoe_egraph.cpp`):
+  - `prefetch [hot] var x = expr` embeds a `VarDecl` inside a `PrefetchStmt`. None of the analysis/transform passes recognised this form. As a result, the variable declared by the prefetch statement was:
+    - Not added to "written" sets in `copy_prop`, `var_range` — so `killAndRecurseBody` / range invalidation did not kill it on loop back-edges.
+    - Not tracked for range narrowing in `var_range`.
+    - Not simplified (the `addrExpr` and `varDecl->initializer` were not folded) by `alg_simp`, `egraph_optimizer`, and `hgoe`.
+    - Invisible to `uniqueness_analysis` — string/array prefetch variables had undefined uniqueness.
+    - Not scope-checked by `borrow_checker` — ownership effects of the embedded declaration were ignored.
+  - Added `PREFETCH_STMT` handling to all seven passes.
+
+- **Multiple passes: `PIPELINE_STMT` stages not traversed** (`src/copy_prop_pass.cpp`, `src/var_range_analysis.cpp`, `src/alg_simp_pass.cpp`, `src/uniqueness_analysis.cpp`, `src/borrow_checker.cpp`, `src/egraph_optimizer.cpp`, `src/hgoe_egraph.cpp`):
+  - `pipeline N { stage name { ... } ... }` sequences multiple named stage bodies. No analysis or transformation pass (except `rlc_pass.cpp`) traversed the stage bodies. Writes inside stages were not killed in range/copy maps, algebraic rules were not applied to stage expressions, string/array vars inside stages were invisible to uniqueness analysis, and borrow-checker did not scope-check stage bodies.
+  - Added `PIPELINE_STMT` handling to all seven passes. Stage bodies are each treated as a separate nested scope, and the `count` expression is treated as a loop-count operand.
+
+- **Multiple passes: `ASSUME_STMT` deopt body not traversed; `ASSUME_STMT` absent from `egraph_optimizer` and `hgoe_egraph`** (`src/alg_simp_pass.cpp`, `src/copy_prop_pass.cpp`, `src/egraph_optimizer.cpp`, `src/hgoe_egraph.cpp`, `src/var_range_analysis.cpp`):
+  - `assume(cond) else { deoptBody }` has an optional deopt body that runs if the assumption is violated. `alg_simp_pass` and `copy_prop_pass` already visited the `condition` but skipped the `deoptBody`. Neither `egraph_optimizer` nor `hgoe_egraph` handled `ASSUME_STMT` at all. Additionally, `var_range_analysis` did not exploit `assume` conditions for range narrowing.
+  - Fixed all five passes: deopt body is now recursed in `alg_simp` and `copy_prop`; `egraph_optimizer` and `hgoe_egraph` now visit both the condition and deopt body; `var_range_analysis` now calls `narrowFromCondition` on the assume condition to propagate the proven constraint into subsequent code.
+
+- **`INVALIDATE_STMT` not erasing the variable's range in `var_range_analysis`** (`src/var_range_analysis.cpp`):
+  - `invalidate x;` marks variable `x` as dead (no longer usable). The variable-range pass did not handle this statement, so stale range constraints could persist through an invalidation point, potentially allowing the pass to emit incorrect bounds for `x` after it was invalidated.
+  - Added `INVALIDATE_STMT` to `scanStmt`: the variable's range entry is now erased when an invalidation is encountered.
+
+- **Multiple passes: expression traversal gaps for `ARRAY_EXPR`, `STRUCT_LITERAL_EXPR`, `SPREAD_EXPR`, `PIPE_EXPR`, `MOVE_EXPR`, `BORROW_EXPR`, `REBORROW_EXPR`, `DICT_EXPR`, `RANGE_ANNOT_EXPR`** (`src/copy_prop_pass.cpp` `propagateInExpr`; `src/alg_simp_pass.cpp` `simplifyExpr`; `src/hgoe_egraph.cpp` `visitExpr`):
+  - All three bottom-up expression traversers had `default: break` for every OmScript-specific expression type. Sub-expressions inside array literals, struct literals, spread operators, pipe operators, move/borrow/reborrow expressions, dict literals, and range annotations were silently skipped.
+  - Added all nine missing cases to each traverser. Each case recurses into all reachable child sub-expressions.
+
+- **`opt_orchestrator` preflight check: `PREFETCH_STMT`, `PIPELINE_STMT`, `ASSUME_STMT` not checked; `checkExpr` missing 10 expression kinds** (`src/opt_orchestrator.cpp`):
+  - The preflight `checkStmt` and `checkExpr` lambdas in `OptimizationOrchestrator::runPreflightCheck()` perform pre-pass validity checks (including division-by-zero detection). They did not handle `PREFETCH_STMT`, `PIPELINE_STMT`, or `ASSUME_STMT` in `checkStmt`, meaning sub-expressions in those statements were never checked. `checkExpr` lacked cases for `INDEX_ASSIGN_EXPR`, `FIELD_ACCESS_EXPR`, `FIELD_ASSIGN_EXPR`, `SPREAD_EXPR`, `PIPE_EXPR`, `MOVE_EXPR`, `BORROW_EXPR`, `REBORROW_EXPR`, `RANGE_ANNOT_EXPR`, `STRUCT_LITERAL_EXPR`, `DICT_EXPR`, and `ARRAY_EXPR`.
+  - Added all missing cases to both `checkStmt` and `checkExpr`.
+
 ## [4.3.2] - 2026-05-07
 
 ### Fixed

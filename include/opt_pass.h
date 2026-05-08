@@ -199,6 +199,10 @@ namespace PassId {
     extern uint32_t kEGraph;
     extern uint32_t kRangeAnalysis;
     extern uint32_t kRLC;
+    extern uint32_t kDCE;
+    extern uint32_t kCSE;
+    extern uint32_t kAlgSimp;
+    extern uint32_t kCopyProp;
     extern uint32_t kWidthLegalization;
     extern uint32_t kWidthOpt;
     extern uint32_t kUniqueness;
@@ -222,13 +226,22 @@ using AnalysisKey = std::string;
 /// dependents.
 ///
 /// ## OmScript standard dependencies (see createDefault()):
-///   constant_returns → (none)
-///   purity           → constant_returns
-///   effects          → purity
-///   synthesis        → purity, effects          (and itself invalidates them)
-///   cfctre           → purity, effects, synthesis
-///   egraph           → cfctre
-///   range_analysis   → purity, effects, cfctre
+///   constant_returns  → (none)
+///   purity            → constant_returns
+///   effects           → purity
+///   ersl              → effects
+///   synthesis         → purity, effects          (and itself invalidates them)
+///   cfctre            → purity, effects, synthesis
+///   egraph            → cfctre
+///   range_analysis    → purity, effects, cfctre
+///   rlc               → effects
+///   dce               → cfctre
+///   cse               → dce
+///   alg_simp          → cfctre, dce
+///   copy_prop         → cfctre, dce, alg_simp
+///   width_legalization → range_analysis, copy_prop, alg_simp
+///   width_opt         → width_legalization
+///   hgoe_egraph       → egraph, cfctre
 ///
 /// ## Invalidation semantics
 /// When fact B is invalidated:

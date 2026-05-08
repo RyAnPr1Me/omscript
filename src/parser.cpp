@@ -510,91 +510,293 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintMinSize = false, hintOptNone = false, hintNoUnwind = false;
             bool hintConstEval = false;
             bool hintSpeculatable = false;
+            bool hintWillReturn = false;
+            bool hintNoSync = false;
+            bool hintNoFree = false;
             int  hintAlign = 0;
             bool isOptMaxFromAnnotation = false;
             OptMaxConfig optMaxCfgFromAnnotation;
             int allocatorSizeParam = -1;
             int allocatorCountParam = -1;
+            FunctionDecl::MemoryEffect hintMemoryEffect = FunctionDecl::MemoryEffect::Default;
+            bool hintNoAliasReturn = false;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
-                if (ann.lexeme == "inline") {
-                    hintInline = true;
-                } else if (ann.lexeme == "noinline") {
-                    hintNoInline = true;
-                } else if (ann.lexeme == "cold") {
-                    hintCold = true;
-                } else if (ann.lexeme == "hot") {
-                    hintHot = true;
-                } else if (ann.lexeme == "pure") {
-                    hintPure = true;
-                } else if (ann.lexeme == "noreturn") {
-                    hintNoReturn = true;
-                } else if (ann.lexeme == "static") {
-                    hintStatic = true;
-                } else if (ann.lexeme == "flatten") {
-                    hintFlatten = true;
-                } else if (ann.lexeme == "unroll") {
-                    hintUnroll = true;
-                } else if (ann.lexeme == "nounroll") {
-                    hintNoUnroll = true;
-                } else if (ann.lexeme == "restrict") {
-                    hintRestrict = true;
-                } else if (ann.lexeme == "vectorize") {
-                    hintVectorize = true;
-                } else if (ann.lexeme == "novectorize") {
-                    hintNoVectorize = true;
-                } else if (ann.lexeme == "parallel") {
-                    hintParallelize = true;
-                } else if (ann.lexeme == "noparallel") {
-                    hintNoParallelize = true;
-                } else if (ann.lexeme == "noalias") {
-                    hintRestrict = true;  // @noalias on functions = @restrict
-                } else if (ann.lexeme == "minsize") {
-                    hintMinSize = true;
-                } else if (ann.lexeme == "optnone") {
-                    hintOptNone = true;
-                } else if (ann.lexeme == "nounwind") {
-                    hintNoUnwind = true;
-                } else if (ann.lexeme == "const_eval") {
-                    hintConstEval = true;
-                } else if (ann.lexeme == "speculatable") {
-                    hintSpeculatable = true;
-                } else if (ann.lexeme == "align") {
-                    consume(TokenType::LPAREN, "Expected '(' after @align");
-                    if (check(TokenType::RPAREN)) {
-                        // @align() with no argument → auto-optimal (cache-line alignment)
-                        hintAlign = -1;
-                    } else {
-                        const Token alignVal = consume(TokenType::INTEGER, "Expected integer alignment value");
-                        hintAlign = static_cast<int>(alignVal.intValue);
-                    }
-                    consume(TokenType::RPAREN, "Expected ')' after @align value");
-                } else if (ann.lexeme == "allocator") {
-                    // @allocator(size=N) or @allocator(size=N, count=M)
-                    consume(TokenType::LPAREN, "Expected '(' after @allocator");
+
+                // ── Compound annotation forms (canonical) ────────────────────
+                // @opt(key, key, align=N, ...)   — optimization hints
+                // @semantics(key, key, ...)       — semantic/ABI attributes
+                // @memory(allocator, size=N, ...) — memory-model attributes
+                if (ann.lexeme == "opt") {
+                    consume(TokenType::LPAREN, "Expected '(' after @opt");
                     while (!check(TokenType::RPAREN) && !isAtEnd()) {
-                        const Token paramKey = consume(TokenType::IDENTIFIER, "Expected param name in @allocator");
-                        consume(TokenType::ASSIGN, "Expected '=' in @allocator");
-                        const Token paramVal = advance();
-                        int idx = 0;
-                        if (paramVal.type == TokenType::INTEGER) idx = static_cast<int>(paramVal.intValue);
-                        if (paramKey.lexeme == "size") {
-                            allocatorSizeParam = idx;
-                        } else if (paramKey.lexeme == "count") {
-                            allocatorCountParam = idx;
+                        const Token key = consume(TokenType::IDENTIFIER,
+                            "Expected option name in @opt(...)");
+                        if (key.lexeme == "inline")          hintInline      = true;
+                        else if (key.lexeme == "noinline")   hintNoInline    = true;
+                        else if (key.lexeme == "hot")        hintHot         = true;
+                        else if (key.lexeme == "cold")       hintCold        = true;
+                        else if (key.lexeme == "vectorize")  hintVectorize   = true;
+                        else if (key.lexeme == "novectorize")hintNoVectorize = true;
+                        else if (key.lexeme == "unroll")     hintUnroll      = true;
+                        else if (key.lexeme == "nounroll")   hintNoUnroll    = true;
+                        else if (key.lexeme == "parallel")   hintParallelize = true;
+                        else if (key.lexeme == "noparallel") hintNoParallelize = true;
+                        else if (key.lexeme == "flatten")    hintFlatten     = true;
+                        else if (key.lexeme == "minsize")    hintMinSize     = true;
+                        else if (key.lexeme == "optnone")    hintOptNone     = true;
+                        else if (key.lexeme == "align") {
+                            if (match(TokenType::ASSIGN)) {
+                                // align=AUTO  →  cache-line optimal (same as bare align)
+                                // align=N     →  explicit power-of-two alignment
+                                if (check(TokenType::IDENTIFIER)) {
+                                    const Token v = advance();
+                                    if (v.lexeme == "AUTO" || v.lexeme == "auto") {
+                                        hintAlign = -1;
+                                    } else {
+                                        error("Expected integer or AUTO after align= in @opt;"
+                                              " got '" + v.lexeme + "'");
+                                    }
+                                } else {
+                                    const Token v = consume(TokenType::INTEGER,
+                                        "Expected integer or AUTO after align= in @opt");
+                                    hintAlign = static_cast<int>(v.intValue);
+                                }
+                            } else {
+                                hintAlign = -1; // bare align — auto / cache-line
+                            }
+                        } else {
+                            error("Unknown option '" + key.lexeme +
+                                  "' in @opt(...);"
+                                  " valid: inline, noinline, hot, cold, vectorize,"
+                                  " novectorize, unroll, nounroll, parallel, noparallel,"
+                                  " flatten, minsize, optnone, align, align=N, align=AUTO");
                         }
                         if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
                     }
-                    consume(TokenType::RPAREN, "Expected ')' after @allocator params");
+                    consume(TokenType::RPAREN, "Expected ')' after @opt options");
+
+                } else if (ann.lexeme == "semantics") {
+                    consume(TokenType::LPAREN, "Expected '(' after @semantics");
+                    while (!check(TokenType::RPAREN) && !isAtEnd()) {
+                        const Token key = consume(TokenType::IDENTIFIER,
+                            "Expected attribute in @semantics(...)");
+                        if (key.lexeme == "pure")            hintPure         = true;
+                        else if (key.lexeme == "speculatable")hintSpeculatable= true;
+                        else if (key.lexeme == "noreturn")   hintNoReturn     = true;
+                        else if (key.lexeme == "nounwind")   hintNoUnwind     = true;
+                        else if (key.lexeme == "restrict")   hintRestrict     = true;
+                        else if (key.lexeme == "noalias")    hintRestrict     = true;
+                        else if (key.lexeme == "const_eval") hintConstEval    = true;
+                        else if (key.lexeme == "willreturn") hintWillReturn   = true;
+                        else if (key.lexeme == "nosync")     hintNoSync       = true;
+                        else if (key.lexeme == "nofree")     hintNoFree       = true;
+                        else {
+                            error("Unknown attribute '" + key.lexeme +
+                                  "' in @semantics(...);"
+                                  " valid: pure, speculatable, noreturn, nounwind,"
+                                  " restrict, noalias, const_eval,"
+                                  " willreturn, nosync, nofree");
+                        }
+                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' after @semantics attributes");
+
+                } else if (ann.lexeme == "memory") {
+                    consume(TokenType::LPAREN, "Expected '(' after @memory");
+                    while (!check(TokenType::RPAREN) && !isAtEnd()) {
+                        const Token key = consume(TokenType::IDENTIFIER,
+                            "Expected option in @memory(...)");
+                        if (key.lexeme == "allocator") {
+                            // `allocator` enables the allocator attribute with default
+                            // size-param index 0.  A subsequent `size=N` in the same
+                            // annotation overrides the index; `size=N` appearing BEFORE
+                            // `allocator` in the list is also respected (the guard keeps
+                            // the already-set value).
+                            if (allocatorSizeParam < 0) allocatorSizeParam = 0;
+                        } else if (key.lexeme == "size") {
+                            consume(TokenType::ASSIGN, "Expected '=' after size in @memory");
+                            const Token v = consume(TokenType::INTEGER,
+                                "Expected integer after size= in @memory");
+                            allocatorSizeParam = static_cast<int>(v.intValue);
+                        } else if (key.lexeme == "count") {
+                            consume(TokenType::ASSIGN, "Expected '=' after count in @memory");
+                            const Token v = consume(TokenType::INTEGER,
+                                "Expected integer after count= in @memory");
+                            allocatorCountParam = static_cast<int>(v.intValue);
+
+                        // ── Memory-access level options (mutually exclusive) ───
+                        } else if (key.lexeme == "none") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::None;
+                        } else if (key.lexeme == "readonly") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::ReadOnly;
+                        } else if (key.lexeme == "writeonly") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::WriteOnly;
+                        } else if (key.lexeme == "readwrite") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::ReadWrite;
+                        } else if (key.lexeme == "argmem_ro") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::ArgMemRO;
+                        } else if (key.lexeme == "argmem") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::ArgMem;
+                        } else if (key.lexeme == "inaccessiblemem_or_argmem") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::InaccessibleOrArgMem;
+                        } else if (key.lexeme == "inaccessiblemem") {
+                            hintMemoryEffect = FunctionDecl::MemoryEffect::InaccessibleMem;
+
+                        // ── Aliasing hint ──────────────────────────────────────
+                        } else if (key.lexeme == "noalias_ret") {
+                            hintNoAliasReturn = true;
+
+                        } else {
+                            error("Unknown option '" + key.lexeme +
+                                  "' in @memory(...);\n"
+                                  "  Allocator : allocator, size=N, count=M\n"
+                                  "  Access    : none, readonly, writeonly, readwrite\n"
+                                  "              argmem, argmem_ro\n"
+                                  "              inaccessiblemem, inaccessiblemem_or_argmem\n"
+                                  "  Aliasing  : noalias_ret");
+                        }
+                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' after @memory options");
+
+                // ── Non-compound annotations kept as-is ──────────────────────
+                } else if (ann.lexeme == "static") {
+                    hintStatic = true;
                 } else if (ann.lexeme == "optmax") {
                     isOptMaxFromAnnotation = true;
                     if (check(TokenType::LPAREN)) {
                         optMaxCfgFromAnnotation = parseOptMaxConfig();
                     }
+
+                // ── Deprecated flat forms — accepted but emit a warning ───────
+                // Use @opt(...), @semantics(...), or @memory(...) instead.
+                } else if (ann.lexeme == "inline") {
+                    hintInline = true;
+                    warnings_.push_back("warning: '@inline' is deprecated;"
+                        " use '@opt(inline)' instead");
+                } else if (ann.lexeme == "noinline") {
+                    hintNoInline = true;
+                    warnings_.push_back("warning: '@noinline' is deprecated;"
+                        " use '@opt(noinline)' instead");
+                } else if (ann.lexeme == "hot") {
+                    hintHot = true;
+                    warnings_.push_back("warning: '@hot' is deprecated;"
+                        " use '@opt(hot)' instead");
+                } else if (ann.lexeme == "cold") {
+                    hintCold = true;
+                    warnings_.push_back("warning: '@cold' is deprecated;"
+                        " use '@opt(cold)' instead");
+                } else if (ann.lexeme == "flatten") {
+                    hintFlatten = true;
+                    warnings_.push_back("warning: '@flatten' is deprecated;"
+                        " use '@opt(flatten)' instead");
+                } else if (ann.lexeme == "unroll") {
+                    hintUnroll = true;
+                    warnings_.push_back("warning: '@unroll' is deprecated;"
+                        " use '@opt(unroll)' instead");
+                } else if (ann.lexeme == "nounroll") {
+                    hintNoUnroll = true;
+                    warnings_.push_back("warning: '@nounroll' is deprecated;"
+                        " use '@opt(nounroll)' instead");
+                } else if (ann.lexeme == "vectorize") {
+                    hintVectorize = true;
+                    warnings_.push_back("warning: '@vectorize' is deprecated;"
+                        " use '@opt(vectorize)' instead");
+                } else if (ann.lexeme == "novectorize") {
+                    hintNoVectorize = true;
+                    warnings_.push_back("warning: '@novectorize' is deprecated;"
+                        " use '@opt(novectorize)' instead");
+                } else if (ann.lexeme == "parallel") {
+                    hintParallelize = true;
+                    warnings_.push_back("warning: '@parallel' is deprecated;"
+                        " use '@opt(parallel)' instead");
+                } else if (ann.lexeme == "noparallel") {
+                    hintNoParallelize = true;
+                    warnings_.push_back("warning: '@noparallel' is deprecated;"
+                        " use '@opt(noparallel)' instead");
+                } else if (ann.lexeme == "minsize") {
+                    hintMinSize = true;
+                    warnings_.push_back("warning: '@minsize' is deprecated;"
+                        " use '@opt(minsize)' instead");
+                } else if (ann.lexeme == "optnone") {
+                    hintOptNone = true;
+                    warnings_.push_back("warning: '@optnone' is deprecated;"
+                        " use '@opt(optnone)' instead");
+                } else if (ann.lexeme == "align") {
+                    consume(TokenType::LPAREN, "Expected '(' after @align");
+                    if (check(TokenType::RPAREN)) {
+                        hintAlign = -1;
+                    } else {
+                        const Token alignVal = consume(TokenType::INTEGER,
+                            "Expected integer alignment value");
+                        hintAlign = static_cast<int>(alignVal.intValue);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' after @align value");
+                    warnings_.push_back("warning: '@align(N)' is deprecated;"
+                        " use '@opt(align=N)' or '@opt(align)' instead");
+                } else if (ann.lexeme == "pure") {
+                    hintPure = true;
+                    warnings_.push_back("warning: '@pure' is deprecated;"
+                        " use '@semantics(pure)' instead");
+                } else if (ann.lexeme == "speculatable") {
+                    hintSpeculatable = true;
+                    warnings_.push_back("warning: '@speculatable' is deprecated;"
+                        " use '@semantics(speculatable)' instead");
+                } else if (ann.lexeme == "noreturn") {
+                    hintNoReturn = true;
+                    warnings_.push_back("warning: '@noreturn' is deprecated;"
+                        " use '@semantics(noreturn)' instead");
+                } else if (ann.lexeme == "nounwind") {
+                    hintNoUnwind = true;
+                    warnings_.push_back("warning: '@nounwind' is deprecated;"
+                        " use '@semantics(nounwind)' instead");
+                } else if (ann.lexeme == "restrict") {
+                    hintRestrict = true;
+                    warnings_.push_back("warning: '@restrict' is deprecated;"
+                        " use '@semantics(restrict)' instead");
+                } else if (ann.lexeme == "noalias") {
+                    hintRestrict = true;
+                    warnings_.push_back("warning: '@noalias' is deprecated;"
+                        " use '@semantics(noalias)' instead");
+                } else if (ann.lexeme == "const_eval") {
+                    hintConstEval = true;
+                    warnings_.push_back("warning: '@const_eval' is deprecated;"
+                        " use '@semantics(const_eval)' instead");
+                } else if (ann.lexeme == "allocator") {
+                    consume(TokenType::LPAREN, "Expected '(' after @allocator");
+                    while (!check(TokenType::RPAREN) && !isAtEnd()) {
+                        const Token paramKey = consume(TokenType::IDENTIFIER,
+                            "Expected param name in @allocator");
+                        consume(TokenType::ASSIGN, "Expected '=' in @allocator");
+                        const Token paramVal = advance();
+                        int idx = 0;
+                        if (paramVal.type == TokenType::INTEGER)
+                            idx = static_cast<int>(paramVal.intValue);
+                        if (paramKey.lexeme == "size")       allocatorSizeParam  = idx;
+                        else if (paramKey.lexeme == "count") allocatorCountParam = idx;
+                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' after @allocator params");
+                    warnings_.push_back("warning: '@allocator(...)' is deprecated;"
+                        " use '@memory(allocator, size=N)' instead");
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind, @const_eval, @speculatable, @align, @allocator (use @prefetch on parameters)");
+                          "';\n"
+                          "  Use compound forms: @opt(...), @semantics(...), @memory(...)\n"
+                          "  @opt    : inline, noinline, hot, cold, vectorize, novectorize,\n"
+                          "            unroll, nounroll, parallel, noparallel, flatten,\n"
+                          "            minsize, optnone, align, align=N, align=AUTO\n"
+                          "  @semantics: pure, speculatable, noreturn, nounwind,\n"
+                          "              restrict, noalias, const_eval,\n"
+                          "              willreturn, nosync, nofree\n"
+                          "  @memory : none, readonly, writeonly, readwrite,\n"
+                          "            argmem, argmem_ro,\n"
+                          "            inaccessiblemem, inaccessiblemem_or_argmem,\n"
+                          "            noalias_ret,\n"
+                          "            allocator, size=N, count=M\n"
+                          "  Other   : @static, @optmax, @optmax(...)");
                 }
             }
             auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
@@ -618,22 +820,74 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintNoUnwind = hintNoUnwind;
             func->hintConstEval = hintConstEval;
             func->hintSpeculatable = hintSpeculatable;
+            func->hintWillReturn = hintWillReturn;
+            func->hintNoSync = hintNoSync;
+            func->hintNoFree = hintNoFree;
             func->hintAlign = hintAlign;
             func->allocatorSizeParam = allocatorSizeParam;
             func->allocatorCountParam = allocatorCountParam;
+            func->hintMemoryEffect = hintMemoryEffect;
+            func->hintNoAliasReturn = hintNoAliasReturn;
             if (isOptMaxFromAnnotation) {
                 func->isOptMax = true;
                 func->optMaxConfig = optMaxCfgFromAnnotation;
                 func->optMaxConfig.enabled = true;
             }
             // Warn about conflicting annotations at parse time.
+            // optnone is the strongest suppressor — nothing else is meaningful with it.
             if (hintOptNone && hintInline) {
-                warnings_.push_back("warning: '@optnone' and '@inline' are mutually exclusive on function '"
-                    + func->name + "' — '@inline' will be ignored (optnone requires noinline)");
+                warnings_.push_back("warning: '@opt(optnone)' and '@opt(inline)' are mutually exclusive on function '"
+                    + func->name + "' — inline will be ignored (optnone requires noinline)");
             }
             if (hintOptNone && hintHot) {
-                warnings_.push_back("warning: '@optnone' disables all optimizations on function '"
-                    + func->name + "' — '@hot' annotation will have no effect");
+                warnings_.push_back("warning: '@opt(optnone)' disables all optimizations on function '"
+                    + func->name + "' — hot hint will have no effect");
+            }
+            // Paired contradictions.
+            if (hintHot && hintCold) {
+                warnings_.push_back("warning: '@opt(hot)' and '@opt(cold)' are contradictory on function '"
+                    + func->name + "' — hot takes precedence");
+            }
+            if (hintInline && hintNoInline) {
+                warnings_.push_back("warning: '@opt(inline)' and '@opt(noinline)' are contradictory on function '"
+                    + func->name + "' — noinline takes precedence");
+            }
+            if (hintVectorize && hintNoVectorize) {
+                warnings_.push_back("warning: '@opt(vectorize)' and '@opt(novectorize)' are contradictory on function '"
+                    + func->name + "' — novectorize takes precedence");
+            }
+            if (hintUnroll && hintNoUnroll) {
+                warnings_.push_back("warning: '@opt(unroll)' and '@opt(nounroll)' are contradictory on function '"
+                    + func->name + "' — nounroll takes precedence");
+            }
+            if (hintParallelize && hintNoParallelize) {
+                warnings_.push_back("warning: '@opt(parallel)' and '@opt(noparallel)' are contradictory on function '"
+                    + func->name + "' — noparallel takes precedence");
+            }
+            // @semantics(willreturn) and @semantics(noreturn) are contradictory.
+            if (hintWillReturn && hintNoReturn) {
+                warnings_.push_back("warning: '@semantics(willreturn)' and '@semantics(noreturn)' are contradictory on function '"
+                    + func->name + "' — noreturn takes precedence");
+                hintWillReturn = false; // noreturn wins
+            }
+            // @semantics(pure) implies memory(none) or memory(read) — warn if
+            // an explicit @memory access level contradicts that contract.
+            using ME = FunctionDecl::MemoryEffect;
+            if (hintPure && (hintMemoryEffect == ME::WriteOnly ||
+                             hintMemoryEffect == ME::ArgMem    ||
+                             hintMemoryEffect == ME::ReadWrite)) {
+                warnings_.push_back("warning: '@semantics(pure)' and '@memory(" +
+                    std::string(hintMemoryEffect == ME::WriteOnly ? "writeonly"
+                              : hintMemoryEffect == ME::ArgMem    ? "argmem"
+                                                                  : "readwrite") +
+                    ")' are contradictory on function '" + func->name +
+                    "' — pure implies readonly or no-memory access");
+            }
+            // allocator + none is a contradiction (allocator must write memory).
+            if (func->allocatorSizeParam >= 0 && hintMemoryEffect == ME::None) {
+                warnings_.push_back("warning: '@memory(allocator)' and '@memory(none)' are"
+                    " contradictory on function '" + func->name +
+                    "' — an allocator must write memory");
             }
             functions.push_back(std::move(func));
         } catch (const std::exception& e) {
@@ -3441,7 +3695,17 @@ std::unique_ptr<Expression> Parser::parseShift() {
     while ((check(TokenType::LSHIFT) || check(TokenType::RSHIFT)) && !isStartOfLongerCustomOp(2)) {
         advance();
         const std::string op = tokens[current - 1].lexeme;
+        const int opLine = tokens[current - 1].line;
         auto right = parseAddition();
+        // Warn on a shift count that definitely exceeds 63: the result is
+        // undefined in C/LLVM and is almost always a programming error.
+        if (right && right->type == ASTNodeType::LITERAL_EXPR) {
+            const auto* lit = static_cast<const LiteralExpr*>(right.get());
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue > 63) {
+                warnings_.push_back("warning: shift count " + std::to_string(lit->intValue)
+                    + " exceeds 63 (line " + std::to_string(opLine) + ")");
+            }
+        }
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
 
@@ -3465,7 +3729,17 @@ std::unique_ptr<Expression> Parser::parseMultiplication() {
 
     while (match(TokenType::STAR) || match(TokenType::SLASH) || match(TokenType::PERCENT)) {
         const std::string op = tokens[current - 1].lexeme;
+        const int opLine = tokens[current - 1].line;
         auto right = parsePower();
+        // Warn on a literal zero divisor: integer division/modulo by zero is
+        // undefined behaviour and is almost certainly a programming error.
+        if ((op == "/" || op == "%") && right && right->type == ASTNodeType::LITERAL_EXPR) {
+            const auto* lit = static_cast<const LiteralExpr*>(right.get());
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue == 0) {
+                warnings_.push_back("warning: " + op
+                    + " by zero literal (line " + std::to_string(opLine) + ")");
+            }
+        }
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
 

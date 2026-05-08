@@ -145,12 +145,62 @@ static unsigned propagateInExpr(std::unique_ptr<Expression>& expr,
         count += propagateInExpr(ia->value, map, opaque);
         break;
     }
+    case ASTNodeType::FIELD_ACCESS_EXPR:
+        count += propagateInExpr(static_cast<FieldAccessExpr*>(expr.get())->object, map, opaque);
+        break;
+    case ASTNodeType::FIELD_ASSIGN_EXPR: {
+        auto* fa = static_cast<FieldAssignExpr*>(expr.get());
+        count += propagateInExpr(fa->object, map, opaque);
+        count += propagateInExpr(fa->value,  map, opaque);
+        break;
+    }
     case ASTNodeType::POSTFIX_EXPR:
         count += propagateInExpr(static_cast<PostfixExpr*>(expr.get())->operand, map, opaque);
         break;
     case ASTNodeType::PREFIX_EXPR:
         count += propagateInExpr(static_cast<PrefixExpr*>(expr.get())->operand, map, opaque);
         break;
+    case ASTNodeType::SPREAD_EXPR:
+        count += propagateInExpr(static_cast<SpreadExpr*>(expr.get())->operand, map, opaque);
+        break;
+    case ASTNodeType::PIPE_EXPR:
+        count += propagateInExpr(static_cast<PipeExpr*>(expr.get())->left, map, opaque);
+        break;
+    case ASTNodeType::MOVE_EXPR:
+        count += propagateInExpr(static_cast<MoveExpr*>(expr.get())->source, map, opaque);
+        break;
+    case ASTNodeType::BORROW_EXPR:
+        count += propagateInExpr(static_cast<BorrowExpr*>(expr.get())->source, map, opaque);
+        break;
+    case ASTNodeType::REBORROW_EXPR: {
+        auto* rb = static_cast<ReborrowExpr*>(expr.get());
+        count += propagateInExpr(rb->source, map, opaque);
+        if (rb->indexExpr) count += propagateInExpr(rb->indexExpr, map, opaque);
+        break;
+    }
+    case ASTNodeType::RANGE_ANNOT_EXPR:
+        count += propagateInExpr(static_cast<RangeAnnotExpr*>(expr.get())->inner, map, opaque);
+        break;
+    case ASTNodeType::STRUCT_LITERAL_EXPR: {
+        auto* sl = static_cast<StructLiteralExpr*>(expr.get());
+        for (auto& fv : sl->fieldValues)
+            count += propagateInExpr(fv.second, map, opaque);
+        break;
+    }
+    case ASTNodeType::DICT_EXPR: {
+        auto* de = static_cast<DictExpr*>(expr.get());
+        for (auto& p : de->pairs) {
+            count += propagateInExpr(p.first,  map, opaque);
+            count += propagateInExpr(p.second, map, opaque);
+        }
+        break;
+    }
+    case ASTNodeType::ARRAY_EXPR: {
+        auto* ae = static_cast<ArrayExpr*>(expr.get());
+        for (auto& el : ae->elements)
+            count += propagateInExpr(el, map, opaque);
+        break;
+    }
     default:
         break;
     }
@@ -201,6 +251,14 @@ static void collectWrittenInStmt(const Statement* stmt,
     case ASTNodeType::VAR_DECL:
         out.insert(static_cast<const VarDecl*>(stmt)->name);
         break;
+    case ASTNodeType::MOVE_DECL:
+        out.insert(static_cast<const MoveDecl*>(stmt)->name);
+        break;
+    case ASTNodeType::PREFETCH_STMT: {
+        const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+        if (ps->varDecl) out.insert(ps->varDecl->name);
+        break;
+    }
     case ASTNodeType::EXPR_STMT:
         collectWrittenNames(static_cast<const ExprStmt*>(stmt)->expression.get(), out);
         break;
@@ -224,6 +282,14 @@ static void collectWrittenDeep(const Statement* stmt,
     case ASTNodeType::VAR_DECL:
         out.insert(static_cast<const VarDecl*>(stmt)->name);
         break;
+    case ASTNodeType::MOVE_DECL:
+        out.insert(static_cast<const MoveDecl*>(stmt)->name);
+        break;
+    case ASTNodeType::PREFETCH_STMT: {
+        const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+        if (ps->varDecl) out.insert(ps->varDecl->name);
+        break;
+    }
     case ASTNodeType::EXPR_STMT:
         collectWrittenNames(static_cast<const ExprStmt*>(stmt)->expression.get(), out);
         break;
@@ -255,6 +321,25 @@ static void collectWrittenDeep(const Statement* stmt,
         const auto* blk = static_cast<const BlockStmt*>(stmt);
         for (const auto& s : blk->statements)
             collectWrittenDeep(s.get(), out);
+        break;
+    }
+    case ASTNodeType::SWITCH_STMT: {
+        const auto* sw = static_cast<const SwitchStmt*>(stmt);
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                collectWrittenDeep(s.get(), out);
+        break;
+    }
+    case ASTNodeType::CATCH_STMT:
+        collectWrittenDeep(static_cast<const CatchStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::DEFER_STMT:
+        collectWrittenDeep(static_cast<const DeferStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        for (const auto& stage : pl->stages)
+            collectWrittenDeep(stage.body.get(), out);
         break;
     }
     default:
@@ -316,6 +401,33 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
             } else {
                 // var y = <expr> — kill any copy whose destination or source is y.
                 killName(map, vd->name);
+            }
+            break;
+        }
+
+        case ASTNodeType::MOVE_DECL: {
+            auto* md = static_cast<MoveDecl*>(stmt.get());
+            // Propagate into the initializer FIRST.
+            count += propagateInExpr(md->initializer, map, opaque);
+            // A move consumes the source variable — kill any copy entry that
+            // references the source name (if the initializer is a simple ident).
+            if (const auto* initId = asIdentifier(md->initializer.get()))
+                killName(map, initId->name);
+            // Always kill the destination: move semantics means the new name
+            // holds a unique copy and cannot alias a prior expression.
+            killName(map, md->name);
+            break;
+        }
+
+        case ASTNodeType::PREFETCH_STMT: {
+            auto* ps = static_cast<PrefetchStmt*>(stmt.get());
+            if (ps->varDecl) {
+                // prefetch [hot] var x = expr  — treats the embedded VarDecl
+                // exactly like a regular VAR_DECL for copy-propagation purposes.
+                count += propagateInExpr(ps->varDecl->initializer, map, opaque);
+                killName(map, ps->varDecl->name);
+            } else if (ps->addrExpr) {
+                count += propagateInExpr(ps->addrExpr, map, opaque);
             }
             break;
         }
@@ -420,15 +532,72 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
             killName(map, static_cast<InvalidateStmt*>(stmt.get())->varName);
             break;
 
-        case ASTNodeType::ASSUME_STMT:
-            count += propagateInExpr(
-                static_cast<AssumeStmt*>(stmt.get())->condition, map, opaque);
+        case ASTNodeType::ASSUME_STMT: {
+            auto* as = static_cast<AssumeStmt*>(stmt.get());
+            count += propagateInExpr(as->condition, map, opaque);
+            if (as->deoptBody)
+                count += killAndRecurseBody(as->deoptBody.get(), map, opaque);
             break;
+        }
 
         case ASTNodeType::THROW_STMT:
             count += propagateInExpr(
                 static_cast<ThrowStmt*>(stmt.get())->value, map, opaque);
             break;
+
+        case ASTNodeType::SWITCH_STMT: {
+            auto* sw = static_cast<SwitchStmt*>(stmt.get());
+            count += propagateInExpr(sw->condition, map, opaque);
+            // Collect every name written across all cases, kill them before
+            // recursing so the post-switch map is conservatively safe.
+            std::unordered_set<std::string> switchWrites;
+            for (auto& sc : sw->cases)
+                for (auto& s : sc.body)
+                    collectWrittenDeep(s.get(), switchWrites);
+            for (const auto& w : switchWrites) killName(map, w);
+            // Propagate into each case body with a snapshot of the current
+            // (already-killed) map for intra-case opportunities.
+            for (auto& sc : sw->cases) {
+                if (sc.value) count += propagateInExpr(sc.value, map, opaque);
+                for (auto& val : sc.values) count += propagateInExpr(val, map, opaque);
+                for (auto& s : sc.body) {
+                    if (s && s->type == ASTNodeType::BLOCK)
+                        count += propagateInBlock(
+                            static_cast<BlockStmt*>(s.get()), map, opaque);
+                }
+            }
+            break;
+        }
+
+        case ASTNodeType::CATCH_STMT: {
+            auto* cs = static_cast<CatchStmt*>(stmt.get());
+            // Catch body runs only on the exceptional path; kill writes
+            // conservatively and propagate inside the body.
+            count += killAndRecurseBody(cs->body.get(), map, opaque);
+            break;
+        }
+
+        case ASTNodeType::DEFER_STMT: {
+            auto* ds = static_cast<DeferStmt*>(stmt.get());
+            // Defer body runs at scope exit; kill writes conservatively and
+            // propagate inside the body.
+            count += killAndRecurseBody(ds->body.get(), map, opaque);
+            break;
+        }
+
+        case ASTNodeType::PIPELINE_STMT: {
+            auto* pl = static_cast<PipelineStmt*>(stmt.get());
+            // Propagate into the count expression first.
+            if (pl->count) count += propagateInExpr(pl->count, map, opaque);
+            // Kill all writes across all stages, then recurse into each.
+            std::unordered_set<std::string> pipeWrites;
+            for (const auto& stage : pl->stages)
+                collectWrittenDeep(stage.body.get(), pipeWrites);
+            for (const auto& w : pipeWrites) killName(map, w);
+            for (auto& stage : pl->stages)
+                count += killAndRecurseBody(stage.body.get(), map, opaque);
+            break;
+        }
 
         default:
             break;
@@ -473,6 +642,29 @@ static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out) {
     case ASTNodeType::FOR_EACH_STMT:
         collectOpaqueVarsInStmt(static_cast<const ForEachStmt*>(stmt)->body.get(), out);
         break;
+    case ASTNodeType::SWITCH_STMT: {
+        const auto* sw = static_cast<const SwitchStmt*>(stmt);
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                collectOpaqueVarsInStmt(s.get(), out);
+        break;
+    }
+    case ASTNodeType::CATCH_STMT:
+        collectOpaqueVarsInStmt(static_cast<const CatchStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::DEFER_STMT:
+        collectOpaqueVarsInStmt(static_cast<const DeferStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::ASSUME_STMT:
+        collectOpaqueVarsInStmt(
+            static_cast<const AssumeStmt*>(stmt)->deoptBody.get(), out);
+        break;
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        for (const auto& stage : pl->stages)
+            collectOpaqueVarsInStmt(stage.body.get(), out);
+        break;
+    }
     default:
         break;
     }

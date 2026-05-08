@@ -25,6 +25,7 @@
 
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace omscript {
@@ -122,17 +123,150 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             count += simplifyExpr(arg);
         break;
     }
+    case ASTNodeType::INDEX_EXPR: {
+        auto* idx = static_cast<IndexExpr*>(expr.get());
+        count += simplifyExpr(idx->array);
+        count += simplifyExpr(idx->index);
+        break;
+    }
+    case ASTNodeType::INDEX_ASSIGN_EXPR: {
+        auto* ia = static_cast<IndexAssignExpr*>(expr.get());
+        count += simplifyExpr(ia->array);
+        count += simplifyExpr(ia->index);
+        count += simplifyExpr(ia->value);
+        break;
+    }
+    case ASTNodeType::FIELD_ACCESS_EXPR:
+        count += simplifyExpr(static_cast<FieldAccessExpr*>(expr.get())->object);
+        break;
+    case ASTNodeType::FIELD_ASSIGN_EXPR: {
+        auto* fa = static_cast<FieldAssignExpr*>(expr.get());
+        count += simplifyExpr(fa->object);
+        count += simplifyExpr(fa->value);
+        break;
+    }
+    case ASTNodeType::ASSIGN_EXPR:
+        count += simplifyExpr(static_cast<AssignExpr*>(expr.get())->value);
+        break;
+    case ASTNodeType::SPREAD_EXPR:
+        count += simplifyExpr(static_cast<SpreadExpr*>(expr.get())->operand);
+        break;
+    case ASTNodeType::PIPE_EXPR:
+        count += simplifyExpr(static_cast<PipeExpr*>(expr.get())->left);
+        break;
+    case ASTNodeType::MOVE_EXPR:
+        count += simplifyExpr(static_cast<MoveExpr*>(expr.get())->source);
+        break;
+    case ASTNodeType::BORROW_EXPR:
+        count += simplifyExpr(static_cast<BorrowExpr*>(expr.get())->source);
+        break;
+    case ASTNodeType::REBORROW_EXPR: {
+        auto* rb = static_cast<ReborrowExpr*>(expr.get());
+        count += simplifyExpr(rb->source);
+        if (rb->indexExpr) count += simplifyExpr(rb->indexExpr);
+        break;
+    }
+    case ASTNodeType::RANGE_ANNOT_EXPR:
+        count += simplifyExpr(static_cast<RangeAnnotExpr*>(expr.get())->inner);
+        break;
+    case ASTNodeType::STRUCT_LITERAL_EXPR: {
+        auto* sl = static_cast<StructLiteralExpr*>(expr.get());
+        for (auto& fv : sl->fieldValues)
+            count += simplifyExpr(fv.second);
+        break;
+    }
+    case ASTNodeType::DICT_EXPR: {
+        auto* de = static_cast<DictExpr*>(expr.get());
+        for (auto& p : de->pairs) {
+            count += simplifyExpr(p.first);
+            count += simplifyExpr(p.second);
+        }
+        break;
+    }
+    case ASTNodeType::ARRAY_EXPR: {
+        auto* ae = static_cast<ArrayExpr*>(expr.get());
+        for (auto& el : ae->elements)
+            count += simplifyExpr(el);
+        break;
+    }
     default:
         break;
     }
 
     // ── Apply rules at this node ─────────────────────────────────────────
 
+    // ── Unary literal folding ──────────────────────────────────────────────
+    // Evaluate unary operators on integer literals at compile time.
+    // Must come before double-negation so that e.g. -(-5) → -(−5) = 5 folds.
+    if (expr->type == ASTNodeType::UNARY_EXPR) {
+        auto* un = static_cast<UnaryExpr*>(expr.get());
+        long long lv = 0;
+        if (isIntLiteral(un->operand.get(), &lv)) {
+            std::optional<long long> result;
+            if      (un->op == "-") result = static_cast<long long>(-static_cast<uint64_t>(lv));
+            else if (un->op == "!") result = (lv != 0) ? 0LL : 1LL;
+            else if (un->op == "~") result = ~lv;
+            if (result.has_value()) {
+                expr = makeIntLiteral(*result);
+                ++count;
+                return count;
+            }
+        }
+    }
+
     if (expr->type == ASTNodeType::BINARY_EXPR) {
         auto* bin = static_cast<BinaryExpr*>(expr.get());
         const std::string& op = bin->op;
         Expression* L = bin->left.get();
         Expression* R = bin->right.get();
+
+        // ── Integer literal constant folding ──────────────────────────────
+        // When both operands are integer literals, evaluate the operation at
+        // compile time.  Runs before identity rules so that a folded constant
+        // (e.g. 3-3=0, 2*3=6) can immediately trigger further simplifications.
+        {
+            long long lv = 0, rv = 0;
+            if (isIntLiteral(L, &lv) && isIntLiteral(R, &rv)) {
+                std::optional<long long> result;
+                // Cast through uint64_t for +, -, * so that overflow is
+                // well-defined (two's complement wrapping), matching the
+                // language's integer semantics for 64-bit wrap-around.
+                if      (op == "+")                      result = static_cast<long long>(static_cast<uint64_t>(lv) + static_cast<uint64_t>(rv));
+                else if (op == "-")                      result = static_cast<long long>(static_cast<uint64_t>(lv) - static_cast<uint64_t>(rv));
+                else if (op == "*")                      result = static_cast<long long>(static_cast<uint64_t>(lv) * static_cast<uint64_t>(rv));
+                else if (op == "/" && rv != 0) {
+                    // Guard: INT64_MIN / -1 is UB (signed overflow); return INT64_MIN to match
+                    // wrap-around semantics consistent with runtime integer evaluation.
+                    if (lv == LLONG_MIN && rv == -1) result = static_cast<long long>(LLONG_MIN);
+                    else                             result = lv / rv;
+                }
+                else if (op == "%" && rv != 0) {
+                    // Guard: INT64_MIN % -1 is UB/SIGFPE on x86-64; result is 0.
+                    if (lv == LLONG_MIN && rv == -1) result = 0LL;
+                    else                             result = lv % rv;
+                }
+                else if (op == "&")                      result = lv & rv;
+                else if (op == "|")                      result = lv | rv;
+                else if (op == "^")                      result = lv ^ rv;
+                else if (op == "==" )                    result = (lv == rv) ? 1LL : 0LL;
+                else if (op == "!=" )                    result = (lv != rv) ? 1LL : 0LL;
+                else if (op == "<"  )                    result = (lv <  rv) ? 1LL : 0LL;
+                else if (op == "<=" )                    result = (lv <= rv) ? 1LL : 0LL;
+                else if (op == ">"  )                    result = (lv >  rv) ? 1LL : 0LL;
+                else if (op == ">=" )                    result = (lv >= rv) ? 1LL : 0LL;
+                else if (op == "&&" )                    result = (lv && rv) ? 1LL : 0LL;
+                else if (op == "||" )                    result = (lv || rv) ? 1LL : 0LL;
+                else if (op == "<<" && rv >= 0 && rv < 64) result = static_cast<long long>(static_cast<uint64_t>(lv) << static_cast<uint64_t>(rv));
+                // OmScript `>>` on scalar integers is always a logical (unsigned) right-shift
+                // (maps to LLVM CreateLShr).  Cast through uint64_t to match that semantics.
+                else if (op == ">>" && rv >= 0 && rv < 64) result = static_cast<long long>(static_cast<uint64_t>(lv) >> static_cast<uint64_t>(rv));
+                if (result.has_value()) {
+                    expr = makeIntLiteral(*result);
+                    ++count;
+                    return count;
+                }
+            }
+        }
 
         // ── Additive identity ──────────────────────────────────────────────
         if (op == "+") {
@@ -147,6 +281,27 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 expr = std::move(bin->right);
                 ++count;
                 return count;
+            }
+            // x + x → x * 2  (same identifier — always valid for any numeric type)
+            if (sameIdent(L, R)) {
+                auto dup = std::make_unique<IdentifierExpr>(
+                    static_cast<const IdentifierExpr*>(L)->name);
+                expr = makeBinary("*", std::move(dup), makeIntLiteral(2));
+                ++count;
+                return count;
+            }
+            // (-x) + (-y) → -(x + y)
+            if (L->type == ASTNodeType::UNARY_EXPR && R->type == ASTNodeType::UNARY_EXPR) {
+                auto* ul = static_cast<UnaryExpr*>(bin->left.get());
+                auto* ur = static_cast<UnaryExpr*>(bin->right.get());
+                if (ul->op == "-" && ur->op == "-") {
+                    auto inner = makeBinary("+",
+                        std::move(ul->operand),
+                        std::move(ur->operand));
+                    expr = makeUnary("-", std::move(inner));
+                    ++count;
+                    return count;
+                }
             }
         }
 
@@ -169,6 +324,15 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 expr = makeIntLiteral(0);
                 ++count;
                 return count;
+            }
+            // x - (-y) → x + y
+            if (R->type == ASTNodeType::UNARY_EXPR) {
+                auto* ur = static_cast<UnaryExpr*>(bin->right.get());
+                if (ur->op == "-") {
+                    expr = makeBinary("+", std::move(bin->left), std::move(ur->operand));
+                    ++count;
+                    return count;
+                }
             }
         }
 
@@ -207,6 +371,16 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 expr = std::make_unique<UnaryExpr>("-", std::move(bin->right));
                 ++count;
                 return count;
+            }
+            // (-x) * (-y) → x * y
+            if (L->type == ASTNodeType::UNARY_EXPR && R->type == ASTNodeType::UNARY_EXPR) {
+                auto* ul = static_cast<UnaryExpr*>(bin->left.get());
+                auto* ur = static_cast<UnaryExpr*>(bin->right.get());
+                if (ul->op == "-" && ur->op == "-") {
+                    expr = makeBinary("*", std::move(ul->operand), std::move(ur->operand));
+                    ++count;
+                    return count;
+                }
             }
         }
 
@@ -395,6 +569,12 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 ++count;
                 return count;
             }
+            // x && x → x  (idempotent logical and)
+            if (sameIdent(L, R)) {
+                expr = std::move(bin->left);
+                ++count;
+                return count;
+            }
         }
         if (op == "||") {
             if (isIntLiteralVal(L, 1)) {
@@ -421,6 +601,12 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 ++count;
                 return count;
             }
+            // x || x → x  (idempotent logical or)
+            if (sameIdent(L, R)) {
+                expr = std::move(bin->left);
+                ++count;
+                return count;
+            }
         }
     } // end BINARY_EXPR
 
@@ -438,6 +624,62 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 ++count;
                 return count;
             }
+        }
+
+        // ── Push logical NOT into comparison operators ─────────────────────
+        // !(a == b) → a != b,  !(a != b) → a == b,
+        // !(a <  b) → a >= b,  !(a >  b) → a <= b,
+        // !(a <= b) → a >  b,  !(a >= b) → a <  b
+        // This is always correct for integers; the egraph does it at the IR
+        // level, but doing it at the AST level allows downstream passes to
+        // see a simpler comparison expression.
+        if (un->op == "!" && un->operand &&
+                un->operand->type == ASTNodeType::BINARY_EXPR) {
+            auto* inner = static_cast<BinaryExpr*>(un->operand.get());
+            std::string flipped;
+            if      (inner->op == "==") flipped = "!=";
+            else if (inner->op == "!=") flipped = "==";
+            else if (inner->op == "<" ) flipped = ">=";
+            else if (inner->op == ">" ) flipped = "<=";
+            else if (inner->op == "<=") flipped = ">";
+            else if (inner->op == ">=") flipped = "<";
+            if (!flipped.empty()) {
+                auto newBin = std::make_unique<BinaryExpr>(
+                    flipped,
+                    std::move(inner->left),
+                    std::move(inner->right));
+                expr = std::move(newBin);
+                ++count;
+                return count;
+            }
+        }
+    }
+
+    // ── Ternary constant-condition folding ────────────────────────────────
+    // If the condition is an integer literal, we can statically choose a branch.
+    //   non-zero ? a : b  →  a
+    //   0        ? a : b  →  b
+    // If both arms are the same identifier we can also drop the condition.
+    //   cond ? x : x  →  x  (when both arms are the same variable name)
+    if (expr->type == ASTNodeType::TERNARY_EXPR) {
+        auto* tern = static_cast<TernaryExpr*>(expr.get());
+        long long cv = 0;
+        if (isIntLiteral(tern->condition.get(), &cv)) {
+            // Statically resolve the branch.
+            if (cv != 0) {
+                expr = std::move(tern->thenExpr);
+            } else {
+                expr = std::move(tern->elseExpr);
+            }
+            ++count;
+            return count;
+        }
+        // cond ? x : x  →  x  (both arms are the same simple identifier)
+        if (sameIdent(tern->thenExpr.get(), tern->elseExpr.get())) {
+            expr = makeIdentifier(
+                static_cast<IdentifierExpr*>(tern->thenExpr.get())->name);
+            ++count;
+            return count;
         }
     }
 
@@ -460,6 +702,19 @@ static unsigned simplifyStmt(Statement* stmt) {
     case ASTNodeType::VAR_DECL:
         count += simplifyExpr(static_cast<VarDecl*>(stmt)->initializer);
         break;
+
+    case ASTNodeType::MOVE_DECL:
+        count += simplifyExpr(static_cast<MoveDecl*>(stmt)->initializer);
+        break;
+
+    case ASTNodeType::PREFETCH_STMT: {
+        auto* ps = static_cast<PrefetchStmt*>(stmt);
+        if (ps->varDecl)
+            count += simplifyExpr(ps->varDecl->initializer);
+        if (ps->addrExpr)
+            count += simplifyExpr(ps->addrExpr);
+        break;
+    }
 
     case ASTNodeType::RETURN_STMT:
         count += simplifyExpr(static_cast<ReturnStmt*>(stmt)->value);
@@ -503,9 +758,12 @@ static unsigned simplifyStmt(Statement* stmt) {
         break;
     }
 
-    case ASTNodeType::ASSUME_STMT:
-        count += simplifyExpr(static_cast<AssumeStmt*>(stmt)->condition);
+    case ASTNodeType::ASSUME_STMT: {
+        auto* as = static_cast<AssumeStmt*>(stmt);
+        count += simplifyExpr(as->condition);
+        if (as->deoptBody) count += simplifyStmt(as->deoptBody.get());
         break;
+    }
 
     case ASTNodeType::THROW_STMT:
         count += simplifyExpr(static_cast<ThrowStmt*>(stmt)->value);
@@ -543,6 +801,17 @@ static unsigned simplifyStmt(Statement* stmt) {
     case ASTNodeType::DEFER_STMT:
         count += simplifyStmt(static_cast<DeferStmt*>(stmt)->body.get());
         break;
+
+    case ASTNodeType::PIPELINE_STMT: {
+        auto* pl = static_cast<PipelineStmt*>(stmt);
+        if (pl->count) count += simplifyExpr(pl->count);
+        for (auto& stage : pl->stages) {
+            if (stage.body)
+                for (auto& s : stage.body->statements)
+                    count += simplifyStmt(s.get());
+        }
+        break;
+    }
 
     default:
         break;

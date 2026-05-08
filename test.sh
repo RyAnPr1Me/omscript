@@ -66,7 +66,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=90
+NUM_BENCHMARKS=94
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -159,6 +159,10 @@ BENCH_NAME=(
     "borrow_alias"       # 87 — borrow var ref: &T = &x immutable reference auto-deref
     "borrow_mut"         # 88 — borrow mut ref: &T = &x mutable write-through pointer
     "ptr_noalias"        # 89 — OPTMAX memory={noalias=true} on pointer-heavy computation
+    "const_fold"         # 90 — compile-time integer constant folding in alg_simp_pass
+    "mul_new_str"        # 91 — strength reduction for multipliers 23, 29, 35, 38, 39, 42, 44
+    "ternary_fold"       # 92 — constant-condition ternary folding + not-of-comparison pushdown
+    "mul_more_str"       # 93 — strength reduction for multipliers 46, 47, 52, 54, 55, 58, 59, 61
 )
 
 BENCH_DESC=(
@@ -252,6 +256,10 @@ BENCH_DESC=(
     "borrow var ref: &T — immutable reference alias; auto-deref reads from &x"
     "borrow mut ref: &T — mutable reference; write-through r=v stores to source"
     "OPTMAX memory={noalias=true} pointer loop: noalias+dereferenceable attrs enable vectorizer"
+    "const_fold: compile-time constant folding of integer literal expressions in alg_simp_pass"
+    "mul_new_str: strength reduction for new multipliers 23/29/35/38/39/42/44 via e-graph shift+add/sub"
+    "ternary_fold: constant-condition ternary folded at AST level; not-of-comparison pushed to !=/>= etc."
+    "mul_more_str: strength reduction for 3-op multipliers 46/47/52/54/55/58/59/61 via e-graph"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -346,6 +354,10 @@ BENCH_N=(
     10000000  # 87  borrow_alias
     10000000  # 88  borrow_mut
      5000000  # 89  ptr_noalias
+    10000000  # 90  const_fold
+    10000000  # 91  mul_new_str
+    10000000  # 92  ternary_fold
+    10000000  # 93  mul_more_str
 )
 
 BOTTLENECK_LABELS=(
@@ -439,6 +451,10 @@ BOTTLENECK_LABELS=(
     "borrow var auto-deref: noalias+dereferenceable on reference alias enables load hoisting"
     "borrow mut write-through: pointer alias store; OM proves no-escape → scalar substitute"
     "OPTMAX noalias ptr loop: all ptr params marked noalias → wide SIMD without alias guards"
+    "const_fold: early literal folding removes redundant IR nodes before LLVM sees them"
+    "mul_new_str: e-graph shift+add/sub sequences for unusual multipliers reduce latency chains"
+    "ternary_fold: constant-condition ternary removed at AST; not-of-comparison pushed to !=/>= etc."
+    "mul_more_str: e-graph strength reduction for 3-op multipliers 46/47/52/54/55/58/59/61"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -2418,6 +2434,99 @@ fn bench_ptr_noalias(@prefetch n:int) -> int {
     return sum % 1000000007;
 }
 
+// ── 90. const_fold ───────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+// Tests compile-time constant folding in alg_simp_pass (runs on all code,
+// before any LLVM passes).  Integer literal sub-expressions like 3*4+5
+// are evaluated at the AST level during compilation, yielding simpler IR.
+// C writes the same constants as literals; both compilers fold them.
+@hot @flatten @unroll @pure @vectorize @static @nounwind
+fn bench_constfold(@prefetch n:int) -> int {
+    var acc:int = 0;
+    // Constants the alg_simp_pass must fold at compile time.
+    // These are written as expressions to exercise the folding path:
+    //   3*4+5 → 17,  1<<10 → 1024,  (1<<8)-1 → 255,  100/4 → 25
+    // After folding, the loop body is acc += 17 + i, etc.
+    const C1:int = 3 * 4 + 5;        // → 17
+    const C2:int = 1 << 10;          // → 1024
+    const C3:int = (1 << 8) - 1;     // → 255
+    const C4:int = 100 / 4;          // → 25
+    const C5:int = 7 * 7 - 6 * 8;   // → 49 - 48 → 1
+    for (i:int in 0...n) {
+        acc += i * C5 + (i & C3) ^ (i % C4);
+        acc ^= (i * C1) & C2;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 91. mul_new_str ──────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+// Tests e-graph strength reduction for newly added multipliers:
+// 23 = (x<<4)+(x<<3)-x,  29 = (x<<5)-(x<<2)+x,  35 = (x<<5)+(x<<1)+x,
+// 38 = (x<<5)+(x<<2)+(x<<1),  39 = (x<<5)+(x<<3)-x,  42 = (x<<5)+(x<<3)+(x<<1),
+// 44 = (x<<5)+(x<<3)+(x<<2)
+@hot @flatten @unroll @pure @vectorize @static @nounwind
+fn bench_mulnewstr(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        acc += i * 23;
+        acc += i * 29;
+        acc += i * 35;
+        acc ^= i * 38;
+        acc += i * 39;
+        acc ^= i * 42;
+        acc += i * 44;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 92. ternary_fold ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+// Tests ternary constant-condition folding (1?a:b→a, 0?a:b→b) and
+// logical-not-of-comparison pushdown (!(a<b)→a>=b) in alg_simp_pass.
+// The folded selects become plain arithmetic; C writes the same without
+// any conditionals so both see the same loop body.
+@hot @flatten @unroll @pure @vectorize @static @nounwind
+fn bench_ternfold(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        // Constant-condition ternaries that alg_simp_pass must eliminate.
+        // After folding, these collapse to purely arithmetic expressions.
+        const pick:int = 1 > 0 ? i * 3 : i * 7;   // folds to i*3
+        const skip:int = 0 > 1 ? i * 5 : i * 2;   // folds to i*2
+        // not-of-comparison: !(i < n) becomes i >= n; used as a multiplier
+        // to exercise the pushdown.  When i < n is always true in [0,n),
+        // !(i < n) is always 0 so acc += 0 (DCE removes it).
+        var not_lt:int = !(i < n) ? 1 : 0;
+        acc += pick + skip + not_lt;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 93. mul_more_str ─────────────────────────────────────────
+@optmax(fast_math=true, aggressive_vec=true, safety=relaxed)
+// Tests strength reduction for new 3-op multipliers 46, 47, 52, 54, 55,
+// 58, 59, 61 added to the e-graph.
+@hot @flatten @unroll @pure @vectorize @static @nounwind
+fn bench_mulmorestr(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 0...n) {
+        acc += i * 46;
+        acc ^= i * 47;
+        acc += i * 52;
+        acc ^= i * 54;
+        acc += i * 55;
+        acc ^= i * 58;
+        acc += i * 59;
+        acc ^= i * 61;
+    }
+    invalidate n;
+    return acc;
+}
+
 // ── main dispatch ─────────────────────────────────────────────
 fn main() -> int {
     var test_id:int = input();
@@ -2514,6 +2623,10 @@ fn main() -> int {
         case 87: print(bench_borrow_alias(n));     break;
         case 88: print(bench_borrow_mut(n));       break;
         case 89: print(bench_ptr_noalias(n));      break;
+        case 90: print(bench_constfold(n));        break;
+        case 91: print(bench_mulnewstr(n));        break;
+        case 92: print(bench_ternfold(n));         break;
+        case 93: print(bench_mulmorestr(n));       break;
         default: print(0);
     }
     invalidate n;
@@ -4068,6 +4181,76 @@ static long bench_ptr_noalias(long n) {
     return sum % 1000000007L;
 }
 
+static long bench_constfold(long n) {
+    /* C uses the same constant expressions; the compiler evaluates them
+       at compile time.  Tests whether OM achieves equivalent IR quality
+       after alg_simp_pass constant folding removes the expression nodes. */
+    const long C1 = 3 * 4 + 5;       /* 17 */
+    const long C2 = 1 << 10;         /* 1024 */
+    const long C3 = (1 << 8) - 1;    /* 255 */
+    const long C4 = 100 / 4;         /* 25 */
+    const long C5 = 7 * 7 - 6 * 8;  /* 1 */
+    long acc = 0;
+    BH_IVDEP
+    for (long i = 0; i < n; i++) {
+        acc += i * C5 + (i & C3) ^ (i % C4);
+        acc ^= (i * C1) & C2;
+    }
+    return acc;
+}
+
+static long bench_mulnewstr(long n) {
+    /* Test strength reduction for multipliers 23, 29, 35, 38, 39, 42, 44.
+       Clang -O3 will emit the same shift+add/sub sequences.  OM achieves
+       parity via the newly added e-graph rules. */
+    long acc = 0;
+    BH_IVDEP
+    for (long i = 0; i < n; i++) {
+        acc += i * 23;
+        acc += i * 29;
+        acc += i * 35;
+        acc ^= i * 38;
+        acc += i * 39;
+        acc ^= i * 42;
+        acc += i * 44;
+    }
+    return acc;
+}
+
+static long bench_ternfold(long n) {
+    /* Test ternary constant folding and not-of-comparison.
+       C resolves the same conditions at compile time; OM achieves
+       equivalent IR via the new alg_simp_pass rules. */
+    long acc = 0;
+    BH_IVDEP
+    for (long i = 0; i < n; i++) {
+        /* Constant-condition ternaries folded at compile time */
+        long pick = (1 > 0) ? i * 3 : i * 7;   /* → i*3 */
+        long skip = (0 > 1) ? i * 5 : i * 2;   /* → i*2 */
+        long not_lt = (i < n) ? 0 : 1;          /* always 0 in [0,n) */
+        acc += pick + skip + not_lt;
+    }
+    return acc;
+}
+
+static long bench_mulmorestr(long n) {
+    /* Test strength reduction for 3-op multipliers 46, 47, 52, 54, 55,
+       58, 59, 61.  Clang -O3 emits shift+add/sub; OM via new e-graph rules. */
+    long acc = 0;
+    BH_IVDEP
+    for (long i = 0; i < n; i++) {
+        acc += i * 46;
+        acc ^= i * 47;
+        acc += i * 52;
+        acc ^= i * 54;
+        acc += i * 55;
+        acc ^= i * 58;
+        acc += i * 59;
+        acc ^= i * 61;
+    }
+    return acc;
+}
+
 /* ── Close the global hot-attribute push ─────────────────────── */
 #ifdef __clang__
 #  pragma clang attribute pop
@@ -4169,6 +4352,10 @@ int main(void) {
         case 87: r = bench_borrow_alias(n);        break;
         case 88: r = bench_borrow_mut(n);          break;
         case 89: r = bench_ptr_noalias(n);         break;
+        case 90: r = bench_constfold(n);           break;
+        case 91: r = bench_mulnewstr(n);           break;
+        case 92: r = bench_ternfold(n);            break;
+        case 93: r = bench_mulmorestr(n);          break;
     }
     printf("%ld\n", r);
     return 0;

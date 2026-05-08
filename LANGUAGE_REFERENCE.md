@@ -45,15 +45,15 @@
 
 ## 1. Overview
 
-OmScript is a statically-typed, compiled programming language designed for high-performance computing with an emphasis on optimization, control, and clarity. It compiles to native code via LLVM, offering manual control over optimization strategies while maintaining modern language ergonomics.
+OmScript is a **statically typed**, compiled programming language designed for high-performance computing with an emphasis on optimization, control, and clarity. All variable declarations require explicit type annotations. Arrays, maps, strings, and structs are represented as typed pointers in LLVM IR — there are no runtime type tags and no boxing. It compiles to native code via LLVM, offering manual control over optimization strategies while maintaining modern language ergonomics.
 
 ### Design Goals
 
-- **Performance**: Native compilation through LLVM with aggressive optimization support
-- **Control**: Fine-grained control over optimization strategies, vectorization, and memory layout
-- **Safety with escape hatches**: Type safety by default with explicit mechanisms for unsafe operations
-- **Ergonomics**: Modern syntax with type inference, pattern matching, and functional programming features
-- **Compiler transparency**: Direct access to compiler optimization hints and runtime characteristics
+- **Performance**: Native compilation through LLVM with a multi-layer optimizer (AST pre-passes → E-graph → superoptimizer → HGOE)
+- **Control**: Fine-grained control over optimization strategies, vectorization, memory layout, and per-function annotations
+- **Explicit memory**: Arrays, maps, and strings are heap-allocated (`malloc`/`free`); the compiler promotes safe allocations to stack or read-only globals automatically; typed values are represented as LLVM pointer types throughout — no `ptrtoint` round-trips for typed array/struct/map variables
+- **Ergonomics**: Modern syntax with mandatory type annotations, functional programming builtins, lambdas, and pipe operator
+- **Compiler transparency**: Optimization feedback (`-v`), LLVM IR emission (`emit-ir`), and direct access to compiler hints via `@opt`, `@semantics`, `@memory`
 
 ### Source of Truth
 
@@ -78,7 +78,7 @@ OmScript source code undergoes the following compilation stages:
 - **Preprocessor**: Macros, conditional compilation, predefined macros (§3)
 - **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), mandatory type annotations (§4)
 - **Variables and constants**: `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, compound assignment, destructuring (§5)
-- **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, generics, annotations (`@inline`, `@hot`, `@pure`, `@vectorize`, etc.), tail calls, lambdas (§6)
+- **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, generics, annotations (`@opt(hot)`, `@semantics(pure)`, `@memory(allocator)`, etc.), tail calls, lambdas (§6)
 - **Control flow**: `if`/`elif`/`else`, `unless`, `guard`, `switch`, `when`, `defer`, `with`, branch hints (§7)
 - **Loops**: `while`, `do`/`while`, `until`, `for` (ranges, downto, step), `foreach`, `loop`, `repeat`, `forever`, `times`, `parallel`, `pipeline`, loop annotations (`@loop(unroll=N)`, `@loop(vectorize)`) (§8)
 - **Operators**: Arithmetic, comparison, logical, bitwise, null-coalescing, range, spread, pipe-forward, address-of, precedence table (§9)
@@ -852,7 +852,7 @@ The preprocessor defines the following macros automatically:
 | `__BASE_FILE__` | `"main.om"` | Top-level source as passed on the command line — preserved across `#line` (string) |
 | `__DATE__` | `"Jan 23 2026"` | Compilation date in C-style `Mmm dd yyyy` form (string) |
 | `__TIME__` | `"14:05:09"` | Compilation time in `HH:MM:SS` form (string) |
-| `__VERSION__` | `"4.3.2"` | OmScript compiler version (string) |
+| `__VERSION__` | `"4.4.0"` | OmScript compiler version (string) |
 | `__OS__` | `"linux"` / `"windows"` / `"macos"` | Target operating system (string) |
 | `__ARCH__` | `"x86_64"` / `"aarch64"` / `"arm"` | Target architecture (string) |
 | `__COUNTER__` | `0`, `1`, ... | Global counter, increments on each use (integer) |
@@ -1252,7 +1252,7 @@ struct Point {
 }
 ```
 
-**Fields are untyped** in the declaration (dynamic typing); type information is inferred from usage.
+**Fields** must have explicit type annotations when the struct is declared with typed fields. For structs declared without per-field annotations (legacy form), fields default to `i64` and type information is inferred from usage.
 
 **Representation**: Opaque pointer to heap-allocated struct object (reference-counted).
 
@@ -1862,260 +1862,259 @@ fn main() {
 
 Functions may be preceded by **annotation attributes** (introduced by `@`) that modify compilation and optimization behavior.
 
-**Annotation syntax**: `@annotation` appears on the line before `fn`:
-```omscript
-@inline
-fn fast_add(a: int, b: int) -> int {
-    return a + b;
-}
-```
+OmScript provides three **compound annotation forms** that group related hints into a single, namespaced annotation.  Multiple options may appear comma-separated inside the parentheses, and multiple compound annotations may be stacked on separate lines before `fn`.
 
-**Multiple annotations**: Stack annotations on separate lines:
 ```omscript
-@vectorize
-@inline
+@opt(hot, inline, vectorize)
+@semantics(pure, nounwind)
 fn compute(x: int) -> int {
-    return x * 2;
+    return x * 2
 }
 ```
 
-**Recognized function annotations**:
+---
 
-#### `@inline` — Force Inlining
-Requests that the function be inlined at all call sites (LLVM `alwaysinline` attribute).
+#### `@opt(...)` — Optimization Hints
 
-```omscript
-@inline
-fn add(a: int, b: int) -> int {
-    return a + b;
-}
-```
+Controls how the compiler optimizes this function.
 
-**Effect**: Function body is substituted directly at call sites, eliminating call overhead. Use for small, hot functions.
+**Syntax**: `@opt(option, option, ...)` where options are:
 
-#### `@noinline` — Prevent Inlining
-Requests that the function never be inlined (LLVM `noinline` attribute).
-
-```omscript
-@noinline
-fn large_computation(x: int) -> int {
-    // Complex logic that should remain a separate function
-    return x * x * x;
-}
-```
-
-**Effect**: Function always emits a call instruction. Use for debugging or code size control.
-
-#### `@hot` — Hot Function Hint
-Marks the function as frequently executed (LLVM `hot` attribute).
+| Option | Effect |
+|--------|--------|
+| `inline` | Force-inline at all call sites (`alwaysinline`) |
+| `noinline` | Never inline (`noinline`) |
+| `hot` | Mark as frequently executed; prioritizes optimization effort |
+| `cold` | Mark as rarely executed; deprioritizes and may move off hot paths |
+| `vectorize` | Hint SIMD vectorization for loops in this function |
+| `novectorize` | Disable auto-vectorization |
+| `unroll` | Request loop unrolling |
+| `nounroll` | Disable loop unrolling |
+| `parallel` | Hint that loops may be parallelized across threads |
+| `noparallel` | Prevent loop parallelization |
+| `flatten` | Aggressively unroll and flatten control flow |
+| `minsize` | Optimize for code size over speed (`minsize` + `optsize`) |
+| `optnone` | Disable all optimizations (useful for debugging IR) |
+| `align=N` | Align function entry to `N` bytes (power of two) |
+| `align=AUTO` | Auto-align to cache-line optimal (64 bytes); also aligns all local allocas |
+| `align` | Same as `align=AUTO` (bare form) |
 
 ```omscript
-@hot
+@opt(hot, inline)
 fn inner_loop(n: int) -> int {
-    var sum: int = 0;
-    for (i: int in 0...n) {
-        sum = sum + i;
-    }
-    return sum;
+    var sum: int = 0
+    for (i: int in 0...n) { sum = sum + i }
+    return sum
 }
-```
 
-**Effect**: Compiler prioritizes optimizations for this function (e.g., aggressive inlining, vectorization).
-
-#### `@cold` — Cold Function Hint
-Marks the function as rarely executed (LLVM `cold` attribute).
-
-```omscript
-@cold
+@opt(cold, minsize)
 fn error_handler(code: int) {
-    println("Error: ", code);
+    println("Error: ", code)
+}
+
+@opt(align=32)
+fn simd_kernel(x: int) -> int {
+    return x * 2
+}
+
+@opt(align=AUTO)
+fn cache_friendly_kernel(arr: int[], n: int) -> int {
+    // All local allocas are 64-byte (cache-line) aligned.
+    var sum: int = 0
+    for (i: int in 0...n) { sum = sum + arr[i] }
+    return sum
 }
 ```
 
-**Effect**: Compiler deprioritizes this function (may move it out-of-line, reduce optimization effort).
+---
 
-#### `@pure` — Pure Function (No Side Effects)
-Indicates the function has no side effects and returns the same result for the same inputs (LLVM `readonly` or `readnone` attribute).
+#### `@semantics(...)` — Semantic / ABI Attributes
+
+Declares behavioral contracts that the optimizer may rely on.
+
+**Syntax**: `@semantics(attr, attr, ...)` where attrs are:
+
+| Attribute | Effect |
+|-----------|--------|
+| `pure` | No side effects; same inputs always produce same outputs (`readonly`/`readnone`) |
+| `speculatable` | May be hoisted across branches and into loop preheaders without observable cost |
+| `noreturn` | Function never returns (e.g., calls `exit()`, throws unconditionally) |
+| `nounwind` | Never throws; enables more aggressive inlining and frame omission |
+| `restrict` | Pointer parameters do not alias each other (C `restrict` on all ptr params) |
+| `noalias` | Same as `restrict` |
+| `const_eval` | Compile-time foldable when all arguments are constants |
+| `willreturn` | Function always terminates in finite time (no infinite loops or unbounded recursion). Enables DSE and load-forwarding across the call. |
+| `nosync` | No synchronization, mutex, or blocking I/O. Enables call reordering and speculative CSE. |
+| `nofree` | Function never deallocates memory. Alias analysis can prove that pointers live across the call remain valid. |
 
 ```omscript
-@pure
+@semantics(pure, nounwind)
 fn square(x: int) -> int {
-    return x * x;
+    return x * x
+}
+
+@semantics(noreturn)
+fn fatal(msg: str) {
+    println(msg)
+    exit(1)
+}
+
+@semantics(restrict, pure)
+fn dot_product(a: ptr<int>, b: ptr<int>, n: int) -> int {
+    var s: int = 0
+    for (i: int in 0...n) { s = s + a[i] * b[i] }
+    return s
+}
+
+@semantics(willreturn, nosync, nofree)
+fn compute_hash(data: ptr<int>, n: int) -> int {
+    var h: int = 0
+    for (i: int in 0...n) { h = h ^ (data[i] * 2654435761) }
+    return h
 }
 ```
 
-**Effect**: Enables memoization, dead-code elimination, and reordering. Use only if the function truly has no side effects (no I/O, no global state mutation).
+**Combining `pure` + `speculatable`** gives the strongest optimization signal: `pure` proves read-only semantics; `speculatable` additionally permits the call to be executed speculatively before all guards are evaluated.
 
-#### `@static` — Static Function (Internal Linkage)
-Marks the function as having internal linkage (not exported from the module).
+**`willreturn` + `nosync` + `nofree`** is a strong combination for pure compute functions: it tells LLVM the call can be sunk/hoisted, reordered freely, and all pointers passed in remain alive after the call returns.
+
+---
+
+#### `@memory(...)` — Memory Model Attributes
+
+Provides memory-access level, aliasing, and allocator metadata so the optimizer can reason about pointer provenance, alias analysis, and reordering safety.
+
+**Syntax**: `@memory(option, option, ...)` — options may be combined freely.
+
+##### Memory-Access Level (mutually exclusive)
+
+| Option | LLVM effect | Description |
+|--------|-------------|-------------|
+| `none` | `memory(none)` | No memory access at all. Implies `nounwind`, `nosync`, `willreturn`. |
+| `readonly` | `memory(read)` | Only reads memory; never writes. |
+| `writeonly` | `memory(write)` | Only writes memory; never reads. |
+| `readwrite` | *(explicit default)* | Documents that both reads and writes may occur (no-op). |
+| `argmem` | `memory(argmem: readwrite)` | Only reads/writes through its own pointer arguments. |
+| `argmem_ro` | `memory(argmem: read)` | Only reads through its own pointer arguments. |
+| `inaccessiblemem` | `memory(inaccessiblemem: readwrite)` | Only accesses memory the caller cannot see (e.g., global errno, thread-local state). |
+| `inaccessiblemem_or_argmem` | `memory(inaccessiblemem: rw, argmem: rw)` | Combines inaccessible-memory and arg-memory access. |
+
+##### Aliasing Hints
+
+| Option | LLVM effect | Description |
+|--------|-------------|-------------|
+| `noalias_ret` | `noalias` on return | Return pointer is guaranteed not to alias any pointer visible to the caller. Use for factory functions that return fresh objects but are not full allocators. |
+
+##### Allocator Metadata
+
+| Option | LLVM effect | Description |
+|--------|-------------|-------------|
+| `allocator` | `allocsize(0)` + `noalias` return | Return pointer is a freshly allocated region; default size param is index 0. |
+| `size=N` | Overrides allocsize size-param index | Parameter at index `N` (0-based) holds the allocation byte count. |
+| `count=M` | Overrides allocsize count-param index | Parameter at index `M` is a count multiplied by `size`. |
+
+```omscript
+// Pure math — no memory access at all.
+@memory(none)
+@semantics(pure)
+fn clamp(v: int, lo: int, hi: int) -> int {
+    if (v < lo) { return lo }
+    if (v > hi) { return hi }
+    return v
+}
+
+// Reads only through its pointer arguments.
+@memory(argmem_ro)
+fn sum(data: ptr<int>, n: int) -> int {
+    var s: int = 0
+    for (i: int in 0...n) { s = s + data[i] }
+    return s
+}
+
+// Returns a fresh object — not a full allocator but still non-aliasing.
+@memory(noalias_ret)
+fn make_point(x: int, y: int) -> ptr {
+    // builds and returns a Point
+}
+
+// Full allocator: arg 0 is the byte count.
+@memory(allocator, size=0)
+fn my_alloc(bytes: int) -> ptr {
+    return malloc(bytes)
+}
+
+// Calloc-style: arg 0 is count, arg 1 is element size.
+@memory(allocator, size=1, count=0)
+fn my_calloc(count: int, size: int) -> ptr {
+    return calloc(count, size)
+}
+
+// Only touches memory inaccessible to the caller (e.g., errno).
+@memory(inaccessiblemem_or_argmem)
+fn safe_sqrt(x: f64) -> f64 {
+    return sqrt(x)
+}
+```
+
+**Combining with `@semantics`**: `@memory(none)` and `@semantics(pure, nounwind)` produce identical LLVM attributes; using both is redundant. `@memory(readonly)` is weaker than `@semantics(pure)` (pure also implies `nosync` and `willreturn` for non-recursive functions). The compiler warns when contradictory combinations are used.
+
+---
+
+#### `@static` — Internal Linkage
+
+Marks the function as module-private (not exported). May enable additional interprocedural optimizations.
 
 ```omscript
 @static
-fn helper(x: int) -> int {
-    return x + 1;
-}
+fn helper(x: int) -> int { return x + 1 }
 ```
 
-**Effect**: Function is not visible outside the compilation unit. May enable additional interprocedural optimizations.
+---
 
-#### `@vectorize` — Request Vectorization
-Hints that the function should be optimized for SIMD vectorization (applies to loops within the function).
+#### `@optmax` / `@optmax(...)` — Maximum Optimization
 
-```omscript
-@vectorize
-fn sum_array(arr: int[], n: int) -> int {
-    var total: int = 0;
-    for (i: int in 0...n) {
-        total = total + arr[i];
-    }
-    return total;
-}
-```
-
-**Effect**: Compiler attempts to generate SIMD instructions for loops. May combine with loop annotations (see §8.16).
-
-#### `@flatten` — Flatten Control Flow
-Requests aggressive loop unrolling and branch flattening to reduce control flow overhead.
-
-```omscript
-@flatten
-fn compute_polynomial(x: int) -> int {
-    var result: int = 0;
-    for (i: int in 0...5) {
-        result = result + i * x;
-    }
-    return result;
-}
-```
-
-**Effect**: Loops may be fully unrolled, branches may be converted to selects. Increases code size but reduces branch mispredictions.
-
-#### `@allocator` — Allocator Function Hint
-Marks the function as a memory allocator (LLVM `noalias` return and specific allocator attributes).
-
-```omscript
-@allocator
-fn my_malloc(size: int) -> ptr {
-    // Allocation logic
-    return null;  // Placeholder
-}
-```
-
-**Effect**: Return pointer is guaranteed not to alias any existing pointer. Enables optimizations around memory operations.
-
-#### `@optmax` — Maximum Optimization (OPTMAX)
-Marks a function for aggressive optimization (equivalent to wrapping in `OPTMAX=:` / `OPTMAX!:` markers).
+Applies the OPTMAX optimization profile (aggressive inlining, loop transforms, etc.). See §18.3 for configuration options.
 
 ```omscript
 @optmax
-fn optimize_me(n: int) -> int {
-    var sum: int = 0;
-    for (i: int in 0...n) {
-        sum = sum + i;
-    }
-    return sum;
+fn hot_kernel(n: int) -> int {
+    var s: int = 0
+    for (i: int in 0...n) { s = s + i }
+    return s
 }
 ```
 
-**Effect**: Applies OPTMAX optimization profile (see §6 for OPTMAX details).
+---
 
-#### `@prefetch` — Memory Prefetch Hint
-Requests that pointer parameters be prefetched at function entry.
+#### Deprecated Flat Annotations
 
-```omscript
-@prefetch
-fn process_array(arr: ptr<int>, n: int) {
-    // Array processing
-}
-```
+The individual flat forms (`@hot`, `@cold`, `@inline`, `@pure`, `@noreturn`, etc.) are **deprecated**.  They still compile — the compiler emits a warning and applies the same effect — but all new code should use the compound forms above.
 
-**Effect**: Emits `llvm.prefetch` intrinsics at function entry for pointer parameters. Reduces memory latency in pointer-heavy code.
+| Deprecated | Replacement |
+|------------|-------------|
+| `@inline` | `@opt(inline)` |
+| `@noinline` | `@opt(noinline)` |
+| `@hot` | `@opt(hot)` |
+| `@cold` | `@opt(cold)` |
+| `@vectorize` | `@opt(vectorize)` |
+| `@novectorize` | `@opt(novectorize)` |
+| `@unroll` | `@opt(unroll)` |
+| `@nounroll` | `@opt(nounroll)` |
+| `@parallel` | `@opt(parallel)` |
+| `@noparallel` | `@opt(noparallel)` |
+| `@flatten` | `@opt(flatten)` |
+| `@minsize` | `@opt(minsize)` |
+| `@optnone` | `@opt(optnone)` |
+| `@align(N)` | `@opt(align=N)` / `@opt(align=AUTO)` |
+| `@pure` | `@semantics(pure)` |
+| `@speculatable` | `@semantics(speculatable)` |
+| `@noreturn` | `@semantics(noreturn)` |
+| `@nounwind` | `@semantics(nounwind)` |
+| `@restrict` | `@semantics(restrict)` |
+| `@noalias` | `@semantics(noalias)` |
+| `@const_eval` | `@semantics(const_eval)` |
+| `@allocator(size=N)` | `@memory(allocator, size=N)` |
 
-#### `@musttail` — Mandatory Tail Call
-Guarantees that all `return call(...)` statements in the function are compiled as tail calls (no stack frame growth).
-
-```omscript
-@musttail
-fn factorial_tail(n: int, acc: int) -> int {
-    if (n == 0) {
-        return acc;
-    }
-    return factorial_tail(n - 1, acc * n);
-}
-```
-
-**Effect**: Recursive calls do not consume stack space (equivalent to iteration). Compilation fails if tail-call optimization is not possible.
-
-#### Additional Annotations
-
-**`@novectorize`**: Opposite of `@vectorize` — disables auto-vectorization for this function.
-
-**`@nounroll`**: Disables loop unrolling inside this function.
-
-**`@unroll`**: Requests loop unrolling (may combine with `@vectorize`). Also available as a per-loop annotation (see §8.16).
-
-**`@noreturn`**: Declares that the function never returns (e.g., it calls `exit()` or throws unconditionally). Emits LLVM `noreturn` attribute. Enables dead-code elimination after call sites.
-
-**`@restrict`**: Asserts that pointer parameters do not alias each other (LLVM `noalias` on all pointer arguments). Equivalent to C `restrict` on every pointer parameter.
-
-**`@noalias`**: Same as `@restrict` — annotates all pointer parameters as non-aliasing.
-
-**`@nounwind`**: Declares that the function never throws an exception or calls `unwind`. Enables more aggressive inlining and frame-omission.
-
-**`@const_eval`**: Marks the function as a compile-time-evaluable constant function. The optimizer attempts to fold calls at compile time when all arguments are constants.
-
-**`@minsize`**: Requests minimum code-size optimization (LLVM `minsize` + `optsize` attributes). Trades runtime speed for smaller binary footprint.
-
-**`@optnone`**: Completely disables all optimizations for this function. Useful for debugging generated code.
-
-**`@parallel`**: Hints that loops in this function may be parallelized across threads.
-
-**`@noparallel`**: Prevents loop parallelization in this function.
-
-#### `@align` — Function and Body Alignment
-
-`@align(N)` aligns the function entry point to exactly `N` bytes (must be a power of two).
-
-`@align()` (no argument) selects **cache-line-optimal alignment** (64 bytes) for the function entry point AND aligns every local variable alloca in the function body to 64 bytes, maximising cache locality.
-
-```omscript
-@align(16)
-fn hot_loop(x: int) -> int {
-    return x * 2;
-}
-
-@align()
-fn cache_friendly(arr: int[], n: int) -> int {
-    // All local variables are 64-byte cache-line aligned.
-    var sum: int = 0;
-    for (i: int in 0...n) {
-        sum = sum + arr[i];
-    }
-    return sum;
-}
-```
-
-**Sentinels**:
-- `hintAlign = 0` — not set (uses optimization-level default: 16 bytes at O2+, 32 for `@hot`)
-- `hintAlign = N` (N > 0) — exact alignment: function entry only
-- `hintAlign = -1` — auto/cache-line: aligns function entry and ALL allocas to 64 bytes
-
-**Effect**: Improves I-cache density for hot functions; 64-byte alignment prevents false-sharing between cache lines. At O2+ the default is 16 bytes; `@hot` uses 32 bytes.
-
-#### `@speculatable` — Speculatable Function
-
-Marks the function as having no observable side effects, allowing LLVM to **hoist or speculate calls** across branches and into loop preheaders.
-
-```omscript
-@speculatable @pure
-fn square(x: int) -> int {
-    return x * x;
-}
-```
-
-**Effect**: Adds LLVM `Speculatable` attribute. The optimizer may execute the call even on paths that are not reached, provided it cannot cause undefined behaviour. Only safe when the function is truly free of side effects (no I/O, no global mutation, no trapping operations).
-
-**Combine with `@pure`** for the strongest optimization signal: `@pure` proves read-only semantics; `@speculatable` additionally enables speculative execution.
 
 ### 6.7 Method-Call Syntax — Universal Function Call Syntax (UFCS)
 
@@ -3496,19 +3495,25 @@ var g: int = Color::GREEN;  // 10 (scope resolution syntax)
 [length: i64][element₀: i64][element₁: i64]...[element_{n-1}: i64]
 ```
 
-- **Header:** 8-byte signed integer storing the logical element count.
-- **Element storage:** Contiguous i64 slots immediately following the header.
-- **Element type:** All array elements are i64 by default (supports integers, floats-as-i64-bits, and string pointers).
-- **Zero-initialization:** Array elements are NOT zero-initialized by default (caller must explicitly fill or assign).
-- **Pointer representation:** Arrays pass as i64 (ptrtoint of the allocation) across function boundaries; callers convert via `IntToPtr` to access elements.
+- **Header:** 8-byte signed integer at slot 0 storing the logical element count.
+- **Element storage:** Contiguous i64 slots at offsets 8, 16, 24, … from the base pointer.
+- **Element type:** All array elements are i64 by default (integers, floats stored as IEEE 754 bits, string pointers cast to i64).
+- **Zero-initialization:** Array elements are NOT zero-initialized by default unless `array_fill(n, 0)` is used (which emits `calloc`) or the literal path detects all-zero elements.
+- **Pointer representation:** Arrays are passed as `i64` (pointer-to-integer) across function call boundaries. Callers convert back via `IntToPtr` before accessing elements.
+- **Minimum heap capacity:** An empty heap array (`var a = []`) pre-allocates **16 slots = 128 bytes** so the first 15 `push()` calls never trigger a `realloc`. This eliminates the LLVM `dereferenceable(8)`/`allocsize` mismatch that breaks alias analysis when `malloc(8)` is immediately followed by `realloc`.
 
 **Metadata tracking:**
-- `arrayLenRangeMD_`: LLVM range metadata `!range [0, 2^63)` attached to length loads, informing optimizations that array lengths are always non-negative.
-- `tbaaArrayLen_`, `tbaaArrayData_`: TBAA (Type-Based Alias Analysis) tags distinguish length field from element data, enabling aggressive load/store reordering.
+- `arrayLenRangeMD_`: LLVM `!range [0, 2^63)` metadata attached to all length loads, proving to the optimizer that lengths are always non-negative (enables unsigned comparisons for loop bounds).
+- `tbaaArrayLen_`, `tbaaArrayElem_`: distinct TBAA tags on the header slot vs element slots; lets the optimizer reorder element stores past length loads (they can't alias).
 
 **Address calculations:**
-- Element at index `i` resides at byte offset `(i + 1) * 8` from the array base pointer.
-- Negative indices are NOT supported by the runtime (indexing with `i < 0` is undefined behavior).
+- Element at index `i` (0-based) resides at `basePtr + (i + 1) * 8`.
+- Negative indices are NOT supported — indexing with `i < 0` is undefined behavior.
+
+**`push()` growth strategy:**
+- Capacity is tracked implicitly: the number of allocated slots = the next power-of-2 ≥ `length + 1`, or `kMinArrayCapacity` (16) if smaller.
+- On every `push(arr, v)`, the code checks whether `oldSlots` is a power-of-2 AND ≥ 16. If so, the buffer is doubled using `ctlz`-based `nextPow2(newLen + 1)` and `realloc`. Otherwise the existing buffer is reused at zero cost.
+- `realloc` is called at most O(log n) times for n pushes. The grow path is weighted 1:99 (predicted not-taken) for branch predictor hinting.
 
 ### 11.2 Construction
 
@@ -3517,16 +3522,34 @@ var g: int = Color::GREEN;  // 10 (scope resolution syntax)
 ```omscript
 var a = [1, 2, 3, 4];            // 4-element array
 var b = [10 * 2, 30, sum(x)];    // expressions allowed
+var c = [1, ...a, 5];            // spread — creates a new 6-element array
 ```
 
-**Compile-time evaluation:** When all elements are compile-time constant integers, the parser emits a `LiteralExpr` with `literalType = ARRAY` and `arrayValue = vector<int64_t>`. The code generator replaces this with a single `memcpy` from a global constant array, eliminating per-element stores.
+**Three-tier allocation strategy** (decided at the variable-declaration site):
+
+| Tier | Condition | IR emitted |
+|------|-----------|------------|
+| **Read-only global** (O2+) | All elements are compile-time integer constants AND the variable has only read-only uses | `private unnamed_addr constant [n+1 x i64]` global; pointer returned as `ptrtoint`. Zero runtime cost; length + data in a single cache line. |
+| **Stack alloca** (O1+) | Element count ≤ 512 AND variable doesn't escape its scope (or is `const`) | `alloca [n+1 x i64]` in function entry block; 16-byte aligned. Freed automatically on function exit. |
+| **Heap malloc** | Everything else (dynamic expressions, escaping variables, > 512 elements) | `malloc((n+1)*8)` with `nonnull` + `dereferenceable((n+1)*8)` return attributes. For empty arrays (`n=0`), pre-allocates `kMinArrayCapacity * 8 = 128` bytes. |
+
+**Const integer literal fast path (heap tier):** When all elements are compile-time integer constants but the variable escapes (so a heap allocation is needed), the code generator builds a `private unnamed_addr constant` global for the data and emits a single `memcpy` into the malloc'd buffer — no per-element stores.
+
+**Spread literals:** A spread expression `[a, ...b, c]` computes the total element count dynamically (summing `len()` of each spread source), allocates exactly `(totalLen+1)*8` bytes, and copies elements using typed loops with `inbounds` GEPs and TBAA-tagged stores. The malloc call carries `nonnull` and, when `totalLen` is a compile-time constant, `dereferenceable(totalBytes)`.
 
 #### `array_fill(n, val)`
 
 **Signature:** `array_fill(i64, any) → array`  
 **Semantics:** Allocate an array of length `n` and initialize every element to `val`.  
-**Time complexity:** O(n)  
-**Implementation:** Allocates `(n+1)*8` bytes via `malloc`, stores `n` in slot 0, then loop-stores `val` into slots 1..n.
+**Time complexity:** O(n)
+
+**Allocation fast paths:**
+
+1. **Read-only global (O2+):** When both `n` and `val` are compile-time constants, `2 ≤ n ≤ 1024`, and the variable has only read-only uses, the compiler emits a `private unnamed_addr constant` LLVM global initialized with `[n, val, val, …]` — zero runtime allocation.
+2. **Zero-fill heap:** When `val` is 0 at compile time, emits `calloc(n+1, 8)` — avoids a `malloc` + fill loop, lets the OS/allocator supply pre-zeroed pages.
+3. **General heap:** For dynamic `val`, emits `malloc((n+1)*8)` followed by a vectorizable fill loop with `llvm.loop.vectorize.enable` metadata.
+
+In all heap paths the returned pointer carries `nonnull` and `dereferenceable((n+1)*8)` (exact bytes when `n` is constant, conservative `dereferenceable(8)` otherwise).
 
 **Example:**
 ```omscript
@@ -3534,8 +3557,6 @@ var a = array_fill(100, 42);   // [42, 42, ..., 42] (100 elements)
 println(len(a));                // 100
 println(a[0]);                  // 42
 ```
-
-**Constant folding:** When both `n` and `val` are compile-time constants AND `n*sizeof(i64) <= 4096`, the compiler may emit a stack alloca + unrolled stores instead of a heap allocation.
 
 #### Type-annotated literals (planned feature)
 
@@ -6004,15 +6025,17 @@ Subtract with INT64_MAX/MIN clamping.
 
 ### 19.5 Type utilities
 
-#### `typeof(any) → string`
+#### `typeof(any) → int` *(deprecated)*
 
-Return a string representing the type: `"int"`, `"float"`, `"string"`, `"array"`, `"dict"`, etc.
+**Deprecated** — emit a compile-time integer tag based on the static type of the argument: `1` = integer, `2` = float, `3` = string. This function is resolved entirely at compile time from static type information; it does not perform any runtime type query. Use explicit type annotations instead.
 
-**Example:**
+> **Migration**: Replace `if (typeof(x) == 2)` guards with properly typed function overloads or separate typed variables. `typeof` will be removed in a future version.
+
+**Example (legacy):**
 ```omscript
-println(typeof(42));      // "int"
-println(typeof(3.14));    // "float"
-println(typeof("hello")); // "string"
+println(typeof(42));      // 1  (compile-time constant; argument evaluated for side effects only)
+println(typeof(3.14));    // 2
+println(typeof("hello")); // 3
 ```
 
 ---
@@ -7356,7 +7379,7 @@ The OmScript compiler processes source code through eleven phases:
    Identify functions that always return a compile-time constant (used by CF-CTRE).
 
 5. **Purity Inference**  
-   Mark functions as `@pure` when they have no side effects and deterministic output. Propagates across call graph.
+   Mark functions as `@semantics(pure)` when they have no side effects and deterministic output. Propagates across call graph.
 
 6. **Effect Inference**  
    Build `FunctionEffects` summaries: `hasIO`, `hasMutation`, `readsMemory`, `writesMemory`. Used by loop optimizer legality checks.
@@ -7456,16 +7479,25 @@ The four currently defined `IRInvariant` values (`opt_pass.h:203-208`):
 
 `AnalysisDependencyGraph` (`opt_pass.h:283-343`) records "fact A depends on fact B" edges. When a transform invalidates fact B, every fact that transitively depends on B is also invalidated. Callers therefore only need to invalidate the *directly* affected fact; the cascade is computed automatically.
 
-The standard OmScript dependency graph is built by `AnalysisDependencyGraph::createDefault()` (`opt_pass.h:336`):
+The standard OmScript dependency graph is built by `AnalysisDependencyGraph::createDefault()` (`src/optimization_manager.cpp`):
 
 ```
-constant_returns → (no dependencies)
-purity           → constant_returns
-effects          → purity
-synthesis        → purity, effects
-cfctre           → purity, effects, synthesis
-egraph           → cfctre
-range_analysis   → purity, effects, cfctre
+constant_returns    → (no dependencies)
+purity              → constant_returns
+effects             → purity
+ersl                → effects
+synthesis           → purity, effects
+cfctre              → purity, effects, synthesis
+egraph              → cfctre
+range_analysis      → purity, effects, cfctre
+rlc                 → effects
+dce                 → cfctre
+cse                 → dce
+alg_simp            → cfctre, dce
+copy_prop           → cfctre, dce, alg_simp
+width_legalization  → range_analysis, copy_prop, alg_simp
+width_opt           → width_legalization
+hgoe_egraph         → egraph, cfctre
 ```
 
 Read this as "the named fact depends on the listed facts": invalidating `purity` therefore cascades to `effects`, `synthesis`, `cfctre`, `egraph`, and `range_analysis`. Lookup is via `getAllDependents(key)`, which performs a BFS over the dependency edges and returns the fact itself plus every transitive dependent.
@@ -7489,11 +7521,17 @@ Stages run in numerical order and `PassMetadata::phase` (a `PassPhase` value) ma
 
 ### 25.3 Per-O-level pass list
 
+`PassKind` controls which passes run at each level:
+- **`Analysis`** and **`SemanticTransform`** passes run at every level that needs the fact.
+- **`CostTransform`** passes (DCE, CSE, AlgSimp, WidthOpt, etc.) are skipped at O0. At O0 the user expects minimal compile time and maximum AST fidelity for debugger step-accuracy; running rewrites would unpredictably modify the code structure.
+
 #### O0 (debug)
 1. Lexer
 2. Parser
 3. Type pre-analysis
-4. Codegen (no optimization)
+4. Codegen (no optimization; `CostTransform` passes skipped)
+
+**IR quality at O0**: All functions still receive `nounwind`, `mustprogress`, `nosync`, `nofree`, `willreturn`, `noundef` (on params/return), `nonnull` (on pointer return), `ZExt`/`SExt` signedness on integer params — these correctness-enabling attributes are unconditional and do not depend on O-level.
 
 #### O1 (basic)
 1. Lexer
@@ -7501,22 +7539,24 @@ Stages run in numerical order and `PassMetadata::phase` (a `PassPhase` value) ma
 3. Type pre-analysis
 4. Purity inference (lightweight, no cross-function analysis)
 5. CF-CTRE (same fuel/depth limits as O2 — see below)
-6. Codegen
-7. LLVM: SimplifyCFG, Mem2Reg, SROA, EarlyCSE
+6. DCE (`CostTransform`), CSE, AlgSimp, CopyProp
+7. Codegen
+8. LLVM: SimplifyCFG, Mem2Reg, SROA, EarlyCSE
 
 #### O2 (standard)
-1–6. (All AST phases)
+1–6. All AST phases (Analysis + SemanticTransform passes)
 7. **Synthesis expansion** (if `std::synthesize` present)
 8. **CF-CTRE** (fuel limit `kMaxInstructions = 10,000,000`, depth limit `kMaxDepth = 128` — see `include/cfctre.h:483-484`)
-9. **Abstract interpretation**
-10. **E-graph optimization** (`SaturationConfig`: `maxNodes = 50,000`, `maxIterations = 30` — see `include/egraph.h:331-332`)
-11. Codegen
-12. LLVM canonicalization: LoopSimplify, LCSSA, IndVarSimplify
-13. **Polyhedral optimizer** (tiling, interchange, skewing — see §26.13)
-14. LLVM midend: Inlining, IPSCCP, GVN, LICM, DSE, Loop Vectorizer, SLP Vectorizer
-15. **Superoptimizer** (idiom recognition + algebraic + branch→select + synthesis, level 2 default — see §26.2)
-16. **HGOE** (only when a hardware profile is available — i.e. `-march=` or `-mtune=` resolves to a known microarch — see §26.3)
-17. Post-pipeline cleanup: AggressiveDCE, GlobalDCE
+9. **Abstract interpretation / range analysis**
+10. **DCE, CSE, AlgSimp, CopyProp, WidthLegalization, WidthOpt** (`CostTransform` passes)
+11. **E-graph optimization** (`SaturationConfig`: `maxNodes = 50,000`, `maxIterations = 30` — see `include/egraph.h:331-332`)
+12. Codegen
+13. LLVM canonicalization: LoopSimplify, LCSSA, IndVarSimplify
+14. **Polyhedral optimizer** (tiling, interchange, skewing — see §26.13)
+15. LLVM midend: Inlining, IPSCCP, GVN, LICM, DSE, Loop Vectorizer, SLP Vectorizer
+16. **Superoptimizer** (idiom recognition + algebraic + branch→select + synthesis, level 2 default — see §26.2)
+17. **HGOE** (only when a hardware profile is available — i.e. `-march=` or `-mtune=` resolves to a known microarch — see §26.3)
+18. Post-pipeline cleanup: AggressiveDCE, GlobalDCE
 
 **CF-CTRE fuel/depth limits are constants, not per-O-level knobs.** All O-levels that run CF-CTRE share the same `kMaxInstructions` / `kMaxDepth` budgets. See `include/cfctre.h:483-484` and §28.10.
 
@@ -7546,6 +7586,63 @@ Diagnostic(level, code, message, location) → DiagnosticManager → stderr
 **Current status**: Not implemented. Every invocation recompiles from source.
 
 **Planned**: Timestamp-based invalidation of `oms.toml` → build cache mapping.
+
+### 25.6 LLVM IR quality guarantees
+
+The code generator (`src/codegen.cpp`) applies a layered set of LLVM attributes and metadata to produce IR that LLVM's midend can optimize without guesswork.
+
+#### Unconditional per-function attributes (all O-levels)
+
+Every user-defined function receives the following attributes regardless of optimization level:
+
+| Attribute | Why |
+|-----------|-----|
+| `nounwind` | OmScript uses a flag-based error model, never C++ exceptions |
+| `mustprogress` | Every loop in OmScript is finite (no `while(true)` without `break` or `return`); enables LICM and loop transforms |
+| `prefer-vector-width=N` | Set to the target's preferred SIMD width for autovectorization hints |
+| `nosync` | OmScript is single-threaded; no concurrent memory access |
+| `nofree` | User functions never call `free()` directly |
+| `willreturn` | Asserts finite termination; enables DSE and load-forwarding across the call |
+| `noundef` (params + return) | OmScript always initializes variables before use |
+| `ZExt`/`SExt` (integer params + return) | Signals correct signedness to calling-convention optimization |
+| `nonnull` + `dereferenceable(8)` (pointer return, O1+) | OmScript functions that return arrays/strings always return non-null |
+
+Exception: functions that contain concurrency primitives (e.g. explicit atomic operations) have `nosync`, `nofree`, and `willreturn` suppressed.
+
+#### O2+ additions
+
+| Attribute | When applied |
+|-----------|-------------|
+| `noalias` + `nonnull` + `dereferenceable(8)` + `align(16)` + `nocapture` (pointer params) | All pointer parameters, because OmScript's ownership model prevents aliasing across function boundaries |
+| `nosync` (function-level reinforcement) | Explicit even for functions without concurrency primitives |
+| `nonnull` (pointer params) | Ownership model guarantees non-null pointer arguments |
+| `!range [lo, hi+1)` on CallInst | When the AST pre-pass proves a narrowed `ValueRange` for the function's return value |
+| Function entry alignment (16 B default; 32 B for `@hot`; 64 B for `@align`) | I-cache alignment |
+
+#### Call-site attribute propagation
+
+At every user function call site, `generateCall` propagates the callee's
+function-level attributes to the `CallInst`:
+
+| Call-site attribute | Source |
+|--------------------|--------|
+| `speculatable` | Callee has `@semantics(speculatable)` |
+| `willreturn` | Callee has `WillReturn` attribute |
+| `nosync` | Callee has `NoSync` attribute |
+| `nofree` | Callee has `NoFree` attribute |
+| memory effects (`memory(none)`, `memory(read)`, …) | Copied from callee's `MemoryEffects`; enables LICM to hoist calls out of loops |
+| `!range [lo, hi+1)` metadata | When the pre-pass `returnRange` fact provides a narrowed `ValueRange` |
+
+These are redundant with the function definition in theory, but LLVM's LICM, DSE, and call-site devirtualization passes scan `CallInst` attributes directly; without them on the call instruction, passes that run before inlining cannot see them.
+
+#### Load/store metadata
+
+| Metadata | Location |
+|----------|----------|
+| `!noundef` | All local variable loads and array element loads |
+| `!range` | Array-length loads and array-element loads of integer elements (range `[0, INT64_MAX)` for lengths) |
+| `!nonnull` | `stdout` global pointer load; `malloc`/`calloc` return values |
+| `!invariant.load` | Read-only globals and string literals |
 
 ---
 
@@ -8237,7 +8334,7 @@ if (res.applied()) { /* update analyses */ }
 
 ## 27. Integer Type-Cast Reference
 
-OmScript provides explicit integer type casts as built-in functions. These are **not** part of the type system (OmScript is dynamically typed at runtime) but are codegen-time operations that emit truncation or sign-extension instructions.
+OmScript provides explicit integer type casts as built-in functions. These are codegen-time operations that emit truncation or sign-extension instructions; the result is always a 64-bit integer at the LLVM IR level.
 
 ### 27.1 Overview Table
 
@@ -8439,11 +8536,11 @@ When the argument to a cast is a **compile-time constant**, CF-CTRE folds the ca
 
 ### 27.8 Type-system interaction
 
-Casts are **runtime operations**, not type annotations. OmScript has a single `int` type at the AST level. The cast functions are built-in functions that emit IR at codegen time.
+Casts are **codegen-time operations**, not type annotations. OmScript has a single `int` type at the AST level for integer values. The cast functions are built-in functions that emit IR at codegen time.
 
-**Contrast with statically-typed languages**:
+**Contrast with C**:
 - In C: `uint32_t x = (uint32_t)y;` — type-level constraint enforced at compile time.
-- In OmScript: `let x = u32(y);` — runtime operation, `x` still has dynamic type `int`.
+- In OmScript: `let x: int = u32(y);` — codegen-time truncation + zero-extension; result is stored as `i64`.
 
 ### 27.9 Worked examples
 
@@ -8607,9 +8704,9 @@ A function is eligible for CF-CTRE evaluation if:
 4. **Fuel remaining**: Instruction budget not exhausted.
 
 **Purity inference** (phase 5 of pipeline):
-- Mark function `@pure` if:
+- Mark function `@semantics(pure)` if:
   - Body contains no `print`, `input`, `file_read`, `file_write`, `sleep`, `random`, `time`.
-  - All called functions are also `@pure`.
+  - All called functions are also `@semantics(pure)`.
   - No global variable writes.
 
 ### 28.4 Execution Model
@@ -9113,7 +9210,7 @@ When `std::synthesize` is the **sole expression** in a function's return stateme
 2. Extracts examples from the literal array argument.
 3. Runs `SynthesisEngine::synthesize()`.
 4. **Replaces the function body** with the synthesized expression AST.
-5. Marks the function `@pure` and `@const_eval`.
+5. Marks the function `@semantics(pure, const_eval)`.
 
 **Example**:
 ```omscript
@@ -9508,14 +9605,14 @@ fn multiply_add(a: int, b: int, c: int) -> int {
 
 ### Version
 
-**OmScript Compiler Version**: `4.3.2`
+**OmScript Compiler Version**: `4.4.0`
 
 Defined in `include/version.h`:
 ```cpp
 #define OMSCRIPT_VERSION_MAJOR 4
-#define OMSCRIPT_VERSION_MINOR 3
-#define OMSCRIPT_VERSION_PATCH 2
-#define OMSC_VERSION "4.3.2"
+#define OMSCRIPT_VERSION_MINOR 4
+#define OMSCRIPT_VERSION_PATCH 0
+#define OMSC_VERSION "4.4.0"
 ```
 
 ### Stability Statement
@@ -9548,7 +9645,7 @@ fn compute(x: int) -> int {
 ```
 
 **Compatibility**:
-- Source files written for v4.x will compile with warnings in v4.3.
+- Source files written for v4.x will compile with warnings in v4.4.
 - v5.0 will require explicit migration (automated tool planned).
 
 **LLVM compatibility**:

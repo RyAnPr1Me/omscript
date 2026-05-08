@@ -971,6 +971,63 @@ static void visitExpr(std::unique_ptr<Expression>& exprPtr,
         visitExpr(idx->index, rules, cfg, stats);
         break;
     }
+    case ASTNodeType::INDEX_ASSIGN_EXPR: {
+        auto* ia = static_cast<IndexAssignExpr*>(expr);
+        visitExpr(ia->array, rules, cfg, stats);
+        visitExpr(ia->index, rules, cfg, stats);
+        visitExpr(ia->value, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::FIELD_ACCESS_EXPR:
+        visitExpr(static_cast<FieldAccessExpr*>(expr)->object, rules, cfg, stats);
+        break;
+    case ASTNodeType::FIELD_ASSIGN_EXPR: {
+        auto* fa = static_cast<FieldAssignExpr*>(expr);
+        visitExpr(fa->object, rules, cfg, stats);
+        visitExpr(fa->value,  rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::SPREAD_EXPR:
+        visitExpr(static_cast<SpreadExpr*>(expr)->operand, rules, cfg, stats);
+        break;
+    case ASTNodeType::PIPE_EXPR:
+        visitExpr(static_cast<PipeExpr*>(expr)->left, rules, cfg, stats);
+        break;
+    case ASTNodeType::MOVE_EXPR:
+        visitExpr(static_cast<MoveExpr*>(expr)->source, rules, cfg, stats);
+        break;
+    case ASTNodeType::BORROW_EXPR:
+        visitExpr(static_cast<BorrowExpr*>(expr)->source, rules, cfg, stats);
+        break;
+    case ASTNodeType::REBORROW_EXPR: {
+        auto* rb = static_cast<ReborrowExpr*>(expr);
+        visitExpr(rb->source, rules, cfg, stats);
+        if (rb->indexExpr) visitExpr(rb->indexExpr, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::RANGE_ANNOT_EXPR:
+        visitExpr(static_cast<RangeAnnotExpr*>(expr)->inner, rules, cfg, stats);
+        break;
+    case ASTNodeType::STRUCT_LITERAL_EXPR: {
+        auto* sl = static_cast<StructLiteralExpr*>(expr);
+        for (auto& fv : sl->fieldValues)
+            visitExpr(fv.second, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::DICT_EXPR: {
+        auto* de = static_cast<DictExpr*>(expr);
+        for (auto& p : de->pairs) {
+            visitExpr(p.first,  rules, cfg, stats);
+            visitExpr(p.second, rules, cfg, stats);
+        }
+        break;
+    }
+    case ASTNodeType::ARRAY_EXPR: {
+        auto* ae = static_cast<ArrayExpr*>(expr);
+        for (auto& el : ae->elements)
+            visitExpr(el, rules, cfg, stats);
+        break;
+    }
     default:
         break;
     }
@@ -987,6 +1044,93 @@ static void visitStmt(Statement* stmt,
                       const HGOEGuidedConfig& cfg,
                       HGOEGuidedStats& stats);
 
+// ── LICM helpers ─────────────────────────────────────────────────────────────
+
+/// Returns true when @p expr references any identifier in @p vars.
+static bool exprRefersToAny(const Expression* expr,
+                             const std::unordered_set<std::string>& vars) {
+    if (!expr) return false;
+    switch (expr->type) {
+    case ASTNodeType::IDENTIFIER_EXPR:
+        return vars.count(static_cast<const IdentifierExpr*>(expr)->name) > 0;
+    case ASTNodeType::BINARY_EXPR: {
+        const auto* b = static_cast<const BinaryExpr*>(expr);
+        return exprRefersToAny(b->left.get(), vars)
+            || exprRefersToAny(b->right.get(), vars);
+    }
+    case ASTNodeType::UNARY_EXPR:
+        return exprRefersToAny(
+            static_cast<const UnaryExpr*>(expr)->operand.get(), vars);
+    case ASTNodeType::CALL_EXPR:
+        return true; // conservative: treat all calls as non-invariant
+    default:
+        return false; // literals and other leaves — invariant
+    }
+}
+
+/// Returns true when @p expr is a pure, side-effect-free expression.
+static bool exprIsPure(const Expression* expr) {
+    if (!expr) return true;
+    switch (expr->type) {
+    case ASTNodeType::LITERAL_EXPR:
+    case ASTNodeType::IDENTIFIER_EXPR:
+        return true;
+    case ASTNodeType::BINARY_EXPR: {
+        const auto* b = static_cast<const BinaryExpr*>(expr);
+        return exprIsPure(b->left.get()) && exprIsPure(b->right.get());
+    }
+    case ASTNodeType::UNARY_EXPR:
+        return exprIsPure(
+            static_cast<const UnaryExpr*>(expr)->operand.get());
+    case ASTNodeType::CALL_EXPR:
+        return false; // calls may have side effects
+    default:
+        return false; // conservative
+    }
+}
+
+/// Collect names of all variables written by @p stmt or its descendants.
+static void collectWrittenVars(const Statement* stmt,
+                                std::unordered_set<std::string>& out) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case ASTNodeType::VAR_DECL:
+        out.insert(static_cast<const VarDecl*>(stmt)->name);
+        break;
+    case ASTNodeType::MOVE_DECL:
+        out.insert(static_cast<const MoveDecl*>(stmt)->name);
+        break;
+    case ASTNodeType::BLOCK: {
+        const auto* blk = static_cast<const BlockStmt*>(stmt);
+        for (const auto& s : blk->statements) collectWrittenVars(s.get(), out);
+        break;
+    }
+    case ASTNodeType::IF_STMT: {
+        const auto* is = static_cast<const IfStmt*>(stmt);
+        collectWrittenVars(is->thenBranch.get(), out);
+        collectWrittenVars(is->elseBranch.get(), out);
+        break;
+    }
+    case ASTNodeType::WHILE_STMT:
+        collectWrittenVars(static_cast<const WhileStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::FOR_STMT: {
+        const auto* fs = static_cast<const ForStmt*>(stmt);
+        out.insert(fs->iteratorVar);
+        collectWrittenVars(fs->body.get(), out);
+        break;
+    }
+    case ASTNodeType::FOR_EACH_STMT: {
+        const auto* fe = static_cast<const ForEachStmt*>(stmt);
+        out.insert(fe->iteratorVar);
+        collectWrittenVars(fe->body.get(), out);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 static void visitBlock(BlockStmt* block,
                        const std::vector<RewriteRule>& rules,
                        const HGOEGuidedConfig& cfg,
@@ -994,6 +1138,60 @@ static void visitBlock(BlockStmt* block,
     if (!block) return;
     for (auto& s : block->statements)
         visitStmt(s.get(), rules, cfg, stats);
+
+    // ── LICM: hoist loop-invariant VarDecls before FOR_STMTs ─────────────
+    // For each FOR_STMT in this block whose body is a BlockStmt, move any
+    // VarDecl whose initializer is pure and references no loop-variant
+    // variable to just before the loop.  This ensures the computation runs
+    // once rather than on every iteration.
+    size_t i = 0;
+    while (i < block->statements.size()) {
+        Statement* s = block->statements[i].get();
+        if (!s || s->type != ASTNodeType::FOR_STMT) { ++i; continue; }
+        auto* fs = static_cast<ForStmt*>(s);
+        if (!fs->body || fs->body->type != ASTNodeType::BLOCK) { ++i; continue; }
+        auto* body = static_cast<BlockStmt*>(fs->body.get());
+
+        // Build the set of loop-variant variables (iterator + all written).
+        std::unordered_set<std::string> loopVars;
+        loopVars.insert(fs->iteratorVar);
+        collectWrittenVars(body, loopVars);
+
+        // Partition body statements: hoistable VarDecls vs. the rest.
+        std::vector<std::unique_ptr<Statement>> toHoist;
+        std::vector<std::unique_ptr<Statement>> remaining;
+        for (auto& bodyStmt : body->statements) {
+            bool doHoist = false;
+            if (bodyStmt && bodyStmt->type == ASTNodeType::VAR_DECL) {
+                const auto* vd = static_cast<const VarDecl*>(bodyStmt.get());
+                if (vd->initializer
+                    && exprIsPure(vd->initializer.get())
+                    && !exprRefersToAny(vd->initializer.get(), loopVars)) {
+                    doHoist = true;
+                }
+            }
+            if (doHoist)
+                toHoist.push_back(std::move(bodyStmt));
+            else
+                remaining.push_back(std::move(bodyStmt));
+        }
+
+        if (toHoist.empty()) { ++i; continue; }
+
+        // Insert hoisted declarations just before the FOR_STMT at index i.
+        const size_t numHoisted = toHoist.size();
+        for (size_t h = 0; h < numHoisted; ++h) {
+            block->statements.insert(
+                block->statements.begin() + static_cast<ptrdiff_t>(i + h),
+                std::move(toHoist[h]));
+        }
+        // The FOR_STMT is now at i + numHoisted; advance past it.
+        i += numHoisted + 1;
+
+        // Update loop body to the non-hoisted statements.
+        body->statements = std::move(remaining);
+        stats.rewrites += static_cast<size_t>(numHoisted);
+    }
 }
 
 static void visitStmt(Statement* stmt,
@@ -1051,6 +1249,58 @@ static void visitStmt(Statement* stmt,
     case ASTNodeType::THROW_STMT: {
         auto* ts = static_cast<ThrowStmt*>(stmt);
         if (ts->value) visitExpr(ts->value, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::DO_WHILE_STMT: {
+        auto* dw = static_cast<DoWhileStmt*>(stmt);
+        visitStmt(dw->body.get(), rules, cfg, stats);
+        if (dw->condition) visitExpr(dw->condition, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::SWITCH_STMT: {
+        auto* sw = static_cast<SwitchStmt*>(stmt);
+        if (sw->condition) visitExpr(sw->condition, rules, cfg, stats);
+        for (auto& sc : sw->cases) {
+            if (sc.value) visitExpr(sc.value, rules, cfg, stats);
+            for (auto& val : sc.values) visitExpr(val, rules, cfg, stats);
+            for (auto& s : sc.body) visitStmt(s.get(), rules, cfg, stats);
+        }
+        break;
+    }
+    case ASTNodeType::CATCH_STMT: {
+        auto* cs = static_cast<CatchStmt*>(stmt);
+        if (cs->body) visitBlock(cs->body.get(), rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::DEFER_STMT: {
+        auto* ds = static_cast<DeferStmt*>(stmt);
+        visitStmt(ds->body.get(), rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::MOVE_DECL: {
+        auto* md = static_cast<MoveDecl*>(stmt);
+        if (md->initializer) visitExpr(md->initializer, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::PREFETCH_STMT: {
+        auto* ps = static_cast<PrefetchStmt*>(stmt);
+        if (ps->varDecl && ps->varDecl->initializer)
+            visitExpr(ps->varDecl->initializer, rules, cfg, stats);
+        if (ps->addrExpr)
+            visitExpr(ps->addrExpr, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::PIPELINE_STMT: {
+        auto* pl = static_cast<PipelineStmt*>(stmt);
+        if (pl->count) visitExpr(pl->count, rules, cfg, stats);
+        for (auto& stage : pl->stages)
+            if (stage.body) visitBlock(stage.body.get(), rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::ASSUME_STMT: {
+        auto* as = static_cast<AssumeStmt*>(stmt);
+        if (as->condition) visitExpr(as->condition, rules, cfg, stats);
+        if (as->deoptBody) visitStmt(as->deoptBody.get(), rules, cfg, stats);
         break;
     }
     default:

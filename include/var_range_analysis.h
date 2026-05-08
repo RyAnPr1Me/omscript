@@ -71,6 +71,16 @@ using VarRangeMap = std::unordered_map<std::string, ValueRange>;
 std::optional<ValueRange> evalExprRange(const Expression* expr,
                                          const VarRangeMap& env);
 
+/// Returns true when the range of @p expr in environment @p env is provably
+/// non-negative (lower bound ≥ 0).
+///
+/// This is the primary predicate used by AlgSimpPass and other optimisation
+/// passes to enable strength reductions and fold comparisons such as
+/// `abs(x) == x` when `x ≥ 0`.
+///
+/// Returns false if the range is unknown or if the lower bound may be negative.
+bool definitelyNonNeg(const Expression* expr, const VarRangeMap& env);
+
 /// Compute intra-function variable ranges by forward dataflow over @p fn.
 ///
 /// Returns a `VarRangeMap` containing only variables whose ranges have been

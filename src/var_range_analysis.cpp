@@ -193,9 +193,11 @@ std::optional<ValueRange> evalExprRange(const Expression* expr,
     return {};
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers
-// ─────────────────────────────────────────────────────────────────────────────
+bool definitelyNonNeg(const Expression* expr, const VarRangeMap& env)
+{
+    const auto r = evalExprRange(expr, env);
+    return r.has_value() && r->lo >= 0;
+}
 
 /// Join two VarRangeMaps: for each variable present in both, join the ranges;
 /// for variables only in one map, use the full range (conservative).
@@ -271,11 +273,30 @@ static void narrowFromBinary(const BinaryExpr* bin, VarRangeMap& env, bool taken
 }
 
 /// Narrow @p env using the condition @p cond being taken or not-taken.
-/// Only handles simple binary comparisons for now.
 static void narrowFromCondition(const Expression* cond, VarRangeMap& env, bool taken) {
     if (!cond) return;
     if (cond->type == ASTNodeType::BINARY_EXPR) {
         const auto* bin = static_cast<const BinaryExpr*>(cond);
+        if (bin->op == "&&") {
+            if (taken) {
+                // Both sub-conditions are true: narrow for each in sequence.
+                narrowFromCondition(bin->left.get(),  env, true);
+                narrowFromCondition(bin->right.get(), env, true);
+            } else {
+                // !(a && b) = !a || !b: conservative — can't narrow further.
+            }
+            return;
+        }
+        if (bin->op == "||") {
+            if (!taken) {
+                // Both sub-conditions are false: narrow for each in sequence.
+                narrowFromCondition(bin->left.get(),  env, false);
+                narrowFromCondition(bin->right.get(), env, false);
+            } else {
+                // a || b is true but we don't know which branch: conservative.
+            }
+            return;
+        }
         narrowFromBinary(bin, env, taken);
         return;
     }
@@ -297,6 +318,14 @@ static void collectWritten(const Statement* stmt,
     case ASTNodeType::VAR_DECL:
         out.insert(static_cast<const VarDecl*>(stmt)->name);
         break;
+    case ASTNodeType::MOVE_DECL:
+        out.insert(static_cast<const MoveDecl*>(stmt)->name);
+        break;
+    case ASTNodeType::PREFETCH_STMT: {
+        const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+        if (ps->varDecl) out.insert(ps->varDecl->name);
+        break;
+    }
     case ASTNodeType::EXPR_STMT: {
         std::function<void(const Expression*)> scan = [&](const Expression* e) {
             if (!e) return;
@@ -361,6 +390,22 @@ static void collectWritten(const Statement* stmt,
                 collectWritten(s.get(), out);
         break;
     }
+    case ASTNodeType::CATCH_STMT: {
+        const auto* cs = static_cast<const CatchStmt*>(stmt);
+        collectWritten(cs->body.get(), out);
+        break;
+    }
+    case ASTNodeType::DEFER_STMT: {
+        const auto* ds = static_cast<const DeferStmt*>(stmt);
+        collectWritten(ds->body.get(), out);
+        break;
+    }
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        for (const auto& stage : pl->stages)
+            collectWritten(stage.body.get(), out);
+        break;
+    }
     default:
         break;
     }
@@ -389,6 +434,34 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
             env[vd->name] = *r;
         else
             env.erase(vd->name); // unknown range: remove stale entry
+        break;
+    }
+
+    // ── Move declaration ─────────────────────────────────────────────────────
+    case ASTNodeType::MOVE_DECL: {
+        const auto* md = static_cast<const MoveDecl*>(stmt);
+        // The moved-from variable loses its range (value is consumed).
+        if (const auto* initId = dynamic_cast<const IdentifierExpr*>(md->initializer.get()))
+            env.erase(initId->name);
+        // The new variable may inherit the source's range if known.
+        auto r = evalExprRange(md->initializer.get(), env);
+        if (r && r->isNarrowed())
+            env[md->name] = *r;
+        else
+            env.erase(md->name);
+        break;
+    }
+
+    // ── Prefetch declaration — treat the embedded VarDecl like VAR_DECL ──────
+    case ASTNodeType::PREFETCH_STMT: {
+        const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+        if (ps->varDecl) {
+            auto r = evalExprRange(ps->varDecl->initializer.get(), env);
+            if (r && r->isNarrowed())
+                env[ps->varDecl->name] = *r;
+            else
+                env.erase(ps->varDecl->name);
+        }
         break;
     }
 
@@ -472,6 +545,97 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         collectWritten(dw->body.get(), writes);
         for (const auto& w : writes) env.erase(w);
         if (dw->body) scanStmt(dw->body.get(), env);
+        break;
+    }
+
+    // ── For-each loop — iterator var unranged, invalidate body writes ─────────
+    case ASTNodeType::FOR_EACH_STMT: {
+        const auto* fe = static_cast<const ForEachStmt*>(stmt);
+        // Iterator variable takes an element value from the collection —
+        // its range is unknown without element-type analysis.
+        env.erase(fe->iteratorVar);
+        std::unordered_set<std::string> writes;
+        collectWritten(fe->body.get(), writes);
+        for (const auto& w : writes) env.erase(w);
+        if (fe->body) scanStmt(fe->body.get(), env);
+        break;
+    }
+
+    // ── Switch — invalidate writes in all cases, recurse into each case ───────
+    case ASTNodeType::SWITCH_STMT: {
+        const auto* sw = static_cast<const SwitchStmt*>(stmt);
+        // Kill all variables assigned in any case (may or may not execute).
+        std::unordered_set<std::string> writes;
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                collectWritten(s.get(), writes);
+        for (const auto& w : writes) env.erase(w);
+        // Recurse into case bodies for nested declarations.
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                scanStmt(s.get(), env);
+        break;
+    }
+
+    // ── Catch / defer — invalidate writes, recurse ───────────────────────────
+    case ASTNodeType::CATCH_STMT: {
+        const auto* cs = static_cast<const CatchStmt*>(stmt);
+        std::unordered_set<std::string> writes;
+        collectWritten(cs->body.get(), writes);
+        for (const auto& w : writes) env.erase(w);
+        if (cs->body) scanStmt(cs->body.get(), env);
+        break;
+    }
+    case ASTNodeType::DEFER_STMT: {
+        const auto* ds = static_cast<const DeferStmt*>(stmt);
+        std::unordered_set<std::string> writes;
+        collectWritten(ds->body.get(), writes);
+        for (const auto& w : writes) env.erase(w);
+        if (ds->body) scanStmt(ds->body.get(), env);
+        break;
+    }
+
+    // ── Pipeline statement ─────────────────────────────────────────────────────
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        // Kill all variables written inside any stage body, then scan stages.
+        std::unordered_set<std::string> writes;
+        for (const auto& stage : pl->stages)
+            collectWritten(stage.body.get(), writes);
+        for (const auto& w : writes) env.erase(w);
+        for (const auto& stage : pl->stages)
+            if (stage.body) scanStmt(stage.body.get(), env);
+        break;
+    }
+
+    // ── Assume statement — narrow from the condition, scan deopt body ─────────
+    case ASTNodeType::ASSUME_STMT: {
+        const auto* as = static_cast<const AssumeStmt*>(stmt);
+        // Narrow the range environment from the assume condition being true.
+        narrowFromCondition(as->condition.get(), env, /*taken=*/true);
+        // The deopt body executes only on the exceptional (violation) path;
+        // we don't merge its effects back into the main env.
+        break;
+    }
+
+    // ── Invalidate statement — clear the variable's range ────────────────────
+    case ASTNodeType::INVALIDATE_STMT:
+        env.erase(static_cast<const InvalidateStmt*>(stmt)->varName);
+        break;
+
+    // ── Expression statement — propagate ranges through assignments ──────────
+    case ASTNodeType::EXPR_STMT: {
+        const auto* es = static_cast<const ExprStmt*>(stmt);
+        if (es->expression &&
+            es->expression->type == ASTNodeType::ASSIGN_EXPR) {
+            const auto* ae =
+                static_cast<const AssignExpr*>(es->expression.get());
+            auto r = evalExprRange(ae->value.get(), env);
+            if (r && r->isNarrowed())
+                env[ae->name] = *r;
+            else
+                env.erase(ae->name);
+        }
         break;
     }
 

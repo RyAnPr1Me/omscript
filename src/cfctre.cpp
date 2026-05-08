@@ -929,7 +929,7 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
     if (op == "|")  return CTValue::fromI64(a | b);
     if (op == "^")  return CTValue::fromI64(a ^ b);
     if (op == "<<" && b >= 0 && b < 64) return CTValue::fromU64(ua << static_cast<unsigned>(b));
-    if (op == ">>" && b >= 0 && b < 64) return CTValue::fromI64(a >> static_cast<int>(b));
+    if (op == ">>" && b >= 0 && b < 64) return CTValue::fromU64(ua >> static_cast<unsigned>(b));
     if (op == ">>>") {
         const int sh = static_cast<int>(b & 63);
         return CTValue::fromU64(ua >> sh);
@@ -963,7 +963,7 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
     if (op == "|=") return CTValue::fromI64(a | b);
     if (op == "^=") return CTValue::fromI64(a ^ b);
     if (op == "<<=" && b >= 0 && b < 64) return CTValue::fromU64(ua << static_cast<unsigned>(b));
-    if (op == ">>=" && b >= 0 && b < 64) return CTValue::fromI64(a >> static_cast<int>(b));
+    if (op == ">>=" && b >= 0 && b < 64) return CTValue::fromU64(ua >> static_cast<unsigned>(b));
     if (op == ">>>=") {
         const int sh = static_cast<int>(b & 63);
         return CTValue::fromU64(ua >> sh);
@@ -983,7 +983,7 @@ CTValue CTEngine::evalUnaryOp(const std::string& op, const CTValue& val) {
         return CTValue::uninit();
     }
     if (val.isInt()) {
-        if (op == "-")  return CTValue::fromI64(-val.asI64());
+        if (op == "-")  return CTValue::fromI64(static_cast<int64_t>(-static_cast<uint64_t>(val.asI64())));
         if (op == "~")  return CTValue::fromI64(~val.asI64());
         if (op == "!")  return CTValue::fromI64(val.asI64() == 0 ? 1 : 0);
         if (op == "+")  return val;
@@ -1159,7 +1159,11 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // ── abs ──────────────────────────────────────────────────────────────
     if (name == "abs" && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64(*v < 0 ? -*v : *v);
+        if (auto v = intArg(0)) {
+            // Guard: -INT64_MIN overflows; return INT64_MIN to match wrap-around semantics.
+            if (*v == INT64_MIN) return CTValue::fromI64(INT64_MIN);
+            return CTValue::fromI64(*v < 0 ? -*v : *v);
+        }
         return std::nullopt;
     }
 
@@ -1192,6 +1196,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // ── min / max ────────────────────────────────────────────────────────
     if (name == "min" && n == 2) {
+        if (args[0] == args[1]) return args[0];  // min(x, x) → x
         auto a = intArg(0), b = intArg(1);
         if (a && b) return CTValue::fromI64(std::min(*a, *b));
         auto da = dArg(0), db = dArg(1);
@@ -1199,6 +1204,7 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         return std::nullopt;
     }
     if (name == "max" && n == 2) {
+        if (args[0] == args[1]) return args[0];  // max(x, x) → x
         auto a = intArg(0), b = intArg(1);
         if (a && b) return CTValue::fromI64(std::max(*a, *b));
         auto da = dArg(0), db = dArg(1);
@@ -1228,6 +1234,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // ── pow ──────────────────────────────────────────────────────────────
     if (name == "pow" && n == 2) {
+        // pow(x, 0) = 1 for any x (even symbolic).
+        auto ie0 = intArg(1);
+        if (ie0 && *ie0 == 0) return CTValue::fromI64(1);
         auto db = dArg(0), de = dArg(1);
         if (db && de) {
             // If both are exact integers, keep integer semantics.
@@ -1294,8 +1303,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "gcd" && n == 2) {
         auto a = intArg(0), b = intArg(1);
         if (a && b) {
-            uint64_t ua = static_cast<uint64_t>(std::abs(*a));
-            uint64_t ub = static_cast<uint64_t>(std::abs(*b));
+            // std::abs(INT64_MIN) is UB; use unsigned negation instead.
+            uint64_t ua = (*a < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(*a)) : static_cast<uint64_t>(*a);
+            uint64_t ub = (*b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(*b)) : static_cast<uint64_t>(*b);
             while (ub) { const uint64_t t = ub; ub = ua % ub; ua = t; }
             return CTValue::fromI64(static_cast<int64_t>(ua));
         }
@@ -1304,8 +1314,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "lcm" && n == 2) {
         auto a = intArg(0), b = intArg(1);
         if (a && b) {
-            uint64_t ua = static_cast<uint64_t>(std::abs(*a));
-            uint64_t ub = static_cast<uint64_t>(std::abs(*b));
+            // std::abs(INT64_MIN) is UB; use unsigned negation instead.
+            uint64_t ua = (*a < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(*a)) : static_cast<uint64_t>(*a);
+            uint64_t ub = (*b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(*b)) : static_cast<uint64_t>(*b);
             if (ua == 0 || ub == 0) return CTValue::fromI64(0);
             uint64_t g = ua, tb = ub;
             while (tb) { const uint64_t t = tb; tb = g % tb; g = t; }
@@ -1360,6 +1371,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (v && k) {
             uint64_t x = static_cast<uint64_t>(*v);
             const int sh = static_cast<int>(*k) & 63;
+            // When sh == 0, (64 - sh) == 64 which is UB for a 64-bit shift.
+            if (sh == 0) return CTValue::fromI64(static_cast<int64_t>(x));
             return CTValue::fromI64(static_cast<int64_t>((x << sh) | (x >> (64 - sh))));
         }
         return std::nullopt;
@@ -1369,6 +1382,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (v && k) {
             uint64_t x = static_cast<uint64_t>(*v);
             const int sh = static_cast<int>(*k) & 63;
+            // When sh == 0, (64 - sh) == 64 which is UB for a 64-bit shift.
+            if (sh == 0) return CTValue::fromI64(static_cast<int64_t>(x));
             return CTValue::fromI64(static_cast<int64_t>((x >> sh) | (x << (64 - sh))));
         }
         return std::nullopt;

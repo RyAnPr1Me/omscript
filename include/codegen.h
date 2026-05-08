@@ -373,6 +373,14 @@ class CodeGenerator {
     // Defer stack: each scope level has its own list of deferred statements (LIFO)
     std::vector<std::vector<Statement*>> deferStack;
 
+    /// Deferred-free queue: heap pointers queued by `invalidate` statements.
+    /// The actual free() call is emitted in a batch at the function's exit point
+    /// (generateReturn / generateThrow), rather than at the invalidate site.
+    /// Variables are logically dead immediately at the invalidate call; any
+    /// subsequent use is a compile-time error.  The deferred physical free lets
+    /// LLVM move or coalesce the free() calls to an optimal CFG point.
+    std::vector<llvm::Value*> deferredFreeQueue_;
+
     struct LoopContext {
         llvm::BasicBlock* breakTarget;
         llvm::BasicBlock* continueTarget;
@@ -777,6 +785,14 @@ class CodeGenerator {
     /// separately for oversized element types (e.g. large structs).
     static constexpr size_t kMaxStackArrayElements = 512;
 
+    /// Minimum number of element slots to reserve when heap-allocating an empty
+    /// array that may later grow via push().  Matches the `minSlots` constant in
+    /// the push/unshift builtins (16 slots × 8 bytes = 128 bytes).  This avoids
+    /// emitting `malloc(8)` for `var arr = []`, which confuses LLVM's
+    /// dereferenceable-size inference and triggers an immediate realloc on the
+    /// first push.
+    static constexpr size_t kMinArrayCapacity = 16;
+
     /// Track which variables hold stack-allocated arrays so that free()
     /// is not called on them and bounds-check code uses the correct base.
     llvm::StringSet<> stackAllocatedArrays_;
@@ -901,6 +917,7 @@ class CodeGenerator {
     [[nodiscard]] llvm::Type* resolveAnnotatedType(const std::string& annotation);
     llvm::Value* toBool(llvm::Value* v);
     llvm::Value* toDefaultType(llvm::Value* v);
+    [[nodiscard]] llvm::Value* getArrayPtr(llvm::Value* v);
     /// Convert v to targetTy inserting appropriate casts (unchanged if not needed).
     llvm::Value* convertTo(llvm::Value* v, llvm::Type* targetTy);
     llvm::Value* ensureFloat(llvm::Value* v);
@@ -1076,6 +1093,12 @@ class CodeGenerator {
     llvm::Function* getOrDeclareMemchr();
     llvm::Function* getOrDeclareFree();
     llvm::Function* getOrDeclareStrstr();
+
+    /// Emit free() for every pointer queued in deferredFreeQueue_ and clear the
+    /// queue.  Called just before every function-exit edge (return / throw /
+    /// unreachable-abort) so that all invalidated heap objects are freed in a
+    /// single batch at the optimal CFG exit point.
+    void emitDeferredFrees();
     llvm::Function* getOrDeclareMemcpy();
     llvm::Function* getOrDeclareMemmove();
     llvm::Function* getOrDeclareToupper();

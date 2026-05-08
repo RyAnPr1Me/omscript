@@ -72,6 +72,8 @@ using omscript::ASTNodeType;
 using omscript::BinaryExpr;
 using omscript::BlockStmt;
 using omscript::CallExpr;
+using omscript::CatchStmt;
+using omscript::DeferStmt;
 using omscript::DoWhileStmt;
 using omscript::Expression;
 using omscript::ExprStmt;
@@ -86,6 +88,7 @@ using omscript::PostfixExpr;
 using omscript::PrefixExpr;
 using omscript::ReturnStmt;
 using omscript::Statement;
+using omscript::SwitchStmt;
 using omscript::TernaryExpr;
 using omscript::UnaryExpr;
 using omscript::VarDecl;
@@ -176,6 +179,22 @@ static bool stmtCallsAny(const Statement* s, const std::unordered_set<std::strin
         auto* fe = static_cast<const ForEachStmt*>(s);
         return exprCallsAny(fe->collection.get(), names) || stmtCallsAny(fe->body.get(), names);
     }
+    case ASTNodeType::SWITCH_STMT: {
+        auto* sw = static_cast<const SwitchStmt*>(s);
+        if (exprCallsAny(sw->condition.get(), names)) return true;
+        for (const auto& sc : sw->cases) {
+            if (sc.value && exprCallsAny(sc.value.get(), names)) return true;
+            for (const auto& val : sc.values)
+                if (exprCallsAny(val.get(), names)) return true;
+            for (const auto& st : sc.body)
+                if (stmtCallsAny(st.get(), names)) return true;
+        }
+        return false;
+    }
+    case ASTNodeType::CATCH_STMT:
+        return stmtCallsAny(static_cast<const CatchStmt*>(s)->body.get(), names);
+    case ASTNodeType::DEFER_STMT:
+        return stmtCallsAny(static_cast<const DeferStmt*>(s)->body.get(), names);
     default:
         return false;
     }
@@ -745,8 +764,11 @@ llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
     if (v->getType()->isDoubleTy()) {
         return builder->CreateFCmpONE(v, llvm::ConstantFP::get(getFloatType(), 0.0), "tobool");
     } else if (v->getType()->isPointerTy()) {
-        llvm::Value* intVal = builder->CreatePtrToInt(v, getDefaultType(), "ptrtoint");
-        return builder->CreateICmpNE(intVal, llvm::ConstantInt::get(getDefaultType(), 0), "tobool");
+        // Compare the pointer directly against null — avoids a ptrtoint and
+        // preserves provenance / nonnull information for alias analysis.
+        return builder->CreateICmpNE(
+            v, llvm::ConstantPointerNull::get(
+                   llvm::cast<llvm::PointerType>(v->getType())), "tobool");
     } else {
         return builder->CreateICmpNE(v, llvm::ConstantInt::get(v->getType(), 0, true), "tobool");
     }
@@ -772,6 +794,15 @@ llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
         return builder->CreateZExt(v, getDefaultType(), "zext");
     }
     return v;
+}
+
+llvm::Value* CodeGenerator::getArrayPtr(llvm::Value* v) {
+    if (v->getType()->isPointerTy())
+        return v;
+    llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
+    if (v->getType() != getDefaultType())
+        v = toDefaultType(v);
+    return builder->CreateIntToPtr(v, ptrTy, "arr.ptr");
 }
 
 llvm::Value* CodeGenerator::ensureFloat(llvm::Value* v) {
@@ -1158,7 +1189,10 @@ llvm::LoadInst* CodeGenerator::emitLoadArrayElem(llvm::Value* elemPtr,
 }
 
 void CodeGenerator::emitStoreArrayLen(llvm::Value* len, llvm::Value* arrPtr) {
-    auto* st = builder->CreateStore(len, arrPtr);
+    // Use aligned store (align 8) to match the aligned load in emitLoadArrayLen.
+    // This is required for consistent TBAA and allows LLVM to reason correctly
+    // about the length slot without treating it as an unaligned scalar access.
+    auto* st = builder->CreateAlignedStore(len, arrPtr, llvm::MaybeAlign(8));
     st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 }
 
@@ -1187,8 +1221,17 @@ llvm::Value* CodeGenerator::emitAllocArray(llvm::Value* len,
                                              /*NUW=*/true, /*NSW=*/true);
     llvm::Value* buf   = builder->CreateCall(getOrDeclareMalloc(), {bytes},
                                               name + ".buf");
+    // Set dereferenceable to the actual allocation size when known at compile
+    // time.  For dynamic sizes, conservatively use 8 bytes (one slot).
+    // This lets LLVM's alias analysis and bounds reasoning use the tightest
+    // safe lower-bound rather than always assuming only 8 bytes are valid.
+    uint64_t derefBytes = 8;
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(len)) {
+        uint64_t n = static_cast<uint64_t>(ci->getSExtValue());
+        derefBytes = (n + 1) * 8;
+    }
     llvm::cast<llvm::CallInst>(buf)->addRetAttr(
-        llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        llvm::Attribute::getWithDereferenceableBytes(*context, derefBytes));
     emitStoreArrayLen(len, buf);
     return buf;
 }
@@ -4726,7 +4769,60 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoUnwind);
     }
 
-    // @allocator(size=N) / @allocator(size=N, count=M): mark as allocator wrapper.
+    // @memory(none|readonly|writeonly|...) — explicit memory-effect annotation.
+    // Applied AFTER @semantics(pure) so an explicit @memory always wins.
+    // @memory(readwrite) is a no-op (documents intent, emits no attribute).
+    if (func->hintMemoryEffect != FunctionDecl::MemoryEffect::Default &&
+        func->hintMemoryEffect != FunctionDecl::MemoryEffect::ReadWrite) {
+        using ME = FunctionDecl::MemoryEffect;
+        switch (func->hintMemoryEffect) {
+        case ME::None:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::none()));
+            // none implies nothrow, nosync, willreturn.
+            function->addFnAttr(llvm::Attribute::NoUnwind);
+            function->setNoSync();
+            if (!isSelfRecursive) function->setWillReturn();
+            break;
+        case ME::ReadOnly:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects(llvm::ModRefInfo::Ref)));
+            function->setNoSync();
+            if (!isSelfRecursive) function->setWillReturn();
+            break;
+        case ME::WriteOnly:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects(llvm::ModRefInfo::Mod)));
+            break;
+        case ME::ArgMem:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::argMemOnly()));
+            break;
+        case ME::ArgMemRO:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+            function->setNoSync();
+            break;
+        case ME::InaccessibleMem:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::inaccessibleMemOnly()));
+            break;
+        case ME::InaccessibleOrArgMem:
+            function->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
+            break;
+        default:
+            break;
+        }
+    }
+
+    // @memory(noalias_ret) — return pointer does not alias any existing pointer.
+    if (func->hintNoAliasReturn && function->getReturnType()->isPointerTy()) {
+        function->addRetAttr(llvm::Attribute::NoAlias);
+    }
+
+    // @memory(allocator, size=N) / @memory(allocator, size=N, count=M):
+    // mark as allocator wrapper.
     if (func->allocatorSizeParam >= 0) {
         const unsigned sizeIdx  = static_cast<unsigned>(func->allocatorSizeParam);
         if (func->allocatorCountParam >= 0) {
@@ -4789,6 +4885,25 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // speculate calls across branches and into loop preheaders.
     if (func->hintSpeculatable) {
         function->addFnAttr(llvm::Attribute::Speculatable);
+    }
+
+    // @semantics(willreturn): user guarantees this function always terminates in
+    // finite time (no infinite loops, no unbounded recursion).  LLVM uses this
+    // to allow DSE and loop-carried analysis across the call.
+    if (func->hintWillReturn) {
+        function->addFnAttr(llvm::Attribute::WillReturn);
+    }
+
+    // @semantics(nosync): no synchronization, mutex, or blocking I/O inside.
+    // Lets the optimizer reorder or CSE calls across speculative paths.
+    if (func->hintNoSync) {
+        function->setNoSync();
+    }
+
+    // @semantics(nofree): function never deallocates memory.  Alias analysis can
+    // then prove that pointers live across the call boundary remain valid.
+    if (func->hintNoFree) {
+        function->addFnAttr(llvm::Attribute::NoFree);
     }
 
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.
@@ -4937,6 +5052,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constFloatFolds_.clear();
     stackAllocatedArrays_.clear();
     readOnlyGlobalArrays_.clear();
+    deferredFreeQueue_.clear();
     pendingArrayStackAlloc_ = false;
     pendingArrayReadOnlyGlobal_ = false;
     scopeComptimeInts_.clear();
@@ -6636,7 +6752,7 @@ llvm::Value* CodeGenerator::emitComptimeArray(const std::vector<ConstValue>& ele
         llvm::GlobalValue::PrivateLinkage, arrConst, ".comptime.arr");
     gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
     gv->setAlignment(llvm::Align(8));
-    return builder->CreatePtrToInt(gv, i64Ty, "comptime.arr");
+    return gv;
 }
 
 void CodeGenerator::generateAssume(AssumeStmt* stmt) {
@@ -6646,20 +6762,27 @@ void CodeGenerator::generateAssume(AssumeStmt* stmt) {
         cond = builder->CreateICmpNE(cond, llvm::ConstantInt::get(cond->getType(), 0), "assume.cond");
     }
     llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
-    builder->CreateCall(assumeFn, {cond});
 
     if (stmt->deoptBody) {
-        // if (!cond) { deoptBody }
+        // Emit the branch BEFORE the assume so LLVM does not treat the deopt
+        // path as dead code.  The assume is placed in afterBB so it still
+        // helps optimizations on the fast (condition-true) path.
         llvm::Function* parent = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* deoptBB = llvm::BasicBlock::Create(*context, "deopt", parent);
         llvm::BasicBlock* afterBB = llvm::BasicBlock::Create(*context, "after.assume", parent);
         builder->CreateCondBr(cond, afterBB, deoptBB);
+
         builder->SetInsertPoint(deoptBB);
         generateStatement(stmt->deoptBody.get());
         if (!builder->GetInsertBlock()->getTerminator()) {
             builder->CreateBr(afterBB);
         }
+
         builder->SetInsertPoint(afterBB);
+        // Now it is safe to assume: we only reach here when cond was true.
+        builder->CreateCall(assumeFn, {cond});
+    } else {
+        builder->CreateCall(assumeFn, {cond});
     }
 }
 

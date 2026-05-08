@@ -226,6 +226,50 @@ static void collectStringArrayVars(
         return;  // No nested body to scan in a VarDecl
     }
 
+    // Move declaration: the new variable takes ownership of the source.
+    // Track string/array type on the new name the same way VarDecl does.
+    if (const auto* md = dynamic_cast<const MoveDecl*>(stmt)) {
+        if (md->initializer) {
+            if (md->typeName == "string" || md->typeName == "str") {
+                strVars.insert(md->name);
+            } else if (isFreshStringExpr(md->initializer.get(), strVars, arrVars)) {
+                strVars.insert(md->name);
+            } else if (md->initializer->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const auto* id = static_cast<const IdentifierExpr*>(md->initializer.get());
+                if (strVars.count(id->name))
+                    strVars.insert(md->name);
+                else if (arrVars.count(id->name))
+                    arrVars.insert(md->name);
+            } else if (isFreshArrayExpr(md->initializer.get(), strVars, arrVars)) {
+                arrVars.insert(md->name);
+            }
+        }
+        return;
+    }
+
+    // Prefetch with embedded VarDecl: track like VarDecl.
+    if (const auto* ps = dynamic_cast<const PrefetchStmt*>(stmt)) {
+        if (ps->varDecl) {
+            const auto* vd = ps->varDecl.get();
+            if (vd->initializer) {
+                if (vd->typeName == "string" || vd->typeName == "str") {
+                    strVars.insert(vd->name);
+                } else if (isFreshStringExpr(vd->initializer.get(), strVars, arrVars)) {
+                    strVars.insert(vd->name);
+                } else if (vd->initializer->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    const auto* id = static_cast<const IdentifierExpr*>(vd->initializer.get());
+                    if (strVars.count(id->name))
+                        strVars.insert(vd->name);
+                    else if (arrVars.count(id->name))
+                        arrVars.insert(vd->name);
+                } else if (isFreshArrayExpr(vd->initializer.get(), strVars, arrVars)) {
+                    arrVars.insert(vd->name);
+                }
+            }
+        }
+        return;
+    }
+
     // Recurse into compound statements
     if (const auto* ifc = dynamic_cast<const IfStmt*>(stmt)) {
         collectStringArrayVars(ifc->thenBranch.get(), strVars, arrVars);
@@ -253,6 +297,24 @@ static void collectStringArrayVars(
         for (const auto& sc : sw->cases)
             for (const auto& s : sc.body)
                 collectStringArrayVars(s.get(), strVars, arrVars);
+        return;
+    }
+    if (const auto* cs = dynamic_cast<const CatchStmt*>(stmt)) {
+        collectStringArrayVars(cs->body.get(), strVars, arrVars);
+        return;
+    }
+    if (const auto* ds = dynamic_cast<const DeferStmt*>(stmt)) {
+        collectStringArrayVars(ds->body.get(), strVars, arrVars);
+        return;
+    }
+    if (const auto* pl = dynamic_cast<const PipelineStmt*>(stmt)) {
+        for (const auto& stage : pl->stages)
+            collectStringArrayVars(stage.body.get(), strVars, arrVars);
+        return;
+    }
+    if (const auto* as = dynamic_cast<const AssumeStmt*>(stmt)) {
+        if (as->deoptBody)
+            collectStringArrayVars(as->deoptBody.get(), strVars, arrVars);
         return;
     }
 }
@@ -387,6 +449,29 @@ static void markSharedVars(
         return;
     }
 
+    // Move declaration: ownership is transferred, so the source is NOT shared
+    // (it is consumed).  Only the new variable needs tracking; it is unique
+    // by definition unless the initializer is a call that captures.
+    if (const auto* md = dynamic_cast<const MoveDecl*>(stmt)) {
+        if (md->initializer && md->initializer->type == ASTNodeType::CALL_EXPR) {
+            const auto* call = static_cast<const CallExpr*>(md->initializer.get());
+            for (const auto& arg : call->arguments)
+                markArgShared(arg.get(), call->callee);
+        }
+        return;
+    }
+
+    // Prefetch with embedded VarDecl: check the initializer for captures.
+    if (const auto* ps = dynamic_cast<const PrefetchStmt*>(stmt)) {
+        if (ps->varDecl && ps->varDecl->initializer &&
+            ps->varDecl->initializer->type == ASTNodeType::CALL_EXPR) {
+            const auto* call = static_cast<const CallExpr*>(ps->varDecl->initializer.get());
+            for (const auto& arg : call->arguments)
+                markArgShared(arg.get(), call->callee);
+        }
+        return;
+    }
+
     if (const auto* es = dynamic_cast<const ExprStmt*>(stmt)) {
         scanExprForAliases(es->expression.get());
         return;
@@ -438,6 +523,25 @@ static void markSharedVars(
             for (const auto& s : sc.body)
                 markSharedVars(s.get(), strVars, arrVars, sharedVars);
         }
+        return;
+    }
+    if (const auto* cs = dynamic_cast<const CatchStmt*>(stmt)) {
+        markSharedVars(cs->body.get(), strVars, arrVars, sharedVars);
+        return;
+    }
+    if (const auto* ds = dynamic_cast<const DeferStmt*>(stmt)) {
+        markSharedVars(ds->body.get(), strVars, arrVars, sharedVars);
+        return;
+    }
+    if (const auto* pl = dynamic_cast<const PipelineStmt*>(stmt)) {
+        for (const auto& stage : pl->stages)
+            markSharedVars(stage.body.get(), strVars, arrVars, sharedVars);
+        return;
+    }
+    if (const auto* as = dynamic_cast<const AssumeStmt*>(stmt)) {
+        if (as->condition) scanExprForAliases(as->condition.get());
+        if (as->deoptBody)
+            markSharedVars(as->deoptBody.get(), strVars, arrVars, sharedVars);
         return;
     }
 }

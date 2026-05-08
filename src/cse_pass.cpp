@@ -158,6 +158,9 @@ static void collectKeysFromStmt(const Statement* stmt,
     case ASTNodeType::RETURN_STMT:
         collectKeys(static_cast<const ReturnStmt*>(stmt)->value.get(), freq, idempotent, opaque);
         break;
+    case ASTNodeType::THROW_STMT:
+        collectKeys(static_cast<const ThrowStmt*>(stmt)->value.get(), freq, idempotent, opaque);
+        break;
     case ASTNodeType::IF_STMT: {
         const auto* ifS = static_cast<const IfStmt*>(stmt);
         collectKeys(ifS->condition.get(), freq, idempotent, opaque);
@@ -229,6 +232,9 @@ static void replaceInStmt(Statement* stmt,
         break;
     case ASTNodeType::RETURN_STMT:
         replaceInExpr(static_cast<ReturnStmt*>(stmt)->value, key, varName, idempotent);
+        break;
+    case ASTNodeType::THROW_STMT:
+        replaceInExpr(static_cast<ThrowStmt*>(stmt)->value, key, varName, idempotent);
         break;
     case ASTNodeType::IF_STMT:
         replaceInExpr(static_cast<IfStmt*>(stmt)->condition, key, varName, idempotent);
@@ -433,31 +439,104 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Forward declarations for mutual recursion.
+static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out);
+static void collectOpaqueVarsInList(const std::vector<std::unique_ptr<Statement>>& stmts, OpaqueSet& out);
+
 /// Collect all volatile/atomic variable names in a block (recursive).
 static void collectOpaqueVars(const BlockStmt* block, OpaqueSet& out) {
     if (!block) return;
-    for (const auto& s : block->statements) {
-        if (!s) continue;
-        if (s->type == ASTNodeType::VAR_DECL) {
-            const auto* vd = static_cast<const VarDecl*>(s.get());
-            if (vd->isVolatile || vd->isAtomic) out.insert(vd->name);
-        } else if (s->type == ASTNodeType::BLOCK) {
-            collectOpaqueVars(static_cast<const BlockStmt*>(s.get()), out);
-        } else if (s->type == ASTNodeType::IF_STMT) {
-            const auto* ifS = static_cast<const IfStmt*>(s.get());
-            if (ifS->thenBranch && ifS->thenBranch->type == ASTNodeType::BLOCK)
-                collectOpaqueVars(static_cast<const BlockStmt*>(ifS->thenBranch.get()), out);
-            if (ifS->elseBranch && ifS->elseBranch->type == ASTNodeType::BLOCK)
-                collectOpaqueVars(static_cast<const BlockStmt*>(ifS->elseBranch.get()), out);
-        } else if (s->type == ASTNodeType::WHILE_STMT) {
-            const auto* ws = static_cast<const WhileStmt*>(s.get());
-            if (ws->body && ws->body->type == ASTNodeType::BLOCK)
-                collectOpaqueVars(static_cast<const BlockStmt*>(ws->body.get()), out);
-        } else if (s->type == ASTNodeType::FOR_STMT) {
-            const auto* fs = static_cast<const ForStmt*>(s.get());
-            if (fs->body && fs->body->type == ASTNodeType::BLOCK)
-                collectOpaqueVars(static_cast<const BlockStmt*>(fs->body.get()), out);
+    collectOpaqueVarsInList(block->statements, out);
+}
+
+/// Walk a flat list of statements accumulating volatile/atomic var names.
+static void collectOpaqueVarsInList(const std::vector<std::unique_ptr<Statement>>& stmts, OpaqueSet& out) {
+    for (const auto& s : stmts)
+        collectOpaqueVarsInStmt(s.get(), out);
+}
+
+/// Walk a single statement accumulating volatile/atomic var names.
+static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case ASTNodeType::VAR_DECL: {
+        const auto* vd = static_cast<const VarDecl*>(stmt);
+        if (vd->isVolatile || vd->isAtomic) out.insert(vd->name);
+        break;
+    }
+    case ASTNodeType::BLOCK:
+        collectOpaqueVars(static_cast<const BlockStmt*>(stmt), out);
+        break;
+    case ASTNodeType::IF_STMT: {
+        const auto* ifS = static_cast<const IfStmt*>(stmt);
+        collectOpaqueVarsInStmt(ifS->thenBranch.get(), out);
+        collectOpaqueVarsInStmt(ifS->elseBranch.get(), out);
+        break;
+    }
+    case ASTNodeType::WHILE_STMT: {
+        const auto* ws = static_cast<const WhileStmt*>(stmt);
+        collectOpaqueVarsInStmt(ws->body.get(), out);
+        break;
+    }
+    case ASTNodeType::FOR_STMT: {
+        const auto* fs = static_cast<const ForStmt*>(stmt);
+        collectOpaqueVarsInStmt(fs->body.get(), out);
+        break;
+    }
+    case ASTNodeType::DO_WHILE_STMT: {
+        const auto* dw = static_cast<const DoWhileStmt*>(stmt);
+        collectOpaqueVarsInStmt(dw->body.get(), out);
+        break;
+    }
+    case ASTNodeType::FOR_EACH_STMT: {
+        const auto* fe = static_cast<const ForEachStmt*>(stmt);
+        collectOpaqueVarsInStmt(fe->body.get(), out);
+        break;
+    }
+    case ASTNodeType::SWITCH_STMT: {
+        const auto* sw = static_cast<const SwitchStmt*>(stmt);
+        for (const auto& sc : sw->cases)
+            collectOpaqueVarsInList(sc.body, out);
+        break;
+    }
+    case ASTNodeType::CATCH_STMT: {
+        const auto* cs = static_cast<const CatchStmt*>(stmt);
+        collectOpaqueVarsInStmt(cs->body.get(), out);
+        break;
+    }
+    case ASTNodeType::DEFER_STMT: {
+        const auto* ds = static_cast<const DeferStmt*>(stmt);
+        collectOpaqueVarsInStmt(ds->body.get(), out);
+        break;
+    }
+    case ASTNodeType::MOVE_DECL: {
+        // MoveDecl transfers unique ownership from the source variable; it does
+        // not carry its own volatile/atomic flag because volatility is a property
+        // of the storage site (the original VarDecl), not of the move operation
+        // itself.  No new opaque variable is introduced here.
+        break;
+    }
+    case ASTNodeType::ASSUME_STMT: {
+        const auto* as = static_cast<const AssumeStmt*>(stmt);
+        collectOpaqueVarsInStmt(as->deoptBody.get(), out);
+        break;
+    }
+    case ASTNodeType::PREFETCH_STMT: {
+        const auto* ps = static_cast<const PrefetchStmt*>(stmt);
+        if (ps->varDecl) {
+            if (ps->varDecl->isVolatile || ps->varDecl->isAtomic)
+                out.insert(ps->varDecl->name);
         }
+        break;
+    }
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        for (const auto& stage : pl->stages)
+            collectOpaqueVarsInStmt(stage.body.get(), out);
+        break;
+    }
+    default:
+        break;
     }
 }
 
