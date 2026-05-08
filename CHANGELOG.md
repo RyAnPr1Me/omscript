@@ -171,6 +171,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - All three bottom-up expression traversers had `default: break` for every OmScript-specific expression type. Sub-expressions inside array literals, struct literals, spread operators, pipe operators, move/borrow/reborrow expressions, dict literals, and range annotations were silently skipped.
   - Added all nine missing cases to each traverser. Each case recurses into all reachable child sub-expressions.
 
+- **`opt_orchestrator` preflight check: `PREFETCH_STMT`, `PIPELINE_STMT`, `ASSUME_STMT` not checked; `checkExpr` missing 10 expression kinds** (`src/opt_orchestrator.cpp`):
+  - The preflight `checkStmt` and `checkExpr` lambdas in `OptimizationOrchestrator::runPreflightCheck()` perform pre-pass validity checks (including division-by-zero detection). They did not handle `PREFETCH_STMT`, `PIPELINE_STMT`, or `ASSUME_STMT` in `checkStmt`, meaning sub-expressions in those statements were never checked. `checkExpr` lacked cases for `INDEX_ASSIGN_EXPR`, `FIELD_ACCESS_EXPR`, `FIELD_ASSIGN_EXPR`, `SPREAD_EXPR`, `PIPE_EXPR`, `MOVE_EXPR`, `BORROW_EXPR`, `REBORROW_EXPR`, `RANGE_ANNOT_EXPR`, `STRUCT_LITERAL_EXPR`, `DICT_EXPR`, and `ARRAY_EXPR`.
+  - Added all missing cases to both `checkStmt` and `checkExpr`.
+
 ## [4.3.2] - 2026-05-07
 
 ### Fixed

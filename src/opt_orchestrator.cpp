@@ -828,6 +828,46 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
         }
         case ASTNodeType::ASSIGN_EXPR:
             checkExpr(static_cast<const AssignExpr*>(e)->value.get(), fnName); break;
+        case ASTNodeType::INDEX_ASSIGN_EXPR: {
+            const auto* ia = static_cast<const IndexAssignExpr*>(e);
+            checkExpr(ia->array.get(), fnName); checkExpr(ia->index.get(), fnName);
+            checkExpr(ia->value.get(), fnName); break;
+        }
+        case ASTNodeType::FIELD_ACCESS_EXPR:
+            checkExpr(static_cast<const FieldAccessExpr*>(e)->object.get(), fnName); break;
+        case ASTNodeType::FIELD_ASSIGN_EXPR: {
+            const auto* fa = static_cast<const FieldAssignExpr*>(e);
+            checkExpr(fa->object.get(), fnName); checkExpr(fa->value.get(), fnName); break;
+        }
+        case ASTNodeType::SPREAD_EXPR:
+            checkExpr(static_cast<const SpreadExpr*>(e)->operand.get(), fnName); break;
+        case ASTNodeType::PIPE_EXPR:
+            checkExpr(static_cast<const PipeExpr*>(e)->left.get(), fnName); break;
+        case ASTNodeType::MOVE_EXPR:
+            checkExpr(static_cast<const MoveExpr*>(e)->source.get(), fnName); break;
+        case ASTNodeType::BORROW_EXPR:
+            checkExpr(static_cast<const BorrowExpr*>(e)->source.get(), fnName); break;
+        case ASTNodeType::REBORROW_EXPR: {
+            const auto* rb = static_cast<const ReborrowExpr*>(e);
+            checkExpr(rb->source.get(), fnName);
+            if (rb->indexExpr) checkExpr(rb->indexExpr.get(), fnName); break;
+        }
+        case ASTNodeType::RANGE_ANNOT_EXPR:
+            checkExpr(static_cast<const RangeAnnotExpr*>(e)->inner.get(), fnName); break;
+        case ASTNodeType::STRUCT_LITERAL_EXPR:
+            for (const auto& fv : static_cast<const StructLiteralExpr*>(e)->fieldValues)
+                checkExpr(fv.second.get(), fnName);
+            break;
+        case ASTNodeType::DICT_EXPR:
+            for (const auto& p : static_cast<const DictExpr*>(e)->pairs) {
+                checkExpr(p.first.get(),  fnName);
+                checkExpr(p.second.get(), fnName);
+            }
+            break;
+        case ASTNodeType::ARRAY_EXPR:
+            for (const auto& el : static_cast<const ArrayExpr*>(e)->elements)
+                checkExpr(el.get(), fnName);
+            break;
         default: break;
         }
     };
@@ -893,6 +933,26 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
         case ASTNodeType::THROW_STMT: {
             const auto* ts = static_cast<const ThrowStmt*>(s);
             if (ts->value) checkExpr(ts->value.get(), fnName);
+            break;
+        }
+        case ASTNodeType::PREFETCH_STMT: {
+            const auto* ps = static_cast<const PrefetchStmt*>(s);
+            if (ps->varDecl && ps->varDecl->initializer)
+                checkExpr(ps->varDecl->initializer.get(), fnName);
+            if (ps->addrExpr) checkExpr(ps->addrExpr.get(), fnName);
+            break;
+        }
+        case ASTNodeType::ASSUME_STMT: {
+            const auto* as = static_cast<const AssumeStmt*>(s);
+            if (as->condition) checkExpr(as->condition.get(), fnName);
+            if (as->deoptBody) checkStmt(as->deoptBody.get(), fnName);
+            break;
+        }
+        case ASTNodeType::PIPELINE_STMT: {
+            const auto* pl = static_cast<const PipelineStmt*>(s);
+            if (pl->count) checkExpr(pl->count.get(), fnName);
+            for (const auto& stage : pl->stages)
+                if (stage.body) checkStmt(stage.body.get(), fnName);
             break;
         }
         default: break;
