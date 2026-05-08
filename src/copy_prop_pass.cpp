@@ -145,6 +145,15 @@ static unsigned propagateInExpr(std::unique_ptr<Expression>& expr,
         count += propagateInExpr(ia->value, map, opaque);
         break;
     }
+    case ASTNodeType::FIELD_ACCESS_EXPR:
+        count += propagateInExpr(static_cast<FieldAccessExpr*>(expr.get())->object, map, opaque);
+        break;
+    case ASTNodeType::FIELD_ASSIGN_EXPR: {
+        auto* fa = static_cast<FieldAssignExpr*>(expr.get());
+        count += propagateInExpr(fa->object, map, opaque);
+        count += propagateInExpr(fa->value,  map, opaque);
+        break;
+    }
     case ASTNodeType::POSTFIX_EXPR:
         count += propagateInExpr(static_cast<PostfixExpr*>(expr.get())->operand, map, opaque);
         break;

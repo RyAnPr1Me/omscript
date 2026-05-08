@@ -126,6 +126,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `stmtCallsAny` (used by `usesConcurrencyPrimitive` to decide whether a function body contains any call to `thread_create`, `mutex_lock`, etc.) did not recurse into `SWITCH_STMT` case bodies, `CATCH_STMT` bodies, or `DEFER_STMT` bodies. A function that only called concurrency primitives inside a switch arm or a deferred cleanup block would be incorrectly classified as "not concurrent", potentially allowing the effect-inference pass to attach `nosync` or downgrade memory-ordering assumptions.
   - Added `SWITCH_STMT`, `CATCH_STMT`, and `DEFER_STMT` cases to `stmtCallsAny`. Also added the three corresponding `using omscript::` declarations to the anonymous namespace so the type names resolve without qualification.
 
+- **Copy-propagation: `propagateInExpr` does not recurse into field-access and field-assign expressions** (`src/copy_prop_pass.cpp`):
+  - `propagateInExpr` handled `BINARY_EXPR`, `UNARY_EXPR`, `TERNARY_EXPR`, `CALL_EXPR`, `ASSIGN_EXPR`, `INDEX_EXPR`, `INDEX_ASSIGN_EXPR`, `POSTFIX_EXPR`, and `PREFIX_EXPR`, but had no cases for `FIELD_ACCESS_EXPR` or `FIELD_ASSIGN_EXPR`. Sub-expressions inside a struct field access (`obj.field`) or assignment (`obj.field = rhs`) were silently skipped, so copies could not be propagated into either the object expression or the right-hand-side value of a field assignment.
+  - Added both cases: `FIELD_ACCESS_EXPR` recurses into the `object` sub-expression; `FIELD_ASSIGN_EXPR` recurses into both `object` and `value`.
+
+- **Algebraic simplification: `simplifyExpr` does not recurse into index/field sub-expressions** (`src/alg_simp_pass.cpp`):
+  - The `simplifyExpr` bottom-up recurser had no cases for `INDEX_EXPR`, `INDEX_ASSIGN_EXPR`, `FIELD_ACCESS_EXPR`, `FIELD_ASSIGN_EXPR`, or `ASSIGN_EXPR`. Algebraic simplification rules (constant folding, identity elimination, strength reduction) were silently skipped for sub-expressions inside array indexing (`arr[i+0]`), element writes, struct field reads and writes, and direct assignment RHS values.
+  - Added the five missing cases. Each recurses into all child sub-expressions so that bottom-up folding works through nested containers.
+
 ## [4.3.2] - 2026-05-07
 
 ### Fixed

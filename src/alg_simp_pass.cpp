@@ -123,6 +123,31 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             count += simplifyExpr(arg);
         break;
     }
+    case ASTNodeType::INDEX_EXPR: {
+        auto* idx = static_cast<IndexExpr*>(expr.get());
+        count += simplifyExpr(idx->array);
+        count += simplifyExpr(idx->index);
+        break;
+    }
+    case ASTNodeType::INDEX_ASSIGN_EXPR: {
+        auto* ia = static_cast<IndexAssignExpr*>(expr.get());
+        count += simplifyExpr(ia->array);
+        count += simplifyExpr(ia->index);
+        count += simplifyExpr(ia->value);
+        break;
+    }
+    case ASTNodeType::FIELD_ACCESS_EXPR:
+        count += simplifyExpr(static_cast<FieldAccessExpr*>(expr.get())->object);
+        break;
+    case ASTNodeType::FIELD_ASSIGN_EXPR: {
+        auto* fa = static_cast<FieldAssignExpr*>(expr.get());
+        count += simplifyExpr(fa->object);
+        count += simplifyExpr(fa->value);
+        break;
+    }
+    case ASTNodeType::ASSIGN_EXPR:
+        count += simplifyExpr(static_cast<AssignExpr*>(expr.get())->value);
+        break;
     default:
         break;
     }
