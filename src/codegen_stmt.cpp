@@ -61,7 +61,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             llvm::Value* initVal = generateExpression(stmt->initializer.get());
             if (initVal->getType() != ty)
                 initVal = convertTo(initVal, ty);
-            builder->CreateStore(initVal, gv);
+            auto* si = builder->CreateStore(initVal, gv);
+            // Tag global scalar-variable initializer stores with the scalar TBAA
+            // node so LLVM AA distinguishes these from heap array/struct data.
+            if (tbaaScalar_)
+                si->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
         }
         return;
     }
@@ -2270,12 +2274,19 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                 builder->CreateCall(assumeFn, {nn});
             }
             // For range:      x = start + idx       (nsw safe; both fit in i64)
+            // For range_step: x = start + idx * step (nsw when start and step are
+            //   non-negative and proven in-range by the loop condition).
+            const bool startNonNeg = startV && nonNegValues_.count(startV);
+            const bool stepNonNeg  = !stepV || nonNegValues_.count(stepV);
             llvm::Value* offset = stepV
-                ? builder->CreateMul(curIdxR, stepV, "frng.off")
+                ? builder->CreateMul(curIdxR, stepV, "frng.off",
+                                     /*HasNUW=*/stepNonNeg, /*HasNSW=*/stepNonNeg)
                 : curIdxR;
+            // nsw on the iterator add: safe when start>=0 (proven) and offset>=0 (proven).
+            const bool iterNSW = (startNonNeg && stepNonNeg) || (stepV == nullptr);
             llvm::Value* iterVal = builder->CreateAdd(
                 startV, offset, "frng.val",
-                /*HasNUW=*/false, /*HasNSW=*/stepV == nullptr);
+                /*HasNUW=*/false, /*HasNSW=*/iterNSW);
             builder->CreateAlignedStore(iterVal, iterAllocaR, iterAllocaR->getAlign());
 
             loopStack.push_back({endBBR, incBBR});
