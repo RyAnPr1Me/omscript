@@ -508,6 +508,16 @@ static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx) 
         }
         break;
     }
+    case ASTNodeType::CATCH_STMT: {
+        auto* cs = static_cast<CatchStmt*>(stmt);
+        if (cs->body) optimizeStatementImpl(cs->body.get(), ctx);
+        break;
+    }
+    case ASTNodeType::DEFER_STMT: {
+        auto* ds = static_cast<DeferStmt*>(stmt);
+        if (ds->body) optimizeStatementImpl(ds->body.get(), ctx);
+        break;
+    }
     case ASTNodeType::INVALIDATE_STMT:
         [[fallthrough]];
     default:

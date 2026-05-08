@@ -880,6 +880,21 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
             }
             break;
         }
+        case ASTNodeType::CATCH_STMT: {
+            const auto* cs = static_cast<const CatchStmt*>(s);
+            checkStmt(cs->body.get(), fnName);
+            break;
+        }
+        case ASTNodeType::DEFER_STMT: {
+            const auto* ds = static_cast<const DeferStmt*>(s);
+            checkStmt(ds->body.get(), fnName);
+            break;
+        }
+        case ASTNodeType::THROW_STMT: {
+            const auto* ts = static_cast<const ThrowStmt*>(s);
+            if (ts->value) checkExpr(ts->value.get(), fnName);
+            break;
+        }
         default: break;
         }
     };

@@ -81,6 +81,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `collectWritten` (used to conservatively widen loop-iteration variable ranges when the loop body may reassign them) handled `switch` cases but not `catch` or `defer` bodies. A variable reassigned inside a `catch` or `defer` block nested in a loop would not be widened, potentially keeping a stale narrowed range. This could cause incorrect range-guided optimizations (e.g., mis-folding comparisons) on variables that are actually overwritten on the exceptional path.
   - Added `CATCH_STMT` and `DEFER_STMT` cases to `collectWritten`.
 
+- **E-graph optimizer and HGOE pass: `catch`/`defer` bodies not traversed** (`src/egraph_optimizer.cpp`, `src/hgoe_egraph.cpp`):
+  - `optimizeStatementImpl` in `egraph_optimizer.cpp` and `visitStmt` in `hgoe_egraph.cpp` did not recurse into `CATCH_STMT` or `DEFER_STMT` bodies. Expressions inside catch-handler and defer blocks were silently skipped, leaving valid e-graph and HGOE rewrites (e.g., strength reductions, algebraic simplifications) on the table.
+  - `hgoe_egraph.cpp::visitStmt` also missed `DO_WHILE_STMT` and `SWITCH_STMT`.
+  - Added the missing cases to both files. `opt_orchestrator.cpp`'s `checkStmt` preflight validator received the same additions (`CATCH_STMT`, `DEFER_STMT`, `THROW_STMT`) for completeness.
+
 ### Documentation
 
 - **`LANGUAGE_REFERENCE.md`**:

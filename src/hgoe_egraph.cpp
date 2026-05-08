@@ -1053,6 +1053,32 @@ static void visitStmt(Statement* stmt,
         if (ts->value) visitExpr(ts->value, rules, cfg, stats);
         break;
     }
+    case ASTNodeType::DO_WHILE_STMT: {
+        auto* dw = static_cast<DoWhileStmt*>(stmt);
+        visitStmt(dw->body.get(), rules, cfg, stats);
+        if (dw->condition) visitExpr(dw->condition, rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::SWITCH_STMT: {
+        auto* sw = static_cast<SwitchStmt*>(stmt);
+        if (sw->condition) visitExpr(sw->condition, rules, cfg, stats);
+        for (auto& sc : sw->cases) {
+            if (sc.value) visitExpr(sc.value, rules, cfg, stats);
+            for (auto& val : sc.values) visitExpr(val, rules, cfg, stats);
+            for (auto& s : sc.body) visitStmt(s.get(), rules, cfg, stats);
+        }
+        break;
+    }
+    case ASTNodeType::CATCH_STMT: {
+        auto* cs = static_cast<CatchStmt*>(stmt);
+        if (cs->body) visitBlock(cs->body.get(), rules, cfg, stats);
+        break;
+    }
+    case ASTNodeType::DEFER_STMT: {
+        auto* ds = static_cast<DeferStmt*>(stmt);
+        visitStmt(ds->body.get(), rules, cfg, stats);
+        break;
+    }
     default:
         break;
     }
