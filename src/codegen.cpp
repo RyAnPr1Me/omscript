@@ -5098,7 +5098,15 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
         // Use the parameter's actual LLVM type (respects type annotations).
         llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name, argIt->getType());
-        builder->CreateStore(&(*argIt), alloca);
+        {
+            auto* paramSt = builder->CreateStore(&(*argIt), alloca);
+            // Tag parameter-init stores with scalar TBAA so LLVM AA knows the
+            // alloca slot doesn't alias heap array/struct/map data.
+            llvm::Type* paramTy = argIt->getType();
+            if (tbaaScalar_ && (paramTy->isIntegerTy() || paramTy->isFloatTy() ||
+                                paramTy->isDoubleTy()  || paramTy->isPointerTy()))
+                paramSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+        }
         bindVariable(param.name, alloca);
         // Annotate parameter with its declared type for signed/unsigned tracking.
         if (!param.typeName.empty())

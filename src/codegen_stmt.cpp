@@ -1443,7 +1443,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Initialize iterator
     llvm::Value* startVal = generateExpression(stmt->start.get());
     startVal = convertTo(startVal, iterType);
-    builder->CreateAlignedStore(startVal, iterAlloca, iterAlloca->getAlign());
+    {
+        auto* initSt = builder->CreateAlignedStore(startVal, iterAlloca, iterAlloca->getAlign());
+        // Tag the iterator init store with scalar TBAA so LLVM AA knows it
+        // doesn't alias heap array/struct/map data.
+        if (tbaaScalar_ && (iterType->isIntegerTy() || iterType->isFloatTy() ||
+                            iterType->isDoubleTy()  || iterType->isPointerTy()))
+            initSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+    }
 
     // Early non-negativity tracking: mark the iterator alloca as non-negative
     {
@@ -1575,6 +1582,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     builder->SetInsertPoint(condBB);
     llvm::Value* curVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
+    // Tag iterator loads with TBAA + noundef so LLVM AA and LVI can use them.
+    if (auto* curLoadInst = llvm::dyn_cast<llvm::LoadInst>(curVal)) {
+        if (tbaaScalar_ && (iterType->isIntegerTy() || iterType->isFloatTy() ||
+                            iterType->isDoubleTy()  || iterType->isPointerTy()))
+            curLoadInst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+        curLoadInst->setMetadata(llvm::LLVMContext::MD_noundef,
+                                 llvm::MDNode::get(*context, {}));
+    }
     // !range on the condition block load: when the loop has constant bounds
     if (stepKnownPositive && iterType->isIntegerTy(64)) {
         auto bit = allocaUpperBound_.find(iterAlloca);
@@ -1658,7 +1673,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
         if (startNonNeg) {
             // Load the iterator once and reuse for all assume conditions.
-            llvm::Value* iterVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.assume");
+            auto* iterLoadForAssume = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.assume");
+            // Tag with TBAA + noundef for improved LLVM analysis.
+            if (tbaaScalar_ && (iterType->isIntegerTy() || iterType->isFloatTy() ||
+                                iterType->isDoubleTy()  || iterType->isPointerTy()))
+                iterLoadForAssume->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+            iterLoadForAssume->setMetadata(llvm::LLVMContext::MD_noundef,
+                                           llvm::MDNode::get(*context, {}));
+            llvm::Value* iterVal = iterLoadForAssume;
             llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
                 module.get(), llvm::Intrinsic::assume, {});
             // Lower bound: assume iter >= 0 (always true for non-negative starts).
@@ -1871,6 +1893,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Increment block
     builder->SetInsertPoint(incBB);
     llvm::Value* nextVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
+    // Tag incBB iterator load with TBAA + noundef.
+    if (auto* nextLoadInst = llvm::dyn_cast<llvm::LoadInst>(nextVal)) {
+        if (tbaaScalar_ && (iterType->isIntegerTy() || iterType->isFloatTy() ||
+                            iterType->isDoubleTy()  || iterType->isPointerTy()))
+            nextLoadInst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+        nextLoadInst->setMetadata(llvm::LLVMContext::MD_noundef,
+                                  llvm::MDNode::get(*context, {}));
+    }
     // !range on the increment block load: we reach incBB only after the
     if (stepKnownPositive && iterType->isIntegerTy(64)) {
         auto bit = allocaUpperBound_.find(iterAlloca);
@@ -1905,6 +1935,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         incVal = builder->CreateNSWAdd(nextVal, stepVal, "nextvar");
     }
     builder->CreateAlignedStore(incVal, iterAlloca, iterAlloca->getAlign());
+    // Tag the iterator increment store with scalar TBAA.
+    if (auto* incStoreLast = llvm::dyn_cast<llvm::StoreInst>(
+            &builder->GetInsertBlock()->back())) {
+        if (tbaaScalar_ && (iterType->isIntegerTy() || iterType->isFloatTy() ||
+                            iterType->isDoubleTy()  || iterType->isPointerTy()))
+            incStoreLast->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+    }
     auto* backBr = builder->CreateBr(condBB);
 
     // Attach SIMD interleave hint to the for-loop back-edge at O2+.
@@ -2388,7 +2425,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     // Allocate hidden index variable and the user's iterator variable
     llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "_foreach_idx");
-    builder->CreateAlignedStore(llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca, idxAlloca->getAlign());
+    {
+        auto* idxInitSt = builder->CreateAlignedStore(
+            llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca, idxAlloca->getAlign());
+        if (tbaaScalar_)
+            idxInitSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+    }
     // The foreach hidden index starts at 0 and only increments, so it is
     nonNegValues_.insert(idxAlloca);
 
@@ -2409,6 +2451,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Condition: idx < length
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), idxAlloca, llvm::MaybeAlign(8), "foreach.idx");
+    // Tag cond-block index load with TBAA + noundef.
+    if (auto* curIdxLoad = llvm::dyn_cast<llvm::LoadInst>(curIdx)) {
+        if (tbaaScalar_)
+            curIdxLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+        curIdxLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
+    }
     // !range [0, INT64_MAX): the foreach index is always non-negative (starts
     if (optimizationLevel >= OptimizationLevel::O1) {
         llvm::cast<llvm::LoadInst>(curIdx)->setMetadata(
@@ -2465,6 +2513,13 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         }
     }
     builder->CreateAlignedStore(elemVal, iterAlloca, iterAlloca->getAlign());
+    // Tag the iterator element store with scalar TBAA (iterAlloca is always
+    // a single i64 slot regardless of element type).
+    if (auto* elemStoreLast = llvm::dyn_cast<llvm::StoreInst>(
+            &builder->GetInsertBlock()->back())) {
+        if (tbaaScalar_)
+            elemStoreLast->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+    }
 
     loopStack.push_back({endBB, incBB});
     auto savedLenCacheFE = std::move(loopArrayLenCache_);
@@ -2481,7 +2536,11 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Reuse curIdx from condBB — the hidden index alloca is only modified in
     llvm::Value* incIdx = builder->CreateAdd(curIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next",
                                              /*HasNUW=*/true, /*HasNSW=*/true);
-    builder->CreateAlignedStore(incIdx, idxAlloca, idxAlloca->getAlign());
+    {
+        auto* incSt = builder->CreateAlignedStore(incIdx, idxAlloca, idxAlloca->getAlign());
+        if (tbaaScalar_)
+            incSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+    }
     auto* backBr = builder->CreateBr(condBB);
 
     // Attach loop metadata to the back-edge branch so LLVM's loop optimizer,
