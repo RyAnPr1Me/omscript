@@ -7,7 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI/Release build fix** (`src/alg_simp_pass.cpp`):
+  - Added missing `#include <climits>` that caused `LLONG_MIN` to be undeclared on GCC (all Linux CI jobs and the Release PGO build were failing). Clang finds `LLONG_MIN` via implicit includes but GCC strictly requires the explicit header.
+  - Fixed a misleading-indentation warning in `src/opt_orchestrator.cpp:853` that was flagged by `tidy-check` (the `break` now lives on its own line inside the REBORROW_EXPR case).
+
 ### Added
+
+- **Round-27: Final comprehensive metadata sweep** (`src/codegen_builtins.cpp`, `src/codegen_stmt.cpp`):
+  - **`!range [0,256)` + `nonNegValues_` on `foreach.charext`** (`codegen_stmt.cpp`): When iterating over a string with `foreach`, each character is loaded as `i8` and zero-extended to `i64`. This ZExt was missing the `charRangeMD_` and `nonNegValues_` tracking already applied to the identical `idx.charext` instruction in `codegen_expr.cpp`. Now consistent.
+  - **`!range [0,2)` + `nonNegValues_` on `contains.result`** (`codegen_builtins.cpp`): `array_contains` always returns 0 (not found) or 1 (found). The result PHI node now receives `boolRangeMD_` and is inserted into `nonNegValues_`, matching the treatment of `array_any`, `array_every`, and boolean comparison results.
+  - **`!range [0,2)` + `nonNegValues_` on `fwrite.result`** (`codegen_builtins.cpp`): `file_write` returns 0 on success or 1 when `fopen` fails. The result PHI is always in {0, 1} so `boolRangeMD_` + `nonNegValues_` apply.
+  - **`!range [0,2)` + `nonNegValues_` on `fappend.result`** (`codegen_builtins.cpp`): Same treatment for `file_append`, which has an identical 0/1 error-code return PHI.
+  - **`arrayLenRangeMD_` + `nonNegValues_` on `mapsize.result`** (`codegen_builtins.cpp`): `map_size` returns the count of entries in a hash map, which is always ≥ 0. The `CallInst` result now gets `!range [0, i64max)` metadata (matching `emitLoadArrayLen` and `strlen` results) and is tracked in `nonNegValues_`. This lets downstream comparisons (`map_size(m) > 0`, etc.) benefit from LLVM's value-range inference.
+
+
+  - **`nuw+nsw` on `gcd.shifted`**: In binary Stein's GCD, `shifted = lo << k` where `lo` is the minimum of two positive odd integers derived from `llvm.abs` of the inputs (is_int_min_poison=true ⟹ inputs ≤ INT64_MAX) and `k = ctz(|a|∣|b|) ≤ 62`. The product equals `gcd(a,b) ≤ min(|a|,|b|) ≤ INT64_MAX`, so neither unsigned nor signed overflow is possible.
+  - **`nuw+nsw` on `lcm.gcdval`**: Identical reasoning applies to the embedded GCD step inside the `lcm` builtin.
+  - **`!range [0,2)` + `nonNegValues_` on `aany.result`**: `array_any` always returns 0 (not found) or 1 (found); the result PHI is given the same boolean-range metadata as `array_count`, `file_exists`, `is_nan`, etc.
+  - **`!range [0,2)` + `nonNegValues_` on `aevery.result`**: Same treatment for `array_every`, which also returns a strict 0/1 boolean.
+  - **`nonNegValues_` on `scount.result`**: `str_count` accumulates a match count starting at zero with `nuw+nsw` increments; the final PHI (merging the zero-on-empty path with the loop exit count) is now tracked as non-negative.
+
+
+  - **`nonNegValues_.insert` on `join.celemlen`**: the concatenation loop's per-element strlen (`join.celemlen`) had `arrayLenRangeMD_` but was not added to `nonNegValues_`, unlike its sizing-loop counterpart `join.elemlen` (which already had both). Now consistent.
+  - **`nonNegValues_.insert` on `fwrite.len` / `fappend.len`**: strlen results in `file_write` and `file_append` had `arrayLenRangeMD_` but missed `nonNegValues_` tracking. Adding it keeps value-range state consistent so downstream passes can exploit non-negativity if the block is inlined.
+  - **`nonNegValues_.insert` on `strpad.slen`**: strlen result in `str_pad_left` / `str_pad_right` had `arrayLenRangeMD_` but no `nonNegValues_` entry. The value feeds a `ULT(slen, effectiveWidth)` branch guard and a `nuw+nsw` subtract — proper tracking helps LLVM propagate the non-negativity through both.
+  - **`nonNegValues_.insert` on `cmd.clen`**: strlen result in `command` had no metadata at all. Added `nonNegValues_` to match the pattern of other strlen-derived values.
+  - **`nuw+nsw` on `cmd.ns1`**: `needOne = newSize + 1` where `newSize = curSize + chunkLen` already carries `nuw+nsw` (curSize is a non-negative byte counter, chunkLen is a non-negative strlen). Adding `nuw+nsw` to the `+1` lets LLVM track the full chain through `ICmpUGT(needOne, curCap)` without an artificial upper-bound hypothesis.
+
+- **Round-24: boolean metadata sweep + no-wrap arithmetic** (`src/codegen_builtins.cpp`):
+  - **`emitBoolZExt` on `bigint_is_zero` / `bigint_is_negative`**: C library returns i32 0/1; `CreateIsNotNull` converts to i1, then `emitBoolZExt` attaches `zext nneg` + `!range [0,2)` + `nonNegValues_` (consistent with `bigint_eq/lt/le/gt/ge` from Round-23).
+  - **`charRangeMD_` + `nonNegValues_` on `char_code` result**: i8 loaded from string extended to i64 now gets the same `!range [0,256)` metadata and non-negative tracking as `char_at`.
+  - **`zext nneg` on `str_format` probe length**: snprintf returns a non-negative count on success; `CreateZExt(probeResult, i64, IsNonNeg=true)` expresses this so LLVM can infer `[0, 2^31)` on the widened value without a separate analysis pass.
+  - **`nuw+nsw` on `range_step` slot index**: `slot = i + 1` where `i` is ULT-bounded in `[0, count)` (non-negative by clamp) → `i+1` is in `[1, count+1]`, no unsigned or signed overflow. Companion `rstep.next` already had these flags.
+  - **`nuw+nsw` on `array_slice` length**: `endArg - startArg` where all code paths above the subtraction clamp `endArg ≥ startArg` (via `select(endArg < startArg, startArg, endArg)`) — no underflow possible.
+
+- **Round-23: `emitBoolZExt` sweep + arithmetic precision** (`src/codegen_builtins.cpp`):
+  - **`emitBoolZExt` on `file_exists`**: `access()==0` comparison result gains `zext nneg` + `!range [0,2)`.
+  - **`emitBoolZExt` on `is_power_of_2`**: bare `CreateZExt + nonNegValues_.insert` replaced by `emitBoolZExt` (which does both, plus the `nneg` flag).
+  - **`emitBoolZExt` on `env_set`**: `setenv()==0` comparison gains the full boolean metadata.
+  - **`emitBoolZExt` on `is_nan`**: `fcmp uno` result gains `zext nneg` + `!range [0,2)`.
+  - **`emitBoolZExt` on `is_inf`**: `or(fcmp oeq pos, fcmp oeq neg)` result gains full boolean metadata.
+  - **`zext nneg` on array sort comparator**: the two `zext i1→i32` in `__omsc_cmp_arr_asc` now carry the `nneg` flag (LLVM can propagate the `[0,1]` range into the `sub` that computes the 3-way result).
+  - **`emitBoolZExt` on `bigint_eq/lt/le/gt/ge`**: the C library returns i32 0/1; `CreateIsNotNull` converts to i1, then `emitBoolZExt` adds `zext nneg` + `!range [0,2)` + `nonNegValues_` tracking for all five comparison builtins.
+  - **`nuw+nsw` on `lcm.diff`**: the Stein-GCD inner loop for `lcm` has the same `hi-lo` (select-proven) structure as `gcd.diff` fixed in Round 22; now tagged `nuw+nsw`.
+
+- **Round-22: Unsigned bounds checks + arithmetic precision** (`src/codegen_builtins.cpp`):
+  - **ULT/ULE single-check bounds checks**: the double-check pattern `SGE(idx, 0) && SLT(idx, len)` is replaced with a single `ULT(idx, len)` (or `ULE` for insert-at-end). Since array/string lengths are always non-negative (proven by `nonNegValues_`), `ULT(idx, len)` is equivalent to the two-check pattern but emits one fewer `icmp` and eliminates the `and` instruction. Applied to: `swap`, `char_at`, `array_remove`, `array_insert`.
+  - **`emitBoolZExt` for `array_count`**: the bare `CreateZExt(isNonZero, ...)` predicate accumulator increment is migrated to `emitBoolZExt`, adding `zext nneg` + `!range [0,2)` + `nonNegValues_` tracking.
+  - **`nuw+nsw` on `gcd.diff`**: `hi - lo` where `hi = max(a, b_odd)` and `lo = min(a, b_odd)` (proven by select) — no underflow/overflow possible.
+  - **`nuw+nsw` on `log2.val`**: `63 - ctlz(n)` where `ctlz(n) ∈ [0, 63]` (guarded by `isPositive` + `is_zero_poison=true`) — result is in `[0, 63]`.
+
+- **Round-21: `zext nneg` flag + no-wrap arithmetic** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `src/codegen_builtins.cpp`):
+  - `emitBoolZExt()` now passes `IsNonNeg=true` to `CreateZExt`, emitting `zext nneg` (LLVM 18+). This lets LLVM's value-range inference skip a separate sign-bit analysis on all boolean 0/1 values.
+  - `toDefaultType()` passes `IsNonNeg=true` for `i1` sources and values in `nonNegValues_`. Non-negative source → `zext nneg`; unsigned-tagged but potentially high-bit sources remain plain `zext` (correct semantics preserved).
+  - `str_ends_with`: `strLen - sufLen` tagged `nuw+nsw` (proven by the `tooLong` guard above it).
+  - `str_substr`: `strLen - clamped_start` tagged `nuw+nsw` (after start is clamped to `[0, strLen]`).
+  - `str_replace`: loop tail `strLen - consumed` tagged `nuw+nsw` (`bSrc` is bounded by `strPtr+strLen`).
+  - `str_trim`/`str_trim_left`/`str_trim_right`: `trimEnd - trimStart` tagged `nuw+nsw` (scan invariant).
+  - String subscript `str[i]`: `zext i8→i64` result now carries `!range [0, 256)` via `charRangeMD_` and is inserted into `nonNegValues_`.
+  - Last bare `CreateZExt` in the mul-by-zero comparison fold migrated to `emitBoolZExt`.
+
+- **Round-20: builtin boolean metadata** (`src/codegen_builtins.cpp`):
+  - `emitBoolZExt` applied to all boolean-returning builtins: `is_alpha`, `is_digit`, `is_upper`, `is_lower`, `is_space`, `is_alnum`, `str_eq`, `str_contains`, `str_starts_with`, `str_ends_with`, `is_even`, `bool(x)` cast.
+  - `map_has` call result tagged `!range [0, 2)` + `nonNegValues_`.
+  - `char_at` `zext` result tagged `!range [0, 256)` via `charRangeMD_`.
+
+- **Round-19: `emitBoolZExt` helper + `or disjoint`** (`src/codegen.cpp`, `src/codegen_expr.cpp`):
+  - New helper `emitBoolZExt(i1 val, name)`: emits `zext nneg` + `!range [0, 2)` + `nonNegValues_` tracking in one call. Replaced all 20 bare `CreateZExt` in `codegen_expr.cpp` (float comparisons, integer comparisons, `&&`/`||`, `!`, scmp/pcmp, mul-by-zero).
+  - `or disjoint` flag at O1+: when KnownBits proves the LHS and RHS have no shared 1-bits, the `or` instruction is flagged `disjoint`, enabling LLVM to treat it as `add`.
+
+- **Round-18: scalar alloca metadata** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `src/codegen_stmt.cpp`):
+  - `!tbaa` (`tbaaScalar_`) on all scalar alloca loads/stores: identifier loads in `generateIdentifier`, increment/decrement loads in `generateIncDec`, `VarDecl` init stores, for-loop `condBB`/`incBB`/assume loads and stores, foreach index loads/stores, and parameter init stores.
+  - `lshr exact` flag via KnownBits: when the shift amount is a known-positive constant and the input has that many known-zero trailing bits, `CreateLShr` is emitted with `isExact=true`.
+  - While-loop preheader assumption loads gain `!noundef` + `!tbaa` + `!range [0, INT64_MAX)`.
+
+- **Round-17: IR quality overhaul** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `src/codegen_stmt.cpp`):
+  - `toDefaultType`: `i1` and unsigned values use `ZExt`; all other signed narrow integers (`i2`–`i63`) use `SExt` so that `i32 -1` extends to `i64 -1`, not `2^32-1`.
+  - `splatScalarToVector`: uses `PoisonValue` as the undef lane (avoids unnecessary materialization).
+  - `putchar`/`puts`/`fputs`: marked `nosync`.
+  - `qsort`: marked `nounwind`, `willreturn`, `nocapture(3)`.
+  - `emitShiftAdd`: all generated `shl`/`add` instructions carry `nuw`+`nsw`.
+  - `NSWNeg` emitted when the negated operand is in `nonNegValues_`.
+  - `range_step` multiply and add carry `nsw`+`nuw`.
+  - All alloca/global-init stores carry `tbaaScalar_`.
 
 - **Round-16: IR quality improvements** (`src/codegen_expr.cpp`):
   - **Identity cast elimination**: `as`-cast on same-size integer types (e.g. `i32 as i32`) now returns the value directly instead of emitting a `bitcast` instruction. Opaque pointer→pointer casts also return directly (all pointers share the `ptr` type). Fallback `as`-cast path guards `srcTy == dstTy` before creating a `bitcast`.

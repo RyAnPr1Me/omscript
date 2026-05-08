@@ -1610,9 +1610,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* bit = builder->CreateAnd(x, one, "evenbit");
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* isEven = builder->CreateICmpEQ(bit, zero, "iseven");
-        auto* result = builder->CreateZExt(isEven, getDefaultType(), "evenval");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isEven, "evenval");
     }
 
     if (bid == BuiltinId::IS_ODD) {
@@ -1745,14 +1743,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::Value* swapLenLoad = emitLoadArrayLen(arrPtr, "swap.len");
         llvm::Value* length = swapLenLoad;
 
-        // Bounds check both indices: 0 <= i < length and 0 <= j < length
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* iInBounds = builder->CreateICmpSLT(i, length, "swap.i.inbounds");
-        llvm::Value* iNotNeg = builder->CreateICmpSGE(i, zero, "swap.i.notneg");
-        llvm::Value* iValid = builder->CreateAnd(iInBounds, iNotNeg, "swap.i.valid");
-        llvm::Value* jInBounds = builder->CreateICmpSLT(j, length, "swap.j.inbounds");
-        llvm::Value* jNotNeg = builder->CreateICmpSGE(j, zero, "swap.j.notneg");
-        llvm::Value* jValid = builder->CreateAnd(jInBounds, jNotNeg, "swap.j.valid");
+        // Bounds check both indices: 0 <= i < length and 0 <= j < length.
+        // ULT(i, length) is equivalent to (SLT(i, length) && SGE(i, 0)) when
+        // length >= 0 (guaranteed: emitLoadArrayLen tracks into nonNegValues_).
+        // This eliminates one icmp + one and per index check.
+        llvm::Value* iValid = builder->CreateICmpULT(i, length, "swap.i.valid");
+        llvm::Value* jValid = builder->CreateICmpULT(j, length, "swap.j.valid");
         llvm::Value* bothValid = builder->CreateAnd(iValid, jValid, "swap.valid");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -1874,10 +1870,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* lower = builder->CreateICmpULE(
             builder->CreateSub(x, ca, "sub.a"), c25, "islower");
         llvm::Value* isAlpha = builder->CreateOr(upper, lower, "isalpha");
-        auto* result = builder->CreateZExt(isAlpha, getDefaultType(), "alphaval");
-        // is_alpha always returns 0 or 1.
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isAlpha, "alphaval");
     }
 
     if (bid == BuiltinId::IS_DIGIT) {
@@ -1890,10 +1883,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* c9 = llvm::ConstantInt::get(getDefaultType(), 9);   // '9'-'0'
         llvm::Value* isDigit = builder->CreateICmpULE(
             builder->CreateSub(x, c0, "sub.0"), c9, "isdigit");
-        auto* result = builder->CreateZExt(isDigit, getDefaultType(), "digitval");
-        // is_digit always returns 0 or 1.
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isDigit, "digitval");
     }
 
     if (bid == BuiltinId::IS_UPPER) {
@@ -1905,9 +1895,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* c25 = llvm::ConstantInt::get(getDefaultType(), 25); // 'Z'-'A'
         llvm::Value* isUpper = builder->CreateICmpULE(
             builder->CreateSub(x, cA, "sub.A"), c25, "isupper");
-        auto* result = builder->CreateZExt(isUpper, getDefaultType(), "upperval");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isUpper, "upperval");
     }
 
     if (bid == BuiltinId::IS_LOWER) {
@@ -1919,9 +1907,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* c25 = llvm::ConstantInt::get(getDefaultType(), 25); // 'z'-'a'
         llvm::Value* isLower = builder->CreateICmpULE(
             builder->CreateSub(x, ca, "sub.a"), c25, "islower");
-        auto* result = builder->CreateZExt(isLower, getDefaultType(), "lowerval");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isLower, "lowerval");
     }
 
     if (bid == BuiltinId::IS_SPACE) {
@@ -1936,9 +1922,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateSub(x, c9, "sub.9"), c4, "isctrl");
         llvm::Value* isSpc = builder->CreateICmpEQ(x, c32, "isspc");
         llvm::Value* isSpace = builder->CreateOr(isCtrl, isSpc, "isspace");
-        auto* result = builder->CreateZExt(isSpace, getDefaultType(), "spaceval");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isSpace, "spaceval");
     }
 
     if (bid == BuiltinId::IS_ALNUM) {
@@ -1959,9 +1943,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateSub(x, c0, "sub.0"), c9,  "isdigit2");
         llvm::Value* isAlnum = builder->CreateOr(
             builder->CreateOr(upper, lower, "isalpha2"), digit, "isalnum");
-        auto* result = builder->CreateZExt(isAlnum, getDefaultType(), "alnumval");
-        nonNegValues_.insert(result);
-        return result;
+        return emitBoolZExt(isAlnum, "alnumval");
     }
 
     // typeof(x) returns a compile-time type tag: 1=integer, 2=float, 3=string.
@@ -2062,10 +2044,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(strLen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* inBounds = builder->CreateICmpSLT(idxArg, strLen, "charat.inbounds");
-        llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "charat.notneg");
-        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "charat.valid");
+        // ULT(idx, strLen) ≡ (SGE(idx,0) && SLT(idx,strLen)) when strLen ≥ 0.
+        llvm::Value* valid = builder->CreateICmpULT(idxArg, strLen, "charat.valid");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "charat.ok", function);
@@ -2091,6 +2071,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         charVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // Zero-extend to i64; result is always in [0, 256).
         auto* result = builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
+        if (charRangeMD_)
+            llvm::cast<llvm::Instruction>(result)->setMetadata(
+                llvm::LLVMContext::MD_range, charRangeMD_);
         nonNegValues_.insert(result);
         return result;
     }
@@ -2111,9 +2094,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lhsPtr, rhsPtr}, "streq.cmp");
         // strcmp returns 0 on equality; convert to boolean (1 if equal, 0 otherwise)
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "streq.eq");
-        auto* streqResult = builder->CreateZExt(isEqual, getDefaultType(), "streq.result");
-        nonNegValues_.insert(streqResult);
-        return streqResult;
+        return emitBoolZExt(isEqual, "streq.result");
     }
 
     if (bid == BuiltinId::STR_CONCAT) {
@@ -2324,7 +2305,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // is_zero_poison=true since we guard with isPositive
         llvm::Value* clz = builder->CreateCall(
             ctlzIntrinsic, {n, builder->getTrue()}, "log2.clz");
-        llvm::Value* log2val = builder->CreateSub(bits, clz, "log2.val");
+        // clz ∈ [0, 63] (is_zero_poison=true + isPositive guard), so
+        // 63 - clz ∈ [0, 63]: the subtraction is nuw+nsw.
+        llvm::Value* log2val = builder->CreateSub(bits, clz, "log2.val",
+                                                   /*HasNUW=*/true, /*HasNSW=*/true);
 
         return builder->CreateSelect(isPositive, log2val, negOne, "log2.result");
     }
@@ -2396,7 +2380,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* aGtB = builder->CreateICmpUGT(phiA, bOdd, "gcd.gt");
         llvm::Value* lo = builder->CreateSelect(aGtB, bOdd, phiA, "gcd.lo");
         llvm::Value* hi = builder->CreateSelect(aGtB, phiA, bOdd, "gcd.hi");
-        llvm::Value* diff = builder->CreateSub(hi, lo, "gcd.diff");
+        // hi = max(phiA, bOdd), lo = min(phiA, bOdd): hi ≥ lo → nuw+nsw.
+        llvm::Value* diff = builder->CreateSub(hi, lo, "gcd.diff",
+                                               /*HasNUW=*/true, /*HasNSW=*/true);
 
         // Continue if diff != 0
         llvm::Value* done = builder->CreateICmpEQ(diff, zero, "gcd.dz");
@@ -2406,7 +2392,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Multiply result by 2^k (common factor)
         builder->SetInsertPoint(contBB);
-        llvm::Value* shifted = builder->CreateShl(lo, k, "gcd.shifted");
+        // lo is the GCD of the odd-part loop (positive), k = ctz(abs(a)|abs(b)) ≤ 62.
+        // Result = lo * 2^k = gcd(a,b) ≤ min(|a|,|b|) ≤ INT64_MAX → nuw+nsw.
+        llvm::Value* shifted = builder->CreateShl(lo, k, "gcd.shifted", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateBr(doneBB);
 
         // Final merge
@@ -2773,7 +2761,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* startOverflow = builder->CreateICmpSGT(startArg, strLen, "substr.startover");
         startArg = builder->CreateSelect(startOverflow, strLen, startArg, "substr.startfinal");
         // Clamp length: max(0, min(len, strLen - start))
-        llvm::Value* remaining = builder->CreateSub(strLen, startArg, "substr.remaining");
+        // After clamping: startArg ∈ [0, strLen], so remaining is nuw+nsw.
+        llvm::Value* remaining = builder->CreateSub(strLen, startArg, "substr.remaining",
+                                                     /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* lenNeg = builder->CreateICmpSLT(lenArg, zero, "substr.lenneg");
         lenArg = builder->CreateSelect(lenNeg, zero, lenArg, "substr.lenclamp");
         llvm::Value* lenOverflow = builder->CreateICmpSGT(lenArg, remaining, "substr.lenover");
@@ -2938,9 +2928,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNotNull = builder->CreateICmpNE(result, nullPtr, "contains.notnull");
-        auto* containsResult = builder->CreateZExt(isNotNull, getDefaultType(), "contains.result");
-        nonNegValues_.insert(containsResult);
-        return containsResult;
+        return emitBoolZExt(isNotNull, "contains.result");
     }
 
     if (bid == BuiltinId::STR_INDEX_OF) {
@@ -3134,7 +3122,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(buildDoneBB);
         // Copy remaining chars: tail = strLen - (bSrc - strPtr)
         llvm::Value* consumed = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), bSrc, strPtr, "replace.consumed");
-        llvm::Value* tail     = builder->CreateSub(strLen, consumed, "replace.tail");
+        // consumed ≤ strLen (bSrc never exceeds strPtr+strLen), so sub is nuw+nsw.
+        llvm::Value* tail     = builder->CreateSub(strLen, consumed, "replace.tail",
+                                                    /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCall(getOrDeclareMemcpy(), {bDst, bSrc, tail});
         llvm::Value* endPtr   = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), bDst, tail, "replace.end");
         builder->CreateStore(i8zero, endPtr);
@@ -3239,7 +3229,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         trimEnd->addIncoming(endIdx, endBodyBB); // found non-space
 
         // Build trimmed string
-        llvm::Value* trimLen = builder->CreateSub(trimEnd, trimStart, "trim.len2");
+        // trimStart ≤ trimEnd (scan invariant), so sub is nuw+nsw.
+        llvm::Value* trimLen = builder->CreateSub(trimEnd, trimStart, "trim.len2",
+                                                   /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* trimAlloc = builder->CreateAdd(trimLen, llvm::ConstantInt::get(getDefaultType(), 1), "trim.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* trimBuf = builder->CreateCall(getOrDeclareMalloc(), {trimAlloc}, "trim.buf");
         llvm::cast<llvm::CallInst>(trimBuf)->addRetAttr(
@@ -3291,9 +3283,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrncmp(),
             {strPtr, prefixPtr, prefixLen}, "startswith.cmp");
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "startswith.eq");
-        auto* swResult = builder->CreateZExt(isEqual, getDefaultType(), "startswith.result");
-        nonNegValues_.insert(swResult);
-        return swResult;
+        return emitBoolZExt(isEqual, "startswith.result");
     }
 
     if (bid == BuiltinId::STR_ENDS_WITH) {
@@ -3352,11 +3342,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateBr(mergeBB);
         builder->SetInsertPoint(checkBB);
         // Compare str + (strLen - sufLen) with suffix using memcmp.
-        llvm::Value* offset = builder->CreateSub(strLen, sufLen, "endswith.offset");
+        // In checkBB: sufLen ≤ strLen (proven by tooLong guard), so sub is nuw+nsw.
+        llvm::Value* offset = builder->CreateSub(strLen, sufLen, "endswith.offset",
+                                                  /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* tailPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, offset, "endswith.tail");
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareMemcmp(), {tailPtr, suffixPtr, sufLen}, "endswith.cmp");
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "endswith.eq");
-        llvm::Value* resultCheck = builder->CreateZExt(isEqual, getDefaultType(), "endswith.result");
+        llvm::Value* resultCheck = emitBoolZExt(isEqual, "endswith.result");
         builder->CreateBr(mergeBB);
         builder->SetInsertPoint(mergeBB);
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "endswith.phi");
@@ -3907,6 +3899,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "contains.result");
         result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), loopBB);
         result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), foundBB);
+        // array_contains returns 0 or 1 — attach !range [0,2) and mark non-negative.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(result);
         return result;
     }
 
@@ -3957,10 +3953,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             auto* b = builder->CreateAlignedLoad(getDefaultType(), bPtr, llvm::MaybeAlign(8), "b");
             llvm::cast<llvm::Instruction>(a)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
             llvm::cast<llvm::Instruction>(b)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            // zext nneg: i1 sign bit is always 0, so extension is non-negative.
             auto* gt = builder->CreateZExt(builder->CreateICmpSGT(a, b, "gt"),
-                                           llvm::Type::getInt32Ty(*context));
+                                           llvm::Type::getInt32Ty(*context), "gt.zext",
+                                           /*IsNonNeg=*/true);
             auto* lt = builder->CreateZExt(builder->CreateICmpSLT(a, b, "lt"),
-                                           llvm::Type::getInt32Ty(*context));
+                                           llvm::Type::getInt32Ty(*context), "lt.zext",
+                                           /*IsNonNeg=*/true);
             builder->CreateRet(builder->CreateSub(gt, lt, "cmp"));
             builder->restoreIP(savedIP);
             return fn;
@@ -4242,7 +4241,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
         }
 
-        llvm::Value* sliceLen = builder->CreateSub(endArg, startArg, "slice.len");
+        // endArg ≥ startArg is guaranteed by all clamp paths above — nuw+nsw.
+        llvm::Value* sliceLen = builder->CreateSub(endArg, startArg, "slice.len",
+                                                   /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = emitAllocArray(sliceLen, "slice");
         // Copy elements: arr[start+1..end+1) to buf[1..)
         llvm::Value* srcIdx = builder->CreateAdd(startArg, one, "slice.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4283,13 +4284,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             getArrayPtr(arrArg);
                 llvm::Value* aremLenLoad = emitLoadArrayLen(arrPtr, "aremove.len");
         llvm::Value* arrLen = aremLenLoad;
-        // Bounds check: 0 <= idx < length
+        // Bounds check: 0 <= idx < length.
+        // ULT(idx, arrLen) ≡ (SGE(idx,0) && SLT(idx,arrLen)) since arrLen ≥ 0.
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
-        llvm::Value* inBounds = builder->CreateICmpSLT(idxArg, arrLen, "aremove.inbounds");
-        llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "aremove.notneg");
-        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "aremove.valid");
+        llvm::Value* valid = builder->CreateICmpULT(idxArg, arrLen, "aremove.valid");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "aremove.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "aremove.fail", function);
@@ -4806,6 +4806,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "aany.result");
         result->addIncoming(zero, loopBB);
         result->addIncoming(one, foundBB);
+        // aany returns 0 or 1 — attach !range [0,2) and track non-negativity.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(result);
         return result;
     }
 
@@ -4873,6 +4877,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "aevery.result");
         result->addIncoming(one, loopBB);
         result->addIncoming(zero, failBB);
+        // aevery returns 0 or 1 — attach !range [0,2) and track non-negativity.
+        if (optimizationLevel >= OptimizationLevel::O1)
+            result->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(result);
         return result;
     }
 
@@ -4999,7 +5007,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "acnt.pred");
         predResult = toDefaultType(predResult);
         llvm::Value* isNonZero = builder->CreateICmpNE(predResult, zero, "acnt.nz");
-        llvm::Value* incr = builder->CreateZExt(isNonZero, getDefaultType(), "acnt.incr");
+        llvm::Value* incr = emitBoolZExt(isNonZero, "acnt.incr");
         // acnt.newacc: acc is in [0, length], incr in {0,1}; sum ≤ INT64_MAX so
         // both nsw and nuw are safe and let SCEV prove the accumulator is non-negative.
         llvm::Value* newAcc = builder->CreateAdd(acc, incr, "acnt.newacc", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -5515,6 +5523,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::MDNode::get(*context, {}));
         llvm::Value* celemPtr = builder->CreateIntToPtr(celemInt, ptrTy, "join.celemptr");
         llvm::Value* celemLen = builder->CreateCall(getOrDeclareStrlen(), {celemPtr}, "join.celemlen");
+        nonNegValues_.insert(celemLen);
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(celemLen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -5620,6 +5629,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "scount.result");
         result->addIncoming(zero, emptySubBB);
         result->addIncoming(count, doneBB);
+        // Both incoming values are non-negative (zero / nuw-accumulated count).
+        nonNegValues_.insert(result);
         return result;
     }
 
@@ -5758,6 +5769,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {contentPtr}, "fwrite.len");
+        nonNegValues_.insert(slen);
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(slen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -5770,6 +5782,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "fwrite.result");
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), nullBB);
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), okBB);
+        // file_write returns 0 (success) or 1 (fopen failed) — always in [0,2).
+        if (optimizationLevel >= OptimizationLevel::O1)
+            phi->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(phi);
         return phi;
     }
 
@@ -5804,6 +5820,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {contentPtr}, "fappend.len");
+        nonNegValues_.insert(slen);
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(slen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -5816,6 +5833,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "fappend.result");
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), nullBB);
         phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), okBB);
+        // file_append returns 0 (success) or 1 (fopen failed) — always in [0,2).
+        if (optimizationLevel >= OptimizationLevel::O1)
+            phi->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(phi);
         return phi;
     }
 
@@ -5830,7 +5851,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             {pathPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)}, "fexists.access");
         llvm::Value* isZero = builder->CreateICmpEQ(result,
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "fexists.cmp");
-        return builder->CreateZExt(isZero, getDefaultType(), "fexists.result");
+        return emitBoolZExt(isZero, "fexists.result");
     }
 
     // -----------------------------------------------------------------------
@@ -5879,7 +5900,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = mapArg->getType()->isPointerTy()
             ? mapArg : builder->CreateIntToPtr(toDefaultType(mapArg), ptrTy, "maphas.ptr");
-        return builder->CreateCall(getOrEmitHashMapHas(), {mapPtr, keyArg}, "maphas.result");
+        auto* callResult = builder->CreateCall(getOrEmitHashMapHas(), {mapPtr, keyArg}, "maphas.result");
+        if (boolRangeMD_)
+            callResult->setMetadata(llvm::LLVMContext::MD_range, boolRangeMD_);
+        nonNegValues_.insert(callResult);
+        return callResult;
     }
 
     if (bid == BuiltinId::MAP_REMOVE) {
@@ -5924,7 +5949,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = mapArg->getType()->isPointerTy()
             ? mapArg : builder->CreateIntToPtr(toDefaultType(mapArg), ptrTy, "mapsize.ptr");
-        return builder->CreateCall(getOrEmitHashMapSize(), {mapPtr}, "mapsize.result");
+        llvm::Value* sz = builder->CreateCall(getOrEmitHashMapSize(), {mapPtr}, "mapsize.result");
+        // Map entry count is always non-negative; annotate like array lengths.
+        nonNegValues_.insert(sz);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::CallInst>(sz)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        return sz;
     }
 
     // -----------------------------------------------------------------------
@@ -6041,7 +6072,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* val = builder->CreateAdd(startArg,
             builder->CreateMul(i, stepArg, "rstep.offset"), "rstep.val");
-        llvm::Value* slot = builder->CreateAdd(i, one, "rstep.slot");
+        // i is ULT-bounded in [0, count); slot = i+1 is in [1, count+1] — nuw+nsw.
+        llvm::Value* slot = builder->CreateAdd(i, one, "rstep.slot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, slot, "rstep.elemptr");
         builder->CreateStore(val, elemPtr);
         llvm::Value* nextI = builder->CreateAdd(i, one, "rstep.next", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -6065,7 +6097,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
             ? strArg : builder->CreateIntToPtr(strArg, ptrTy, "charcode.ptr");
         llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), strPtr, "charcode.ch");
-        return builder->CreateZExt(ch, getDefaultType(), "charcode.result");
+        // Zero-extend to i64; result is always in [0, 256).
+        auto* result = builder->CreateZExt(ch, getDefaultType(), "charcode.result");
+        if (charRangeMD_)
+            llvm::cast<llvm::Instruction>(result)->setMetadata(
+                llvm::LLVMContext::MD_range, charRangeMD_);
+        nonNegValues_.insert(result);
+        return result;
     }
 
     if (bid == BuiltinId::NUMBER_TO_STRING) {
@@ -6336,9 +6374,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isAnd0 = builder->CreateICmpEQ(andVal, zero, "ispow2.and0");
         // x > 0 && (x & (x-1)) == 0
         llvm::Value* result = builder->CreateAnd(isPos, isAnd0, "ispow2.result");
-        auto* ext = builder->CreateZExt(result, getDefaultType(), "ispow2.ext");
-        nonNegValues_.insert(ext);  // is_power_of_2 returns 0 or 1 — always non-negative
-        return ext;
+        // emitBoolZExt attaches !range [0,2), zext nneg, and nonNegValues_ tracking.
+        return emitBoolZExt(result, "ispow2.ext");
     }
 
     if (bid == BuiltinId::LCM) {
@@ -6402,14 +6439,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* aGtB = builder->CreateICmpUGT(phiA, bOdd, "lcm.gt");
         llvm::Value* lo = builder->CreateSelect(aGtB, bOdd, phiA, "lcm.lo");
         llvm::Value* hi = builder->CreateSelect(aGtB, phiA, bOdd, "lcm.hi");
-        llvm::Value* diff = builder->CreateSub(hi, lo, "lcm.diff");
+        // hi = max(phiA, bOdd), lo = min(phiA, bOdd) via select: hi ≥ lo → nuw+nsw.
+        llvm::Value* diff = builder->CreateSub(hi, lo, "lcm.diff",
+                                               /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* gcdDone = builder->CreateICmpEQ(diff, zero, "lcm.dz");
         phiA->addIncoming(lo, loopBB);
         phiB->addIncoming(diff, loopBB);
         builder->CreateCondBr(gcdDone, contBB, loopBB);
 
         builder->SetInsertPoint(contBB);
-        llvm::Value* gcdShifted = builder->CreateShl(lo, k, "lcm.gcdval");
+        // lo is the GCD odd-part (positive), k = ctz(|a||b|) ≤ 62.
+        // gcdShifted = lo * 2^k = gcd(a,b) ≤ min(|a|,|b|) ≤ INT64_MAX → nuw+nsw.
+        llvm::Value* gcdShifted = builder->CreateShl(lo, k, "lcm.gcdval", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateBr(doneBB);
 
         // lcm(a, b) = |a| / gcd(a, b) * |b|  (divide first to avoid overflow)
@@ -6740,13 +6781,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::Value* ainsLenLoad = emitLoadArrayLen(arrPtr, "ains.len");
         llvm::Value* arrLen = ainsLenLoad;
 
-        // Bounds check: 0 <= idx <= length (insert at end is allowed)
+        // Bounds check: 0 <= idx <= length (insert at end is allowed).
+        // ULE(idx, arrLen) ≡ (SGE(idx,0) && SLE(idx,arrLen)) since arrLen ≥ 0.
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
-        llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "ains.notneg");
-        llvm::Value* notOver = builder->CreateICmpSLE(idxArg, arrLen, "ains.notover");
-        llvm::Value* valid = builder->CreateAnd(notNeg, notOver, "ains.valid");
+        llvm::Value* valid = builder->CreateICmpULE(idxArg, arrLen, "ains.valid");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "ains.ok", function);
@@ -6846,6 +6886,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // slen = strlen(str)
         llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strpad.slen");
+        nonNegValues_.insert(slen);
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(slen)->setMetadata(
                 llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -6999,10 +7040,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(appendBB);
         llvm::Value* chunkLen = builder->CreateCall(getOrDeclareStrlen(), {chunkBuf}, "cmd.clen");
+        nonNegValues_.insert(chunkLen);
         llvm::Value* curSize  = builder->CreateAlignedLoad(getDefaultType(), sizePtr, llvm::MaybeAlign(8), "cmd.csz");
         llvm::Value* curCap   = builder->CreateAlignedLoad(getDefaultType(), capPtr,  llvm::MaybeAlign(8), "cmd.ccap");
         llvm::Value* newSize  = builder->CreateAdd(curSize, chunkLen, "cmd.nsz", true, true);
-        llvm::Value* needOne  = builder->CreateAdd(newSize, llvm::ConstantInt::get(getDefaultType(), 1), "cmd.ns1");
+        // newSize = curSize + chunkLen (both non-negative); newSize + 1 can't wrap.
+        llvm::Value* needOne  = builder->CreateAdd(newSize, llvm::ConstantInt::get(getDefaultType(), 1), "cmd.ns1", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* needGrow = builder->CreateICmpUGT(needOne, curCap, "cmd.needgrow");
         builder->CreateCondBr(needGrow, growBB, copyBB);
 
@@ -8165,8 +8208,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // setenv returns 0 on success, -1 on failure; convert to 1/0
         llvm::Value* success = builder->CreateICmpEQ(rc,
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "env_set.ok");
-        llvm::Value* result = builder->CreateZExt(success, getDefaultType(), "env_set.res");
-        return result;
+        return emitBoolZExt(success, "env_set.res");
     }
 
     // ── str_format(fmt, val1[, val2[, val3[, val4]]]) ──────────────────────
@@ -8256,7 +8298,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             getOrDeclareSnprintf(), probeCallArgs, "strfmt.probe");
         // snprintf returns the number of characters that would have been written
         // (not counting the null terminator).  Extend to i64 for arithmetic.
-        llvm::Value* neededLen = builder->CreateZExt(probeResult, getDefaultType(), "strfmt.needed");
+        // snprintf returns non-negative on success; zext nneg allows LLVM to infer [0,2^31).
+        llvm::Value* neededLen = builder->CreateZExt(probeResult, getDefaultType(), "strfmt.needed",
+                                                     /*IsNonNeg=*/true);
         nonNegValues_.insert(neededLen);
 
         // Allocate neededLen + 1 bytes (room for null terminator).
@@ -8446,31 +8490,33 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto [a, b] = getBigintBinaryArgs("bigint_gcd");
         return builder->CreateCall(getOrDeclareBigintGcd(), {a, b}, "bigint.gcd");
     }
-    // Comparison builtins: return i32 (0 or 1), widened to i64 for OmScript
+    // Comparison builtins: return i32 (0 or 1), widened to i64 for OmScript.
+    // ICmpNE converts the i32 0/1 to i1, then emitBoolZExt adds zext nneg +
+    // !range [0,2) + nonNegValues_ tracking.
     if (bid == BuiltinId::BIGINT_EQ) {
         auto [a, b] = getBigintBinaryArgs("bigint_eq");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintEq(), {a, b}, "bigint.eq");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.eq.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.eq.cmp"), "bigint.eq.zext");
     }
     if (bid == BuiltinId::BIGINT_LT) {
         auto [a, b] = getBigintBinaryArgs("bigint_lt");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintLt(), {a, b}, "bigint.lt");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.lt.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.lt.cmp"), "bigint.lt.zext");
     }
     if (bid == BuiltinId::BIGINT_LE) {
         auto [a, b] = getBigintBinaryArgs("bigint_le");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintLe(), {a, b}, "bigint.le");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.le.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.le.cmp"), "bigint.le.zext");
     }
     if (bid == BuiltinId::BIGINT_GT) {
         auto [a, b] = getBigintBinaryArgs("bigint_gt");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintGt(), {a, b}, "bigint.gt");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.gt.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.gt.cmp"), "bigint.gt.zext");
     }
     if (bid == BuiltinId::BIGINT_GE) {
         auto [a, b] = getBigintBinaryArgs("bigint_ge");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintGe(), {a, b}, "bigint.ge");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.ge.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.ge.cmp"), "bigint.ge.zext");
     }
     if (bid == BuiltinId::BIGINT_CMP) {
         auto [a, b] = getBigintBinaryArgs("bigint_cmp");
@@ -8493,12 +8539,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::BIGINT_IS_ZERO) {
         llvm::Value* a = getBigintUnaryArg("bigint_is_zero");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintIsZero(), {a}, "bigint.iszero");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.iszero.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.iszero.cmp"), "bigint.iszero.zext");
     }
     if (bid == BuiltinId::BIGINT_IS_NEGATIVE) {
         llvm::Value* a = getBigintUnaryArg("bigint_is_negative");
         llvm::Value* r = builder->CreateCall(getOrDeclareBigintIsNegative(), {a}, "bigint.isneg");
-        return builder->CreateZExt(r, getDefaultType(), "bigint.isneg.zext");
+        return emitBoolZExt(builder->CreateIsNotNull(r, "bigint.isneg.cmp"), "bigint.isneg.zext");
     }
     if (bid == BuiltinId::BIGINT_SHL) {
         validateArgCount(expr, "bigint_shl", 2);
@@ -8622,7 +8668,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* fval = ensureFloat(arg);
         // IEEE NaN: unordered comparison with itself is true only for NaN.
         llvm::Value* cmp = builder->CreateFCmpUNO(fval, fval, "is_nan.cmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "is_nan.result");
+        return emitBoolZExt(cmp, "is_nan.result");
     }
 
     // ── is_inf(x) — 1 if x (as f64) is ±Infinity, else 0 ───────────────────
@@ -8642,7 +8688,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isPos = builder->CreateFCmpOEQ(fval, pos, "is_inf.pos");
         llvm::Value* isNeg = builder->CreateFCmpOEQ(fval, neg, "is_inf.neg");
         llvm::Value* either = builder->CreateOr(isPos, isNeg, "is_inf.either");
-        return builder->CreateZExt(either, getDefaultType(), "is_inf.result");
+        return emitBoolZExt(either, "is_inf.result");
     }
 
     // ── 2D Column-Major Matrix Builtins ──────────────────────────────────────
@@ -9293,9 +9339,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 // bool(x): normalise to 0 or 1; return as i64 (conventional boolean width)
                 auto* zero = llvm::ConstantInt::get(arg->getType(), 0);
                 auto* cmp  = builder->CreateICmpNE(arg, zero, "bool.cmp");
-                auto* r = builder->CreateZExt(cmp, getDefaultType(), "bool.zext");
-                nonNegValues_.insert(r);
-                return r;
+                return emitBoolZExt(cmp, "bool.zext");
             }
 
             if (castBits == srcBits) {

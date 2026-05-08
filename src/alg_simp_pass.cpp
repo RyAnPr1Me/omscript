@@ -23,6 +23,7 @@
 #include "alg_simp_pass.h"
 #include "pass_utils.h"
 
+#include <climits>
 #include <iostream>
 #include <memory>
 #include <optional>

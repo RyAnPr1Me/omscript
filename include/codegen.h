@@ -552,6 +552,9 @@ class CodeGenerator {
     llvm::MDNode* tbaaMapVal_ = nullptr;      ///< TBAA access tag for map value slots
     llvm::MDNode* tbaaMapHash_ = nullptr;     ///< TBAA access tag for map hash slots
     llvm::MDNode* tbaaMapMeta_ = nullptr;     ///< TBAA access tag for map header (capacity/size)
+    /// TBAA access tag for scalar variable slots (alloca/global variable storage).
+    /// Disambiguates named-variable loads/stores from heap-allocated array/struct/map data.
+    llvm::MDNode* tbaaScalar_ = nullptr;
     /// Per-field TBAA cache: unique tag per (structType, fieldIdx) to prevent field aliasing.
     std::map<std::pair<std::string, size_t>, llvm::MDNode*> tbaaStructFieldCache_;
     /// Returns (creating if needed) a per-field TBAA access tag for the given struct type and field index.
@@ -956,6 +959,11 @@ class CodeGenerator {
                                unsigned interleaveCount = 4);
 
     // IR emit helpers: each performs one logical operation with all required metadata attached.
+
+    /// Emit a ZExt from i1 → i64 with `!range [0,2)` metadata attached and the
+    /// result inserted into nonNegValues_.  Use instead of bare CreateZExt for
+    /// all boolean (comparison-result) widening operations.
+    llvm::Value* emitBoolZExt(llvm::Value* i1Val, const llvm::Twine& name = "booltmp");
 
     /// Load the array length header word (attaches tbaaArrayLen_ + arrayLenRangeMD_; result marked non-neg).
     llvm::Value* emitLoadArrayLen(llvm::Value* arrPtr, const llvm::Twine& name = "arrlen");

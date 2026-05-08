@@ -494,6 +494,7 @@ void CodeGenerator::initTBAAMetadata() {
     llvm::MDNode* tbaaMapValType = makeTBAAType("map value");
     llvm::MDNode* tbaaMapHashType = makeTBAAType("map hash");
     llvm::MDNode* tbaaMapMetaType = makeTBAAType("map meta");
+    llvm::MDNode* tbaaScalarType  = makeTBAAType("scalar variable");
 
     // Access tag nodes: !{ !base-type, !access-type, offset }
     // For scalar types, base == access.
@@ -507,6 +508,7 @@ void CodeGenerator::initTBAAMetadata() {
     tbaaMapVal_      = llvm::MDNode::get(C, {tbaaMapValType, tbaaMapValType, zero});
     tbaaMapHash_     = llvm::MDNode::get(C, {tbaaMapHashType, tbaaMapHashType, zero});
     tbaaMapMeta_     = llvm::MDNode::get(C, {tbaaMapMetaType, tbaaMapMetaType, zero});
+    tbaaScalar_      = llvm::MDNode::get(C, {tbaaScalarType, tbaaScalarType, zero});
 
     // !range metadata: array lengths are always in [0, INT64_MAX).
     auto* i64Ty = llvm::Type::getInt64Ty(C);
@@ -790,8 +792,23 @@ llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
             // need i64 must truncate explicitly with convertTo().
             return v;
         }
-        // Narrow integers (i1–i63): zero-extend to i64.
-        return builder->CreateZExt(v, getDefaultType(), "zext");
+        // Narrow integers (i1–i63): extend to i64.
+        // i1 is always 0/1 so ZExt is correct.  For wider signed integers use
+        // SExt so that e.g. an i32 value of -1 becomes -1 in i64, not 2^32-1.
+        if (srcBits == 1 || unsignedExprs_.count(v) || isUnsignedValue(v)) {
+            // The `nneg` flag (LLVM 18+) tells the optimizer the source value's
+            // sign bit is 0 (i.e., non-negative when interpreted as signed).
+            // This is safe for:
+            //   • i1 — only values 0/1, sign bit always 0.
+            //   • values in nonNegValues_ — proven to be in [0, 2^(n-1)-1].
+            // It is NOT safe to set nneg merely because the value is tagged as
+            // unsigned — an unsigned i32 may have its MSB set (values 2^31..2^32-1)
+            // even though we treat it as non-negative semantically.
+            const bool canNNeg = (srcBits == 1) || nonNegValues_.count(v);
+            return builder->CreateZExt(v, getDefaultType(), "zext",
+                                       /*IsNonNeg=*/canNNeg);
+        }
+        return builder->CreateSExt(v, getDefaultType(), "sext");
     }
     return v;
 }
@@ -844,8 +861,12 @@ llvm::Value* CodeGenerator::convertToVectorElement(llvm::Value* v, llvm::Type* e
 llvm::Value* CodeGenerator::splatScalarToVector(llvm::Value* scalar, llvm::Type* vecTy) {
     auto* fvt = llvm::cast<llvm::FixedVectorType>(vecTy);
     scalar = convertToVectorElement(scalar, fvt->getElementType());
-    llvm::Value* undef = llvm::UndefValue::get(vecTy);
-    llvm::Value* ins = builder->CreateInsertElement(undef, scalar,
+    // Use PoisonValue (not UndefValue) as the initial vector for the insert so
+    // LLVM knows all non-inserted lanes are poison until the shufflevector fills
+    // them.  This is the canonical LLVM 12+ idiom and enables better cost
+    // modelling in the vectoriser.
+    llvm::Value* poison = llvm::PoisonValue::get(vecTy);
+    llvm::Value* ins = builder->CreateInsertElement(poison, scalar,
         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "splat.ins");
     const llvm::SmallVector<int, 16> mask(fvt->getNumElements(), 0);
     return builder->CreateShuffleVector(ins, mask, "splat");
@@ -1170,6 +1191,19 @@ CodeGenerator::CountingLoopInfo CodeGenerator::emitCountingLoop(
 
 // ── IR emit helpers ───────────────────────────────────────────────────────────
 
+llvm::Value* CodeGenerator::emitBoolZExt(llvm::Value* i1Val, const llvm::Twine& name) {
+    // IsNonNeg=true sets the `zext nneg` flag (LLVM 18+): the source i1 value
+    // is always 0 or 1, so the sign bit of the result is always 0.
+    // This lets LLVM's value-range analysis skip a separate analysis step.
+    auto* result = builder->CreateZExt(i1Val, getDefaultType(), name, /*IsNonNeg=*/true);
+    // Attach !range [0,2) so LLVM knows this is a 0-or-1 value.
+    if (boolRangeMD_)
+        llvm::cast<llvm::Instruction>(result)->setMetadata(
+            llvm::LLVMContext::MD_range, boolRangeMD_);
+    nonNegValues_.insert(result);
+    return result;
+}
+
 llvm::Value* CodeGenerator::emitLoadArrayLen(llvm::Value* arrPtr,
                                               const llvm::Twine& name) {
     auto* load = builder->CreateAlignedLoad(getDefaultType(), arrPtr,
@@ -1430,6 +1464,7 @@ llvm::Function* CodeGenerator::getOrDeclarePutchar() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     return fn;
 }
 
@@ -1442,6 +1477,7 @@ llvm::Function* CodeGenerator::getOrDeclarePuts() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1459,6 +1495,7 @@ llvm::Function* CodeGenerator::getOrDeclareFputs() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
@@ -1761,6 +1798,10 @@ llvm::Function* CodeGenerator::getOrDeclareQsort() {
     auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
                                        {ptrTy, getDefaultType(), getDefaultType(), ptrTy}, false);
     llvm::Function* fn = declareExternalFn("qsort", ty);
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    // qsort reads+writes the array (param 0) and does not capture the comparator (param 3).
+    OMSC_ADD_NOCAPTURE(fn, 3);
     return fn;
 }
 
@@ -5081,7 +5122,15 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
         // Use the parameter's actual LLVM type (respects type annotations).
         llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name, argIt->getType());
-        builder->CreateStore(&(*argIt), alloca);
+        {
+            auto* paramSt = builder->CreateStore(&(*argIt), alloca);
+            // Tag parameter-init stores with scalar TBAA so LLVM AA knows the
+            // alloca slot doesn't alias heap array/struct/map data.
+            llvm::Type* paramTy = argIt->getType();
+            if (tbaaScalar_ && (paramTy->isIntegerTy() || paramTy->isFloatTy() ||
+                                paramTy->isDoubleTy()  || paramTy->isPointerTy()))
+                paramSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+        }
         bindVariable(param.name, alloca);
         // Annotate parameter with its declared type for signed/unsigned tracking.
         if (!param.typeName.empty())
