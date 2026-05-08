@@ -795,8 +795,19 @@ llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
         // Narrow integers (i1–i63): extend to i64.
         // i1 is always 0/1 so ZExt is correct.  For wider signed integers use
         // SExt so that e.g. an i32 value of -1 becomes -1 in i64, not 2^32-1.
-        if (srcBits == 1 || unsignedExprs_.count(v) || isUnsignedValue(v))
-            return builder->CreateZExt(v, getDefaultType(), "zext");
+        if (srcBits == 1 || unsignedExprs_.count(v) || isUnsignedValue(v)) {
+            // The `nneg` flag (LLVM 18+) tells the optimizer the source value's
+            // sign bit is 0 (i.e., non-negative when interpreted as signed).
+            // This is safe for:
+            //   • i1 — only values 0/1, sign bit always 0.
+            //   • values in nonNegValues_ — proven to be in [0, 2^(n-1)-1].
+            // It is NOT safe to set nneg merely because the value is tagged as
+            // unsigned — an unsigned i32 may have its MSB set (values 2^31..2^32-1)
+            // even though we treat it as non-negative semantically.
+            const bool canNNeg = (srcBits == 1) || nonNegValues_.count(v);
+            return builder->CreateZExt(v, getDefaultType(), "zext",
+                                       /*IsNonNeg=*/canNNeg);
+        }
         return builder->CreateSExt(v, getDefaultType(), "sext");
     }
     return v;
@@ -1181,7 +1192,10 @@ CodeGenerator::CountingLoopInfo CodeGenerator::emitCountingLoop(
 // ── IR emit helpers ───────────────────────────────────────────────────────────
 
 llvm::Value* CodeGenerator::emitBoolZExt(llvm::Value* i1Val, const llvm::Twine& name) {
-    auto* result = builder->CreateZExt(i1Val, getDefaultType(), name);
+    // IsNonNeg=true sets the `zext nneg` flag (LLVM 18+): the source i1 value
+    // is always 0 or 1, so the sign bit of the result is always 0.
+    // This lets LLVM's value-range analysis skip a separate analysis step.
+    auto* result = builder->CreateZExt(i1Val, getDefaultType(), name, /*IsNonNeg=*/true);
     // Attach !range [0,2) so LLVM knows this is a 0-or-1 value.
     if (boolRangeMD_)
         llvm::cast<llvm::Instruction>(result)->setMetadata(

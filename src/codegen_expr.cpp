@@ -1779,9 +1779,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             llvm::Value* cmp = (expr->op == "==")
                                 ? builder->CreateICmpEQ(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp")
                                 : builder->CreateICmpNE(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp");
-                            auto* r = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-                            nonNegValues_.insert(r);
-                            return r;
+                            return emitBoolZExt(cmp, "booltmp");
                         }
                     }
                     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(mulLeft)) {
@@ -5900,7 +5898,13 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
         auto* charLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
         charLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        return builder->CreateZExt(charLoad, getDefaultType(), "idx.charext");
+        auto* charExt = builder->CreateZExt(charLoad, getDefaultType(), "idx.charext");
+        // !range [0, 256) — char is always a byte value
+        if (charRangeMD_)
+            llvm::cast<llvm::Instruction>(charExt)->setMetadata(
+                llvm::LLVMContext::MD_range, charRangeMD_);
+        nonNegValues_.insert(charExt);
+        return charExt;
     }
     // Array: element is at slot (index + 1) in the i64 buffer.
     llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,

@@ -2758,7 +2758,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* startOverflow = builder->CreateICmpSGT(startArg, strLen, "substr.startover");
         startArg = builder->CreateSelect(startOverflow, strLen, startArg, "substr.startfinal");
         // Clamp length: max(0, min(len, strLen - start))
-        llvm::Value* remaining = builder->CreateSub(strLen, startArg, "substr.remaining");
+        // After clamping: startArg ∈ [0, strLen], so remaining is nuw+nsw.
+        llvm::Value* remaining = builder->CreateSub(strLen, startArg, "substr.remaining",
+                                                     /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* lenNeg = builder->CreateICmpSLT(lenArg, zero, "substr.lenneg");
         lenArg = builder->CreateSelect(lenNeg, zero, lenArg, "substr.lenclamp");
         llvm::Value* lenOverflow = builder->CreateICmpSGT(lenArg, remaining, "substr.lenover");
@@ -3117,7 +3119,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(buildDoneBB);
         // Copy remaining chars: tail = strLen - (bSrc - strPtr)
         llvm::Value* consumed = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), bSrc, strPtr, "replace.consumed");
-        llvm::Value* tail     = builder->CreateSub(strLen, consumed, "replace.tail");
+        // consumed ≤ strLen (bSrc never exceeds strPtr+strLen), so sub is nuw+nsw.
+        llvm::Value* tail     = builder->CreateSub(strLen, consumed, "replace.tail",
+                                                    /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCall(getOrDeclareMemcpy(), {bDst, bSrc, tail});
         llvm::Value* endPtr   = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), bDst, tail, "replace.end");
         builder->CreateStore(i8zero, endPtr);
@@ -3222,7 +3226,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         trimEnd->addIncoming(endIdx, endBodyBB); // found non-space
 
         // Build trimmed string
-        llvm::Value* trimLen = builder->CreateSub(trimEnd, trimStart, "trim.len2");
+        // trimStart ≤ trimEnd (scan invariant), so sub is nuw+nsw.
+        llvm::Value* trimLen = builder->CreateSub(trimEnd, trimStart, "trim.len2",
+                                                   /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* trimAlloc = builder->CreateAdd(trimLen, llvm::ConstantInt::get(getDefaultType(), 1), "trim.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* trimBuf = builder->CreateCall(getOrDeclareMalloc(), {trimAlloc}, "trim.buf");
         llvm::cast<llvm::CallInst>(trimBuf)->addRetAttr(
@@ -3333,7 +3339,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateBr(mergeBB);
         builder->SetInsertPoint(checkBB);
         // Compare str + (strLen - sufLen) with suffix using memcmp.
-        llvm::Value* offset = builder->CreateSub(strLen, sufLen, "endswith.offset");
+        // In checkBB: sufLen ≤ strLen (proven by tooLong guard), so sub is nuw+nsw.
+        llvm::Value* offset = builder->CreateSub(strLen, sufLen, "endswith.offset",
+                                                  /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* tailPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, offset, "endswith.tail");
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareMemcmp(), {tailPtr, suffixPtr, sufLen}, "endswith.cmp");
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "endswith.eq");
