@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `cse_pass.cpp` `collectOpaqueVarsInStmt`: added `ASSUME_STMT` (recurses into deoptBody), `PREFETCH_STMT` (registers volatile/atomic prefetch-declared vars), and `PIPELINE_STMT` (recurses into each stage body) so CSE correctly avoids sinking loads across opaque barriers inside those constructs.
   - `dce_pass.cpp` `transformStmt`: added `ASSUME_STMT` (recurses into deoptBody), `PREFETCH_STMT` (explicit leaf case), and `PIPELINE_STMT` (recurses into each stage's `BlockStmt` via `transformBlock`) so dead-code elimination propagates into all reachable sub-statements.
 
+- **Round-8 correctness audit** (`src/cfctre.cpp`, `src/alg_simp_pass.cpp`, `src/borrow_checker.cpp`, `src/codegen_expr.cpp`):
+  - `cfctre.cpp`: Fixed 6 C++ undefined-behavior issues in the compile-time evaluator:
+    - `>>` and `>>=` operators used C++ arithmetic (signed) right-shift instead of logical (unsigned), diverging from OmScript semantics; fixed by casting operands to `uint64_t` before shifting.
+    - Unary negation of `INT64_MIN` is signed overflow (UB); fixed with `uint64_t` two's-complement negation.
+    - `abs(INT64_MIN)` in the built-in `abs` evaluator overflows; guarded with early return of `INT64_MIN`.
+    - `std::abs(INT64_MIN)` in `gcd` and `lcm` built-in evaluators is UB; replaced with explicit unsigned-cast negation.
+    - `rotate_left`/`rotate_right` with shift amount 0 caused `x >> 64` / `x << 64` (UB for 64-bit integers); guarded with early return for `sh == 0`.
+  - `alg_simp_pass.cpp`: Constant-fold guard for `INT64_MIN / -1` and `INT64_MIN % -1` (SIGFPE on x86-64) was missing from the literal-folding path; added explicit guards matching `cfctre.cpp`.
+  - `borrow_checker.cpp`: `ASSUME_STMT` was not handled in `checkStmt`, so use-after-move errors inside `assume(cond)` conditions and deopt bodies were silently missed; added explicit case that checks both the condition expression and the optional deopt body.
+  - `codegen_expr.cpp`: SIMD vector `>>` emitted `CreateAShr` (arithmetic shift) while the scalar path and language semantics mandate `CreateLShr` (logical shift); changed to `CreateLShr`.
+
 ## [4.4.0] - 2026-05-07
 
 ### Added
