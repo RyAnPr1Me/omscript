@@ -7,7 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI/Release build fix** (`src/alg_simp_pass.cpp`):
+  - Added missing `#include <climits>` that caused `LLONG_MIN` to be undeclared on GCC (all Linux CI jobs and the Release PGO build were failing). Clang finds `LLONG_MIN` via implicit includes but GCC strictly requires the explicit header.
+  - Fixed a misleading-indentation warning in `src/opt_orchestrator.cpp:853` that was flagged by `tidy-check` (the `break` now lives on its own line inside the REBORROW_EXPR case).
+
 ### Added
+
+- **Round-21: `zext nneg` flag + no-wrap arithmetic** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `src/codegen_builtins.cpp`):
+  - `emitBoolZExt()` now passes `IsNonNeg=true` to `CreateZExt`, emitting `zext nneg` (LLVM 18+). This lets LLVM's value-range inference skip a separate sign-bit analysis on all boolean 0/1 values.
+  - `toDefaultType()` passes `IsNonNeg=true` for `i1` sources and values in `nonNegValues_`. Non-negative source → `zext nneg`; unsigned-tagged but potentially high-bit sources remain plain `zext` (correct semantics preserved).
+  - `str_ends_with`: `strLen - sufLen` tagged `nuw+nsw` (proven by the `tooLong` guard above it).
+  - `str_substr`: `strLen - clamped_start` tagged `nuw+nsw` (after start is clamped to `[0, strLen]`).
+  - `str_replace`: loop tail `strLen - consumed` tagged `nuw+nsw` (`bSrc` is bounded by `strPtr+strLen`).
+  - `str_trim`/`str_trim_left`/`str_trim_right`: `trimEnd - trimStart` tagged `nuw+nsw` (scan invariant).
+  - String subscript `str[i]`: `zext i8→i64` result now carries `!range [0, 256)` via `charRangeMD_` and is inserted into `nonNegValues_`.
+  - Last bare `CreateZExt` in the mul-by-zero comparison fold migrated to `emitBoolZExt`.
+
+- **Round-20: builtin boolean metadata** (`src/codegen_builtins.cpp`):
+  - `emitBoolZExt` applied to all boolean-returning builtins: `is_alpha`, `is_digit`, `is_upper`, `is_lower`, `is_space`, `is_alnum`, `str_eq`, `str_contains`, `str_starts_with`, `str_ends_with`, `is_even`, `bool(x)` cast.
+  - `map_has` call result tagged `!range [0, 2)` + `nonNegValues_`.
+  - `char_at` `zext` result tagged `!range [0, 256)` via `charRangeMD_`.
+
+- **Round-19: `emitBoolZExt` helper + `or disjoint`** (`src/codegen.cpp`, `src/codegen_expr.cpp`):
+  - New helper `emitBoolZExt(i1 val, name)`: emits `zext nneg` + `!range [0, 2)` + `nonNegValues_` tracking in one call. Replaced all 20 bare `CreateZExt` in `codegen_expr.cpp` (float comparisons, integer comparisons, `&&`/`||`, `!`, scmp/pcmp, mul-by-zero).
+  - `or disjoint` flag at O1+: when KnownBits proves the LHS and RHS have no shared 1-bits, the `or` instruction is flagged `disjoint`, enabling LLVM to treat it as `add`.
+
+- **Round-18: scalar alloca metadata** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `src/codegen_stmt.cpp`):
+  - `!tbaa` (`tbaaScalar_`) on all scalar alloca loads/stores: identifier loads in `generateIdentifier`, increment/decrement loads in `generateIncDec`, `VarDecl` init stores, for-loop `condBB`/`incBB`/assume loads and stores, foreach index loads/stores, and parameter init stores.
+  - `lshr exact` flag via KnownBits: when the shift amount is a known-positive constant and the input has that many known-zero trailing bits, `CreateLShr` is emitted with `isExact=true`.
+  - While-loop preheader assumption loads gain `!noundef` + `!tbaa` + `!range [0, INT64_MAX)`.
+
+- **Round-17: IR quality overhaul** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `src/codegen_stmt.cpp`):
+  - `toDefaultType`: `i1` and unsigned values use `ZExt`; all other signed narrow integers (`i2`–`i63`) use `SExt` so that `i32 -1` extends to `i64 -1`, not `2^32-1`.
+  - `splatScalarToVector`: uses `PoisonValue` as the undef lane (avoids unnecessary materialization).
+  - `putchar`/`puts`/`fputs`: marked `nosync`.
+  - `qsort`: marked `nounwind`, `willreturn`, `nocapture(3)`.
+  - `emitShiftAdd`: all generated `shl`/`add` instructions carry `nuw`+`nsw`.
+  - `NSWNeg` emitted when the negated operand is in `nonNegValues_`.
+  - `range_step` multiply and add carry `nsw`+`nuw`.
+  - All alloca/global-init stores carry `tbaaScalar_`.
 
 - **Round-16: IR quality improvements** (`src/codegen_expr.cpp`):
   - **Identity cast elimination**: `as`-cast on same-size integer types (e.g. `i32 as i32`) now returns the value directly instead of emitting a `bitcast` instruction. Opaque pointer→pointer casts also return directly (all pointers share the `ptr` type). Fallback `as`-cast path guards `srcTy == dstTy` before creating a `bitcast`.
