@@ -6762,20 +6762,27 @@ void CodeGenerator::generateAssume(AssumeStmt* stmt) {
         cond = builder->CreateICmpNE(cond, llvm::ConstantInt::get(cond->getType(), 0), "assume.cond");
     }
     llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
-    builder->CreateCall(assumeFn, {cond});
 
     if (stmt->deoptBody) {
-        // if (!cond) { deoptBody }
+        // Emit the branch BEFORE the assume so LLVM does not treat the deopt
+        // path as dead code.  The assume is placed in afterBB so it still
+        // helps optimizations on the fast (condition-true) path.
         llvm::Function* parent = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* deoptBB = llvm::BasicBlock::Create(*context, "deopt", parent);
         llvm::BasicBlock* afterBB = llvm::BasicBlock::Create(*context, "after.assume", parent);
         builder->CreateCondBr(cond, afterBB, deoptBB);
+
         builder->SetInsertPoint(deoptBB);
         generateStatement(stmt->deoptBody.get());
         if (!builder->GetInsertBlock()->getTerminator()) {
             builder->CreateBr(afterBB);
         }
+
         builder->SetInsertPoint(afterBB);
+        // Now it is safe to assume: we only reach here when cond was true.
+        builder->CreateCall(assumeFn, {cond});
+    } else {
+        builder->CreateCall(assumeFn, {cond});
     }
 }
 

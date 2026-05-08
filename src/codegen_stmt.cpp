@@ -3888,6 +3888,51 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
             scanExpr(fs->step.get()); scanStmt(fs->body.get());
             break;
         }
+        case ASTNodeType::FOR_EACH_STMT: {
+            const auto* fe = static_cast<const ForEachStmt*>(s);
+            scanExpr(fe->collection.get());
+            scanStmt(fe->body.get());
+            break;
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            const auto* dw = static_cast<const DoWhileStmt*>(s);
+            scanStmt(dw->body.get());
+            scanExpr(dw->condition.get());
+            break;
+        }
+        case ASTNodeType::SWITCH_STMT: {
+            const auto* sw = static_cast<const SwitchStmt*>(s);
+            scanExpr(sw->condition.get());
+            for (const auto& sc : sw->cases)
+                for (const auto& sub : sc.body)
+                    scanStmt(sub.get());
+            break;
+        }
+        case ASTNodeType::CATCH_STMT:
+            scanStmt(static_cast<const CatchStmt*>(s)->body.get()); break;
+        case ASTNodeType::DEFER_STMT:
+            scanStmt(static_cast<const DeferStmt*>(s)->body.get()); break;
+        case ASTNodeType::PREFETCH_STMT: {
+            const auto* ps = static_cast<const PrefetchStmt*>(s);
+            if (ps->varDecl) scanExpr(ps->varDecl->initializer.get());
+            if (ps->addrExpr) scanExpr(ps->addrExpr.get());
+            break;
+        }
+        case ASTNodeType::PIPELINE_STMT: {
+            const auto* pl = static_cast<const PipelineStmt*>(s);
+            if (pl->count) scanExpr(pl->count.get());
+            for (const auto& stage : pl->stages)
+                if (stage.body)
+                    for (const auto& sub : stage.body->statements)
+                        scanStmt(sub.get());
+            break;
+        }
+        case ASTNodeType::ASSUME_STMT: {
+            const auto* as = static_cast<const AssumeStmt*>(s);
+            if (as->condition) scanExpr(as->condition.get());
+            if (as->deoptBody) scanStmt(as->deoptBody.get());
+            break;
+        }
         default: break;
         }
     };

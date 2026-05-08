@@ -312,6 +312,11 @@ static void collectStringArrayVars(
             collectStringArrayVars(stage.body.get(), strVars, arrVars);
         return;
     }
+    if (const auto* as = dynamic_cast<const AssumeStmt*>(stmt)) {
+        if (as->deoptBody)
+            collectStringArrayVars(as->deoptBody.get(), strVars, arrVars);
+        return;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -531,6 +536,12 @@ static void markSharedVars(
     if (const auto* pl = dynamic_cast<const PipelineStmt*>(stmt)) {
         for (const auto& stage : pl->stages)
             markSharedVars(stage.body.get(), strVars, arrVars, sharedVars);
+        return;
+    }
+    if (const auto* as = dynamic_cast<const AssumeStmt*>(stmt)) {
+        if (as->condition) scanExprForAliases(as->condition.get());
+        if (as->deoptBody)
+            markSharedVars(as->deoptBody.get(), strVars, arrVars, sharedVars);
         return;
     }
 }
