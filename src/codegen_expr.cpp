@@ -1992,1044 +1992,1044 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const bool ns = baseNonNeg || inOptMaxFunction;  // nsw: safe when base >= 0 or @optmax
             // nuw: safe exactly when nsw is safe for non-negative base (base>=0 ⇒
             // base*K ≤ INT64_MAX < UINT64_MAX, so no unsigned wrap either).
-            const bool nf = ns;
+            const bool nuw = ns;
             // Use the actual type of the base value for shift amounts so that the
             // shift instruction is well-typed for all integer widths (i8/i16/i32/i64).
             llvm::Type* baseTy = base->getType();
             auto mkShift = [&](int64_t v) { return llvm::ConstantInt::get(baseTy, v); };
             switch (multiplier) {
             case 3: {
-                auto* shl = builder->CreateShl(base, mkShift(1), "mul3.shl", nf, ns);
-                return builder->CreateAdd(shl, base, "mul3", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(1), "mul3.shl", nuw, ns);
+                return builder->CreateAdd(shl, base, "mul3", nuw, ns);
             }
             case 5: {
-                auto* shl = builder->CreateShl(base, mkShift(2), "mul5.shl", nf, ns);
-                return builder->CreateAdd(shl, base, "mul5", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(2), "mul5.shl", nuw, ns);
+                return builder->CreateAdd(shl, base, "mul5", nuw, ns);
             }
             case 7: {
-                auto* shl = builder->CreateShl(base, mkShift(3), "mul7.shl", nf, ns);
-                return builder->CreateSub(shl, base, "mul7", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(3), "mul7.shl", nuw, ns);
+                return builder->CreateSub(shl, base, "mul7", nuw, ns);
             }
             case 9: {
-                auto* shl = builder->CreateShl(base, mkShift(3), "mul9.shl", nf, ns);
-                return builder->CreateAdd(shl, base, "mul9", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(3), "mul9.shl", nuw, ns);
+                return builder->CreateAdd(shl, base, "mul9", nuw, ns);
             }
             case 10: {
                 // n*10 → (n<<3) + (n<<1)
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul10.shl3", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul10.shl1", nf, ns);
-                return builder->CreateAdd(shl3, shl1, "mul10", nf, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul10.shl3", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul10.shl1", nuw, ns);
+                return builder->CreateAdd(shl3, shl1, "mul10", nuw, ns);
             }
             case 15: {
                 // n*15 → (n<<4) - n
-                auto* shl = builder->CreateShl(base, mkShift(4), "mul15.shl", nf, ns);
-                return builder->CreateSub(shl, base, "mul15", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(4), "mul15.shl", nuw, ns);
+                return builder->CreateSub(shl, base, "mul15", nuw, ns);
             }
             case 17: {
                 // n*17 → (n<<4) + n
-                auto* shl = builder->CreateShl(base, mkShift(4), "mul17.shl", nf, ns);
-                return builder->CreateAdd(shl, base, "mul17", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(4), "mul17.shl", nuw, ns);
+                return builder->CreateAdd(shl, base, "mul17", nuw, ns);
             }
             case 6: {
                 // n*6 → (n<<2) + (n<<1)  (= n*4 + n*2)
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul6.shl2", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul6.shl1", nf, ns);
-                return builder->CreateAdd(shl2, shl1, "mul6", nf, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul6.shl2", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul6.shl1", nuw, ns);
+                return builder->CreateAdd(shl2, shl1, "mul6", nuw, ns);
             }
             case 12: {
                 // n*12 → (n<<3) + (n<<2)  (= n*8 + n*4)
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul12.shl3", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul12.shl2", nf, ns);
-                return builder->CreateAdd(shl3, shl2, "mul12", nf, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul12.shl3", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul12.shl2", nuw, ns);
+                return builder->CreateAdd(shl3, shl2, "mul12", nuw, ns);
             }
             case 24: {
                 // n*24 → (n<<5) - (n<<3)  (= n*32 - n*8)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul24.shl5", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul24.shl3", nf, ns);
-                return builder->CreateSub(shl5, shl3, "mul24", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul24.shl5", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul24.shl3", nuw, ns);
+                return builder->CreateSub(shl5, shl3, "mul24", nuw, ns);
             }
             case 25: {
                 // n*25 → ((n<<5) - (n<<3)) + n  (= (n*32 - n*8) + n = n*24 + n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul25.shl5", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul25.shl3", nf, ns);
-                auto* t = builder->CreateSub(shl5, shl3, "mul25.t", nf, ns);
-                return builder->CreateAdd(t, base, "mul25", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul25.shl5", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul25.shl3", nuw, ns);
+                auto* t = builder->CreateSub(shl5, shl3, "mul25.t", nuw, ns);
+                return builder->CreateAdd(t, base, "mul25", nuw, ns);
             }
             case 31: {
                 // n*31 → (n<<5) - n
-                auto* shl = builder->CreateShl(base, mkShift(5), "mul31.shl", nf, ns);
-                return builder->CreateSub(shl, base, "mul31", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(5), "mul31.shl", nuw, ns);
+                return builder->CreateSub(shl, base, "mul31", nuw, ns);
             }
             case 33: {
                 // n*33 → (n<<5) + n
-                auto* shl = builder->CreateShl(base, mkShift(5), "mul33.shl", nf, ns);
-                return builder->CreateAdd(shl, base, "mul33", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(5), "mul33.shl", nuw, ns);
+                return builder->CreateAdd(shl, base, "mul33", nuw, ns);
             }
             case 63: {
                 // n*63 → (n<<6) - n
-                auto* shl = builder->CreateShl(base, mkShift(6), "mul63.shl", nf, ns);
-                return builder->CreateSub(shl, base, "mul63", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(6), "mul63.shl", nuw, ns);
+                return builder->CreateSub(shl, base, "mul63", nuw, ns);
             }
             case 65: {
                 // n*65 → (n<<6) + n
-                auto* shl = builder->CreateShl(base, mkShift(6), "mul65.shl", nf, ns);
-                return builder->CreateAdd(shl, base, "mul65", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(6), "mul65.shl", nuw, ns);
+                return builder->CreateAdd(shl, base, "mul65", nuw, ns);
             }
             case 127: {
                 // n*127 → (n<<7) - n
-                auto* shl = builder->CreateShl(base, mkShift(7), "mul127.shl", nf, ns);
-                return builder->CreateSub(shl, base, "mul127", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(7), "mul127.shl", nuw, ns);
+                return builder->CreateSub(shl, base, "mul127", nuw, ns);
             }
             case 255: {
                 // n*255 → (n<<8) - n
-                auto* shl = builder->CreateShl(base, mkShift(8), "mul255.shl", nf, ns);
-                return builder->CreateSub(shl, base, "mul255", nf, ns);
+                auto* shl = builder->CreateShl(base, mkShift(8), "mul255.shl", nuw, ns);
+                return builder->CreateSub(shl, base, "mul255", nuw, ns);
             }
             case 1000: {
                 // n*1000 → (n<<10) - (n<<5) + (n<<3)  (= 1024n - 32n + 8n)
-                auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1000.shl10", nf, ns);
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul1000.shl5", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul1000.shl3", nf, ns);
-                auto* t = builder->CreateSub(shl10, shl5, "mul1000.t", nf, ns);
-                return builder->CreateAdd(t, shl3, "mul1000", nf, ns);
+                auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1000.shl10", nuw, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul1000.shl5", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul1000.shl3", nuw, ns);
+                auto* t = builder->CreateSub(shl10, shl5, "mul1000.t", nuw, ns);
+                return builder->CreateAdd(t, shl3, "mul1000", nuw, ns);
             }
             case 100: {
                 // n*100 → (n<<7) - (n<<5) + (n<<2)  (= 128n - 32n + 4n)
-                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul100.shl7", nf, ns);
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul100.shl5", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul100.shl2", nf, ns);
-                auto* t = builder->CreateSub(shl7, shl5, "mul100.t", nf, ns);
-                return builder->CreateAdd(t, shl2, "mul100", nf, ns);
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul100.shl7", nuw, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul100.shl5", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul100.shl2", nuw, ns);
+                auto* t = builder->CreateSub(shl7, shl5, "mul100.t", nuw, ns);
+                return builder->CreateAdd(t, shl2, "mul100", nuw, ns);
             }
             case 11: {
                 // n*11 → (n<<3) + (n<<1) + n  (= 8n + 2n + n)
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul11.shl3", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul11.shl1", nf, ns);
-                auto* t = builder->CreateAdd(shl3, shl1, "mul11.t", nf, ns);
-                return builder->CreateAdd(t, base, "mul11", nf, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul11.shl3", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul11.shl1", nuw, ns);
+                auto* t = builder->CreateAdd(shl3, shl1, "mul11.t", nuw, ns);
+                return builder->CreateAdd(t, base, "mul11", nuw, ns);
             }
             case 13: {
                 // n*13 → (n<<4) - (n<<1) - n  (= 16n - 2n - n)
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul13.shl4", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul13.shl1", nf, ns);
-                auto* t = builder->CreateSub(shl4, shl1, "mul13.t", nf, ns);
-                return builder->CreateSub(t, base, "mul13", nf, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul13.shl4", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul13.shl1", nuw, ns);
+                auto* t = builder->CreateSub(shl4, shl1, "mul13.t", nuw, ns);
+                return builder->CreateSub(t, base, "mul13", nuw, ns);
             }
             case 20: {
                 // n*20 → (n<<4) + (n<<2)  (= 16n + 4n)
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul20.shl4", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul20.shl2", nf, ns);
-                return builder->CreateAdd(shl4, shl2, "mul20", nf, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul20.shl4", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul20.shl2", nuw, ns);
+                return builder->CreateAdd(shl4, shl2, "mul20", nuw, ns);
             }
             case 21: {
                 // n*21 → (n<<4) + (n<<2) + n  (= 16n + 4n + n)
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul21.shl4", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul21.shl2", nf, ns);
-                auto* t = builder->CreateAdd(shl4, shl2, "mul21.t", nf, ns);
-                return builder->CreateAdd(t, base, "mul21", nf, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul21.shl4", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul21.shl2", nuw, ns);
+                auto* t = builder->CreateAdd(shl4, shl2, "mul21.t", nuw, ns);
+                return builder->CreateAdd(t, base, "mul21", nuw, ns);
             }
             case 14: {
                 // n*14 → (n<<4) - (n<<1)  (= 16n - 2n)
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul14.shl4", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul14.shl1", nf, ns);
-                return builder->CreateSub(shl4, shl1, "mul14", nf, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul14.shl4", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul14.shl1", nuw, ns);
+                return builder->CreateSub(shl4, shl1, "mul14", nuw, ns);
             }
             case 28: {
                 // n*28 → (n<<5) - (n<<2)  (= 32n - 4n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul28.shl5", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul28.shl2", nf, ns);
-                return builder->CreateSub(shl5, shl2, "mul28", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul28.shl5", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul28.shl2", nuw, ns);
+                return builder->CreateSub(shl5, shl2, "mul28", nuw, ns);
             }
             case 60: {
                 // n*60 → (n<<6) - (n<<2)  (= 64n - 4n)
-                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul60.shl6", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul60.shl2", nf, ns);
-                return builder->CreateSub(shl6, shl2, "mul60", nf, ns);
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul60.shl6", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul60.shl2", nuw, ns);
+                return builder->CreateSub(shl6, shl2, "mul60", nuw, ns);
             }
             case 96: {
                 // n*96 → (n<<7) - (n<<5)  (= 128n - 32n)
-                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul96.shl7", nf, ns);
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul96.shl5", nf, ns);
-                return builder->CreateSub(shl7, shl5, "mul96", nf, ns);
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul96.shl7", nuw, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul96.shl5", nuw, ns);
+                return builder->CreateSub(shl7, shl5, "mul96", nuw, ns);
             }
             case 120: {
                 // n*120 → (n<<7) - (n<<3)  (= 128n - 8n)
-                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul120.shl7", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul120.shl3", nf, ns);
-                return builder->CreateSub(shl7, shl3, "mul120", nf, ns);
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul120.shl7", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul120.shl3", nuw, ns);
+                return builder->CreateSub(shl7, shl3, "mul120", nuw, ns);
             }
             case 18: {
                 // n*18 → (n<<4) + (n<<1)  (= 16n + 2n)
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul18.shl4", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul18.shl1", nf, ns);
-                return builder->CreateAdd(shl4, shl1, "mul18", nf, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul18.shl4", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul18.shl1", nuw, ns);
+                return builder->CreateAdd(shl4, shl1, "mul18", nuw, ns);
             }
             case 36: {
                 // n*36 → (n<<5) + (n<<2)  (= 32n + 4n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul36.shl5", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul36.shl2", nf, ns);
-                return builder->CreateAdd(shl5, shl2, "mul36", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul36.shl5", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul36.shl2", nuw, ns);
+                return builder->CreateAdd(shl5, shl2, "mul36", nuw, ns);
             }
             case 37: {
                 // n*37 → (n<<5) + (n<<2) + n  (= 32n + 4n + n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul37.shl5", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul37.shl2", nf, ns);
-                auto* t = builder->CreateAdd(shl5, shl2, "mul37.t", nf, ns);
-                return builder->CreateAdd(t, base, "mul37", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul37.shl5", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul37.shl2", nuw, ns);
+                auto* t = builder->CreateAdd(shl5, shl2, "mul37.t", nuw, ns);
+                return builder->CreateAdd(t, base, "mul37", nuw, ns);
             }
             case 40: {
                 // n*40 → (n<<5) + (n<<3)  (= 32n + 8n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul40.shl5", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul40.shl3", nf, ns);
-                return builder->CreateAdd(shl5, shl3, "mul40", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul40.shl5", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul40.shl3", nuw, ns);
+                return builder->CreateAdd(shl5, shl3, "mul40", nuw, ns);
             }
             case 41: {
                 // n*41 → (n<<5) + (n<<3) + n  (= 32n + 8n + n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul41.shl5", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul41.shl3", nf, ns);
-                auto* t = builder->CreateAdd(shl5, shl3, "mul41.t", nf, ns);
-                return builder->CreateAdd(t, base, "mul41", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul41.shl5", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul41.shl3", nuw, ns);
+                auto* t = builder->CreateAdd(shl5, shl3, "mul41.t", nuw, ns);
+                return builder->CreateAdd(t, base, "mul41", nuw, ns);
             }
             case 48: {
                 // n*48 → (n<<5) + (n<<4)  (= 32n + 16n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul48.shl5", nf, ns);
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul48.shl4", nf, ns);
-                return builder->CreateAdd(shl5, shl4, "mul48", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul48.shl5", nuw, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul48.shl4", nuw, ns);
+                return builder->CreateAdd(shl5, shl4, "mul48", nuw, ns);
             }
             case 49: {
                 // n*49 → (n<<5) + (n<<4) + n  (= 32n + 16n + n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul49.shl5", nf, ns);
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul49.shl4", nf, ns);
-                auto* t = builder->CreateAdd(shl5, shl4, "mul49.t", nf, ns);
-                return builder->CreateAdd(t, base, "mul49", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul49.shl5", nuw, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul49.shl4", nuw, ns);
+                auto* t = builder->CreateAdd(shl5, shl4, "mul49.t", nuw, ns);
+                return builder->CreateAdd(t, base, "mul49", nuw, ns);
             }
             case 50: {
                 // n*50 → (n<<6) - (n<<4) + (n<<1)  (= 64n - 16n + 2n)
-                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul50.shl6", nf, ns);
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul50.shl4", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul50.shl1", nf, ns);
-                auto* t = builder->CreateSub(shl6, shl4, "mul50.t", nf, ns);
-                return builder->CreateAdd(t, shl1, "mul50", nf, ns);
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul50.shl6", nuw, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul50.shl4", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul50.shl1", nuw, ns);
+                auto* t = builder->CreateSub(shl6, shl4, "mul50.t", nuw, ns);
+                return builder->CreateAdd(t, shl1, "mul50", nuw, ns);
             }
             case 200: {
                 // n*200 → (n<<8) - (n<<6) + (n<<3)  (= 256n - 64n + 8n)
-                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul200.shl8", nf, ns);
-                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul200.shl6", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul200.shl3", nf, ns);
-                auto* t = builder->CreateSub(shl8, shl6, "mul200.t", nf, ns);
-                return builder->CreateAdd(t, shl3, "mul200", nf, ns);
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul200.shl8", nuw, ns);
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul200.shl6", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul200.shl3", nuw, ns);
+                auto* t = builder->CreateSub(shl8, shl6, "mul200.t", nuw, ns);
+                return builder->CreateAdd(t, shl3, "mul200", nuw, ns);
             }
             case 19: {
                 // n*19 → (n<<4) + (n<<1) + n  (= 16n + 2n + n)
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul19.shl4", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul19.shl1", nf, ns);
-                auto* t = builder->CreateAdd(shl4, shl1, "mul19.t", nf, ns);
-                return builder->CreateAdd(t, base, "mul19", nf, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul19.shl4", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul19.shl1", nuw, ns);
+                auto* t = builder->CreateAdd(shl4, shl1, "mul19.t", nuw, ns);
+                return builder->CreateAdd(t, base, "mul19", nuw, ns);
             }
             case 22: {
                 // n*22 → (n<<4) + (n<<2) + (n<<1)  (= 16n + 4n + 2n)
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul22.shl4", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul22.shl2", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul22.shl1", nf, ns);
-                auto* t = builder->CreateAdd(shl4, shl2, "mul22.t", nf, ns);
-                return builder->CreateAdd(t, shl1, "mul22", nf, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul22.shl4", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul22.shl2", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul22.shl1", nuw, ns);
+                auto* t = builder->CreateAdd(shl4, shl2, "mul22.t", nuw, ns);
+                return builder->CreateAdd(t, shl1, "mul22", nuw, ns);
             }
             case 26: {
                 // n*26 → (n<<5) - (n<<2) - (n<<1)  (= 32n - 4n - 2n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul26.shl5", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul26.shl2", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul26.shl1", nf, ns);
-                auto* t = builder->CreateSub(shl5, shl2, "mul26.t", nf, ns);
-                return builder->CreateSub(t, shl1, "mul26", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul26.shl5", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul26.shl2", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul26.shl1", nuw, ns);
+                auto* t = builder->CreateSub(shl5, shl2, "mul26.t", nuw, ns);
+                return builder->CreateSub(t, shl1, "mul26", nuw, ns);
             }
             case 27: {
                 // n*27 → (n<<5) - (n<<2) - n  (= 32n - 4n - n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul27.shl5", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul27.shl2", nf, ns);
-                auto* t = builder->CreateSub(shl5, shl2, "mul27.t", nf, ns);
-                return builder->CreateSub(t, base, "mul27", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul27.shl5", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul27.shl2", nuw, ns);
+                auto* t = builder->CreateSub(shl5, shl2, "mul27.t", nuw, ns);
+                return builder->CreateSub(t, base, "mul27", nuw, ns);
             }
             case 30: {
                 // n*30 → (n<<5) - (n<<1)  (= 32n - 2n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul30.shl5", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul30.shl1", nf, ns);
-                return builder->CreateSub(shl5, shl1, "mul30", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul30.shl5", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul30.shl1", nuw, ns);
+                return builder->CreateSub(shl5, shl1, "mul30", nuw, ns);
             }
             case 256: {
                 // n*256 → (n<<8)
-                return builder->CreateShl(base, mkShift(8), "mul256", nf, ns);
+                return builder->CreateShl(base, mkShift(8), "mul256", nuw, ns);
             }
             case 512: {
                 // n*512 → (n<<9)
-                return builder->CreateShl(base, mkShift(9), "mul512", nf, ns);
+                return builder->CreateShl(base, mkShift(9), "mul512", nuw, ns);
             }
             case 1024: {
                 // n*1024 → (n<<10)
-                return builder->CreateShl(base, mkShift(10), "mul1024", nf, ns);
+                return builder->CreateShl(base, mkShift(10), "mul1024", nuw, ns);
             }
             case 2048: {
                 // n*2048 → (n<<11)
-                return builder->CreateShl(base, mkShift(11), "mul2048", nf, ns);
+                return builder->CreateShl(base, mkShift(11), "mul2048", nuw, ns);
             }
             case 4096: {
                 // n*4096 → (n<<12)
-                return builder->CreateShl(base, mkShift(12), "mul4096", nf, ns);
+                return builder->CreateShl(base, mkShift(12), "mul4096", nuw, ns);
             }
             case 8192: {
                 // n*8192 → (n<<13)
-                return builder->CreateShl(base, mkShift(13), "mul8192", nf, ns);
+                return builder->CreateShl(base, mkShift(13), "mul8192", nuw, ns);
             }
             // ── Extended multiply-by-constant patterns (2-instruction) ─────────
             case 34: {
                 // n*34 → (n<<5) + (n<<1)  (= 32n + 2n)
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul34.shl5", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul34.shl1", nf, ns);
-                return builder->CreateAdd(shl5, shl1, "mul34", nf, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul34.shl5", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul34.shl1", nuw, ns);
+                return builder->CreateAdd(shl5, shl1, "mul34", nuw, ns);
             }
             case 56: {
                 // n*56 → (n<<6) - (n<<3)  (= 64n - 8n)
-                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul56.shl6", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul56.shl3", nf, ns);
-                return builder->CreateSub(shl6, shl3, "mul56", nf, ns);
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul56.shl6", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul56.shl3", nuw, ns);
+                return builder->CreateSub(shl6, shl3, "mul56", nuw, ns);
             }
             case 62: {
                 // n*62 → (n<<6) - (n<<1)  (= 64n - 2n)
-                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul62.shl6", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul62.shl1", nf, ns);
-                return builder->CreateSub(shl6, shl1, "mul62", nf, ns);
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul62.shl6", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul62.shl1", nuw, ns);
+                return builder->CreateSub(shl6, shl1, "mul62", nuw, ns);
             }
             case 66: {
                 // n*66 → (n<<6) + (n<<1)  (= 64n + 2n)
-                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul66.shl6", nf, ns);
-                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul66.shl1", nf, ns);
-                return builder->CreateAdd(shl6, shl1, "mul66", nf, ns);
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul66.shl6", nuw, ns);
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul66.shl1", nuw, ns);
+                return builder->CreateAdd(shl6, shl1, "mul66", nuw, ns);
             }
             case 68: {
                 // n*68 → (n<<6) + (n<<2)  (= 64n + 4n)
-                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul68.shl6", nf, ns);
-                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul68.shl2", nf, ns);
-                return builder->CreateAdd(shl6, shl2, "mul68", nf, ns);
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul68.shl6", nuw, ns);
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul68.shl2", nuw, ns);
+                return builder->CreateAdd(shl6, shl2, "mul68", nuw, ns);
             }
             case 72: {
                 // n*72 → (n<<6) + (n<<3)  (= 64n + 8n)
-                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul72.shl6", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul72.shl3", nf, ns);
-                return builder->CreateAdd(shl6, shl3, "mul72", nf, ns);
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul72.shl6", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul72.shl3", nuw, ns);
+                return builder->CreateAdd(shl6, shl3, "mul72", nuw, ns);
             }
             case 80: {
                 // n*80 → (n<<6) + (n<<4)  (= 64n + 16n)
-                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul80.shl6", nf, ns);
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul80.shl4", nf, ns);
-                return builder->CreateAdd(shl6, shl4, "mul80", nf, ns);
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul80.shl6", nuw, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul80.shl4", nuw, ns);
+                return builder->CreateAdd(shl6, shl4, "mul80", nuw, ns);
             }
             case 112: {
                 // n*112 → (n<<7) - (n<<4)  (= 128n - 16n)
-                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul112.shl7", nf, ns);
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul112.shl4", nf, ns);
-                return builder->CreateSub(shl7, shl4, "mul112", nf, ns);
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul112.shl7", nuw, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul112.shl4", nuw, ns);
+                return builder->CreateSub(shl7, shl4, "mul112", nuw, ns);
             }
             case 129: {
                 // n*129 → (n<<7) + n  (= 128n + n)
-                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul129.shl7", nf, ns);
-                return builder->CreateAdd(shl7, base, "mul129", nf, ns);
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul129.shl7", nuw, ns);
+                return builder->CreateAdd(shl7, base, "mul129", nuw, ns);
             }
             case 136: {
                 // n*136 → (n<<7) + (n<<3)  (= 128n + 8n)
-                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul136.shl7", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul136.shl3", nf, ns);
-                return builder->CreateAdd(shl7, shl3, "mul136", nf, ns);
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul136.shl7", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul136.shl3", nuw, ns);
+                return builder->CreateAdd(shl7, shl3, "mul136", nuw, ns);
             }
             case 144: {
                 // n*144 → (n<<7) + (n<<4)  (= 128n + 16n)
-                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul144.shl7", nf, ns);
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul144.shl4", nf, ns);
-                return builder->CreateAdd(shl7, shl4, "mul144", nf, ns);
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul144.shl7", nuw, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul144.shl4", nuw, ns);
+                return builder->CreateAdd(shl7, shl4, "mul144", nuw, ns);
             }
             case 160: {
                 // n*160 → (n<<7) + (n<<5)  (= 128n + 32n)
-                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul160.shl7", nf, ns);
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul160.shl5", nf, ns);
-                return builder->CreateAdd(shl7, shl5, "mul160", nf, ns);
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul160.shl7", nuw, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul160.shl5", nuw, ns);
+                return builder->CreateAdd(shl7, shl5, "mul160", nuw, ns);
             }
             case 192: {
                 // n*192 → (n<<7) + (n<<6)  (= 128n + 64n)
-                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul192.shl7", nf, ns);
-                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul192.shl6", nf, ns);
-                return builder->CreateAdd(shl7, shl6, "mul192", nf, ns);
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul192.shl7", nuw, ns);
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul192.shl6", nuw, ns);
+                return builder->CreateAdd(shl7, shl6, "mul192", nuw, ns);
             }
             case 224: {
                 // n*224 → (n<<8) - (n<<5)  (= 256n - 32n)
-                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul224.shl8", nf, ns);
-                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul224.shl5", nf, ns);
-                return builder->CreateSub(shl8, shl5, "mul224", nf, ns);
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul224.shl8", nuw, ns);
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul224.shl5", nuw, ns);
+                return builder->CreateSub(shl8, shl5, "mul224", nuw, ns);
             }
             case 240: {
                 // n*240 → (n<<8) - (n<<4)  (= 256n - 16n)
-                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul240.shl8", nf, ns);
-                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul240.shl4", nf, ns);
-                return builder->CreateSub(shl8, shl4, "mul240", nf, ns);
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul240.shl8", nuw, ns);
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul240.shl4", nuw, ns);
+                return builder->CreateSub(shl8, shl4, "mul240", nuw, ns);
             }
             case 248: {
                 // n*248 → (n<<8) - (n<<3)  (= 256n - 8n)
-                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul248.shl8", nf, ns);
-                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul248.shl3", nf, ns);
-                return builder->CreateSub(shl8, shl3, "mul248", nf, ns);
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul248.shl8", nuw, ns);
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul248.shl3", nuw, ns);
+                return builder->CreateSub(shl8, shl3, "mul248", nuw, ns);
             }
             case 257: {
                 // n*257 → (n<<8) + n  (= 256n + n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul257.shl8");
-                return builder->CreateAdd(shl8, base, "mul257", nf, ns);
+                return builder->CreateAdd(shl8, base, "mul257", nuw, ns);
             }
             case 264: {
                 // n*264 → (n<<8) + (n<<3)  (= 256n + 8n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul264.shl8");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul264.shl3");
-                return builder->CreateAdd(shl8, shl3, "mul264", nf, ns);
+                return builder->CreateAdd(shl8, shl3, "mul264", nuw, ns);
             }
             case 272: {
                 // n*272 → (n<<8) + (n<<4)  (= 256n + 16n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul272.shl8");
                 auto* shl4 = builder->CreateShl(base, mkShift(4), "mul272.shl4");
-                return builder->CreateAdd(shl8, shl4, "mul272", nf, ns);
+                return builder->CreateAdd(shl8, shl4, "mul272", nuw, ns);
             }
             case 288: {
                 // n*288 → (n<<8) + (n<<5)  (= 256n + 32n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul288.shl8");
                 auto* shl5 = builder->CreateShl(base, mkShift(5), "mul288.shl5");
-                return builder->CreateAdd(shl8, shl5, "mul288", nf, ns);
+                return builder->CreateAdd(shl8, shl5, "mul288", nuw, ns);
             }
             case 320: {
                 // n*320 → (n<<8) + (n<<6)  (= 256n + 64n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul320.shl8");
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul320.shl6");
-                return builder->CreateAdd(shl8, shl6, "mul320", nf, ns);
+                return builder->CreateAdd(shl8, shl6, "mul320", nuw, ns);
             }
             case 384: {
                 // n*384 → (n<<8) + (n<<7)  (= 256n + 128n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul384.shl8");
                 auto* shl7 = builder->CreateShl(base, mkShift(7), "mul384.shl7");
-                return builder->CreateAdd(shl8, shl7, "mul384", nf, ns);
+                return builder->CreateAdd(shl8, shl7, "mul384", nuw, ns);
             }
             case 448: {
                 // n*448 → (n<<9) - (n<<6)  (= 512n - 64n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul448.shl9");
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul448.shl6");
-                return builder->CreateSub(shl9, shl6, "mul448", nf, ns);
+                return builder->CreateSub(shl9, shl6, "mul448", nuw, ns);
             }
             case 480: {
                 // n*480 → (n<<9) - (n<<5)  (= 512n - 32n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul480.shl9");
                 auto* shl5 = builder->CreateShl(base, mkShift(5), "mul480.shl5");
-                return builder->CreateSub(shl9, shl5, "mul480", nf, ns);
+                return builder->CreateSub(shl9, shl5, "mul480", nuw, ns);
             }
             case 496: {
                 // n*496 → (n<<9) - (n<<4)  (= 512n - 16n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul496.shl9");
                 auto* shl4 = builder->CreateShl(base, mkShift(4), "mul496.shl4");
-                return builder->CreateSub(shl9, shl4, "mul496", nf, ns);
+                return builder->CreateSub(shl9, shl4, "mul496", nuw, ns);
             }
             case 504: {
                 // n*504 → (n<<9) - (n<<3)  (= 512n - 8n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul504.shl9");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul504.shl3");
-                return builder->CreateSub(shl9, shl3, "mul504", nf, ns);
+                return builder->CreateSub(shl9, shl3, "mul504", nuw, ns);
             }
             case 511: {
                 // n*511 → (n<<9) - n  (= 512n - n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul511.shl9");
-                return builder->CreateSub(shl9, base, "mul511", nf, ns);
+                return builder->CreateSub(shl9, base, "mul511", nuw, ns);
             }
             case 513: {
                 // n*513 → (n<<9) + n  (= 512n + n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul513.shl9");
-                return builder->CreateAdd(shl9, base, "mul513", nf, ns);
+                return builder->CreateAdd(shl9, base, "mul513", nuw, ns);
             }
             case 640: {
                 // n*640 → (n<<9) + (n<<7)  (= 512n + 128n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul640.shl9");
                 auto* shl7 = builder->CreateShl(base, mkShift(7), "mul640.shl7");
-                return builder->CreateAdd(shl9, shl7, "mul640", nf, ns);
+                return builder->CreateAdd(shl9, shl7, "mul640", nuw, ns);
             }
             case 768: {
                 // n*768 → (n<<9) + (n<<8)  (= 512n + 256n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul768.shl9");
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul768.shl8");
-                return builder->CreateAdd(shl9, shl8, "mul768", nf, ns);
+                return builder->CreateAdd(shl9, shl8, "mul768", nuw, ns);
             }
             // ── Extended multiply-by-constant patterns (3-instruction) ─────────
             case 23: {
                 // n*23 → (n<<5) - (n<<3) - n  (= 32n - 8n - n)
                 auto* shl5 = builder->CreateShl(base, mkShift(5), "mul23.shl5");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul23.shl3");
-                auto* t = builder->CreateSub(shl5, shl3, "mul23.t", nf, ns);
-                return builder->CreateSub(t, base, "mul23", nf, ns);
+                auto* t = builder->CreateSub(shl5, shl3, "mul23.t", nuw, ns);
+                return builder->CreateSub(t, base, "mul23", nuw, ns);
             }
             case 43: {
                 // n*43 → (n<<6) - (n<<5) + (n<<3) + n  is 4-instr; use:
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul43.shl2");
-                auto* n5   = builder->CreateAdd(shl2, base, "mul43.n5", nf, ns);  // 5n
+                auto* n5   = builder->CreateAdd(shl2, base, "mul43.n5", nuw, ns);  // 5n
                 auto* n40  = builder->CreateShl(n5, mkShift(3), "mul43.n40");     // 40n
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul43.shl1");
-                auto* t    = builder->CreateAdd(n40, shl1, "mul43.t", nf, ns);    // 42n
-                return builder->CreateAdd(t, base, "mul43", nf, ns);              // 43n
+                auto* t    = builder->CreateAdd(n40, shl1, "mul43.t", nuw, ns);    // 42n
+                return builder->CreateAdd(t, base, "mul43", nuw, ns);              // 43n
             }
             case 45: {
                 // n*45 → (n<<6) - (n<<5) + (n<<3) + n  but simpler:
                 // n*45 = (n*5)*9 = ((n<<2)+n)*9 = ((n<<2)+n)<<3 + ((n<<2)+n)
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul45.shl2");
-                auto* n5   = builder->CreateAdd(shl2, base, "mul45.n5", nf, ns);  // 5n
+                auto* n5   = builder->CreateAdd(shl2, base, "mul45.n5", nuw, ns);  // 5n
                 auto* n40  = builder->CreateShl(n5, mkShift(3), "mul45.n40");     // 40n
-                return builder->CreateAdd(n40, n5, "mul45", nf, ns);              // 45n
+                return builder->CreateAdd(n40, n5, "mul45", nuw, ns);              // 45n
             }
             case 53: {
                 // n*53 = (n*54) - n = ((n*27)<<1) - n
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul53.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul53.shl3");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul53.shl1");
-                auto* t    = builder->CreateSub(shl6, shl3, "mul53.t", nf, ns);   // 56n
-                auto* t2   = builder->CreateSub(t, shl1, "mul53.t2", nf, ns);     // 54n
-                return builder->CreateSub(t2, base, "mul53", nf, ns);             // 53n
+                auto* t    = builder->CreateSub(shl6, shl3, "mul53.t", nuw, ns);   // 56n
+                auto* t2   = builder->CreateSub(t, shl1, "mul53.t2", nuw, ns);     // 54n
+                return builder->CreateSub(t2, base, "mul53", nuw, ns);             // 53n
             }
             case 58: {
                 // n*58 = (n<<6) - (n<<2) - (n<<1)  = 64n-4n-2n = 58n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul58.shl6");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul58.shl2");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul58.shl1");
-                auto* t    = builder->CreateSub(shl6, shl2, "mul58.t", nf, ns);   // 60n
-                return builder->CreateSub(t, shl1, "mul58", nf, ns);              // 58n
+                auto* t    = builder->CreateSub(shl6, shl2, "mul58.t", nuw, ns);   // 60n
+                return builder->CreateSub(t, shl1, "mul58", nuw, ns);              // 58n
             }
             case 59: {
                 // n*59 = (n<<6) - (n<<2) - n  = 64n-4n-n = 59n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul59.shl6");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul59.shl2");
-                auto* t    = builder->CreateSub(shl6, shl2, "mul59.t", nf, ns);   // 60n
-                return builder->CreateSub(t, base, "mul59", nf, ns);              // 59n
+                auto* t    = builder->CreateSub(shl6, shl2, "mul59.t", nuw, ns);   // 60n
+                return builder->CreateSub(t, base, "mul59", nuw, ns);              // 59n
             }
             case 61: {
                 // n*61 = (n<<6) - (n<<1) - n  = 64n-2n-n = 61n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul61.shl6");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul61.shl1");
-                auto* t    = builder->CreateSub(shl6, shl1, "mul61.t", nf, ns);   // 62n
-                return builder->CreateSub(t, base, "mul61", nf, ns);              // 61n
+                auto* t    = builder->CreateSub(shl6, shl1, "mul61.t", nuw, ns);   // 62n
+                return builder->CreateSub(t, base, "mul61", nuw, ns);              // 61n
             }
             case 57: {
                 // n*57 → (n<<6) - (n<<3) + n  (= 64n - 8n + n)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul57.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul57.shl3");
-                auto* t = builder->CreateSub(shl6, shl3, "mul57.t", nf, ns);
-                return builder->CreateAdd(t, base, "mul57", nf, ns);
+                auto* t = builder->CreateSub(shl6, shl3, "mul57.t", nuw, ns);
+                return builder->CreateAdd(t, base, "mul57", nuw, ns);
             }
             case 67: {
                 // n*67 = (n<<6) + (n<<1) + n  = 64n+2n+n = 67n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul67.shl6");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul67.shl1");
-                auto* t    = builder->CreateAdd(shl6, shl1, "mul67.t", nf, ns);   // 66n
-                return builder->CreateAdd(t, base, "mul67", nf, ns);              // 67n
+                auto* t    = builder->CreateAdd(shl6, shl1, "mul67.t", nuw, ns);   // 66n
+                return builder->CreateAdd(t, base, "mul67", nuw, ns);              // 67n
             }
             case 69: {
                 // n*69 = (n<<6) + (n<<2) + n  = 64n+4n+n = 69n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul69.shl6");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul69.shl2");
-                auto* t    = builder->CreateAdd(shl6, shl2, "mul69.t", nf, ns);   // 68n
-                return builder->CreateAdd(t, base, "mul69", nf, ns);              // 69n
+                auto* t    = builder->CreateAdd(shl6, shl2, "mul69.t", nuw, ns);   // 68n
+                return builder->CreateAdd(t, base, "mul69", nuw, ns);              // 69n
             }
             case 71: {
                 // n*71 = (n<<6) + (n<<3) - n  = 64n+8n-n = 71n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul71.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul71.shl3");
-                auto* t    = builder->CreateAdd(shl6, shl3, "mul71.t", nf, ns);   // 72n
-                return builder->CreateSub(t, base, "mul71", nf, ns);              // 71n
+                auto* t    = builder->CreateAdd(shl6, shl3, "mul71.t", nuw, ns);   // 72n
+                return builder->CreateSub(t, base, "mul71", nuw, ns);              // 71n
             }
             case 73: {
                 // n*73 = (n<<6) + (n<<3) + n  = 64n+8n+n = 73n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul73.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul73.shl3");
-                auto* t    = builder->CreateAdd(shl6, shl3, "mul73.t", nf, ns);   // 72n
-                return builder->CreateAdd(t, base, "mul73", nf, ns);              // 73n
+                auto* t    = builder->CreateAdd(shl6, shl3, "mul73.t", nuw, ns);   // 72n
+                return builder->CreateAdd(t, base, "mul73", nuw, ns);              // 73n
             }
             case 74: {
                 // n*74 = (n<<6) + (n<<3) + (n<<1)  = 64n+8n+2n = 74n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul74.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul74.shl3");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul74.shl1");
-                auto* t    = builder->CreateAdd(shl6, shl3, "mul74.t", nf, ns);   // 72n
-                return builder->CreateAdd(t, shl1, "mul74", nf, ns);              // 74n
+                auto* t    = builder->CreateAdd(shl6, shl3, "mul74.t", nuw, ns);   // 72n
+                return builder->CreateAdd(t, shl1, "mul74", nuw, ns);              // 74n
             }
             case 75: {
                 // n*75 = (n*25)*3 = ((n<<5)-(n<<3)+n)*3  but also:
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul75.shl6");
                 auto* shl4 = builder->CreateShl(base, mkShift(4), "mul75.shl4");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul75.shl2");
-                auto* t    = builder->CreateAdd(shl6, shl4, "mul75.t", nf, ns);   // 80n
-                auto* t2   = builder->CreateSub(t, shl2, "mul75.t2", nf, ns);     // 76n
-                return builder->CreateSub(t2, base, "mul75", nf, ns);             // 75n
+                auto* t    = builder->CreateAdd(shl6, shl4, "mul75.t", nuw, ns);   // 80n
+                auto* t2   = builder->CreateSub(t, shl2, "mul75.t2", nuw, ns);     // 76n
+                return builder->CreateSub(t2, base, "mul75", nuw, ns);             // 75n
             }
             case 76: {
                 // n*76 = (n<<6) + (n<<4) - (n<<2) = 64+16-4=76 (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul76.shl6");
                 auto* shl4 = builder->CreateShl(base, mkShift(4), "mul76.shl4");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul76.shl2");
-                auto* t    = builder->CreateAdd(shl6, shl4, "mul76.t", nf, ns);   // 80n
-                return builder->CreateSub(t, shl2, "mul76", nf, ns);              // 76n
+                auto* t    = builder->CreateAdd(shl6, shl4, "mul76.t", nuw, ns);   // 80n
+                return builder->CreateSub(t, shl2, "mul76", nuw, ns);              // 76n
             }
             case 77: {
                 // n*77 = (n<<6) + (n<<4) - (n<<2) + n = 64+16-4+1=77 (4-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul77.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul77.shl3");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul77.shl2");
-                auto* t    = builder->CreateAdd(shl6, shl3, "mul77.t", nf, ns);   // 72n
-                auto* t2   = builder->CreateAdd(t, shl2, "mul77.t2", nf, ns);     // 76n
-                return builder->CreateAdd(t2, base, "mul77", nf, ns);             // 77n
+                auto* t    = builder->CreateAdd(shl6, shl3, "mul77.t", nuw, ns);   // 72n
+                auto* t2   = builder->CreateAdd(t, shl2, "mul77.t2", nuw, ns);     // 76n
+                return builder->CreateAdd(t2, base, "mul77", nuw, ns);             // 77n
             }
             case 1023: {
                 // n*1023 → (n<<10) - n  (= 1024n - n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1023.shl10");
-                return builder->CreateSub(shl10, base, "mul1023", nf, ns);
+                return builder->CreateSub(shl10, base, "mul1023", nuw, ns);
             }
             case 1025: {
                 // n*1025 → (n<<10) + n  (= 1024n + n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1025.shl10");
-                return builder->CreateAdd(shl10, base, "mul1025", nf, ns);
+                return builder->CreateAdd(shl10, base, "mul1025", nuw, ns);
             }
             case 1152: {
                 // n*1152 → (n<<10) + (n<<7)  (= 1024n + 128n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1152.shl10");
                 auto* shl7 = builder->CreateShl(base, mkShift(7), "mul1152.shl7");
-                return builder->CreateAdd(shl10, shl7, "mul1152", nf, ns);
+                return builder->CreateAdd(shl10, shl7, "mul1152", nuw, ns);
             }
             case 1280: {
                 // n*1280 → (n<<10) + (n<<8)  (= 1024n + 256n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1280.shl10");
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul1280.shl8");
-                return builder->CreateAdd(shl10, shl8, "mul1280", nf, ns);
+                return builder->CreateAdd(shl10, shl8, "mul1280", nuw, ns);
             }
             case 1536: {
                 // n*1536 → (n<<10) + (n<<9)  (= 1024n + 512n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1536.shl10");
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul1536.shl9");
-                return builder->CreateAdd(shl10, shl9, "mul1536", nf, ns);
+                return builder->CreateAdd(shl10, shl9, "mul1536", nuw, ns);
             }
             case 1792: {
                 // n*1792 → (n<<11) - (n<<8)  (= 2048n - 256n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul1792.shl11");
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul1792.shl8");
-                return builder->CreateSub(shl11, shl8, "mul1792", nf, ns);
+                return builder->CreateSub(shl11, shl8, "mul1792", nuw, ns);
             }
             case 2047: {
                 // n*2047 → (n<<11) - n  (= 2048n - n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2047.shl11");
-                return builder->CreateSub(shl11, base, "mul2047", nf, ns);
+                return builder->CreateSub(shl11, base, "mul2047", nuw, ns);
             }
             case 2049: {
                 // n*2049 → (n<<11) + n  (= 2048n + n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2049.shl11");
-                return builder->CreateAdd(shl11, base, "mul2049", nf, ns);
+                return builder->CreateAdd(shl11, base, "mul2049", nuw, ns);
             }
             // ── n×128 family ─────────────────────────────────────────────────────
             case 124: {
                 // n*124 → (n<<7) - (n<<2)  (= 128n - 4n)
                 auto* shl7 = builder->CreateShl(base, mkShift(7), "mul124.shl7");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul124.shl2");
-                return builder->CreateSub(shl7, shl2, "mul124", nf, ns);
+                return builder->CreateSub(shl7, shl2, "mul124", nuw, ns);
             }
             case 126: {
                 // n*126 → (n<<7) - (n<<1)  (= 128n - 2n)
                 auto* shl7 = builder->CreateShl(base, mkShift(7), "mul126.shl7");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul126.shl1");
-                return builder->CreateSub(shl7, shl1, "mul126", nf, ns);
+                return builder->CreateSub(shl7, shl1, "mul126", nuw, ns);
             }
             case 130: {
                 // n*130 → (n<<7) + (n<<1)  (= 128n + 2n)
                 auto* shl7 = builder->CreateShl(base, mkShift(7), "mul130.shl7");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul130.shl1");
-                return builder->CreateAdd(shl7, shl1, "mul130", nf, ns);
+                return builder->CreateAdd(shl7, shl1, "mul130", nuw, ns);
             }
             case 132: {
                 // n*132 → (n<<7) + (n<<2)  (= 128n + 4n)
                 auto* shl7 = builder->CreateShl(base, mkShift(7), "mul132.shl7");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul132.shl2");
-                return builder->CreateAdd(shl7, shl2, "mul132", nf, ns);
+                return builder->CreateAdd(shl7, shl2, "mul132", nuw, ns);
             }
             // ── n×256 family ─────────────────────────────────────────────────────
             case 252: {
                 // n*252 → (n<<8) - (n<<2)  (= 256n - 4n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul252.shl8");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul252.shl2");
-                return builder->CreateSub(shl8, shl2, "mul252", nf, ns);
+                return builder->CreateSub(shl8, shl2, "mul252", nuw, ns);
             }
             case 254: {
                 // n*254 → (n<<8) - (n<<1)  (= 256n - 2n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul254.shl8");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul254.shl1");
-                return builder->CreateSub(shl8, shl1, "mul254", nf, ns);
+                return builder->CreateSub(shl8, shl1, "mul254", nuw, ns);
             }
             case 258: {
                 // n*258 → (n<<8) + (n<<1)  (= 256n + 2n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul258.shl8");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul258.shl1");
-                return builder->CreateAdd(shl8, shl1, "mul258", nf, ns);
+                return builder->CreateAdd(shl8, shl1, "mul258", nuw, ns);
             }
             case 260: {
                 // n*260 → (n<<8) + (n<<2)  (= 256n + 4n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul260.shl8");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul260.shl2");
-                return builder->CreateAdd(shl8, shl2, "mul260", nf, ns);
+                return builder->CreateAdd(shl8, shl2, "mul260", nuw, ns);
             }
             // ── n×512 family ─────────────────────────────────────────────────────
             case 508: {
                 // n*508 → (n<<9) - (n<<2)  (= 512n - 4n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul508.shl9");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul508.shl2");
-                return builder->CreateSub(shl9, shl2, "mul508", nf, ns);
+                return builder->CreateSub(shl9, shl2, "mul508", nuw, ns);
             }
             case 510: {
                 // n*510 → (n<<9) - (n<<1)  (= 512n - 2n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul510.shl9");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul510.shl1");
-                return builder->CreateSub(shl9, shl1, "mul510", nf, ns);
+                return builder->CreateSub(shl9, shl1, "mul510", nuw, ns);
             }
             case 514: {
                 // n*514 → (n<<9) + (n<<1)  (= 512n + 2n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul514.shl9");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul514.shl1");
-                return builder->CreateAdd(shl9, shl1, "mul514", nf, ns);
+                return builder->CreateAdd(shl9, shl1, "mul514", nuw, ns);
             }
             case 516: {
                 // n*516 → (n<<9) + (n<<2)  (= 512n + 4n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul516.shl9");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul516.shl2");
-                return builder->CreateAdd(shl9, shl2, "mul516", nf, ns);
+                return builder->CreateAdd(shl9, shl2, "mul516", nuw, ns);
             }
             case 520: {
                 // n*520 → (n<<9) + (n<<3)  (= 512n + 8n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul520.shl9");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul520.shl3");
-                return builder->CreateAdd(shl9, shl3, "mul520", nf, ns);
+                return builder->CreateAdd(shl9, shl3, "mul520", nuw, ns);
             }
             case 528: {
                 // n*528 → (n<<9) + (n<<4)  (= 512n + 16n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul528.shl9");
                 auto* shl4 = builder->CreateShl(base, mkShift(4), "mul528.shl4");
-                return builder->CreateAdd(shl9, shl4, "mul528", nf, ns);
+                return builder->CreateAdd(shl9, shl4, "mul528", nuw, ns);
             }
             case 544: {
                 // n*544 → (n<<9) + (n<<5)  (= 512n + 32n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul544.shl9");
                 auto* shl5 = builder->CreateShl(base, mkShift(5), "mul544.shl5");
-                return builder->CreateAdd(shl9, shl5, "mul544", nf, ns);
+                return builder->CreateAdd(shl9, shl5, "mul544", nuw, ns);
             }
             case 576: {
                 // n*576 → (n<<9) + (n<<6)  (= 512n + 64n)
                 auto* shl9 = builder->CreateShl(base, mkShift(9), "mul576.shl9");
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul576.shl6");
-                return builder->CreateAdd(shl9, shl6, "mul576", nf, ns);
+                return builder->CreateAdd(shl9, shl6, "mul576", nuw, ns);
             }
             // ── n×1024 family ────────────────────────────────────────────────────
             case 960: {
                 // n*960 → (n<<10) - (n<<6)  (= 1024n - 64n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul960.shl10");
                 auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul960.shl6");
-                return builder->CreateSub(shl10, shl6, "mul960", nf, ns);
+                return builder->CreateSub(shl10, shl6, "mul960", nuw, ns);
             }
             case 992: {
                 // n*992 → (n<<10) - (n<<5)  (= 1024n - 32n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul992.shl10");
                 auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul992.shl5");
-                return builder->CreateSub(shl10, shl5, "mul992", nf, ns);
+                return builder->CreateSub(shl10, shl5, "mul992", nuw, ns);
             }
             case 1008: {
                 // n*1008 → (n<<10) - (n<<4)  (= 1024n - 16n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1008.shl10");
                 auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul1008.shl4");
-                return builder->CreateSub(shl10, shl4, "mul1008", nf, ns);
+                return builder->CreateSub(shl10, shl4, "mul1008", nuw, ns);
             }
             case 1016: {
                 // n*1016 → (n<<10) - (n<<3)  (= 1024n - 8n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1016.shl10");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul1016.shl3");
-                return builder->CreateSub(shl10, shl3, "mul1016", nf, ns);
+                return builder->CreateSub(shl10, shl3, "mul1016", nuw, ns);
             }
             case 1020: {
                 // n*1020 → (n<<10) - (n<<2)  (= 1024n - 4n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1020.shl10");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul1020.shl2");
-                return builder->CreateSub(shl10, shl2, "mul1020", nf, ns);
+                return builder->CreateSub(shl10, shl2, "mul1020", nuw, ns);
             }
             case 1022: {
                 // n*1022 → (n<<10) - (n<<1)  (= 1024n - 2n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1022.shl10");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul1022.shl1");
-                return builder->CreateSub(shl10, shl1, "mul1022", nf, ns);
+                return builder->CreateSub(shl10, shl1, "mul1022", nuw, ns);
             }
             case 1026: {
                 // n*1026 → (n<<10) + (n<<1)  (= 1024n + 2n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1026.shl10");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul1026.shl1");
-                return builder->CreateAdd(shl10, shl1, "mul1026", nf, ns);
+                return builder->CreateAdd(shl10, shl1, "mul1026", nuw, ns);
             }
             case 1028: {
                 // n*1028 → (n<<10) + (n<<2)  (= 1024n + 4n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1028.shl10");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul1028.shl2");
-                return builder->CreateAdd(shl10, shl2, "mul1028", nf, ns);
+                return builder->CreateAdd(shl10, shl2, "mul1028", nuw, ns);
             }
             case 1032: {
                 // n*1032 → (n<<10) + (n<<3)  (= 1024n + 8n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1032.shl10");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul1032.shl3");
-                return builder->CreateAdd(shl10, shl3, "mul1032", nf, ns);
+                return builder->CreateAdd(shl10, shl3, "mul1032", nuw, ns);
             }
             case 1040: {
                 // n*1040 → (n<<10) + (n<<4)  (= 1024n + 16n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1040.shl10");
                 auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul1040.shl4");
-                return builder->CreateAdd(shl10, shl4, "mul1040", nf, ns);
+                return builder->CreateAdd(shl10, shl4, "mul1040", nuw, ns);
             }
             case 1056: {
                 // n*1056 → (n<<10) + (n<<5)  (= 1024n + 32n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1056.shl10");
                 auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul1056.shl5");
-                return builder->CreateAdd(shl10, shl5, "mul1056", nf, ns);
+                return builder->CreateAdd(shl10, shl5, "mul1056", nuw, ns);
             }
             case 1088: {
                 // n*1088 → (n<<10) + (n<<6)  (= 1024n + 64n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1088.shl10");
                 auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul1088.shl6");
-                return builder->CreateAdd(shl10, shl6, "mul1088", nf, ns);
+                return builder->CreateAdd(shl10, shl6, "mul1088", nuw, ns);
             }
             // ── n×2048 family ────────────────────────────────────────────────────
             case 1920: {
                 // n*1920 → (n<<11) - (n<<7)  (= 2048n - 128n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul1920.shl11");
                 auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul1920.shl7");
-                return builder->CreateSub(shl11, shl7, "mul1920", nf, ns);
+                return builder->CreateSub(shl11, shl7, "mul1920", nuw, ns);
             }
             case 1984: {
                 // n*1984 → (n<<11) - (n<<6)  (= 2048n - 64n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul1984.shl11");
                 auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul1984.shl6");
-                return builder->CreateSub(shl11, shl6, "mul1984", nf, ns);
+                return builder->CreateSub(shl11, shl6, "mul1984", nuw, ns);
             }
             case 2016: {
                 // n*2016 → (n<<11) - (n<<5)  (= 2048n - 32n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2016.shl11");
                 auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul2016.shl5");
-                return builder->CreateSub(shl11, shl5, "mul2016", nf, ns);
+                return builder->CreateSub(shl11, shl5, "mul2016", nuw, ns);
             }
             case 2032: {
                 // n*2032 → (n<<11) - (n<<4)  (= 2048n - 16n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2032.shl11");
                 auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul2032.shl4");
-                return builder->CreateSub(shl11, shl4, "mul2032", nf, ns);
+                return builder->CreateSub(shl11, shl4, "mul2032", nuw, ns);
             }
             case 2040: {
                 // n*2040 → (n<<11) - (n<<3)  (= 2048n - 8n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2040.shl11");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul2040.shl3");
-                return builder->CreateSub(shl11, shl3, "mul2040", nf, ns);
+                return builder->CreateSub(shl11, shl3, "mul2040", nuw, ns);
             }
             case 2044: {
                 // n*2044 → (n<<11) - (n<<2)  (= 2048n - 4n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2044.shl11");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul2044.shl2");
-                return builder->CreateSub(shl11, shl2, "mul2044", nf, ns);
+                return builder->CreateSub(shl11, shl2, "mul2044", nuw, ns);
             }
             case 2046: {
                 // n*2046 → (n<<11) - (n<<1)  (= 2048n - 2n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2046.shl11");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul2046.shl1");
-                return builder->CreateSub(shl11, shl1, "mul2046", nf, ns);
+                return builder->CreateSub(shl11, shl1, "mul2046", nuw, ns);
             }
             case 2050: {
                 // n*2050 → (n<<11) + (n<<1)  (= 2048n + 2n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2050.shl11");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul2050.shl1");
-                return builder->CreateAdd(shl11, shl1, "mul2050", nf, ns);
+                return builder->CreateAdd(shl11, shl1, "mul2050", nuw, ns);
             }
             case 2052: {
                 // n*2052 → (n<<11) + (n<<2)  (= 2048n + 4n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2052.shl11");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul2052.shl2");
-                return builder->CreateAdd(shl11, shl2, "mul2052", nf, ns);
+                return builder->CreateAdd(shl11, shl2, "mul2052", nuw, ns);
             }
             case 2056: {
                 // n*2056 → (n<<11) + (n<<3)  (= 2048n + 8n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2056.shl11");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul2056.shl3");
-                return builder->CreateAdd(shl11, shl3, "mul2056", nf, ns);
+                return builder->CreateAdd(shl11, shl3, "mul2056", nuw, ns);
             }
             case 2064: {
                 // n*2064 → (n<<11) + (n<<4)  (= 2048n + 16n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2064.shl11");
                 auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul2064.shl4");
-                return builder->CreateAdd(shl11, shl4, "mul2064", nf, ns);
+                return builder->CreateAdd(shl11, shl4, "mul2064", nuw, ns);
             }
             case 2080: {
                 // n*2080 → (n<<11) + (n<<5)  (= 2048n + 32n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2080.shl11");
                 auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul2080.shl5");
-                return builder->CreateAdd(shl11, shl5, "mul2080", nf, ns);
+                return builder->CreateAdd(shl11, shl5, "mul2080", nuw, ns);
             }
             case 2112: {
                 // n*2112 → (n<<11) + (n<<6)  (= 2048n + 64n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2112.shl11");
                 auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul2112.shl6");
-                return builder->CreateAdd(shl11, shl6, "mul2112", nf, ns);
+                return builder->CreateAdd(shl11, shl6, "mul2112", nuw, ns);
             }
             case 2176: {
                 // n*2176 → (n<<11) + (n<<7)  (= 2048n + 128n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2176.shl11");
                 auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul2176.shl7");
-                return builder->CreateAdd(shl11, shl7, "mul2176", nf, ns);
+                return builder->CreateAdd(shl11, shl7, "mul2176", nuw, ns);
             }
             case 2304: {
                 // n*2304 → (n<<11) + (n<<8)  (= 2048n + 256n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2304.shl11");
                 auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul2304.shl8");
-                return builder->CreateAdd(shl11, shl8, "mul2304", nf, ns);
+                return builder->CreateAdd(shl11, shl8, "mul2304", nuw, ns);
             }
             case 2560: {
                 // n*2560 → (n<<11) + (n<<9)  (= 2048n + 512n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2560.shl11");
                 auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul2560.shl9");
-                return builder->CreateAdd(shl11, shl9, "mul2560", nf, ns);
+                return builder->CreateAdd(shl11, shl9, "mul2560", nuw, ns);
             }
             case 3072: {
                 // n*3072 → (n<<11) + (n<<10)  (= 2048n + 1024n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul3072.shl11");
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul3072.shl10");
-                return builder->CreateAdd(shl11, shl10, "mul3072", nf, ns);
+                return builder->CreateAdd(shl11, shl10, "mul3072", nuw, ns);
             }
             // ── n×4096 family ────────────────────────────────────────────────────
             case 3584: {
                 // n*3584 → (n<<12) - (n<<9)  (= 4096n - 512n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul3584.shl12");
                 auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul3584.shl9");
-                return builder->CreateSub(shl12, shl9, "mul3584", nf, ns);
+                return builder->CreateSub(shl12, shl9, "mul3584", nuw, ns);
             }
             case 3840: {
                 // n*3840 → (n<<12) - (n<<8)  (= 4096n - 256n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul3840.shl12");
                 auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul3840.shl8");
-                return builder->CreateSub(shl12, shl8, "mul3840", nf, ns);
+                return builder->CreateSub(shl12, shl8, "mul3840", nuw, ns);
             }
             case 3968: {
                 // n*3968 → (n<<12) - (n<<7)  (= 4096n - 128n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul3968.shl12");
                 auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul3968.shl7");
-                return builder->CreateSub(shl12, shl7, "mul3968", nf, ns);
+                return builder->CreateSub(shl12, shl7, "mul3968", nuw, ns);
             }
             case 4032: {
                 // n*4032 → (n<<12) - (n<<6)  (= 4096n - 64n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4032.shl12");
                 auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul4032.shl6");
-                return builder->CreateSub(shl12, shl6, "mul4032", nf, ns);
+                return builder->CreateSub(shl12, shl6, "mul4032", nuw, ns);
             }
             case 4064: {
                 // n*4064 → (n<<12) - (n<<5)  (= 4096n - 32n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4064.shl12");
                 auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul4064.shl5");
-                return builder->CreateSub(shl12, shl5, "mul4064", nf, ns);
+                return builder->CreateSub(shl12, shl5, "mul4064", nuw, ns);
             }
             case 4080: {
                 // n*4080 → (n<<12) - (n<<4)  (= 4096n - 16n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4080.shl12");
                 auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul4080.shl4");
-                return builder->CreateSub(shl12, shl4, "mul4080", nf, ns);
+                return builder->CreateSub(shl12, shl4, "mul4080", nuw, ns);
             }
             case 4088: {
                 // n*4088 → (n<<12) - (n<<3)  (= 4096n - 8n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4088.shl12");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul4088.shl3");
-                return builder->CreateSub(shl12, shl3, "mul4088", nf, ns);
+                return builder->CreateSub(shl12, shl3, "mul4088", nuw, ns);
             }
             case 4092: {
                 // n*4092 → (n<<12) - (n<<2)  (= 4096n - 4n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4092.shl12");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul4092.shl2");
-                return builder->CreateSub(shl12, shl2, "mul4092", nf, ns);
+                return builder->CreateSub(shl12, shl2, "mul4092", nuw, ns);
             }
             case 4094: {
                 // n*4094 → (n<<12) - (n<<1)  (= 4096n - 2n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4094.shl12");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul4094.shl1");
-                return builder->CreateSub(shl12, shl1, "mul4094", nf, ns);
+                return builder->CreateSub(shl12, shl1, "mul4094", nuw, ns);
             }
             case 4095: {
                 // n*4095 → (n<<12) - n  (= 4096n - n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4095.shl12");
-                return builder->CreateSub(shl12, base, "mul4095", nf, ns);
+                return builder->CreateSub(shl12, base, "mul4095", nuw, ns);
             }
             case 4097: {
                 // n*4097 → (n<<12) + n  (= 4096n + n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4097.shl12");
-                return builder->CreateAdd(shl12, base, "mul4097", nf, ns);
+                return builder->CreateAdd(shl12, base, "mul4097", nuw, ns);
             }
             case 4098: {
                 // n*4098 → (n<<12) + (n<<1)  (= 4096n + 2n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4098.shl12");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul4098.shl1");
-                return builder->CreateAdd(shl12, shl1, "mul4098", nf, ns);
+                return builder->CreateAdd(shl12, shl1, "mul4098", nuw, ns);
             }
             case 4100: {
                 // n*4100 → (n<<12) + (n<<2)  (= 4096n + 4n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4100.shl12");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul4100.shl2");
-                return builder->CreateAdd(shl12, shl2, "mul4100", nf, ns);
+                return builder->CreateAdd(shl12, shl2, "mul4100", nuw, ns);
             }
             case 4104: {
                 // n*4104 → (n<<12) + (n<<3)  (= 4096n + 8n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4104.shl12");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul4104.shl3");
-                return builder->CreateAdd(shl12, shl3, "mul4104", nf, ns);
+                return builder->CreateAdd(shl12, shl3, "mul4104", nuw, ns);
             }
             case 4112: {
                 // n*4112 → (n<<12) + (n<<4)  (= 4096n + 16n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4112.shl12");
                 auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul4112.shl4");
-                return builder->CreateAdd(shl12, shl4, "mul4112", nf, ns);
+                return builder->CreateAdd(shl12, shl4, "mul4112", nuw, ns);
             }
             case 4128: {
                 // n*4128 → (n<<12) + (n<<5)  (= 4096n + 32n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4128.shl12");
                 auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul4128.shl5");
-                return builder->CreateAdd(shl12, shl5, "mul4128", nf, ns);
+                return builder->CreateAdd(shl12, shl5, "mul4128", nuw, ns);
             }
             case 4160: {
                 // n*4160 → (n<<12) + (n<<6)  (= 4096n + 64n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4160.shl12");
                 auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul4160.shl6");
-                return builder->CreateAdd(shl12, shl6, "mul4160", nf, ns);
+                return builder->CreateAdd(shl12, shl6, "mul4160", nuw, ns);
             }
             case 4224: {
                 // n*4224 → (n<<12) + (n<<7)  (= 4096n + 128n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4224.shl12");
                 auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul4224.shl7");
-                return builder->CreateAdd(shl12, shl7, "mul4224", nf, ns);
+                return builder->CreateAdd(shl12, shl7, "mul4224", nuw, ns);
             }
             case 4352: {
                 // n*4352 → (n<<12) + (n<<8)  (= 4096n + 256n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4352.shl12");
                 auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul4352.shl8");
-                return builder->CreateAdd(shl12, shl8, "mul4352", nf, ns);
+                return builder->CreateAdd(shl12, shl8, "mul4352", nuw, ns);
             }
             case 4608: {
                 // n*4608 → (n<<12) + (n<<9)  (= 4096n + 512n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4608.shl12");
                 auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul4608.shl9");
-                return builder->CreateAdd(shl12, shl9, "mul4608", nf, ns);
+                return builder->CreateAdd(shl12, shl9, "mul4608", nuw, ns);
             }
             case 5120: {
                 // n*5120 → (n<<12) + (n<<10)  (= 4096n + 1024n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul5120.shl12");
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul5120.shl10");
-                return builder->CreateAdd(shl12, shl10, "mul5120", nf, ns);
+                return builder->CreateAdd(shl12, shl10, "mul5120", nuw, ns);
             }
             case 6144: {
                 // n*6144 → (n<<12) + (n<<11)  (= 4096n + 2048n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul6144.shl12");
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul6144.shl11");
-                return builder->CreateAdd(shl12, shl11, "mul6144", nf, ns);
+                return builder->CreateAdd(shl12, shl11, "mul6144", nuw, ns);
             }
             // ── n×8192 family ────────────────────────────────────────────────
             case 7168: {
@@ -3100,478 +3100,478 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 8193: {
                 // n*8193 → (n<<13) + n  (= 8192n + n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8193.shl13");
-                return builder->CreateAdd(shl13, base, "mul8193", nf, ns);
+                return builder->CreateAdd(shl13, base, "mul8193", nuw, ns);
             }
             case 8194: {
                 // n*8194 → (n<<13) + (n<<1)  (= 8192n + 2n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8194.shl13");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul8194.shl1");
-                return builder->CreateAdd(shl13, shl1, "mul8194", nf, ns);
+                return builder->CreateAdd(shl13, shl1, "mul8194", nuw, ns);
             }
             case 8196: {
                 // n*8196 → (n<<13) + (n<<2)  (= 8192n + 4n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8196.shl13");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul8196.shl2");
-                return builder->CreateAdd(shl13, shl2, "mul8196", nf, ns);
+                return builder->CreateAdd(shl13, shl2, "mul8196", nuw, ns);
             }
             case 8200: {
                 // n*8200 → (n<<13) + (n<<3)  (= 8192n + 8n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8200.shl13");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul8200.shl3");
-                return builder->CreateAdd(shl13, shl3, "mul8200", nf, ns);
+                return builder->CreateAdd(shl13, shl3, "mul8200", nuw, ns);
             }
             case 8208: {
                 // n*8208 → (n<<13) + (n<<4)  (= 8192n + 16n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8208.shl13");
                 auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul8208.shl4");
-                return builder->CreateAdd(shl13, shl4, "mul8208", nf, ns);
+                return builder->CreateAdd(shl13, shl4, "mul8208", nuw, ns);
             }
             case 8224: {
                 // n*8224 → (n<<13) + (n<<5)  (= 8192n + 32n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8224.shl13");
                 auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul8224.shl5");
-                return builder->CreateAdd(shl13, shl5, "mul8224", nf, ns);
+                return builder->CreateAdd(shl13, shl5, "mul8224", nuw, ns);
             }
             case 8256: {
                 // n*8256 → (n<<13) + (n<<6)  (= 8192n + 64n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8256.shl13");
                 auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul8256.shl6");
-                return builder->CreateAdd(shl13, shl6, "mul8256", nf, ns);
+                return builder->CreateAdd(shl13, shl6, "mul8256", nuw, ns);
             }
             case 8320: {
                 // n*8320 → (n<<13) + (n<<7)  (= 8192n + 128n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8320.shl13");
                 auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul8320.shl7");
-                return builder->CreateAdd(shl13, shl7, "mul8320", nf, ns);
+                return builder->CreateAdd(shl13, shl7, "mul8320", nuw, ns);
             }
             case 8448: {
                 // n*8448 → (n<<13) + (n<<8)  (= 8192n + 256n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8448.shl13");
                 auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul8448.shl8");
-                return builder->CreateAdd(shl13, shl8, "mul8448", nf, ns);
+                return builder->CreateAdd(shl13, shl8, "mul8448", nuw, ns);
             }
             case 8704: {
                 // n*8704 → (n<<13) + (n<<9)  (= 8192n + 512n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8704.shl13");
                 auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul8704.shl9");
-                return builder->CreateAdd(shl13, shl9, "mul8704", nf, ns);
+                return builder->CreateAdd(shl13, shl9, "mul8704", nuw, ns);
             }
             case 9216: {
                 // n*9216 → (n<<13) + (n<<10)  (= 8192n + 1024n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul9216.shl13");
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul9216.shl10");
-                return builder->CreateAdd(shl13, shl10, "mul9216", nf, ns);
+                return builder->CreateAdd(shl13, shl10, "mul9216", nuw, ns);
             }
             case 10240: {
                 // n*10240 → (n<<13) + (n<<11)  (= 8192n + 2048n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul10240.shl13");
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul10240.shl11");
-                return builder->CreateAdd(shl13, shl11, "mul10240", nf, ns);
+                return builder->CreateAdd(shl13, shl11, "mul10240", nuw, ns);
             }
             case 12288: {
                 // n*12288 → (n<<13) + (n<<12)  (= 8192n + 4096n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul12288.shl13");
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul12288.shl12");
-                return builder->CreateAdd(shl13, shl12, "mul12288", nf, ns);
+                return builder->CreateAdd(shl13, shl12, "mul12288", nuw, ns);
             }
             // ── n×16384 family ──────────────────────────────────────────────
             case 14336: {
                 // n*14336 → (n<<14) - (n<<11)  (= 16384n - 2048n)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul14336.shl14");
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul14336.shl11");
-                return builder->CreateSub(shl14, shl11, "mul14336", nf, ns);
+                return builder->CreateSub(shl14, shl11, "mul14336", nuw, ns);
             }
             case 15360: {
                 // n*15360 → (n<<14) - (n<<10)  (= 16384n - 1024n)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul15360.shl14");
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul15360.shl10");
-                return builder->CreateSub(shl14, shl10, "mul15360", nf, ns);
+                return builder->CreateSub(shl14, shl10, "mul15360", nuw, ns);
             }
             case 16384: {
                 // n*16384 → n<<14
-                return builder->CreateShl(base, mkShift(14), "mul16384", nf, ns);
+                return builder->CreateShl(base, mkShift(14), "mul16384", nuw, ns);
             }
             case 16385: {
                 // n*16385 → (n<<14) + n
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16385.shl14");
-                return builder->CreateAdd(shl14, base, "mul16385", nf, ns);
+                return builder->CreateAdd(shl14, base, "mul16385", nuw, ns);
             }
             case 16386: {
                 // n*16386 → (n<<14) + (n<<1)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16386.shl14");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul16386.shl1");
-                return builder->CreateAdd(shl14, shl1, "mul16386", nf, ns);
+                return builder->CreateAdd(shl14, shl1, "mul16386", nuw, ns);
             }
             case 16388: {
                 // n*16388 → (n<<14) + (n<<2)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16388.shl14");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul16388.shl2");
-                return builder->CreateAdd(shl14, shl2, "mul16388", nf, ns);
+                return builder->CreateAdd(shl14, shl2, "mul16388", nuw, ns);
             }
             case 16392: {
                 // n*16392 → (n<<14) + (n<<3)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16392.shl14");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul16392.shl3");
-                return builder->CreateAdd(shl14, shl3, "mul16392", nf, ns);
+                return builder->CreateAdd(shl14, shl3, "mul16392", nuw, ns);
             }
             case 16400: {
                 // n*16400 → (n<<14) + (n<<4)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16400.shl14");
                 auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul16400.shl4");
-                return builder->CreateAdd(shl14, shl4, "mul16400", nf, ns);
+                return builder->CreateAdd(shl14, shl4, "mul16400", nuw, ns);
             }
             case 16416: {
                 // n*16416 → (n<<14) + (n<<5)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16416.shl14");
                 auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul16416.shl5");
-                return builder->CreateAdd(shl14, shl5, "mul16416", nf, ns);
+                return builder->CreateAdd(shl14, shl5, "mul16416", nuw, ns);
             }
             case 16448: {
                 // n*16448 → (n<<14) + (n<<6)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16448.shl14");
                 auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul16448.shl6");
-                return builder->CreateAdd(shl14, shl6, "mul16448", nf, ns);
+                return builder->CreateAdd(shl14, shl6, "mul16448", nuw, ns);
             }
             case 16512: {
                 // n*16512 → (n<<14) + (n<<7)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16512.shl14");
                 auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul16512.shl7");
-                return builder->CreateAdd(shl14, shl7, "mul16512", nf, ns);
+                return builder->CreateAdd(shl14, shl7, "mul16512", nuw, ns);
             }
             case 16640: {
                 // n*16640 → (n<<14) + (n<<8)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16640.shl14");
                 auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul16640.shl8");
-                return builder->CreateAdd(shl14, shl8, "mul16640", nf, ns);
+                return builder->CreateAdd(shl14, shl8, "mul16640", nuw, ns);
             }
             case 16896: {
                 // n*16896 → (n<<14) + (n<<9)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16896.shl14");
                 auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul16896.shl9");
-                return builder->CreateAdd(shl14, shl9, "mul16896", nf, ns);
+                return builder->CreateAdd(shl14, shl9, "mul16896", nuw, ns);
             }
             case 17408: {
                 // n*17408 → (n<<14) + (n<<10)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul17408.shl14");
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul17408.shl10");
-                return builder->CreateAdd(shl14, shl10, "mul17408", nf, ns);
+                return builder->CreateAdd(shl14, shl10, "mul17408", nuw, ns);
             }
             case 18432: {
                 // n*18432 → (n<<14) + (n<<11)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul18432.shl14");
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul18432.shl11");
-                return builder->CreateAdd(shl14, shl11, "mul18432", nf, ns);
+                return builder->CreateAdd(shl14, shl11, "mul18432", nuw, ns);
             }
             case 20480: {
                 // n*20480 → (n<<14) + (n<<12)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul20480.shl14");
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul20480.shl12");
-                return builder->CreateAdd(shl14, shl12, "mul20480", nf, ns);
+                return builder->CreateAdd(shl14, shl12, "mul20480", nuw, ns);
             }
             case 24576: {
                 // n*24576 → (n<<14) + (n<<13)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul24576.shl14");
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul24576.shl13");
-                return builder->CreateAdd(shl14, shl13, "mul24576", nf, ns);
+                return builder->CreateAdd(shl14, shl13, "mul24576", nuw, ns);
             }
             // ── n×32768 family ──────────────────────────────────────────────
             case 28672: {
                 // n*28672 → (n<<15) - (n<<12)  (= 32768n - 4096n)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul28672.shl15");
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul28672.shl12");
-                return builder->CreateSub(shl15, shl12, "mul28672", nf, ns);
+                return builder->CreateSub(shl15, shl12, "mul28672", nuw, ns);
             }
             case 30720: {
                 // n*30720 → (n<<15) - (n<<11)  (= 32768n - 2048n)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul30720.shl15");
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul30720.shl11");
-                return builder->CreateSub(shl15, shl11, "mul30720", nf, ns);
+                return builder->CreateSub(shl15, shl11, "mul30720", nuw, ns);
             }
             case 32768: {
                 // n*32768 → n<<15
-                return builder->CreateShl(base, mkShift(15), "mul32768", nf, ns);
+                return builder->CreateShl(base, mkShift(15), "mul32768", nuw, ns);
             }
             case 32769: {
                 // n*32769 → (n<<15) + n
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32769.shl15");
-                return builder->CreateAdd(shl15, base, "mul32769", nf, ns);
+                return builder->CreateAdd(shl15, base, "mul32769", nuw, ns);
             }
             case 32770: {
                 // n*32770 → (n<<15) + (n<<1)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32770.shl15");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul32770.shl1");
-                return builder->CreateAdd(shl15, shl1, "mul32770", nf, ns);
+                return builder->CreateAdd(shl15, shl1, "mul32770", nuw, ns);
             }
             case 32772: {
                 // n*32772 → (n<<15) + (n<<2)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32772.shl15");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul32772.shl2");
-                return builder->CreateAdd(shl15, shl2, "mul32772", nf, ns);
+                return builder->CreateAdd(shl15, shl2, "mul32772", nuw, ns);
             }
             case 32776: {
                 // n*32776 → (n<<15) + (n<<3)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32776.shl15");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul32776.shl3");
-                return builder->CreateAdd(shl15, shl3, "mul32776", nf, ns);
+                return builder->CreateAdd(shl15, shl3, "mul32776", nuw, ns);
             }
             case 32800: {
                 // n*32800 → (n<<15) + (n<<5)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32800.shl15");
                 auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul32800.shl5");
-                return builder->CreateAdd(shl15, shl5, "mul32800", nf, ns);
+                return builder->CreateAdd(shl15, shl5, "mul32800", nuw, ns);
             }
             case 32896: {
                 // n*32896 → (n<<15) + (n<<7)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32896.shl15");
                 auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul32896.shl7");
-                return builder->CreateAdd(shl15, shl7, "mul32896", nf, ns);
+                return builder->CreateAdd(shl15, shl7, "mul32896", nuw, ns);
             }
             case 33024: {
                 // n*33024 → (n<<15) + (n<<8)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul33024.shl15");
                 auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul33024.shl8");
-                return builder->CreateAdd(shl15, shl8, "mul33024", nf, ns);
+                return builder->CreateAdd(shl15, shl8, "mul33024", nuw, ns);
             }
             case 33280: {
                 // n*33280 → (n<<15) + (n<<9)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul33280.shl15");
                 auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul33280.shl9");
-                return builder->CreateAdd(shl15, shl9, "mul33280", nf, ns);
+                return builder->CreateAdd(shl15, shl9, "mul33280", nuw, ns);
             }
             case 33792: {
                 // n*33792 → (n<<15) + (n<<10)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul33792.shl15");
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul33792.shl10");
-                return builder->CreateAdd(shl15, shl10, "mul33792", nf, ns);
+                return builder->CreateAdd(shl15, shl10, "mul33792", nuw, ns);
             }
             case 34816: {
                 // n*34816 → (n<<15) + (n<<11)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul34816.shl15");
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul34816.shl11");
-                return builder->CreateAdd(shl15, shl11, "mul34816", nf, ns);
+                return builder->CreateAdd(shl15, shl11, "mul34816", nuw, ns);
             }
             case 36864: {
                 // n*36864 → (n<<15) + (n<<12)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul36864.shl15");
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul36864.shl12");
-                return builder->CreateAdd(shl15, shl12, "mul36864", nf, ns);
+                return builder->CreateAdd(shl15, shl12, "mul36864", nuw, ns);
             }
             case 40960: {
                 // n*40960 → (n<<15) + (n<<13)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul40960.shl15");
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul40960.shl13");
-                return builder->CreateAdd(shl15, shl13, "mul40960", nf, ns);
+                return builder->CreateAdd(shl15, shl13, "mul40960", nuw, ns);
             }
             case 49152: {
                 // n*49152 → (n<<15) + (n<<14)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul49152.shl15");
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul49152.shl14");
-                return builder->CreateAdd(shl15, shl14, "mul49152", nf, ns);
+                return builder->CreateAdd(shl15, shl14, "mul49152", nuw, ns);
             }
             // ── n×65536 family ──────────────────────────────────────────────
             case 57344: {
                 // n*57344 → (n<<16) - (n<<13)  (= 65536n - 8192n)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul57344.shl16");
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul57344.shl13");
-                return builder->CreateSub(shl16, shl13, "mul57344", nf, ns);
+                return builder->CreateSub(shl16, shl13, "mul57344", nuw, ns);
             }
             case 61440: {
                 // n*61440 → (n<<16) - (n<<12)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul61440.shl16");
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul61440.shl12");
-                return builder->CreateSub(shl16, shl12, "mul61440", nf, ns);
+                return builder->CreateSub(shl16, shl12, "mul61440", nuw, ns);
             }
             case 65536: {
                 // n*65536 → n<<16
-                return builder->CreateShl(base, mkShift(16), "mul65536", nf, ns);
+                return builder->CreateShl(base, mkShift(16), "mul65536", nuw, ns);
             }
             case 65537: {
                 // n*65537 → (n<<16) + n
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65537.shl16");
-                return builder->CreateAdd(shl16, base, "mul65537", nf, ns);
+                return builder->CreateAdd(shl16, base, "mul65537", nuw, ns);
             }
             case 65538: {
                 // n*65538 → (n<<16) + (n<<1)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65538.shl16");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul65538.shl1");
-                return builder->CreateAdd(shl16, shl1, "mul65538", nf, ns);
+                return builder->CreateAdd(shl16, shl1, "mul65538", nuw, ns);
             }
             case 65540: {
                 // n*65540 → (n<<16) + (n<<2)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65540.shl16");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul65540.shl2");
-                return builder->CreateAdd(shl16, shl2, "mul65540", nf, ns);
+                return builder->CreateAdd(shl16, shl2, "mul65540", nuw, ns);
             }
             case 65544: {
                 // n*65544 → (n<<16) + (n<<3)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65544.shl16");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul65544.shl3");
-                return builder->CreateAdd(shl16, shl3, "mul65544", nf, ns);
+                return builder->CreateAdd(shl16, shl3, "mul65544", nuw, ns);
             }
             case 65600: {
                 // n*65600 → (n<<16) + (n<<6)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65600.shl16");
                 auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul65600.shl6");
-                return builder->CreateAdd(shl16, shl6, "mul65600", nf, ns);
+                return builder->CreateAdd(shl16, shl6, "mul65600", nuw, ns);
             }
             case 65664: {
                 // n*65664 → (n<<16) + (n<<7)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65664.shl16");
                 auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul65664.shl7");
-                return builder->CreateAdd(shl16, shl7, "mul65664", nf, ns);
+                return builder->CreateAdd(shl16, shl7, "mul65664", nuw, ns);
             }
             case 65792: {
                 // n*65792 → (n<<16) + (n<<8)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65792.shl16");
                 auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul65792.shl8");
-                return builder->CreateAdd(shl16, shl8, "mul65792", nf, ns);
+                return builder->CreateAdd(shl16, shl8, "mul65792", nuw, ns);
             }
             case 66048: {
                 // n*66048 → (n<<16) + (n<<9)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul66048.shl16");
                 auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul66048.shl9");
-                return builder->CreateAdd(shl16, shl9, "mul66048", nf, ns);
+                return builder->CreateAdd(shl16, shl9, "mul66048", nuw, ns);
             }
             case 66560: {
                 // n*66560 → (n<<16) + (n<<10)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul66560.shl16");
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul66560.shl10");
-                return builder->CreateAdd(shl16, shl10, "mul66560", nf, ns);
+                return builder->CreateAdd(shl16, shl10, "mul66560", nuw, ns);
             }
             case 67584: {
                 // n*67584 → (n<<16) + (n<<11)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul67584.shl16");
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul67584.shl11");
-                return builder->CreateAdd(shl16, shl11, "mul67584", nf, ns);
+                return builder->CreateAdd(shl16, shl11, "mul67584", nuw, ns);
             }
             case 69632: {
                 // n*69632 → (n<<16) + (n<<12)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul69632.shl16");
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul69632.shl12");
-                return builder->CreateAdd(shl16, shl12, "mul69632", nf, ns);
+                return builder->CreateAdd(shl16, shl12, "mul69632", nuw, ns);
             }
             case 73728: {
                 // n*73728 → (n<<16) + (n<<13)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul73728.shl16");
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul73728.shl13");
-                return builder->CreateAdd(shl16, shl13, "mul73728", nf, ns);
+                return builder->CreateAdd(shl16, shl13, "mul73728", nuw, ns);
             }
             case 81920: {
                 // n*81920 → (n<<16) + (n<<14)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul81920.shl16");
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul81920.shl14");
-                return builder->CreateAdd(shl16, shl14, "mul81920", nf, ns);
+                return builder->CreateAdd(shl16, shl14, "mul81920", nuw, ns);
             }
             case 98304: {
                 // n*98304 → (n<<16) + (n<<15)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul98304.shl16");
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul98304.shl15");
-                return builder->CreateAdd(shl16, shl15, "mul98304", nf, ns);
+                return builder->CreateAdd(shl16, shl15, "mul98304", nuw, ns);
             }
             case 114688: {
                 // n*114688 → (n<<17) - (n<<14)  (= 131072n - 16384n)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul114688.shl17");
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul114688.shl14");
-                return builder->CreateSub(shl17, shl14, "mul114688", nf, ns);
+                return builder->CreateSub(shl17, shl14, "mul114688", nuw, ns);
             }
             case 122880: {
                 // n*122880 → (n<<17) - (n<<13)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul122880.shl17");
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul122880.shl13");
-                return builder->CreateSub(shl17, shl13, "mul122880", nf, ns);
+                return builder->CreateSub(shl17, shl13, "mul122880", nuw, ns);
             }
             case 131072: {
                 // n*131072 → n<<17
-                return builder->CreateShl(base, mkShift(17), "mul131072", nf, ns);
+                return builder->CreateShl(base, mkShift(17), "mul131072", nuw, ns);
             }
             case 131073: {
                 // n*131073 → (n<<17) + n
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131073.shl17");
-                return builder->CreateAdd(shl17, base, "mul131073", nf, ns);
+                return builder->CreateAdd(shl17, base, "mul131073", nuw, ns);
             }
             case 131074: {
                 // n*131074 → (n<<17) + (n<<1)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131074.shl17");
                 auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul131074.shl1");
-                return builder->CreateAdd(shl17, shl1, "mul131074", nf, ns);
+                return builder->CreateAdd(shl17, shl1, "mul131074", nuw, ns);
             }
             case 131076: {
                 // n*131076 → (n<<17) + (n<<2)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131076.shl17");
                 auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul131076.shl2");
-                return builder->CreateAdd(shl17, shl2, "mul131076", nf, ns);
+                return builder->CreateAdd(shl17, shl2, "mul131076", nuw, ns);
             }
             case 131080: {
                 // n*131080 → (n<<17) + (n<<3)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131080.shl17");
                 auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul131080.shl3");
-                return builder->CreateAdd(shl17, shl3, "mul131080", nf, ns);
+                return builder->CreateAdd(shl17, shl3, "mul131080", nuw, ns);
             }
             case 131136: {
                 // n*131136 → (n<<17) + (n<<6)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131136.shl17");
                 auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul131136.shl6");
-                return builder->CreateAdd(shl17, shl6, "mul131136", nf, ns);
+                return builder->CreateAdd(shl17, shl6, "mul131136", nuw, ns);
             }
             case 131200: {
                 // n*131200 → (n<<17) + (n<<7)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131200.shl17");
                 auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul131200.shl7");
-                return builder->CreateAdd(shl17, shl7, "mul131200", nf, ns);
+                return builder->CreateAdd(shl17, shl7, "mul131200", nuw, ns);
             }
             case 131328: {
                 // n*131328 → (n<<17) + (n<<8)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131328.shl17");
                 auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul131328.shl8");
-                return builder->CreateAdd(shl17, shl8, "mul131328", nf, ns);
+                return builder->CreateAdd(shl17, shl8, "mul131328", nuw, ns);
             }
             case 131584: {
                 // n*131584 → (n<<17) + (n<<9)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131584.shl17");
                 auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul131584.shl9");
-                return builder->CreateAdd(shl17, shl9, "mul131584", nf, ns);
+                return builder->CreateAdd(shl17, shl9, "mul131584", nuw, ns);
             }
             case 132096: {
                 // n*132096 → (n<<17) + (n<<10)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul132096.shl17");
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul132096.shl10");
-                return builder->CreateAdd(shl17, shl10, "mul132096", nf, ns);
+                return builder->CreateAdd(shl17, shl10, "mul132096", nuw, ns);
             }
             case 133120: {
                 // n*133120 → (n<<17) + (n<<11)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul133120.shl17");
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul133120.shl11");
-                return builder->CreateAdd(shl17, shl11, "mul133120", nf, ns);
+                return builder->CreateAdd(shl17, shl11, "mul133120", nuw, ns);
             }
             case 135168: {
                 // n*135168 → (n<<17) + (n<<12)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul135168.shl17");
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul135168.shl12");
-                return builder->CreateAdd(shl17, shl12, "mul135168", nf, ns);
+                return builder->CreateAdd(shl17, shl12, "mul135168", nuw, ns);
             }
             case 139264: {
                 // n*139264 → (n<<17) + (n<<13)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul139264.shl17");
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul139264.shl13");
-                return builder->CreateAdd(shl17, shl13, "mul139264", nf, ns);
+                return builder->CreateAdd(shl17, shl13, "mul139264", nuw, ns);
             }
             case 147456: {
                 // n*147456 → (n<<17) + (n<<14)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul147456.shl17");
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul147456.shl14");
-                return builder->CreateAdd(shl17, shl14, "mul147456", nf, ns);
+                return builder->CreateAdd(shl17, shl14, "mul147456", nuw, ns);
             }
             case 163840: {
                 // n*163840 → (n<<17) + (n<<15)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul163840.shl17");
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul163840.shl15");
-                return builder->CreateAdd(shl17, shl15, "mul163840", nf, ns);
+                return builder->CreateAdd(shl17, shl15, "mul163840", nuw, ns);
             }
             case 196608: {
                 // n*196608 → (n<<17) + (n<<16)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul196608.shl17");
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul196608.shl16");
-                return builder->CreateAdd(shl17, shl16, "mul196608", nf, ns);
+                return builder->CreateAdd(shl17, shl16, "mul196608", nuw, ns);
             }
             default:
                 return nullptr;
