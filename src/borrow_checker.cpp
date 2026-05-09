@@ -753,8 +753,7 @@ void BorrowChecker::run() {
 
 // Forward declaration for the mem-sanitizer helper.
 static void runMemSanitizer(const Program& program,
-                             BorrowCheckResult& result,
-                             const std::string& filename);
+                             BorrowCheckResult& result);
 
 BorrowCheckResult runBorrowCheck(const Program& program,
                                  bool verbose,
@@ -775,13 +774,7 @@ BorrowCheckResult runBorrowCheck(const Program& program,
     }
 
     if (memSanitize) {
-        const std::string filename =
-            program.functions.empty() || !program.functions[0]
-                ? "<unknown>"
-                : program.functions[0]->body
-                    ? program.functions[0]->name
-                    : "<unknown>";
-        runMemSanitizer(program, result, filename);
+        runMemSanitizer(program, result);
     }
 
     return result;
@@ -928,8 +921,7 @@ static void collectMemEvents(const Statement* stmt,
 }
 
 static void runMemSanitizer(const Program& program,
-                             BorrowCheckResult& result,
-                             const std::string& /*file*/) {
+                             BorrowCheckResult& result) {
     for (const auto& fn : program.functions) {
         if (!fn || !fn->body) continue;
         std::vector<MemEvent> events;
