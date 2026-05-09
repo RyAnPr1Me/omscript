@@ -151,7 +151,7 @@ jobs:
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/release.yml/dispatches" \
-            -d "{\"ref\":\"main\",\"inputs\":{\"version\":\"${{ steps.version.outputs.VERSION }}\"}}") || true
+            -d "{\"ref\":\"main\",\"inputs\":{\"version\":\"${{ steps.version.outputs.VERSION }}\"}}")
           echo "GitHub API response status: $HTTP_STATUS"
           if [ "$HTTP_STATUS" != "204" ] && [ "$HTTP_STATUS" != "200" ]; then
             echo "::error::Failed to dispatch release workflow (HTTP $HTTP_STATUS)"
