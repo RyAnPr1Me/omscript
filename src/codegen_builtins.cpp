@@ -1032,6 +1032,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                       ? arg
                                       : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "len.sptr");
             llvm::Value* rawLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "len.strlen");
+            nonNegValues_.insert(rawLen);
             // !range [0, INT64_MAX): strlen always returns non-negative.
             if (optimizationLevel >= OptimizationLevel::O1)
                 llvm::cast<llvm::Instruction>(rawLen)->setMetadata(
@@ -7057,6 +7058,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(appendBB);
         llvm::Value* chunkLen = builder->CreateCall(getOrDeclareStrlen(), {chunkBuf}, "cmd.clen");
         nonNegValues_.insert(chunkLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(chunkLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* curSize  = builder->CreateAlignedLoad(getDefaultType(), sizePtr, llvm::MaybeAlign(8), "cmd.csz");
         llvm::Value* curCap   = builder->CreateAlignedLoad(getDefaultType(), capPtr,  llvm::MaybeAlign(8), "cmd.ccap");
         llvm::Value* newSize  = builder->CreateAdd(curSize, chunkLen, "cmd.nsz", true, true);
@@ -7120,6 +7124,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 ? strArg
                 : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "sfilt.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "sfilt.len");
+        nonNegValues_.insert(strLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(strLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
 
         // Allocate output buffer: same max length + 1 for NUL
         llvm::Value* bufSize = builder->CreateAdd(strLen,
@@ -7411,6 +7419,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "lstrip.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "lstrip.len");
         nonNegValues_.insert(strLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(strLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
 
         llvm::Function* lsParentFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* lsPreBB  = builder->GetInsertBlock();
@@ -7473,6 +7484,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "rstrip.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "rstrip.len");
         nonNegValues_.insert(strLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(strLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
 
         llvm::Function* rsParentFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* rsPreBB  = builder->GetInsertBlock();
@@ -7965,8 +7979,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Escaped form: each `'` → `'\''`.  Worst case: 4x expansion.
         llvm::Value* scPassLen = builder->CreateCall(getOrDeclareStrlen(), {scPassPtr}, "sudo.passlen");
         nonNegValues_.insert(scPassLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(scPassLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* scEscMax  = builder->CreateAdd(
-            builder->CreateMul(scPassLen, llvm::ConstantInt::get(getDefaultType(), 4), "sudo.escmax4"),
+            builder->CreateMul(scPassLen, llvm::ConstantInt::get(getDefaultType(), 4), "sudo.escmax4",
+                               /*HasNUW=*/true, /*HasNSW=*/true),
             llvm::ConstantInt::get(getDefaultType(), 1), "sudo.escmax", true, true);
         llvm::Value* scEscBuf  = builder->CreateCall(getOrDeclareMalloc(), {scEscMax}, "sudo.escbuf");
         llvm::AllocaInst* scEscWrA = createEntryBlockAlloca(scParentFn, "sudo.escwr", getDefaultType());
@@ -8041,6 +8059,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // ---- Step 2: build full pipeline command string ----
         llvm::Value* scCmdLen   = builder->CreateCall(getOrDeclareStrlen(), {scCmdPtr}, "sudo.cmdlen");
         nonNegValues_.insert(scCmdLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(scCmdLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         // prefix: "printf '%s\n' '" = 16 chars, suffix: "' | sudo -S -- sh -c '" = 22 chars,
         // cmd_suffix: "' 2>&1" = 6 chars, NUL = 1
         llvm::Value* scFmtFixed = llvm::ConstantInt::get(getDefaultType(), 16 + 22 + 6 + 1);
@@ -8128,6 +8149,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(scAppendBB);
         llvm::Value* scChunkLen = builder->CreateCall(getOrDeclareStrlen(), {scChunkBuf}, "sudo.clen");
+        nonNegValues_.insert(scChunkLen);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(scChunkLen)->setMetadata(
+                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* scCurSize  = builder->CreateAlignedLoad(getDefaultType(), scSizePtr, llvm::MaybeAlign(8), "sudo.csz");
         llvm::Value* scCurCap   = builder->CreateAlignedLoad(getDefaultType(), scCapPtr,  llvm::MaybeAlign(8), "sudo.ccap");
         llvm::Value* scNewSize  = builder->CreateAdd(scCurSize, scChunkLen, "sudo.nsz", true, true);
