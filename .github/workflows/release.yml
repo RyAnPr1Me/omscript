@@ -67,7 +67,6 @@ jobs:
           path: ~/.ccache
           key: ccache-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ hashFiles('src/**/*.cpp', 'include/**/*.h') }}-
             ccache-${{ runner.os }}-
 
       - name: Cache Homebrew packages (macOS)
