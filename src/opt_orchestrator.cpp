@@ -311,7 +311,10 @@ static void registerAllPasses() {
         "E-graph equality saturation: algebraic simplification + constant folding at AST level",
         PassPhase::ASTTransform,
         PassKind::SemanticTransform,
-        {AnalysisFact::kCFCTRE},
+        // AlgSimp must run first so that expressions are in canonical form,
+        // reducing the e-graph search space and avoiding redundant rewrites.
+        // (AlgSimp transitively requires DCE and CFCTRE.)
+        {AnalysisFact::kCFCTRE, AnalysisFact::kAlgSimp},
         {AnalysisFact::kEGraph},
         // E-graph rewrites change expressions; any fact derived from expression
         // shapes (ranges, CSE candidates, width information) is now stale.
@@ -365,9 +368,10 @@ static void registerAllPasses() {
         "Common Subexpression Elimination: hoist repeated pure binary subexpressions to compiler-managed temps",
         PassPhase::ASTTransform,
         PassKind::CostTransform,
-        // CSE introduces new VarDecl nodes; run after DCE so dead code does
-        // not generate spurious CSE candidates.
-        {AnalysisFact::kDCE},
+        // Copy propagation exposes additional CSE opportunities by substituting
+        // copies of the same value; run CSE after CopyProp so those aliases are
+        // visible.  CopyProp transitively requires DCE and AlgSimp.
+        {AnalysisFact::kDCE, AnalysisFact::kCopyProp},
         {AnalysisFact::kCSE},
         // Introduces new variable declarations — invalidates any fact that
         // tracks exact variable counts or live ranges.
