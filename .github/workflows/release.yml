@@ -179,13 +179,10 @@ jobs:
             timeout 60 "$OMSC" emit-ir "$f" > /dev/null 2>&1 || true
           done
 
-          # Phase C is intentionally omitted: all example files are already
-          # compiled at every optimization level in Phase A above.
-
           # ── Phase C: Compile benchmark programs at -O3 multiple times to
           # build up hot counters for the most expensive optimization paths
           # (LLVM pass pipeline, e-graph saturation, superoptimizer).
-          echo "=== PGO Phase D: Benchmark workloads (repeated) ==="
+          echo "=== PGO Phase C: Benchmark workloads (repeated) ==="
           BENCH_FILES=(
             examples/bench_suite.om
             examples/benchmark_loops_math.om
@@ -198,8 +195,8 @@ jobs:
             done
           done
 
-          # ── Phase E: Exercise CLI paths (help, version, errors).
-          echo "=== PGO Phase E: CLI and error paths ==="
+          # ── Phase D: Exercise CLI paths (help, version, errors).
+          echo "=== PGO Phase D: CLI and error paths ==="
           "$OMSC" --help > /dev/null 2>&1 || true
           "$OMSC" --version > /dev/null 2>&1 || true
           "$OMSC" /dev/null 2>/dev/null || true  # error: empty file
@@ -527,6 +524,11 @@ jobs:
 
       - name: Run integration tests (Linux)
         if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: OMSC_SKIP_BUILD=1 bash run_tests.sh
+
+      - name: Run integration tests (macOS)
+        if: runner.os == 'macOS'
         timeout-minutes: 15
         run: OMSC_SKIP_BUILD=1 bash run_tests.sh
 
